@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     'apps.users',
     'apps.api',
     'apps.pid_analysis',
+    'apps.rbac',
 ]
 
 # Add storages only if S3 is enabled (prevents import errors when not needed)
@@ -69,6 +70,8 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'apps.rbac.middleware.LoginTrackingMiddleware',  # Track login attempts
+    'apps.rbac.middleware.RBACMiddleware',  # RBAC enforcement
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
