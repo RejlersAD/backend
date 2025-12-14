@@ -231,6 +231,15 @@ CORS_ALLOW_HEADERS = [
     'x-requested-with',
 ]
 
+# Expose headers to the frontend
+CORS_EXPOSE_HEADERS = [
+    'content-type',
+    'x-csrftoken',
+]
+
+# Preflight request cache duration
+CORS_PREFLIGHT_MAX_AGE = 86400  # 24 hours
+
 # Celery Configuration
 CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://redis:6379/0')
 CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://redis:6379/0')
