@@ -493,15 +493,39 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def me(self, request):
-        """Get current user's profile"""
+        """Get current user's profile - creates one if it doesn't exist"""
         try:
-            profile = request.user.rbac_profile
+            # Try to get existing profile
+            profile = UserProfile.objects.filter(
+                user=request.user,
+                is_deleted=False
+            ).first()
+            
+            # If no profile exists, return user info without RBAC data
+            if not profile:
+                return Response({
+                    'id': str(request.user.id),
+                    'email': request.user.email,
+                    'username': request.user.username,
+                    'first_name': request.user.first_name,
+                    'last_name': request.user.last_name,
+                    'roles': [],
+                    'organization': None,
+                    'status': 'pending',
+                    'message': 'RBAC profile not configured. Please contact administrator.'
+                })
+            
             serializer = self.get_serializer(profile)
             return Response(serializer.data)
-        except UserProfile.DoesNotExist:
+            
+        except Exception as e:
+            # Log the error for debugging
+            import traceback
+            print(f"[ERROR] /rbac/users/me/ failed: {str(e)}")
+            print(traceback.format_exc())
             return Response(
-                {'error': 'Profile not found'},
-                status=status.HTTP_404_NOT_FOUND
+                {'error': f'Server error: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
     @action(detail=False, methods=['get'])

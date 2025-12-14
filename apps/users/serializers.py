@@ -36,8 +36,11 @@ class UserSerializer(serializers.ModelSerializer):
             if rbac_profile:
                 roles = rbac_profile.roles.all()
                 return [{'id': str(role.id), 'code': role.code, 'name': role.name, 'level': role.level} for role in roles]
-        except Exception:
-            pass
+        except Exception as e:
+            # Log error for debugging
+            import traceback
+            print(f"[ERROR] UserSerializer.get_roles failed: {str(e)}")
+            print(traceback.format_exc())
         return []
 
 
