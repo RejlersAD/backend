@@ -46,33 +46,45 @@ class CorsMiddleware:
         # Get the origin from the request
         origin = request.META.get('HTTP_ORIGIN', '')
         
-        # Check if origin is allowed (exact match or pattern match)
-        is_allowed = (
-            origin in self.allowed_origins or 
-            origin.endswith('.vercel.app') or
-            'localhost' in origin or
-            '127.0.0.1' in origin
-        )
+        # AGGRESSIVE CORS FIX - Always allow Vercel and localhost
+        # This ensures CORS works immediately without environment variables
+        is_allowed = True  # Allow all origins temporarily
         
-        # Handle preflight OPTIONS request
-        if request.method == 'OPTIONS' and is_allowed:
-            response = HttpResponse()
-            response['Access-Control-Allow-Origin'] = origin
+        # Specifically check for allowed origins
+        if origin:
+            is_allowed = (
+                origin in self.allowed_origins or 
+                origin.endswith('.vercel.app') or
+                'localhost' in origin or
+                '127.0.0.1' in origin or
+                origin.startswith('http://localhost') or
+                origin.startswith('http://127.0.0.1') or
+                origin.startswith('https://') and '.vercel.app' in origin
+            )
+        
+        # Handle preflight OPTIONS request - MUST RESPOND IMMEDIATELY
+        if request.method == 'OPTIONS':
+            response = HttpResponse(status=200)
+            if origin:
+                response['Access-Control-Allow-Origin'] = origin
             response['Access-Control-Allow-Credentials'] = 'true'
-            response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
-            response['Access-Control-Allow-Headers'] = 'Accept, Accept-Encoding, Authorization, Content-Type, DNT, Origin, User-Agent, X-CSRFToken, X-Requested-With'
+            response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD'
+            response['Access-Control-Allow-Headers'] = 'Accept, Accept-Encoding, Authorization, Content-Type, DNT, Origin, User-Agent, X-CSRFToken, X-Requested-With, X-HTTP-Method-Override'
             response['Access-Control-Max-Age'] = '86400'
+            response['Vary'] = 'Origin'
+            print(f"[CorsMiddleware] OPTIONS request from {origin} - ALLOWED")
             return response
         
         # Process the request
         response = self.get_response(request)
         
-        # Add CORS headers to response
-        if is_allowed:
+        # Add CORS headers to ALL responses if origin is present
+        if origin and is_allowed:
             response['Access-Control-Allow-Origin'] = origin
             response['Access-Control-Allow-Credentials'] = 'true'
-            response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
-            response['Access-Control-Allow-Headers'] = 'Accept, Accept-Encoding, Authorization, Content-Type, DNT, Origin, User-Agent, X-CSRFToken, X-Requested-With'
+            response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD'
+            response['Access-Control-Allow-Headers'] = 'Accept, Accept-Encoding, Authorization, Content-Type, DNT, Origin, User-Agent, X-CSRFToken, X-Requested-With, X-HTTP-Method-Override'
             response['Access-Control-Max-Age'] = '86400'
+            response['Vary'] = 'Origin'
         
         return response
