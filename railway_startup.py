@@ -93,6 +93,22 @@ def check_health():
         print(f"✗ Health check failed: {e}")
         return False
 
+def assign_super_admin_roles():
+    """Assign super admin roles to default users"""
+    print("\n" + "="*50)
+    print("ASSIGNING SUPER ADMIN ROLES")
+    print("="*50)
+    
+    try:
+        from django.core.management import call_command
+        call_command('assign_super_admin')
+        print("✓ Super admin roles assigned")
+        return True
+    except Exception as e:
+        print(f"⚠ Failed to assign super admin roles: {e}")
+        # Don't fail deployment if this fails
+        return True
+
 if __name__ == "__main__":
     print("=" * 50)
     print("Railway Deployment Initialization")
@@ -101,8 +117,13 @@ if __name__ == "__main__":
     if check_health():
         print("\n✓ Health check passed")
         if create_superuser():
-            print("\n✓ Application is ready to serve traffic")
-            sys.exit(0)
+            print("\n✓ Superuser created/updated")
+            if assign_super_admin_roles():
+                print("\n✓ Application is ready to serve traffic")
+                sys.exit(0)
+            else:
+                print("\n⚠ Role assignment failed but continuing...")
+                sys.exit(0)
         else:
             print("\n⚠ Superuser creation failed but continuing...")
             sys.exit(0)
