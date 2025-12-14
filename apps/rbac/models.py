@@ -306,14 +306,14 @@ class UserProfile(TimeStampedModel):
     def get_all_permissions(self):
         """Get all permissions from all assigned roles"""
         return Permission.objects.filter(
-            roles__userprofile=self,
+            roles__in=self.roles.all(),
             is_active=True
         ).distinct()
     
     def get_all_modules(self):
         """Get all accessible modules from all assigned roles"""
         return Module.objects.filter(
-            roles__userprofile=self,
+            roles__in=self.roles.all(),
             is_active=True
         ).distinct()
 
