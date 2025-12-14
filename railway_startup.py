@@ -93,6 +93,34 @@ def check_health():
         print(f"✗ Health check failed: {e}")
         return False
 
+def seed_rbac_data():
+    """Seed RBAC data (roles, permissions, modules)"""
+    print("\n" + "="*50)
+    print("SEEDING RBAC DATA")
+    print("="*50)
+    
+    try:
+        from apps.rbac.models import Role
+        
+        # Check if roles exist
+        role_count = Role.objects.count()
+        print(f"Current roles in database: {role_count}")
+        
+        if role_count == 0:
+            print("No roles found. Running seed_rbac...")
+            from django.core.management import call_command
+            call_command('seed_rbac')
+            print("✓ RBAC data seeded successfully")
+        else:
+            print("✓ RBAC data already exists")
+        
+        return True
+    except Exception as e:
+        print(f"⚠ Failed to seed RBAC data: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def assign_super_admin_roles():
     """Assign super admin roles to default users"""
     print("\n" + "="*50)
@@ -106,6 +134,8 @@ def assign_super_admin_roles():
         return True
     except Exception as e:
         print(f"⚠ Failed to assign super admin roles: {e}")
+        import traceback
+        traceback.print_exc()
         # Don't fail deployment if this fails
         return True
 
@@ -116,13 +146,24 @@ if __name__ == "__main__":
     
     if check_health():
         print("\n✓ Health check passed")
+        
+        # Step 1: Seed RBAC data
+        if seed_rbac_data():
+            print("\n✓ RBAC data initialized")
+        
+        # Step 2: Create superuser
         if create_superuser():
             print("\n✓ Superuser created/updated")
+            
+            # Step 3: Assign super admin roles
             if assign_super_admin_roles():
-                print("\n✓ Application is ready to serve traffic")
+                print("\n✓ Super admin roles assigned")
+                print("\n" + "="*50)
+                print("✅ APPLICATION IS READY TO SERVE TRAFFIC")
+                print("="*50)
                 sys.exit(0)
             else:
-                print("\n⚠ Role assignment failed but continuing...")
+                print("\n⚠ Role assignment had issues but continuing...")
                 sys.exit(0)
         else:
             print("\n⚠ Superuser creation failed but continuing...")
