@@ -494,15 +494,25 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def me(self, request):
         """Get current user's profile - creates one if it doesn't exist"""
+        import traceback
+        
         try:
+            # Log the request for debugging
+            print(f"\n[DEBUG /rbac/users/me/] User: {request.user}")
+            print(f"[DEBUG /rbac/users/me/] User authenticated: {request.user.is_authenticated}")
+            print(f"[DEBUG /rbac/users/me/] User email: {getattr(request.user, 'email', 'N/A')}")
+            
             # Try to get existing profile
             profile = UserProfile.objects.filter(
                 user=request.user,
                 is_deleted=False
             ).first()
             
+            print(f"[DEBUG /rbac/users/me/] Profile found: {profile is not None}")
+            
             # If no profile exists, return user info without RBAC data
             if not profile:
+                print(f"[DEBUG /rbac/users/me/] No RBAC profile for {request.user.email}")
                 return Response({
                     'id': str(request.user.id),
                     'email': request.user.email,
@@ -515,16 +525,30 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     'message': 'RBAC profile not configured. Please contact administrator.'
                 })
             
+            # Try to serialize the profile
+            print(f"[DEBUG /rbac/users/me/] Serializing profile...")
             serializer = self.get_serializer(profile)
-            return Response(serializer.data)
+            data = serializer.data
+            print(f"[DEBUG /rbac/users/me/] Serialization successful")
+            print(f"[DEBUG /rbac/users/me/] Roles count: {len(data.get('roles', []))}")
+            
+            return Response(data)
             
         except Exception as e:
-            # Log the error for debugging
-            import traceback
-            print(f"[ERROR] /rbac/users/me/ failed: {str(e)}")
-            print(traceback.format_exc())
+            # Log the full error for debugging
+            print(f"\n[ERROR /rbac/users/me/] Exception occurred: {str(e)}")
+            print(f"[ERROR /rbac/users/me/] Exception type: {type(e).__name__}")
+            print(f"[ERROR /rbac/users/me/] Traceback:")
+            traceback.print_exc()
+            
+            # Return detailed error in response
             return Response(
-                {'error': f'Server error: {str(e)}'},
+                {
+                    'error': f'Server error: {str(e)}',
+                    'error_type': type(e).__name__,
+                    'user': str(request.user),
+                    'traceback': traceback.format_exc()
+                },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
