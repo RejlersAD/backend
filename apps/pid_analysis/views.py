@@ -266,7 +266,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK
         )
     
-    @action(detail=True, methods=['get'])
+    @action(detail=True, methods=['get'], url_path='export')
     def export(self, request, pk=None):
         """
         Export report in different formats (PDF, Excel, CSV)
