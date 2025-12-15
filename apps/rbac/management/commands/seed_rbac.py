@@ -45,46 +45,53 @@ class Command(BaseCommand):
                 'order': 1
             },
             {
+                'name': 'PFD to P&ID Converter',
+                'code': 'pfd_to_pid',
+                'description': 'AI-powered conversion of PFD to P&ID drawings',
+                'icon': 'RefreshCw',
+                'order': 2
+            },
+            {
                 'name': 'User Management',
                 'code': 'user_mgmt',
                 'description': 'Manage users, roles, and permissions',
                 'icon': 'Users',
-                'order': 2
+                'order': 3
             },
             {
                 'name': 'Organization Settings',
                 'code': 'org_settings',
                 'description': 'Configure organization settings and preferences',
                 'icon': 'Settings',
-                'order': 3
+                'order': 4
             },
             {
                 'name': 'Audit Logs',
                 'code': 'audit_logs',
                 'description': 'View system audit logs and activity',
                 'icon': 'FileSearch',
-                'order': 4
+                'order': 5
             },
             {
                 'name': 'File Storage',
                 'code': 'file_storage',
                 'description': 'Manage files and documents in S3',
                 'icon': 'Database',
-                'order': 5
+                'order': 6
             },
             {
                 'name': 'Reports & Analytics',
                 'code': 'reports',
                 'description': 'Generate reports and view analytics',
                 'icon': 'BarChart',
-                'order': 6
+                'order': 7
             },
             {
                 'name': 'API Access',
                 'code': 'api_access',
                 'description': 'Access REST APIs programmatically',
                 'icon': 'Code',
-                'order': 7
+                'order': 8
             },
         ]
 
@@ -109,6 +116,15 @@ class Command(BaseCommand):
             {'name': 'Delete P&ID Analysis', 'code': 'pid_delete', 'module': 'pid_analysis', 'action': 'delete', 'description': 'Delete P&ID analysis records'},
             {'name': 'Approve P&ID Analysis', 'code': 'pid_approve', 'module': 'pid_analysis', 'action': 'approve', 'description': 'Approve P&ID analysis results'},
             {'name': 'Export P&ID Reports', 'code': 'pid_export', 'module': 'pid_analysis', 'action': 'export', 'description': 'Export P&ID reports (PDF/Excel/CSV)'},
+            
+            # PFD to P&ID Converter Permissions
+            {'name': 'Upload PFD Files', 'code': 'pfd_upload', 'module': 'pfd_to_pid', 'action': 'create', 'description': 'Upload PFD files for conversion'},
+            {'name': 'View PFD Documents', 'code': 'pfd_view', 'module': 'pfd_to_pid', 'action': 'read', 'description': 'View uploaded PFD documents'},
+            {'name': 'Generate P&ID', 'code': 'pfd_convert', 'module': 'pfd_to_pid', 'action': 'execute', 'description': 'Convert PFD to P&ID using AI'},
+            {'name': 'View P&ID Conversions', 'code': 'pfd_conversion_view', 'module': 'pfd_to_pid', 'action': 'read', 'description': 'View generated P&ID conversions'},
+            {'name': 'Approve P&ID Conversions', 'code': 'pfd_approve', 'module': 'pfd_to_pid', 'action': 'approve', 'description': 'Approve AI-generated P&ID'},
+            {'name': 'Delete PFD/Conversions', 'code': 'pfd_delete', 'module': 'pfd_to_pid', 'action': 'delete', 'description': 'Delete PFD documents and conversions'},
+            {'name': 'Provide Feedback', 'code': 'pfd_feedback', 'module': 'pfd_to_pid', 'action': 'create', 'description': 'Provide feedback on conversions'},
             
             # User Management Permissions
             {'name': 'Create Users', 'code': 'user_create', 'module': 'user_mgmt', 'action': 'create', 'description': 'Create new user accounts'},
@@ -169,13 +185,14 @@ class Command(BaseCommand):
                 'description': 'Organization administrator - manages users and settings',
                 'permissions': [
                     'pid_upload', 'pid_view', 'pid_update', 'pid_delete', 'pid_approve', 'pid_export',
+                    'pfd_upload', 'pfd_view', 'pfd_convert', 'pfd_conversion_view', 'pfd_approve', 'pfd_delete', 'pfd_feedback',
                     'user_create', 'user_view', 'user_update', 'user_delete', 'user_roles',
                     'org_view', 'org_update',
                     'audit_view', 'audit_export',
                     'file_upload', 'file_view', 'file_delete',
                     'report_view', 'report_generate',
                 ],
-                'modules': ['pid_analysis', 'user_mgmt', 'org_settings', 'audit_logs', 'file_storage', 'reports']
+                'modules': ['pid_analysis', 'pfd_to_pid', 'user_mgmt', 'org_settings', 'audit_logs', 'file_storage', 'reports']
             },
             {
                 'name': 'Manager',
@@ -184,11 +201,12 @@ class Command(BaseCommand):
                 'description': 'Project manager - can approve and manage P&ID analysis',
                 'permissions': [
                     'pid_upload', 'pid_view', 'pid_update', 'pid_approve', 'pid_export',
+                    'pfd_upload', 'pfd_view', 'pfd_convert', 'pfd_conversion_view', 'pfd_approve', 'pfd_feedback',
                     'user_view',
                     'file_upload', 'file_view',
                     'report_view', 'report_generate',
                 ],
-                'modules': ['pid_analysis', 'file_storage', 'reports']
+                'modules': ['pid_analysis', 'pfd_to_pid', 'file_storage', 'reports']
             },
             {
                 'name': 'Engineer',
@@ -197,10 +215,11 @@ class Command(BaseCommand):
                 'description': 'Engineering professional - can upload and analyze P&IDs',
                 'permissions': [
                     'pid_upload', 'pid_view', 'pid_update', 'pid_export',
+                    'pfd_upload', 'pfd_view', 'pfd_convert', 'pfd_conversion_view', 'pfd_feedback',
                     'file_upload', 'file_view',
                     'report_view',
                 ],
-                'modules': ['pid_analysis', 'file_storage', 'reports']
+                'modules': ['pid_analysis', 'pfd_to_pid', 'file_storage', 'reports']
             },
             {
                 'name': 'Reviewer',
@@ -209,10 +228,11 @@ class Command(BaseCommand):
                 'description': 'Review specialist - can view and export analysis results',
                 'permissions': [
                     'pid_view', 'pid_export',
+                    'pfd_view', 'pfd_conversion_view', 'pfd_feedback',
                     'file_view',
                     'report_view',
                 ],
-                'modules': ['pid_analysis', 'file_storage', 'reports']
+                'modules': ['pid_analysis', 'pfd_to_pid', 'file_storage', 'reports']
             },
             {
                 'name': 'Viewer',
@@ -221,10 +241,11 @@ class Command(BaseCommand):
                 'description': 'Read-only access - can only view analysis results',
                 'permissions': [
                     'pid_view',
+                    'pfd_view', 'pfd_conversion_view',
                     'file_view',
                     'report_view',
                 ],
-                'modules': ['pid_analysis', 'file_storage', 'reports']
+                'modules': ['pid_analysis', 'pfd_to_pid', 'file_storage', 'reports']
             },
         ]
 

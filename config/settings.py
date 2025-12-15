@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     'apps.users',
     'apps.api',
     'apps.pid_analysis',
+    'apps.pfd_converter',
     'apps.rbac',
 ]
 

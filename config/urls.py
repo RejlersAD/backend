@@ -14,6 +14,7 @@ urlpatterns = [
     # API endpoints
     path('api/v1/', include('apps.api.urls')),
     path('api/v1/pid/', include('apps.pid_analysis.urls')),
+    path('api/v1/pfd/', include('apps.pfd_converter.urls')),
     path('api/v1/rbac/', include('apps.rbac.urls')),
     
     # API Documentation
