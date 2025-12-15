@@ -26,3 +26,7 @@ django-storages==1.14.2
 # Report Export
 reportlab==4.0.7
 openpyxl==3.1.2
+
+# RAG and Document Processing
+python-docx==1.1.0
+scikit-learn==1.6.2

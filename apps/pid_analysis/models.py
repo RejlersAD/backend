@@ -23,6 +23,93 @@ def pid_report_upload_path(instance, filename):
     return f'pid_reports/{drawing_id}/{filename}'
 
 
+def reference_document_upload_path(instance, filename):
+    """
+    Generate S3-compatible upload path for reference documents
+    Format: reference_docs/{category}/{filename}
+    """
+    category = instance.category.lower().replace(' ', '_') if instance.category else 'general'
+    return f'reference_docs/{category}/{filename}'
+
+
+class ReferenceDocument(models.Model):
+    """Reference documents and standards for RAG-enhanced P&ID analysis"""
+    
+    CATEGORY_CHOICES = [
+        ('standard', 'Industry Standard'),
+        ('guideline', 'Design Guideline'),
+        ('specification', 'Technical Specification'),
+        ('best_practice', 'Best Practice'),
+        ('company_standard', 'Company Standard'),
+        ('regulation', 'Regulation/Code'),
+        ('other', 'Other'),
+    ]
+    
+    # Document information
+    title = models.CharField(max_length=255, help_text='Document title')
+    description = models.TextField(blank=True, help_text='Document description')
+    category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='other')
+    
+    # File storage
+    file = models.FileField(
+        upload_to=reference_document_upload_path,
+        validators=[FileExtensionValidator(allowed_extensions=['pdf', 'txt', 'docx', 'doc'])],
+        help_text='Reference document file',
+        storage=None
+    )
+    original_filename = models.CharField(max_length=255)
+    file_size = models.IntegerField(help_text='File size in bytes')
+    
+    # Content (extracted text)
+    content_text = models.TextField(blank=True, help_text='Extracted text content for RAG')
+    chunk_count = models.IntegerField(default=0, help_text='Number of chunks created for RAG')
+    
+    # Vector database tracking
+    vector_db_ids = models.JSONField(default=list, blank=True, help_text='Vector database document IDs')
+    embedding_status = models.CharField(
+        max_length=20,
+        choices=[
+            ('pending', 'Pending'),
+            ('processing', 'Processing'),
+            ('completed', 'Completed'),
+            ('failed', 'Failed'),
+        ],
+        default='pending'
+    )
+    
+    # Metadata
+    author = models.CharField(max_length=255, blank=True)
+    version = models.CharField(max_length=50, blank=True)
+    published_date = models.DateField(null=True, blank=True)
+    tags = models.JSONField(default=list, blank=True, help_text='Searchable tags')
+    
+    # User tracking
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='reference_documents'
+    )
+    
+    # Status
+    is_active = models.BooleanField(default=True, help_text='Include in RAG context retrieval')
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Reference Document'
+        verbose_name_plural = 'Reference Documents'
+        indexes = [
+            models.Index(fields=['category', 'is_active']),
+            models.Index(fields=['embedding_status']),
+        ]
+    
+    def __str__(self):
+        return f"{self.title} ({self.category})"
+
+
 class PIDDrawing(models.Model):
     """P&ID Drawing uploaded for analysis (S3-ready)"""
     

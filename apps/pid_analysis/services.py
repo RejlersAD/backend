@@ -1,16 +1,17 @@
 """
 P&ID Analysis Service
-AI-powered P&ID verification using OpenAI GPT-4 Vision
+AI-powered P&ID verification using OpenAI GPT-4 Vision with RAG support
 """
 import os
 import base64
 import io
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from django.conf import settings
 from openai import OpenAI
 import fitz  # PyMuPDF
 from PIL import Image
+from .rag_service import RAGService
 
 
 class PIDAnalysisService:
@@ -228,12 +229,13 @@ Now analyze THIS specific P&ID drawing and return detailed JSON based on what yo
         
         return images_base64
     
-    def analyze_pid_drawing(self, pdf_file) -> Dict[str, Any]:
+    def analyze_pid_drawing(self, pdf_file, drawing_number: Optional[str] = None) -> Dict[str, Any]:
         """
-        Analyze P&ID drawing using OpenAI GPT-4 Vision
+        Analyze P&ID drawing using OpenAI GPT-4 Vision with optional RAG context
         
         Args:
             pdf_file: Either a file path (str) or a Django FileField object
+            drawing_number: Optional drawing number for RAG context retrieval
         
         Returns:
             Dictionary containing analysis results
@@ -245,11 +247,40 @@ Now analyze THIS specific P&ID drawing and return detailed JSON based on what yo
             if not images_base64:
                 raise ValueError("Failed to convert PDF to images")
             
+            # Get RAG context if available
+            rag_context = ""
+            rag_enabled = os.environ.get('RAG_ENABLED', 'false').lower() == 'true'
+            
+            if rag_enabled and drawing_number:
+                try:
+                    print(f"[INFO] RAG enabled - retrieving context for drawing: {drawing_number}")
+                    rag_service = RAGService()
+                    rag_context = rag_service.retrieve_context(drawing_number)
+                    if rag_context:
+                        print(f"[INFO] Retrieved RAG context ({len(rag_context)} chars)")
+                except Exception as rag_error:
+                    print(f"[WARNING] RAG context retrieval failed: {str(rag_error)}")
+                    # Continue without RAG context - not critical for analysis
+            
+            # Build prompt with optional RAG context
+            analysis_prompt = self.ANALYSIS_PROMPT
+            if rag_context:
+                analysis_prompt = f"""**REFERENCE CONTEXT FROM STANDARDS AND DOCUMENTATION:**
+
+{rag_context}
+
+---
+
+{self.ANALYSIS_PROMPT}
+
+**Important:** Use the reference context above to enhance your analysis with specific standards, guidelines, and best practices. Cross-reference equipment specifications and design requirements with the provided documentation."""
+                print(f"[INFO] Enhanced prompt with RAG context")
+            
             # Build message content with all page images
             message_content = [
                 {
                     "type": "text",
-                    "text": self.ANALYSIS_PROMPT
+                    "text": analysis_prompt
                 }
             ]
             

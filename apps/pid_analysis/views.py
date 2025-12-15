@@ -3,15 +3,19 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
-from .models import PIDDrawing, PIDAnalysisReport, PIDIssue
+from .models import PIDDrawing, PIDAnalysisReport, PIDIssue, ReferenceDocument
 from .serializers import (
     PIDDrawingSerializer,
     PIDDrawingUploadSerializer,
     PIDAnalysisReportSerializer,
     PIDIssueSerializer,
-    IssueUpdateSerializer
+    IssueUpdateSerializer,
+    ReferenceDocumentSerializer,
+    ReferenceDocumentUploadSerializer
 )
 from .services import PIDAnalysisService
+from .rag_service import RAGService
+from .document_processor import DocumentProcessor
 
 
 class PIDDrawingViewSet(viewsets.ModelViewSet):
@@ -93,7 +97,11 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                 analysis_service = PIDAnalysisService()
                 print(f"[DEBUG] Calling analyze_pid_drawing with file: {drawing.file.name}")
                 # Pass the file object directly (works with both S3 and local storage)
-                analysis_result = analysis_service.analyze_pid_drawing(drawing.file)
+                # Also pass drawing number for RAG context retrieval
+                analysis_result = analysis_service.analyze_pid_drawing(
+                    drawing.file,
+                    drawing_number=drawing.drawing_number
+                )
                 print(f"[DEBUG] Analysis completed, result keys: {list(analysis_result.keys())}")
                 
                 # Create report
@@ -432,3 +440,207 @@ class PIDIssueViewSet(viewsets.ModelViewSet):
         report.ignored_count = issues.filter(status='ignored').count()
         report.pending_count = issues.filter(status='pending').count()
         report.save()
+
+
+class ReferenceDocumentViewSet(viewsets.ModelViewSet):
+    """ViewSet for reference documents used in RAG"""
+    
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = ReferenceDocumentSerializer
+    
+    def get_queryset(self):
+        """Return reference documents for current user"""
+        return ReferenceDocument.objects.filter(uploaded_by=self.request.user)
+    
+    def perform_create(self, serializer):
+        """Create reference document with current user"""
+        serializer.save(uploaded_by=self.request.user)
+    
+    @action(detail=False, methods=['post'])
+    def upload(self, request):
+        """
+        Upload reference document and process for RAG
+        
+        POST /api/v1/pid/reference-documents/upload/
+        """
+        print(f"[INFO] Reference document upload request from user: {request.user}")
+        
+        # Validate request data
+        serializer = ReferenceDocumentUploadSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            print(f"[ERROR] Validation failed: {serializer.errors}")
+            return Response(
+                serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Create reference document
+            file = serializer.validated_data['file']
+            ref_doc = ReferenceDocument.objects.create(
+                title=serializer.validated_data['title'],
+                description=serializer.validated_data.get('description', ''),
+                category=serializer.validated_data['category'],
+                file=file,
+                uploaded_by=request.user,
+                embedding_status='pending'
+            )
+            
+            print(f"[INFO] Created reference document: {ref_doc.title} (ID: {ref_doc.id})")
+            
+            # Process document in background
+            try:
+                # Extract text from document
+                processor = DocumentProcessor()
+                content_text = processor.extract_text(ref_doc.file.path)
+                
+                if not content_text or len(content_text.strip()) < 50:
+                    ref_doc.embedding_status = 'failed'
+                    ref_doc.save()
+                    return Response(
+                        {'error': 'Failed to extract meaningful text from document'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                ref_doc.content_text = content_text
+                ref_doc.save()
+                
+                print(f"[INFO] Extracted {len(content_text)} characters from document")
+                
+                # Add to RAG system (generate embeddings and store)
+                rag_service = RAGService()
+                chunk_data = rag_service.add_reference_document(
+                    document_id=str(ref_doc.id),
+                    content=content_text,
+                    metadata={
+                        'title': ref_doc.title,
+                        'category': ref_doc.category,
+                        'filename': file.name
+                    }
+                )
+                
+                # Update document with embedding data (stored as JSON)
+                ref_doc.vector_db_ids = chunk_data  # This will be JSONified by Django
+                ref_doc.chunk_count = len(chunk_data)
+                ref_doc.embedding_status = 'completed'
+                ref_doc.save()
+                
+                print(f"[INFO] Document embedded successfully with {len(chunk_data)} chunks")
+                
+            except Exception as e:
+                print(f"[ERROR] Document processing failed: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                
+                ref_doc.embedding_status = 'failed'
+                ref_doc.save()
+                
+                return Response(
+                    {'error': f'Document processing failed: {str(e)}'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            
+            # Return success response
+            return Response(
+                ReferenceDocumentSerializer(ref_doc, context={'request': request}).data,
+                status=status.HTTP_201_CREATED
+            )
+            
+        except Exception as e:
+            print(f"[ERROR] Upload failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            return Response(
+                {'error': f'Upload failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['post'])
+    def activate(self, request, pk=None):
+        """
+        Activate a reference document for use in RAG
+        
+        POST /api/v1/pid/reference-documents/{id}/activate/
+        """
+        ref_doc = self.get_object()
+        ref_doc.is_active = True
+        ref_doc.save()
+        
+        return Response(
+            ReferenceDocumentSerializer(ref_doc, context={'request': request}).data,
+            status=status.HTTP_200_OK
+        )
+    
+    @action(detail=True, methods=['post'])
+    def deactivate(self, request, pk=None):
+        """
+        Deactivate a reference document (won't be used in RAG)
+        
+        POST /api/v1/pid/reference-documents/{id}/deactivate/
+        """
+        ref_doc = self.get_object()
+        ref_doc.is_active = False
+        ref_doc.save()
+        
+        return Response(
+            ReferenceDocumentSerializer(ref_doc, context={'request': request}).data,
+            status=status.HTTP_200_OK
+        )
+    
+    @action(detail=True, methods=['post'])
+    def reprocess(self, request, pk=None):
+        """
+        Reprocess a failed document
+        
+        POST /api/v1/pid/reference-documents/{id}/reprocess/
+        """
+        ref_doc = self.get_object()
+        
+        try:
+            # Extract text from document
+            processor = DocumentProcessor()
+            content_text = processor.extract_text(ref_doc.file.path)
+            
+            if not content_text or len(content_text.strip()) < 50:
+                return Response(
+                    {'error': 'Failed to extract meaningful text from document'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            ref_doc.content_text = content_text
+            ref_doc.embedding_status = 'processing'
+            ref_doc.save()
+            
+            # Add to RAG system
+            rag_service = RAGService()
+            chunk_data = rag_service.add_reference_document(
+                document_id=str(ref_doc.id),
+                content=content_text,
+                metadata={
+                    'title': ref_doc.title,
+                    'category': ref_doc.category,
+                    'filename': ref_doc.file.name
+                }
+            )
+            
+            # Update document
+            ref_doc.vector_db_ids = chunk_data
+            ref_doc.chunk_count = len(chunk_data)
+            ref_doc.embedding_status = 'completed'
+            ref_doc.save()
+            
+            return Response(
+                ReferenceDocumentSerializer(ref_doc, context={'request': request}).data,
+                status=status.HTTP_200_OK
+            )
+            
+        except Exception as e:
+            ref_doc.embedding_status = 'failed'
+            ref_doc.save()
+            
+            return Response(
+                {'error': f'Reprocessing failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

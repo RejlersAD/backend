@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import PIDDrawing, PIDAnalysisReport, PIDIssue
+from .models import PIDDrawing, PIDAnalysisReport, PIDIssue, ReferenceDocument
 
 
 class PIDIssueSerializer(serializers.ModelSerializer):
@@ -130,4 +130,77 @@ class IssueUpdateSerializer(serializers.ModelSerializer):
         valid_choices = ['pending', 'approved', 'ignored']
         if value not in valid_choices:
             raise serializers.ValidationError(f"Invalid status. Must be one of: {', '.join(valid_choices)}")
+        return value
+
+
+class ReferenceDocumentSerializer(serializers.ModelSerializer):
+    """Serializer for reference documents used in RAG"""
+    
+    uploaded_by_username = serializers.CharField(source='uploaded_by.username', read_only=True)
+    file_url = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = ReferenceDocument
+        fields = [
+            'id', 'title', 'description', 'category', 'file', 'file_url',
+            'content_text', 'chunk_count', 'vector_db_ids', 'embedding_status',
+            'is_active', 'uploaded_by', 'uploaded_by_username',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'content_text', 'chunk_count', 'vector_db_ids',
+            'embedding_status', 'uploaded_by', 'created_at', 'updated_at'
+        ]
+    
+    def get_file_url(self, obj):
+        """Get the file URL"""
+        if obj.file:
+            request = self.context.get('request')
+            if request is not None:
+                return request.build_absolute_uri(obj.file.url)
+            return obj.file.url
+        return None
+
+
+class ReferenceDocumentUploadSerializer(serializers.Serializer):
+    """Serializer for uploading reference documents"""
+    
+    file = serializers.FileField(
+        help_text='Reference document in PDF, DOCX, or TXT format',
+        required=True
+    )
+    title = serializers.CharField(max_length=255, required=True)
+    description = serializers.CharField(required=False, allow_blank=True)
+    category = serializers.ChoiceField(
+        choices=['standard', 'guideline', 'specification', 'procedure', 'other'],
+        default='other'
+    )
+    
+    def validate_file(self, value):
+        """Validate document file"""
+        if not value:
+            raise serializers.ValidationError("File is required")
+        
+        filename = getattr(value, 'name', '')
+        if not filename:
+            raise serializers.ValidationError("File must have a name")
+        
+        # Check file extension
+        allowed_extensions = ['.pdf', '.docx', '.txt']
+        if not any(filename.lower().endswith(ext) for ext in allowed_extensions):
+            raise serializers.ValidationError(
+                f"Only PDF, DOCX, and TXT files are allowed. Received: {filename}"
+            )
+        
+        # Check file size (max 100MB)
+        max_size = 100 * 1024 * 1024  # 100MB
+        file_size = getattr(value, 'size', 0)
+        if file_size > max_size:
+            raise serializers.ValidationError(
+                f"File size cannot exceed 100MB. Current size: {file_size / (1024*1024):.2f}MB"
+            )
+        
+        if file_size == 0:
+            raise serializers.ValidationError("File cannot be empty")
+        
         return value
