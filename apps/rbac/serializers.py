@@ -238,6 +238,20 @@ class UserProfileSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, min_length=8)
     first_name = serializers.CharField(write_only=True, required=False)
     last_name = serializers.CharField(write_only=True, required=False)
+    phone = serializers.CharField(write_only=True, required=False)
+    
+    def validate(self, attrs):
+        """Validate required fields for creation"""
+        if self.instance is None:
+            if 'email' not in attrs:
+                raise serializers.ValidationError({'email': 'Email is required for user creation'})
+            if 'password' not in attrs:
+                raise serializers.ValidationError({'password': 'Password is required for user creation'})
+            if 'first_name' not in attrs:
+                raise serializers.ValidationError({'first_name': 'First name is required for user creation'})
+            if 'last_name' not in attrs:
+                raise serializers.ValidationError({'last_name': 'Last name is required for user creation'})
+        return attrs
     
     class Meta:
         model = UserProfile
@@ -274,15 +288,49 @@ class UserProfileSerializer(serializers.ModelSerializer):
         password = validated_data.pop('password')
         first_name = validated_data.pop('first_name', '')
         last_name = validated_data.pop('last_name', '')
+        phone = validated_data.pop('phone', None)
         
-        # Create user
+        # Auto-assign organization if not provided
+        if 'organization' not in validated_data or validated_data['organization'] is None:
+            request_user = self.context['request'].user
+            try:
+                # Use creator's organization
+                validated_data['organization'] = request_user.rbac_profile.organization
+            except UserProfile.DoesNotExist:
+                # Fallback: get first active organization or create default
+                default_org = Organization.objects.filter(is_active=True).first()
+                if not default_org:
+                    default_org = Organization.objects.create(
+                        name='Default Organization',
+                        code='DEFAULT',
+                        is_active=True
+                    )
+                validated_data['organization'] = default_org
+        
+        # Check if creating super admin
+        is_super_admin = False
+        if role_ids:
+            super_admin_roles = Role.objects.filter(
+                id__in=role_ids,
+                code='super_admin',
+                is_active=True
+            )
+            is_super_admin = super_admin_roles.exists()
+        
+        # Create user with appropriate permissions
         user = User.objects.create_user(
-            username=email.split('@')[0],  # Use email prefix as username
+            username=email.split('@')[0],
             email=email,
             password=password,
             first_name=first_name,
-            last_name=last_name
+            last_name=last_name,
+            is_superuser=is_super_admin,
+            is_staff=is_super_admin
         )
+        
+        # Set phone if provided
+        if phone:
+            validated_data['phone'] = phone
         
         # Create profile
         profile = UserProfile.objects.create(user=user, **validated_data)
@@ -295,7 +343,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
                     user_profile=profile,
                     role_id=role_id,
                     assigned_by=request_user,
-                    is_primary=(i == 0)  # First role is primary
+                    is_primary=(i == 0)
                 )
         
         return profile
