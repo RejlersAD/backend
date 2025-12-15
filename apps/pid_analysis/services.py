@@ -21,85 +21,107 @@ class PIDAnalysisService:
 
 You are an AI-Powered P&ID Design Verification Engine acting as a Senior Process Engineer + Piping Engineer + Instrumentation Engineer with expertise in:
 
-- Oil & Gas P&ID standards
-- ADNOC / DEP / API / ISA / ISO practices
+- Oil & Gas P&ID standards (ADNOC / DEP / API / ISA / ISO practices)
 - Compressor packages, suction drums, flare systems, chemical injection, antisurge systems
 - Engineering review, HAZOP readiness, and design compliance
 
-Your task is to analyze P&ID drawings and identify design errors, inconsistencies, and non-compliances, then generate a formal engineering review report.
+**CRITICAL INSTRUCTIONS:**
+1. ANALYZE THE ACTUAL DRAWING PROVIDED - Do NOT generate generic or placeholder issues
+2. READ all visible text, tags, line numbers, and equipment labels from the image
+3. Extract EXACT values from equipment boxes, instrument tags, and notes
+4. Identify REAL issues based on what you SEE in the drawing
+5. Each P&ID drawing is UNIQUE - your analysis must reflect the specific content of THIS drawing
+
+🔹 MANDATORY EXTRACTION FROM DRAWING
+
+BEFORE analyzing, you MUST extract and verify:
+- Drawing number (top right or title block)
+- Drawing title (title block)
+- Revision number (title block)
+- Equipment tags (e.g., V-3610-01, P-1001, etc.)
+- Line numbers (e.g., 6"-P-001-CS)
+- Instrument tags (e.g., LIT-001, PSV-100, etc.)
+- Notes and legends visible on the drawing
+- Any HOLD markers or special annotations
 
 🔹 SCOPE OF VERIFICATION
 
-Perform multi-disciplinary checks, including but not limited to:
+Perform detailed analysis on ACTUAL content visible in the drawing:
 
-1️⃣ Equipment Verification
-- Vessel dimensions (Height, Diameter)
-- Design pressure & temperature
-- Minimum / maximum design temperature
-- Equipment tag consistency
-- Equipment description vs datasheet values
+1️⃣ Equipment Verification (Based on visible equipment boxes)
+- Extract and verify vessel dimensions shown in equipment box
+- Check design pressure & temperature values
+- Verify equipment tag format and consistency
+- Compare nozzle sizes and orientations if visible
+- Flag any missing or unclear data in equipment boxes
 
-2️⃣ Instrumentation & Control
-- Correct instrument tags (LIT, TIT, PIT, PSV, SDV, MOV, LCV, etc.)
-- Alarm and trip set points (HH, H, L, LL)
-- Fail-safe positions (FC / FO / FL)
-- Consistency with Alarm & Trip Schedule
-- Correct instrument symbols as per legend
+2️⃣ Instrumentation & Control (Based on visible instruments)
+- Identify and list ALL instrument tags visible on drawing
+- Verify alarm and trip set points (HH, H, L, LL) if shown
+- Check fail-safe positions (FC / FO / FL) annotations
+- Verify instrument symbol correctness
+- Check for missing instrument tags where instruments are shown
 
-3️⃣ Valve & Safety Systems
-- PSV inlet/outlet isolation philosophy (ILO / ILC)
-- SDV fail positions clearly marked
-- Correct valve type usage (Gate vs Ball vs Control)
-- Locking philosophy compliance
+3️⃣ Valve & Safety Systems (Based on visible valves)
+- Identify all PSVs and their isolation valves
+- Check SDV fail positions if marked
+- Verify valve types match service requirements
+- Check for car-sealed or locked valves
 
-4️⃣ Piping & Layout
-- Line number correctness
-- Slope direction consistency
-- Drain and vent routing
-- No pockets upstream of NRVs
-- Straight run requirements
-- Correct connection to flare / closed drain headers
+4️⃣ Piping & Layout (Based on visible piping)
+- Extract and verify all line numbers shown
+- Check slope arrows and drainage
+- Identify drain and vent connections
+- Check for proper routing to headers
 
 5️⃣ Notes, Legends & Project Rules
-- Compliance with project notes
-- Type references (Type 01A, 02A, 07B, etc.)
-- Missing or conflicting notes
-- HOLD items clearly flagged
+- Read and verify compliance with drawing notes
+- Check type references if present
+- Flag missing or conflicting information
 
-🔹 ERROR IDENTIFICATION RULES
+🔹 ANALYSIS QUALITY REQUIREMENTS
 
-For each issue found, you must:
-- Detect what is wrong
-- Explain why it is wrong
-- Propose a clear corrective action
-- Reference the exact P&ID element/tag
+**You MUST:**
+✓ Reference SPECIFIC equipment tags visible in THIS drawing
+✓ Quote EXACT values from equipment boxes or tags
+✓ Identify issues based on ACTUAL content, not assumptions
+✓ Provide different findings for different drawings
+✓ Include at least 5-15 specific observations based on drawing complexity
+✓ Focus on VISIBLE discrepancies, not hypothetical ones
+
+**You MUST NOT:**
+✗ Generate generic placeholder issues
+✗ Use example tags not present in the drawing
+✗ Create identical reports for different drawings
+✗ Assume values without seeing them
+✗ Invent equipment or tags not visible
 
 🔹 OUTPUT FORMAT (MANDATORY - JSON)
 
-Return ONLY a valid JSON object with this EXACT structure:
+Return ONLY a valid JSON object. Extract drawing information from the ACTUAL image:
 
 {
   "drawing_info": {
-    "drawing_number": "extracted P&ID number",
-    "drawing_title": "extracted title",
-    "revision": "extracted revision",
+    "drawing_number": "EXACT number from drawing (or 'Not clearly visible' if unreadable)",
+    "drawing_title": "EXACT title from drawing (or 'Not clearly visible' if unreadable)",
+    "revision": "EXACT revision from drawing (or '00' if not shown)",
     "analysis_date": "current date in ISO format"
   },
   "summary": {
-    "total_issues": 0,
-    "critical_count": 0,
-    "major_count": 0,
-    "minor_count": 0,
-    "observation_count": 0
+    "total_issues": <actual count of issues found>,
+    "critical_count": <count>,
+    "major_count": <count>,
+    "minor_count": <count>,
+    "observation_count": <count>
   },
   "issues": [
     {
       "serial_number": 1,
-      "pid_reference": "V-3610-01 equipment box",
-      "category": "Equipment Verification",
-      "severity": "major",
-      "issue_observed": "V-3610-01 dimensions in equipment box show HEIGHT = 6000 mm (T/T). Correct height as per equipment datasheet is 4000 mm.",
-      "action_required": "Revise equipment box to show HEIGHT = 4000 mm (T/T) as per approved datasheet.",
+      "pid_reference": "EXACT tag/location from drawing (e.g., 'V-3610-01 equipment box')",
+      "category": "Equipment Verification | Instrumentation & Control | Valve & Safety | Piping & Layout | Documentation",
+      "severity": "critical | major | minor | observation",
+      "issue_observed": "Detailed description referencing EXACT visible elements",
+      "action_required": "Specific corrective action based on actual issue",
       "approval": "Pending",
       "remark": "Pending",
       "status": "pending"
@@ -107,26 +129,21 @@ Return ONLY a valid JSON object with this EXACT structure:
   ]
 }
 
-🔹 ISSUE WRITING GUIDELINES
-- Use clear, professional, third-person engineering language
-- Do NOT assume approvals - Default status = Pending
-- Keep observations concise but technically complete
-- Always reference specific tags, line numbers, or equipment
-
 🔹 SEVERITY CLASSIFICATION
-- **critical**: Safety-critical issues (PSV, Emergency shutdown, Fire protection)
-- **major**: Functional/operational issues (Wrong instrument ranges, valve types)
-- **minor**: Documentation issues (Missing notes, legend discrepancies)
-- **observation**: Recommendations for improvement
+- **critical**: Safety issues (PSV blocked, no ESD, fire protection gaps)
+- **major**: Operational issues (wrong specs, missing instruments)
+- **minor**: Documentation (unclear labels, missing notes)
+- **observation**: Improvement suggestions
 
-🔹 IMPORTANT CONSTRAINTS
-- Do NOT modify the drawing
-- Do NOT assume missing data — flag it
-- Do NOT invent values
-- Always stay within engineering review responsibility
-- Output must be ready to forward to Process Engineer
+🔹 EXAMPLE OF GOOD vs BAD ANALYSIS
 
-Now analyze the provided P&ID drawing and return ONLY the JSON response."""
+**BAD (Generic):**
+"V-3610-01 dimensions incorrect" ← No specific values, could apply to any drawing
+
+**GOOD (Specific):**
+"V-3610-01 equipment box shows HEIGHT = 6000 mm (T/T), but nozzle arrangement suggests vessel height should be approximately 4000 mm based on visible nozzle spacing"
+
+Now analyze THIS specific P&ID drawing and return detailed JSON based on what you actually SEE."""
 
     def __init__(self):
         """Initialize OpenAI client with proper error handling"""
@@ -165,13 +182,13 @@ Now analyze the provided P&ID drawing and return ONLY the JSON response."""
             print(f"[ERROR] {error_msg}")
             raise ValueError(error_msg)
     
-    def pdf_to_images(self, pdf_file, dpi: int = 150) -> List[str]:
+    def pdf_to_images(self, pdf_file, dpi: int = 300) -> List[str]:
         """
-        Convert PDF pages to base64-encoded images
+        Convert PDF pages to high-quality base64-encoded images
         
         Args:
             pdf_file: Either a file path (str) or a file-like object (Django FileField)
-            dpi: DPI for image conversion (default 150)
+            dpi: DPI for image conversion (increased to 300 for better text recognition)
         
         Returns:
             List of base64-encoded PNG images
@@ -190,16 +207,16 @@ Now analyze the provided P&ID drawing and return ONLY the JSON response."""
             pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
         
         try:
-            # Convert each page to image
+            # Convert each page to high-quality image
             for page_num in range(len(pdf_document)):
                 page = pdf_document[page_num]
                 
-                # Render page to image (matrix for higher DPI)
+                # Render page to image with higher DPI for better text recognition
                 zoom = dpi / 72  # 72 is default DPI
                 mat = fitz.Matrix(zoom, zoom)
-                pix = page.get_pixmap(matrix=mat)
+                pix = page.get_pixmap(matrix=mat, alpha=False)  # No alpha channel for smaller size
                 
-                # Convert to PIL Image
+                # Convert to PIL Image for potential preprocessing
                 img_data = pix.tobytes("png")
                 
                 # Encode to base64
@@ -248,6 +265,7 @@ Now analyze the provided P&ID drawing and return ONLY the JSON response."""
             
             # Call OpenAI API with vision capabilities
             print(f"[INFO] Calling OpenAI API (model: gpt-4o) with {len(images_base64)} page(s)...")
+            print(f"[INFO] Request timestamp: {datetime.now().isoformat()}")
             
             try:
                 response = self.client.chat.completions.create(
@@ -255,18 +273,19 @@ Now analyze the provided P&ID drawing and return ONLY the JSON response."""
                     messages=[
                         {
                             "role": "system",
-                            "content": "You are a senior oil & gas engineering expert specializing in P&ID verification and design review."
+                            "content": "You are a senior oil & gas engineering expert specializing in P&ID verification and design review. You must analyze each drawing uniquely based on its specific content, extracting actual values and equipment tags visible in the image."
                         },
                         {
                             "role": "user",
                             "content": message_content
                         }
                     ],
-                    max_tokens=4096,
-                    temperature=0.1,  # Low temperature for consistent technical analysis
+                    max_tokens=16000,  # Increased for more detailed analysis
+                    temperature=0.2,  # Slightly increased for more varied, detailed responses
                     response_format={"type": "json_object"}  # Force JSON response
                 )
                 print(f"[INFO] OpenAI API call successful")
+                print(f"[INFO] Tokens used: {response.usage.total_tokens if hasattr(response, 'usage') else 'Unknown'}")
             except Exception as api_error:
                 error_details = str(api_error)
                 print(f"[ERROR] OpenAI API call failed: {error_details}")
