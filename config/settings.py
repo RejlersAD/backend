@@ -234,6 +234,7 @@ CORS_ALLOW_HEADERS = [
 # Expose headers to the frontend
 CORS_EXPOSE_HEADERS = [
     'content-type',
+    'content-disposition',
     'x-csrftoken',
 ]
 
