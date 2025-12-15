@@ -129,11 +129,41 @@ Return ONLY a valid JSON object with this EXACT structure:
 Now analyze the provided P&ID drawing and return ONLY the JSON response."""
 
     def __init__(self):
-        """Initialize OpenAI client"""
-        api_key = settings.OPENAI_API_KEY if hasattr(settings, 'OPENAI_API_KEY') else os.getenv('OPENAI_API_KEY')
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY is not configured")
-        self.client = OpenAI(api_key=api_key)
+        """Initialize OpenAI client with proper error handling"""
+        # Try multiple sources for API key (soft-coded approach)
+        api_key = None
+        
+        # Priority 1: Django settings
+        if hasattr(settings, 'OPENAI_API_KEY'):
+            api_key = settings.OPENAI_API_KEY
+            print(f"[DEBUG] API key from Django settings: {api_key[:15] if api_key else 'None'}...")
+        
+        # Priority 2: Environment variable
+        if not api_key or api_key == '':
+            api_key = os.getenv('OPENAI_API_KEY')
+            print(f"[DEBUG] API key from environment: {api_key[:15] if api_key else 'None'}...")
+        
+        # Validate API key
+        if not api_key or api_key.strip() == '' or api_key == 'your-openai-api-key-here':
+            error_msg = (
+                "❌ CRITICAL: OpenAI API key is NOT configured!\n"
+                "This must be set in Railway environment variables.\n"
+                "Instructions:\n"
+                "1. Go to Railway Dashboard → Your Project → Variables\n"
+                "2. Add: OPENAI_API_KEY = your-actual-key\n"
+                "3. Get key from: https://platform.openai.com/api-keys\n"
+                "Contact administrator immediately!"
+            )
+            print(f"[ERROR] {error_msg}")
+            raise ValueError("OpenAI API key not configured - contact administrator")
+        
+        try:
+            self.client = OpenAI(api_key=api_key)
+            print(f"[INFO] ✅ OpenAI client initialized successfully (key: {api_key[:12]}...{api_key[-4:]})")
+        except Exception as e:
+            error_msg = f"Failed to initialize OpenAI client: {str(e)}"
+            print(f"[ERROR] {error_msg}")
+            raise ValueError(error_msg)
     
     def pdf_to_images(self, pdf_file, dpi: int = 150) -> List[str]:
         """
@@ -217,44 +247,85 @@ Now analyze the provided P&ID drawing and return ONLY the JSON response."""
                 })
             
             # Call OpenAI API with vision capabilities
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a senior oil & gas engineering expert specializing in P&ID verification and design review."
-                    },
-                    {
-                        "role": "user",
-                        "content": message_content
-                    }
-                ],
-                max_tokens=4096,
-                temperature=0.1,  # Low temperature for consistent technical analysis
-            )
+            print(f"[INFO] Calling OpenAI API (model: gpt-4o) with {len(images_base64)} page(s)...")
+            
+            try:
+                response = self.client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a senior oil & gas engineering expert specializing in P&ID verification and design review."
+                        },
+                        {
+                            "role": "user",
+                            "content": message_content
+                        }
+                    ],
+                    max_tokens=4096,
+                    temperature=0.1,  # Low temperature for consistent technical analysis
+                    response_format={"type": "json_object"}  # Force JSON response
+                )
+                print(f"[INFO] OpenAI API call successful")
+            except Exception as api_error:
+                error_details = str(api_error)
+                print(f"[ERROR] OpenAI API call failed: {error_details}")
+                
+                # Check for common API errors
+                if "invalid_api_key" in error_details.lower():
+                    raise Exception("Invalid OpenAI API key. Please check your OPENAI_API_KEY in .env file")
+                elif "insufficient_quota" in error_details.lower():
+                    raise Exception("OpenAI API quota exceeded. Please check your account billing")
+                elif "rate_limit" in error_details.lower():
+                    raise Exception("OpenAI API rate limit reached. Please wait a moment and try again")
+                else:
+                    raise Exception(f"OpenAI API error: {error_details}")
             
             # Extract and parse JSON response
             result_text = response.choices[0].message.content
             
             # Log raw response for debugging
+            print(f"[DEBUG] OpenAI Raw Response length: {len(result_text) if result_text else 0} chars")
             print(f"[DEBUG] OpenAI Raw Response (first 500 chars): {result_text[:500] if result_text else 'EMPTY'}")
             
             if not result_text or not result_text.strip():
-                raise ValueError("OpenAI returned empty response")
+                raise ValueError(
+                    "OpenAI returned empty response. This may be due to:\n"
+                    "1. Invalid or expired API key\n"
+                    "2. Insufficient quota/credits\n"
+                    "3. PDF image quality issues\n"
+                    "Please check your OpenAI account and API key configuration."
+                )
             
             # Clean potential markdown code blocks
+            original_text = result_text
             if result_text.startswith("```json"):
                 result_text = result_text.split("```json")[1].split("```")[0].strip()
+                print(f"[DEBUG] Cleaned markdown ```json wrapper")
             elif result_text.startswith("```"):
                 result_text = result_text.split("```")[1].split("```")[0].strip()
+                print(f"[DEBUG] Cleaned markdown ``` wrapper")
             
             import json
             try:
                 analysis_result = json.loads(result_text)
+                print(f"[INFO] Successfully parsed JSON response")
             except json.JSONDecodeError as e:
                 print(f"[ERROR] JSON Decode Error: {str(e)}")
-                print(f"[ERROR] Problematic text: {result_text[:1000]}")
-                raise ValueError(f"OpenAI returned invalid JSON: {str(e)}")
+                print(f"[ERROR] Error at position: {e.pos}")
+                print(f"[ERROR] Problematic text (first 1000 chars): {result_text[:1000]}")
+                print(f"[ERROR] Original response (first 1000 chars): {original_text[:1000]}")
+                
+                # Try to provide helpful error message
+                raise ValueError(
+                    f"OpenAI returned invalid JSON format.\n"
+                    f"Error: {str(e)}\n"
+                    f"This usually means:\n"
+                    f"1. API returned an error message instead of analysis\n"
+                    f"2. API key is invalid or has insufficient permissions\n"
+                    f"3. Response was truncated due to token limits\n"
+                    f"Response preview: {original_text[:200]}..."
+                )
             
             # Validate and enrich response
             if 'issues' not in analysis_result:

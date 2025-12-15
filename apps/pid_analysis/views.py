@@ -147,14 +147,32 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                 traceback.print_exc()
                 
                 drawing.status = 'failed'
+                drawing.error_message = str(e)[:500]  # Store error for debugging
                 drawing.save()
+                
+                # Provide detailed error response
+                error_message = str(e)
+                error_type = type(e).__name__
+                
+                # Check for specific error types and provide helpful messages
+                if "OPENAI_API_KEY" in error_message or "API key" in error_message:
+                    user_message = "OpenAI API key is not configured or invalid. Please contact administrator."
+                elif "quota" in error_message.lower():
+                    user_message = "OpenAI API quota exceeded. Please contact administrator."
+                elif "rate_limit" in error_message.lower():
+                    user_message = "Too many requests. Please wait a moment and try again."
+                elif "invalid JSON" in error_message:
+                    user_message = f"Analysis processing error: {error_message}"
+                else:
+                    user_message = f"Analysis failed: {error_message}"
                 
                 return Response(
                     {
                         'success': False,
-                        'error': f'Analysis failed: {str(e)}',
-                        'error_type': type(e).__name__,
-                        'drawing_id': drawing.id
+                        'error': user_message,
+                        'error_type': error_type,
+                        'drawing_id': drawing.id,
+                        'details': error_message if request.user.is_staff else None  # Full details only for staff
                     },
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )

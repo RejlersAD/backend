@@ -53,6 +53,7 @@ class PIDDrawing(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='uploaded')
     analysis_started_at = models.DateTimeField(null=True, blank=True)
     analysis_completed_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True, null=True, help_text='Error message if analysis failed')
     
     # User tracking
     uploaded_by = models.ForeignKey(
