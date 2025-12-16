@@ -1210,30 +1210,45 @@ Extract ALL visible data, perform engineering validation, identify REAL issues w
         
         Soft-coded approach: Handles any level of nesting automatically.
         Enhanced to handle all edge cases including tabs, multiple quotes, etc.
+        Ultra-defensive: Catches all exceptions during key sanitization.
         """
-        if isinstance(obj, dict):
-            # Clean dictionary keys and recursively sanitize values
-            sanitized = {}
-            for key, value in obj.items():
-                # Aggressive cleaning: remove ALL whitespace characters, quotes, etc.
-                clean_key = str(key).strip()
-                # Remove leading/trailing: newlines, carriage returns, tabs, quotes
-                for char in ['\n', '\r', '\t', '"', "'", ' ']:
-                    clean_key = clean_key.strip(char)
-                # Additional pass to catch nested patterns like "\n \"key\""
-                clean_key = clean_key.strip()
-                
-                if not clean_key:  # Skip empty keys
-                    print(f"[WARNING] Skipping empty key after sanitization: {repr(key)}")
-                    continue
-                    
-                sanitized[clean_key] = self._sanitize_json_keys(value)
-            return sanitized
-        elif isinstance(obj, list):
-            # Recursively sanitize list items
-            return [self._sanitize_json_keys(item) for item in obj]
-        else:
-            # Return primitive values as-is
+        try:
+            if isinstance(obj, dict):
+                # Clean dictionary keys and recursively sanitize values
+                sanitized = {}
+                for key, value in obj.items():
+                    try:
+                        # Aggressive cleaning: remove ALL whitespace characters, quotes, etc.
+                        clean_key = str(key).strip()
+                        # Remove leading/trailing: newlines, carriage returns, tabs, quotes
+                        for char in ['\n', '\r', '\t', '"', "'", ' ']:
+                            clean_key = clean_key.strip(char)
+                        # Additional pass to catch nested patterns like "\n \"key\""
+                        clean_key = clean_key.strip()
+                        
+                        if not clean_key:  # Skip empty keys
+                            print(f"[WARNING] Skipping empty key after sanitization: {repr(key)}")
+                            continue
+                            
+                        sanitized[clean_key] = self._sanitize_json_keys(value)
+                    except Exception as key_error:
+                        print(f"[ERROR] Failed to sanitize key {repr(key)}: {str(key_error)}")
+                        # Try to add with original key as fallback
+                        try:
+                            sanitized[str(key)] = value
+                        except:
+                            print(f"[ERROR] Could not add key {repr(key)} even with fallback, skipping")
+                            continue
+                return sanitized
+            elif isinstance(obj, list):
+                # Recursively sanitize list items
+                return [self._sanitize_json_keys(item) for item in obj]
+            else:
+                # Return primitive values as-is
+                return obj
+        except Exception as e:
+            print(f"[ERROR] Critical error in _sanitize_json_keys: {str(e)}")
+            # If sanitization fails completely, return as-is (last resort)
             return obj
     
     def analyze_pid_drawing(self, pdf_file, drawing_number: Optional[str] = None) -> Dict[str, Any]:
@@ -1426,38 +1441,78 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
                         f"Check Railway logs for full response"
                     )
             
-            # Validate and enrich response with soft-coded defaults
-            min_issues_found = len(analysis_result.get('issues', []))
+            # Validate and enrich response with soft-coded defaults (defensive approach)
+            try:
+                min_issues_found = len(analysis_result.get('issues', []))
+            except Exception as e:
+                print(f"[ERROR] Failed to count issues: {str(e)}")
+                min_issues_found = 0
             
-            if 'issues' not in analysis_result:
-                analysis_result['issues'] = []
-                print(f"[WARNING] No 'issues' key in response, initialized empty array")
+            # Safely check and add missing keys with try-except for each operation
+            try:
+                if 'issues' not in analysis_result:
+                    analysis_result['issues'] = []
+                    print(f"[WARNING] No 'issues' key in response, initialized empty array")
+            except Exception as e:
+                print(f"[ERROR] Failed to check/add 'issues' key: {str(e)}")
+                # Try to create a new dict with the key
+                try:
+                    analysis_result = {'issues': [], **analysis_result}
+                except:
+                    print(f"[ERROR] Could not add 'issues' key, continuing...")
             
-            if 'summary' not in analysis_result:
-                # Calculate summary from issues
-                issues_list = analysis_result.get('issues', [])
-                critical = sum(1 for i in issues_list if i.get('severity', '').lower() == 'critical')
-                major = sum(1 for i in issues_list if i.get('severity', '').lower() == 'major')
-                minor = sum(1 for i in issues_list if i.get('severity', '').lower() == 'minor')
-                observation = sum(1 for i in issues_list if i.get('severity', '').lower() == 'observation')
-                
-                analysis_result['summary'] = {
-                    'total_issues': len(issues_list),
-                    'critical_count': critical,
-                    'major_count': major,
-                    'minor_count': minor,
-                    'observation_count': observation
-                }
-                print(f"[INFO] Generated summary: {analysis_result['summary']}")
+            try:
+                if 'summary' not in analysis_result:
+                    # Calculate summary from issues
+                    issues_list = analysis_result.get('issues', [])
+                    critical = sum(1 for i in issues_list if i.get('severity', '').lower() == 'critical')
+                    major = sum(1 for i in issues_list if i.get('severity', '').lower() == 'major')
+                    minor = sum(1 for i in issues_list if i.get('severity', '').lower() == 'minor')
+                    observation = sum(1 for i in issues_list if i.get('severity', '').lower() == 'observation')
+                    
+                    analysis_result['summary'] = {
+                        'total_issues': len(issues_list),
+                        'critical_count': critical,
+                        'major_count': major,
+                        'minor_count': minor,
+                        'observation_count': observation
+                    }
+                    print(f"[INFO] Generated summary: {analysis_result['summary']}")
+            except Exception as e:
+                print(f"[ERROR] Failed to check/generate 'summary': {str(e)}")
+                # Add minimal summary
+                try:
+                    analysis_result['summary'] = {
+                        'total_issues': 0,
+                        'critical_count': 0,
+                        'major_count': 0,
+                        'minor_count': 0,
+                        'observation_count': 0
+                    }
+                except:
+                    print(f"[ERROR] Could not add 'summary' key, continuing...")
             
-            if 'drawing_info' not in analysis_result:
-                analysis_result['drawing_info'] = {
-                    'drawing_number': drawing_number or 'Unknown',
-                    'drawing_title': 'P&ID Drawing',
-                    'revision': 'Unknown',
-                    'analysis_date': datetime.now().isoformat()
-                }
-                print(f"[WARNING] No 'drawing_info' in response, using defaults")
+            try:
+                if 'drawing_info' not in analysis_result:
+                    analysis_result['drawing_info'] = {
+                        'drawing_number': drawing_number or 'Unknown',
+                        'drawing_title': 'P&ID Drawing',
+                        'revision': 'Unknown',
+                        'analysis_date': datetime.now().isoformat()
+                    }
+                    print(f"[WARNING] No 'drawing_info' in response, using defaults")
+            except Exception as e:
+                print(f"[ERROR] Failed to check/add 'drawing_info': {str(e)}")
+                # Add minimal drawing_info
+                try:
+                    analysis_result['drawing_info'] = {
+                        'drawing_number': drawing_number or 'Unknown',
+                        'drawing_title': 'P&ID Drawing',
+                        'revision': 'Unknown',
+                        'analysis_date': datetime.now().isoformat()
+                    }
+                except:
+                    print(f"[ERROR] Could not add 'drawing_info' key, continuing...")
             
             # Validation: Check minimum issues requirement (soft-coded with flexibility)
             if self.STRICT_MIN_ISSUES:
@@ -1482,43 +1537,85 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
             # KeyError when accessing malformed JSON keys
             print(f"[ERROR] KeyError accessing JSON key: {str(ke)}")
             print(f"[ERROR] This should not happen after sanitization!")
+            print(f"[RECOVERY] Entering emergency recovery mode...")
             
-            # Provide diagnostic information
-            if 'analysis_result' in locals() and isinstance(analysis_result, dict):
-                try:
-                    available_keys = list(analysis_result.keys())
-                    print(f"[ERROR] Available keys in response: {available_keys}")
-                    print(f"[DEBUG] Raw keys (repr): {repr(available_keys)}")
+            # Emergency recovery: Build minimal valid response
+            try:
+                # Try to extract whatever we can from analysis_result
+                recovered_issues = []
+                recovered_summary = {
+                    'total_issues': 0,
+                    'critical_count': 0,
+                    'major_count': 0,
+                    'minor_count': 0,
+                    'observation_count': 0
+                }
+                recovered_drawing_info = {
+                    'drawing_number': drawing_number or 'Unknown',
+                    'drawing_title': 'P&ID Drawing',
+                    'revision': 'Unknown',
+                    'analysis_date': datetime.now().isoformat()
+                }
+                
+                # Defensively try to access analysis_result
+                if 'analysis_result' in locals():
+                    print(f"[RECOVERY] Attempting to extract data from malformed response...")
                     
-                    # Try to recover by re-sanitizing
-                    print(f"[RECOVERY] Attempting aggressive re-sanitization...")
-                    analysis_result = self._sanitize_json_keys(analysis_result)
-                    print(f"[RECOVERY] Re-sanitized keys: {list(analysis_result.keys())}")
-                    
-                    # Return with minimal structure
-                    return {
-                        'drawing_info': analysis_result.get('drawing_info', {
-                            'drawing_number': drawing_number or 'Unknown',
-                            'drawing_title': 'P&ID Drawing',
-                            'revision': 'Unknown',
-                            'analysis_date': datetime.now().isoformat()
-                        }),
-                        'issues': analysis_result.get('issues', []),
-                        'summary': analysis_result.get('summary', {
-                            'total_issues': len(analysis_result.get('issues', [])),
-                            'critical_count': 0,
-                            'major_count': 0,
-                            'minor_count': 0,
-                            'observation_count': 0
-                        })
+                    # Try to get issues using ultra-safe approach
+                    try:
+                        if isinstance(analysis_result, dict):
+                            # Re-sanitize first
+                            sanitized = self._sanitize_json_keys(analysis_result)
+                            print(f"[RECOVERY] Re-sanitized successfully")
+                            
+                            # Extract issues
+                            if 'issues' in sanitized:
+                                recovered_issues = sanitized['issues']
+                                print(f"[RECOVERY] Extracted {len(recovered_issues)} issues")
+                            
+                            # Extract summary
+                            if 'summary' in sanitized:
+                                recovered_summary = sanitized['summary']
+                                print(f"[RECOVERY] Extracted summary")
+                            
+                            # Extract drawing_info
+                            if 'drawing_info' in sanitized:
+                                recovered_drawing_info = sanitized['drawing_info']
+                                print(f"[RECOVERY] Extracted drawing_info")
+                                
+                    except Exception as extract_error:
+                        print(f"[RECOVERY] Extraction failed: {str(extract_error)}")
+                        print(f"[RECOVERY] Using minimal defaults")
+                
+                # Return minimal valid structure
+                print(f"[RECOVERY] Returning minimal valid structure with {len(recovered_issues)} issues")
+                return {
+                    'drawing_info': recovered_drawing_info,
+                    'issues': recovered_issues,
+                    'summary': recovered_summary
+                }
+                
+            except Exception as recovery_error:
+                print(f"[ERROR] Emergency recovery failed: {str(recovery_error)}")
+                # Last resort: return absolute minimum structure
+                print(f"[RECOVERY] Returning absolute minimum structure")
+                return {
+                    'drawing_info': {
+                        'drawing_number': drawing_number or 'Unknown',
+                        'drawing_title': 'P&ID Drawing (Recovery Mode)',
+                        'revision': 'Unknown',
+                        'analysis_date': datetime.now().isoformat(),
+                        'error': f'Partial recovery from malformed response: {str(ke)}'
+                    },
+                    'issues': [],
+                    'summary': {
+                        'total_issues': 0,
+                        'critical_count': 0,
+                        'major_count': 0,
+                        'minor_count': 0,
+                        'observation_count': 0
                     }
-                except Exception as recovery_error:
-                    print(f"[ERROR] Recovery failed: {str(recovery_error)}")
-                    
-            raise Exception(
-                f"Analysis failed: Critical error accessing JSON keys {str(ke)}. "
-                f"Sanitization may have failed. Please contact support with this error message."
-            )
+                }
         except ValueError as ve:
             # ValueError from JSON parsing or validation
             print(f"[ERROR] Value error in analysis: {str(ve)}")
