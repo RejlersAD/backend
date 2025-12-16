@@ -29,6 +29,37 @@ PID_MIN_ISSUES=15
 - Forces examination of equipment datasheets, instrument schedules, line lists, safety devices, etc.
 - Results in balanced issue distribution: Critical (2-5), Major (3-7), Minor (3-5), Observations (2-5)
 
+**Note:** See `PID_STRICT_MIN_ISSUES` to control enforcement behavior.
+
+---
+
+#### `PID_STRICT_MIN_ISSUES` (Default: False) **NEW**
+**Description:** Controls whether minimum issues requirement is strictly enforced or flexible.
+
+**Purpose:** Allows dynamic issue detection - accepts whatever the AI finds, even if below minimum.
+
+**Values:**
+- `False` (Default) - **FLEXIBLE MODE**: Accept any number of issues found by AI
+  - AI tries to find 15+ issues but doesn't fail if it finds fewer
+  - Better for simple drawings with genuinely few issues
+  - Prevents false positives/padding
+- `True` - **STRICT MODE**: Enforce minimum issues requirement
+  - AI MUST find at least `PID_MIN_ISSUES` issues or warning is logged
+  - Better for complex drawings that should have many findings
+
+**Usage:**
+```bash
+# Railway Dashboard → Variables
+PID_STRICT_MIN_ISSUES=False   # Dynamic/flexible mode (recommended)
+PID_STRICT_MIN_ISSUES=True    # Strict enforcement
+```
+
+**Impact:**
+- **Flexible mode** (False): AI extracts as many real issues as possible, no artificial padding
+- **Strict mode** (True): Logs warnings if minimum not met, may push AI to find more issues
+
+**Recommended:** Keep as `False` for production to avoid forcing AI to create non-existent issues.
+
 ---
 
 #### `PID_MAX_TOKENS` (Default: 16000)
@@ -253,8 +284,51 @@ Check response for total_issues count - should be ≥ MIN_ISSUES setting.
 **Solutions:**
 1. Check Railway environment variables are set correctly
 2. Verify PID_MIN_ISSUES=15 in Variables tab
-3. Redeploy service after adding variables
-4. Check Railway logs for `[CONFIG] Analysis parameters` line
+3. Set PID_STRICT_MIN_ISSUES=False for flexible/dynamic mode
+4. Redeploy service after adding variables
+5. Check Railway logs for `[CONFIG] Analysis parameters` line
+
+**Note:** With `PID_STRICT_MIN_ISSUES=False` (default), the system accepts any number of issues the AI finds. This is RECOMMENDED to avoid forcing AI to create non-existent issues.
+
+---
+
+### Issue: "Analysis failed: Malformed AI response with invalid key"
+
+**Error Message:** 
+```
+Analysis failed: Analysis failed: Malformed AI response with invalid key '\n "drawing_info"'
+```
+
+**Cause:** OpenAI sometimes returns JSON with whitespace/newlines in keys (e.g., `"\n \"drawing_info\""` instead of `"drawing_info"`).
+
+**Solutions:**
+✅ **Automatic Recovery (v2.0+):** The system now includes aggressive JSON sanitization:
+1. All whitespace characters (newlines, tabs, spaces) are stripped from keys
+2. All quote characters are removed from keys
+3. Multi-pass cleaning catches nested patterns
+4. Recovery mechanism attempts re-sanitization on KeyError
+5. Fallback returns minimal valid structure
+
+**What happens now:**
+- AI response is automatically sanitized BEFORE processing
+- Malformed keys like `'\n "drawing_info"'` → `'drawing_info'`
+- If sanitization fails, system tries recovery
+- If recovery fails, returns partial results instead of total failure
+
+**Monitor logs for:**
+```
+[WARNING] Skipping empty key after sanitization: ...
+[RECOVERY] Attempting aggressive re-sanitization...
+[RECOVERY] Re-sanitized keys: ...
+```
+
+**If error persists:**
+1. Check Railway logs for full AI response
+2. May indicate API rate limiting or quota issues
+3. Try re-uploading the drawing
+4. Contact support with error message
+
+---
 
 ### Issue: "Analysis truncated / incomplete JSON"
 
@@ -262,6 +336,8 @@ Check response for total_issues count - should be ≥ MIN_ISSUES setting.
 1. Increase PID_MAX_TOKENS to 20000
 2. Check if drawing is exceptionally complex (many pages)
 3. Review Railway logs for token usage warnings
+
+---
 
 ### Issue: "Results inconsistent between runs"
 
