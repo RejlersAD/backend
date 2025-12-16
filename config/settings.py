@@ -223,6 +223,11 @@ if additional_csrf:
 # Remove duplicates
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(DEFAULT_CSRF_ORIGINS))
 
+# CSRF exemption for API endpoints
+CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE = 'None'
+CSRF_USE_SESSIONS = False
+
 # Debug: Print CORS settings on startup
 print(f"[CORS] Allowed Origins: {CORS_ALLOWED_ORIGINS}")
 print(f"[CORS] Allowed Origin Regexes: {CORS_ALLOWED_ORIGIN_REGEXES}")
