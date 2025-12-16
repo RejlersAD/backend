@@ -1,0 +1,133 @@
+#!/bin/bash
+
+# Railway Environment Variables Setup Script
+# This script helps you verify and set required environment variables for CORS configuration
+
+echo "======================================"
+echo "AIFlow - Railway CORS Setup"
+echo "======================================"
+echo ""
+
+# Required variables
+REQUIRED_VARS=(
+    "FRONTEND_URL"
+    "BACKEND_URL"
+)
+
+# Optional variables with defaults
+OPTIONAL_VARS=(
+    "CORS_ALLOWED_ORIGINS"
+    "CORS_ALLOW_VERCEL"
+    "CORS_ALLOW_LOCALHOST"
+    "CORS_ALLOW_ALL_ORIGINS"
+    "CSRF_TRUSTED_ORIGINS"
+)
+
+echo "✅ Required Environment Variables:"
+echo "-----------------------------------"
+echo ""
+echo "1. FRONTEND_URL"
+echo "   Description: Your Vercel frontend deployment URL"
+echo "   Example: https://airflow-frontend.vercel.app"
+echo "   Current: ${FRONTEND_URL:-[NOT SET - WILL USE DEFAULT]}"
+echo ""
+
+echo "2. BACKEND_URL"
+echo "   Description: Your Railway backend deployment URL"
+echo "   Example: https://aiflowbackend-production.up.railway.app"
+echo "   Current: ${BACKEND_URL:-[NOT SET - WILL USE DEFAULT]}"
+echo ""
+
+echo "======================================"
+echo "📋 Optional Environment Variables:"
+echo "-----------------------------------"
+echo ""
+
+echo "3. CORS_ALLOWED_ORIGINS"
+echo "   Description: Additional allowed origins (comma-separated)"
+echo "   Example: https://staging.example.com,https://dev.example.com"
+echo "   Default: [Empty - uses only FRONTEND_URL and localhost]"
+echo "   Current: ${CORS_ALLOWED_ORIGINS:-[NOT SET]}"
+echo ""
+
+echo "4. CORS_ALLOW_VERCEL"
+echo "   Description: Allow all *.vercel.app domains"
+echo "   Example: true or false"
+echo "   Default: true"
+echo "   Current: ${CORS_ALLOW_VERCEL:-[NOT SET - DEFAULTS TO TRUE]}"
+echo ""
+
+echo "5. CORS_ALLOW_LOCALHOST"
+echo "   Description: Allow localhost and 127.0.0.1"
+echo "   Example: true or false"
+echo "   Default: true"
+echo "   Current: ${CORS_ALLOW_LOCALHOST:-[NOT SET - DEFAULTS TO TRUE]}"
+echo ""
+
+echo "6. CORS_ALLOW_ALL_ORIGINS"
+echo "   Description: Allow ALL origins (ONLY FOR TESTING)"
+echo "   Example: true or false"
+echo "   Default: false"
+echo "   Current: ${CORS_ALLOW_ALL_ORIGINS:-[NOT SET - DEFAULTS TO FALSE]}"
+echo "   ⚠️  WARNING: NEVER set to true in production!"
+echo ""
+
+echo "======================================"
+echo "🚀 How to Set Variables in Railway:"
+echo "-----------------------------------"
+echo ""
+echo "Method 1: Railway Dashboard (Recommended)"
+echo "  1. Go to: https://railway.app/project/your-project-id"
+echo "  2. Click on your backend service"
+echo "  3. Click 'Variables' tab"
+echo "  4. Add each variable:"
+echo "     - Key: FRONTEND_URL"
+echo "     - Value: https://airflow-frontend.vercel.app"
+echo ""
+echo "Method 2: Railway CLI"
+echo "  railway variables set FRONTEND_URL=https://airflow-frontend.vercel.app"
+echo "  railway variables set BACKEND_URL=https://aiflowbackend-production.up.railway.app"
+echo ""
+
+echo "======================================"
+echo "🔍 Verification Commands:"
+echo "-----------------------------------"
+echo ""
+echo "# Check Railway logs for CORS messages:"
+echo "railway logs"
+echo ""
+echo "# Look for these lines:"
+echo "[CorsMiddleware] Loaded allowed origins: ['https://airflow-frontend.vercel.app', ...]"
+echo "[CorsMiddleware] ✓ OPTIONS request from ... - ALLOWED"
+echo ""
+
+echo "======================================"
+echo "🧪 Test CORS Configuration:"
+echo "-----------------------------------"
+echo ""
+echo "# Test OPTIONS (preflight) request:"
+echo "curl -X OPTIONS https://aiflowbackend-production.up.railway.app/api/v1/pid/drawings/upload/ \\"
+echo "  -H \"Origin: https://airflow-frontend.vercel.app\" \\"
+echo "  -H \"Access-Control-Request-Method: POST\" \\"
+echo "  -v"
+echo ""
+echo "# Look for these headers in response:"
+echo "Access-Control-Allow-Origin: https://airflow-frontend.vercel.app"
+echo "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD"
+echo ""
+
+echo "======================================"
+echo "📝 Recommended Settings for Production:"
+echo "-----------------------------------"
+echo ""
+echo "FRONTEND_URL=https://airflow-frontend.vercel.app"
+echo "BACKEND_URL=https://aiflowbackend-production.up.railway.app"
+echo "CORS_ALLOW_VERCEL=true"
+echo "CORS_ALLOW_LOCALHOST=false"
+echo "CORS_ALLOW_ALL_ORIGINS=false"
+echo ""
+
+echo "======================================"
+echo "📖 For detailed documentation, see:"
+echo "   backend/CORS_ENV_SETUP.md"
+echo "======================================"
