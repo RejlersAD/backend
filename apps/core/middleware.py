@@ -1,8 +1,10 @@
 """
 Custom Middleware for AIFlow
 Ensures CORS headers are always present
+Uses soft-coded configuration via environment variables
 """
 from django.http import HttpResponse
+from decouple import config
 import os
 
 
@@ -20,71 +22,94 @@ class CorsMiddleware:
 
     def _load_allowed_origins(self):
         """Load allowed origins from environment variable with defaults"""
+        # Soft-coded default origins - can be overridden by environment variables
         default_origins = [
-            'https://airflow-frontend.vercel.app',
+            config('FRONTEND_URL', default='https://airflow-frontend.vercel.app'),
             'http://localhost:3000',
             'http://localhost:5173',
             'http://127.0.0.1:3000',
             'http://127.0.0.1:5173',
         ]
         
-        # Get additional origins from environment
-        env_origins = os.getenv('CORS_ALLOWED_ORIGINS', '')
+        # Get additional origins from environment (comma-separated)
+        env_origins = config('CORS_ALLOWED_ORIGINS', default='', cast=str)
         if env_origins:
             additional_origins = [origin.strip() for origin in env_origins.split(',') if origin.strip()]
             default_origins.extend(additional_origins)
         
-        # Get frontend URL from environment
-        frontend_url = os.getenv('FRONTEND_URL', '')
-        if frontend_url and frontend_url not in default_origins:
-            default_origins.append(frontend_url)
+        # Remove duplicates while preserving order
+        seen = set()
+        self.allowed_origins = []
+        for origin in default_origins:
+            if origin and origin not in seen:
+                seen.add(origin)
+                self.allowed_origins.append(origin)
         
-        self.allowed_origins = default_origins
+        # Store wildcard patterns for regex matching
+        self.allow_vercel = config('CORS_ALLOW_VERCEL', default=True, cast=bool)
+        self.allow_localhost = config('CORS_ALLOW_LOCALHOST', default=True, cast=bool)
+        
         print(f"[CorsMiddleware] Loaded allowed origins: {self.allowed_origins}")
+        print(f"[CorsMiddleware] Allow Vercel (*.vercel.app): {self.allow_vercel}")
+        print(f"[CorsMiddleware] Allow Localhost: {self.allow_localhost}")
+
+    def _is_origin_allowed(self, origin):
+        """
+        Check if origin is allowed using soft-coded rules
+        Returns True if origin should be allowed
+        """
+        if not origin:
+            return False
+        
+        # Check exact matches
+        if origin in self.allowed_origins:
+            return True
+        
+        # Check Vercel pattern if enabled
+        if self.allow_vercel and '.vercel.app' in origin:
+            return True
+        
+        # Check localhost pattern if enabled
+        if self.allow_localhost and ('localhost' in origin or '127.0.0.1' in origin):
+            return True
+        
+        return False
 
     def __call__(self, request):
         # Get the origin from the request
         origin = request.META.get('HTTP_ORIGIN', '')
         
-        # AGGRESSIVE CORS FIX - Always allow Vercel and localhost
-        # This ensures CORS works immediately without environment variables
-        is_allowed = True  # Allow all origins temporarily
-        
-        # Specifically check for allowed origins
-        if origin:
-            is_allowed = (
-                origin in self.allowed_origins or 
-                origin.endswith('.vercel.app') or
-                'localhost' in origin or
-                '127.0.0.1' in origin or
-                origin.startswith('http://localhost') or
-                origin.startswith('http://127.0.0.1') or
-                origin.startswith('https://') and '.vercel.app' in origin
-            )
+        # Check if origin is allowed
+        is_allowed = self._is_origin_allowed(origin)
         
         # Handle preflight OPTIONS request - MUST RESPOND IMMEDIATELY
         if request.method == 'OPTIONS':
             response = HttpResponse(status=200)
-            if origin:
+            if origin and is_allowed:
                 response['Access-Control-Allow-Origin'] = origin
-            response['Access-Control-Allow-Credentials'] = 'true'
-            response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD'
-            response['Access-Control-Allow-Headers'] = 'Accept, Accept-Encoding, Authorization, Content-Type, DNT, Origin, User-Agent, X-CSRFToken, X-Requested-With, X-HTTP-Method-Override'
-            response['Access-Control-Max-Age'] = '86400'
-            response['Vary'] = 'Origin'
-            print(f"[CorsMiddleware] OPTIONS request from {origin} - ALLOWED")
+                response['Access-Control-Allow-Credentials'] = 'true'
+                response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD'
+                response['Access-Control-Allow-Headers'] = 'Accept, Accept-Encoding, Authorization, Content-Type, DNT, Origin, User-Agent, X-CSRFToken, X-Requested-With, X-HTTP-Method-Override'
+                response['Access-Control-Max-Age'] = '86400'
+                response['Vary'] = 'Origin'
+                print(f"[CorsMiddleware] ✓ OPTIONS request from {origin} - ALLOWED")
+            else:
+                print(f"[CorsMiddleware] ✗ OPTIONS request from {origin} - BLOCKED")
             return response
         
         # Process the request
         response = self.get_response(request)
         
-        # Add CORS headers to ALL responses if origin is present
+        # Add CORS headers to ALL responses if origin is allowed
         if origin and is_allowed:
             response['Access-Control-Allow-Origin'] = origin
             response['Access-Control-Allow-Credentials'] = 'true'
             response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD'
             response['Access-Control-Allow-Headers'] = 'Accept, Accept-Encoding, Authorization, Content-Type, DNT, Origin, User-Agent, X-CSRFToken, X-Requested-With, X-HTTP-Method-Override'
-            response['Access-Control-Max-Age'] = '86400'
+            response['Access-Control-Expose-Headers'] = 'Content-Type, Content-Disposition, X-CSRFToken'
             response['Vary'] = 'Origin'
+            print(f"[CorsMiddleware] ✓ {request.method} request from {origin} - ALLOWED (Status: {response.status_code})")
+        elif origin:
+            print(f"[CorsMiddleware] ✗ {request.method} request from {origin} - BLOCKED (not in allowed origins)")
         
         return response

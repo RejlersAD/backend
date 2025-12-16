@@ -154,61 +154,81 @@ REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 
-# CORS Configuration - Permanent fix for production
-# Always allow these origins
-CORS_ALLOWED_ORIGINS = [
+# CORS Configuration - Soft-coded using environment variables
+# Default allowed origins - can be overridden completely via CORS_ALLOWED_ORIGINS env variable
+DEFAULT_CORS_ORIGINS = [
     'http://localhost:3000',
     'http://127.0.0.1:3000',
     'http://localhost:5173',
     'http://127.0.0.1:5173',
-    'https://airflow-frontend.vercel.app',  # Production Vercel URL
 ]
 
-# Add any additional origins from environment variable
+# Add production frontend URL from environment (soft-coded)
+FRONTEND_URL = config('FRONTEND_URL', default='https://airflow-frontend.vercel.app')
+if FRONTEND_URL:
+    DEFAULT_CORS_ORIGINS.append(FRONTEND_URL)
+
+# Get additional origins from environment variable (comma-separated)
 additional_origins = config('CORS_ALLOWED_ORIGINS', default='', cast=str)
 if additional_origins:
-    CORS_ALLOWED_ORIGINS.extend([s.strip() for s in additional_origins.split(',') if s.strip()])
+    additional_list = [s.strip() for s in additional_origins.split(',') if s.strip()]
+    DEFAULT_CORS_ORIGINS.extend(additional_list)
+
+# Remove duplicates while preserving order
+CORS_ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS))
 
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_ALL_ORIGINS = False  # Set to True only for testing, False for production
+CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=False, cast=bool)  # Only enable via env var for testing
 
-# Allow all Vercel deployments using regex pattern (includes previews and production)
+# Soft-coded regex patterns for dynamic origins (Vercel previews, localhost ports)
 CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://.*\.vercel\.app$",  # All Vercel deployments
+    r"^https://.*\.vercel\.app$",  # All Vercel deployments (production + previews)
     r"^http://localhost:\d+$",  # All localhost ports
+    r"^http://127\.0\.0\.1:\d+$",  # All 127.0.0.1 ports
 ]
 
-# Auto-add dynamic Vercel deployment URLs
-if not DEBUG:
-    # Allow all Vercel domains in production (or configure specific domain in env)
-    vercel_domain = config('VERCEL_URL', default='')
-    if vercel_domain:
-        vercel_origin = f'https://{vercel_domain}' if not vercel_domain.startswith('http') else vercel_domain
-        if vercel_origin not in CORS_ALLOWED_ORIGINS:
-            CORS_ALLOWED_ORIGINS.append(vercel_origin)
-    
-    # Also add production frontend domain if specified
-    frontend_url = config('FRONTEND_URL', default='')
-    if frontend_url and frontend_url not in CORS_ALLOWED_ORIGINS:
-        CORS_ALLOWED_ORIGINS.append(frontend_url)
+# Auto-add dynamic Vercel deployment URL if specified
+vercel_domain = config('VERCEL_URL', default='')
+if vercel_domain:
+    vercel_origin = f'https://{vercel_domain}' if not vercel_domain.startswith('http') else vercel_domain
+    if vercel_origin not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(vercel_origin)
 
-# CSRF Trusted Origins - CRITICAL for production
-CSRF_TRUSTED_ORIGINS = [
-    'https://airflow-frontend.vercel.app',
-    'https://aiflowbackend-production.up.railway.app',
-]
+# CSRF Trusted Origins - Soft-coded for production security
+# Default trusted origins
+DEFAULT_CSRF_ORIGINS = []
 
-# Add Railway domain dynamically
+# Add production frontend from environment
+if FRONTEND_URL:
+    DEFAULT_CSRF_ORIGINS.append(FRONTEND_URL)
+
+# Add backend URL from environment (Railway production)
+BACKEND_URL = config('BACKEND_URL', default='https://aiflowbackend-production.up.railway.app')
+if BACKEND_URL:
+    DEFAULT_CSRF_ORIGINS.append(BACKEND_URL)
+
+# Add Railway domain dynamically if available
 railway_domain = config('RAILWAY_PUBLIC_DOMAIN', default='')
 if railway_domain:
     csrf_origin = f'https://{railway_domain}' if not railway_domain.startswith('http') else railway_domain
-    if csrf_origin not in CSRF_TRUSTED_ORIGINS:
-        CSRF_TRUSTED_ORIGINS.append(csrf_origin)
+    if csrf_origin not in DEFAULT_CSRF_ORIGINS:
+        DEFAULT_CSRF_ORIGINS.append(csrf_origin)
+
+# Get additional CSRF origins from environment (comma-separated)
+additional_csrf = config('CSRF_TRUSTED_ORIGINS', default='', cast=str)
+if additional_csrf:
+    csrf_list = [s.strip() for s in additional_csrf.split(',') if s.strip()]
+    DEFAULT_CSRF_ORIGINS.extend(csrf_list)
+
+# Remove duplicates
+CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(DEFAULT_CSRF_ORIGINS))
 
 # Debug: Print CORS settings on startup
 print(f"[CORS] Allowed Origins: {CORS_ALLOWED_ORIGINS}")
 print(f"[CORS] Allowed Origin Regexes: {CORS_ALLOWED_ORIGIN_REGEXES}")
 print(f"[CSRF] Trusted Origins: {CSRF_TRUSTED_ORIGINS}")
+print(f"[CONFIG] Frontend URL: {FRONTEND_URL}")
+print(f"[CONFIG] Backend URL: {BACKEND_URL}")
 
 # Additional CORS settings for proper functionality
 CORS_ALLOW_METHODS = [
