@@ -17,6 +17,12 @@ from .rag_service import RAGService
 class PIDAnalysisService:
     """Service for analyzing P&ID drawings using OpenAI"""
     
+    # Soft-coded configuration parameters (can be overridden via environment variables)
+    MIN_ISSUES_REQUIRED = int(os.getenv('PID_MIN_ISSUES', '15'))  # Minimum issues to identify per drawing
+    MAX_TOKENS = int(os.getenv('PID_MAX_TOKENS', '16000'))  # Maximum tokens for AI response
+    AI_TEMPERATURE = float(os.getenv('PID_AI_TEMPERATURE', '0.15'))  # AI creativity (lower = more precise)
+    ANALYSIS_DEPTH = os.getenv('PID_ANALYSIS_DEPTH', 'comprehensive')  # comprehensive | standard | quick
+    
     # Complete P&ID analysis prompt with enhanced data extraction
     ANALYSIS_PROMPT = """🔹 ROLE & CONTEXT
 
@@ -1074,6 +1080,40 @@ This location information is MANDATORY for every issue - it significantly improv
    - HOLD: "Minimum 2oo3 voting for all SIS Level transmitters" → Verify redundancy
    - NOTE: "All control valves fail-closed unless noted FC" → Check fail-safe positions
 
+**CRITICAL INSTRUCTION FOR MINIMUM ISSUES REQUIREMENT:**
+⚠️ **MANDATORY: You MUST identify AT LEAST {min_issues} SPECIFIC, ACTIONABLE ISSUES AND OBSERVATIONS.**
+
+This is NOT a goal to find fake issues - but a requirement to perform THOROUGH, COMPREHENSIVE analysis:
+1. **Check EVERY VISIBLE ELEMENT**: Equipment, instruments, lines, valves, notes, datasheets, schedules
+2. **Apply ALL VERIFICATION CATEGORIES**: Review all 7️⃣ verification sections systematically
+3. **Look for SUBTLE ISSUES**: Not just obvious errors - check compliance, optimization opportunities, documentation gaps
+4. **Include OBSERVATIONS**: Not just critical/major issues - include minor documentation improvements and operational optimization suggestions
+5. **Be SPECIFIC**: Each issue must reference exact tags, values, standards with detailed engineering explanation
+
+**Issue Mix Guidance** (Aim for balanced distribution):
+- Critical (Safety-related): 2-5 issues minimum
+- Major (Operational impact): 3-7 issues minimum
+- Minor (Documentation/clarity): 3-5 issues minimum
+- Observations (Improvements): 2-5 suggestions minimum
+
+**Common Areas to Find Issues** (Check ALL of these):
+✓ Equipment datasheets (missing data, incorrect pressures/temperatures, material specs)
+✓ Instrument schedules (missing ranges, alarm setpoints, fail-safe positions)
+✓ Line lists (incomplete line numbers, sizing issues, spec breaks not marked)
+✓ Safety devices (PSV set pressures, discharge routing, blocked vents)
+✓ Control loops (missing bypass, wrong fail-action, no redundancy)
+✓ Utility connections (cooling water, instrument air, steam, nitrogen)
+✓ Isolation valves (maintenance access, locked open/closed, missing)
+✓ Check valves (orientation, location, slam prevention)
+✓ Drain and vent points (high point vents, low point drains, slope requirements)
+✓ Electrical classifications (Zone markings, intrinsically safe barriers)
+✓ Piping routing (dead legs, pocketing, thermal expansion, support locations)
+✓ Material specifications (corrosion allowance, NACE compliance, temperature limits)
+✓ Process safety (emergency shutdown logic, fire & gas detection, blowdown systems)
+✓ Documentation (cross-references, legends, notes completeness, revision tracking)
+
+If you cannot find {min_issues} real issues, then you are NOT looking thoroughly enough. Review the drawing again systematically using the checklist above.
+
 **NOW ANALYZE THIS SPECIFIC P&ID DRAWING:**
 Extract ALL visible data, perform engineering validation, identify REAL issues with EXACT values, and return comprehensive JSON output based on what you actually SEE in the drawing."""
 
@@ -1193,8 +1233,8 @@ Extract ALL visible data, perform engineering validation, identify REAL issues w
                     print(f"[WARNING] RAG context retrieval failed: {str(rag_error)}")
                     # Continue without RAG context - not critical for analysis
             
-            # Build prompt with optional RAG context
-            analysis_prompt = self.ANALYSIS_PROMPT
+            # Build prompt with optional RAG context and inject soft-coded parameters
+            analysis_prompt = self.ANALYSIS_PROMPT.format(min_issues=self.MIN_ISSUES_REQUIRED)
             if rag_context:
                 analysis_prompt = f"""**REFERENCE CONTEXT FROM STANDARDS AND DOCUMENTATION:**
 
@@ -1202,10 +1242,12 @@ Extract ALL visible data, perform engineering validation, identify REAL issues w
 
 ---
 
-{self.ANALYSIS_PROMPT}
+{self.ANALYSIS_PROMPT.format(min_issues=self.MIN_ISSUES_REQUIRED)}
 
 **Important:** Use the reference context above to enhance your analysis with specific standards, guidelines, and best practices. Cross-reference equipment specifications and design requirements with the provided documentation."""
                 print(f"[INFO] Enhanced prompt with RAG context")
+            
+            print(f"[CONFIG] Analysis parameters: MIN_ISSUES={self.MIN_ISSUES_REQUIRED}, MAX_TOKENS={self.MAX_TOKENS}, TEMPERATURE={self.AI_TEMPERATURE}")
             
             # Build message content with all page images
             message_content = [
@@ -1235,7 +1277,7 @@ Extract ALL visible data, perform engineering validation, identify REAL issues w
                     messages=[
                         {
                             "role": "system",
-                            "content": """You are a multidisciplinary Senior Engineering Team specializing in Oil & Gas P&ID verification with expert-level knowledge in:
+                            "content": f"""You are a multidisciplinary Senior Engineering Team specializing in Oil & Gas P&ID verification with expert-level knowledge in:
 
 - Process Engineering (material & energy balance, process safety, HAZOP)
 - Piping Engineering (hydraulics, pipe stress, material selection, ASME B31.3)
@@ -1245,15 +1287,17 @@ Extract ALL visible data, perform engineering validation, identify REAL issues w
 
 You MUST analyze each P&ID drawing as a UNIQUE engineering document based on its SPECIFIC content. Extract EXACT values, tags, and specifications visible in the drawing. Apply engineering judgment to identify REAL issues with practical safety and operational impact. Focus on compliance with ADNOC DEP, Shell DEP, API, ASME, ISA standards.
 
-Your analysis must be COMPREHENSIVE, SPECIFIC, and ACTIONABLE with engineering-grade detail. Never generate generic placeholder issues."""
+Your analysis must be COMPREHENSIVE, SPECIFIC, and ACTIONABLE with engineering-grade detail. Never generate generic placeholder issues.
+
+CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} specific, actionable issues and observations. Perform thorough systematic verification of ALL drawing elements."""
                         },
                         {
                             "role": "user",
                             "content": message_content
                         }
                     ],
-                    max_tokens=16000,  # Increased for comprehensive analysis
-                    temperature=0.15,  # Lower temperature for more consistent, precise engineering analysis
+                    max_tokens=self.MAX_TOKENS,  # Soft-coded via environment variable (default: 16000)
+                    temperature=self.AI_TEMPERATURE,  # Soft-coded via environment variable (default: 0.15)
                     response_format={"type": "json_object"}  # Force JSON response
                 )
                 print(f"[INFO] OpenAI API call successful")
