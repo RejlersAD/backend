@@ -822,6 +822,13 @@ Return ONLY a valid JSON object with ALL sections populated based on actual draw
       "issue_observed": "DETAILED description with EXACT values from drawing. Example: 'PSV-101 protecting vessel V-101 has set pressure of 35 barg, but vessel MAWP shown in datasheet is 32 barg. Set pressure exceeds MAWP by 3 barg (9.4% over), violating ASME VIII requirement that set pressure ≤ MAWP.'",
       "engineering_impact": "Explain WHY this is an issue: 'Vessel could be overpressured beyond design limits before PSV opens, risking vessel rupture. This is a critical safety violation.'",
       "action_required": "SPECIFIC corrective action with exact values: 'Change PSV-101 set pressure from 35 barg to 30 barg (90% of MAWP per API 521 recommendation for process relief). Verify PSV capacity is adequate at new set pressure. Update PSV datasheet and purchase specification.'",
+      "location_on_drawing": {
+        "zone": "Top-Left | Top-Center | Top-Right | Middle-Left | Middle-Center | Middle-Right | Bottom-Left | Bottom-Center | Bottom-Right",
+        "proximity_description": "Describe location relative to major equipment (e.g., 'Adjacent to vessel V-101', 'On discharge line from pump P-2001A', 'Near title block', 'In equipment datasheet table', 'Center of process flow')",
+        "visual_cues": "List visual landmarks to help locate (e.g., 'Red PSV symbol upstream of vessel', 'Equipment tag shown in bold box', 'In instrument schedule table row 5', 'Between cooler E-301 and separator V-302')",
+        "drawing_section": "Process Equipment Area | Piping Section | Instrument Schedule Table | Equipment Datasheet Table | Title Block | Legend | Notes Section | Control Loop Diagram",
+        "search_keywords": ["List of keywords to search on drawing: equipment tags, line numbers, instrument tags mentioned in this issue"]
+      },
       "approval": "Pending / Approved / Ignored (default: Pending)",
       "remark": "Pending / Engineer's comment (default: Pending)",
       "status": "pending / approved / ignored (default: pending)",
@@ -904,11 +911,28 @@ Return ONLY a valid JSON object with ALL sections populated based on actual draw
   "issue_observed": "Equipment datasheet shows vessel V-3610-01 design pressure = 45 barg @ 150°C with MAWP = 45 barg. However, PSV-101 protecting this vessel has set pressure = 48 barg (visible on PSV schedule table). Set pressure exceeds vessel MAWP by 3 barg (6.7% over). Per ASME VIII, relief device set pressure must not exceed MAWP of protected equipment.",
   "engineering_impact": "Vessel could be overpressured to 48 barg before PSV opens, exceeding design MAWP by 6.7%. This violates ASME pressure vessel code and risks vessel rupture under relief conditions. If vessel experiences overpressure event (blocked outlet, thermal expansion, runaway reaction), PSV will not open until vessel is already operating beyond safe design limits.",
   "action_required": "Reduce PSV-101 set pressure from 48 barg to maximum 45 barg (100% of MAWP). Recommend setting PSV-101 to 42 barg (93% of MAWP per API 521 good practice for process relief scenarios). Verify PSV relieving capacity remains adequate at reduced set pressure for worst-case relief scenario (fire case, blocked outlet case, thermal relief case). Update PSV specification sheet and procurement datasheet. If 48 barg set pressure is mandatory for process reasons, then increase vessel design pressure to minimum 50 barg and recalculate vessel wall thickness per ASME VIII.",
+  "location_on_drawing": {
+    "zone": "Top-Center",
+    "proximity_description": "PSV-101 is located on top of vessel V-3610-01, connected to the vessel vapor outlet nozzle N2",
+    "visual_cues": "Red PSV symbol with spring-loaded relief valve icon, tag PSV-101 shown adjacent to symbol, connected via short piping to vessel top nozzle",
+    "drawing_section": "Process Equipment Area",
+    "search_keywords": ["PSV-101", "V-3610-01", "set pressure", "MAWP", "equipment datasheet"]
+  },
   "status": "pending",
   "related_issues": [5]
 }
 
 ---
+
+**CRITICAL INSTRUCTION FOR LOCATION INFORMATION:**
+For EVERY issue identified, you MUST provide detailed location information to help engineers quickly find the issue on the drawing:
+1. **Zone**: Divide the drawing mentally into a 3x3 grid (Top-Left, Top-Center, Top-Right, Middle-Left, Middle-Center, Middle-Right, Bottom-Left, Bottom-Center, Bottom-Right) and identify which zone contains the issue
+2. **Proximity Description**: Describe the location relative to major equipment, vessels, or prominent features visible on the drawing
+3. **Visual Cues**: Describe what the engineer should LOOK FOR - symbol type, color, size, surrounding elements
+4. **Drawing Section**: Identify if the issue is in the process flow area, a data table (equipment datasheet, instrument schedule, line list), title block, legend, or notes section
+5. **Search Keywords**: List exact tags, line numbers, or text that can be searched/found on the drawing
+
+This location information is MANDATORY for every issue - it significantly improves the usability of the analysis report.
 
 **NOW ANALYZE THIS SPECIFIC P&ID DRAWING:**
 Extract ALL visible data, perform engineering validation, identify REAL issues with EXACT values, and return comprehensive JSON output based on what you actually SEE in the drawing."""
