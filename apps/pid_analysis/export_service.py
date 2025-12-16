@@ -192,6 +192,49 @@ class PIDReportExportService:
         ]))
         elements.append(issues_table)
         
+        # Specification Breaks Section
+        if hasattr(report, 'report_data') and isinstance(report.report_data, dict):
+            spec_breaks = report.report_data.get('specification_breaks', [])
+            if spec_breaks:
+                elements.append(PageBreak())
+                elements.append(Paragraph('SPECIFICATION BREAKS', subtitle_style))
+                elements.append(Spacer(1, 0.3*cm))
+                
+                spec_breaks_data = [
+                    ['ID', 'Location', 'Upstream Spec', 'Downstream Spec', 'Reason', 'Marked']
+                ]
+                
+                for sb in spec_breaks:
+                    upstream = f"{sb.get('upstream_spec', {}).get('material_spec', 'N/A')}\n{sb.get('upstream_spec', {}).get('pressure_class', 'N/A')}"
+                    downstream = f"{sb.get('downstream_spec', {}).get('material_spec', 'N/A')}\n{sb.get('downstream_spec', {}).get('pressure_class', 'N/A')}"
+                    
+                    spec_breaks_data.append([
+                        sb.get('spec_break_id', '')[:10],
+                        sb.get('location', '')[:40],
+                        upstream,
+                        downstream,
+                        sb.get('reason_for_break', '')[:50],
+                        '✓' if sb.get('break_properly_marked') == 'Yes' else '✗'
+                    ])
+                
+                spec_table = Table(spec_breaks_data, colWidths=[2*cm, 6*cm, 4*cm, 4*cm, 6*cm, 1.5*cm])
+                spec_table.setStyle(TableStyle([
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 9),
+                    ('FONTSIZE', (0, 1), (-1, -1), 7),
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor(self.REJLERS_COLORS['border'])),
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8B5CF6')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                    ('ALIGN', (5, 1), (5, -1), 'CENTER'),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 3),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+                    ('TOPPADDING', (0, 0), (-1, -1), 3),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#FAF5FF')]),
+                ]))
+                elements.append(spec_table)
+        
         # Footer
         elements.append(Spacer(1, 1*cm))
         footer_text = f"<b>CONFIDENTIAL ENGINEERING DOCUMENT</b><br/>This document is the property of Rejlers Abu Dhabi. Unauthorized distribution is prohibited.<br/><i>Generated: {datetime.now().strftime('%d-%b-%Y %H:%M:%S')}</i>"
@@ -350,6 +393,46 @@ class PIDReportExportService:
                 cell.alignment = left_alignment if col in [2, 3, 4] else center_alignment
                 cell.border = border
         
+        # Specification Breaks Section
+        if hasattr(report, 'report_data') and isinstance(report.report_data, dict):
+            spec_breaks = report.report_data.get('specification_breaks', [])
+            if spec_breaks:
+                row += 4
+                ws[f'A{row}'] = 'SPECIFICATION BREAKS'
+                ws[f'A{row}'].font = subtitle_font
+                ws.merge_cells(f'A{row}:F{row}')
+                
+                row += 1
+                spec_headers = ['ID', 'Location', 'Upstream Spec', 'Downstream Spec', 'Reason', 'Marked']
+                for col, header in enumerate(spec_headers, start=1):
+                    cell = ws.cell(row=row, column=col)
+                    cell.value = header
+                    cell.font = header_font
+                    cell.fill = PatternFill(start_color='8B5CF6', end_color='8B5CF6', fill_type='solid')
+                    cell.alignment = center_alignment
+                    cell.border = border
+                
+                for sb in spec_breaks:
+                    row += 1
+                    upstream = f"{sb.get('upstream_spec', {}).get('material_spec', 'N/A')} {sb.get('upstream_spec', {}).get('pressure_class', '')}"
+                    downstream = f"{sb.get('downstream_spec', {}).get('material_spec', 'N/A')} {sb.get('downstream_spec', {}).get('pressure_class', '')}"
+                    
+                    spec_data = [
+                        sb.get('spec_break_id', ''),
+                        sb.get('location', ''),
+                        upstream,
+                        downstream,
+                        sb.get('reason_for_break', ''),
+                        '✓' if sb.get('break_properly_marked') == 'Yes' else '✗'
+                    ]
+                    
+                    for col, value in enumerate(spec_data, start=1):
+                        cell = ws.cell(row=row, column=col)
+                        cell.value = value
+                        cell.font = normal_font
+                        cell.alignment = left_alignment if col in [2, 3, 4, 5] else center_alignment
+                        cell.border = border
+        
         # Column widths
         ws.column_dimensions['A'].width = 8
         ws.column_dimensions['B'].width = 25
@@ -425,6 +508,31 @@ class PIDReportExportService:
             ])
         
         writer.writerow([])
+        
+        # Specification Breaks
+        if hasattr(report, 'report_data') and isinstance(report.report_data, dict):
+            spec_breaks = report.report_data.get('specification_breaks', [])
+            if spec_breaks:
+                writer.writerow(['SPECIFICATION BREAKS'])
+                writer.writerow(['ID', 'Location', 'Upstream Spec', 'Downstream Spec', 'Reason', 'Properly Marked', 'Transition Required', 'Cost Impact'])
+                
+                for sb in spec_breaks:
+                    upstream = f"{sb.get('upstream_spec', {}).get('material_spec', 'N/A')} {sb.get('upstream_spec', {}).get('pressure_class', '')}"
+                    downstream = f"{sb.get('downstream_spec', {}).get('material_spec', 'N/A')} {sb.get('downstream_spec', {}).get('pressure_class', '')}"
+                    
+                    writer.writerow([
+                        sb.get('spec_break_id', ''),
+                        sb.get('location', ''),
+                        upstream,
+                        downstream,
+                        sb.get('reason_for_break', ''),
+                        sb.get('break_properly_marked', 'N/A'),
+                        sb.get('transition_piece_required', 'N/A'),
+                        sb.get('cost_impact', 'N/A')
+                    ])
+                
+                writer.writerow([])
+        
         writer.writerow([f'CONFIDENTIAL ENGINEERING DOCUMENT - Generated: {datetime.now().strftime("%d-%b-%Y %H:%M:%S")}'])
         
         return response
