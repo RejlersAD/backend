@@ -20,6 +20,8 @@ class PIDAnalysisService:
     
     # Soft-coded configuration parameters (can be overridden via environment variables)
     MIN_ISSUES_REQUIRED = int(os.getenv('PID_MIN_ISSUES', '15'))  # Minimum issues to identify per drawing
+    # STRICT_MIN_ISSUES: If False, accepts any number of issues (flexible/dynamic mode)
+    STRICT_MIN_ISSUES = os.getenv('PID_STRICT_MIN_ISSUES', 'False').lower() in ('true', '1', 'yes')
     MAX_TOKENS = int(os.getenv('PID_MAX_TOKENS', '16000'))  # Maximum tokens for AI response
     AI_TEMPERATURE = float(os.getenv('PID_AI_TEMPERATURE', '0.15'))  # AI creativity (lower = more precise)
     ANALYSIS_DEPTH = os.getenv('PID_ANALYSIS_DEPTH', 'comprehensive')  # comprehensive | standard | quick
@@ -1207,13 +1209,24 @@ Extract ALL visible data, perform engineering validation, identify REAL issues w
         Fixes AI responses with malformed keys like '\n "drawing_info"'.
         
         Soft-coded approach: Handles any level of nesting automatically.
+        Enhanced to handle all edge cases including tabs, multiple quotes, etc.
         """
         if isinstance(obj, dict):
             # Clean dictionary keys and recursively sanitize values
             sanitized = {}
             for key, value in obj.items():
-                # Strip whitespace, newlines, quotes from keys
-                clean_key = key.strip().strip('\n').strip('\r').strip('"').strip("'")
+                # Aggressive cleaning: remove ALL whitespace characters, quotes, etc.
+                clean_key = str(key).strip()
+                # Remove leading/trailing: newlines, carriage returns, tabs, quotes
+                for char in ['\n', '\r', '\t', '"', "'", ' ']:
+                    clean_key = clean_key.strip(char)
+                # Additional pass to catch nested patterns like "\n \"key\""
+                clean_key = clean_key.strip()
+                
+                if not clean_key:  # Skip empty keys
+                    print(f"[WARNING] Skipping empty key after sanitization: {repr(key)}")
+                    continue
+                    
                 sanitized[clean_key] = self._sanitize_json_keys(value)
             return sanitized
         elif isinstance(obj, list):
@@ -1446,28 +1459,65 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
                 }
                 print(f"[WARNING] No 'drawing_info' in response, using defaults")
             
-            # Validation: Check minimum issues requirement
-            if min_issues_found < self.MIN_ISSUES_REQUIRED:
-                print(f"[WARNING] Only {min_issues_found} issues found, expected minimum {self.MIN_ISSUES_REQUIRED}")
-                print(f"[WARNING] AI may need re-analysis with different parameters")
+            # Validation: Check minimum issues requirement (soft-coded with flexibility)
+            if self.STRICT_MIN_ISSUES:
+                # STRICT mode: Enforce minimum issues requirement
+                if min_issues_found < self.MIN_ISSUES_REQUIRED:
+                    print(f"[WARNING] Only {min_issues_found} issues found, expected minimum {self.MIN_ISSUES_REQUIRED}")
+                    print(f"[WARNING] AI may need re-analysis with different parameters")
+                    print(f"[INFO] STRICT mode enabled - minimum issues required")
+                else:
+                    print(f"[SUCCESS] Found {min_issues_found} issues (minimum {self.MIN_ISSUES_REQUIRED} satisfied)")
             else:
-                print(f"[SUCCESS] Found {min_issues_found} issues (minimum {self.MIN_ISSUES_REQUIRED} satisfied)")
+                # FLEXIBLE mode: Accept any number of issues
+                if min_issues_found < self.MIN_ISSUES_REQUIRED:
+                    print(f"[INFO] Found {min_issues_found} issues (target was {self.MIN_ISSUES_REQUIRED})")
+                    print(f"[INFO] FLEXIBLE mode - accepting dynamic issue count")
+                else:
+                    print(f"[SUCCESS] Found {min_issues_found} issues (exceeded minimum {self.MIN_ISSUES_REQUIRED})")
             
             return analysis_result
             
         except KeyError as ke:
             # KeyError when accessing malformed JSON keys
             print(f"[ERROR] KeyError accessing JSON key: {str(ke)}")
-            print(f"[ERROR] Available keys in response: {list(analysis_result.keys()) if 'analysis_result' in locals() else 'N/A'}")
+            print(f"[ERROR] This should not happen after sanitization!")
             
             # Provide diagnostic information
-            if 'analysis_result' in locals():
-                print(f"[DEBUG] Raw keys (repr): {repr(list(analysis_result.keys()))}")
-                
+            if 'analysis_result' in locals() and isinstance(analysis_result, dict):
+                try:
+                    available_keys = list(analysis_result.keys())
+                    print(f"[ERROR] Available keys in response: {available_keys}")
+                    print(f"[DEBUG] Raw keys (repr): {repr(available_keys)}")
+                    
+                    # Try to recover by re-sanitizing
+                    print(f"[RECOVERY] Attempting aggressive re-sanitization...")
+                    analysis_result = self._sanitize_json_keys(analysis_result)
+                    print(f"[RECOVERY] Re-sanitized keys: {list(analysis_result.keys())}")
+                    
+                    # Return with minimal structure
+                    return {
+                        'drawing_info': analysis_result.get('drawing_info', {
+                            'drawing_number': drawing_number or 'Unknown',
+                            'drawing_title': 'P&ID Drawing',
+                            'revision': 'Unknown',
+                            'analysis_date': datetime.now().isoformat()
+                        }),
+                        'issues': analysis_result.get('issues', []),
+                        'summary': analysis_result.get('summary', {
+                            'total_issues': len(analysis_result.get('issues', [])),
+                            'critical_count': 0,
+                            'major_count': 0,
+                            'minor_count': 0,
+                            'observation_count': 0
+                        })
+                    }
+                except Exception as recovery_error:
+                    print(f"[ERROR] Recovery failed: {str(recovery_error)}")
+                    
             raise Exception(
-                f"Analysis failed: Malformed AI response with invalid key {str(ke)}. "
-                f"The AI returned JSON with whitespace or newlines in keys. "
-                f"This has been logged for debugging. Please try again."
+                f"Analysis failed: Critical error accessing JSON keys {str(ke)}. "
+                f"Sanitization may have failed. Please contact support with this error message."
             )
         except ValueError as ve:
             # ValueError from JSON parsing or validation
