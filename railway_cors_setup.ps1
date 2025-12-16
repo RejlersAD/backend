@@ -118,23 +118,23 @@ Write-Host "If CORS errors persist:" -ForegroundColor Yellow
 Write-Host ""
 
 Write-Host "1. Check Railway Logs" -ForegroundColor Green
-Write-Host "   - Go to Railway Dashboard → Deployments → Latest deployment → Logs"
+Write-Host "   - Go to Railway Dashboard > Deployments > Latest deployment > Logs"
 Write-Host "   - Look for: [CorsMiddleware] Loaded allowed origins: [...]"
-Write-Host "   - Look for: [CorsMiddleware] ✓ OPTIONS request from ... - ALLOWED"
+Write-Host "   - Look for: [CorsMiddleware] OPTIONS request from ... - ALLOWED"
 Write-Host ""
 
 Write-Host "2. Verify Frontend URL in Vercel" -ForegroundColor Green
-Write-Host "   - Go to Vercel Dashboard → Settings → Environment Variables"
+Write-Host "   - Go to Vercel Dashboard > Settings > Environment Variables"
 Write-Host "   - Ensure: VITE_API_URL = https://aiflowbackend-production.up.railway.app/api/v1"
 Write-Host ""
 
 Write-Host "3. Clear Browser Cache" -ForegroundColor Green
 Write-Host "   - Hard refresh: Ctrl + Shift + R (Chrome/Edge)"
-Write-Host "   - Or: F12 → Network tab → Disable cache checkbox"
+Write-Host "   - Or: F12 > Network tab > Disable cache checkbox"
 Write-Host ""
 
 Write-Host "4. Check Browser Console" -ForegroundColor Green
-Write-Host "   - F12 → Console tab"
+Write-Host "   - F12 > Console tab"
 Write-Host "   - Look for CORS errors or network failures"
 Write-Host "   - Check Network tab for failed OPTIONS/POST requests"
 Write-Host ""
