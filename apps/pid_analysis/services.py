@@ -5,6 +5,7 @@ AI-powered P&ID verification using OpenAI GPT-4 Vision with RAG support
 import os
 import base64
 import io
+import json
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from django.conf import settings
@@ -1341,58 +1342,95 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
                 result_text = result_text.split("```")[1].split("```")[0].strip()
                 print(f"[DEBUG] Cleaned markdown ``` wrapper")
             
-            import json
+            # Parse JSON response with comprehensive error handling
             try:
                 analysis_result = json.loads(result_text)
                 print(f"[INFO] Successfully parsed JSON response")
-            except json.JSONDecodeError as e:
-                print(f"[ERROR] JSON Decode Error: {str(e)}")
-                print(f"[ERROR] Error at position: {e.pos}")
+                print(f"[INFO] Issues found: {len(analysis_result.get('issues', []))}")
+            except json.JSONDecodeError as json_error:
+                print(f"[ERROR] JSON Decode Error: {str(json_error)}")
+                print(f"[ERROR] Error at position: {json_error.pos}")
                 print(f"[ERROR] Problematic text (first 1000 chars): {result_text[:1000]}")
                 print(f"[ERROR] Original response (first 1000 chars): {original_text[:1000]}")
                 
-                # Try to provide helpful error message
-                raise ValueError(
-                    f"OpenAI returned invalid JSON format.\n"
-                    f"Error: {str(e)}\n"
-                    f"This usually means:\n"
-                    f"1. API returned an error message instead of analysis\n"
-                    f"2. API key is invalid or has insufficient permissions\n"
-                    f"3. Response was truncated due to token limits\n"
-                    f"Response preview: {original_text[:200]}..."
-                )
+                # Soft-coded error messages based on error type
+                error_context = os.getenv('PID_ERROR_CONTEXT', 'detailed')  # detailed | simple
+                
+                if error_context == 'simple':
+                    raise ValueError(f"Invalid JSON response from AI: {str(json_error)}")
+                else:
+                    # Detailed error message
+                    raise ValueError(
+                        f"OpenAI returned invalid JSON format.\n"
+                        f"Error: {str(json_error)}\n"
+                        f"Position: {json_error.pos}\n"
+                        f"This usually means:\n"
+                        f"1. API returned an error message instead of analysis\n"
+                        f"2. API key is invalid or has insufficient permissions\n"
+                        f"3. Response was truncated due to token limits\n"
+                        f"4. Drawing image quality too poor for analysis\n"
+                        f"Response preview: {original_text[:200]}...\n"
+                        f"Check Railway logs for full response"
+                    )
             
-            # Validate and enrich response
+            # Validate and enrich response with soft-coded defaults
+            min_issues_found = len(analysis_result.get('issues', []))
+            
             if 'issues' not in analysis_result:
                 analysis_result['issues'] = []
+                print(f"[WARNING] No 'issues' key in response, initialized empty array")
             
             if 'summary' not in analysis_result:
+                # Calculate summary from issues
+                issues_list = analysis_result.get('issues', [])
+                critical = sum(1 for i in issues_list if i.get('severity', '').lower() == 'critical')
+                major = sum(1 for i in issues_list if i.get('severity', '').lower() == 'major')
+                minor = sum(1 for i in issues_list if i.get('severity', '').lower() == 'minor')
+                observation = sum(1 for i in issues_list if i.get('severity', '').lower() == 'observation')
+                
                 analysis_result['summary'] = {
-                    'total_issues': len(analysis_result.get('issues', [])),
-                    'critical_count': 0,
-                    'major_count': 0,
-                    'minor_count': 0,
-                    'observation_count': 0
+                    'total_issues': len(issues_list),
+                    'critical_count': critical,
+                    'major_count': major,
+                    'minor_count': minor,
+                    'observation_count': observation
                 }
+                print(f"[INFO] Generated summary: {analysis_result['summary']}")
             
             if 'drawing_info' not in analysis_result:
                 analysis_result['drawing_info'] = {
-                    'drawing_number': 'Unknown',
-                    'drawing_title': 'Unknown',
+                    'drawing_number': drawing_number or 'Unknown',
+                    'drawing_title': 'P&ID Drawing',
                     'revision': 'Unknown',
                     'analysis_date': datetime.now().isoformat()
                 }
+                print(f"[WARNING] No 'drawing_info' in response, using defaults")
+            
+            # Validation: Check minimum issues requirement
+            if min_issues_found < self.MIN_ISSUES_REQUIRED:
+                print(f"[WARNING] Only {min_issues_found} issues found, expected minimum {self.MIN_ISSUES_REQUIRED}")
+                print(f"[WARNING] AI may need re-analysis with different parameters")
+            else:
+                print(f"[SUCCESS] Found {min_issues_found} issues (minimum {self.MIN_ISSUES_REQUIRED} satisfied)")
             
             return analysis_result
             
-        except json.JSONDecodeError as e:
-            print(f"[ERROR] JSON parsing failed: {str(e)}")
-            raise Exception(f"P&ID analysis failed: AI returned invalid JSON format. {str(e)}")
+        except ValueError as ve:
+            # ValueError from JSON parsing or validation
+            print(f"[ERROR] Value error in analysis: {str(ve)}")
+            raise Exception(f"Analysis failed: {str(ve)}")
         except Exception as e:
             print(f"[ERROR] P&ID analysis exception: {type(e).__name__}: {str(e)}")
             import traceback
             traceback.print_exc()
-            raise Exception(f"P&ID analysis failed: {str(e)}")
+            
+            # Soft-coded error message format
+            error_format = os.getenv('PID_ERROR_FORMAT', 'technical')  # technical | user-friendly
+            
+            if error_format == 'user-friendly':
+                raise Exception(f"Analysis failed: {str(e)}")
+            else:
+                raise Exception(f"Analysis failed: {type(e).__name__}: {str(e)}")
     
     def generate_report_summary(self, issues: List[Dict]) -> Dict[str, int]:
         """Generate summary statistics from issues"""
