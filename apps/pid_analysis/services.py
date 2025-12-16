@@ -1201,6 +1201,28 @@ Extract ALL visible data, perform engineering validation, identify REAL issues w
         
         return images_base64
     
+    def _sanitize_json_keys(self, obj):
+        """
+        Recursively sanitize JSON object to remove whitespace/newlines from keys.
+        Fixes AI responses with malformed keys like '\n "drawing_info"'.
+        
+        Soft-coded approach: Handles any level of nesting automatically.
+        """
+        if isinstance(obj, dict):
+            # Clean dictionary keys and recursively sanitize values
+            sanitized = {}
+            for key, value in obj.items():
+                # Strip whitespace, newlines, quotes from keys
+                clean_key = key.strip().strip('\n').strip('\r').strip('"').strip("'")
+                sanitized[clean_key] = self._sanitize_json_keys(value)
+            return sanitized
+        elif isinstance(obj, list):
+            # Recursively sanitize list items
+            return [self._sanitize_json_keys(item) for item in obj]
+        else:
+            # Return primitive values as-is
+            return obj
+    
     def analyze_pid_drawing(self, pdf_file, drawing_number: Optional[str] = None) -> Dict[str, Any]:
         """
         Analyze P&ID drawing using OpenAI GPT-4 Vision with optional RAG context
@@ -1346,7 +1368,25 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
             try:
                 analysis_result = json.loads(result_text)
                 print(f"[INFO] Successfully parsed JSON response")
+                
+                # Debug: Log raw keys before sanitization
+                if isinstance(analysis_result, dict):
+                    raw_keys = list(analysis_result.keys())
+                    print(f"[DEBUG] Raw JSON keys before sanitization: {raw_keys}")
+                    print(f"[DEBUG] Raw keys (repr): {repr(raw_keys)}")
+                
+                # CRITICAL FIX: Sanitize JSON keys (remove whitespace, newlines from keys)
+                # AI sometimes adds formatting that breaks key access
+                analysis_result = self._sanitize_json_keys(analysis_result)
+                print(f"[INFO] JSON keys sanitized")
+                
+                # Debug: Log clean keys after sanitization
+                if isinstance(analysis_result, dict):
+                    clean_keys = list(analysis_result.keys())
+                    print(f"[DEBUG] Clean JSON keys after sanitization: {clean_keys}")
+                
                 print(f"[INFO] Issues found: {len(analysis_result.get('issues', []))}")
+                
             except json.JSONDecodeError as json_error:
                 print(f"[ERROR] JSON Decode Error: {str(json_error)}")
                 print(f"[ERROR] Error at position: {json_error.pos}")
@@ -1415,6 +1455,20 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
             
             return analysis_result
             
+        except KeyError as ke:
+            # KeyError when accessing malformed JSON keys
+            print(f"[ERROR] KeyError accessing JSON key: {str(ke)}")
+            print(f"[ERROR] Available keys in response: {list(analysis_result.keys()) if 'analysis_result' in locals() else 'N/A'}")
+            
+            # Provide diagnostic information
+            if 'analysis_result' in locals():
+                print(f"[DEBUG] Raw keys (repr): {repr(list(analysis_result.keys()))}")
+                
+            raise Exception(
+                f"Analysis failed: Malformed AI response with invalid key {str(ke)}. "
+                f"The AI returned JSON with whitespace or newlines in keys. "
+                f"This has been logged for debugging. Please try again."
+            )
         except ValueError as ve:
             # ValueError from JSON parsing or validation
             print(f"[ERROR] Value error in analysis: {str(ve)}")
