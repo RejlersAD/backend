@@ -91,6 +91,7 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
     instrument_schedule = serializers.SerializerMethodField()
     line_list = serializers.SerializerMethodField()
     summary = serializers.SerializerMethodField()
+    holds_and_notes = serializers.SerializerMethodField()
     
     class Meta:
         model = PIDAnalysisReport
@@ -99,7 +100,7 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
             'approved_count', 'ignored_count', 'pending_count',
             'report_data', 'pdf_report', 'excel_report',
             'issues', 'equipment_datasheets', 'instrument_schedule', 
-            'line_list', 'summary', 'generated_at', 'updated_at'
+            'line_list', 'summary', 'holds_and_notes', 'generated_at', 'updated_at'
         ]
         read_only_fields = ['id', 'generated_at', 'updated_at']
     
@@ -137,6 +138,13 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
         """Extract summary from report_data"""
         if isinstance(obj.report_data, dict):
             return obj.report_data.get('summary', {})
+        return {}
+    
+    def get_holds_and_notes(self, obj):
+        """Extract HOLDS and NOTES compliance from report_data"""
+        if isinstance(obj.report_data, dict):
+            pfd_compliance = obj.report_data.get('pfd_guidelines_compliance', {})
+            return pfd_compliance.get('holds_and_notes_compliance', {})
         return {}
 
 

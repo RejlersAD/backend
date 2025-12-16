@@ -527,8 +527,29 @@ Final completeness check:
   * All symbols used on drawing are explained in legend
   * Abbreviations are explained or are standard
   * Line designation, valve symbols, instrument symbols clearly defined
+- **HOLDS & NOTES Verification (CRITICAL - RIGHT TOP CORNER)**:
+  * **HOLDS**: Extract ALL HOLD items listed on drawing (typically in table format at right top corner)
+    - HOLD number/identifier
+    - HOLD description/requirement
+    - Check if drawing design complies with each HOLD
+    - Flag violations of HOLD requirements as CRITICAL issues
+  * **GENERAL NOTES**: Extract and verify ALL general notes (numbered notes section)
+    - Design conditions and requirements
+    - Material selection criteria
+    - Special requirements (NACE, PWHT, testing, etc.)
+    - Operating constraints and limitations
+  * **DESIGN NOTES**: Extract project-specific design notes
+    - Pressure/temperature design basis
+    - Fluid properties and composition
+    - Safety factors and margins
+    - Special operating conditions
+  * **Verify Compliance**: Check that drawing design follows ALL notes and HOLDS
+    - Cross-reference equipment specs against notes
+    - Verify instrument ranges match design conditions in notes
+    - Confirm material selections comply with NACE/corrosion notes
+    - Flag any violations of notes/holds as issues
 - **TBC (To Be Confirmed) Items**:
-  * Identify all "TBC", "TBD", "HOLD", "VERIFY" notes on drawing
+  * Identify all "TBC", "TBD", "TO BE CONFIRMED", "VERIFY" items on drawing
   * Flag these as requiring resolution before construction
 - **Cross-References Completeness**:
   * Check for continuation symbols (to/from other P&ID sheets)
@@ -779,6 +800,36 @@ Return ONLY a valid JSON object with ALL sections populated based on actual draw
       "abbreviations_explained": "Yes / No",
       "missing_notes": ["Design pressure/temperature not specified", "Material selection criteria not noted"]
     },
+    "holds_and_notes_compliance": {
+      "holds_section_present": "Yes / No",
+      "holds_list": [
+        {
+          "hold_number": "HOLD-1 / H1 / etc.",
+          "hold_description": "EXACT text of HOLD requirement from drawing (typically from right top corner table)",
+          "compliance_status": "Compliant / Non-Compliant / Partially Compliant / Not Applicable",
+          "verification_notes": "Detailed explanation of how drawing complies or violates this HOLD",
+          "related_issues": ["List issue serial numbers if HOLD is violated"]
+        }
+      ],
+      "general_notes_list": [
+        {
+          "note_number": "Note 1 / NOTE-01 / etc.",
+          "note_text": "EXACT text of general note from drawing",
+          "note_category": "Design Conditions / Material Selection / Safety / Operating Requirements / Testing / Other",
+          "compliance_status": "Compliant / Non-Compliant / Partially Compliant",
+          "verification_notes": "How drawing complies with this note",
+          "related_issues": ["List issue serial numbers if note is violated"]
+        }
+      ],
+      "design_notes_list": [
+        {
+          "note_description": "Design basis, pressure/temp ratings, fluid properties, special requirements",
+          "compliance_status": "Compliant / Non-Compliant",
+          "verification_notes": "Verification details"
+        }
+      ],
+      "critical_violations": ["List any CRITICAL violations of HOLDS or NOTES that pose safety/operational risks"]
+    },
     "referenced_documents": [
       "PFD-001 Rev.B (Process Flow Diagram)",
       "Piping Spec PS-101 Rev.3",
@@ -933,6 +984,21 @@ For EVERY issue identified, you MUST provide detailed location information to he
 5. **Search Keywords**: List exact tags, line numbers, or text that can be searched/found on the drawing
 
 This location information is MANDATORY for every issue - it significantly improves the usability of the analysis report.
+
+**CRITICAL INSTRUCTION FOR HOLDS & NOTES COMPLIANCE:**
+1. **Extract ALL HOLDS**: Look for HOLDS table (typically right top corner of drawing). Extract every HOLD item with exact text.
+2. **Extract ALL NOTES**: Extract general notes, design notes, and special requirements from notes section.
+3. **Verify Compliance**: For EVERY equipment item, instrument, line, and design decision:
+   - Check if any HOLD applies to that item
+   - Check if any NOTE constrains that design choice
+   - If design violates a HOLD or NOTE, flag as CRITICAL issue with reference to specific HOLD/NOTE number
+4. **Cross-Reference Issues**: When creating issues list, reference which HOLD or NOTE is violated (if applicable)
+5. **Examples of HOLD/NOTE Violations to Check**:
+   - HOLD: "All PSVs shall discharge to flare header" → Check PSV discharge destinations
+   - NOTE: "Design pressure for all equipment = 50 barg @ 150°C" → Verify all equipment datasheets match
+   - NOTE: "All carbon steel piping in sour service requires NACE MR0175 compliance" → Check material specs
+   - HOLD: "Minimum 2oo3 voting for all SIS Level transmitters" → Verify redundancy
+   - NOTE: "All control valves fail-closed unless noted FC" → Check fail-safe positions
 
 **NOW ANALYZE THIS SPECIFIC P&ID DRAWING:**
 Extract ALL visible data, perform engineering validation, identify REAL issues with EXACT values, and return comprehensive JSON output based on what you actually SEE in the drawing."""
