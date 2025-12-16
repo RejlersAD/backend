@@ -370,6 +370,52 @@ For EACH piping line segment, perform detailed piping engineering check:
   * Steam traps on steam lines
   * Spectacle blinds for positive isolation
 
+**4️⃣ SPECIFICATION BREAKS (SPEC BREAKS) - CRITICAL IDENTIFICATION**
+**SPEC BREAKS are locations where piping specification changes (material, pressure class, or special requirements).**
+
+**Intelligent Spec Break Detection:**
+- **Scan ALL Pipe Lines** for specification changes:
+  * **Material Changes**: CS → SS316, CS → Alloy, SS → LTCS, etc.
+  * **Pressure Class Changes**: 150# → 300#, 300# → 600#, etc.
+  * **Special Requirement Changes**: Standard → NACE, Non-traced → Heat Traced, etc.
+  
+- **Identify Each Spec Break Location**:
+  * Note exact location (between which equipment, at which point on line)
+  * Extract upstream line spec (line number, material, pressure class)
+  * Extract downstream line spec (line number, material, pressure class)
+  * Determine reason for break (corrosion, pressure, temperature, cost optimization)
+  
+- **Verify Spec Break Documentation**:
+  * ✅ Is spec break clearly marked on drawing? (Symbol, notation, callout)
+  * ✅ Are both upstream and downstream line numbers shown?
+  * ✅ Is transition piece specified? (Reducer, flange adapter, spool piece)
+  * ✅ Are material specifications compatible? (dissimilar metal issues)
+  * ✅ Is pressure rating adequate on both sides?
+  
+- **Common Spec Break Scenarios**:
+  * **CS to SS**: Entering corrosive service (acids, high chloride, sour gas)
+  * **150# to 300#**: Pressure increase (pump discharge, compressor outlet)
+  * **Standard to NACE**: Entering sour service (H2S > 50 ppm)
+  * **Non-traced to Heat Traced**: Freeze protection zone, viscosity management
+  * **Standard to Jacketed**: Temperature control requirement
+  
+- **Flag Missing or Improper Spec Breaks**:
+  * Spec break exists but not marked → MAJOR issue (procurement/construction error risk)
+  * Material incompatibility at break → CRITICAL issue (galvanic corrosion)
+  * Pressure class downgrade without justification → CRITICAL issue (safety risk)
+  * Missing transition piece specification → MAJOR issue (installation delay)
+  
+- **Procurement & Cost Impact**:
+  * Note material cost differential (SS316 ~3x CS, Alloy ~10x CS)
+  * Identify long-lead items (exotic materials, special flanges)
+  * Flag impact on material take-off (MTO) and Bill of Materials (BOM)
+
+**Example Spec Breaks to Identify:**
+1. Line 6"-P-1501-CS-150 → 6"-P-1502-SS316-300 (before corrosive reactor feed)
+2. Line 4"-U-2101-CS-150 → 4"-U-2102-CS-300 (pump discharge pressure rise)
+3. Line 2"-P-3001-CS-150 → 2"-P-3002-LTCS-150 (entering cryogenic section)
+4. Line 8"-FG-4001-CS-150 → 8"-FG-4002-CS-150-NACE (entering sour gas area)
+
 **5️⃣ PID/PFD GUIDELINES COMPLIANCE - ADNOC DEP 30.20.10.13-Gen AUDIT**
 Comprehensive standards compliance check:
 - **Drawing Legend & Symbol Compliance**:
@@ -677,6 +723,34 @@ Return ONLY a valid JSON object with ALL sections populated based on actual draw
       "setpoint_source": "DCS operator / Cascade from TIC-102 / Ratio to FIC-102",
       "bypass_provision": "Manual bypass valve HV-101A/B around FCV-101",
       "notes": "Control philosophy notes"
+    }
+  ],
+  
+  "specification_breaks": [
+    {
+      "spec_break_id": "SB-1 / SPEC BREAK-1 / Sequential number",
+      "location": "Line number and location (e.g., On line 6\"-P-1501 between V-101 and P-201A)",
+      "upstream_spec": {
+        "line_number": "6\"-P-1501-CS-150",
+        "material_spec": "CS (Carbon Steel A106 Gr.B)",
+        "pressure_class": "150#",
+        "special_requirements": "None / NACE / PWHT / etc."
+      },
+      "downstream_spec": {
+        "line_number": "6\"-P-1502-SS316-300",
+        "material_spec": "SS316 (Stainless Steel 316)",
+        "pressure_class": "300#",
+        "special_requirements": "NACE MR0175"
+      },
+      "reason_for_break": "Material change (CS to SS316) due to corrosive service / Pressure class change / Temperature change / Special requirement",
+      "break_properly_marked": "Yes / No (Is spec break symbol/notation clearly shown on drawing)",
+      "transition_piece_required": "Yes / No - Reducer, Expander, Spool piece, Flange adapter",
+      "transition_details": "6\" 150# CS to 6\" 300# SS316 flange adapter required",
+      "spec_break_location_zone": "Zone on drawing where spec break occurs (for visualization)",
+      "procurement_impact": "This break affects material procurement - CS pipe upstream, SS316 pipe downstream",
+      "cost_impact": "High / Medium / Low (SS316 is ~3x cost of CS)",
+      "installation_notes": "Ensure proper flange bolt-up torque per ASME B16.5 for dissimilar materials",
+      "issues_found": ["Spec break not marked on drawing", "Missing transition piece specification", "Pressure class change not justified"]
     }
   ],
   

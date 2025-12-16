@@ -92,6 +92,7 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
     line_list = serializers.SerializerMethodField()
     summary = serializers.SerializerMethodField()
     holds_and_notes = serializers.SerializerMethodField()
+    specification_breaks = serializers.SerializerMethodField()
     
     class Meta:
         model = PIDAnalysisReport
@@ -100,7 +101,8 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
             'approved_count', 'ignored_count', 'pending_count',
             'report_data', 'pdf_report', 'excel_report',
             'issues', 'equipment_datasheets', 'instrument_schedule', 
-            'line_list', 'summary', 'holds_and_notes', 'generated_at', 'updated_at'
+            'line_list', 'summary', 'holds_and_notes', 'specification_breaks',
+            'generated_at', 'updated_at'
         ]
         read_only_fields = ['id', 'generated_at', 'updated_at']
     
@@ -146,6 +148,12 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
             pfd_compliance = obj.report_data.get('pfd_guidelines_compliance', {})
             return pfd_compliance.get('holds_and_notes_compliance', {})
         return {}
+    
+    def get_specification_breaks(self, obj):
+        """Extract specification breaks from report_data"""
+        if isinstance(obj.report_data, dict):
+            return obj.report_data.get('specification_breaks', [])
+        return []
 
 
 class PIDDrawingSerializer(serializers.ModelSerializer):
