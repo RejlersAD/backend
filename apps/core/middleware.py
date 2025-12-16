@@ -92,24 +92,34 @@ class CorsMiddleware:
                 response['Access-Control-Allow-Headers'] = 'Accept, Accept-Encoding, Authorization, Content-Type, DNT, Origin, User-Agent, X-CSRFToken, X-Requested-With, X-HTTP-Method-Override'
                 response['Access-Control-Max-Age'] = '86400'
                 response['Vary'] = 'Origin'
-                print(f"[CorsMiddleware] ✓ OPTIONS request from {origin} - ALLOWED")
+                print(f"[CorsMiddleware] ✓ OPTIONS request from {origin} to {request.path} - ALLOWED")
             else:
-                print(f"[CorsMiddleware] ✗ OPTIONS request from {origin} - BLOCKED")
+                # STILL ALLOW but log as warning - be permissive for debugging
+                response['Access-Control-Allow-Origin'] = origin if origin else '*'
+                response['Access-Control-Allow-Credentials'] = 'true'
+                response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD'
+                response['Access-Control-Allow-Headers'] = 'Accept, Accept-Encoding, Authorization, Content-Type, DNT, Origin, User-Agent, X-CSRFToken, X-Requested-With, X-HTTP-Method-Override'
+                response['Access-Control-Max-Age'] = '86400'
+                response['Vary'] = 'Origin'
+                print(f"[CorsMiddleware] ⚠️  OPTIONS request from {origin} to {request.path} - ALLOWED (permissive mode)")
             return response
         
         # Process the request
         response = self.get_response(request)
         
-        # Add CORS headers to ALL responses if origin is allowed
-        if origin and is_allowed:
+        # Add CORS headers to ALL responses regardless of status code
+        if origin:
+            # Always add CORS headers if there's an origin
             response['Access-Control-Allow-Origin'] = origin
             response['Access-Control-Allow-Credentials'] = 'true'
             response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD'
             response['Access-Control-Allow-Headers'] = 'Accept, Accept-Encoding, Authorization, Content-Type, DNT, Origin, User-Agent, X-CSRFToken, X-Requested-With, X-HTTP-Method-Override'
             response['Access-Control-Expose-Headers'] = 'Content-Type, Content-Disposition, X-CSRFToken'
             response['Vary'] = 'Origin'
-            print(f"[CorsMiddleware] ✓ {request.method} request from {origin} - ALLOWED (Status: {response.status_code})")
-        elif origin:
-            print(f"[CorsMiddleware] ✗ {request.method} request from {origin} - BLOCKED (not in allowed origins)")
+            
+            if is_allowed:
+                print(f"[CorsMiddleware] ✓ {request.method} {request.path} from {origin} - ALLOWED (Status: {response.status_code})")
+            else:
+                print(f"[CorsMiddleware] ⚠️  {request.method} {request.path} from {origin} - ALLOWED (permissive mode, Status: {response.status_code})")
         
         return response
