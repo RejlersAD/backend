@@ -7,9 +7,13 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+from apps.core.cors_test_views import CorsTestView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    
+    # CORS diagnostic endpoint (no auth required)
+    path('api/v1/cors-test/', CorsTestView.as_view(), name='cors-test'),
     
     # API endpoints
     path('api/v1/', include('apps.api.urls')),

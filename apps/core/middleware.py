@@ -76,34 +76,50 @@ class CorsMiddleware:
         return False
 
     def __call__(self, request):
+        # CRITICAL: Log that middleware is being called
+        print(f"[CorsMiddleware] === MIDDLEWARE CALLED ===")
+        print(f"[CorsMiddleware] Method: {request.method}")
+        print(f"[CorsMiddleware] Path: {request.path}")
+        print(f"[CorsMiddleware] Origin: {request.META.get('HTTP_ORIGIN', 'NO ORIGIN')}")
+        
         # Get the origin from the request
         origin = request.META.get('HTTP_ORIGIN', '')
         
-        # ULTRA-PERMISSIVE MODE: Allow ALL origins if no specific origin provided
-        # This ensures CORS works even without environment variables configured
+        # ULTRA-PERMISSIVE MODE: Allow ALL origins
+        # If no origin header, use wildcard for maximum compatibility
         if not origin:
             origin = '*'
+            print(f"[CorsMiddleware] No origin provided, using wildcard '*'")
         
-        # Check if origin is allowed (but we're permissive anyway)
-        is_allowed = self._is_origin_allowed(origin) if origin != '*' else True
-        
-        # Handle preflight OPTIONS request - MUST RESPOND IMMEDIATELY WITH CORS HEADERS
+        # Handle preflight OPTIONS request - MUST RESPOND IMMEDIATELY
+        # This MUST happen BEFORE any other processing
         if request.method == 'OPTIONS':
+            print(f"[CorsMiddleware] !!! OPTIONS PREFLIGHT REQUEST DETECTED !!!")
+            print(f"[CorsMiddleware] Creating immediate 200 response with CORS headers...")
+            
             response = HttpResponse(status=200)
-            # ALWAYS add CORS headers - ultra permissive
+            
+            # Add ALL necessary CORS headers (ultra-permissive)
             response['Access-Control-Allow-Origin'] = origin
             response['Access-Control-Allow-Credentials'] = 'true' if origin != '*' else 'false'
             response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD'
             response['Access-Control-Allow-Headers'] = 'Accept, Accept-Encoding, Authorization, Content-Type, DNT, Origin, User-Agent, X-CSRFToken, X-Requested-With, X-HTTP-Method-Override'
-            response['Access-Control-Max-Age'] = '86400'
+            response['Access-Control-Max-Age'] = '86400'  # Cache preflight for 24 hours
             response['Vary'] = 'Origin'
-            print(f"[CorsMiddleware] ✓ OPTIONS request from {origin} to {request.path} - ALLOWED (ultra-permissive mode)")
+            
+            print(f"[CorsMiddleware] ✓ OPTIONS preflight response prepared")
+            print(f"[CorsMiddleware] ✓ Access-Control-Allow-Origin: {origin}")
+            print(f"[CorsMiddleware] ✓ Status: 200")
+            print(f"[CorsMiddleware] === RETURNING PREFLIGHT RESPONSE ===")
+            
             return response
         
-        # Process the request
+        # Process normal request
+        print(f"[CorsMiddleware] Processing {request.method} request...")
         response = self.get_response(request)
+        print(f"[CorsMiddleware] Response status: {response.status_code}")
         
-        # ALWAYS add CORS headers to ALL responses - no exceptions
+        # ALWAYS add CORS headers to ALL responses
         response['Access-Control-Allow-Origin'] = origin
         response['Access-Control-Allow-Credentials'] = 'true' if origin != '*' else 'false'
         response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD'
@@ -111,6 +127,7 @@ class CorsMiddleware:
         response['Access-Control-Expose-Headers'] = 'Content-Type, Content-Disposition, X-CSRFToken'
         response['Vary'] = 'Origin'
         
-        print(f"[CorsMiddleware] ✓ {request.method} {request.path} from {origin} - ALLOWED (Status: {response.status_code})")
+        print(f"[CorsMiddleware] ✓ CORS headers added to response")
+        print(f"[CorsMiddleware] === RETURNING RESPONSE ===")
         
         return response

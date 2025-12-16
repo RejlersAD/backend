@@ -65,11 +65,12 @@ if config('USE_S3', default=False, cast=bool) and config('AWS_STORAGE_BUCKET_NAM
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
-    'apps.core.middleware.CorsMiddleware',  # Custom CORS middleware - FIRST
+    'apps.core.middleware.CorsMiddleware',  # Custom CORS middleware - MUST BE FIRST
+    'apps.core.csrf_exempt_middleware.CsrfExemptMiddleware',  # CSRF exemption for API - BEFORE CSRF
     'corsheaders.middleware.CorsMiddleware',  # Django CORS headers - BACKUP
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',  # CSRF validation (exempted for /api/)
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'apps.rbac.middleware.LoginTrackingMiddleware',  # Track login attempts
     'apps.rbac.middleware.RBACMiddleware',  # RBAC enforcement
