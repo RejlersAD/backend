@@ -5,21 +5,92 @@ from .models import PIDDrawing, PIDAnalysisReport, PIDIssue, ReferenceDocument
 class PIDIssueSerializer(serializers.ModelSerializer):
     """Serializer for P&ID issues"""
     
+    # Add location_on_drawing from report_data if available
+    location_on_drawing = serializers.SerializerMethodField()
+    engineering_impact = serializers.SerializerMethodField()
+    standard_reference = serializers.SerializerMethodField()
+    related_issues = serializers.SerializerMethodField()
+    
     class Meta:
         model = PIDIssue
         fields = [
             'id', 'serial_number', 'pid_reference', 'issue_observed',
             'action_required', 'severity', 'category', 'status',
-            'approval', 'remark', 'created_at', 'updated_at'
+            'approval', 'remark', 'location_on_drawing', 'engineering_impact',
+            'standard_reference', 'related_issues', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def get_location_on_drawing(self, obj):
+        """Extract location_on_drawing from analysis report JSON if available"""
+        # Try to get report from context first
+        report = self.context.get('report')
+        if not report and hasattr(obj, 'analysis_report'):
+            report = obj.analysis_report
+        
+        if report and hasattr(report, 'report_data'):
+            report_data = report.report_data
+            if isinstance(report_data, dict) and 'issues' in report_data:
+                # Find matching issue by serial number
+                for issue in report_data.get('issues', []):
+                    if issue.get('serial_number') == obj.serial_number:
+                        return issue.get('location_on_drawing', None)
+        return None
+    
+    def get_engineering_impact(self, obj):
+        """Extract engineering_impact from analysis report JSON if available"""
+        report = self.context.get('report')
+        if not report and hasattr(obj, 'analysis_report'):
+            report = obj.analysis_report
+            
+        if report and hasattr(report, 'report_data'):
+            report_data = report.report_data
+            if isinstance(report_data, dict) and 'issues' in report_data:
+                for issue in report_data.get('issues', []):
+                    if issue.get('serial_number') == obj.serial_number:
+                        return issue.get('engineering_impact', '')
+        return ''
+    
+    def get_standard_reference(self, obj):
+        """Extract standard_reference from analysis report JSON if available"""
+        report = self.context.get('report')
+        if not report and hasattr(obj, 'analysis_report'):
+            report = obj.analysis_report
+            
+        if report and hasattr(report, 'report_data'):
+            report_data = report.report_data
+            if isinstance(report_data, dict) and 'issues' in report_data:
+                for issue in report_data.get('issues', []):
+                    if issue.get('serial_number') == obj.serial_number:
+                        return issue.get('standard_reference', '')
+        return ''
+    
+    def get_related_issues(self, obj):
+        """Extract related_issues from analysis report JSON if available"""
+        report = self.context.get('report')
+        if not report and hasattr(obj, 'analysis_report'):
+            report = obj.analysis_report
+            
+        if report and hasattr(report, 'report_data'):
+            report_data = report.report_data
+            if isinstance(report_data, dict) and 'issues' in report_data:
+                for issue in report_data.get('issues', []):
+                    if issue.get('serial_number') == obj.serial_number:
+                        return issue.get('related_issues', [])
+        return []
 
 
 class PIDAnalysisReportSerializer(serializers.ModelSerializer):
     """Serializer for P&ID analysis reports"""
     
-    issues = PIDIssueSerializer(many=True, read_only=True)
+    issues = serializers.SerializerMethodField()
     pid_drawing_number = serializers.CharField(source='pid_drawing.drawing_number', read_only=True)
+    
+    # Additional fields from report_data JSON
+    equipment_datasheets = serializers.SerializerMethodField()
+    instrument_schedule = serializers.SerializerMethodField()
+    line_list = serializers.SerializerMethodField()
+    summary = serializers.SerializerMethodField()
     
     class Meta:
         model = PIDAnalysisReport
@@ -27,9 +98,46 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
             'id', 'pid_drawing', 'pid_drawing_number', 'total_issues',
             'approved_count', 'ignored_count', 'pending_count',
             'report_data', 'pdf_report', 'excel_report',
-            'issues', 'generated_at', 'updated_at'
+            'issues', 'equipment_datasheets', 'instrument_schedule', 
+            'line_list', 'summary', 'generated_at', 'updated_at'
         ]
         read_only_fields = ['id', 'generated_at', 'updated_at']
+    
+    def get_issues(self, obj):
+        """Get issues with full data from report_data JSON"""
+        # Always prioritize report_data JSON as it has complete information including location_on_drawing
+        if isinstance(obj.report_data, dict) and obj.report_data.get('issues'):
+            return obj.report_data.get('issues', [])
+        
+        # Fallback to related PIDIssue objects if report_data not available
+        if obj.issues.exists():
+            return PIDIssueSerializer(obj.issues.all(), many=True, context={'report': obj}).data
+        
+        return []
+    
+    def get_equipment_datasheets(self, obj):
+        """Extract equipment datasheets from report_data"""
+        if isinstance(obj.report_data, dict):
+            return obj.report_data.get('equipment_datasheets', [])
+        return []
+    
+    def get_instrument_schedule(self, obj):
+        """Extract instrument schedule from report_data"""
+        if isinstance(obj.report_data, dict):
+            return obj.report_data.get('instrument_schedule', [])
+        return []
+    
+    def get_line_list(self, obj):
+        """Extract line list from report_data"""
+        if isinstance(obj.report_data, dict):
+            return obj.report_data.get('line_list', [])
+        return []
+    
+    def get_summary(self, obj):
+        """Extract summary from report_data"""
+        if isinstance(obj.report_data, dict):
+            return obj.report_data.get('summary', {})
+        return {}
 
 
 class PIDDrawingSerializer(serializers.ModelSerializer):
