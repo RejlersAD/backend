@@ -356,3 +356,26 @@ else:
 
 # OpenAI Configuration (existing)
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
+
+# ==============================================================================
+# REPORT GENERATION CONFIGURATION (SOFT-CODED)
+# ==============================================================================
+
+# Company Branding for Reports
+REPORT_COMPANY_NAME = config('REPORT_COMPANY_NAME', default='REJLERS ABU DHABI')
+REPORT_COMPANY_SUBTITLE = config('REPORT_COMPANY_SUBTITLE', default='Engineering & Design Consultancy')
+REPORT_COMPANY_WEBSITE = config('REPORT_COMPANY_WEBSITE', default='www.rejlers.com/ae')
+
+# Report Colors (Hex values without #)
+REPORT_PRIMARY_COLOR = config('REPORT_PRIMARY_COLOR', default='003366')  # Dark blue
+REPORT_SECONDARY_COLOR = config('REPORT_SECONDARY_COLOR', default='FFA500')  # Orange
+REPORT_TEXT_COLOR = config('REPORT_TEXT_COLOR', default='333333')
+REPORT_BORDER_COLOR = config('REPORT_BORDER_COLOR', default='CCCCCC')
+
+# Report Template Settings
+REPORT_TITLE = config('REPORT_TITLE', default='P&ID DESIGN VERIFICATION REPORT')
+REPORT_FOOTER_TEXT = config('REPORT_FOOTER_TEXT', default='CONFIDENTIAL ENGINEERING DOCUMENT')
+REPORT_FOOTER_NOTE = config('REPORT_FOOTER_NOTE', default='This document is the property of {company}. Unauthorized distribution is prohibited.')
+
+# Format footer note with company name
+REPORT_FOOTER_NOTE_FORMATTED = REPORT_FOOTER_NOTE.format(company=REPORT_COMPANY_NAME)

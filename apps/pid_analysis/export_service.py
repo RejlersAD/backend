@@ -1,8 +1,9 @@
 """
 P&ID Report Export Service
-Generate professional reports in PDF, Excel, and CSV formats with Rejlers Abu Dhabi branding
+Generate professional reports in PDF, Excel, and CSV formats with customizable branding
 """
 from django.http import HttpResponse
+from django.conf import settings
 from datetime import datetime
 import csv
 import io
@@ -11,15 +12,33 @@ import io
 class PIDReportExportService:
     """Service for exporting P&ID reports in various formats"""
     
-    REJLERS_COLORS = {
-        'primary': '#003366',  # Dark blue
-        'secondary': '#FFA500',  # Orange
-        'text': '#333333',
-        'border': '#CCCCCC'
-    }
+    def __init__(self):
+        """Initialize with soft-coded configuration from settings"""
+        # Company Branding (soft-coded)
+        self.company_name = getattr(settings, 'REPORT_COMPANY_NAME', 'REJLERS ABU DHABI')
+        self.company_subtitle = getattr(settings, 'REPORT_COMPANY_SUBTITLE', 'Engineering & Design Consultancy')
+        self.company_website = getattr(settings, 'REPORT_COMPANY_WEBSITE', 'www.rejlers.com/ae')
+        
+        # Report Colors (soft-coded, add # prefix for hex colors)
+        primary = getattr(settings, 'REPORT_PRIMARY_COLOR', '003366')
+        secondary = getattr(settings, 'REPORT_SECONDARY_COLOR', 'FFA500')
+        text = getattr(settings, 'REPORT_TEXT_COLOR', '333333')
+        border = getattr(settings, 'REPORT_BORDER_COLOR', 'CCCCCC')
+        
+        self.colors = {
+            'primary': f'#{primary}' if not primary.startswith('#') else primary,
+            'secondary': f'#{secondary}' if not secondary.startswith('#') else secondary,
+            'text': f'#{text}' if not text.startswith('#') else text,
+            'border': f'#{border}' if not border.startswith('#') else border
+        }
+        
+        # Report Template Settings (soft-coded)
+        self.report_title = getattr(settings, 'REPORT_TITLE', 'P&ID DESIGN VERIFICATION REPORT')
+        self.footer_text = getattr(settings, 'REPORT_FOOTER_TEXT', 'CONFIDENTIAL ENGINEERING DOCUMENT')
+        self.footer_note = getattr(settings, 'REPORT_FOOTER_NOTE_FORMATTED', f'This document is the property of {self.company_name}. Unauthorized distribution is prohibited.')
     
     def export_pdf(self, drawing):
-        """Export report as PDF with Rejlers branding"""
+        """Export report as PDF with customizable branding"""
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -50,7 +69,7 @@ class PIDReportExportService:
             'CustomTitle',
             parent=styles['Heading1'],
             fontSize=24,
-            textColor=colors.HexColor(self.REJLERS_COLORS['primary']),
+            textColor=colors.HexColor(self.colors['primary']),
             spaceAfter=30,
             alignment=TA_CENTER,
             fontName='Helvetica-Bold'
@@ -60,7 +79,7 @@ class PIDReportExportService:
             'CustomSubtitle',
             parent=styles['Heading2'],
             fontSize=14,
-            textColor=colors.HexColor(self.REJLERS_COLORS['primary']),
+            textColor=colors.HexColor(self.colors['primary']),
             spaceAfter=12,
             alignment=TA_LEFT,
             fontName='Helvetica-Bold'
@@ -70,16 +89,16 @@ class PIDReportExportService:
             'Header',
             parent=styles['Normal'],
             fontSize=10,
-            textColor=colors.HexColor(self.REJLERS_COLORS['primary']),
+            textColor=colors.HexColor(self.colors['primary']),
             alignment=TA_CENTER,
             fontName='Helvetica-Bold'
         )
         
         # Header
         header_data = [
-            [Paragraph('<b>REJLERS ABU DHABI</b>', header_style)],
-            [Paragraph('Engineering & Design Consultancy', styles['Normal'])],
-            [Paragraph('www.rejlers.com/ae', styles['Normal'])]
+            [Paragraph(f'<b>{self.company_name}</b>', header_style)],
+            [Paragraph(self.company_subtitle, styles['Normal'])],
+            [Paragraph(self.company_website, styles['Normal'])]
         ]
         header_table = Table(header_data, colWidths=[landscape(A4)[0] - 4*cm])
         header_table.setStyle(TableStyle([
@@ -87,13 +106,13 @@ class PIDReportExportService:
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, 0), 16),
             ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor(self.REJLERS_COLORS['primary'])),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor(self.colors['primary'])),
         ]))
         elements.append(header_table)
         elements.append(Spacer(1, 0.5*cm))
         
         # Title
-        elements.append(Paragraph('P&ID DESIGN VERIFICATION REPORT', title_style))
+        elements.append(Paragraph(self.report_title, title_style))
         elements.append(Spacer(1, 0.5*cm))
         
         # Drawing Information
@@ -113,9 +132,9 @@ class PIDReportExportService:
             ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
             ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
             ('FONTSIZE', (0, 0), (-1, -1), 10),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor(self.REJLERS_COLORS['border'])),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor(self.colors['border'])),
             ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#F0F0F0')),
-            ('TEXTCOLOR', (0, 0), (0, -1), colors.HexColor(self.REJLERS_COLORS['primary'])),
+            ('TEXTCOLOR', (0, 0), (0, -1), colors.HexColor(self.colors['primary'])),
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('LEFTPADDING', (0, 0), (-1, -1), 8),
@@ -139,8 +158,8 @@ class PIDReportExportService:
         summary_table.setStyle(TableStyle([
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, -1), 12),
-            ('GRID', (0, 0), (-1, -1), 1, colors.HexColor(self.REJLERS_COLORS['border'])),
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor(self.REJLERS_COLORS['primary'])),
+            ('GRID', (0, 0), (-1, -1), 1, colors.HexColor(self.colors['border'])),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor(self.colors['primary'])),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
@@ -173,13 +192,36 @@ class PIDReportExportService:
                 issue.status.upper()
             ])
         
+        # Add issues (soft-coded fallback: use report_data if DB is empty)
+        db_issues = list(report.issues.all().order_by('serial_number'))
+        if db_issues:
+            for issue in db_issues:
+                issues_data.append([
+                    str(issue.serial_number),
+                    issue.pid_reference[:30],
+                    issue.issue_observed[:80],
+                    issue.action_required[:80],
+                    issue.severity.upper(),
+                    issue.status.upper()
+                ])
+        elif hasattr(report, 'report_data') and isinstance(report.report_data, dict):
+            for issue in report.report_data.get('issues', []):
+                issues_data.append([
+                    str(issue.get('serial_number', '')),
+                    str(issue.get('pid_reference', ''))[:30],
+                    str(issue.get('issue_observed', ''))[:80],
+                    str(issue.get('action_required', ''))[:80],
+                    str(issue.get('severity', '')).upper(),
+                    str(issue.get('status', '')).upper()
+                ])
+        
         issues_table = Table(issues_data, colWidths=[1.5*cm, 4*cm, 8*cm, 8*cm, 2.5*cm, 2.5*cm])
         issues_table.setStyle(TableStyle([
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, 0), 9),
             ('FONTSIZE', (0, 1), (-1, -1), 8),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor(self.REJLERS_COLORS['border'])),
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor(self.REJLERS_COLORS['primary'])),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor(self.colors['border'])),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor(self.colors['primary'])),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
             ('ALIGN', (0, 0), (0, -1), 'CENTER'),
             ('ALIGN', (4, 1), (5, -1), 'CENTER'),
@@ -222,7 +264,7 @@ class PIDReportExportService:
                     ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
                     ('FONTSIZE', (0, 0), (-1, 0), 9),
                     ('FONTSIZE', (0, 1), (-1, -1), 7),
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor(self.REJLERS_COLORS['border'])),
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor(self.colors['border'])),
                     ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8B5CF6')),
                     ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
                     ('ALIGN', (5, 1), (5, -1), 'CENTER'),
@@ -237,7 +279,7 @@ class PIDReportExportService:
         
         # Footer
         elements.append(Spacer(1, 1*cm))
-        footer_text = f"<b>CONFIDENTIAL ENGINEERING DOCUMENT</b><br/>This document is the property of Rejlers Abu Dhabi. Unauthorized distribution is prohibited.<br/><i>Generated: {datetime.now().strftime('%d-%b-%Y %H:%M:%S')}</i>"
+        footer_text = f"<b>{self.footer_text}</b><br/>{self.footer_note}<br/><i>Generated: {datetime.now().strftime('%d-%b-%Y %H:%M:%S')}</i>"
         elements.append(Paragraph(footer_text, ParagraphStyle('Footer', parent=styles['Normal'], fontSize=8, alignment=TA_CENTER, textColor=colors.HexColor('#666666'))))
         
         # Build PDF
@@ -251,7 +293,7 @@ class PIDReportExportService:
         return response
     
     def export_excel(self, drawing):
-        """Export report as Excel with Rejlers branding"""
+        """Export report as Excel with customizable branding"""
         try:
             import openpyxl
             from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -288,23 +330,23 @@ class PIDReportExportService:
         
         # Company Header
         ws.merge_cells('A1:F1')
-        ws['A1'] = 'REJLERS ABU DHABI'
+        ws['A1'] = self.company_name
         ws['A1'].font = Font(name='Arial', size=18, bold=True, color='003366')
         ws['A1'].alignment = center_alignment
         
         ws.merge_cells('A2:F2')
-        ws['A2'] = 'Engineering & Design Consultancy'
+        ws['A2'] = self.company_subtitle
         ws['A2'].font = Font(name='Arial', size=10, color='666666')
         ws['A2'].alignment = center_alignment
         
         ws.merge_cells('A3:F3')
-        ws['A3'] = 'www.rejlers.com/ae'
+        ws['A3'] = self.company_website
         ws['A3'].font = Font(name='Arial', size=9, color='0066CC')
         ws['A3'].alignment = center_alignment
         
         # Title
         ws.merge_cells('A5:F5')
-        ws['A5'] = 'P&ID DESIGN VERIFICATION REPORT'
+        ws['A5'] = self.report_title
         ws['A5'].font = title_font
         ws['A5'].alignment = center_alignment
         
@@ -444,7 +486,7 @@ class PIDReportExportService:
         # Footer
         row += 3
         ws.merge_cells(f'A{row}:F{row}')
-        ws[f'A{row}'] = f'CONFIDENTIAL ENGINEERING DOCUMENT - Generated: {datetime.now().strftime("%d-%b-%Y %H:%M:%S")}'
+        ws[f'A{row}'] = f'{self.footer_text} - Generated: {datetime.now().strftime("%d-%b-%Y %H:%M:%S")}'
         ws[f'A{row}'].font = Font(name='Arial', size=8, italic=True, color='666666')
         ws[f'A{row}'].alignment = center_alignment
         
@@ -469,8 +511,8 @@ class PIDReportExportService:
         writer = csv.writer(response)
         
         # Header
-        writer.writerow(['REJLERS ABU DHABI - P&ID DESIGN VERIFICATION REPORT'])
-        writer.writerow(['www.rejlers.com/ae'])
+        writer.writerow([f'{self.company_name} - {self.report_title}'])
+        writer.writerow([self.company_website])
         writer.writerow([])
         
         # Drawing Information
@@ -533,6 +575,6 @@ class PIDReportExportService:
                 
                 writer.writerow([])
         
-        writer.writerow([f'CONFIDENTIAL ENGINEERING DOCUMENT - Generated: {datetime.now().strftime("%d-%b-%Y %H:%M:%S")}'])
+        writer.writerow([f'{self.footer_text} - Generated: {datetime.now().strftime("%d-%b-%Y %H:%M:%S")}'])
         
         return response
