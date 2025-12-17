@@ -32,13 +32,21 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         """Create drawing with current user"""
         serializer.save(uploaded_by=self.request.user)
     
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post', 'options'])
     def upload(self, request):
         """
         Upload P&ID drawing and optionally start analysis
         
         POST /api/v1/pid/drawings/upload/
         """
+        # Handle OPTIONS request for CORS preflight
+        if request.method == 'OPTIONS':
+            from django.http import HttpResponse
+            response = HttpResponse()
+            response['Access-Control-Allow-Origin'] = '*'
+            response['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+            response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+            return response
         print(f"[DEBUG] ===== UPLOAD REQUEST RECEIVED =====")
         print(f"[DEBUG] User: {request.user} (authenticated: {request.user.is_authenticated})")
         print(f"[DEBUG] Content-Type: {request.content_type}")
@@ -474,13 +482,21 @@ class ReferenceDocumentViewSet(viewsets.ModelViewSet):
         """Create reference document with current user"""
         serializer.save(uploaded_by=self.request.user)
     
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post', 'options'])
     def upload(self, request):
         """
         Upload reference document and process for RAG
         
         POST /api/v1/pid/reference-documents/upload/
         """
+        # Handle OPTIONS request for CORS preflight
+        if request.method == 'OPTIONS':
+            from django.http import HttpResponse
+            response = HttpResponse()
+            response['Access-Control-Allow-Origin'] = '*'
+            response['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+            response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+            return response
         print(f"[INFO] Reference document upload request from user: {request.user}")
         
         # Validate request data

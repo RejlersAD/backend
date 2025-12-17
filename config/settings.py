@@ -181,6 +181,38 @@ CORS_ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS))
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=False, cast=bool)  # Only enable via env var for testing
 
+# Enhanced CORS headers for file uploads and complex requests
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+    'x-custom-header',
+    'cache-control',
+]
+
+# Allow all HTTP methods for API endpoints
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
+
+# Expose additional headers to frontend
+CORS_EXPOSE_HEADERS = [
+    'content-disposition',
+    'content-length',
+    'content-type',
+]
+
 # Soft-coded regex patterns for dynamic origins (Vercel previews, localhost ports)
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.vercel\.app$",  # All Vercel deployments (production + previews)
