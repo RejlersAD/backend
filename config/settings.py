@@ -65,15 +65,13 @@ if config('USE_S3', default=False, cast=bool) and config('AWS_STORAGE_BUCKET_NAM
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
-    'apps.core.middleware.CorsMiddleware',  # Custom CORS middleware - MUST BE FIRST
-    'apps.core.csrf_exempt_middleware.CsrfExemptMiddleware',  # CSRF exemption for API - BEFORE CSRF
-    'corsheaders.middleware.CorsMiddleware',  # Django CORS headers - BACKUP
+    'corsheaders.middleware.CorsMiddleware',  # Use django-cors-headers only
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',  # CSRF validation (exempted for /api/)
+    'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'apps.rbac.middleware.LoginTrackingMiddleware',  # Track login attempts
-    'apps.rbac.middleware.RBACMiddleware',  # RBAC enforcement
+    'apps.rbac.middleware.LoginTrackingMiddleware',
+    'apps.rbac.middleware.RBACMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -266,14 +264,33 @@ CSRF_COOKIE_SECURE = True
 CSRF_COOKIE_SAMESITE = 'None'
 CSRF_USE_SESSIONS = False
 
-# ULTRA-SIMPLE CORS SETTINGS
-CORS_ALLOW_ALL_ORIGINS = True
+# EMERGENCY CORS SETTINGS - Use only django-cors-headers
+CORS_ALLOW_ALL_ORIGINS = True  
 CORS_ALLOW_CREDENTIALS = False
+CORS_ALLOWED_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
 
-# Debug: Print simple CORS settings
-print(f"[CORS] Allow All Origins: {CORS_ALLOW_ALL_ORIGINS}")
-print(f"[CORS] Frontend URL: {FRONTEND_URL}")
-print(f"[CORS] Backend URL: {BACKEND_URL}")
+# Allow all HTTP methods
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
+
+# Simple logging
+print(f"[CORS] EMERGENCY MODE: Allow All Origins = {CORS_ALLOW_ALL_ORIGINS}")
 
 # Additional CORS settings for proper functionality
 CORS_ALLOW_METHODS = [
