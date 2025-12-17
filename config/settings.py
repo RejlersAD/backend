@@ -266,12 +266,20 @@ CSRF_COOKIE_SECURE = True
 CSRF_COOKIE_SAMESITE = 'None'
 CSRF_USE_SESSIONS = False
 
-# Debug: Print CORS settings on startup
+# EMERGENCY CORS MODE - Enable for critical deployments
+CORS_EMERGENCY_MODE = config('CORS_EMERGENCY_MODE', default=True, cast=bool)
+CORS_PREFLIGHT_MAX_AGE = config('CORS_PREFLIGHT_MAX_AGE', default=86400, cast=int)
+
+# Debug: Print comprehensive CORS settings on startup
+print(f"[CORS] === COMPREHENSIVE CORS CONFIGURATION ===")
+print(f"[CORS] Emergency Mode: {CORS_EMERGENCY_MODE}")
 print(f"[CORS] Allowed Origins: {CORS_ALLOWED_ORIGINS}")
 print(f"[CORS] Allowed Origin Regexes: {CORS_ALLOWED_ORIGIN_REGEXES}")
+print(f"[CORS] Preflight Max Age: {CORS_PREFLIGHT_MAX_AGE}s")
 print(f"[CSRF] Trusted Origins: {CSRF_TRUSTED_ORIGINS}")
 print(f"[CONFIG] Frontend URL: {FRONTEND_URL}")
 print(f"[CONFIG] Backend URL: {BACKEND_URL}")
+print(f"[CORS] === READY TO HANDLE REQUESTS ===")
 
 # Additional CORS settings for proper functionality
 CORS_ALLOW_METHODS = [
