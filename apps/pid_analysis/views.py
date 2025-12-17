@@ -17,7 +17,6 @@ from .serializers import (
 from .services import PIDAnalysisService
 from .rag_service import RAGService
 from .document_processor import DocumentProcessor
-from apps.core.decorators import emergency_cors
 
 
 class PIDDrawingViewSet(viewsets.ModelViewSet):
@@ -35,7 +34,6 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         """Create drawing with current user"""
         serializer.save(uploaded_by=self.request.user)
     
-    @emergency_cors
     @action(detail=False, methods=['post', 'options'])
     def upload(self, request):
         """
