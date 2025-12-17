@@ -266,54 +266,14 @@ CSRF_COOKIE_SECURE = True
 CSRF_COOKIE_SAMESITE = 'None'
 CSRF_USE_SESSIONS = False
 
-# EMERGENCY CORS MODE - Enable for critical deployments
-CORS_EMERGENCY_MODE = config('CORS_EMERGENCY_MODE', default=True, cast=bool)
-CORS_PREFLIGHT_MAX_AGE = config('CORS_PREFLIGHT_MAX_AGE', default=86400, cast=int)
+# ULTRA-SIMPLE CORS SETTINGS
+CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = False
 
-# ULTRA-PERMISSIVE CORS SETTINGS FOR EMERGENCY MODE
-if CORS_EMERGENCY_MODE:
-    CORS_ALLOW_ALL_ORIGINS = True
-    CORS_ALLOW_CREDENTIALS = False
-    CORS_ALLOW_HEADERS = [
-        'accept',
-        'accept-encoding',
-        'authorization',
-        'content-type',
-        'dnt',
-        'origin',
-        'user-agent',
-        'x-csrftoken',
-        'x-requested-with',
-        'x-http-method-override',
-        'cache-control',
-        'pragma',
-        'x-custom-header',
-    ]
-    print("[SETTINGS] EMERGENCY CORS MODE: Allowing ALL origins")
-else:
-    # Standard CORS settings when not in emergency mode
-    CORS_ALLOWED_ORIGINS = [
-        'https://airflow-frontend.vercel.app',
-        'https://airflow-frontend-git-main-rejlers.vercel.app',
-        'http://localhost:3000',
-        'http://localhost:5173',
-        'http://127.0.0.1:3000',
-        'http://127.0.0.1:5173',
-    ]
-
-# Debug: Print comprehensive CORS settings on startup
-print(f"[CORS] === COMPREHENSIVE CORS CONFIGURATION ===")
-print(f"[CORS] Emergency Mode: {CORS_EMERGENCY_MODE}")
-if CORS_EMERGENCY_MODE:
-    print(f"[CORS] Allow All Origins: {CORS_ALLOW_ALL_ORIGINS}")
-else:
-    print(f"[CORS] Allowed Origins: {CORS_ALLOWED_ORIGINS}")
-print(f"[CORS] Allowed Origin Regexes: {CORS_ALLOWED_ORIGIN_REGEXES}")
-print(f"[CORS] Preflight Max Age: {CORS_PREFLIGHT_MAX_AGE}s")
-print(f"[CSRF] Trusted Origins: {CSRF_TRUSTED_ORIGINS}")
-print(f"[CONFIG] Frontend URL: {FRONTEND_URL}")
-print(f"[CONFIG] Backend URL: {BACKEND_URL}")
-print(f"[CORS] === READY TO HANDLE REQUESTS ===")
+# Debug: Print simple CORS settings
+print(f"[CORS] Allow All Origins: {CORS_ALLOW_ALL_ORIGINS}")
+print(f"[CORS] Frontend URL: {FRONTEND_URL}")
+print(f"[CORS] Backend URL: {BACKEND_URL}")
 
 # Additional CORS settings for proper functionality
 CORS_ALLOW_METHODS = [
