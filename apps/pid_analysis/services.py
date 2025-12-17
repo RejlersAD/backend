@@ -1313,14 +1313,14 @@ Extract ALL visible data, perform engineering validation, identify REAL issues w
                 len(images_base64)
             )
             
-            print(f"[AI ANALYSIS] 🎉 Analysis completed successfully in {processing_time:.2f}s")
+            print(f"[AI ANALYSIS] Analysis completed successfully in {processing_time:.2f}s")
             
             return enhanced_result
             
         except Exception as e:
             processing_time = (datetime.now() - analysis_start_time).total_seconds()
             error_msg = f"AI Analysis failed after {processing_time:.2f}s: {str(e)}"
-            print(f"[AI ANALYSIS] ❌ {error_msg}")
+            print(f"[AI ANALYSIS] ERROR: {error_msg}")
             
             # Return structured error response
             return {
@@ -1713,7 +1713,7 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
         base_prompt = self.ANALYSIS_PROMPT.format(min_issues=self.MIN_ISSUES_REQUIRED)
         
         if rag_context:
-            return f"""**🔍 REFERENCE CONTEXT FROM ENGINEERING STANDARDS:**
+            return f"""**REFERENCE CONTEXT FROM ENGINEERING STANDARDS:**
 
 {rag_context}
 
@@ -1721,7 +1721,7 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
 
 {base_prompt}
 
-**📋 CONTEXT-AWARE ANALYSIS INSTRUCTIONS:**
+**CONTEXT-AWARE ANALYSIS INSTRUCTIONS:**
 - Use the provided reference context to enhance your analysis accuracy
 - Cross-reference findings against the standards mentioned above
 - Highlight any deviations from the referenced guidelines
@@ -1735,7 +1735,7 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
         
         for attempt in range(self.RETRY_ATTEMPTS):
             try:
-                print(f"[AI ANALYSIS] 🎯 Analysis attempt {attempt + 1}/{self.RETRY_ATTEMPTS}")
+                print(f"[AI ANALYSIS] Analysis attempt {attempt + 1}/{self.RETRY_ATTEMPTS}")
                 
                 # Prepare image content for API
                 image_content = []
@@ -1775,7 +1775,7 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
                 result_text = response.choices[0].message.content
                 tokens_used = response.usage.total_tokens
                 
-                print(f"[AI ANALYSIS] ✅ API call successful (tokens: {tokens_used})")
+                print(f"[AI ANALYSIS] API call successful (tokens: {tokens_used})")
                 
                 # Parse JSON response with error handling
                 try:
@@ -1787,7 +1787,7 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
                     return result_json
                     
                 except json.JSONDecodeError as json_error:
-                    print(f"[AI ANALYSIS] ⚠️ JSON parsing failed on attempt {attempt + 1}: {str(json_error)}")
+                    print(f"[AI ANALYSIS] WARNING: JSON parsing failed on attempt {attempt + 1}: {str(json_error)}")
                     if attempt == self.RETRY_ATTEMPTS - 1:
                         # Last attempt - return fallback structure
                         return self._create_fallback_response(result_text, tokens_used)
@@ -1795,12 +1795,12 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
                 
             except Exception as e:
                 last_exception = e
-                print(f"[AI ANALYSIS] ❌ Attempt {attempt + 1} failed: {str(e)}")
+                print(f"[AI ANALYSIS] ERROR: Attempt {attempt + 1} failed: {str(e)}")
                 
                 if attempt < self.RETRY_ATTEMPTS - 1:
                     import time
                     wait_time = (attempt + 1) * 2  # Exponential backoff
-                    print(f"[AI ANALYSIS] ⏳ Retrying in {wait_time}s...")
+                    print(f"[AI ANALYSIS] Retrying in {wait_time}s...")
                     time.sleep(wait_time)
         
         # All attempts failed
