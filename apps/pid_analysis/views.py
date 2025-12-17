@@ -17,6 +17,7 @@ from .serializers import (
 from .services import PIDAnalysisService
 from .rag_service import RAGService
 from .document_processor import DocumentProcessor
+from apps.core.decorators import emergency_cors
 
 
 class PIDDrawingViewSet(viewsets.ModelViewSet):
@@ -34,6 +35,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         """Create drawing with current user"""
         serializer.save(uploaded_by=self.request.user)
     
+    @emergency_cors
     @action(detail=False, methods=['post', 'options'])
     def upload(self, request):
         """
@@ -41,13 +43,21 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         
         POST /api/v1/pid/drawings/upload/
         """
+        print(f"[UPLOAD_VIEW] === UPLOAD REQUEST RECEIVED ===")
+        print(f"[UPLOAD_VIEW] Method: {request.method}")
+        print(f"[UPLOAD_VIEW] Origin: {request.META.get('HTTP_ORIGIN', 'NO ORIGIN')}")
+        print(f"[UPLOAD_VIEW] Content-Type: {request.content_type}")
+        print(f"[UPLOAD_VIEW] Files: {list(request.FILES.keys())}")
+        
         # Handle OPTIONS request for CORS preflight
         if request.method == 'OPTIONS':
+            print("[UPLOAD_VIEW] HANDLING OPTIONS PREFLIGHT")
             from django.http import HttpResponse
             response = HttpResponse()
             response['Access-Control-Allow-Origin'] = '*'
             response['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
             response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+            return response
             return response
         print(f"[DEBUG] ===== UPLOAD REQUEST RECEIVED =====")
         print(f"[DEBUG] User: {request.user} (authenticated: {request.user.is_authenticated})")
