@@ -279,16 +279,34 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         
         GET /api/v1/pid/drawings/{id}/report/
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         drawing = self.get_object()
+        logger.debug(f"[report] Fetching report for drawing {drawing.id} (status: {drawing.status})")
         
         if not hasattr(drawing, 'analysis_report'):
+            logger.warning(f"[report] No analysis_report found for drawing {drawing.id}")
             return Response(
                 {'error': 'No analysis report available'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
+        report = drawing.analysis_report
+        logger.debug(f"[report] Found report {report.id}, total_issues: {report.total_issues}")
+        logger.debug(f"[report] Report has report_data: {bool(report.report_data)}")
+        logger.debug(f"[report] DB issues count: {report.issues.count()}")
+        
+        if isinstance(report.report_data, dict):
+            logger.debug(f"[report] report_data keys: {list(report.report_data.keys())}")
+            issues_in_data = report.report_data.get('issues', [])
+            logger.debug(f"[report] Issues in report_data: {len(issues_in_data)}")
+        
+        serialized_data = PIDAnalysisReportSerializer(report).data
+        logger.debug(f"[report] Serialized issues count: {len(serialized_data.get('issues', []))}")
+        
         return Response(
-            PIDAnalysisReportSerializer(drawing.analysis_report).data,
+            serialized_data,
             status=status.HTTP_200_OK
         )
     

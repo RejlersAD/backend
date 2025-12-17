@@ -107,15 +107,37 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'generated_at', 'updated_at']
     
     def get_issues(self, obj):
-        """Get issues with full data from report_data JSON"""
-        # Always prioritize report_data JSON as it has complete information including location_on_drawing
-        if isinstance(obj.report_data, dict) and obj.report_data.get('issues'):
-            return obj.report_data.get('issues', [])
+        """Get issues with comprehensive fallback and debugging"""
+        import logging
+        logger = logging.getLogger(__name__)
         
-        # Fallback to related PIDIssue objects if report_data not available
-        if obj.issues.exists():
-            return PIDIssueSerializer(obj.issues.all(), many=True, context={'report': obj}).data
+        # Debug: Log what we're working with
+        logger.debug(f"[get_issues] Processing report ID {obj.id}")
+        logger.debug(f"[get_issues] report_data type: {type(obj.report_data)}")
         
+        # Method 1: Try report_data JSON (most complete data)
+        if isinstance(obj.report_data, dict):
+            issues_data = obj.report_data.get('issues')
+            if issues_data is not None:  # Check for None, allow empty list []
+                logger.debug(f"[get_issues] Found {len(issues_data)} issues in report_data")
+                if len(issues_data) > 0:
+                    logger.debug(f"[get_issues] First issue sample: {list(issues_data[0].keys()) if issues_data else 'N/A'}")
+                return issues_data
+            else:
+                logger.debug(f"[get_issues] No 'issues' key in report_data. Keys: {list(obj.report_data.keys())}")
+        
+        # Method 2: Try database PIDIssue objects
+        db_issues = obj.issues.all()
+        if db_issues.exists():
+            issue_count = db_issues.count()
+            logger.debug(f"[get_issues] Found {issue_count} issues in database")
+            return PIDIssueSerializer(db_issues, many=True, context={'report': obj}).data
+        
+        # Method 3: Check if analysis is still in progress
+        if hasattr(obj, 'pid_drawing') and obj.pid_drawing.status == 'processing':
+            logger.debug(f"[get_issues] Drawing status is 'processing', analysis may be incomplete")
+        
+        logger.warning(f"[get_issues] No issues found for report {obj.id} via any method")
         return []
     
     def get_equipment_datasheets(self, obj):
