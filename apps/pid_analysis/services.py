@@ -16,17 +16,21 @@ from .rag_service import RAGService
 
 
 class PIDAnalysisService:
-    """Service for analyzing P&ID drawings using OpenAI"""
+    """Enhanced AI-Powered P&ID Analysis Service with Intelligent Adaptation"""
     
-    # Soft-coded configuration parameters (can be overridden via environment variables)
-    MIN_ISSUES_REQUIRED = int(os.getenv('PID_MIN_ISSUES', '15'))  # Minimum issues to identify per drawing
-    # STRICT_MIN_ISSUES: If False, accepts any number of issues (flexible/dynamic mode)
+    # Enhanced soft-coded configuration with intelligent defaults
+    MIN_ISSUES_REQUIRED = int(os.getenv('PID_MIN_ISSUES', '10'))  # Reduced for more realistic expectations
     STRICT_MIN_ISSUES = os.getenv('PID_STRICT_MIN_ISSUES', 'False').lower() in ('true', '1', 'yes')
-    MAX_TOKENS = int(os.getenv('PID_MAX_TOKENS', '16000'))  # Maximum tokens for AI response
-    AI_TEMPERATURE = float(os.getenv('PID_AI_TEMPERATURE', '0.15'))  # AI creativity (lower = more precise)
-    ANALYSIS_DEPTH = os.getenv('PID_ANALYSIS_DEPTH', 'comprehensive')  # comprehensive | standard | quick
+    MAX_TOKENS = int(os.getenv('PID_MAX_TOKENS', '16000'))
+    AI_TEMPERATURE = float(os.getenv('PID_AI_TEMPERATURE', '0.1'))  # More deterministic
+    ANALYSIS_DEPTH = os.getenv('PID_ANALYSIS_DEPTH', 'comprehensive')
     
-    # Complete P&ID analysis prompt with enhanced data extraction
+    # New intelligent analysis parameters
+    CONTEXT_WINDOW_SIZE = int(os.getenv('PID_CONTEXT_WINDOW', '4000'))  # Context for RAG
+    RETRY_ATTEMPTS = int(os.getenv('PID_RETRY_ATTEMPTS', '3'))  # API call retries
+    ANALYSIS_CONFIDENCE_THRESHOLD = float(os.getenv('PID_CONFIDENCE_THRESHOLD', '0.7'))  # Quality threshold
+    
+    # Enhanced analysis prompt with better structure and intelligence
     ANALYSIS_PROMPT = """🔹 ROLE & CONTEXT
 
 You are an AI-Powered P&ID Design Verification Engine acting as a multidisciplinary Senior Engineering Team with deep expertise in:
@@ -1253,47 +1257,82 @@ Extract ALL visible data, perform engineering validation, identify REAL issues w
     
     def analyze_pid_drawing(self, pdf_file, drawing_number: Optional[str] = None) -> Dict[str, Any]:
         """
-        Analyze P&ID drawing using OpenAI GPT-4 Vision with optional RAG context
+        Enhanced AI-Powered P&ID Analysis with intelligent retry logic and better error handling
         
         Args:
             pdf_file: Either a file path (str) or a Django FileField object
             drawing_number: Optional drawing number for RAG context retrieval
         
         Returns:
-            Dictionary containing analysis results
+            Dictionary containing comprehensive analysis results with metadata
         """
+        analysis_start_time = datetime.now()
+        
         try:
-            # Convert PDF pages to images
+            print(f"[AI ANALYSIS] 🚀 Starting enhanced P&ID analysis for drawing: {drawing_number or 'unnamed'}")
+            
+            # Convert PDF pages to images with error handling
             images_base64 = self.pdf_to_images(pdf_file)
             
             if not images_base64:
-                raise ValueError("Failed to convert PDF to images")
+                raise ValueError("Failed to convert PDF to images - file may be corrupted or invalid")
+            
+            print(f"[AI ANALYSIS] ✅ Successfully converted PDF to {len(images_base64)} page(s)")
             
             # Get RAG context if available
             rag_context = ""
+            rag_metadata = {"used": False, "context_length": 0}
             rag_enabled = os.environ.get('RAG_ENABLED', 'false').lower() == 'true'
             
             if rag_enabled and drawing_number:
                 try:
-                    print(f"[INFO] RAG enabled - retrieving context for drawing: {drawing_number}")
+                    print(f"[AI ANALYSIS] 🔍 RAG enabled - retrieving context for drawing: {drawing_number}")
                     rag_service = RAGService()
                     rag_context = rag_service.retrieve_context(drawing_number)
                     if rag_context:
-                        print(f"[INFO] Retrieved RAG context ({len(rag_context)} chars)")
+                        rag_metadata = {"used": True, "context_length": len(rag_context)}
+                        print(f"[AI ANALYSIS] ✅ Retrieved RAG context ({len(rag_context)} chars)")
                 except Exception as rag_error:
-                    print(f"[WARNING] RAG context retrieval failed: {str(rag_error)}")
+                    print(f"[AI ANALYSIS] ⚠️ RAG context retrieval failed: {str(rag_error)}")
                     # Continue without RAG context - not critical for analysis
             
-            # Build prompt with optional RAG context and inject soft-coded parameters
-            analysis_prompt = self.ANALYSIS_PROMPT.format(min_issues=self.MIN_ISSUES_REQUIRED)
-            if rag_context:
-                analysis_prompt = f"""**REFERENCE CONTEXT FROM STANDARDS AND DOCUMENTATION:**
-
-{rag_context}
-
----
-
-{self.ANALYSIS_PROMPT.format(min_issues=self.MIN_ISSUES_REQUIRED)}
+            # Build enhanced prompt with adaptive context
+            analysis_prompt = self._build_analysis_prompt(rag_context)
+            
+            # Perform analysis with intelligent retry logic
+            analysis_result = self._execute_analysis_with_retry(images_base64, analysis_prompt)
+            
+            # Calculate processing metrics
+            processing_time = (datetime.now() - analysis_start_time).total_seconds()
+            
+            # Enhance result with metadata
+            enhanced_result = self._enhance_analysis_result(
+                analysis_result, 
+                processing_time, 
+                rag_metadata, 
+                len(images_base64)
+            )
+            
+            print(f"[AI ANALYSIS] 🎉 Analysis completed successfully in {processing_time:.2f}s")
+            
+            return enhanced_result
+            
+        except Exception as e:
+            processing_time = (datetime.now() - analysis_start_time).total_seconds()
+            error_msg = f"AI Analysis failed after {processing_time:.2f}s: {str(e)}"
+            print(f"[AI ANALYSIS] ❌ {error_msg}")
+            
+            # Return structured error response
+            return {
+                'success': False,
+                'error': error_msg,
+                'error_type': type(e).__name__,
+                'processing_time': processing_time,
+                'metadata': {
+                    'ai_model': 'GPT-4 Vision',
+                    'analysis_failed': True
+                }
+            }
 
 **Important:** Use the reference context above to enhance your analysis with specific standards, guidelines, and best practices. Cross-reference equipment specifications and design requirements with the provided documentation."""
                 print(f"[INFO] Enhanced prompt with RAG context")
@@ -1668,3 +1707,173 @@ CRITICAL REQUIREMENT: You MUST identify AT LEAST {self.MIN_ISSUES_REQUIRED} spec
                 summary['observation_count'] += 1
         
         return summary
+
+    def _build_analysis_prompt(self, rag_context: str = "") -> str:
+        """Build intelligent analysis prompt with optional RAG context"""
+        base_prompt = self.ANALYSIS_PROMPT.format(min_issues=self.MIN_ISSUES_REQUIRED)
+        
+        if rag_context:
+            return f"""**🔍 REFERENCE CONTEXT FROM ENGINEERING STANDARDS:**
+
+{rag_context}
+
+---
+
+{base_prompt}
+
+**📋 CONTEXT-AWARE ANALYSIS INSTRUCTIONS:**
+- Use the provided reference context to enhance your analysis accuracy
+- Cross-reference findings against the standards mentioned above
+- Highlight any deviations from the referenced guidelines
+"""
+        
+        return base_prompt
+    
+    def _execute_analysis_with_retry(self, images_base64: List[str], prompt: str) -> Dict[str, Any]:
+        """Execute analysis with intelligent retry logic"""
+        last_exception = None
+        
+        for attempt in range(self.RETRY_ATTEMPTS):
+            try:
+                print(f"[AI ANALYSIS] 🎯 Analysis attempt {attempt + 1}/{self.RETRY_ATTEMPTS}")
+                
+                # Prepare image content for API
+                image_content = []
+                for i, image_b64 in enumerate(images_base64):
+                    image_content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_b64}",
+                            "detail": "high"
+                        }
+                    })
+                
+                # Call OpenAI API with adaptive temperature
+                temperature = self.AI_TEMPERATURE + (attempt * 0.05)  # Slightly increase creativity on retries
+                
+                response = self.client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "system", 
+                            "content": "You are an advanced AI engineering consultant specializing in P&ID analysis."
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                *image_content
+                            ]
+                        }
+                    ],
+                    max_tokens=self.MAX_TOKENS,
+                    temperature=temperature,
+                    response_format={"type": "json_object"}
+                )
+                
+                # Extract and validate response
+                result_text = response.choices[0].message.content
+                tokens_used = response.usage.total_tokens
+                
+                print(f"[AI ANALYSIS] ✅ API call successful (tokens: {tokens_used})")
+                
+                # Parse JSON response with error handling
+                try:
+                    result_json = self._extract_json_from_response(result_text)
+                    result_json['tokens_used'] = tokens_used
+                    result_json['ai_temperature'] = temperature
+                    result_json['attempt_number'] = attempt + 1
+                    
+                    return result_json
+                    
+                except json.JSONDecodeError as json_error:
+                    print(f"[AI ANALYSIS] ⚠️ JSON parsing failed on attempt {attempt + 1}: {str(json_error)}")
+                    if attempt == self.RETRY_ATTEMPTS - 1:
+                        # Last attempt - return fallback structure
+                        return self._create_fallback_response(result_text, tokens_used)
+                    continue
+                
+            except Exception as e:
+                last_exception = e
+                print(f"[AI ANALYSIS] ❌ Attempt {attempt + 1} failed: {str(e)}")
+                
+                if attempt < self.RETRY_ATTEMPTS - 1:
+                    import time
+                    wait_time = (attempt + 1) * 2  # Exponential backoff
+                    print(f"[AI ANALYSIS] ⏳ Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+        
+        # All attempts failed
+        raise last_exception or Exception("Analysis failed after all retry attempts")
+    
+    def _enhance_analysis_result(self, result: Dict[str, Any], processing_time: float, 
+                               rag_metadata: Dict, page_count: int) -> Dict[str, Any]:
+        """Enhance analysis result with metadata and quality metrics"""
+        
+        # Calculate confidence score based on various factors
+        confidence_score = self._calculate_confidence_score(result)
+        
+        # Add comprehensive metadata
+        enhanced_result = {
+            **result,
+            'success': True,
+            'metadata': {
+                'ai_model': 'GPT-4 Vision',
+                'processing_time': f"{processing_time:.2f}s",
+                'confidence_score': confidence_score,
+                'analysis_type': self.ANALYSIS_DEPTH,
+                'page_count': page_count,
+                'rag_context_used': rag_metadata['used'],
+                'rag_context_length': rag_metadata['context_length'],
+                'analysis_timestamp': datetime.now().isoformat(),
+                'tokens_used': result.get('tokens_used', 'N/A'),
+                'ai_temperature': result.get('ai_temperature', self.AI_TEMPERATURE),
+                'retry_attempt': result.get('attempt_number', 1)
+            }
+        }
+        
+        return enhanced_result
+    
+    def _calculate_confidence_score(self, result: Dict[str, Any]) -> str:
+        """Calculate confidence score based on analysis quality indicators"""
+        score = 0.7  # Base confidence
+        
+        # Check for detailed issues
+        issues = result.get('issues', [])
+        if len(issues) >= 5:
+            score += 0.1
+        if len(issues) >= 10:
+            score += 0.1
+            
+        # Check for detailed descriptions
+        detailed_issues = [issue for issue in issues if len(issue.get('issue_observed', '')) > 50]
+        if len(detailed_issues) > len(issues) * 0.7:
+            score += 0.1
+            
+        # Convert to descriptive confidence
+        if score >= 0.9:
+            return "Very High"
+        elif score >= 0.8:
+            return "High"
+        elif score >= 0.7:
+            return "Good"
+        else:
+            return "Moderate"
+    
+    def _create_fallback_response(self, response_text: str, tokens_used: int) -> Dict[str, Any]:
+        """Create fallback response when JSON parsing fails"""
+        return {
+            'issues': [{
+                'serial_number': 1,
+                'pid_reference': 'SYSTEM-001',
+                'issue_observed': 'AI analysis completed but response format requires manual review',
+                'action_required': 'Review raw analysis output for detailed findings',
+                'severity': 'observation',
+                'category': 'analysis_format',
+                'status': 'pending'
+            }],
+            'total_issues': 1,
+            'raw_response': response_text,
+            'tokens_used': tokens_used,
+            'parsing_error': True
+        }
