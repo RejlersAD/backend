@@ -181,18 +181,10 @@ class PIDReportExportService:
             ['#', 'P&ID Ref', 'Issue Observed', 'Action Required', 'Severity', 'Status']
         ]
         
-        # Add issues
-        for issue in report.issues.all().order_by('serial_number'):
-            issues_data.append([
-                str(issue.serial_number),
-                issue.pid_reference[:30],  # Truncate if too long
-                issue.issue_observed[:80],  # Truncate
-                issue.action_required[:80],  # Truncate
-                issue.severity.upper(),
-                issue.status.upper()
-            ])
+        # Add issues with comprehensive fallback strategy
+        issues_found = False
         
-        # Add issues (soft-coded fallback: use report_data if DB is empty)
+        # Method 1: Try database issues first
         db_issues = list(report.issues.all().order_by('serial_number'))
         if db_issues:
             for issue in db_issues:
@@ -204,15 +196,53 @@ class PIDReportExportService:
                     issue.severity.upper(),
                     issue.status.upper()
                 ])
-        elif hasattr(report, 'report_data') and isinstance(report.report_data, dict):
-            for issue in report.report_data.get('issues', []):
+            issues_found = True
+        
+        # Method 2: Try report_data JSON if no database issues
+        if not issues_found and hasattr(report, 'report_data') and isinstance(report.report_data, dict):
+            # Try multiple possible keys
+            possible_keys = ['issues', 'identified_issues', 'analysis_issues', 'pid_issues']
+            for key in possible_keys:
+                if key in report.report_data and isinstance(report.report_data[key], list):
+                    for issue in report.report_data[key]:
+                        if isinstance(issue, dict):
+                            issues_data.append([
+                                str(issue.get('serial_number', '')),
+                                str(issue.get('pid_reference', ''))[:30],
+                                str(issue.get('issue_observed', ''))[:80],
+                                str(issue.get('action_required', ''))[:80],
+                                str(issue.get('severity', '')).upper(),
+                                str(issue.get('status', '')).upper()
+                            ])
+                    issues_found = True
+                    break
+            
+            # Try nested structure
+            if not issues_found and 'analysis_result' in report.report_data:
+                analysis_result = report.report_data['analysis_result']
+                if isinstance(analysis_result, dict) and 'issues' in analysis_result:
+                    for issue in analysis_result['issues']:
+                        if isinstance(issue, dict):
+                            issues_data.append([
+                                str(issue.get('serial_number', '')),
+                                str(issue.get('pid_reference', ''))[:30],
+                                str(issue.get('issue_observed', ''))[:80],
+                                str(issue.get('action_required', ''))[:80],
+                                str(issue.get('severity', '')).upper(),
+                                str(issue.get('status', '')).upper()
+                            ])
+                    issues_found = True
+        
+        # Method 3: Generate placeholder if report claims issues exist
+        if not issues_found and report.total_issues > 0:
+            for i in range(min(report.total_issues, 10)):
                 issues_data.append([
-                    str(issue.get('serial_number', '')),
-                    str(issue.get('pid_reference', ''))[:30],
-                    str(issue.get('issue_observed', ''))[:80],
-                    str(issue.get('action_required', ''))[:80],
-                    str(issue.get('severity', '')).upper(),
-                    str(issue.get('status', '')).upper()
+                    str(i + 1),
+                    f'REF-{i+1:03d}',
+                    'Issue data not found in serialization',
+                    'Investigate backend data pipeline',
+                    'OBSERVATION',
+                    'PENDING'
                 ])
         
         issues_table = Table(issues_data, colWidths=[1.5*cm, 4*cm, 8*cm, 8*cm, 2.5*cm, 2.5*cm])
@@ -416,24 +446,77 @@ class PIDReportExportService:
             cell.alignment = center_alignment
             cell.border = border
         
-        # Add issues
-        for issue in report.issues.all().order_by('serial_number'):
-            row += 1
-            data = [
-                issue.serial_number,
-                issue.pid_reference,
-                issue.issue_observed,
-                issue.action_required,
-                issue.severity.upper(),
-                issue.status.upper()
-            ]
-            
-            for col, value in enumerate(data, start=1):
-                cell = ws.cell(row=row, column=col)
-                cell.value = value
-                cell.font = normal_font
-                cell.alignment = left_alignment if col in [2, 3, 4] else center_alignment
-                cell.border = border
+        # Add issues with comprehensive fallback strategy
+        issues_found = False
+        
+        # Method 1: Try database issues first
+        db_issues = list(report.issues.all().order_by('serial_number'))
+        if db_issues:
+            for issue in db_issues:
+                row += 1
+                data = [
+                    issue.serial_number,
+                    issue.pid_reference,
+                    issue.issue_observed,
+                    issue.action_required,
+                    issue.severity.upper(),
+                    issue.status.upper()
+                ]
+                
+                for col, value in enumerate(data, start=1):
+                    cell = ws.cell(row=row, column=col)
+                    cell.value = value
+                    cell.font = normal_font
+                    cell.alignment = left_alignment if col in [2, 3, 4] else center_alignment
+                    cell.border = border
+            issues_found = True
+        
+        # Method 2: Try report_data JSON if no database issues
+        if not issues_found and hasattr(report, 'report_data') and isinstance(report.report_data, dict):
+            # Try multiple possible keys
+            possible_keys = ['issues', 'identified_issues', 'analysis_issues', 'pid_issues']
+            for key in possible_keys:
+                if key in report.report_data and isinstance(report.report_data[key], list):
+                    for issue in report.report_data[key]:
+                        if isinstance(issue, dict):
+                            row += 1
+                            data = [
+                                issue.get('serial_number', ''),
+                                issue.get('pid_reference', ''),
+                                issue.get('issue_observed', ''),
+                                issue.get('action_required', ''),
+                                str(issue.get('severity', '')).upper(),
+                                str(issue.get('status', '')).upper()
+                            ]
+                            
+                            for col, value in enumerate(data, start=1):
+                                cell = ws.cell(row=row, column=col)
+                                cell.value = value
+                                cell.font = normal_font
+                                cell.alignment = left_alignment if col in [2, 3, 4] else center_alignment
+                                cell.border = border
+                    issues_found = True
+                    break
+        
+        # Method 3: Generate placeholder if report claims issues exist
+        if not issues_found and report.total_issues > 0:
+            for i in range(min(report.total_issues, 10)):
+                row += 1
+                data = [
+                    i + 1,
+                    f'REF-{i+1:03d}',
+                    'Issue data not found in serialization',
+                    'Investigate backend data pipeline',
+                    'OBSERVATION',
+                    'PENDING'
+                ]
+                
+                for col, value in enumerate(data, start=1):
+                    cell = ws.cell(row=row, column=col)
+                    cell.value = value
+                    cell.font = normal_font
+                    cell.alignment = left_alignment if col in [2, 3, 4] else center_alignment
+                    cell.border = border
         
         # Specification Breaks Section
         if hasattr(report, 'report_data') and isinstance(report.report_data, dict):
@@ -536,18 +619,62 @@ class PIDReportExportService:
         writer.writerow(['DETAILED ISSUES & OBSERVATIONS'])
         writer.writerow(['#', 'P&ID Reference', 'Category', 'Issue Observed', 'Action Required', 'Severity', 'Status', 'Approval', 'Remark'])
         
-        for issue in report.issues.all().order_by('serial_number'):
-            writer.writerow([
-                issue.serial_number,
-                issue.pid_reference,
-                issue.category,
-                issue.issue_observed,
-                issue.action_required,
-                issue.severity.upper(),
-                issue.status.upper(),
-                issue.approval,
-                issue.remark
-            ])
+        # Add issues with comprehensive fallback strategy
+        issues_found = False
+        
+        # Method 1: Try database issues first
+        db_issues = list(report.issues.all().order_by('serial_number'))
+        if db_issues:
+            for issue in db_issues:
+                writer.writerow([
+                    issue.serial_number,
+                    issue.pid_reference,
+                    issue.category,
+                    issue.issue_observed,
+                    issue.action_required,
+                    issue.severity.upper(),
+                    issue.status.upper(),
+                    issue.approval,
+                    issue.remark
+                ])
+            issues_found = True
+        
+        # Method 2: Try report_data JSON if no database issues
+        if not issues_found and hasattr(report, 'report_data') and isinstance(report.report_data, dict):
+            # Try multiple possible keys
+            possible_keys = ['issues', 'identified_issues', 'analysis_issues', 'pid_issues']
+            for key in possible_keys:
+                if key in report.report_data and isinstance(report.report_data[key], list):
+                    for issue in report.report_data[key]:
+                        if isinstance(issue, dict):
+                            writer.writerow([
+                                issue.get('serial_number', ''),
+                                issue.get('pid_reference', ''),
+                                issue.get('category', ''),
+                                issue.get('issue_observed', ''),
+                                issue.get('action_required', ''),
+                                str(issue.get('severity', '')).upper(),
+                                str(issue.get('status', '')).upper(),
+                                issue.get('approval', ''),
+                                issue.get('remark', '')
+                            ])
+                    issues_found = True
+                    break
+        
+        # Method 3: Generate placeholder if report claims issues exist
+        if not issues_found and report.total_issues > 0:
+            for i in range(min(report.total_issues, 10)):
+                writer.writerow([
+                    i + 1,
+                    f'REF-{i+1:03d}',
+                    'OBSERVATION',
+                    'Issue data not found in serialization',
+                    'Investigate backend data pipeline',
+                    'OBSERVATION',
+                    'PENDING',
+                    'N/A',
+                    'Data retrieval issue'
+                ])
         
         writer.writerow([])
         

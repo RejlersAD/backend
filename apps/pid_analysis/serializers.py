@@ -86,6 +86,9 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
     issues = serializers.SerializerMethodField()
     pid_drawing_number = serializers.CharField(source='pid_drawing.drawing_number', read_only=True)
     
+    # Debug information for troubleshooting
+    debug_info = serializers.SerializerMethodField()
+    
     # Additional fields from report_data JSON
     equipment_datasheets = serializers.SerializerMethodField()
     instrument_schedule = serializers.SerializerMethodField()
@@ -100,45 +103,134 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
             'id', 'pid_drawing', 'pid_drawing_number', 'total_issues',
             'approved_count', 'ignored_count', 'pending_count',
             'report_data', 'pdf_report', 'excel_report',
-            'issues', 'equipment_datasheets', 'instrument_schedule', 
+            'issues', 'debug_info', 'equipment_datasheets', 'instrument_schedule', 
             'line_list', 'summary', 'holds_and_notes', 'specification_breaks',
             'generated_at', 'updated_at'
         ]
         read_only_fields = ['id', 'generated_at', 'updated_at']
     
     def get_issues(self, obj):
-        """Get issues with comprehensive fallback and debugging"""
+        """Get issues with comprehensive fallback strategies and debugging"""
         import logging
         logger = logging.getLogger(__name__)
         
-        # Debug: Log what we're working with
-        logger.debug(f"[get_issues] Processing report ID {obj.id}")
-        logger.debug(f"[get_issues] report_data type: {type(obj.report_data)}")
+        result_issues = []
+        debug_info = {
+            'report_id': obj.id,
+            'total_issues_field': obj.total_issues,
+            'methods_tried': []
+        }
         
-        # Method 1: Try report_data JSON (most complete data)
-        if isinstance(obj.report_data, dict):
-            issues_data = obj.report_data.get('issues')
-            if issues_data is not None:  # Check for None, allow empty list []
-                logger.debug(f"[get_issues] Found {len(issues_data)} issues in report_data")
-                if len(issues_data) > 0:
-                    logger.debug(f"[get_issues] First issue sample: {list(issues_data[0].keys()) if issues_data else 'N/A'}")
-                return issues_data
+        # Method 1: Extract from report_data JSON (most complete)
+        if hasattr(obj, 'report_data') and obj.report_data:
+            debug_info['has_report_data'] = True
+            debug_info['report_data_type'] = str(type(obj.report_data))
+            
+            if isinstance(obj.report_data, dict):
+                debug_info['report_data_keys'] = list(obj.report_data.keys())
+                
+                # Try multiple possible keys for issues data
+                possible_keys = ['issues', 'identified_issues', 'analysis_issues', 'pid_issues']
+                for key in possible_keys:
+                    if key in obj.report_data:
+                        issues_data = obj.report_data[key]
+                        if isinstance(issues_data, list):
+                            result_issues = issues_data
+                            debug_info['methods_tried'].append(f'report_data[{key}] - found {len(issues_data)} issues')
+                            logger.info(f"[get_issues] Found {len(issues_data)} issues in report_data[{key}] for report {obj.id}")
+                            break
+                        else:
+                            debug_info['methods_tried'].append(f'report_data[{key}] - not a list: {type(issues_data)}')
+                
+                # Try nested structures
+                if not result_issues and 'analysis_result' in obj.report_data:
+                    analysis_result = obj.report_data['analysis_result']
+                    if isinstance(analysis_result, dict) and 'issues' in analysis_result:
+                        nested_issues = analysis_result['issues']
+                        if isinstance(nested_issues, list):
+                            result_issues = nested_issues
+                            debug_info['methods_tried'].append(f'nested analysis_result.issues - found {len(nested_issues)} issues')
+                            logger.info(f"[get_issues] Found {len(nested_issues)} issues in nested analysis_result for report {obj.id}")
             else:
-                logger.debug(f"[get_issues] No 'issues' key in report_data. Keys: {list(obj.report_data.keys())}")
+                debug_info['methods_tried'].append(f'report_data not dict: {type(obj.report_data)}')
+        else:
+            debug_info['has_report_data'] = False
+            debug_info['methods_tried'].append('no report_data available')
         
-        # Method 2: Try database PIDIssue objects
-        db_issues = obj.issues.all()
-        if db_issues.exists():
-            issue_count = db_issues.count()
-            logger.debug(f"[get_issues] Found {issue_count} issues in database")
-            return PIDIssueSerializer(db_issues, many=True, context={'report': obj}).data
+        # Method 2: Database PIDIssue objects
+        if not result_issues:
+            db_issues_qs = obj.issues.all().order_by('serial_number')
+            if db_issues_qs.exists():
+                db_issues_count = db_issues_qs.count()
+                result_issues = PIDIssueSerializer(db_issues_qs, many=True, context={'report': obj}).data
+                debug_info['methods_tried'].append(f'database PIDIssue objects - found {db_issues_count} issues')
+                logger.info(f"[get_issues] Found {db_issues_count} issues in database for report {obj.id}")
+            else:
+                debug_info['methods_tried'].append('database PIDIssue objects - none found')
         
-        # Method 3: Check if analysis is still in progress
-        if hasattr(obj, 'pid_drawing') and obj.pid_drawing.status == 'processing':
-            logger.debug(f"[get_issues] Drawing status is 'processing', analysis may be incomplete")
+        # Method 3: Generate mock issues if analysis indicates there should be some
+        if not result_issues and obj.total_issues > 0:
+            logger.warning(f"[get_issues] Report {obj.id} claims {obj.total_issues} total issues but none found via normal methods")
+            
+            # Try to extract any issue-like data from report_data
+            if isinstance(obj.report_data, dict):
+                mock_issues = []
+                for i in range(min(obj.total_issues, 10)):  # Limit to 10 mock issues
+                    mock_issue = {
+                        'id': f'mock_{i+1}',
+                        'serial_number': i + 1,
+                        'pid_reference': f'REF-{i+1:03d}',
+                        'issue_observed': 'Issue data not properly serialized - please check backend logs',
+                        'action_required': 'Investigate data serialization issue',
+                        'severity': 'observation',
+                        'status': 'pending',
+                        'category': 'Data Issue',
+                        'approval': 'Pending',
+                        'remark': 'Auto-generated placeholder'
+                    }
+                    mock_issues.append(mock_issue)
+                
+                if mock_issues:
+                    result_issues = mock_issues
+                    debug_info['methods_tried'].append(f'mock issues generated - created {len(mock_issues)} placeholders')
+                    logger.warning(f"[get_issues] Generated {len(mock_issues)} mock issues for report {obj.id}")
         
-        logger.warning(f"[get_issues] No issues found for report {obj.id} via any method")
-        return []
+        # Log debug information
+        debug_info['final_count'] = len(result_issues)
+        debug_info['has_issues'] = len(result_issues) > 0
+        logger.info(f"[get_issues] Final result for report {obj.id}: {debug_info}")
+        
+        # Add debug info to response for frontend debugging
+        if hasattr(self, '_debug_mode') or (hasattr(self.context, 'get') and self.context.get('debug', False)):
+            for issue in result_issues:
+                if isinstance(issue, dict):
+                    issue['_debug_info'] = debug_info
+        
+        return result_issues
+    
+    def get_debug_info(self, obj):
+        """Provide debug information for troubleshooting"""
+        debug_data = {
+            'report_id': obj.id,
+            'total_issues_field': obj.total_issues,
+            'pending_count': obj.pending_count,
+            'approved_count': obj.approved_count,
+            'ignored_count': obj.ignored_count,
+            'has_report_data': bool(obj.report_data),
+            'report_data_type': str(type(obj.report_data)),
+            'db_issues_count': obj.issues.count(),
+            'drawing_status': obj.pid_drawing.status if hasattr(obj, 'pid_drawing') else 'unknown'
+        }
+        
+        if isinstance(obj.report_data, dict):
+            debug_data['report_data_keys'] = list(obj.report_data.keys())
+            debug_data['has_issues_key'] = 'issues' in obj.report_data
+            if 'issues' in obj.report_data:
+                issues_data = obj.report_data['issues']
+                debug_data['issues_type'] = str(type(issues_data))
+                debug_data['issues_length'] = len(issues_data) if isinstance(issues_data, (list, dict)) else 'N/A'
+        
+        return debug_data
     
     def get_equipment_datasheets(self, obj):
         """Extract equipment datasheets from report_data"""
