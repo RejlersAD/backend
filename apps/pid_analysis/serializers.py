@@ -320,32 +320,51 @@ class PIDDrawingUploadSerializer(serializers.Serializer):
         return super().to_internal_value(data)
     
     def validate_file(self, value):
-        """Validate PDF file"""
+        """Validate PDF file with enhanced debugging"""
+        print(f"[SERIALIZER] File validation - received value: {value}")
+        print(f"[SERIALIZER] Value type: {type(value)}")
+        
         if not value:
+            print(f"[SERIALIZER] File validation failed: No file provided")
             raise serializers.ValidationError("File is required")
+        
+        # Check if it's a proper file object
+        if not hasattr(value, 'name') or not hasattr(value, 'read'):
+            print(f"[SERIALIZER] File validation failed: Not a proper file object")
+            raise serializers.ValidationError("The submitted data was not a file. Check the encoding type on the form.")
         
         # Get filename
         filename = getattr(value, 'name', '')
+        print(f"[SERIALIZER] File name: {filename}")
+        
         if not filename:
+            print(f"[SERIALIZER] File validation failed: No filename")
             raise serializers.ValidationError("File must have a name")
         
-        # Check file extension
-        if not filename.lower().endswith('.pdf'):
+        # Check file extension (allow PDF, PNG, JPG for broader compatibility)
+        allowed_extensions = ['.pdf', '.png', '.jpg', '.jpeg']
+        if not any(filename.lower().endswith(ext) for ext in allowed_extensions):
+            print(f"[SERIALIZER] File validation failed: Invalid extension for {filename}")
             raise serializers.ValidationError(
-                f"Only PDF files are allowed. Received: {filename}"
+                f"Only PDF, PNG, JPG files are allowed. Received: {filename}"
             )
         
         # Check file size (max 50MB)
         max_size = 50 * 1024 * 1024  # 50MB
         file_size = getattr(value, 'size', 0)
+        print(f"[SERIALIZER] File size: {file_size} bytes")
+        
         if file_size > max_size:
+            print(f"[SERIALIZER] File validation failed: File too large")
             raise serializers.ValidationError(
                 f"File size cannot exceed 50MB. Current size: {file_size / (1024*1024):.2f}MB"
             )
         
         if file_size == 0:
+            print(f"[SERIALIZER] File validation failed: Empty file")
             raise serializers.ValidationError("File cannot be empty")
         
+        print(f"[SERIALIZER] File validation successful: {filename} ({file_size} bytes)")
         return value
 
 

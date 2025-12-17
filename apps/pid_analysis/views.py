@@ -1,6 +1,7 @@
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from .models import PIDDrawing, PIDAnalysisReport, PIDIssue, ReferenceDocument
@@ -23,6 +24,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
     
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = PIDDrawingSerializer
+    parser_classes = [MultiPartParser, FormParser]  # Enable multipart parsing
     
     def get_queryset(self):
         """Return drawings for current user"""
@@ -52,6 +54,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         print(f"[DEBUG] Content-Type: {request.content_type}")
         print(f"[DEBUG] Request data keys: {list(request.data.keys())}")
         print(f"[DEBUG] Request FILES: {list(request.FILES.keys())}")
+        print(f"[DEBUG] Request encoding: {getattr(request, 'encoding', 'Unknown')}")
         
         # Debug all form fields
         for key, value in request.data.items():
@@ -60,12 +63,26 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                 if file_obj:
                     print(f"[DEBUG]   {key}: [File: {file_obj.name}, {file_obj.size} bytes, {file_obj.content_type}]")
                 else:
-                    print(f"[DEBUG]   {key}: {value}")
+                    print(f"[DEBUG]   {key}: {value} (NOT A FILE OBJECT!)")
             else:
                 print(f"[DEBUG]   {key}: '{value}' (type: {type(value).__name__})")
         
+        # Check if file is in FILES instead of data
+        file_in_files = request.FILES.get('file')
+        if file_in_files:
+            print(f"[DEBUG] ✓ File found in request.FILES: {file_in_files.name}")
+        else:
+            print(f"[DEBUG] ✗ No file found in request.FILES")
+        
+        # Prepare data for serializer - combine data and FILES
+        serializer_data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if file_in_files:
+            serializer_data['file'] = file_in_files
+        
+        print(f"[DEBUG] Serializer data keys: {list(serializer_data.keys())}")
+        
         # Validate request data
-        serializer = PIDDrawingUploadSerializer(data=request.data)
+        serializer = PIDDrawingUploadSerializer(data=serializer_data)
         
         if not serializer.is_valid():
             print(f"[ERROR] Validation failed: {serializer.errors}")
@@ -473,6 +490,7 @@ class ReferenceDocumentViewSet(viewsets.ModelViewSet):
     
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = ReferenceDocumentSerializer
+    parser_classes = [MultiPartParser, FormParser]  # Enable multipart parsing
     
     def get_queryset(self):
         """Return reference documents for current user"""
