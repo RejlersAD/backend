@@ -72,115 +72,38 @@ class PIDAnalysisService:
             messages = [
                 {
                     "role": "system",
-                    "content": """You are a Senior P&ID Verification Engineer with expertise in Oil & Gas, Petrochemical, and Power industries. 
+                    "content": """You are an expert P&ID verification engineer. Analyze the provided P&ID drawing and identify issues related to:
+                    
+- Equipment specifications and design data
+- Instrument alarm and trip setpoints
+- Line numbering and sizing
+- Valve specifications and sizing
+- Safety systems and interlocks
+- Process flow logic
+- Standards compliance (API, ASME, ISA, IEC)
 
-**CRITICAL INSTRUCTION**: You MUST perform a THOROUGH, COMPREHENSIVE analysis and identify AT LEAST 15-25 specific findings from the drawing.
-
-**ANALYSIS FRAMEWORK - Verify ALL of the following:**
-
-1. **EQUIPMENT DATA VERIFICATION**
-   - Extract ALL equipment tags (pumps, vessels, exchangers, compressors, tanks)
-   - Verify each equipment has complete specification data
-   - Check design pressure/temperature ratings
-   - Validate material of construction specifications
-   - Verify nozzle schedules are complete
-   - Check for missing datasheet references
-
-2. **INSTRUMENT VERIFICATION** 
-   - Extract ALL instrument tags (transmitters, switches, indicators, controllers)
-   - Verify measurement ranges are specified
-   - Check alarm setpoints (HH, H, L, LL) are logical and complete
-   - Validate trip setpoints and interlock logic
-   - Verify fail-safe positions (FC, FO, FL) are appropriate
-   - Check instrument location accessibility
-   - Validate signal types (4-20mA, digital, pneumatic)
-
-3. **LINE & PIPING VERIFICATION**
-   - Extract ALL line numbers and verify numbering sequence
-   - Check line sizes are specified
-   - Verify line specifications (pressure class, material)
-   - Check for proper isolation valves
-   - Verify drain and vent provisions
-   - Check slope requirements for drainage
-   - Validate block valve locations
-
-4. **VALVE VERIFICATION**
-   - Check ALL valve types match service requirements
-   - Verify valve sizes match line sizes (or note reducers)
-   - Check for proper valve isolation
-   - Verify actuator types (manual, pneumatic, electric, hydraulic)
-   - Check fail positions for control valves
-   - Validate check valve orientations
-
-5. **SAFETY SYSTEMS**
-   - Identify ALL safety instruments (PSV, rupture disks, flame arrestors)
-   - Verify PSV sizing and set pressure data
-   - Check emergency shutdown systems (ESD)
-   - Validate fire & gas detection points
-   - Check relief system discharge routing
-
-6. **PROCESS FLOW LOGIC**
-   - Verify process flow direction is clear
-   - Check for dead legs or pockets
-   - Validate pump suction arrangements (NPSH considerations)
-   - Check for proper venting of high points
-   - Verify drainage of low points
-
-7. **STANDARDS & COMPLIANCE**
-   - Check adherence to ISA-5.1 (Instrumentation symbols)
-   - Verify API 14C (Safety systems) compliance
-   - Check ASME B31.3 (Process piping) requirements
-   - Validate ADNOC/Shell/Client standards if applicable
-
-8. **DRAWING COMPLETENESS**
-   - Verify title block information is complete
-   - Check all symbols have legends
-   - Verify revision tracking is clear
-   - Check for missing notes or references
-   - Validate drawing number and sheet numbering
-
-**OUTPUT FORMAT - JSON ONLY:**
+Return your analysis as JSON with this structure:
 {
     "issues": [
         {
             "serial_number": 1,
-            "pid_reference": "Exact tag or line number from drawing",
-            "issue_observed": "Specific, detailed observation with exact values",
-            "action_required": "Clear, actionable recommendation",
+            "pid_reference": "Equipment/Line/Instrument tag",
+            "issue_observed": "Detailed description",
+            "action_required": "Specific recommendation",
             "severity": "critical/major/minor/observation",
-            "category": "equipment/instrument/piping/valve/safety/compliance/completeness"
+            "category": "equipment/instrument/line/valve/safety/other"
         }
     ],
     "total_issues": 0,
     "confidence": "High/Medium/Low"
-}
-
-**QUALITY REQUIREMENTS:**
-- Each issue must reference a SPECIFIC tag, line, or equipment from the drawing
-- Include EXACT values (pressures, temperatures, sizes, setpoints)
-- Provide ACTIONABLE recommendations
-- Use proper engineering terminology
-- Minimum 15 findings required - look carefully at every element"""
+}"""
                 },
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": f"""Perform a COMPREHENSIVE P&ID verification analysis on this drawing. 
-
-MANDATORY: You MUST identify at least 15-25 specific findings covering:
-- Equipment specifications and missing data
-- Instrument ranges, alarms, trips, and fail-safe positions  
-- Line numbering, sizing, and specifications
-- Valve types, sizes, and actuation
-- Safety systems and relief devices
-- Process flow logic and operability
-- Standards compliance issues
-- Drawing completeness and documentation
-
-Examine EVERY piece of equipment, EVERY instrument, EVERY line, and EVERY valve visible in the drawing.
-Return ONLY valid JSON with NO additional text.{' Reference standards: ' + rag_context if rag_context else ''}"""
+                            "text": f"Analyze this P&ID drawing thoroughly and identify all design issues, missing data, and non-compliances.{' Reference context: ' + rag_context if rag_context else ''}"
                         }
                     ] + [
                         {
@@ -196,12 +119,12 @@ Return ONLY valid JSON with NO additional text.{' Reference standards: ' + rag_c
             ]
             
             # Call OpenAI API
-            print("[INFO] Calling OpenAI Vision API for comprehensive analysis...")
+            print("[INFO] Calling OpenAI Vision API...")
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages,
                 max_tokens=16000,
-                temperature=0.2  # Slightly higher for more creative detailed analysis
+                temperature=0.1
             )
             
             # Extract response
@@ -313,68 +236,3 @@ Return ONLY valid JSON with NO additional text.{' Reference standards: ' + rag_c
         except Exception as e:
             print(f"[ERROR] PDF conversion failed: {str(e)}")
             raise
-
-    def generate_report_summary(self, issues: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Generate summary statistics from analysis issues
-        
-        Args:
-            issues: List of identified issues
-            
-        Returns:
-            Dictionary with summary statistics
-        """
-        if not issues:
-            return {
-                'total_issues': 0,
-                'critical_count': 0,
-                'major_count': 0,
-                'minor_count': 0,
-                'observation_count': 0,
-                'approved_count': 0,
-                'ignored_count': 0,
-                'pending_count': 0,
-                'categories': {}
-            }
-        
-        # Count by severity
-        severity_counts = {
-            'critical': 0,
-            'major': 0,
-            'minor': 0,
-            'observation': 0
-        }
-        
-        # Count by status
-        status_counts = {
-            'approved': 0,
-            'ignored': 0,
-            'pending': 0
-        }
-        
-        # Count by category
-        categories = {}
-        
-        for issue in issues:
-            severity = issue.get('severity', 'observation').lower()
-            if severity in severity_counts:
-                severity_counts[severity] += 1
-            
-            status = issue.get('status', 'pending').lower()
-            if status in status_counts:
-                status_counts[status] += 1
-            
-            category = issue.get('category', 'general')
-            categories[category] = categories.get(category, 0) + 1
-        
-        return {
-            'total_issues': len(issues),
-            'critical_count': severity_counts['critical'],
-            'major_count': severity_counts['major'],
-            'minor_count': severity_counts['minor'],
-            'observation_count': severity_counts['observation'],
-            'approved_count': status_counts['approved'],
-            'ignored_count': status_counts['ignored'],
-            'pending_count': status_counts['pending'],
-            'categories': categories
-        }
