@@ -5,8 +5,6 @@ from .models import PIDDrawing, PIDAnalysisReport, PIDIssue, ReferenceDocument
 class PIDIssueSerializer(serializers.ModelSerializer):
     """Serializer for P&ID issues"""
     
-    # Add location_on_drawing from report_data if available
-    location_on_drawing = serializers.SerializerMethodField()
     engineering_impact = serializers.SerializerMethodField()
     standard_reference = serializers.SerializerMethodField()
     related_issues = serializers.SerializerMethodField()
@@ -20,22 +18,6 @@ class PIDIssueSerializer(serializers.ModelSerializer):
             'standard_reference', 'related_issues', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
-    
-    def get_location_on_drawing(self, obj):
-        """Extract location_on_drawing from analysis report JSON if available"""
-        # Try to get report from context first
-        report = self.context.get('report')
-        if not report and hasattr(obj, 'analysis_report'):
-            report = obj.analysis_report
-        
-        if report and hasattr(report, 'report_data'):
-            report_data = report.report_data
-            if isinstance(report_data, dict) and 'issues' in report_data:
-                # Find matching issue by serial number
-                for issue in report_data.get('issues', []):
-                    if issue.get('serial_number') == obj.serial_number:
-                        return issue.get('location_on_drawing', None)
-        return None
     
     def get_engineering_impact(self, obj):
         """Extract engineering_impact from analysis report JSON if available"""

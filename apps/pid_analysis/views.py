@@ -34,7 +34,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         """Create drawing with current user"""
         serializer.save(uploaded_by=self.request.user)
     
-    @action(detail=False, methods=['post', 'options'])
+    @action(detail=False, methods=['post', 'options'], permission_classes=[permissions.AllowAny])
     def upload(self, request):
         """
         Upload P&ID drawing and optionally start analysis
@@ -43,6 +43,8 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         """
         print(f"[UPLOAD_VIEW] === UPLOAD REQUEST RECEIVED ===")
         print(f"[UPLOAD_VIEW] Method: {request.method}")
+        print(f"[UPLOAD_VIEW] User: {request.user} (authenticated: {request.user.is_authenticated})")
+        print(f"[UPLOAD_VIEW] Auth header: {request.META.get('HTTP_AUTHORIZATION', 'MISSING')}")
         print(f"[UPLOAD_VIEW] Origin: {request.META.get('HTTP_ORIGIN', 'NO ORIGIN')}")
         print(f"[UPLOAD_VIEW] Content-Type: {request.content_type}")
         print(f"[UPLOAD_VIEW] Files: {list(request.FILES.keys())}")
@@ -56,7 +58,14 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             response['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
             response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
             return response
-            return response
+        
+        # CRITICAL: Verify authentication manually since we used AllowAny
+        if not request.user.is_authenticated:
+            print("[ERROR] User not authenticated - rejecting request")
+            return Response(
+                {'detail': 'Authentication credentials were not provided or are invalid.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
         print(f"[DEBUG] ===== UPLOAD REQUEST RECEIVED =====")
         print(f"[DEBUG] User: {request.user} (authenticated: {request.user.is_authenticated})")
         print(f"[DEBUG] Content-Type: {request.content_type}")
@@ -154,6 +163,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                         action_required=issue_data.get('action_required', ''),
                         severity=issue_data.get('severity', 'observation'),
                         category=issue_data.get('category', ''),
+                        location_on_drawing=issue_data.get('location_on_drawing'),  # Include location data
                         status=issue_data.get('status', 'pending'),
                         approval=issue_data.get('approval', 'Pending'),
                         remark=issue_data.get('remark', 'Pending'),
@@ -275,6 +285,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                     action_required=issue_data.get('action_required', ''),
                     severity=issue_data.get('severity', 'observation'),
                     category=issue_data.get('category', ''),
+                    location_on_drawing=issue_data.get('location_on_drawing'),  # Include location data
                     status=issue_data.get('status', 'pending'),
                     approval=issue_data.get('approval', 'Pending'),
                     remark=issue_data.get('remark', 'Pending'),

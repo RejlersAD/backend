@@ -236,6 +236,13 @@ class PIDIssue(models.Model):
     severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default='observation')
     category = models.CharField(max_length=100, blank=True, help_text='Equipment, Instrumentation, Piping, etc.')
     
+    # Location on drawing (for direction/navigation)
+    location_on_drawing = models.JSONField(
+        null=True,
+        blank=True,
+        help_text='Location information: zone, drawing_section, proximity_description, visual_cues'
+    )
+    
     # Review status
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     approval = models.CharField(max_length=50, default='Pending')
