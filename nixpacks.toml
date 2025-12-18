@@ -1,2 +1,12 @@
-# Force Railway to use Nixpacks instead of Docker
+# Railway Production Configuration
+# Matches Docker container settings for consistency
 providers = ["python"]
+
+[phases.setup]
+nixPkgs = ["python311", "postgresql"]
+
+[phases.install]
+cmds = ["pip install --upgrade pip setuptools wheel", "pip install -r requirements.txt"]
+
+[start]
+cmd = "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 600 --access-logfile - --error-logfile - --log-level info"
