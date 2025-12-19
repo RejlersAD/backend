@@ -564,7 +564,8 @@ class ReferenceDocumentViewSet(viewsets.ModelViewSet):
             try:
                 # Extract text from document
                 processor = DocumentProcessor()
-                content_text = processor.extract_text(ref_doc.file.path)
+                # Soft-coded: Pass file object directly (works with both S3 and local storage)
+                content_text = processor.extract_text(ref_doc.file, ref_doc.original_filename)
                 
                 if not content_text or len(content_text.strip()) < 50:
                     ref_doc.embedding_status = 'failed'
@@ -672,7 +673,8 @@ class ReferenceDocumentViewSet(viewsets.ModelViewSet):
         try:
             # Extract text from document
             processor = DocumentProcessor()
-            content_text = processor.extract_text(ref_doc.file.path)
+            # Soft-coded: Pass file object directly (works with both S3 and local storage)
+            content_text = processor.extract_text(ref_doc.file, ref_doc.original_filename)
             
             if not content_text or len(content_text.strip()) < 50:
                 return Response(

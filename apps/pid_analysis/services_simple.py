@@ -204,14 +204,15 @@ Return your analysis as JSON with this structure:
         images_base64 = []
         
         try:
-            # Handle Django FieldFile
-            if hasattr(pdf_file, 'path'):
-                pdf_path = pdf_file.path
+            # Soft-coded approach: Handle both file paths and file objects (S3/Django FileField)
+            if isinstance(pdf_file, str):
+                # Local file path
+                doc = fitz.open(pdf_file)
             else:
-                pdf_path = str(pdf_file)
-            
-            # Open PDF
-            doc = fitz.open(pdf_path)
+                # File object (from S3 or Django FileField) - read content into memory
+                pdf_file.seek(0)  # Ensure we're at the start
+                pdf_bytes = pdf_file.read()
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             
             # Convert each page
             for page_num in range(len(doc)):
