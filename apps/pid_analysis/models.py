@@ -136,6 +136,23 @@ class PIDDrawing(models.Model):
     revision = models.CharField(max_length=20, blank=True)
     project_name = models.CharField(max_length=255, blank=True)
     
+    # Structured Drawing Number Components (Smart Format)
+    area = models.CharField(max_length=2, blank=True, help_text='Area code (2 digits)')
+    p_area = models.CharField(max_length=2, blank=True, help_text='P/Area code (2 digits)')
+    doc_code = models.CharField(max_length=2, blank=True, help_text='Document code (2 digits)')
+    serial_number = models.CharField(max_length=4, blank=True, help_text='Serial number (4 digits)')
+    rev = models.CharField(max_length=1, blank=True, help_text='Revision (1 digit)')
+    sheet_number = models.CharField(max_length=1, blank=True, default='1', help_text='Sheet number')
+    total_sheets = models.CharField(max_length=1, blank=True, default='1', help_text='Total sheets')
+    
+    def get_formatted_drawing_number(self):
+        """Generate formatted drawing number from components"""
+        if all([self.area, self.p_area, self.doc_code, self.serial_number]):
+            rev_part = f"-{self.rev}" if self.rev else ""
+            sheet_part = f"-{self.sheet_number}/{self.total_sheets}" if self.sheet_number and self.total_sheets else ""
+            return f"{self.area}-{self.p_area}-{self.doc_code}-{self.serial_number}{rev_part}{sheet_part}"
+        return self.drawing_number or 'N/A'
+    
     # Analysis status
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='uploaded')
     analysis_started_at = models.DateTimeField(null=True, blank=True)

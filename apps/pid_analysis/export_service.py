@@ -39,12 +39,36 @@ class PIDReportExportService:
     
     def export_pdf(self, drawing):
         """Export report as PDF with customizable branding"""
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import A4, landscape
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.units import cm
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
-        from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+        print(f"[PDF_EXPORT] Starting PDF export for drawing: {drawing.drawing_number}")
+        print(f"[PDF_EXPORT] Drawing has analysis_report: {hasattr(drawing, 'analysis_report')}")
+        
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4, landscape
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import cm
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+            from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+            print(f"[PDF_EXPORT] Reportlab imported successfully")
+        except ImportError as e:
+            print(f"[ERROR] Failed to import reportlab: {str(e)}")
+            return HttpResponse(
+                f"PDF export library not available: {str(e)}",
+                content_type='text/plain',
+                status=500
+            )
+        
+        # Verify report exists
+        if not hasattr(drawing, 'analysis_report'):
+            print(f"[PDF_EXPORT ERROR] Drawing has no analysis_report")
+            return HttpResponse(
+                "No analysis report available for this drawing",
+                content_type='text/plain',
+                status=404
+            )
+        
+        report = drawing.analysis_report
+        print(f"[PDF_EXPORT] Report total_issues: {report.total_issues}")
         
         buffer = io.BytesIO()
         
@@ -120,12 +144,33 @@ class PIDReportExportService:
         
         drawing_info = [
             ['Drawing Number:', drawing.drawing_number or 'N/A'],
+        ]
+        
+        # Add structured drawing number details if available
+        if drawing.area or drawing.p_area or drawing.doc_code or drawing.serial_number:
+            structured_parts = []
+            if drawing.area:
+                structured_parts.append(f'Area: {drawing.area}')
+            if drawing.p_area:
+                structured_parts.append(f'P/Area: {drawing.p_area}')
+            if drawing.doc_code:
+                structured_parts.append(f'Doc Code: {drawing.doc_code}')
+            if drawing.serial_number:
+                structured_parts.append(f'Serial: {drawing.serial_number}')
+            if drawing.rev:
+                structured_parts.append(f'Rev: {drawing.rev}')
+            if drawing.sheet_number and drawing.total_sheets:
+                structured_parts.append(f'Sheet: {drawing.sheet_number}/{drawing.total_sheets}')
+            
+            drawing_info.append(['  (Structure):', ' | '.join(structured_parts)])
+        
+        drawing_info.extend([
             ['Drawing Title:', drawing.drawing_title or 'N/A'],
             ['Revision:', drawing.revision or 'N/A'],
             ['Project Name:', drawing.project_name or 'N/A'],
             ['Analysis Date:', drawing.analysis_completed_at.strftime('%d-%b-%Y %H:%M') if drawing.analysis_completed_at else 'N/A'],
             ['Report Generated:', datetime.now().strftime('%d-%b-%Y %H:%M')],
-        ]
+        ])
         
         info_table = Table(drawing_info, colWidths=[5*cm, 15*cm])
         info_table.setStyle(TableStyle([
@@ -312,8 +357,18 @@ class PIDReportExportService:
         footer_text = f"<b>{self.footer_text}</b><br/>{self.footer_note}<br/><i>Generated: {datetime.now().strftime('%d-%b-%Y %H:%M:%S')}</i>"
         elements.append(Paragraph(footer_text, ParagraphStyle('Footer', parent=styles['Normal'], fontSize=8, alignment=TA_CENTER, textColor=colors.HexColor('#666666'))))
         
-        # Build PDF
-        doc.build(elements)
+        # Build PDF with error handling
+        try:
+            doc.build(elements)
+        except Exception as e:
+            print(f"[ERROR] Failed to build PDF document: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return HttpResponse(
+                f"Failed to generate PDF: {str(e)}",
+                content_type='text/plain',
+                status=500
+            )
         
         # FileResponse
         buffer.seek(0)
@@ -324,15 +379,33 @@ class PIDReportExportService:
     
     def export_excel(self, drawing):
         """Export report as Excel with customizable branding"""
+        print(f"[EXCEL_EXPORT] Starting Excel export for drawing: {drawing.drawing_number}")
+        print(f"[EXCEL_EXPORT] Drawing has analysis_report: {hasattr(drawing, 'analysis_report')}")
+        
         try:
             import openpyxl
             from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
             from openpyxl.utils import get_column_letter
-        except ImportError:
+            print(f"[EXCEL_EXPORT] openpyxl imported successfully")
+        except ImportError as e:
+            print(f"[ERROR] Failed to import openpyxl: {str(e)}")
             return HttpResponse(
-                "openpyxl not installed. Please install it to use Excel export.",
+                f"Excel export library not available: {str(e)}",
+                content_type='text/plain',
                 status=500
             )
+        
+        # Verify report exists
+        if not hasattr(drawing, 'analysis_report'):
+            print(f"[EXCEL_EXPORT ERROR] Drawing has no analysis_report")
+            return HttpResponse(
+                "No analysis report available for this drawing",
+                content_type='text/plain',
+                status=404
+            )
+        
+        report = drawing.analysis_report
+        print(f"[EXCEL_EXPORT] Report total_issues: {report.total_issues}")
         
         # Create workbook
         wb = openpyxl.Workbook()
@@ -389,12 +462,33 @@ class PIDReportExportService:
         row += 1
         info_data = [
             ['Drawing Number:', drawing.drawing_number or 'N/A'],
+        ]
+        
+        # Add structured drawing number details if available
+        if drawing.area or drawing.p_area or drawing.doc_code or drawing.serial_number:
+            structured_parts = []
+            if drawing.area:
+                structured_parts.append(f'Area: {drawing.area}')
+            if drawing.p_area:
+                structured_parts.append(f'P/Area: {drawing.p_area}')
+            if drawing.doc_code:
+                structured_parts.append(f'Doc Code: {drawing.doc_code}')
+            if drawing.serial_number:
+                structured_parts.append(f'Serial: {drawing.serial_number}')
+            if drawing.rev:
+                structured_parts.append(f'Rev: {drawing.rev}')
+            if drawing.sheet_number and drawing.total_sheets:
+                structured_parts.append(f'Sheet: {drawing.sheet_number}/{drawing.total_sheets}')
+            
+            info_data.append(['  (Structure):', ' | '.join(structured_parts)])
+        
+        info_data.extend([
             ['Drawing Title:', drawing.drawing_title or 'N/A'],
             ['Revision:', drawing.revision or 'N/A'],
             ['Project Name:', drawing.project_name or 'N/A'],
             ['Analysis Date:', drawing.analysis_completed_at.strftime('%d-%b-%Y %H:%M') if drawing.analysis_completed_at else 'N/A'],
             ['Report Generated:', datetime.now().strftime('%d-%b-%Y %H:%M')],
-        ]
+        ])
         
         for label, value in info_data:
             ws[f'A{row}'] = label
@@ -573,10 +667,20 @@ class PIDReportExportService:
         ws[f'A{row}'].font = Font(name='Arial', size=8, italic=True, color='666666')
         ws[f'A{row}'].alignment = center_alignment
         
-        # Save to buffer
+        # Save to buffer with error handling
         buffer = io.BytesIO()
-        wb.save(buffer)
-        buffer.seek(0)
+        try:
+            wb.save(buffer)
+            buffer.seek(0)
+        except Exception as e:
+            print(f"[ERROR] Failed to save Excel workbook: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return HttpResponse(
+                f"Failed to generate Excel: {str(e)}",
+                content_type='text/plain',
+                status=500
+            )
         
         response = HttpResponse(
             buffer.getvalue(),
@@ -588,6 +692,21 @@ class PIDReportExportService:
     
     def export_csv(self, drawing):
         """Export report as CSV"""
+        print(f"[CSV_EXPORT] Starting CSV export for drawing: {drawing.drawing_number}")
+        print(f"[CSV_EXPORT] Drawing has analysis_report: {hasattr(drawing, 'analysis_report')}")
+        
+        # Verify report exists
+        if not hasattr(drawing, 'analysis_report'):
+            print(f"[CSV_EXPORT ERROR] Drawing has no analysis_report")
+            return HttpResponse(
+                "No analysis report available for this drawing",
+                content_type='text/plain',
+                status=404
+            )
+        
+        report = drawing.analysis_report
+        print(f"[CSV_EXPORT] Report total_issues: {report.total_issues}")
+        
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = f'attachment; filename="PID_Analysis_{drawing.drawing_number or "Report"}_{datetime.now().strftime("%Y%m%d")}.csv"'
         
@@ -601,6 +720,25 @@ class PIDReportExportService:
         # Drawing Information
         writer.writerow(['DRAWING INFORMATION'])
         writer.writerow(['Drawing Number', drawing.drawing_number or 'N/A'])
+        
+        # Add structured drawing number details if available
+        if drawing.area or drawing.p_area or drawing.doc_code or drawing.serial_number:
+            structured_parts = []
+            if drawing.area:
+                structured_parts.append(f'Area: {drawing.area}')
+            if drawing.p_area:
+                structured_parts.append(f'P/Area: {drawing.p_area}')
+            if drawing.doc_code:
+                structured_parts.append(f'Doc Code: {drawing.doc_code}')
+            if drawing.serial_number:
+                structured_parts.append(f'Serial: {drawing.serial_number}')
+            if drawing.rev:
+                structured_parts.append(f'Rev: {drawing.rev}')
+            if drawing.sheet_number and drawing.total_sheets:
+                structured_parts.append(f'Sheet: {drawing.sheet_number}/{drawing.total_sheets}')
+            
+            writer.writerow(['  (Structure)', ' | '.join(structured_parts)])
+        
         writer.writerow(['Drawing Title', drawing.drawing_title or 'N/A'])
         writer.writerow(['Revision', drawing.revision or 'N/A'])
         writer.writerow(['Project Name', drawing.project_name or 'N/A'])

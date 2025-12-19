@@ -7,6 +7,7 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView, TokenObtainPairView
 from apps.users.serializers_jwt import EmailTokenObtainPairSerializer
 from .views import UserViewSet, HealthCheckView, CORSDiagnosticView
+from .export_wrapper import pid_export_wrapper
 
 
 # Custom JWT view for email-based login
@@ -31,4 +32,6 @@ urlpatterns = [
     
     # Router URLs
     path('', include(router.urls)),
+    # PID export wrapper (stable endpoint)
+    path('pid-export/<int:pk>/', pid_export_wrapper, name='pid-export'),
 ]

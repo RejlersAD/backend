@@ -4,8 +4,127 @@ from .views import (
     PIDDrawingViewSet, 
     PIDAnalysisReportViewSet, 
     PIDIssueViewSet,
-    ReferenceDocumentViewSet
+    ReferenceDocumentViewSet,
 )
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework import permissions
+from rest_framework.response import Response
+from django.http import HttpResponse
+
+# Export endpoint - using test-export pattern because drawings/pk/export doesn't work
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def test_export(request, pk):
+    """Export drawing report in PDF/Excel/CSV format - accessible at /test-export/{pk}/"""
+    from .models import PIDDrawing
+    from .export_service import PIDReportExportService
+    
+    print(f"[EXPORT via TEST] Reached export endpoint! PK={pk}")
+    
+    try:
+        drawing = PIDDrawing.objects.get(id=pk)
+        print(f"[EXPORT via TEST] Drawing found: {drawing.drawing_number}")
+    except PIDDrawing.DoesNotExist:
+        return Response({'error': 'Drawing not found'}, status=404)
+    
+    if not hasattr(drawing, 'analysis_report'):
+        return Response({'error': 'No analysis report available'}, status=404)
+    
+    export_format = request.query_params.get('format', 'pdf')
+    print(f"[EXPORT via TEST] Format: {export_format}")
+    
+    export_service = PIDReportExportService()
+    
+    try:
+        if export_format == 'pdf':
+            return export_service.export_pdf(drawing)
+        elif export_format == 'excel':
+            return export_service.export_excel(drawing)
+        elif export_format == 'csv':
+            return export_service.export_csv(drawing)
+        else:
+            return Response({'error': 'Invalid format'}, status=400)
+    except Exception as e:
+        print(f"[EXPORT via TEST ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return Response({'error': str(e)}, status=500)
+
+# Export endpoint - EXACT COPY of test_export but with export logic
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def export_drawing(request, pk):
+    """Export drawing report in PDF/Excel/CSV format"""
+    from .models import PIDDrawing
+    from .export_service import PIDReportExportService
+    
+    print(f"[EXPORT DRAWING] Reached export endpoint! PK={pk}")
+    
+    try:
+        drawing = PIDDrawing.objects.get(id=pk)
+        print(f"[EXPORT DRAWING] Drawing found: {drawing.drawing_number}")
+    except PIDDrawing.DoesNotExist:
+        return Response({'error': 'Drawing not found'}, status=404)
+    
+    if not hasattr(drawing, 'analysis_report'):
+        return Response({'error': 'No analysis report available'}, status=404)
+    
+    export_format = request.query_params.get('format', 'pdf')
+    print(f"[EXPORT DRAWING] Format: {export_format}")
+    
+    export_service = PIDReportExportService()
+    
+    try:
+        if export_format == 'pdf':
+            return export_service.export_pdf(drawing)
+        elif export_format == 'excel':
+            return export_service.export_excel(drawing)
+        elif export_format == 'csv':
+            return export_service.export_csv(drawing)
+        else:
+            return Response({'error': 'Invalid format'}, status=400)
+    except Exception as e:
+        print(f"[EXPORT DRAWING ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return Response({'error': str(e)}, status=500)
+
+# Direct export handler that bypasses ViewSet
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def direct_export(request, pk):
+    """Direct export endpoint that doesn't rely on ViewSet"""
+    from .models import PIDDrawing
+    from .export_service import PIDReportExportService
+    
+    print(f"\n[DIRECT EXPORT] ===== DIRECT EXPORT CALLED =====")
+    print(f"[DIRECT EXPORT] PK: {pk}, Format: {request.query_params.get('format', 'pdf')}")
+    
+    try:
+        drawing = PIDDrawing.objects.get(id=pk)
+    except PIDDrawing.DoesNotExist:
+        return Response({'error': 'Drawing not found'}, status=404)
+    
+    if not hasattr(drawing, 'analysis_report'):
+        return Response({'error': 'No analysis report available'}, status=404)
+    
+    export_format = request.query_params.get('format', 'pdf')
+    export_service = PIDReportExportService()
+    
+    try:
+        if export_format == 'pdf':
+            return export_service.export_pdf(drawing)
+        elif export_format == 'excel':
+            return export_service.export_excel(drawing)
+        elif export_format == 'csv':
+            return export_service.export_csv(drawing)
+        else:
+            return Response({'error': 'Invalid format'}, status=400)
+    except Exception as e:
+        print(f"[DIRECT EXPORT ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return Response({'error': str(e)}, status=500)
 
 router = DefaultRouter()
 router.register(r'drawings', PIDDrawingViewSet, basename='pid-drawing')
@@ -14,5 +133,10 @@ router.register(r'issues', PIDIssueViewSet, basename='pid-issue')
 router.register(r'reference-documents', ReferenceDocumentViewSet, basename='reference-document')
 
 urlpatterns = [
+    # Export endpoint - using different pattern to avoid router conflict
+    path('export/<int:pk>/', export_drawing, name='pid-drawing-export'),
+    # Test URL
+    path('test-export/<int:pk>/', test_export, name='test-export'),
+    # Router URLs LAST
     path('', include(router.urls)),
 ]

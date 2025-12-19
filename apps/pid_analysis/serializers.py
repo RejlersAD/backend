@@ -290,6 +290,49 @@ class PIDDrawingUploadSerializer(serializers.Serializer):
     project_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
     auto_analyze = serializers.BooleanField(default=True, help_text='Automatically start analysis after upload')
     
+    # Structured Drawing Number Components (Optional - will auto-parse if not provided)
+    area = serializers.CharField(max_length=2, required=False, allow_blank=True)
+    p_area = serializers.CharField(max_length=2, required=False, allow_blank=True)
+    doc_code = serializers.CharField(max_length=2, required=False, allow_blank=True)
+    serial_number = serializers.CharField(max_length=4, required=False, allow_blank=True)
+    rev = serializers.CharField(max_length=1, required=False, allow_blank=True)
+    sheet_number = serializers.CharField(max_length=1, required=False, allow_blank=True, default='1')
+    total_sheets = serializers.CharField(max_length=1, required=False, allow_blank=True, default='1')
+    
+    def validate(self, data):
+        """Smart validation and auto-parsing of drawing number"""
+        import re
+        
+        # If structured fields not provided but drawing_number exists, try to parse it
+        if data.get('drawing_number') and not data.get('area'):
+            drawing_num = data['drawing_number'].strip()
+            
+            # Pattern: XX-XX-XX-XXXX-X-X/X or XX-XX-XX-XXXX-X or similar
+            pattern = r'^(\d{2})-(\d{2})-(\d{2})-(\d{4})(?:-(\d))?(?:-(\d)/(\d))?'
+            match = re.match(pattern, drawing_num)
+            
+            if match:
+                data['area'] = match.group(1)
+                data['p_area'] = match.group(2)
+                data['doc_code'] = match.group(3)
+                data['serial_number'] = match.group(4)
+                data['rev'] = match.group(5) or ''
+                data['sheet_number'] = match.group(6) or '1'
+                data['total_sheets'] = match.group(7) or '1'
+                print(f"[SMART_PARSE] Auto-parsed drawing number: {drawing_num}")
+        
+        # If structured fields provided, rebuild drawing_number
+        elif all([data.get('area'), data.get('p_area'), data.get('doc_code'), data.get('serial_number')]):
+            parts = [data['area'], data['p_area'], data['doc_code'], data['serial_number']]
+            if data.get('rev'):
+                parts.append(data['rev'])
+            if data.get('sheet_number') and data.get('total_sheets'):
+                parts.append(f"{data['sheet_number']}/{data['total_sheets']}")
+            data['drawing_number'] = '-'.join(parts)
+            print(f"[SMART_BUILD] Built drawing number: {data['drawing_number']}")
+        
+        return data
+    
     def to_internal_value(self, data):
         """Override to handle FormData boolean strings"""
         # Convert string booleans to actual booleans (FormData sends 'true'/'false' as strings)

@@ -1,5 +1,5 @@
 from rest_framework import viewsets, status, permissions
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.utils import timezone
@@ -17,6 +17,63 @@ from .serializers import (
 from .services import PIDAnalysisService
 from .rag_service import RAGService
 from .document_processor import DocumentProcessor
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def export_report(request, pk):
+    """
+    Standalone export view for P&ID reports
+    GET /api/v1/pid/drawings/{id}/export/?format=pdf|excel|csv
+    """
+    from .export_service import PIDReportExportService
+    
+    print(f"[EXPORT] ===== STANDALONE EXPORT REQUEST =====")
+    print(f"[EXPORT] User: {request.user} (authenticated: {request.user.is_authenticated})")
+    print(f"[EXPORT] Drawing ID: {pk}")
+    
+    # Get drawing - filter by user for security
+    drawing = get_object_or_404(PIDDrawing, id=pk, uploaded_by=request.user)
+    print(f"[EXPORT] Drawing found: {drawing.drawing_number}")
+    
+    # Check if report exists
+    if not hasattr(drawing, 'analysis_report'):
+        print(f"[EXPORT ERROR] No analysis report for drawing {pk}")
+        return Response(
+            {'error': 'No analysis report available'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    print(f"[EXPORT] Report found: {drawing.analysis_report.id}")
+    
+    export_format = request.query_params.get('format', 'pdf')
+    print(f"[EXPORT] Format: {export_format}")
+    
+    export_service = PIDReportExportService()
+    
+    try:
+        print(f"[EXPORT] Generating {export_format}...")
+        if export_format == 'pdf':
+            response = export_service.export_pdf(drawing)
+        elif export_format == 'excel':
+            response = export_service.export_excel(drawing)
+        elif export_format == 'csv':
+            response = export_service.export_csv(drawing)
+        else:
+            return Response(
+                {'error': 'Invalid format. Use pdf, excel, or csv'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        print(f"[EXPORT] Success - returning file")
+        return response
+    except Exception as e:
+        print(f"[EXPORT ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return Response(
+            {'error': f'Export failed: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 class PIDDrawingViewSet(viewsets.ModelViewSet):
@@ -354,39 +411,73 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK
         )
     
-    @action(detail=True, methods=['get'], url_path='export')
+    @action(detail=True, methods=['get'], url_path='export', permission_classes=[permissions.AllowAny])
     def export(self, request, pk=None):
         """
         Export report in different formats (PDF, Excel, CSV)
         
         GET /api/v1/pid/drawings/{id}/export/?format=pdf|excel|csv
         """
+        import sys
         from .export_service import PIDReportExportService
         
-        drawing = self.get_object()
+        # EXTREMELY VERBOSE LOGGING
+        print(f"\n{'='*80}", file=sys.stderr)
+        print(f"[EXPORT ACTION] ===== EXPORT REQUEST RECEIVED =====", file=sys.stderr)
+        print(f"[EXPORT ACTION] Request path: {request.path}", file=sys.stderr)
+        print(f"[EXPORT ACTION] Request method: {request.method}", file=sys.stderr)
+        print(f"[EXPORT ACTION] User: {request.user} (authenticated: {request.user.is_authenticated})", file=sys.stderr)
+        print(f"[EXPORT ACTION] Drawing ID (pk): {pk}", file=sys.stderr)
+        print(f"[EXPORT ACTION] Query params: {dict(request.query_params)}", file=sys.stderr)
+        print(f"{'='*80}\n", file=sys.stderr)
+        
+        print(f"[EXPORT] ===== EXPORT REQUEST RECEIVED =====")
+        print(f"[EXPORT] User: {request.user} (authenticated: {request.user.is_authenticated})")
+        print(f"[EXPORT] Drawing ID: {pk}")
+        
+        # Get drawing without user filter for testing
+        try:
+            drawing = PIDDrawing.objects.get(id=pk)
+            print(f"[EXPORT] Drawing found: {drawing.drawing_number}")
+        except PIDDrawing.DoesNotExist:
+            print(f"[EXPORT ERROR] Drawing {pk} does not exist")
+            return Response(
+                {'error': f'Drawing {pk} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
         
         if not hasattr(drawing, 'analysis_report'):
+            print(f"[EXPORT ERROR] No analysis report available for drawing {pk}")
             return Response(
                 {'error': 'No analysis report available'},
                 status=status.HTTP_404_NOT_FOUND
             )
         
+        print(f"[EXPORT] Report found: {drawing.analysis_report.id}")
+        
         export_format = request.query_params.get('format', 'pdf')
+        print(f"[EXPORT] Format requested: {export_format}")
+        
         export_service = PIDReportExportService()
         
         try:
+            print(f"[EXPORT] Starting export as {export_format}...")
             if export_format == 'pdf':
-                return export_service.export_pdf(drawing)
+                response = export_service.export_pdf(drawing)
             elif export_format == 'excel':
-                return export_service.export_excel(drawing)
+                response = export_service.export_excel(drawing)
             elif export_format == 'csv':
-                return export_service.export_csv(drawing)
+                response = export_service.export_csv(drawing)
             else:
+                print(f"[EXPORT ERROR] Invalid format: {export_format}")
                 return Response(
                     {'error': 'Invalid format. Use pdf, excel, or csv'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+            print(f"[EXPORT] Export successful, returning {export_format} file")
+            return response
         except Exception as e:
+            print(f"[EXPORT ERROR] Export failed: {str(e)}")
             import traceback
             traceback.print_exc()
             return Response(
