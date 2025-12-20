@@ -10,6 +10,9 @@ from django.http import HttpResponse
 from apps.pid_analysis.models import PIDDrawing
 from apps.pid_analysis.export_service import PIDReportExportService
 
+# Import feature registry views
+from apps.api.feature_views import list_features, get_feature, get_categories, get_navigation
+
 
 def pid_export_view(request, pk):
     """Plain Django view for export - no DRF decorators"""
@@ -60,11 +63,22 @@ urlpatterns = [
     path('api/v1/cors-test/', CorsTestView.as_view(), name='cors-test'),
     path('api/v1/cors/health/', cors_health_check, name='cors-health'),
     
-    # API endpoints
+    # Feature Registry API (Dynamic Feature Discovery)
+    path('api/v1/features/', list_features, name='list-features'),
+    path('api/v1/features/<str:feature_id>/', get_feature, name='get-feature'),
+    path('api/v1/features/meta/categories/', get_categories, name='feature-categories'),
+    path('api/v1/features/meta/navigation/', get_navigation, name='feature-navigation'),
+    
+    # API endpoints - Core
     path('api/v1/', include('apps.api.urls')),
+    path('api/v1/rbac/', include('apps.rbac.urls')),
+    
+    # API endpoints - Features (Plugin Architecture)
     path('api/v1/pid/', include('apps.pid_analysis.urls')),
     path('api/v1/pfd/', include('apps.pfd_converter.urls')),
-    path('api/v1/rbac/', include('apps.rbac.urls')),
+    path('api/v1/crs/', include('apps.crs_documents.urls')),
+    path('api/v1/projects/', include('apps.core.project_urls')),
+    # Add new feature URLs here - no routing changes needed!
     
     # API Documentation
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),

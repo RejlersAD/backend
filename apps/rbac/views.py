@@ -772,3 +772,533 @@ class StorageViewSet(viewsets.ModelViewSet):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+# ============================================================================
+# ANALYTICS VIEWSETS - AI-Powered Admin Features
+# ============================================================================
+
+from .analytics_models import (
+    SystemMetrics, UserActivityAnalytics, SecurityAlert, PredictiveInsight,
+    FeatureUsageAnalytics, ErrorLogAnalytics, SystemHealthCheck
+)
+from .analytics_serializers import (
+    SystemMetricsSerializer, UserActivityAnalyticsSerializer, SecurityAlertSerializer,
+    PredictiveInsightSerializer, FeatureUsageAnalyticsSerializer, ErrorLogAnalyticsSerializer,
+    SystemHealthCheckSerializer, DashboardStatsSerializer, RealTimeActivitySerializer
+)
+from datetime import timedelta, datetime
+from django.db.models import Avg, Sum, Count, Max, Min, F
+
+
+class AnalyticsDashboardViewSet(viewsets.ViewSet):
+    """
+    AI-Powered Analytics Dashboard
+    Comprehensive admin overview with real-time insights
+    """
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    
+    @action(detail=False, methods=['get'])
+    def overview(self, request):
+        """
+        Get comprehensive dashboard overview
+        Includes system health, user stats, security alerts, and AI insights
+        """
+        today = timezone.now().date()
+        yesterday = today - timedelta(days=1)
+        
+        # User Statistics
+        total_users = UserProfile.objects.filter(is_deleted=False).count()
+        active_today = UserActivityAnalytics.objects.filter(
+            date=today, 
+            login_count__gt=0
+        ).count()
+        
+        # System Metrics (Latest)
+        latest_metrics = SystemMetrics.objects.first()
+        
+        # Security Alerts
+        active_alerts = SecurityAlert.objects.filter(status='new').count()
+        critical_alerts = SecurityAlert.objects.filter(
+            status='new',
+            severity='critical'
+        ).count()
+        
+        # AI Predictions
+        active_predictions = PredictiveInsight.objects.filter(
+            is_active=True,
+            is_acknowledged=False
+        ).count()
+        high_impact = PredictiveInsight.objects.filter(
+            is_active=True,
+            is_acknowledged=False,
+            impact_level='high'
+        ).count()
+        
+        # Error Statistics
+        errors_today = ErrorLogAnalytics.objects.filter(
+            last_occurrence__date=today,
+            status='open'
+        ).count()
+        critical_errors = ErrorLogAnalytics.objects.filter(
+            status='open',
+            severity='critical'
+        ).count()
+        
+        # User Growth
+        users_yesterday = UserProfile.objects.filter(
+            created_at__date__lte=yesterday,
+            is_deleted=False
+        ).count()
+        growth_rate = ((total_users - users_yesterday) / users_yesterday * 100) if users_yesterday > 0 else 0
+        
+        # System Health
+        latest_health = SystemHealthCheck.objects.first()
+        health_score = latest_health.health_score if latest_health else 100.0
+        
+        data = {
+            'total_users': total_users,
+            'active_users_today': active_today,
+            'total_api_requests_today': latest_metrics.api_requests_count if latest_metrics else 0,
+            'system_health_score': health_score,
+            'avg_response_time_ms': latest_metrics.avg_response_time_ms if latest_metrics else 0,
+            'success_rate_percentage': latest_metrics.success_rate_percentage if latest_metrics else 100,
+            'active_connections': latest_metrics.active_connections if latest_metrics else 0,
+            'active_alerts_count': active_alerts,
+            'critical_alerts_count': critical_alerts,
+            'active_predictions_count': active_predictions,
+            'high_impact_insights_count': high_impact,
+            'errors_today': errors_today,
+            'critical_errors_count': critical_errors,
+            'user_growth_percentage': round(growth_rate, 2),
+            'engagement_trend': 'growing' if growth_rate > 0 else 'stable',
+        }
+        
+        serializer = DashboardStatsSerializer(data)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def real_time_activity(self, request):
+        """
+        Get real-time activity feed
+        Recent user actions, alerts, and system events
+        """
+        limit = int(request.query_params.get('limit', 20))
+        
+        # Get recent audit logs
+        recent_audits = AuditLog.objects.select_related('user').order_by('-timestamp')[:limit]
+        
+        activities = []
+        for audit in recent_audits:
+            activities.append({
+                'activity_type': audit.action,
+                'user_email': audit.user_email,
+                'description': f"{audit.action.title()} {audit.resource_type}",
+                'timestamp': audit.timestamp,
+                'severity': 'high' if not audit.success else 'normal',
+                'metadata': {
+                    'resource_id': audit.resource_id,
+                    'success': audit.success,
+                    'changes': audit.changes
+                }
+            })
+        
+        serializer = RealTimeActivitySerializer(activities, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def system_performance(self, request):
+        """
+        Get system performance metrics over time
+        """
+        days = int(request.query_params.get('days', 7))
+        start_date = timezone.now() - timedelta(days=days)
+        
+        metrics = SystemMetrics.objects.filter(
+            timestamp__gte=start_date
+        ).order_by('timestamp').values(
+            'timestamp', 'avg_response_time_ms', 'success_rate_percentage',
+            'cpu_usage_percentage', 'memory_usage_mb', 'active_connections',
+            'api_requests_count', 'failed_requests_count'
+        )
+        
+        return Response(list(metrics))
+    
+    @action(detail=False, methods=['get'])
+    def user_engagement_trends(self, request):
+        """
+        Get user engagement trends and patterns
+        """
+        days = int(request.query_params.get('days', 30))
+        start_date = timezone.now().date() - timedelta(days=days)
+        
+        analytics = UserActivityAnalytics.objects.filter(
+            date__gte=start_date
+        ).values('date').annotate(
+            total_logins=Sum('login_count'),
+            avg_engagement=Avg('engagement_score'),
+            avg_productivity=Avg('productivity_score'),
+            users_with_anomalies=Count('id', filter=Q(anomaly_detected=True))
+        ).order_by('date')
+        
+        return Response(list(analytics))
+
+
+class SystemMetricsViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for system performance metrics
+    Read-only for admins to monitor system health
+    """
+    queryset = SystemMetrics.objects.all()
+    serializer_class = SystemMetricsSerializer
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['timestamp']
+    ordering = ['-timestamp']
+    
+    @action(detail=False, methods=['get'])
+    def latest(self, request):
+        """Get the most recent metrics"""
+        latest = self.queryset.first()
+        if latest:
+            serializer = self.get_serializer(latest)
+            return Response(serializer.data)
+        return Response({})
+    
+    @action(detail=False, methods=['get'])
+    def averages(self, request):
+        """Get average metrics over a time period"""
+        days = int(request.query_params.get('days', 7))
+        start_date = timezone.now() - timedelta(days=days)
+        
+        averages = self.queryset.filter(timestamp__gte=start_date).aggregate(
+            avg_response_time=Avg('avg_response_time_ms'),
+            avg_success_rate=Avg('success_rate_percentage'),
+            avg_cpu=Avg('cpu_usage_percentage'),
+            avg_memory=Avg('memory_usage_mb'),
+            total_requests=Sum('api_requests_count'),
+            total_failed=Sum('failed_requests_count')
+        )
+        
+        return Response(averages)
+
+
+class UserActivityAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for user behavior analytics
+    AI-powered insights into user patterns and engagement
+    """
+    queryset = UserActivityAnalytics.objects.select_related('user').all()
+    serializer_class = UserActivityAnalyticsSerializer
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['date', 'anomaly_detected', 'usage_pattern']
+    search_fields = ['user__email', 'user__first_name', 'user__last_name']
+    ordering = ['-date']
+    
+    @action(detail=False, methods=['get'])
+    def top_engaged_users(self, request):
+        """Get users with highest engagement scores"""
+        days = int(request.query_params.get('days', 7))
+        start_date = timezone.now().date() - timedelta(days=days)
+        limit = int(request.query_params.get('limit', 10))
+        
+        top_users = self.queryset.filter(date__gte=start_date).values(
+            'user__email', 'user__first_name', 'user__last_name'
+        ).annotate(
+            avg_engagement=Avg('engagement_score'),
+            total_logins=Sum('login_count'),
+            total_actions=Sum('drawings_uploaded') + Sum('analyses_completed')
+        ).order_by('-avg_engagement')[:limit]
+        
+        return Response(list(top_users))
+    
+    @action(detail=False, methods=['get'])
+    def anomalies(self, request):
+        """Get users with detected anomalies"""
+        days = int(request.query_params.get('days', 7))
+        start_date = timezone.now().date() - timedelta(days=days)
+        
+        anomalies = self.queryset.filter(
+            date__gte=start_date,
+            anomaly_detected=True
+        ).select_related('user').order_by('-risk_score')
+        
+        serializer = self.get_serializer(anomalies, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['get'])
+    def user_timeline(self, request, pk=None):
+        """Get activity timeline for a specific user"""
+        user_id = pk
+        days = int(request.query_params.get('days', 30))
+        start_date = timezone.now().date() - timedelta(days=days)
+        
+        timeline = self.queryset.filter(
+            user_id=user_id,
+            date__gte=start_date
+        ).order_by('date')
+        
+        serializer = self.get_serializer(timeline, many=True)
+        return Response(serializer.data)
+
+
+class SecurityAlertViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for security alerts
+    AI-powered threat detection and management
+    """
+    queryset = SecurityAlert.objects.select_related('user', 'resolved_by').all()
+    serializer_class = SecurityAlertSerializer
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['severity', 'status', 'alert_type']
+    search_fields = ['title', 'description', 'user__email']
+    ordering = ['-detection_time']
+    
+    @action(detail=True, methods=['post'])
+    def resolve(self, request, pk=None):
+        """Mark alert as resolved"""
+        alert = self.get_object()
+        alert.status = 'resolved'
+        alert.resolved_at = timezone.now()
+        alert.resolved_by = request.user
+        alert.resolution_notes = request.data.get('notes', '')
+        alert.save()
+        
+        serializer = self.get_serializer(alert)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def investigate(self, request, pk=None):
+        """Mark alert as under investigation"""
+        alert = self.get_object()
+        alert.status = 'investigating'
+        alert.save()
+        
+        serializer = self.get_serializer(alert)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def critical(self, request):
+        """Get all critical unresolved alerts"""
+        critical_alerts = self.queryset.filter(
+            severity='critical',
+            status__in=['new', 'investigating']
+        )
+        
+        serializer = self.get_serializer(critical_alerts, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def statistics(self, request):
+        """Get security alert statistics"""
+        days = int(request.query_params.get('days', 30))
+        start_date = timezone.now() - timedelta(days=days)
+        
+        stats = {
+            'total_alerts': self.queryset.filter(detection_time__gte=start_date).count(),
+            'by_severity': dict(self.queryset.filter(
+                detection_time__gte=start_date
+            ).values('severity').annotate(count=Count('id')).values_list('severity', 'count')),
+            'by_status': dict(self.queryset.filter(
+                detection_time__gte=start_date
+            ).values('status').annotate(count=Count('id')).values_list('status', 'count')),
+            'resolution_time_avg_hours': 0,  # Calculate from resolved alerts
+        }
+        
+        return Response(stats)
+
+
+class PredictiveInsightViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for AI-generated predictions and insights
+    Machine learning powered recommendations
+    """
+    queryset = PredictiveInsight.objects.select_related('acknowledged_by').all()
+    serializer_class = PredictiveInsightSerializer
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['insight_type', 'impact_level', 'is_active', 'is_acknowledged']
+    ordering = ['-created_at']
+    
+    @action(detail=True, methods=['post'])
+    def acknowledge(self, request, pk=None):
+        """Acknowledge an insight"""
+        insight = self.get_object()
+        insight.is_acknowledged = True
+        insight.acknowledged_by = request.user
+        insight.acknowledged_at = timezone.now()
+        insight.save()
+        
+        serializer = self.get_serializer(insight)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def pending(self, request):
+        """Get unacknowledged insights"""
+        pending = self.queryset.filter(
+            is_active=True,
+            is_acknowledged=False
+        ).order_by('-confidence_score')
+        
+        serializer = self.get_serializer(pending, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def high_priority(self, request):
+        """Get high-impact unacknowledged insights"""
+        high_priority = self.queryset.filter(
+            is_active=True,
+            is_acknowledged=False,
+            impact_level='high'
+        ).order_by('-confidence_score')
+        
+        serializer = self.get_serializer(high_priority, many=True)
+        return Response(serializer.data)
+
+
+class FeatureUsageAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for feature usage analytics
+    Track feature adoption and health
+    """
+    queryset = FeatureUsageAnalytics.objects.all()
+    serializer_class = FeatureUsageAnalyticsSerializer
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['feature_name', 'date', 'trend']
+    ordering = ['-date']
+    
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """Get summary of all features"""
+        days = int(request.query_params.get('days', 7))
+        start_date = timezone.now().date() - timedelta(days=days)
+        
+        summary = self.queryset.filter(date__gte=start_date).values(
+            'feature_name'
+        ).annotate(
+            avg_adoption_rate=Avg('adoption_rate_percentage'),
+            avg_health_score=Avg('health_score'),
+            total_users=Sum('active_users'),
+            total_usage=Sum('total_usage_count')
+        ).order_by('-total_usage')
+        
+        return Response(list(summary))
+    
+    @action(detail=False, methods=['get'])
+    def trending(self, request):
+        """Get trending features"""
+        trending = self.queryset.filter(
+            trend='growing'
+        ).order_by('-growth_rate_percentage')[:10]
+        
+        serializer = self.get_serializer(trending, many=True)
+        return Response(serializer.data)
+
+
+class ErrorLogAnalyticsViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for error analytics
+    AI-powered error tracking and root cause analysis
+    """
+    queryset = ErrorLogAnalytics.objects.all()
+    serializer_class = ErrorLogAnalyticsSerializer
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['severity', 'status', 'error_type']
+    search_fields = ['error_type', 'error_message']
+    ordering = ['-last_occurrence']
+    
+    @action(detail=True, methods=['post'])
+    def mark_resolved(self, request, pk=None):
+        """Mark error as resolved"""
+        error = self.get_object()
+        error.status = 'resolved'
+        error.resolution_notes = request.data.get('notes', '')
+        error.resolved_at = timezone.now()
+        error.save()
+        
+        serializer = self.get_serializer(error)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def critical_errors(self, request):
+        """Get all critical unresolved errors"""
+        critical = self.queryset.filter(
+            severity='critical',
+            status='open'
+        ).order_by('-occurrence_count')
+        
+        serializer = self.get_serializer(critical, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def statistics(self, request):
+        """Get error statistics"""
+        days = int(request.query_params.get('days', 7))
+        start_date = timezone.now() - timedelta(days=days)
+        
+        stats = {
+            'total_errors': self.queryset.filter(last_occurrence__gte=start_date).count(),
+            'total_occurrences': self.queryset.filter(
+                last_occurrence__gte=start_date
+            ).aggregate(total=Sum('occurrence_count'))['total'] or 0,
+            'by_severity': dict(self.queryset.filter(
+                last_occurrence__gte=start_date
+            ).values('severity').annotate(count=Count('id')).values_list('severity', 'count')),
+            'affected_users': self.queryset.filter(
+                last_occurrence__gte=start_date
+            ).aggregate(total=Sum('affected_users_count'))['total'] or 0,
+        }
+        
+        return Response(stats)
+
+
+class SystemHealthCheckViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for system health monitoring
+    Real-time system status and diagnostics
+    """
+    queryset = SystemHealthCheck.objects.all()
+    serializer_class = SystemHealthCheckSerializer
+    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    ordering = ['-check_time']
+    
+    @action(detail=False, methods=['get'])
+    def latest(self, request):
+        """Get latest health check"""
+        latest = self.queryset.first()
+        if latest:
+            serializer = self.get_serializer(latest)
+            return Response(serializer.data)
+        return Response({})
+    
+    @action(detail=False, methods=['get'])
+    def history(self, request):
+        """Get health check history"""
+        hours = int(request.query_params.get('hours', 24))
+        start_time = timezone.now() - timedelta(hours=hours)
+        
+        history = self.queryset.filter(check_time__gte=start_time).order_by('check_time')
+        serializer = self.get_serializer(history, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def component_status(self, request):
+        """Get current status of all system components"""
+        latest = self.queryset.first()
+        if latest:
+            return Response({
+                'database': latest.database_status,
+                'redis': latest.redis_status,
+                'celery': latest.celery_status,
+                'storage': latest.storage_status,
+                'api': latest.api_status,
+                'overall': latest.overall_status,
+                'health_score': latest.health_score,
+                'check_time': latest.check_time,
+            })
+        return Response({})
+

@@ -263,7 +263,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'is_deleted', 'deleted_at', 'deleted_by',
             'created_at', 'updated_at',
             # Write-only fields for user creation
-            'email', 'password', 'first_name', 'last_name'
+            'email', 'password', 'first_name', 'last_name', 'phone'
         ]
         read_only_fields = [
             'id', 'user', 'last_login_ip', 'last_login_at', 'failed_login_attempts',

@@ -49,13 +49,17 @@ INSTALLED_APPS = [
     'corsheaders',
     'drf_spectacular',
     
-    # Local apps
+    # Local apps - Core
     'apps.core',
     'apps.users',
     'apps.api',
+    'apps.rbac',
+    
+    # Local apps - Features (Plugin Architecture)
     'apps.pid_analysis',
     'apps.pfd_converter',
-    'apps.rbac',
+    'apps.crs_documents',
+    # Add new features here - no core changes needed!
 ]
 
 # Add storages only if S3 is enabled (prevents import errors when not needed)
