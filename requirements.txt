@@ -19,6 +19,11 @@ PyPDF2==3.0.1
 pdf2image==1.17.0
 pymupdf==1.24.0
 
+# Google Sheets API
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.1.1
+google-auth-oauthlib>=1.1.0
+
 # MongoDB - NoSQL database for reports and unstructured data
 pymongo==4.6.1
 motor==3.3.2

@@ -58,7 +58,7 @@ INSTALLED_APPS = [
     # Local apps - Features (Plugin Architecture)
     'apps.pid_analysis',
     'apps.pfd_converter',
-    'apps.crs_documents',
+    'apps.crs',
     # Add new features here - no core changes needed!
 ]
 

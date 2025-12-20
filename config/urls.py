@@ -76,7 +76,7 @@ urlpatterns = [
     # API endpoints - Features (Plugin Architecture)
     path('api/v1/pid/', include('apps.pid_analysis.urls')),
     path('api/v1/pfd/', include('apps.pfd_converter.urls')),
-    path('api/v1/crs/', include('apps.crs_documents.urls')),
+    path('api/v1/crs/', include('apps.crs.urls')),
     path('api/v1/projects/', include('apps.core.project_urls')),
     # Add new feature URLs here - no routing changes needed!
     
