@@ -224,6 +224,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     """User profile serializer with full details"""
     user = UserSerializer(read_only=True)
     organization_name = serializers.CharField(source='organization.name', read_only=True)
+    organization_id = serializers.UUIDField(write_only=True, required=False)
     roles = RoleListSerializer(many=True, read_only=True)
     role_ids = serializers.ListField(
         child=serializers.UUIDField(),
@@ -261,7 +262,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserProfile
         fields = [
-            'id', 'user', 'organization', 'organization_name', 'status', 'is_mfa_enabled',
+            'id', 'user', 'organization', 'organization_id', 'organization_name', 'status', 'is_mfa_enabled',
             'roles', 'role_ids', 'module_ids', 'permissions', 'modules',
             'employee_id', 'department', 'job_title', 'manager',
             'last_login_ip', 'last_login_at', 'failed_login_attempts',
@@ -288,6 +289,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         role_ids = validated_data.pop('role_ids', [])
         module_ids = validated_data.pop('module_ids', [])
+        organization_id = validated_data.pop('organization_id', None)
         
         # Extract user data
         email = validated_data.pop('email')
@@ -295,6 +297,10 @@ class UserProfileSerializer(serializers.ModelSerializer):
         first_name = validated_data.pop('first_name', '')
         last_name = validated_data.pop('last_name', '')
         phone = validated_data.pop('phone', None)
+        
+        # Set organization from organization_id if provided
+        if organization_id:
+            validated_data['organization'] = Organization.objects.get(id=organization_id)
         
         # Auto-assign organization if not provided
         if 'organization' not in validated_data or validated_data['organization'] is None:
