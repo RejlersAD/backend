@@ -184,6 +184,7 @@ class Command(BaseCommand):
         self.stdout.write(f'  Total permissions: {len(permissions)}')
 
         # Define Roles with Permissions
+        # Only Super Admin and Admin roles - all other users get custom roles based on selected features
         roles_data = [
             {
                 'name': 'Super Administrator',
@@ -198,74 +199,8 @@ class Command(BaseCommand):
                 'code': 'admin',
                 'level': 2,
                 'description': 'Organization administrator - manages users and settings',
-                'permissions': [
-                    'pid_upload', 'pid_view', 'pid_update', 'pid_delete', 'pid_approve', 'pid_export',
-                    'pfd_upload', 'pfd_view', 'pfd_convert', 'pfd_conversion_view', 'pfd_approve', 'pfd_delete', 'pfd_feedback',
-                    'crs_upload', 'crs_view', 'crs_update', 'crs_delete', 'crs_export', 'crs_approve',
-                    'user_create', 'user_view', 'user_update', 'user_delete', 'user_roles',
-                    'org_view', 'org_update',
-                    'audit_view', 'audit_export',
-                    'file_upload', 'file_view', 'file_delete',
-                    'report_view', 'report_generate',
-                ],
-                'modules': ['pid_analysis', 'pfd_to_pid', 'crs_documents', 'user_mgmt', 'org_settings', 'audit_logs', 'file_storage', 'reports']
-            },
-            {
-                'name': 'Manager',
-                'code': 'manager',
-                'level': 3,
-                'description': 'Project manager - can approve and manage documents',
-                'permissions': [
-                    'pid_upload', 'pid_view', 'pid_update', 'pid_approve', 'pid_export',
-                    'pfd_upload', 'pfd_view', 'pfd_convert', 'pfd_conversion_view', 'pfd_approve', 'pfd_feedback',
-                    'crs_upload', 'crs_view', 'crs_update', 'crs_export', 'crs_approve',
-                    'user_view',
-                    'file_upload', 'file_view',
-                    'report_view', 'report_generate',
-                ],
-                'modules': ['pid_analysis', 'pfd_to_pid', 'crs_documents', 'file_storage', 'reports']
-            },
-            {
-                'name': 'Engineer',
-                'code': 'engineer',
-                'level': 4,
-                'description': 'Engineering professional - can upload and analyze documents',
-                'permissions': [
-                    'pid_upload', 'pid_view', 'pid_update', 'pid_export',
-                    'pfd_upload', 'pfd_view', 'pfd_convert', 'pfd_conversion_view', 'pfd_feedback',
-                    'crs_upload', 'crs_view', 'crs_update', 'crs_export',
-                    'file_upload', 'file_view',
-                    'report_view',
-                ],
-                'modules': ['pid_analysis', 'pfd_to_pid', 'crs_documents', 'file_storage', 'reports']
-            },
-            {
-                'name': 'Reviewer',
-                'code': 'reviewer',
-                'level': 5,
-                'description': 'Review specialist - can view and export analysis results',
-                'permissions': [
-                    'pid_view', 'pid_export',
-                    'pfd_view', 'pfd_conversion_view', 'pfd_feedback',
-                    'crs_view', 'crs_export',
-                    'file_view',
-                    'report_view',
-                ],
-                'modules': ['pid_analysis', 'pfd_to_pid', 'crs_documents', 'file_storage', 'reports']
-            },
-            {
-                'name': 'Viewer',
-                'code': 'viewer',
-                'level': 6,
-                'description': 'Read-only access - can only view analysis results',
-                'permissions': [
-                    'pid_view',
-                    'pfd_view', 'pfd_conversion_view',
-                    'crs_view',
-                    'file_view',
-                    'report_view',
-                ],
-                'modules': ['pid_analysis', 'pfd_to_pid', 'crs_documents', 'file_storage', 'reports']
+                'permissions': list(permissions.keys()),  # All permissions
+                'modules': list(modules.keys())  # All modules
             },
         ]
 

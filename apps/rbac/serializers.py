@@ -355,20 +355,26 @@ class UserProfileSerializer(serializers.ModelSerializer):
         # Assign roles based on modules (feature-based access)
         if module_ids:
             request_user = self.context['request'].user
-            # Find or create a custom role for this user based on selected modules
             from django.db import transaction
             
             with transaction.atomic():
-                # Get the "Custom User" role or create one
+                # Create a unique custom role for this user based on email
+                user_role_code = f'custom_{email.split("@")[0]}'
                 custom_role, created = Role.objects.get_or_create(
-                    code='custom_user',
+                    code=user_role_code,
                     defaults={
-                        'name': 'Custom User',
-                        'description': 'Custom user role with selected features',
-                        'level': 5,
+                        'name': f'Custom Role - {first_name} {last_name}',
+                        'description': f'Custom role for {email} with selected features',
+                        'level': 10,  # Higher level for custom roles
                         'is_active': True
                     }
                 )
+                
+                # If role already exists, update the name
+                if not created:
+                    custom_role.name = f'Custom Role - {first_name} {last_name}'
+                    custom_role.description = f'Custom role for {email} with selected features'
+                    custom_role.save()
                 
                 # Assign the custom role to the user
                 user_role, _ = UserRole.objects.get_or_create(
@@ -377,6 +383,10 @@ class UserProfileSerializer(serializers.ModelSerializer):
                     assigned_by=request_user,
                     defaults={'is_primary': not role_ids}  # Primary if no other roles
                 )
+                
+                # Clear existing module assignments for this custom role
+                RoleModule.objects.filter(role=custom_role).delete()
+                RolePermission.objects.filter(role=custom_role).delete()
                 
                 # Assign modules to the role
                 for module_id in module_ids:
