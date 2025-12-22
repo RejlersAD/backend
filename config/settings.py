@@ -162,8 +162,11 @@ REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 
-# CORS Configuration - Soft-coded using environment variables
-# Default allowed origins - can be overridden completely via CORS_ALLOWED_ORIGINS env variable
+# ==============================================================================
+# CORS CONFIGURATION (UNIFIED - All CORS settings in one place)
+# ==============================================================================
+
+# Default allowed origins for development
 DEFAULT_CORS_ORIGINS = [
     'http://localhost:3000',
     'http://127.0.0.1:3000',
@@ -171,10 +174,15 @@ DEFAULT_CORS_ORIGINS = [
     'http://127.0.0.1:5173',
 ]
 
-# Add production frontend URL from environment (soft-coded)
+# Add production frontend URL from environment
 FRONTEND_URL = config('FRONTEND_URL', default='https://airflow-frontend.vercel.app')
 if FRONTEND_URL:
     DEFAULT_CORS_ORIGINS.append(FRONTEND_URL)
+
+# Add backend URL for self-referencing
+BACKEND_URL = config('BACKEND_URL', default='https://aiflowbackend-production.up.railway.app')
+if BACKEND_URL:
+    DEFAULT_CORS_ORIGINS.append(BACKEND_URL)
 
 # Get additional origins from environment variable (comma-separated)
 additional_origins = config('CORS_ALLOWED_ORIGINS', default='', cast=str)
@@ -185,10 +193,23 @@ if additional_origins:
 # Remove duplicates while preserving order
 CORS_ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS))
 
-CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=False, cast=bool)  # Only enable via env var for testing
+# Emergency mode - allow all origins (Railway should set this to True)
+CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=True, cast=bool)
 
-# Enhanced CORS headers for file uploads and complex requests
+# Allow credentials (required for authentication)
+CORS_ALLOW_CREDENTIALS = True
+
+# Allowed HTTP methods
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
+
+# Allowed request headers (comprehensive list for file uploads and auth)
 CORS_ALLOW_HEADERS = [
     'accept',
     'accept-encoding',
@@ -203,58 +224,55 @@ CORS_ALLOW_HEADERS = [
     'cache-control',
 ]
 
-# Allow all HTTP methods for API endpoints
-CORS_ALLOW_METHODS = [
-    'DELETE',
-    'GET',
-    'OPTIONS',
-    'PATCH',
-    'POST',
-    'PUT',
-]
-
-# Expose additional headers to frontend
+# Expose headers to frontend (for file downloads and custom headers)
 CORS_EXPOSE_HEADERS = [
+    'content-type',
     'content-disposition',
     'content-length',
-    'content-type',
+    'x-csrftoken',
 ]
 
-# Soft-coded regex patterns for dynamic origins (Vercel previews, localhost ports)
+# Regex patterns for dynamic origins (Vercel previews, localhost ports)
 CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://.*\.vercel\.app$",  # All Vercel deployments (production + previews)
+    r"^https://.*\.vercel\.app$",  # All Vercel deployments
     r"^http://localhost:\d+$",  # All localhost ports
     r"^http://127\.0\.0\.1:\d+$",  # All 127.0.0.1 ports
 ]
 
-# Auto-add dynamic Vercel deployment URL if specified
-vercel_domain = config('VERCEL_URL', default='')
-if vercel_domain:
-    vercel_origin = f'https://{vercel_domain}' if not vercel_domain.startswith('http') else vercel_domain
-    if vercel_origin not in CORS_ALLOWED_ORIGINS:
-        CORS_ALLOWED_ORIGINS.append(vercel_origin)
+# Preflight request cache duration (24 hours)
+CORS_PREFLIGHT_MAX_AGE = 86400
 
-# CSRF Trusted Origins - Soft-coded for production security
+# Logging for debugging
+print(f"[CORS] ====== Configuration Loaded ======")
+print(f"[CORS] Allow All Origins: {CORS_ALLOW_ALL_ORIGINS}")
+print(f"[CORS] Allow Credentials: {CORS_ALLOW_CREDENTIALS}")
+print(f"[CORS] Frontend URL: {FRONTEND_URL}")
+print(f"[CORS] Backend URL: {BACKEND_URL}")
+if not CORS_ALLOW_ALL_ORIGINS:
+    print(f"[CORS] Specific Origins: {CORS_ALLOWED_ORIGINS}")
+print(f"[CORS] ===================================")
+
+# ==============================================================================
+# CSRF CONFIGURATION
+# ==============================================================================
+
 # Default trusted origins
 DEFAULT_CSRF_ORIGINS = []
 
-# Add production frontend from environment
+# Add frontend and backend URLs
 if FRONTEND_URL:
     DEFAULT_CSRF_ORIGINS.append(FRONTEND_URL)
-
-# Add backend URL from environment (Railway production)
-BACKEND_URL = config('BACKEND_URL', default='https://aiflowbackend-production.up.railway.app')
 if BACKEND_URL:
     DEFAULT_CSRF_ORIGINS.append(BACKEND_URL)
 
-# Add Railway domain dynamically if available
+# Add Railway domain dynamically
 railway_domain = config('RAILWAY_PUBLIC_DOMAIN', default='')
 if railway_domain:
     csrf_origin = f'https://{railway_domain}' if not railway_domain.startswith('http') else railway_domain
     if csrf_origin not in DEFAULT_CSRF_ORIGINS:
         DEFAULT_CSRF_ORIGINS.append(csrf_origin)
 
-# Get additional CSRF origins from environment (comma-separated)
+# Get additional CSRF origins from environment
 additional_csrf = config('CSRF_TRUSTED_ORIGINS', default='', cast=str)
 if additional_csrf:
     csrf_list = [s.strip() for s in additional_csrf.split(',') if s.strip()]
@@ -263,73 +281,13 @@ if additional_csrf:
 # Remove duplicates
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(DEFAULT_CSRF_ORIGINS))
 
-# CSRF exemption for API endpoints
+# CSRF settings
 CSRF_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SAMESITE = 'None' if not DEBUG else 'Lax'
 CSRF_USE_SESSIONS = False
 
 # ==============================================================================
-# UNIFIED CORS CONFIGURATION
-# ==============================================================================
-# This section consolidates all CORS settings in one place for clarity
-
-# Emergency mode - allow all origins (can be disabled in production)
-# Set CORS_ALLOW_ALL_ORIGINS=False in Railway environment to use specific origins
-CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=True, cast=bool)
-
-# If not allowing all origins, use the configured list
-if not CORS_ALLOW_ALL_ORIGINS:
-    # CORS_ALLOWED_ORIGINS is already configured above (lines 165-186)
-    pass  # Use the CORS_ALLOWED_ORIGINS list defined earlier
-
-# Allow credentials (cookies, authorization headers)
-CORS_ALLOW_CREDENTIALS = True
-
-# Allowed HTTP methods
-CORS_ALLOW_METHODS = [
-    'DELETE',
-    'GET',
-    'OPTIONS',
-    'PATCH',
-    'POST',
-    'PUT',
-]
-
-# Allowed request headers
-CORS_ALLOW_HEADERS = [
-    'accept',
-    'accept-encoding',
-    'authorization',
-    'content-type',
-    'dnt',
-    'origin',
-    'user-agent',
-    'x-csrftoken',
-    'x-requested-with',
-    'cache-control',
-]
-
-# Expose headers to the frontend
-CORS_EXPOSE_HEADERS = [
-    'content-type',
-    'content-disposition',
-    'content-length',
-    'x-csrftoken',
-]
-
-# Preflight request cache duration (24 hours)
-CORS_PREFLIGHT_MAX_AGE = 86400
-
-# Logging for debugging
-print(f"[CORS] Configuration Loaded:")
-print(f"[CORS] - Allow All Origins: {CORS_ALLOW_ALL_ORIGINS}")
-print(f"[CORS] - Allow Credentials: {CORS_ALLOW_CREDENTIALS}")
-if not CORS_ALLOW_ALL_ORIGINS:
-    print(f"[CORS] - Allowed Origins: {CORS_ALLOWED_ORIGINS}")
-print(f"[CORS] - Frontend URL: {FRONTEND_URL}")
-
-# ==============================================================================
-# End of CORS Configuration
+# End of CORS/CSRF Configuration
 # ==============================================================================
 
 # Celery Configuration
