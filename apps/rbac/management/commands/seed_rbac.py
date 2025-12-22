@@ -52,46 +52,53 @@ class Command(BaseCommand):
                 'order': 2
             },
             {
+                'name': 'CRS Document Management',
+                'code': 'crs_documents',
+                'description': 'Upload and manage CRS documents with AI analysis',
+                'icon': 'FolderOpen',
+                'order': 3
+            },
+            {
                 'name': 'User Management',
                 'code': 'user_mgmt',
                 'description': 'Manage users, roles, and permissions',
                 'icon': 'Users',
-                'order': 3
+                'order': 4
             },
             {
                 'name': 'Organization Settings',
                 'code': 'org_settings',
                 'description': 'Configure organization settings and preferences',
                 'icon': 'Settings',
-                'order': 4
+                'order': 5
             },
             {
                 'name': 'Audit Logs',
                 'code': 'audit_logs',
                 'description': 'View system audit logs and activity',
                 'icon': 'FileSearch',
-                'order': 5
+                'order': 6
             },
             {
                 'name': 'File Storage',
                 'code': 'file_storage',
                 'description': 'Manage files and documents in S3',
                 'icon': 'Database',
-                'order': 6
+                'order': 7
             },
             {
                 'name': 'Reports & Analytics',
                 'code': 'reports',
                 'description': 'Generate reports and view analytics',
                 'icon': 'BarChart',
-                'order': 7
+                'order': 8
             },
             {
                 'name': 'API Access',
                 'code': 'api_access',
                 'description': 'Access REST APIs programmatically',
                 'icon': 'Code',
-                'order': 8
+                'order': 9
             },
         ]
 
@@ -125,6 +132,14 @@ class Command(BaseCommand):
             {'name': 'Approve P&ID Conversions', 'code': 'pfd_approve', 'module': 'pfd_to_pid', 'action': 'approve', 'description': 'Approve AI-generated P&ID'},
             {'name': 'Delete PFD/Conversions', 'code': 'pfd_delete', 'module': 'pfd_to_pid', 'action': 'delete', 'description': 'Delete PFD documents and conversions'},
             {'name': 'Provide Feedback', 'code': 'pfd_feedback', 'module': 'pfd_to_pid', 'action': 'create', 'description': 'Provide feedback on conversions'},
+            
+            # CRS Document Management Permissions
+            {'name': 'Upload CRS Documents', 'code': 'crs_upload', 'module': 'crs_documents', 'action': 'create', 'description': 'Upload CRS documents for processing'},
+            {'name': 'View CRS Documents', 'code': 'crs_view', 'module': 'crs_documents', 'action': 'read', 'description': 'View uploaded CRS documents'},
+            {'name': 'Update CRS Documents', 'code': 'crs_update', 'module': 'crs_documents', 'action': 'update', 'description': 'Update CRS document information'},
+            {'name': 'Delete CRS Documents', 'code': 'crs_delete', 'module': 'crs_documents', 'action': 'delete', 'description': 'Delete CRS documents'},
+            {'name': 'Export CRS Reports', 'code': 'crs_export', 'module': 'crs_documents', 'action': 'export', 'description': 'Export CRS analysis reports'},
+            {'name': 'Approve CRS Documents', 'code': 'crs_approve', 'module': 'crs_documents', 'action': 'approve', 'description': 'Approve CRS document analysis'},
             
             # User Management Permissions
             {'name': 'Create Users', 'code': 'user_create', 'module': 'user_mgmt', 'action': 'create', 'description': 'Create new user accounts'},
@@ -186,40 +201,43 @@ class Command(BaseCommand):
                 'permissions': [
                     'pid_upload', 'pid_view', 'pid_update', 'pid_delete', 'pid_approve', 'pid_export',
                     'pfd_upload', 'pfd_view', 'pfd_convert', 'pfd_conversion_view', 'pfd_approve', 'pfd_delete', 'pfd_feedback',
+                    'crs_upload', 'crs_view', 'crs_update', 'crs_delete', 'crs_export', 'crs_approve',
                     'user_create', 'user_view', 'user_update', 'user_delete', 'user_roles',
                     'org_view', 'org_update',
                     'audit_view', 'audit_export',
                     'file_upload', 'file_view', 'file_delete',
                     'report_view', 'report_generate',
                 ],
-                'modules': ['pid_analysis', 'pfd_to_pid', 'user_mgmt', 'org_settings', 'audit_logs', 'file_storage', 'reports']
+                'modules': ['pid_analysis', 'pfd_to_pid', 'crs_documents', 'user_mgmt', 'org_settings', 'audit_logs', 'file_storage', 'reports']
             },
             {
                 'name': 'Manager',
                 'code': 'manager',
                 'level': 3,
-                'description': 'Project manager - can approve and manage P&ID analysis',
+                'description': 'Project manager - can approve and manage documents',
                 'permissions': [
                     'pid_upload', 'pid_view', 'pid_update', 'pid_approve', 'pid_export',
                     'pfd_upload', 'pfd_view', 'pfd_convert', 'pfd_conversion_view', 'pfd_approve', 'pfd_feedback',
+                    'crs_upload', 'crs_view', 'crs_update', 'crs_export', 'crs_approve',
                     'user_view',
                     'file_upload', 'file_view',
                     'report_view', 'report_generate',
                 ],
-                'modules': ['pid_analysis', 'pfd_to_pid', 'file_storage', 'reports']
+                'modules': ['pid_analysis', 'pfd_to_pid', 'crs_documents', 'file_storage', 'reports']
             },
             {
                 'name': 'Engineer',
                 'code': 'engineer',
                 'level': 4,
-                'description': 'Engineering professional - can upload and analyze P&IDs',
+                'description': 'Engineering professional - can upload and analyze documents',
                 'permissions': [
                     'pid_upload', 'pid_view', 'pid_update', 'pid_export',
                     'pfd_upload', 'pfd_view', 'pfd_convert', 'pfd_conversion_view', 'pfd_feedback',
+                    'crs_upload', 'crs_view', 'crs_update', 'crs_export',
                     'file_upload', 'file_view',
                     'report_view',
                 ],
-                'modules': ['pid_analysis', 'pfd_to_pid', 'file_storage', 'reports']
+                'modules': ['pid_analysis', 'pfd_to_pid', 'crs_documents', 'file_storage', 'reports']
             },
             {
                 'name': 'Reviewer',
@@ -229,10 +247,11 @@ class Command(BaseCommand):
                 'permissions': [
                     'pid_view', 'pid_export',
                     'pfd_view', 'pfd_conversion_view', 'pfd_feedback',
+                    'crs_view', 'crs_export',
                     'file_view',
                     'report_view',
                 ],
-                'modules': ['pid_analysis', 'pfd_to_pid', 'file_storage', 'reports']
+                'modules': ['pid_analysis', 'pfd_to_pid', 'crs_documents', 'file_storage', 'reports']
             },
             {
                 'name': 'Viewer',
@@ -242,10 +261,11 @@ class Command(BaseCommand):
                 'permissions': [
                     'pid_view',
                     'pfd_view', 'pfd_conversion_view',
+                    'crs_view',
                     'file_view',
                     'report_view',
                 ],
-                'modules': ['pid_analysis', 'pfd_to_pid', 'file_storage', 'reports']
+                'modules': ['pid_analysis', 'pfd_to_pid', 'crs_documents', 'file_storage', 'reports']
             },
         ]
 

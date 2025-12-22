@@ -429,3 +429,38 @@ REPORT_FOOTER_NOTE = config('REPORT_FOOTER_NOTE', default='This document is the 
 
 # Format footer note with company name
 REPORT_FOOTER_NOTE_FORMATTED = REPORT_FOOTER_NOTE.format(company=REPORT_COMPANY_NAME)
+# ==============================================================================
+# EMAIL CONFIGURATION (AWS SES SMTP)
+# ==============================================================================
+
+# Email backend configuration
+EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.smtp.EmailBackend')
+
+# AWS SES SMTP Configuration
+EMAIL_HOST = config('EMAIL_HOST', default='email-smtp.us-east-1.amazonaws.com')
+EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
+EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
+EMAIL_USE_SSL = config('EMAIL_USE_SSL', default=False, cast=bool)
+
+# SMTP Credentials (from AWS SES)
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')  # SMTP Username
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')  # SMTP Password
+
+# From Email
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@rejlers.ae')
+SERVER_EMAIL = config('SERVER_EMAIL', default='admin@rejlers.ae')
+
+# Email settings
+EMAIL_TIMEOUT = 10  # Timeout in seconds
+EMAIL_SUBJECT_PREFIX = config('EMAIL_SUBJECT_PREFIX', default='[AIFlow] ')
+
+print("\n" + "=" * 60)
+print("EMAIL CONFIGURATION")
+print("=" * 60)
+print(f"Email Backend: {EMAIL_BACKEND}")
+print(f"Email Host: {EMAIL_HOST}")
+print(f"Email Port: {EMAIL_PORT}")
+print(f"Use TLS: {EMAIL_USE_TLS}")
+print(f"SMTP User Configured: {'Yes' if EMAIL_HOST_USER else 'No'}")
+print(f"Default From Email: {DEFAULT_FROM_EMAIL}")
+print("=" * 60 + "\n")

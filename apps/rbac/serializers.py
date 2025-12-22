@@ -230,6 +230,11 @@ class UserProfileSerializer(serializers.ModelSerializer):
         write_only=True,
         required=False
     )
+    module_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        write_only=True,
+        required=False
+    )
     permissions = serializers.SerializerMethodField()
     modules = serializers.SerializerMethodField()
     
@@ -257,7 +262,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = UserProfile
         fields = [
             'id', 'user', 'organization', 'organization_name', 'status', 'is_mfa_enabled',
-            'roles', 'role_ids', 'permissions', 'modules',
+            'roles', 'role_ids', 'module_ids', 'permissions', 'modules',
             'employee_id', 'department', 'job_title', 'manager',
             'last_login_ip', 'last_login_at', 'failed_login_attempts',
             'is_deleted', 'deleted_at', 'deleted_by',
@@ -282,6 +287,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     
     def create(self, validated_data):
         role_ids = validated_data.pop('role_ids', [])
+        module_ids = validated_data.pop('module_ids', [])
         
         # Extract user data
         email = validated_data.pop('email')
@@ -335,7 +341,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         # Create profile
         profile = UserProfile.objects.create(user=user, **validated_data)
         
-        # Assign roles
+        # Assign roles based on role_ids if provided
         if role_ids:
             request_user = self.context['request'].user
             for i, role_id in enumerate(role_ids):
@@ -345,6 +351,53 @@ class UserProfileSerializer(serializers.ModelSerializer):
                     assigned_by=request_user,
                     is_primary=(i == 0)
                 )
+        
+        # Assign roles based on modules (feature-based access)
+        if module_ids:
+            request_user = self.context['request'].user
+            # Find or create a custom role for this user based on selected modules
+            from django.db import transaction
+            
+            with transaction.atomic():
+                # Get the "Custom User" role or create one
+                custom_role, created = Role.objects.get_or_create(
+                    code='custom_user',
+                    defaults={
+                        'name': 'Custom User',
+                        'description': 'Custom user role with selected features',
+                        'level': 5,
+                        'is_active': True
+                    }
+                )
+                
+                # Assign the custom role to the user
+                user_role, _ = UserRole.objects.get_or_create(
+                    user_profile=profile,
+                    role=custom_role,
+                    assigned_by=request_user,
+                    defaults={'is_primary': not role_ids}  # Primary if no other roles
+                )
+                
+                # Assign modules to the role
+                for module_id in module_ids:
+                    RoleModule.objects.get_or_create(
+                        role=custom_role,
+                        module_id=module_id,
+                        defaults={'granted_by': request_user}
+                    )
+                
+                # Get all permissions for the selected modules and assign them
+                permissions = Permission.objects.filter(
+                    module_id__in=module_ids,
+                    is_active=True
+                )
+                
+                for permission in permissions:
+                    RolePermission.objects.get_or_create(
+                        role=custom_role,
+                        permission=permission,
+                        defaults={'granted_by': request_user}
+                    )
         
         return profile
     
