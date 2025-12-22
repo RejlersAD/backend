@@ -264,26 +264,28 @@ if additional_csrf:
 CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(DEFAULT_CSRF_ORIGINS))
 
 # CSRF exemption for API endpoints
-CSRF_COOKIE_SECURE = True
-CSRF_COOKIE_SAMESITE = 'None'
+CSRF_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SAMESITE = 'None' if not DEBUG else 'Lax'
 CSRF_USE_SESSIONS = False
 
-# EMERGENCY CORS SETTINGS - Use only django-cors-headers
-CORS_ALLOW_ALL_ORIGINS = True  
-CORS_ALLOW_CREDENTIALS = False
-CORS_ALLOWED_HEADERS = [
-    'accept',
-    'accept-encoding',
-    'authorization',
-    'content-type',
-    'dnt',
-    'origin',
-    'user-agent',
-    'x-csrftoken',
-    'x-requested-with',
-]
+# ==============================================================================
+# UNIFIED CORS CONFIGURATION
+# ==============================================================================
+# This section consolidates all CORS settings in one place for clarity
 
-# Allow all HTTP methods
+# Emergency mode - allow all origins (can be disabled in production)
+# Set CORS_ALLOW_ALL_ORIGINS=False in Railway environment to use specific origins
+CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=True, cast=bool)
+
+# If not allowing all origins, use the configured list
+if not CORS_ALLOW_ALL_ORIGINS:
+    # CORS_ALLOWED_ORIGINS is already configured above (lines 165-186)
+    pass  # Use the CORS_ALLOWED_ORIGINS list defined earlier
+
+# Allow credentials (cookies, authorization headers)
+CORS_ALLOW_CREDENTIALS = True
+
+# Allowed HTTP methods
 CORS_ALLOW_METHODS = [
     'DELETE',
     'GET',
@@ -293,19 +295,7 @@ CORS_ALLOW_METHODS = [
     'PUT',
 ]
 
-# Simple logging
-print(f"[CORS] EMERGENCY MODE: Allow All Origins = {CORS_ALLOW_ALL_ORIGINS}")
-
-# Additional CORS settings for proper functionality
-CORS_ALLOW_METHODS = [
-    'DELETE',
-    'GET',
-    'OPTIONS',
-    'PATCH',
-    'POST',
-    'PUT',
-]
-
+# Allowed request headers
 CORS_ALLOW_HEADERS = [
     'accept',
     'accept-encoding',
@@ -316,17 +306,31 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+    'cache-control',
 ]
 
 # Expose headers to the frontend
 CORS_EXPOSE_HEADERS = [
     'content-type',
     'content-disposition',
+    'content-length',
     'x-csrftoken',
 ]
 
-# Preflight request cache duration
-CORS_PREFLIGHT_MAX_AGE = 86400  # 24 hours
+# Preflight request cache duration (24 hours)
+CORS_PREFLIGHT_MAX_AGE = 86400
+
+# Logging for debugging
+print(f"[CORS] Configuration Loaded:")
+print(f"[CORS] - Allow All Origins: {CORS_ALLOW_ALL_ORIGINS}")
+print(f"[CORS] - Allow Credentials: {CORS_ALLOW_CREDENTIALS}")
+if not CORS_ALLOW_ALL_ORIGINS:
+    print(f"[CORS] - Allowed Origins: {CORS_ALLOWED_ORIGINS}")
+print(f"[CORS] - Frontend URL: {FRONTEND_URL}")
+
+# ==============================================================================
+# End of CORS Configuration
+# ==============================================================================
 
 # Celery Configuration
 CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://redis:6379/0')

@@ -6,6 +6,9 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db import transaction
 from django.core.files.storage import default_storage
+from django.http import HttpResponse
+from django.conf import settings
+from io import BytesIO
 import json
 import os
 
@@ -22,6 +25,14 @@ from .serializers import (
 )
 from .pdf_extractor import PDFCommentExtractor
 from .google_sheets_service import GoogleSheetsService
+
+# Import helpers from crs_documents for PDF processing
+try:
+    from apps.crs_documents.helpers.comment_extractor import extract_reviewer_comments, get_comment_statistics
+    from apps.crs_documents.helpers.template_populator import populate_crs_template
+    HELPERS_AVAILABLE = True
+except ImportError:
+    HELPERS_AVAILABLE = False
 
 
 class CRSDocumentViewSet(viewsets.ModelViewSet):
@@ -317,6 +328,114 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                 many=True
             ).data
         })
+    
+    @action(detail=False, methods=['post'], url_path='upload-and-process')
+    def upload_and_process(self, request):
+        """
+        UNIFIED ENDPOINT: Upload CRS file (PDF or Excel) and process it
+        
+        POST /api/v1/crs/documents/upload-and-process/
+        Body (multipart/form-data):
+            - file: PDF or Excel file (required)
+            - project_name: string (optional)
+            - document_number: string (optional)
+            - revision: string (optional)
+            - contractor: string (optional)
+        
+        Returns: Populated CRS template Excel file for download
+        """
+        if not HELPERS_AVAILABLE:
+            return Response({
+                'error': 'PDF/Excel processing helpers not available. Install PyPDF2 and openpyxl.',
+                'success': False
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        try:
+            # Get uploaded file
+            uploaded_file = request.FILES.get('file')
+            if not uploaded_file:
+                return Response({
+                    'error': 'File is required',
+                    'success': False
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get metadata
+            metadata = {
+                'project_name': request.POST.get('project_name', ''),
+                'document_number': request.POST.get('document_number', ''),
+                'revision': request.POST.get('revision', ''),
+                'contractor': request.POST.get('contractor', ''),
+            }
+            
+            # Determine file type
+            file_name = uploaded_file.name.lower()
+            is_pdf = file_name.endswith('.pdf')
+            is_excel = file_name.endswith(('.xlsx', '.xls'))
+            
+            if not (is_pdf or is_excel):
+                return Response({
+                    'error': 'Invalid file type. Only PDF and Excel files are supported.',
+                    'success': False
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Process based on file type
+            if is_pdf:
+                # Extract comments from PDF
+                pdf_buffer = BytesIO(uploaded_file.read())
+                comments = extract_reviewer_comments(pdf_buffer)
+                
+                if not comments:
+                    return Response({
+                        'error': 'No comments found in the PDF file.',
+                        'success': False,
+                        'message': 'The PDF does not contain any extractable reviewer comments.'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                # Load CRS template
+                template_path = os.path.join(settings.BASE_DIR, 'apps', 'crs_documents', 'helpers', 'CRS template.xlsx')
+                if not os.path.exists(template_path):
+                    return Response({
+                        'error': 'CRS template not found',
+                        'success': False,
+                        'message': 'Server configuration error: CRS template.xlsx is missing.'
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                
+                # Populate template
+                output_buffer = populate_crs_template(
+                    template_path=template_path,
+                    comments=comments,
+                    metadata=metadata
+                )
+                
+                # Get statistics
+                stats = get_comment_statistics(comments)
+                
+                # Create response with Excel file
+                response = HttpResponse(
+                    output_buffer.getvalue(),
+                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+                response['Content-Disposition'] = f'attachment; filename="CRS_Populated_{metadata.get("document_number", "output")}.xlsx"'
+                response['X-Comment-Count'] = str(stats['total'])
+                response['X-Processing-Status'] = 'success'
+                
+                return response
+            
+            elif is_excel:
+                # Excel file uploaded - validate and standardize format
+                return Response({
+                    'error': 'Excel processing coming soon',
+                    'success': False,
+                    'message': 'Please upload a PDF file for now. Excel input will be supported soon.'
+                }, status=status.HTTP_501_NOT_IMPLEMENTED)
+            
+        except Exception as e:
+            import traceback
+            return Response({
+                'error': f'Error processing file: {str(e)}',
+                'success': False,
+                'details': traceback.format_exc()
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class CRSCommentViewSet(viewsets.ModelViewSet):
