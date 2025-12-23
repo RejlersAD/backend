@@ -1,5 +1,5 @@
 """
-API views for AIFlow.
+API views for RADAI.
 Smart ViewSets with proper permissions and pagination.
 """
 from rest_framework import viewsets, status
@@ -25,7 +25,7 @@ class HealthCheckView(APIView):
         """Return health status."""
         return Response({
             'status': 'healthy',
-            'message': 'AIFlow API is running successfully'
+            'message': 'RADAI API is running successfully'
         })
 
 

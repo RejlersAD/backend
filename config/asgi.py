@@ -1,5 +1,5 @@
 """
-ASGI config for AIFlow project.
+ASGI config for RADAI project.
 """
 
 import os

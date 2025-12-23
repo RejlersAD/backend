@@ -1,5 +1,5 @@
 """
-Celery configuration for AIFlow project.
+Celery configuration for RADAI project.
 Smart task queue configuration for background processing.
 """
 import os
@@ -8,7 +8,7 @@ from celery import Celery
 # Set the default Django settings module
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 
-app = Celery('aiflow')
+app = Celery('radai')
 
 # Using a string here means the worker doesn't have to serialize
 # the configuration object to child processes.

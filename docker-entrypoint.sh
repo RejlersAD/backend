@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🔧 Initializing AIFlow Backend..."
+echo "🔧 Initializing RADAI Backend..."
 
 # Ensure media directories exist with proper permissions
 mkdir -p /app/media/pid_drawings /app/media/pid_reports /app/media/avatars

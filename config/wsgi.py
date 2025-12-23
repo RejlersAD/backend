@@ -1,5 +1,5 @@
 """
-WSGI config for AIFlow project.
+WSGI config for RADAI project.
 """
 
 import os

@@ -111,7 +111,7 @@ else:
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.postgresql',
-            'NAME': config('DB_NAME', default='aiflow_db'),
+            'NAME': config('DB_NAME', default='radai_db'),
             'USER': config('DB_USER', default='postgres'),
             'PASSWORD': config('DB_PASSWORD', default='postgres'),
             'HOST': config('DB_HOST', default='db'),
@@ -300,8 +300,8 @@ CELERY_TIMEZONE = TIME_ZONE
 
 # API Documentation
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'AIFlow API',
-    'DESCRIPTION': 'Smart API for AIFlow application',
+    'TITLE': 'RADAI API',
+    'DESCRIPTION': 'Smart API for RADAI application',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
 }
@@ -388,7 +388,7 @@ MONGODB_URI = config(
     'MONGODB_URI',
     default='mongodb://mongo:kpdwrBybTiIyKRoUJmOAMfewZKtWqTeu@shuttle.proxy.rlwy.net:23002'
 )
-MONGODB_DATABASE = config('MONGODB_DATABASE', default='aiflow')
+MONGODB_DATABASE = config('MONGODB_DATABASE', default='radai')
 
 # MongoDB Collections (configurable)
 MONGODB_COLLECTIONS = {
@@ -452,7 +452,7 @@ SERVER_EMAIL = config('SERVER_EMAIL', default='admin@rejlers.ae')
 
 # Email settings
 EMAIL_TIMEOUT = 10  # Timeout in seconds
-EMAIL_SUBJECT_PREFIX = config('EMAIL_SUBJECT_PREFIX', default='[AIFlow] ')
+EMAIL_SUBJECT_PREFIX = config('EMAIL_SUBJECT_PREFIX', default='[RADAI] ')
 
 print("\n" + "=" * 60)
 print("EMAIL CONFIGURATION")

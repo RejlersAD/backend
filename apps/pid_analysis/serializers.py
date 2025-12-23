@@ -103,10 +103,21 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
             'methods_tried': []
         }
         
-        # Method 1: Extract from report_data JSON (most complete)
-        if hasattr(obj, 'report_data') and obj.report_data:
+        # PRIORITY METHOD 1: Database PIDIssue objects (have proper IDs for updates)
+        db_issues_qs = obj.issues.all().order_by('serial_number')
+        if db_issues_qs.exists():
+            db_issues_count = db_issues_qs.count()
+            result_issues = PIDIssueSerializer(db_issues_qs, many=True, context={'report': obj}).data
+            debug_info['methods_tried'].append(f'database PIDIssue objects - found {db_issues_count} issues (WITH IDs)')
+            logger.info(f"[get_issues] ✅ Found {db_issues_count} issues WITH IDs in database for report {obj.id}")
+        else:
+            debug_info['methods_tried'].append('database PIDIssue objects - none found')
+        
+        # FALLBACK METHOD 2: Extract from report_data JSON (only if no database issues)
+        if not result_issues and hasattr(obj, 'report_data') and obj.report_data:
             debug_info['has_report_data'] = True
             debug_info['report_data_type'] = str(type(obj.report_data))
+            logger.warning(f"[get_issues] ⚠️ No database issues found, falling back to JSON (issues will lack IDs!)")
             
             if isinstance(obj.report_data, dict):
                 debug_info['report_data_keys'] = list(obj.report_data.keys())
@@ -118,8 +129,8 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
                         issues_data = obj.report_data[key]
                         if isinstance(issues_data, list):
                             result_issues = issues_data
-                            debug_info['methods_tried'].append(f'report_data[{key}] - found {len(issues_data)} issues')
-                            logger.info(f"[get_issues] Found {len(issues_data)} issues in report_data[{key}] for report {obj.id}")
+                            debug_info['methods_tried'].append(f'report_data[{key}] - found {len(issues_data)} issues (NO IDs)')
+                            logger.warning(f"[get_issues] Found {len(issues_data)} issues in report_data[{key}] for report {obj.id} - NO DATABASE IDs!")
                             break
                         else:
                             debug_info['methods_tried'].append(f'report_data[{key}] - not a list: {type(issues_data)}')
@@ -131,51 +142,13 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
                         nested_issues = analysis_result['issues']
                         if isinstance(nested_issues, list):
                             result_issues = nested_issues
-                            debug_info['methods_tried'].append(f'nested analysis_result.issues - found {len(nested_issues)} issues')
-                            logger.info(f"[get_issues] Found {len(nested_issues)} issues in nested analysis_result for report {obj.id}")
+                            debug_info['methods_tried'].append(f'nested analysis_result.issues - found {len(nested_issues)} issues (NO IDs)')
+                            logger.warning(f"[get_issues] Found {len(nested_issues)} issues in nested analysis_result for report {obj.id} - NO DATABASE IDs!")
             else:
                 debug_info['methods_tried'].append(f'report_data not dict: {type(obj.report_data)}')
-        else:
+        elif not result_issues:
             debug_info['has_report_data'] = False
             debug_info['methods_tried'].append('no report_data available')
-        
-        # Method 2: Database PIDIssue objects
-        if not result_issues:
-            db_issues_qs = obj.issues.all().order_by('serial_number')
-            if db_issues_qs.exists():
-                db_issues_count = db_issues_qs.count()
-                result_issues = PIDIssueSerializer(db_issues_qs, many=True, context={'report': obj}).data
-                debug_info['methods_tried'].append(f'database PIDIssue objects - found {db_issues_count} issues')
-                logger.info(f"[get_issues] Found {db_issues_count} issues in database for report {obj.id}")
-            else:
-                debug_info['methods_tried'].append('database PIDIssue objects - none found')
-        
-        # Method 3: Generate mock issues if analysis indicates there should be some
-        if not result_issues and obj.total_issues > 0:
-            logger.warning(f"[get_issues] Report {obj.id} claims {obj.total_issues} total issues but none found via normal methods")
-            
-            # Try to extract any issue-like data from report_data
-            if isinstance(obj.report_data, dict):
-                mock_issues = []
-                for i in range(min(obj.total_issues, 10)):  # Limit to 10 mock issues
-                    mock_issue = {
-                        'id': f'mock_{i+1}',
-                        'serial_number': i + 1,
-                        'pid_reference': f'REF-{i+1:03d}',
-                        'issue_observed': 'Issue data not properly serialized - please check backend logs',
-                        'action_required': 'Investigate data serialization issue',
-                        'severity': 'observation',
-                        'status': 'pending',
-                        'category': 'Data Issue',
-                        'approval': 'Pending',
-                        'remark': 'Auto-generated placeholder'
-                    }
-                    mock_issues.append(mock_issue)
-                
-                if mock_issues:
-                    result_issues = mock_issues
-                    debug_info['methods_tried'].append(f'mock issues generated - created {len(mock_issues)} placeholders')
-                    logger.warning(f"[get_issues] Generated {len(mock_issues)} mock issues for report {obj.id}")
         
         # Log debug information
         debug_info['final_count'] = len(result_issues)
