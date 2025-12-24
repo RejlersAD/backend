@@ -1,0 +1,95 @@
+{
+  "comment_cleaning": {
+    "common_names": {
+      "hindu": [
+        "Sreejith", "Rajeev", "Arun", "Vijay", "Suresh", "Ramesh", "Prakash",
+        "Ganesh", "Harish", "Mahesh", "Naveen", "Pradeep", "Rajan", "Sanjay",
+        "Ashok", "Dinesh", "Girish", "Krishna", "Mohan", "Narayan", "Pavan",
+        "Rajesh", "Shiva", "Venkat", "Bhaskar", "Chandra", "Deepak", "Gautam",
+        "Anand", "Balaji", "Gopal", "Hari", "Jayesh", "Kiran", "Lakshmi",
+        "Murali", "Padma", "Radha", "Sita", "Uma", "Vidya", "Yash"
+      ],
+      "muslim": [
+        "Ahmed", "Ali", "Farhan", "Hassan", "Ibrahim", "Jameel", "Khalid",
+        "Mahmood", "Nasir", "Omar", "Qasim", "Rahman", "Saleem", "Tariq",
+        "Usman", "Waseem", "Yusuf", "Zaheer", "Imran", "Faisal", "Arif",
+        "Bashir", "Danish", "Ehsan", "Faiz", "Ghulam", "Hamid", "Irfan",
+        "Javed", "Kareem", "Latif", "Mubarak", "Naeem", "Riaz", "Sadiq"
+      ],
+      "indian": [
+        "Agarwal", "Banerjee", "Chatterjee", "Das", "Ghosh", "Iyer", "Joshi",
+        "Kumar", "Menon", "Nair", "Patel", "Rao", "Sharma", "Trivedi", "Verma",
+        "Singh", "Gupta", "Reddy", "Shah", "Pillai", "Deshpande", "Kulkarni",
+        "Mukherjee", "Sinha", "Kapoor", "Malhotra", "Bose", "Sen", "Choudhury"
+      ],
+      "western": [
+        "John", "William", "James", "Robert", "Michael", "David", "Richard",
+        "Charles", "Thomas", "Daniel", "Matthew", "Andrew", "Christopher",
+        "Joseph", "Edward", "Peter", "Mark", "Paul", "Steven", "Kevin",
+        "Smith", "Johnson", "Williams", "Brown", "Jones", "Miller", "Davis",
+        "Anderson", "Taylor", "Wilson", "Moore", "Jackson", "Martin", "Lee"
+      ],
+      "scandinavian": [
+        "Erik", "Lars", "Anders", "Sven", "Johan", "Magnus", "Olof", "Gustav",
+        "Henrik", "Karl", "Nils", "Per", "Ulf", "Bjorn", "Ingvar", "Leif",
+        "Eriksson", "Andersson", "Johansson", "Larsson", "Nilsson", "Petersson"
+      ]
+    },
+    "skip_patterns": [
+      "^Typewriter\\s*\\d+\\s*$",
+      "^SHX\\s*Text\\s*$",
+      "^AutoCAD.*$",
+      "^\\d+[\\.\\-]?\\d*$",
+      "^[A-Z]{1,3}\\s*\\d+$",
+      "^RACK\\s*\\.\\s*\\d+$",
+      "^-\\s*\\d+[\\.\\-]?\\d*$",
+      "^\\/\\s*\\d+[\\.\\-]?\\d*$",
+      "^EL\\s*\\.?\\s*\\d+$",
+      "^[A-Z]+\\d+[\\-\\d]*$"
+    ],
+    "prefix_patterns": [
+      "^(Mr|Mrs|Ms|Dr|Prof|Miss|Sir|Madam)\\s+",
+      "^Typewriter\\s*\\d+\\s+",
+      "^SHX\\s*Text\\s+",
+      "^AutoCAD\\s+SHX\\s+Text\\s+",
+      "^(Text Box|Callout|Call Out|Free Text|Note|Highlight)\\s+"
+    ],
+    "annotation_labels": [
+      "Text Box", "Callout", "Call Out", "Free Text", "Note",
+      "Highlight", "Underline", "Strikeout", "Squiggly",
+      "Popup", "Rectangle", "Ellipse", "Line", "Polygon",
+      "Typewriter", "SHX Text", "AutoCAD SHX Text"
+    ],
+    "openai": {
+      "model": "gpt-3.5-turbo",
+      "max_tokens": 150,
+      "temperature": 0.1,
+      "enabled": true,
+      "fallback_to_rules": true
+    },
+    "min_comment_length": 5,
+    "max_comment_length": 2000
+  },
+  "template": {
+    "s3_bucket": "user-management-rejlers",
+    "s3_key": "CRS template.xlsx",
+    "s3_fallback_keys": [
+      "CRS template.xlsx",
+      "templates/CRS template.xlsx",
+      "media/templates/CRS template.xlsx"
+    ],
+    "local_cache_enabled": true
+  },
+  "extraction": {
+    "enable_text_extraction": true,
+    "enable_annotation_extraction": true,
+    "deduplicate_comments": true,
+    "apply_intelligent_cleaning": true,
+    "min_comment_words": 2
+  },
+  "metadata": {
+    "version": "1.0.0",
+    "last_updated": "2025-01-18",
+    "description": "CRS Comment extraction and cleaning configuration"
+  }
+}

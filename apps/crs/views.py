@@ -373,6 +373,10 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                     'success': False
                 }, status=status.HTTP_400_BAD_REQUEST)
             
+            # Check if preview mode is requested (returns JSON instead of file download)
+            preview_mode = request.POST.get('preview', 'false').lower() == 'true'
+            download_format = request.POST.get('format', 'xlsx').lower()  # xlsx, csv, json
+            
             # Get metadata
             metadata = {
                 'project_name': request.POST.get('project_name', ''),
@@ -405,6 +409,44 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                         'message': 'The PDF does not contain any extractable reviewer comments.'
                     }, status=status.HTTP_400_BAD_REQUEST)
                 
+                # Get statistics
+                stats = get_comment_statistics(comments)
+                
+                # Prepare comments data for preview
+                comments_data = []
+                for idx, comment in enumerate(comments, start=1):
+                    comments_data.append({
+                        'index': idx,
+                        'reviewer_name': comment.reviewer_name,
+                        'comment_text': comment.comment_text,
+                        'discipline': comment.discipline,
+                        'page_number': comment.page_number,
+                        'comment_type': comment.comment_type,
+                        'section_reference': comment.section_reference,
+                        'raw_text': getattr(comment, 'raw_text', ''),
+                        'cleaned': getattr(comment, 'cleaned', False),
+                        'cleaning_method': getattr(comment, 'cleaning_method', ''),
+                    })
+                
+                # PREVIEW MODE: Return JSON with extracted comments for user review
+                if preview_mode:
+                    return Response({
+                        'success': True,
+                        'message': f'Successfully extracted {len(comments)} comments',
+                        'preview': True,
+                        'metadata': metadata,
+                        'statistics': {
+                            'total': stats['total'],
+                            'by_type': stats.get('by_type', {}),
+                            'by_discipline': stats.get('by_discipline', {}),
+                            'by_reviewer': stats.get('by_reviewer', {}),
+                            'pages_with_comments': stats.get('pages_with_comments', 0),
+                        },
+                        'comments': comments_data,
+                        'available_formats': ['xlsx', 'csv', 'json'],
+                    }, status=status.HTTP_200_OK)
+                
+                # DOWNLOAD MODE: Generate file in requested format
                 # Load CRS template using smart template manager
                 try:
                     template_buffer = get_crs_template()
@@ -416,22 +458,84 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                         'suggestion': 'Ensure CRS template is available locally or on AWS S3'
                     }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
                 
-                # Populate template (first arg is template_buffer, not template_path)
-                output_buffer = populate_crs_template(
-                    template_buffer,
-                    comments,
-                    metadata
-                )
+                # Handle different download formats
+                doc_number = metadata.get("document_number", "output")
+                safe_filename = "".join(c for c in doc_number if c.isalnum() or c in "-_").strip() or "output"
                 
-                # Get statistics
-                stats = get_comment_statistics(comments)
+                if download_format == 'json':
+                    # Return as JSON file download
+                    import json as json_module
+                    json_content = json_module.dumps({
+                        'metadata': metadata,
+                        'statistics': stats,
+                        'comments': comments_data
+                    }, indent=2, default=str)
+                    
+                    response = HttpResponse(
+                        json_content,
+                        content_type='application/json'
+                    )
+                    response['Content-Disposition'] = f'attachment; filename="CRS_{safe_filename}.json"'
+                    return response
+                
+                elif download_format == 'csv':
+                    # Return as CSV file download
+                    import csv
+                    from io import StringIO
+                    
+                    csv_buffer = StringIO()
+                    writer = csv.writer(csv_buffer)
+                    
+                    # Write header
+                    writer.writerow(['No.', 'Reviewer', 'Comment', 'Discipline', 'Type', 'Page', 'Section'])
+                    
+                    # Write data
+                    for c in comments_data:
+                        writer.writerow([
+                            c['index'],
+                            c['reviewer_name'],
+                            c['comment_text'],
+                            c['discipline'],
+                            c['comment_type'],
+                            c['page_number'] or '',
+                            c['section_reference']
+                        ])
+                    
+                    response = HttpResponse(
+                        csv_buffer.getvalue(),
+                        content_type='text/csv'
+                    )
+                    response['Content-Disposition'] = f'attachment; filename="CRS_{safe_filename}.csv"'
+                    return response
+                
+                else:  # xlsx (default)
+                    # Populate template
+                    output_buffer = populate_crs_template(
+                        template_buffer,
+                        comments,
+                        metadata
+                    )
+                
+                # CRITICAL: Ensure buffer is at the beginning before reading
+                output_buffer.seek(0)
+                output_content = output_buffer.read()
+                
+                # Validate output is not empty
+                if len(output_content) < 100:
+                    return Response({
+                        'error': 'Failed to generate valid Excel file',
+                        'success': False,
+                        'message': 'Output file is too small, likely corrupted'
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
                 
                 # Create response with Excel file
                 response = HttpResponse(
-                    output_buffer.getvalue(),
+                    output_content,
                     content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                 )
-                response['Content-Disposition'] = f'attachment; filename="CRS_Populated_{metadata.get("document_number", "output")}.xlsx"'
+                
+                response['Content-Disposition'] = f'attachment; filename="CRS_Populated_{safe_filename}.xlsx"'
+                response['Content-Length'] = len(output_content)
                 response['X-Comment-Count'] = str(stats['total'])
                 response['X-Processing-Status'] = 'success'
                 

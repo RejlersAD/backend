@@ -1,7 +1,8 @@
 """
 CRS Template Manager - Smart Template Fetching
-Handles CRS template access with AWS S3 fallback
+Handles CRS template access with AWS S3 integration
 Uses soft-coding approach - no core logic modification
+Enhanced with S3Service for proper bucket access
 """
 
 import os
@@ -13,8 +14,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# AWS S3 Template URL
-DEFAULT_TEMPLATE_URL = "https://user-management-rejlers.s3.ap-south-1.amazonaws.com/CRS+template.xlsx"
+# S3 Template Configuration
+S3_TEMPLATE_KEY = "CRS template.xlsx"  # Template in bucket root
+S3_TEMPLATE_FALLBACK_KEYS = [
+    "CRS template.xlsx",
+    "templates/CRS template.xlsx",
+    "media/templates/CRS template.xlsx",
+]
+
+# AWS S3 Template URL (legacy fallback)
+DEFAULT_TEMPLATE_URL = "https://user-management-rejlers.s3.us-east-1.amazonaws.com/CRS+template.xlsx"
 
 # Local template paths (in priority order)
 LOCAL_TEMPLATE_PATHS = [
@@ -25,14 +34,60 @@ LOCAL_TEMPLATE_PATHS = [
 ]
 
 
+def get_s3_service():
+    """Get S3Service instance if available"""
+    try:
+        from apps.core.s3_service import S3Service
+        return S3Service()
+    except ImportError:
+        logger.warning("S3Service not available, falling back to direct URL access")
+        return None
+
+
+def download_template_from_s3_service() -> BytesIO:
+    """
+    Download CRS template using S3Service
+    Tries multiple possible keys in the bucket
+    
+    Returns:
+        BytesIO: Template buffer
+        
+    Raises:
+        FileNotFoundError: If template not found in S3
+    """
+    s3_service = get_s3_service()
+    if not s3_service:
+        raise FileNotFoundError("S3Service not available")
+    
+    # Try each possible template key
+    for template_key in S3_TEMPLATE_FALLBACK_KEYS:
+        logger.info(f"⬇️ Trying to download template: {template_key}")
+        try:
+            result = s3_service.download_file(template_key)
+            
+            if result.get('success') and result.get('body'):
+                # Read the streaming body
+                content = result['body'].read()
+                template_buffer = BytesIO(content)
+                logger.info(f"✅ Downloaded template from S3: {template_key} ({len(content)} bytes)")
+                return template_buffer
+                
+        except Exception as e:
+            logger.debug(f"Template not found at {template_key}: {e}")
+            continue
+    
+    raise FileNotFoundError(f"Template not found in S3. Tried keys: {S3_TEMPLATE_FALLBACK_KEYS}")
+
+
 def get_crs_template() -> BytesIO:
     """
     Smart template fetcher with multiple fallbacks
     
     Priority:
     1. Local template files (multiple locations checked)
-    2. Download from AWS S3 (if accessible)
-    3. Cache downloaded template for future use
+    2. Download from AWS S3 using S3Service (bucket: user-management-rejlers)
+    3. Fallback to direct URL download
+    4. Cache downloaded template for future use
     
     Returns:
         BytesIO: Template file buffer
@@ -41,7 +96,7 @@ def get_crs_template() -> BytesIO:
         FileNotFoundError: If template cannot be found or downloaded
     """
     
-    # Strategy 1: Check local paths
+    # Strategy 1: Check local paths first (fastest)
     for template_path in LOCAL_TEMPLATE_PATHS:
         if os.path.exists(template_path):
             logger.info(f"✅ Found local CRS template: {template_path}")
@@ -54,10 +109,10 @@ def get_crs_template() -> BytesIO:
                 logger.warning(f"⚠️ Failed to read local template {template_path}: {e}")
                 continue
     
-    # Strategy 2: Download from AWS S3
-    logger.info(f"⬇️ No local template found, attempting download from AWS S3...")
+    # Strategy 2: Download from AWS S3 using S3Service
+    logger.info(f"⬇️ No local template found, attempting download from AWS S3 bucket...")
     try:
-        template_buffer = download_template_from_s3(DEFAULT_TEMPLATE_URL)
+        template_buffer = download_template_from_s3_service()
         
         # Cache the downloaded template for future use
         cache_template_locally(template_buffer)
@@ -66,9 +121,22 @@ def get_crs_template() -> BytesIO:
         return template_buffer
         
     except Exception as e:
-        logger.error(f"❌ Failed to download template from S3: {e}")
+        logger.warning(f"⚠️ S3Service download failed: {e}, trying direct URL...")
     
-    # Strategy 3: Raise error if all strategies fail
+    # Strategy 3: Fallback to direct URL download
+    try:
+        template_buffer = download_template_from_s3(DEFAULT_TEMPLATE_URL)
+        
+        # Cache the downloaded template for future use
+        cache_template_locally(template_buffer)
+        
+        logger.info(f"✅ Downloaded and cached template from direct URL")
+        return template_buffer
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to download template: {e}")
+    
+    # Strategy 4: Raise error if all strategies fail
     raise FileNotFoundError(
         "CRS template not found. Please ensure:\n"
         "1. Local template exists in one of these paths:\n"
@@ -147,8 +215,11 @@ def get_template_info() -> dict:
     """
     info = {
         'local_templates': [],
+        's3_bucket': 'user-management-rejlers',
+        's3_key': S3_TEMPLATE_KEY,
         's3_url': DEFAULT_TEMPLATE_URL,
         's3_accessible': False,
+        's3_service_available': False,
         'recommended_action': None
     }
     
@@ -162,12 +233,25 @@ def get_template_info() -> dict:
                 'exists': True
             })
     
-    # Check S3 accessibility (quick HEAD request)
-    try:
-        response = requests.head(DEFAULT_TEMPLATE_URL, timeout=5)
-        info['s3_accessible'] = response.status_code == 200
-    except:
-        info['s3_accessible'] = False
+    # Check S3Service availability
+    s3_service = get_s3_service()
+    info['s3_service_available'] = s3_service is not None
+    
+    # Check S3 accessibility via S3Service
+    if s3_service:
+        try:
+            result = s3_service.download_file(S3_TEMPLATE_KEY)
+            info['s3_accessible'] = result.get('success', False)
+        except:
+            info['s3_accessible'] = False
+    
+    # Fallback: Check S3 accessibility via HEAD request
+    if not info['s3_accessible']:
+        try:
+            response = requests.head(DEFAULT_TEMPLATE_URL, timeout=5)
+            info['s3_accessible'] = response.status_code == 200
+        except:
+            info['s3_accessible'] = False
     
     # Provide recommendation
     if info['local_templates']:

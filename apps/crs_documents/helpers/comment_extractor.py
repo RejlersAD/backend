@@ -2,12 +2,25 @@
 PDF Comment Extractor - NEW HELPER MODULE
 Extracts reviewer comments from ConsolidatedComments PDF
 Does NOT modify existing code or APIs
+Enhanced with intelligent comment cleaning
+Uses PyMuPDF (fitz) for better annotation extraction
 """
 
 import re
+import fitz  # PyMuPDF - better for annotations
 import PyPDF2
 from typing import List, Dict, Optional
 from io import BytesIO
+import logging
+
+# Import comment cleaner for intelligent text processing
+try:
+    from .comment_cleaner import get_comment_cleaner, CleaningResult
+    CLEANER_AVAILABLE = True
+except ImportError:
+    CLEANER_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
 
 
 class ReviewerComment:
@@ -21,14 +34,17 @@ class ReviewerComment:
         self.page_number: Optional[int] = None
         self.comment_type: str = "GENERAL"
         self.raw_text: str = ""
+        self.cleaned: bool = False  # Flag to indicate if cleaning was applied
+        self.cleaning_method: str = ""  # "rule-based", "openai", or "hybrid"
 
 
-def extract_reviewer_comments(pdf_buffer: BytesIO) -> List[ReviewerComment]:
+def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) -> List[ReviewerComment]:
     """
-    Extract reviewer comments from PDF
+    Extract reviewer comments from PDF using PyMuPDF (fitz)
     
     Args:
         pdf_buffer: BytesIO object containing PDF file
+        apply_cleaning: Whether to apply intelligent comment cleaning (default: True)
         
     Returns:
         List of ReviewerComment objects
@@ -37,29 +53,212 @@ def extract_reviewer_comments(pdf_buffer: BytesIO) -> List[ReviewerComment]:
     """
     comments = []
     
+    # Initialize cleaner if available and cleaning is requested
+    cleaner = None
+    if apply_cleaning and CLEANER_AVAILABLE:
+        try:
+            cleaner = get_comment_cleaner()
+            logger.info("✅ Comment cleaner initialized")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not initialize comment cleaner: {e}")
+    
+    try:
+        # Use PyMuPDF (fitz) for better annotation extraction
+        pdf_bytes = pdf_buffer.read()
+        pdf_buffer.seek(0)  # Reset for potential re-use
+        
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        logger.info(f"📄 Opened PDF with {len(doc)} pages")
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            
+            # Extract annotations (comments, highlights, etc.)
+            annotations = page.annots()
+            if annotations:
+                for annot in annotations:
+                    try:
+                        annot_type = annot.type[1]  # Get annotation type name
+                        content = annot.info.get("content", "") or ""
+                        title = annot.info.get("title", "") or ""  # Often contains author name
+                        subject = annot.info.get("subject", "") or ""
+                        
+                        # Skip empty annotations
+                        if not content.strip():
+                            # Try to get text from popup or other sources
+                            popup = annot.info.get("popup", "")
+                            if popup:
+                                content = str(popup)
+                        
+                        if not content.strip():
+                            continue
+                        
+                        comment = ReviewerComment()
+                        comment.comment_text = content.strip()
+                        comment.page_number = page_num + 1
+                        comment.comment_type = _map_annot_type_to_comment_type(annot_type)
+                        comment.reviewer_name = title.strip() if title.strip() else "Not Provided"
+                        comment.raw_text = f"{annot_type}: {content}"
+                        
+                        # Try to extract discipline from content
+                        comment.discipline = _extract_discipline_from_text(content)
+                        
+                        comments.append(comment)
+                        logger.debug(f"Found annotation: {annot_type} - {content[:50]}...")
+                        
+                    except Exception as e:
+                        logger.warning(f"Error extracting annotation: {e}")
+                        continue
+            
+            # Also extract text-based comments from page content
+            text = page.get_text()
+            if text:
+                text_comments = _extract_comments_from_text(text, page_num + 1)
+                comments.extend(text_comments)
+        
+        doc.close()
+        logger.info(f"✅ Extracted {len(comments)} raw comments from PDF")
+    
+    except Exception as e:
+        logger.error(f"Error extracting PDF comments with PyMuPDF: {str(e)}")
+        # Fallback to PyPDF2
+        try:
+            logger.info("Falling back to PyPDF2...")
+            comments = _extract_with_pypdf2(pdf_buffer)
+        except Exception as e2:
+            logger.error(f"PyPDF2 fallback also failed: {str(e2)}")
+            return []
+    
+    # Deduplicate comments
+    comments = _deduplicate_comments(comments)
+    logger.info(f"After deduplication: {len(comments)} comments")
+    
+    # Apply intelligent cleaning if cleaner is available
+    if cleaner:
+        cleaned_comments = []
+        skipped_count = 0
+        
+        for comment in comments:
+            try:
+                result = cleaner.clean_comment(comment.comment_text)
+                
+                if result.should_skip:
+                    skipped_count += 1
+                    logger.debug(f"Skipped comment: {comment.comment_text[:50]}... Reason: {result.skip_reason}")
+                    continue
+                
+                # Update comment with cleaned text
+                comment.raw_text = comment.comment_text  # Preserve original
+                comment.comment_text = result.cleaned_text
+                comment.cleaned = True
+                comment.cleaning_method = result.cleaning_method
+                cleaned_comments.append(comment)
+                
+            except Exception as e:
+                logger.warning(f"Cleaning error for comment: {e}")
+                # Keep original comment on error
+                cleaned_comments.append(comment)
+        
+        logger.info(f"✅ Cleaned {len(cleaned_comments)} comments, skipped {skipped_count} technical elements")
+        comments = cleaned_comments
+    
+    return comments
+
+
+def _map_annot_type_to_comment_type(annot_type: str) -> str:
+    """Map PDF annotation type to our comment type"""
+    annot_type_lower = annot_type.lower()
+    
+    if 'highlight' in annot_type_lower:
+        return 'ADEQUACY'
+    elif 'text' in annot_type_lower or 'note' in annot_type_lower:
+        return 'GENERAL'
+    elif 'stamp' in annot_type_lower or 'hold' in annot_type_lower:
+        return 'HOLD'
+    elif 'freetext' in annot_type_lower:
+        return 'RECOMMENDATION'
+    elif 'ink' in annot_type_lower or 'line' in annot_type_lower:
+        return 'CLARIFICATION'
+    else:
+        return 'GENERAL'
+
+
+def _extract_discipline_from_text(text: str) -> str:
+    """Extract discipline from comment text"""
+    text_lower = text.lower()
+    
+    disciplines = {
+        'DCU': ['dcu', 'distributed control'],
+        'MHC': ['mhc', 'material handling'],
+        'Utilities': ['utility', 'utilities'],
+        'Safety': ['safety', 'hse', 'health'],
+        'Process': ['process'],
+        'Electrical': ['electrical', 'e&i', 'instrumentation'],
+        'Mechanical': ['mechanical', 'rotating'],
+        'Civil': ['civil', 'structural'],
+        'Piping': ['piping', 'pipeline'],
+    }
+    
+    for discipline, keywords in disciplines.items():
+        for keyword in keywords:
+            if keyword in text_lower:
+                return discipline
+    
+    return "Not Provided"
+
+
+def _extract_with_pypdf2(pdf_buffer: BytesIO) -> List[ReviewerComment]:
+    """Fallback extraction using PyPDF2"""
+    comments = []
+    pdf_buffer.seek(0)
+    
     try:
         pdf_reader = PyPDF2.PdfReader(pdf_buffer)
         
-        # Extract text from all pages
         for page_num, page in enumerate(pdf_reader.pages, start=1):
             text = page.extract_text()
             
-            # Extract comments from this page
+            # Extract comments from text
             page_comments = _extract_comments_from_text(text, page_num)
             comments.extend(page_comments)
             
-            # Extract PDF annotations (callouts, highlights, etc.)
+            # Extract PDF annotations
             if '/Annots' in page:
-                annotation_comments = _extract_annotations(page, page_num)
+                annotation_comments = _extract_annotations_pypdf2(page, page_num)
                 comments.extend(annotation_comments)
     
     except Exception as e:
-        print(f"Error extracting PDF comments: {str(e)}")
-        # Return empty list on error - safe fallback
-        return []
+        logger.error(f"PyPDF2 extraction error: {str(e)}")
     
-    # Deduplicate and clean
-    comments = _deduplicate_comments(comments)
+    return comments
+
+
+def _extract_annotations_pypdf2(page, page_num: int) -> List[ReviewerComment]:
+    """Extract comments from PDF annotations using PyPDF2"""
+    comments = []
+    
+    try:
+        annotations = page['/Annots']
+        
+        for annotation in annotations:
+            annot_obj = annotation.get_object()
+            
+            if annot_obj.get('/Subtype') in ['/Text', '/FreeText', '/Highlight', '/Ink', '/Stamp']:
+                comment = ReviewerComment()
+                
+                if '/Contents' in annot_obj:
+                    comment.comment_text = str(annot_obj['/Contents'])
+                    comment.page_number = page_num
+                    comment.comment_type = classify_comment(comment.comment_text)
+                    
+                    if '/T' in annot_obj:
+                        comment.reviewer_name = str(annot_obj['/T'])
+                    
+                    if comment.comment_text.strip():
+                        comments.append(comment)
+    
+    except Exception as e:
+        logger.debug(f"PyPDF2 annotation extraction error: {e}")
     
     return comments
 
@@ -106,39 +305,6 @@ def _extract_comments_from_text(text: str, page_num: int) -> List[ReviewerCommen
             comment.reviewer_name = _extract_reviewer_from_context(text, match.start())
             comment.discipline = _extract_discipline(text, comment.reviewer_name)
             comments.append(comment)
-    
-    return comments
-
-
-def _extract_annotations(page, page_num: int) -> List[ReviewerComment]:
-    """Extract comments from PDF annotations (callouts, sticky notes, etc.)"""
-    comments = []
-    
-    try:
-        annotations = page['/Annots']
-        
-        for annotation in annotations:
-            annot_obj = annotation.get_object()
-            
-            # Check if it's a text annotation
-            if annot_obj.get('/Subtype') == '/Text' or annot_obj.get('/Subtype') == '/FreeText':
-                comment = ReviewerComment()
-                
-                # Get comment content
-                if '/Contents' in annot_obj:
-                    comment.comment_text = str(annot_obj['/Contents'])
-                    comment.page_number = page_num
-                    comment.comment_type = classify_comment(comment.comment_text)
-                    
-                    # Try to extract reviewer from annotation
-                    if '/T' in annot_obj:  # Title/Author field
-                        comment.reviewer_name = str(annot_obj['/T'])
-                    
-                    comments.append(comment)
-    
-    except Exception as e:
-        # Silently handle annotation extraction errors
-        pass
     
     return comments
 

@@ -36,8 +36,17 @@ def populate_crs_template(
         BytesIO containing populated template (SAME FORMAT)
     """
     try:
-        # Load existing template - CRITICAL: keep_vba=True to preserve everything
-        workbook = openpyxl.load_workbook(template_buffer, keep_vba=True)
+        # CRITICAL: Reset buffer position before reading
+        template_buffer.seek(0)
+        
+        # Load existing template
+        # Note: keep_vba only needed for .xlsm files, but safe to include
+        try:
+            workbook = openpyxl.load_workbook(template_buffer, keep_vba=True)
+        except Exception:
+            # Fallback without VBA support for regular .xlsx files
+            template_buffer.seek(0)
+            workbook = openpyxl.load_workbook(template_buffer)
         
         # Work with active sheet (typically "CRS" or "Comments")
         sheet = workbook.active
@@ -57,12 +66,16 @@ def populate_crs_template(
         # Save to BytesIO - PRESERVES ORIGINAL FORMAT
         output_buffer = BytesIO()
         workbook.save(output_buffer)
+        
+        # CRITICAL: Reset position to beginning for reading
         output_buffer.seek(0)
         
         return output_buffer
     
     except Exception as e:
         print(f"Error populating CRS template: {str(e)}")
+        import traceback
+        traceback.print_exc()
         # Return original template on error - SAFE FALLBACK
         template_buffer.seek(0)
         return template_buffer
@@ -131,39 +144,56 @@ def _populate_comment_row(sheet, row_num: int, comment: ReviewerComment, index: 
     """
     Populate a single row with comment data
     Determines column positions dynamically
+    Handles merged cells gracefully
     """
     try:
         # Typical CRS column structure (flexible detection)
         column_mapping = _detect_column_mapping(sheet)
         
+        # Helper to safely set cell value (handles merged cells)
+        def safe_set_value(row, col, value):
+            try:
+                cell = sheet.cell(row, col)
+                # Check if it's a merged cell
+                if hasattr(cell, 'coordinate'):
+                    for merged_range in sheet.merged_cells.ranges:
+                        if cell.coordinate in merged_range:
+                            # Get the top-left cell of the merged range
+                            min_col, min_row, max_col, max_row = merged_range.bounds
+                            cell = sheet.cell(min_row, min_col)
+                            break
+                cell.value = value
+            except AttributeError:
+                # MergedCell objects can't be written to directly
+                pass
+            except Exception:
+                pass
+        
         # Populate each field
         if 'no' in column_mapping:
-            sheet.cell(row_num, column_mapping['no']).value = index
+            safe_set_value(row_num, column_mapping['no'], index)
         
         if 'reviewer' in column_mapping:
-            sheet.cell(row_num, column_mapping['reviewer']).value = comment.reviewer_name
+            safe_set_value(row_num, column_mapping['reviewer'], comment.reviewer_name)
         
         if 'comment' in column_mapping:
-            cell = sheet.cell(row_num, column_mapping['comment'])
-            cell.value = comment.comment_text
-            # Wrap text for long comments
-            cell.alignment = Alignment(wrap_text=True, vertical='top')
+            safe_set_value(row_num, column_mapping['comment'], comment.comment_text)
         
         if 'discipline' in column_mapping:
-            sheet.cell(row_num, column_mapping['discipline']).value = comment.discipline
+            safe_set_value(row_num, column_mapping['discipline'], comment.discipline)
         
         if 'type' in column_mapping:
-            sheet.cell(row_num, column_mapping['type']).value = comment.comment_type
+            safe_set_value(row_num, column_mapping['type'], comment.comment_type)
         
         if 'section' in column_mapping:
-            sheet.cell(row_num, column_mapping['section']).value = comment.section_reference
+            safe_set_value(row_num, column_mapping['section'], comment.section_reference)
         
         if 'page' in column_mapping and comment.page_number:
-            sheet.cell(row_num, column_mapping['page']).value = f"Page {comment.page_number}"
+            safe_set_value(row_num, column_mapping['page'], f"Page {comment.page_number}")
         
         # Status and response columns - leave empty for user to fill
         if 'status' in column_mapping:
-            sheet.cell(row_num, column_mapping['status']).value = "Open"
+            safe_set_value(row_num, column_mapping['status'], "Open")
         
         # Copy formatting from row above if exists
         _copy_row_formatting(sheet, row_num - 1, row_num)
