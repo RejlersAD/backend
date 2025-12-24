@@ -18,6 +18,7 @@ from .serializers import CRSDocumentSerializer, CRSDocumentVersionSerializer
 try:
     from .helpers.comment_extractor import extract_reviewer_comments, get_comment_statistics
     from .helpers.template_populator import populate_crs_template, validate_template
+    from .helpers.template_manager import get_crs_template, get_template_info
     HELPERS_AVAILABLE = True
 except ImportError:
     HELPERS_AVAILABLE = False
@@ -136,21 +137,17 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                     'error': 'PDF file is required'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
-            # Get template file or use default
+            # Get template file or use smart template manager
             template_file = request.FILES.get('template_file')
             if not template_file:
-                # Use default template from test/crs/
-                default_template_path = os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
-                    'test', 'crs', 'CRS template.xlsx'
-                )
-                
-                if os.path.exists(default_template_path):
-                    with open(default_template_path, 'rb') as f:
-                        template_buffer = BytesIO(f.read())
-                else:
+                # Use smart template manager (checks local + AWS S3)
+                try:
+                    template_buffer = get_crs_template()
+                except FileNotFoundError as e:
                     return Response({
-                        'error': 'CRS template not found. Please provide template_file in request.'
+                        'error': 'CRS template not available',
+                        'details': str(e),
+                        'suggestion': 'Upload template_file in request or ensure local/S3 template is available'
                     }, status=status.HTTP_400_BAD_REQUEST)
             else:
                 template_buffer = BytesIO(template_file.read())
@@ -264,6 +261,34 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({
                 'error': f'Error extracting comments: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['get'], url_path='template-status')
+    def check_template_status(self, request):
+        """
+        NEW ACTION: Check CRS template availability
+        
+        GET /api/v1/crs-documents/template-status/
+        
+        Returns: Template availability information
+        """
+        if not HELPERS_AVAILABLE:
+            return Response({
+                'available': False,
+                'error': 'Template manager not available'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        try:
+            template_info = get_template_info()
+            return Response({
+                'available': len(template_info['local_templates']) > 0 or template_info['s3_accessible'],
+                'info': template_info,
+                'status': 'ready' if template_info['local_templates'] else 'needs_download'
+            })
+        except Exception as e:
+            return Response({
+                'available': False,
+                'error': f'Error checking template status: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['post'], url_path='validate-template')

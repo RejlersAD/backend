@@ -116,6 +116,11 @@ else:
             'PASSWORD': config('DB_PASSWORD', default='postgres'),
             'HOST': config('DB_HOST', default='db'),
             'PORT': config('DB_PORT', default='5432'),
+            'CONN_MAX_AGE': 600,  # Connection pooling for 10 minutes
+            'OPTIONS': {
+                'connect_timeout': 60,  # Increased to 60 second connection timeout for Railway DB
+                'options': '-c statement_timeout=60000'  # Increased to 60 second query timeout
+            }
         }
     }
 
@@ -160,7 +165,54 @@ REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 10,
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
 }
+
+# ==============================================================================
+# JWT CONFIGURATION (Simple JWT)
+# ==============================================================================
+from datetime import timedelta
+
+SIMPLE_JWT = {
+    # Token Lifetimes
+    'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),  # Access token valid for 24 hours
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),   # Refresh token valid for 7 days
+    'ROTATE_REFRESH_TOKENS': True,                  # Rotate refresh token on use
+    'BLACKLIST_AFTER_ROTATION': False,              # Keep old refresh tokens valid
+    
+    # Token Types
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+    
+    # Token Classes
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
+    'TOKEN_TYPE_CLAIM': 'token_type',
+    
+    # Signing
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+    'VERIFYING_KEY': None,
+    
+    # Blacklisting (optional - can be enabled later)
+    'JTI_CLAIM': 'jti',
+    
+    # Sliding tokens (disabled)
+    'SLIDING_TOKEN_REFRESH_EXP_CLAIM': 'refresh_exp',
+    'SLIDING_TOKEN_LIFETIME': timedelta(hours=5),
+    'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
+}
+
+print(f"[JWT] ====== Configuration Loaded ======")
+print(f"[JWT] Access Token Lifetime: {SIMPLE_JWT['ACCESS_TOKEN_LIFETIME']}")
+print(f"[JWT] Refresh Token Lifetime: {SIMPLE_JWT['REFRESH_TOKEN_LIFETIME']}")
+print(f"[JWT] Rotate Refresh Tokens: {SIMPLE_JWT['ROTATE_REFRESH_TOKENS']}")
+print(f"[JWT] ===================================")
+
+# ==============================================================================
+# End of JWT Configuration
+# ==============================================================================
 
 # ==============================================================================
 # CORS CONFIGURATION (UNIFIED - All CORS settings in one place)

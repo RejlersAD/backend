@@ -30,6 +30,7 @@ from .google_sheets_service import GoogleSheetsService
 try:
     from apps.crs_documents.helpers.comment_extractor import extract_reviewer_comments, get_comment_statistics
     from apps.crs_documents.helpers.template_populator import populate_crs_template
+    from apps.crs_documents.helpers.template_manager import get_crs_template, get_template_info
     HELPERS_AVAILABLE = True
 except ImportError:
     HELPERS_AVAILABLE = False
@@ -39,6 +40,13 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
     """ViewSet for CRS Document management"""
     queryset = CRSDocument.objects.all()
     permission_classes = [IsAuthenticated]
+    
+    def get_permissions(self):
+        """
+        Enhanced permission handling to ensure JWT authentication works properly
+        """
+        # For all actions, require authentication
+        return [IsAuthenticated()]
     
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -301,33 +309,39 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
     def statistics(self, request):
         """
         Get CRS statistics
         GET /api/v1/crs/documents/statistics/
         """
-        total_documents = CRSDocument.objects.count()
-        total_comments = CRSComment.objects.count()
-        
-        documents_by_status = {}
-        for choice in CRSDocument.STATUS_CHOICES:
-            documents_by_status[choice[0]] = CRSDocument.objects.filter(status=choice[0]).count()
-        
-        comments_by_status = {}
-        for choice in CRSComment.STATUS_CHOICES:
-            comments_by_status[choice[0]] = CRSComment.objects.filter(status=choice[0]).count()
-        
-        return Response({
-            "total_documents": total_documents,
-            "total_comments": total_comments,
-            "documents_by_status": documents_by_status,
-            "comments_by_status": comments_by_status,
-            "recent_documents": CRSDocumentSerializer(
-                CRSDocument.objects.all()[:5],
-                many=True
-            ).data
-        })
+        try:
+            total_documents = CRSDocument.objects.count()
+            total_comments = CRSComment.objects.count()
+            
+            documents_by_status = {}
+            for choice in CRSDocument.STATUS_CHOICES:
+                documents_by_status[choice[0]] = CRSDocument.objects.filter(status=choice[0]).count()
+            
+            comments_by_status = {}
+            for choice in CRSComment.STATUS_CHOICES:
+                comments_by_status[choice[0]] = CRSComment.objects.filter(status=choice[0]).count()
+            
+            return Response({
+                "total_documents": total_documents,
+                "total_comments": total_comments,
+                "documents_by_status": documents_by_status,
+                "comments_by_status": comments_by_status,
+                "recent_documents": CRSDocumentSerializer(
+                    CRSDocument.objects.all()[:5],
+                    many=True,
+                    context={'request': request}
+                ).data
+            })
+        except Exception as e:
+            return Response({
+                'error': f'Statistics error: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['post'], url_path='upload-and-process')
     def upload_and_process(self, request):
@@ -391,20 +405,22 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                         'message': 'The PDF does not contain any extractable reviewer comments.'
                     }, status=status.HTTP_400_BAD_REQUEST)
                 
-                # Load CRS template
-                template_path = os.path.join(settings.BASE_DIR, 'apps', 'crs_documents', 'helpers', 'CRS template.xlsx')
-                if not os.path.exists(template_path):
+                # Load CRS template using smart template manager
+                try:
+                    template_buffer = get_crs_template()
+                except FileNotFoundError as e:
                     return Response({
-                        'error': 'CRS template not found',
+                        'error': 'CRS template not available',
                         'success': False,
-                        'message': 'Server configuration error: CRS template.xlsx is missing.'
+                        'message': str(e),
+                        'suggestion': 'Ensure CRS template is available locally or on AWS S3'
                     }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
                 
-                # Populate template
+                # Populate template (first arg is template_buffer, not template_path)
                 output_buffer = populate_crs_template(
-                    template_path=template_path,
-                    comments=comments,
-                    metadata=metadata
+                    template_buffer,
+                    comments,
+                    metadata
                 )
                 
                 # Get statistics

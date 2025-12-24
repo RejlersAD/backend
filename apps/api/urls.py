@@ -30,6 +30,9 @@ urlpatterns = [
     path('auth/login/', EmailTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     
+    # Core functionality (S3 storage)
+    path('core/', include('apps.core.urls', namespace='core')),
+    
     # Router URLs
     path('', include(router.urls)),
     # PID export wrapper (stable endpoint)
