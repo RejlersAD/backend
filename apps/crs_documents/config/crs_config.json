@@ -87,9 +87,26 @@
     "apply_intelligent_cleaning": true,
     "min_comment_words": 2
   },
+  "departments": [
+    {
+      "id": "process_control_hse",
+      "name": "Process Control and HSE",
+      "code": "PCH"
+    },
+    {
+      "id": "ict",
+      "name": "I&CT",
+      "code": "ICT"
+    },
+    {
+      "id": "structure_civil",
+      "name": "Structure and Civil",
+      "code": "SC"
+    }
+  ],
   "metadata": {
-    "version": "1.0.0",
-    "last_updated": "2025-01-18",
+    "version": "1.1.0",
+    "last_updated": "2025-12-24",
     "description": "CRS Comment extraction and cleaning configuration"
   }
 }

@@ -343,6 +343,49 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                 'error': f'Statistics error: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
+    @action(detail=False, methods=['get'], url_path='config')
+    def get_config(self, request):
+        """
+        Get CRS configuration (departments, etc.)
+        GET /api/v1/crs/documents/config/
+        
+        Returns soft-coded configuration for frontend forms
+        """
+        try:
+            # Load configuration from crs_config.json
+            config_path = os.path.join(
+                settings.BASE_DIR, 
+                'apps', 'crs_documents', 'config', 'crs_config.json'
+            )
+            
+            config_data = {
+                'departments': [
+                    {'id': 'process_control_hse', 'name': 'Process Control and HSE', 'code': 'PCH'},
+                    {'id': 'ict', 'name': 'I&CT', 'code': 'ICT'},
+                    {'id': 'structure_civil', 'name': 'Structure and Civil', 'code': 'SC'},
+                ],
+                'available_formats': ['xlsx', 'csv', 'json', 'pdf', 'docx'],
+            }
+            
+            # Try to load from config file
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r') as f:
+                        file_config = json.load(f)
+                        if 'departments' in file_config:
+                            config_data['departments'] = file_config['departments']
+                except Exception:
+                    pass  # Use defaults
+            
+            return Response({
+                'success': True,
+                'config': config_data
+            })
+        except Exception as e:
+            return Response({
+                'error': f'Config error: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
     @action(detail=False, methods=['post'], url_path='upload-and-process')
     def upload_and_process(self, request):
         """
@@ -375,7 +418,7 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
             
             # Check if preview mode is requested (returns JSON instead of file download)
             preview_mode = request.POST.get('preview', 'false').lower() == 'true'
-            download_format = request.POST.get('format', 'xlsx').lower()  # xlsx, csv, json
+            download_format = request.POST.get('format', 'xlsx').lower()  # xlsx, csv, json, pdf
             
             # Get metadata
             metadata = {
@@ -383,6 +426,7 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                 'document_number': request.POST.get('document_number', ''),
                 'revision': request.POST.get('revision', ''),
                 'contractor': request.POST.get('contractor', ''),
+                'department': request.POST.get('department', ''),
             }
             
             # Determine file type
@@ -443,13 +487,15 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                             'pages_with_comments': stats.get('pages_with_comments', 0),
                         },
                         'comments': comments_data,
-                        'available_formats': ['xlsx', 'csv', 'json'],
+                        'available_formats': ['xlsx', 'csv', 'json', 'pdf', 'docx'],
                     }, status=status.HTTP_200_OK)
                 
                 # DOWNLOAD MODE: Generate file in requested format
                 # Load CRS template using smart template manager
                 try:
                     template_buffer = get_crs_template()
+                    # CRITICAL: Ensure buffer is at the start
+                    template_buffer.seek(0)
                 except FileNotFoundError as e:
                     return Response({
                         'error': 'CRS template not available',
@@ -506,6 +552,202 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                         content_type='text/csv'
                     )
                     response['Content-Disposition'] = f'attachment; filename="CRS_{safe_filename}.csv"'
+                    return response
+                
+                elif download_format == 'pdf':
+                    # Generate PDF report using ReportLab
+                    from reportlab.lib import colors
+                    from reportlab.lib.pagesizes import A4, landscape
+                    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+                    from reportlab.lib.units import inch
+                    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+                    from reportlab.lib.enums import TA_LEFT, TA_CENTER
+                    
+                    pdf_buffer = BytesIO()
+                    doc = SimpleDocTemplate(
+                        pdf_buffer,
+                        pagesize=landscape(A4),
+                        rightMargin=30,
+                        leftMargin=30,
+                        topMargin=30,
+                        bottomMargin=30
+                    )
+                    
+                    elements = []
+                    styles = getSampleStyleSheet()
+                    
+                    # Title
+                    title_style = ParagraphStyle(
+                        'CustomTitle',
+                        parent=styles['Heading1'],
+                        fontSize=16,
+                        alignment=TA_CENTER,
+                        spaceAfter=20
+                    )
+                    elements.append(Paragraph("Comment Resolution Sheet", title_style))
+                    
+                    # Metadata
+                    meta_style = ParagraphStyle(
+                        'Meta',
+                        parent=styles['Normal'],
+                        fontSize=10,
+                        spaceAfter=5
+                    )
+                    if metadata.get('project_name'):
+                        elements.append(Paragraph(f"<b>Project:</b> {metadata['project_name']}", meta_style))
+                    if metadata.get('document_number'):
+                        elements.append(Paragraph(f"<b>Document:</b> {metadata['document_number']}", meta_style))
+                    if metadata.get('revision'):
+                        elements.append(Paragraph(f"<b>Revision:</b> {metadata['revision']}", meta_style))
+                    elements.append(Paragraph(f"<b>Total Comments:</b> {len(comments_data)}", meta_style))
+                    elements.append(Spacer(1, 20))
+                    
+                    # Table data
+                    table_data = [['#', 'Page', 'Type', 'Comment', 'Reviewer', 'Discipline']]
+                    
+                    cell_style = ParagraphStyle(
+                        'Cell',
+                        parent=styles['Normal'],
+                        fontSize=8,
+                        leading=10
+                    )
+                    
+                    for c in comments_data:
+                        # Truncate long comments for PDF
+                        comment_text = c['comment_text'] or ''
+                        if len(comment_text) > 200:
+                            comment_text = comment_text[:200] + '...'
+                        
+                        table_data.append([
+                            str(c['index']),
+                            str(c['page_number'] or '-'),
+                            c['comment_type'] or 'GENERAL',
+                            Paragraph(comment_text, cell_style),
+                            c['reviewer_name'] or '-',
+                            c['discipline'] or '-'
+                        ])
+                    
+                    # Create table
+                    col_widths = [0.4*inch, 0.5*inch, 0.8*inch, 4.5*inch, 1.2*inch, 1*inch]
+                    table = Table(table_data, colWidths=col_widths, repeatRows=1)
+                    
+                    table.setStyle(TableStyle([
+                        # Header
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4F46E5')),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 9),
+                        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                        ('TOPPADDING', (0, 0), (-1, 0), 8),
+                        
+                        # Body
+                        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                        ('FONTSIZE', (0, 1), (-1, -1), 8),
+                        ('ALIGN', (0, 1), (0, -1), 'CENTER'),
+                        ('ALIGN', (1, 1), (1, -1), 'CENTER'),
+                        ('ALIGN', (2, 1), (2, -1), 'CENTER'),
+                        ('VALIGN', (0, 1), (-1, -1), 'TOP'),
+                        ('TOPPADDING', (0, 1), (-1, -1), 6),
+                        ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+                        
+                        # Grid
+                        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F3F4F6')]),
+                    ]))
+                    
+                    elements.append(table)
+                    doc.build(elements)
+                    
+                    pdf_buffer.seek(0)
+                    pdf_content = pdf_buffer.read()
+                    
+                    response = HttpResponse(
+                        pdf_content,
+                        content_type='application/pdf'
+                    )
+                    response['Content-Disposition'] = f'attachment; filename="CRS_{safe_filename}.pdf"'
+                    response['Content-Length'] = len(pdf_content)
+                    return response
+                
+                elif download_format == 'docx':
+                    # Generate Word document using python-docx
+                    from docx import Document
+                    from docx.shared import Inches, Pt, RGBColor
+                    from docx.enum.text import WD_ALIGN_PARAGRAPH
+                    from docx.enum.table import WD_TABLE_ALIGNMENT
+                    from docx.oxml.ns import nsdecls
+                    from docx.oxml import parse_xml
+                    
+                    doc = Document()
+                    
+                    # Title
+                    title = doc.add_heading('Comment Resolution Sheet', 0)
+                    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    
+                    # Metadata section
+                    if metadata.get('project_name'):
+                        doc.add_paragraph(f"Project: {metadata['project_name']}")
+                    if metadata.get('document_number'):
+                        doc.add_paragraph(f"Document Number: {metadata['document_number']}")
+                    if metadata.get('revision'):
+                        doc.add_paragraph(f"Revision: {metadata['revision']}")
+                    if metadata.get('contractor'):
+                        doc.add_paragraph(f"Contractor: {metadata['contractor']}")
+                    if metadata.get('department'):
+                        doc.add_paragraph(f"Department: {metadata['department']}")
+                    doc.add_paragraph(f"Total Comments: {len(comments_data)}")
+                    doc.add_paragraph()  # Empty line
+                    
+                    # Create table
+                    table = doc.add_table(rows=1, cols=6)
+                    table.style = 'Table Grid'
+                    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                    
+                    # Header row
+                    header_cells = table.rows[0].cells
+                    headers = ['#', 'Page', 'Type', 'Comment', 'Reviewer', 'Discipline']
+                    for i, header in enumerate(headers):
+                        header_cells[i].text = header
+                        # Make header bold
+                        for paragraph in header_cells[i].paragraphs:
+                            for run in paragraph.runs:
+                                run.bold = True
+                        # Header background color (indigo)
+                        shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="4F46E5"/>')
+                        header_cells[i]._tc.get_or_add_tcPr().append(shading)
+                        for paragraph in header_cells[i].paragraphs:
+                            for run in paragraph.runs:
+                                run.font.color.rgb = RGBColor(255, 255, 255)
+                    
+                    # Data rows
+                    for c in comments_data:
+                        row_cells = table.add_row().cells
+                        row_cells[0].text = str(c['index'])
+                        row_cells[1].text = str(c['page_number'] or '-')
+                        row_cells[2].text = c['comment_type'] or 'GENERAL'
+                        row_cells[3].text = c['comment_text'] or '-'
+                        row_cells[4].text = c['reviewer_name'] or '-'
+                        row_cells[5].text = c['discipline'] or '-'
+                    
+                    # Set column widths
+                    widths = [Inches(0.4), Inches(0.5), Inches(0.8), Inches(4.0), Inches(1.2), Inches(1.0)]
+                    for row in table.rows:
+                        for idx, cell in enumerate(row.cells):
+                            cell.width = widths[idx]
+                    
+                    # Save to buffer
+                    docx_buffer = BytesIO()
+                    doc.save(docx_buffer)
+                    docx_buffer.seek(0)
+                    docx_content = docx_buffer.read()
+                    
+                    response = HttpResponse(
+                        docx_content,
+                        content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                    )
+                    response['Content-Disposition'] = f'attachment; filename="CRS_{safe_filename}.docx"'
+                    response['Content-Length'] = len(docx_content)
                     return response
                 
                 else:  # xlsx (default)
