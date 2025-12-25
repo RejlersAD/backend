@@ -104,9 +104,29 @@
       "code": "SC"
     }
   ],
+  "user_storage": {
+    "enabled": true,
+    "s3_base_path": "users",
+    "folder_structure": {
+      "uploads": "uploads",
+      "exports": "exports",
+      "history": "history"
+    },
+    "activity_tracking": {
+      "enabled": true,
+      "log_uploads": true,
+      "log_exports": true,
+      "log_downloads": true,
+      "retention_days": 365
+    },
+    "file_retention": {
+      "uploads_days": 90,
+      "exports_days": 90
+    }
+  },
   "metadata": {
-    "version": "1.1.0",
+    "version": "1.2.0",
     "last_updated": "2025-12-24",
-    "description": "CRS Comment extraction and cleaning configuration"
+    "description": "CRS Comment extraction, cleaning, and user storage configuration"
   }
 }

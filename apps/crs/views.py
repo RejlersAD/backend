@@ -35,6 +35,13 @@ try:
 except ImportError:
     HELPERS_AVAILABLE = False
 
+# Import User Storage Manager for user-based S3 folder system
+try:
+    from apps.crs_documents.helpers.user_storage import get_user_storage, UserStorageManager
+    USER_STORAGE_AVAILABLE = True
+except ImportError:
+    USER_STORAGE_AVAILABLE = False
+
 
 class CRSDocumentViewSet(viewsets.ModelViewSet):
     """ViewSet for CRS Document management"""
@@ -444,6 +451,30 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
             if is_pdf:
                 # Extract comments from PDF
                 pdf_buffer = BytesIO(uploaded_file.read())
+                
+                # Save uploaded file to user's S3 folder for history tracking
+                upload_s3_result = None
+                if USER_STORAGE_AVAILABLE:
+                    try:
+                        user_storage = get_user_storage(request.user)
+                        # Reset buffer position for reading
+                        pdf_buffer.seek(0)
+                        upload_s3_result = user_storage.save_upload(
+                            file_content=pdf_buffer.read(),
+                            original_filename=uploaded_file.name,
+                            metadata={
+                                'project_name': metadata.get('project_name', ''),
+                                'document_number': metadata.get('document_number', ''),
+                                'department': metadata.get('department', ''),
+                            }
+                        )
+                        # Reset buffer again after save
+                        pdf_buffer.seek(0)
+                    except Exception as storage_error:
+                        # Log but don't fail - storage is supplementary
+                        import logging
+                        logging.getLogger(__name__).warning(f"User storage save failed: {storage_error}")
+                
                 comments = extract_reviewer_comments(pdf_buffer)
                 
                 if not comments:
@@ -508,6 +539,27 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                 doc_number = metadata.get("document_number", "output")
                 safe_filename = "".join(c for c in doc_number if c.isalnum() or c in "-_").strip() or "output"
                 
+                # Helper function to save exports to user storage
+                def save_export_to_user_storage(content_bytes, export_format, filename):
+                    """Save export file to user's S3 folder"""
+                    if USER_STORAGE_AVAILABLE:
+                        try:
+                            user_storage = get_user_storage(request.user)
+                            user_storage.save_export(
+                                file_content=content_bytes if isinstance(content_bytes, bytes) else content_bytes.encode('utf-8'),
+                                export_format=export_format,
+                                base_filename=filename,
+                                metadata={
+                                    'project_name': metadata.get('project_name', ''),
+                                    'document_number': metadata.get('document_number', ''),
+                                    'department': metadata.get('department', ''),
+                                    'comments_count': len(comments_data),
+                                }
+                            )
+                        except Exception as storage_error:
+                            import logging
+                            logging.getLogger(__name__).warning(f"Export storage failed: {storage_error}")
+                
                 if download_format == 'json':
                     # Return as JSON file download
                     import json as json_module
@@ -516,6 +568,9 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                         'statistics': stats,
                         'comments': comments_data
                     }, indent=2, default=str)
+                    
+                    # Save to user storage
+                    save_export_to_user_storage(json_content, 'json', safe_filename)
                     
                     response = HttpResponse(
                         json_content,
@@ -547,8 +602,13 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                             c['section_reference']
                         ])
                     
+                    csv_content = csv_buffer.getvalue()
+                    
+                    # Save to user storage
+                    save_export_to_user_storage(csv_content, 'csv', safe_filename)
+                    
                     response = HttpResponse(
-                        csv_buffer.getvalue(),
+                        csv_content,
                         content_type='text/csv'
                     )
                     response['Content-Disposition'] = f'attachment; filename="CRS_{safe_filename}.csv"'
@@ -662,6 +722,9 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                     pdf_buffer.seek(0)
                     pdf_content = pdf_buffer.read()
                     
+                    # Save to user storage
+                    save_export_to_user_storage(pdf_content, 'pdf', safe_filename)
+                    
                     response = HttpResponse(
                         pdf_content,
                         content_type='application/pdf'
@@ -742,6 +805,9 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                     docx_buffer.seek(0)
                     docx_content = docx_buffer.read()
                     
+                    # Save to user storage
+                    save_export_to_user_storage(docx_content, 'docx', safe_filename)
+                    
                     response = HttpResponse(
                         docx_content,
                         content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -758,30 +824,33 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                         metadata
                     )
                 
-                # CRITICAL: Ensure buffer is at the beginning before reading
-                output_buffer.seek(0)
-                output_content = output_buffer.read()
-                
-                # Validate output is not empty
-                if len(output_content) < 100:
-                    return Response({
-                        'error': 'Failed to generate valid Excel file',
-                        'success': False,
-                        'message': 'Output file is too small, likely corrupted'
-                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-                
-                # Create response with Excel file
-                response = HttpResponse(
-                    output_content,
-                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                )
-                
-                response['Content-Disposition'] = f'attachment; filename="CRS_Populated_{safe_filename}.xlsx"'
-                response['Content-Length'] = len(output_content)
-                response['X-Comment-Count'] = str(stats['total'])
-                response['X-Processing-Status'] = 'success'
-                
-                return response
+                    # CRITICAL: Ensure buffer is at the beginning before reading
+                    output_buffer.seek(0)
+                    output_content = output_buffer.read()
+                    
+                    # Validate output is not empty
+                    if len(output_content) < 100:
+                        return Response({
+                            'error': 'Failed to generate valid Excel file',
+                            'success': False,
+                            'message': 'Output file is too small, likely corrupted'
+                        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                    
+                    # Save to user storage
+                    save_export_to_user_storage(output_content, 'xlsx', safe_filename)
+                    
+                    # Create response with Excel file
+                    response = HttpResponse(
+                        output_content,
+                        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                    )
+                    
+                    response['Content-Disposition'] = f'attachment; filename="CRS_Populated_{safe_filename}.xlsx"'
+                    response['Content-Length'] = len(output_content)
+                    response['X-Comment-Count'] = str(stats['total'])
+                    response['X-Processing-Status'] = 'success'
+                    
+                    return response
             
             elif is_excel:
                 # Excel file uploaded - validate and standardize format

@@ -25,8 +25,7 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
     """
     queryset = PFDDocument.objects.all()
     serializer_class = PFDDocumentSerializer
-    permission_classes = [IsAuthenticated, HasModuleAccess]
-    module_required = 'pfd_to_pid'
+    permission_classes = [IsAuthenticated]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['document_number', 'document_title', 'project_name']
     ordering_fields = ['created_at', 'status', 'document_number']
@@ -125,8 +124,7 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
     """
     queryset = PIDConversion.objects.all()
     serializer_class = PIDConversionSerializer
-    permission_classes = [IsAuthenticated, HasModuleAccess]
-    module_required = 'pfd_to_pid'
+    permission_classes = [IsAuthenticated]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['pid_drawing_number', 'pid_title']
     ordering_fields = ['created_at', 'status', 'confidence_score']

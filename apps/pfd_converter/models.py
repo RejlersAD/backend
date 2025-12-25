@@ -17,6 +17,7 @@ class PFDDocument(TimeStampedModel):
     STATUS_CHOICES = [
         ('uploaded', 'Uploaded'),
         ('processing', 'Processing'),
+        ('processed', 'Processed'),
         ('converted', 'Converted'),
         ('failed', 'Failed'),
         ('approved', 'Approved'),
@@ -33,10 +34,11 @@ class PFDDocument(TimeStampedModel):
     project_code = models.CharField(max_length=100, blank=True)
     
     # File details
-    file = models.FileField(upload_to='pfd_documents/%Y/%m/%d/')
-    file_name = models.CharField(max_length=255)
-    file_size = models.BigIntegerField(help_text='File size in bytes')
-    file_type = models.CharField(max_length=50)
+    uploaded_file = models.FileField(upload_to='pfd_documents/%Y/%m/%d/', null=True, blank=True)
+    file = models.FileField(upload_to='pfd_documents/%Y/%m/%d/', null=True, blank=True)
+    file_name = models.CharField(max_length=255, blank=True)
+    file_size = models.BigIntegerField(null=True, blank=True, help_text='File size in bytes')
+    file_type = models.CharField(max_length=50, blank=True)
     
     # Processing status
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='uploaded')
@@ -114,6 +116,36 @@ class PIDConversion(TimeStampedModel):
     compliance_checks = models.JSONField(
         default=dict,
         help_text='Standards compliance verification'
+    )
+    
+    # Enhanced AI-Assisted Fields (6-Step Workflow)
+    conversion_method = models.CharField(
+        max_length=50,
+        default='standard',
+        help_text='Conversion method: standard/ai_assisted_6step'
+    )
+    conversion_data = models.JSONField(
+        null=True,
+        blank=True,
+        help_text='Complete conversion data from 6-step workflow'
+    )
+    assumptions_report = models.TextField(
+        blank=True,
+        help_text='Assumptions and limitations report'
+    )
+    valve_list = models.TextField(
+        blank=True,
+        help_text='JSON string of valve list'
+    )
+    pid_pdf = models.BinaryField(
+        null=True,
+        blank=True,
+        help_text='Generated P&ID PDF bytes'
+    )
+    completed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='Conversion completion timestamp'
     )
     
     # Review & approval
