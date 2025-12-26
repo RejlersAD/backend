@@ -6,8 +6,12 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
+from django.conf import settings
 from django_filters.rest_framework import DjangoFilterBackend
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .models import PFDDocument, PIDConversion, ConversionFeedback
 from .serializers import (
@@ -78,7 +82,11 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
             
             try:
                 converter = PFDToPIDConverter()
-                extracted_data = converter.extract_pfd_data(file)
+                
+                # Open the saved file for extraction (file pointer is at end after save)
+                pfd_doc.file.open('rb')
+                extracted_data = converter.extract_pfd_data(pfd_doc.file)
+                pfd_doc.file.close()
                 
                 pfd_doc.extracted_data = extracted_data
                 pfd_doc.status = 'converted'
@@ -196,6 +204,32 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
                 conversion.design_parameters = pid_specs.get('design_basis', {})
                 conversion.compliance_checks = validation
                 conversion.confidence_score = validation.get('compliance_score', 0)
+                
+                # 🎨 Generate actual P&ID drawing PDF
+                try:
+                    logger.info("🎨 Generating P&ID visual drawing...")
+                    drawing_path = converter.generate_pid_drawing(
+                        pfd_data=pfd_doc.extracted_data,
+                        pid_specs={
+                            'pid_drawing_number': conversion.pid_drawing_number,
+                            'pid_title': conversion.pid_title,
+                            'pid_revision': conversion.pid_revision,
+                            'equipment_list': conversion.equipment_list,
+                            'instrument_list': conversion.instrument_list,
+                            'piping_specifications': conversion.piping_details,
+                            'safety_devices': conversion.safety_systems,
+                        }
+                    )
+                    
+                    # Save drawing path to conversion record
+                    relative_path = drawing_path.replace(str(settings.MEDIA_ROOT), '').lstrip('/\\')
+                    conversion.pid_file = relative_path
+                    logger.info(f"✅ P&ID drawing saved: {relative_path}")
+                    
+                except Exception as draw_error:
+                    logger.warning(f"⚠️ P&ID drawing generation failed: {str(draw_error)}")
+                    # Continue without drawing - specs are still valid
+                
                 conversion.status = 'completed'
                 conversion.generation_completed_at = timezone.now()
                 conversion.generation_duration = (
@@ -234,6 +268,67 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=True, methods=['get'])
+    def download_drawing(self, request, pk=None):
+        """
+        Download P&ID drawing PDF
+        
+        GET /api/v1/pfd/conversions/{id}/download_drawing/
+        """
+        try:
+            conversion = self.get_object()
+            
+            logger.info(f"Download request for conversion {pk}, pid_file: {conversion.pid_file}")
+            
+            if not conversion.pid_file:
+                logger.warning(f"P&ID drawing not available for conversion {pk}")
+                
+                # Check if OpenAI API key is configured
+                from decouple import config
+                api_key = config('OPENAI_API_KEY', default='')
+                
+                if not api_key or api_key == '' or api_key.startswith('your-'):
+                    error_msg = (
+                        "P&ID drawing generation requires OpenAI API configuration. "
+                        "Please configure OPENAI_API_KEY in your environment variables or .env file. "
+                        "The system supports DALL-E 3 (HD quality) and DALL-E 2 (fallback) for AI-generated drawings."
+                    )
+                else:
+                    error_msg = (
+                        "P&ID drawing not generated yet. The generation may have failed or is still in progress. "
+                        "Please check the conversion status or try regenerating the drawing."
+                    )
+                
+                return Response(
+                    {'error': error_msg},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Build full path
+            drawing_path = os.path.join(settings.MEDIA_ROOT, str(conversion.pid_file))
+            logger.info(f"Attempting to serve file from: {drawing_path}")
+            
+            if not os.path.exists(drawing_path):
+                logger.error(f"Drawing file not found at path: {drawing_path}")
+                return Response(
+                    {'error': f'Drawing file not found on server. Path checked: {conversion.pid_file}'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Serve file
+            from django.http import FileResponse
+            response = FileResponse(open(drawing_path, 'rb'), content_type='application/pdf')
+            response['Content-Disposition'] = f'attachment; filename="{conversion.pid_drawing_number}.pdf"'
+            logger.info(f"Successfully serving file: {drawing_path}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error in download_drawing: {str(e)}", exc_info=True)
+            return Response(
+                {'error': f'Failed to download drawing: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
     @action(detail=True, methods=['post'])

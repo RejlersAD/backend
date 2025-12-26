@@ -1,0 +1,391 @@
+[
+  {
+    "filename": "P16093-14-01-08-1602_P&ID.pdf",
+    "text_content": "3901\n05\nPI\nNOTE 4, 18\n3901\n04\nPIT\n3901\n03\nPI\n3901\n01\nDPIT\n01\nSVZY\n3901\n3901\n02\nSVZY\n01\n3901\nPSAL\n01\nPSDL\n3901\n3901\n01\nDPZY\n01\n3901\nDPAH\n3901\n01\nPIT\n3901\n02\nXPD\n3901\n01\nXPD\nM\nM\nM\n3901\n01\nTI\n04\n3901\nPI\nH @ 1 barg\nD1\nRS\nSC\nSC\nCC\n01\n3901\nCP\n01\n3901\nSC\nFROM SAHIL GAS EXPORT\n102\n14.76.08.1601\nTO HP FLARE\n116\n14.39.08.1601\nTO CLOSED DRAIN\n103\n14.01.08.1607\nTO HP FLARE\n104\n14.39.08.1601\nTO OPEN DRAIN\n105\n14.01.08.1605\nTO SAHIL EXPORT GAS KOD\n107\n14.01.08.1603\n2\"\nNOTE 8\nFIRE CASE\nNOTE 23\nTO SAFE\nLOCATION\nNOTE 13\n2\"\nNOTE 8\nD2\nNOTE 11\nHOLDS\nNOTE 11\n1. PSV SIZE\nASME B31.8\nHOLD 1\nK1\nNOTE 11\nNOTE 11\nK2A\nK2B\nMIN.\n15D\nK2\nMIN.\nTYPE A\n019\nNOTE 11\nNOTE 11\nTYPE A\n020\nNOTE 21\nI\nI\nI\nMIN.\nMIN.\nMIN. PIG LENGTH\nMIN.\nMIN.\n600\nNOTE 11\nI\nI\nI\nMIN.\n600mm\nF.D.\nA/G\nU/G\nFB\nNOTE 3\nNOTE 11\nNOTE 7\nMIN.\nFB\nNOTE 3\nMIN.\nNOTE 11\nU/G\nNOTE 15\nNOTE 12\nA/G\n1. ALL EQUIPMENT AND INSTRUMENT TAG NUMBERS ON THIS DRAWING ARE PREFIXED BY AREA\n    CODE (14) AND PLANT AREA (01) UNLESS SPECIFIED OTHERWISE.\n2. REFER TO ADCO DOC NO. 30.99.00.0103.1 ALONG WITH THE P&ID-TYPICAL PIG RECEIVER\n    SYSTEM FOR MULTIPHASE FLOW TOWARDS DESIGN REQUIREMENT.\n3. MOVS ARE ONLY OPERATED LOCALLY VIA INTEGRAL ACTUATOR CONTROLS.\n4. LOW RANGE (0-1 BARG) PRESSURE INDICATOR SHALL BE INSTALLED BUT PRESSURE RATED TO\n    PIPELINE DESIGN PRESSURE AND SHALL BE LOCATED AT A MINIMUM DISTANCE FROM PIG TRAP\n    DOOR SO THAT IT IS EASILY VISIBLE\n5. PURGING CONNECTION IS LOCATED NEAR END CLOSURE TO ALLOW PURGING\n    AND/OR FLUSHING THE FULL LENGTH OF BARREL WITH INERT GAS / INHIBITED WATER.\n    ALL UTILITY CONNECTIONS ARE PROVIDED WITH FACILITY FOR QUICK CONNECT/DISCONNECT.\n6. A PORTABLE DRIP TRAY (OF APPROX 5% VOLUME OF PIG TRAP) IS PROVIDED DIRECTLY\n    UNDERNEATH  END CLOSURE OF PIG TRAP TO CONTAIN ANY SPILLED HYDROCARBON DURING\n    OPENING OF TRAP DOOR.\n7. RODDING POINT.\n8. THE CORROSION MONITORING ACCESS FITTINGS SHOULD BE SITUATED SUFFICIENTLY\n    DOWNSTREAM THE CHEMICAL INJECTION ACCESS FITTINGS BY TYPICALLY 10 PIPE DIAMETERS\n    AND SHALL BE IN",
+    "instrumentation": {
+      "has_instruments": true,
+      "instrument_types": [
+        "PSV"
+      ],
+      "control_loops": []
+    },
+    "piping": {
+      "has_piping_specs": true,
+      "line_sizes": [
+        "1\"",
+        "3\"",
+        "16\"",
+        "4\"",
+        "18\"",
+        "2\"",
+        "6\""
+      ],
+      "piping_classes": [
+        "300#"
+      ]
+    },
+    "valves": {
+      "has_valves": true,
+      "valve_types": [
+        "BALL VALVE"
+      ]
+    },
+    "equipment": {
+      "tags": [],
+      "types": []
+    },
+    "symbols": []
+  },
+  {
+    "filename": "P16093-14-01-08-1603_P&ID.pdf",
+    "text_content": "3601\n02\nPIT\n02\n3601\nPIC\n02\n3601\nPHS\n3601\n03\nPIT\n03\n3601\nPSAH\n3601\n03\nPSDH\n3601\n04\nSVZY\n3601\n01\nSVZY\n3601\n02\nLIT\n3601\n03\nLIT\n3601\n02\nLSDL\n02\n3601\nLSAL\n3601\n03\nLSDH\n03\n3601\nLSAH\n3601\n01\nPT\n01\n3601\nPIC\n3601\n02\nSVZY\n3601\n04B\nLG\n3601\n01\nLIT\n01\n3601\nLIC\n01\n3601\nLHS\n3601\n01\nBVZY\n3601\n04A\nLG\n3601\n01\nDPIT\n01\n3601\nDPI\nRS\nFROM GAS EXPORT\nPIG RECEIVER\n108\nFROM NITROGEN\nDISTRIBUTION HEADER\n109\nTO HP FLARE HEADER\n114\nHP & IP GAS\nCOLLECTTON (ASAB CDS)\n115\nT0 CRUDE HEATER\n111\nTO CLOSED DRAIN\n112\nNOTE 8\nHOLDS\n1. PSV SIZE.\n2. VESSEL SIZE.\n3. CONTROL VALVE SIZE.\nHOLD 1\nHOLD 1\nTYPE 01B\nHH 20 barg\nL SET @\n400 mm\nMIN.\nUC\n2800 MM\nLL SET @\n300 mm\nTYPE 01B\nHH SET @\n4690 mm\nNOTE 5\nNOTE 4\n011503-X\n031440-X\nH @ 0.1 bar\nTYPE 01A\nHOLD 3\nHOLD 3\nHOLD 3\nHOLD 3\nHOLD 3\n4590 mm\nHHLL\n4690 mm\nLEVEL\nMIN.\nSAHIL EXPORT GAS\n            KOD\nEQUIPMENT DESCRIPTION\nELEVATION FROM BTL\n300 mm\nLLLL\n400 mm\nLLL\nHLL\n011503-X\n031440-X\n011503-X\n031440-X\nH 15 barg\nL 14 barg\nNOTE 3\nTYPE 02\n150#\n300#\n1. ALL EQUIPMENT AND INSTRUMENT TAG NUMBERS ON THE DRAWING ARE PREFIXED BY THE\n    AREA CODE (14) AND PLANT AREA CODE (01) UNLESS SPECIFIED OTHERWISE.\n2. DELETED.\n3. DISCREPANCY ALRAM PROVIDED TO INDICATE INADVERTENT OPENING OF BDV DURING\n    NORMAL OPERATION.\n4. HIGH HIGH PRESSURE IN EXPORT GAS KOD WILL CLOSE SDV-3601-01 AND SDV-3601-02. SET\n    POINT SHALL BE IN LINE WITH ASAB HP HEADER HH TRIP VALUE.\n5. LINE TO BE CONSIDERED FOR 2 PHASE DUE TO ANY LEVEL FAILURE IN KOD.\n6. ROTAMETER SHALL BE POSITIONED VERTICALLY UP IN FLOW DIRECTION.\n7. 3D STRAIGHT RUN LENGTH REQUIREMENT AT THE UPSTREAM OF INLET NOZZLE.\n8. 5D STRAIGHT LENGTH REQUIREMENT AT UPSTREASM OF CHECK VALVE.\nMIN.\nP16093.30.99.08.1601 SHT. 1 TO 16\nNOTE 4\nTYPE 01A\nDRG. NO.\nTITLE\nDRAWING REFERENCE\nP&ID LEGEND\nLEGEND\n14.01.08.1602\nV-3601-01\n            SAHIL EXPORT GAS KOD\nDESIGN TEMP   : 55\u00b0 C/-29\u00b0 C\nDESIGN PRESS : 22.4 barg/FV\nHEIGHT              : 7800 mm (T/T)\nDIAMETER         : 3300 mm\nMATERIAL : SHELL/HEADER : CS + SS 316 L CLAD\n                      DEMISTER : SS",
+    "instrumentation": {
+      "has_instruments": true,
+      "instrument_types": [
+        "LCV",
+        "PSV",
+        "PCV",
+        "PIC",
+        "PT",
+        "LIC"
+      ],
+      "control_loops": []
+    },
+    "piping": {
+      "has_piping_specs": true,
+      "line_sizes": [
+        "20\"",
+        "1\"",
+        "12\"",
+        "3\"",
+        "16\"",
+        "4\"",
+        "2\"",
+        "6\"",
+        "8\"",
+        "24\""
+      ],
+      "piping_classes": [
+        "300#",
+        "150#"
+      ]
+    },
+    "valves": {
+      "has_valves": true,
+      "valve_types": [
+        "CHECK VALVE",
+        "CONTROL VALVE"
+      ]
+    },
+    "equipment": {
+      "tags": [
+        "1602\nV-3601"
+      ],
+      "types": []
+    },
+    "symbols": []
+  },
+  {
+    "filename": "P16093-16-01-08-1689_P&ID1.pdf",
+    "text_content": "3901\n08A\nFIT\n3901\n08A\nTI\n3901\n08A\nPIT\n08A\n3901\nFI\n08\n3901\nFQI\n08\n3901\nPI\n08\n3901\nTI\n3901\n07\nPIT\n07\n3901\nPIC\n3901\n05\nPSDL\n3901\n06\nPIT\n06\n3901\nPI\nM\nM\nM\n3901\n04\nPI\n3901\n02\nXPD\n3901\n01\nPI\n3901\n05\nPIT\n05\n3901\nPSAL\n3901\n01\nXPD\n3901\n02\nPIT\n3901\n01\nTI\n3901\n01\nDPI\n3901\n03\nSVZY\n3901\n04\nSVZY\n3901\n01\nDPIT\n01\n3901\nDPAH\n3901\n06\nSVZY\n02\n3901\nPI\nRS\nCC\n01\n3901\nCP\n01\n3901\nSC\nTO CLOSED DRAIN\nCOLLECTION HEADER\n168\n16.01.08.1731\nTO CLOSED DRAIN\nCOLLECTION HEADER\n169\n16.01.08.1731\nTO MP FLARE HEADER\n170\n16.39.08.1603\nFUEL GAS CONNECTION\nFOR PURGING\n172\n16.01.08.1730\nBLOCK VALVE STATION\nSAHIL GAS EXPORT LINE\n163\nFROM GLYCOL CONTACTOR\n161\n16.01.08.1686\nTO MP FLARE HEADER\n544\n16.39.08.1603\nTO TUNDISH DRUM\n499\n16.01.08.1732\n1. ALL THE EQUIPMENT AND INSTRUMENT TAG NUMBERS ON THIS DRAWING ARE  PREFIXED BY\n    AREA CODE (16) AND PLANT AREA CODE (01) UNLESS SPECIFIED  OTHERWISE.\n2. REFER TO ADNOC ONSHORE ENGINEERING SPEC. DOC NO.30.99.00.0103\n3. MOVS CAN ONLY BE OPERATED LOCALLY VIA INTEGRAL ACTUATOR CONTROLS.\n4. LOW RANGE (0-1 BARG) PRESSURE INDICATOR SHALL BE INSTALLED BUT PRESSURE RATED\n    TO PIPELINE DESIGN PRESSURE AND SHALL BE LOCATED AT A MINIMUM DISTANCE FROM\n    PIG TRAP DOOR SO THAT IT IS EASILY VISIBLE.\n5. THE CC, CP AND BP ACCESS FITTINGS SHOULD BE SITUATED SUFFICIENTLY DOWNSTREAM\n    THE CHEMICAL INJECTION ACCESS FITTINGS BY TYPICALLY 10 PIPE DIAMETERS AND SHALL\n    BE INSTALLED FLUSH MOUTED AT 6 O'CLOCK POSITION\n6. RODDING POINT.\n7. VALVE PROVIDED WITH INCHING FACILITY WITH MIN MECHANICAL FLOW STOP (99%).\n8. DELETED.\n9. DELETED.\n10. MULTIPHASE FLOW, ADEQUATE PIPING SUPPORTS PROVIDED.\n11. OPERATIONAL PROCEDURES ARE WRITTEN SUCH THAT THERE IS ALWAYS  AN OPEN ROUTE\n      TO THE CDS.\n12. SEQUENTIAL KEY INTERLOCKING SYSTEM TO REGULATE OPERATION OF PIG TRAP VALVES AND\n     TRAP DOOR SHALL BE PROVIDED FOR SAFE HANDLING. REFER TO ADNOC DOCUMENT NO.\n      ES-30-90-00-0103-1 FOR SAFETY INTERLOCKING SYSTEM.\n13. PURGE LOCATION NEAR PIG-TRAP VALVE OR END CLOSURE TO ALLOW PURGING AND/OR\n      F",
+    "instrumentation": {
+      "has_instruments": true,
+      "instrument_types": [
+        "PSV",
+        "PCV",
+        "PIC"
+      ],
+      "control_loops": []
+    },
+    "piping": {
+      "has_piping_specs": true,
+      "line_sizes": [
+        "1\"",
+        "12\"",
+        "3\"",
+        "16\"",
+        "4\"",
+        "18\"",
+        "2\"",
+        "6\""
+      ],
+      "piping_classes": []
+    },
+    "valves": {
+      "has_valves": true,
+      "valve_types": [
+        "BALL VALVE",
+        "CONTROL VALVE",
+        "BLOCK VALVE"
+      ]
+    },
+    "equipment": {
+      "tags": [],
+      "types": []
+    },
+    "symbols": []
+  },
+  {
+    "filename": "1.5900837 DEBOTTLENECKING OF STEAM CONDENSATE SYSTEM IN HABSHAN 5_50196-H5-562-PX-PID-00003_B.pdf",
+    "text_content": "M\nM\nM\nM\n2403\nLT\nR\n3404\nPG\n3403\nPG\nESD\nI 2850\n7406\nHS\n7404\nVAH\n7402\nVSH\n7404\nVSH\nESD\nI 2850\n7402\nVAH\n7401\nHS\n4401\nTIC\n4401\nTT\n2402\nLG\n2403\nLI\n2401\nLT\n7405\nHS\n2401\nLALL\nESD\nI 2850\n1401\nFIC\n3401\nPG\n3402\nPG\n2403\nLIC\n1401\nFT\n7403\nHS\nR\n1401\nFZT\n1401\nFZI\n1402\nFAL\n1402\nFT\nV1\nV1\nV1\nD1\nV1\nD1\nD1\nD1\nD1\nD1\nV1\nV1\nD1\nFROM ONSITE STEAM\nCONDENSATE\nHEADER\n(ICPR-II)\nONSITE STEAM\nCONDENSATE\n1564 577-00-40-143\nTO STEAM\nCONDENSATE\nCOLLECTION\n(ICPR-II)\nGRADE 1 STEAM\nCONDENSATE\n1563 577-00-40-143\nO\nOD\n1002\nO\nOD\n1003\nO\nOD\n1005\nO\nOD\n1001\n11. STRAIGHT RUN MIN 5D (INCLUDING REDUCER AND STRAINER AT HORIZONTAL RUN).\n(NOTE 11)\n(NOTE 11)\nWH\nLPT\nLPT\nVENT TO ATMOSPHERE\n   AT SAFE LOCATION\nVENT TO ATMOSPHERE\n   AT SAFE LOCATION\n5. DELETED.\n2. ALL INSTRUMENT SIGNALS SHALL TERMINATE IN IES-502 UNLESS STATED OTHERWISE. (LATER)\nMin. 5000 mm\nM. NAKAMURA / T. KIMURA\nR. TSURUMI\nBL\nVENT TO ATMOSPHERE\nAT SAFE LOCATION\nVENT TO ATMOSPHERE\nAT SAFE LOCATION\nWH\nWH\nWH\nVENT TO ATMOSPHERE\nAT SAFE LOCATION\n(NOTE 6)\nMIN.\nTOP CONNECTION\nGENERAL NOTES:\n(NOTE 6)\nNOTES:\n1. ALL INSTRUMENT TAG NUMBERS ON THIS P&ID INCLUDING PACKAGE UNITS ARE\n    PREFIXED WITH UNIT NUMBER 562 UNLESS OTHERWISE NOTED.\nINTERLOCK\nNUMBER\nLEVEL\nINITIATOR\nESD\nSIL\nACTIONS\nTIME\nDELAY\nINTERLOCK TABLE\n6. SEE DETAIL 'F' ON PID 500-00-30-107.\n1\n(NOTE 1)\nI-2850\nBL\n7~9. DELETED.\nEQUIPMENT LIST\n(NOTE 6)\n1\nBAY 01\n2. ACCESS TO BE PROVIDED FOR RESET OF VIBRATION SWITCH.\n3. EACH FIN FAN MOTOR TO HAVE REMOTE CONTROL (START / STOP) AND INDICATION\n    (RUN / STOP) IN THE DCS AND A MANUAL START / STOP BUTTON AT GRADE.\n(NOTE 1)\nMIN\nTRIPS 562-P-201A/B\n4. LOCAL LOCKABLE STOP PUSH BUTTON LOCATED NEAR FAN MOTOR.\nLOW LOW LEVEL IN VESSEL 562-V-201, LALL-2401\n1. LI-2403 TO BE ADJACENT TO LV-2403.\nTL\n(NOTE 6)\n3500 mm\n(NOTE 2)\n(NOTE 2)\n(NOTE 10)\n10. TEMPERATURE CONTROL IS BY ON/OFF OF EACH FAN.\nWH\nMIN.\n300#\n300#\n1\"\n(V)\n3/4\"\n(V)\n3/4\"\nN5\n562-0411-SC-2\"-11030-P\nN\nP\nN\nP\nJ2A\nJ1A\nN1\nM1\nJ1B\nN6\nN2\nJ3B\nJ2B\n562-P-201A\nONSITE CONDENSATE COLLECTION PUMP\n562-P-201A\n2\"\nUC\n2\"\n562-0407-VE-3\"",
+    "instrumentation": {
+      "has_instruments": true,
+      "instrument_types": [
+        "TIC",
+        "PAH",
+        "PSV",
+        "FIC",
+        "PT",
+        "FT",
+        "LT",
+        "TT",
+        "LIC"
+      ],
+      "control_loops": []
+    },
+    "piping": {
+      "has_piping_specs": true,
+      "line_sizes": [
+        "1\"",
+        "14\"",
+        "3\"",
+        "4\"",
+        "8\"",
+        "2\"",
+        "24\"",
+        "6\""
+      ],
+      "piping_classes": [
+        "300#"
+      ]
+    },
+    "valves": {
+      "has_valves": true,
+      "valve_types": [
+        "CONTROL VALVE"
+      ]
+    },
+    "equipment": {
+      "tags": [
+        "562-E-201",
+        "562-V-201",
+        "562-E-202",
+        "562-P-201B",
+        "8501B\n8501A",
+        "562-P-202",
+        "562-V-202",
+        "201\nD-562",
+        "562-P-201A"
+      ],
+      "types": []
+    },
+    "symbols": []
+  },
+  {
+    "filename": "1.5900837 DEBOTTLENECKING OF STEAM CONDENSATE SYSTEM IN HABSHAN 5_50196-H5-562-PX-PID-00004_B.pdf",
+    "text_content": "M\nM\nM\nM\n2403\nLT\nR\n3404\nPG\n3403\nPG\nESD\nI 2850\n7406\nHS\n7404\nVAH\n7402\nVSH\n7404\nVSH\nESD\nI 2850\n7402\nVAH\n7401\nHS\n4401\nTIC\n4401\nTT\n2402\nLG\n2403\nLI\n2401\nLT\n7405\nHS\n2401\nLALL\nESD\nI 2850\n1401\nFIC\n3401\nPG\n3402\nPG\n2403\nLIC\n1401\nFT\n7403\nHS\nR\n1401\nFZT\n1401\nFZI\n1402\nFAL\n1402\nFT\nV1\nV1\nV1\nD1\nV1\nD1\nD1\nD1\nD1\nD1\nV1\nV1\nD1\nFROM ONSITE STEAM\nCONDENSATE\nHEADER\n(ICPR-II)\nONSITE STEAM\nCONDENSATE\n1564 577-00-40-143\nTO STEAM\nCONDENSATE\nCOLLECTION\n(ICPR-II)\nGRADE 1 STEAM\nCONDENSATE\n1563 577-00-40-143\nO\nOD\n1002\nO\nOD\n1003\nO\nOD\n1005\nO\nOD\n1001\n11. STRAIGHT RUN MIN 5D (INCLUDING REDUCER AND STRAINER AT HORIZONTAL RUN).\n(NOTE 11)\n(NOTE 11)\nWH\nLPT\nLPT\nVENT TO ATMOSPHERE\n   AT SAFE LOCATION\nVENT TO ATMOSPHERE\n   AT SAFE LOCATION\n5. DELETED.\n2. ALL INSTRUMENT SIGNALS SHALL TERMINATE IN IES-502 UNLESS STATED OTHERWISE. (LATER)\nMin. 5000 mm\nM. NAKAMURA / T. KIMURA\nR. TSURUMI\nBL\nVENT TO ATMOSPHERE\nAT SAFE LOCATION\nVENT TO ATMOSPHERE\nAT SAFE LOCATION\nWH\nWH\nWH\nVENT TO ATMOSPHERE\nAT SAFE LOCATION\n(NOTE 6)\nMIN.\nTOP CONNECTION\nGENERAL NOTES:\n(NOTE 6)\nNOTES:\n1. ALL INSTRUMENT TAG NUMBERS ON THIS P&ID INCLUDING PACKAGE UNITS ARE\n    PREFIXED WITH UNIT NUMBER 562 UNLESS OTHERWISE NOTED.\nINTERLOCK\nNUMBER\nLEVEL\nINITIATOR\nESD\nSIL\nACTIONS\nTIME\nDELAY\nINTERLOCK TABLE\n6. SEE DETAIL 'F' ON PID 500-00-30-107.\n1\n(NOTE 1)\nI-2850\nBL\n7~9. DELETED.\nEQUIPMENT LIST\n(NOTE 6)\n1\nBAY 01\n2. ACCESS TO BE PROVIDED FOR RESET OF VIBRATION SWITCH.\n3. EACH FIN FAN MOTOR TO HAVE REMOTE CONTROL (START / STOP) AND INDICATION\n    (RUN / STOP) IN THE DCS AND A MANUAL START / STOP BUTTON AT GRADE.\n(NOTE 1)\nMIN\nTRIPS 562-P-201A/B\n4. LOCAL LOCKABLE STOP PUSH BUTTON LOCATED NEAR FAN MOTOR.\nLOW LOW LEVEL IN VESSEL 562-V-201, LALL-2401\n1. LI-2403 TO BE ADJACENT TO LV-2403.\nTL\n(NOTE 6)\n3500 mm\n(NOTE 2)\n(NOTE 2)\n(NOTE 10)\n10. TEMPERATURE CONTROL IS BY ON/OFF OF EACH FAN.\nWH\nMIN.\n300#\n300#\n1\"\n(V)\n3/4\"\n(V)\n3/4\"\nN5\n562-0411-SC-2\"-11030-P\nN\nP\nN\nP\nJ2A\nJ1A\nN1\nM1\nJ1B\nN6\nN2\nJ3B\nJ2B\n562-P-201A\nONSITE CONDENSATE COLLECTION PUMP\n562-P-201A\n2\"\nUC\n2\"\n562-0407-VE-3\"",
+    "instrumentation": {
+      "has_instruments": true,
+      "instrument_types": [
+        "TIC",
+        "PAH",
+        "PSV",
+        "FIC",
+        "PT",
+        "FT",
+        "LT",
+        "TT",
+        "LIC"
+      ],
+      "control_loops": []
+    },
+    "piping": {
+      "has_piping_specs": true,
+      "line_sizes": [
+        "1\"",
+        "3\"",
+        "4\"",
+        "8\"",
+        "2\"",
+        "24\"",
+        "6\"",
+        "10\""
+      ],
+      "piping_classes": [
+        "300#"
+      ]
+    },
+    "valves": {
+      "has_valves": true,
+      "valve_types": [
+        "CONTROL VALVE"
+      ]
+    },
+    "equipment": {
+      "tags": [
+        "562-P-203A",
+        "562-E-201",
+        "562-V-201",
+        "562-P-201B",
+        "562-V-203",
+        "562-E-203",
+        "201\nD-562",
+        "562-P-201A",
+        "6001\nI 6001",
+        "562-P-203"
+      ],
+      "types": []
+    },
+    "symbols": []
+  },
+  {
+    "filename": "11.5901062 CONDUCT FEASIBILITY STUDY FOR THE CONVERSION OF JET A1 TANK TO UGL-95 at HFZT_5638-E1-150",
+    "text_content": "Option:1 Hookup Point \nfor Jet-A1 \nTank T-504 O/L to Road \nTanker Loading Function\n* ESD Level-2 \nfunctionality will remain \nsame, Operating \nphilosophy of Tank \nT-504 will be matched \nwith other ULG Tanks\nNew ESD Valve is not \nrequired\n16\"-1500-UG-XX3-11051X-V\nFROM STORAGE TANK\nT-504\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-004\nTP\n12\nULG-95\nDemolition scope\nDemolition scope\nTP\n17\nTP\n18\nISSUED FOR COMPANY REVIEW\nISSUED FOR APPROVAL\n0\n1\n19-05-2025\n02-06-2025\nTP\n26\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-012\nFROM T-203/204\n",
+    "instrumentation": {
+      "has_instruments": false,
+      "instrument_types": [],
+      "control_loops": []
+    },
+    "piping": {
+      "has_piping_specs": true,
+      "line_sizes": [
+        "16\""
+      ],
+      "piping_classes": []
+    },
+    "valves": {
+      "has_valves": false,
+      "valve_types": []
+    },
+    "equipment": {
+      "tags": [],
+      "types": []
+    },
+    "symbols": []
+  },
+  {
+    "filename": "11.5901062 CONDUCT FEASIBILITY STUDY FOR THE CONVERSION OF JET A1 TANK TO UGL-95 at HFZT_5638-E1-150",
+    "text_content": "Option:1 Hookup Point \nfor Jet-A1 \nTank T-504 O/L to Road \nTanker Loading Function\n* ESD Level-2 \nfunctionality will remain \nsame, Operating \nphilosophy of Tank \nT-504 will be matched \nwith other ULG Tanks\nNew ESD Valve is not \nrequired\n16\"-1500-UG-XX3-11051X-V\nFROM STORAGE TANK\nT-504\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-004\nTP\n12\nULG-95\nDemolition scope\nDemolition scope\nTP\n17\nTP\n18\nISSUED FOR COMPANY REVIEW\nISSUED FOR APPROVAL\n0\n1\n19-05-2025\n02-06-2025\nTP\n26\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-012\nFROM T-203/204\n",
+    "instrumentation": {
+      "has_instruments": false,
+      "instrument_types": [],
+      "control_loops": []
+    },
+    "piping": {
+      "has_piping_specs": true,
+      "line_sizes": [
+        "16\""
+      ],
+      "piping_classes": []
+    },
+    "valves": {
+      "has_valves": false,
+      "valve_types": []
+    },
+    "equipment": {
+      "tags": [],
+      "types": []
+    },
+    "symbols": []
+  },
+  {
+    "filename": "11.5901062 CONDUCT FEASIBILITY STUDY FOR THE CONVERSION OF JET A1 TANK TO UGL-95 at HFZT_5638-E1-150",
+    "text_content": "Option:1 Hookup Point \nfor Jet-A1 \nTank T-504 O/L to Road \nTanker Loading Function\n* ESD Level-2 \nfunctionality will remain \nsame, Operating \nphilosophy of Tank \nT-504 will be matched \nwith other ULG Tanks\nNew ESD Valve is not \nrequired\n16\"-1500-UG-XX3-11051X-V\nFROM STORAGE TANK\nT-504\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-004\nTP\n12\nULG-95\nDemolition scope\nDemolition scope\nTP\n17\nTP\n18\nISSUED FOR COMPANY REVIEW\nISSUED FOR APPROVAL\n0\n1\n19-05-2025\n02-06-2025\nTP\n26\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-012\nFROM T-203/204\n",
+    "instrumentation": {
+      "has_instruments": false,
+      "instrument_types": [],
+      "control_loops": []
+    },
+    "piping": {
+      "has_piping_specs": true,
+      "line_sizes": [
+        "16\""
+      ],
+      "piping_classes": []
+    },
+    "valves": {
+      "has_valves": false,
+      "valve_types": []
+    },
+    "equipment": {
+      "tags": [],
+      "types": []
+    },
+    "symbols": []
+  },
+  {
+    "filename": "11.5901062 CONDUCT FEASIBILITY STUDY FOR THE CONVERSION OF JET A1 TANK TO UGL-95 at HFZT_5638-E1-150",
+    "text_content": "Option:1 Hookup Point \nfor Jet-A1 \nTank T-504 O/L to Road \nTanker Loading Function\n* ESD Level-2 \nfunctionality will remain \nsame, Operating \nphilosophy of Tank \nT-504 will be matched \nwith other ULG Tanks\nNew ESD Valve is not \nrequired\n16\"-1500-UG-XX3-11051X-V\nFROM STORAGE TANK\nT-504\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-004\nTP\n12\nULG-95\nDemolition scope\nDemolition scope\nTP\n17\nTP\n18\nISSUED FOR COMPANY REVIEW\nISSUED FOR APPROVAL\n0\n1\n19-05-2025\n02-06-2025\nTP\n26\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-012\nFROM T-203/204\n",
+    "instrumentation": {
+      "has_instruments": false,
+      "instrument_types": [],
+      "control_loops": []
+    },
+    "piping": {
+      "has_piping_specs": true,
+      "line_sizes": [
+        "16\""
+      ],
+      "piping_classes": []
+    },
+    "valves": {
+      "has_valves": false,
+      "valve_types": []
+    },
+    "equipment": {
+      "tags": [],
+      "types": []
+    },
+    "symbols": []
+  },
+  {
+    "filename": "11.5901062 CONDUCT FEASIBILITY STUDY FOR THE CONVERSION OF JET A1 TANK TO UGL-95 at HFZT_5638-E1-150",
+    "text_content": "Option:1 Hookup Point \nfor Jet-A1 \nTank T-504 O/L to Road \nTanker Loading Function\n* ESD Level-2 \nfunctionality will remain \nsame, Operating \nphilosophy of Tank \nT-504 will be matched \nwith other ULG Tanks\nNew ESD Valve is not \nrequired\n16\"-1500-UG-XX3-11051X-V\nFROM STORAGE TANK\nT-504\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-004\nTP\n12\nULG-95\nDemolition scope\nDemolition scope\nTP\n17\nTP\n18\nISSUED FOR COMPANY REVIEW\nISSUED FOR APPROVAL\n0\n1\n19-05-2025\n02-06-2025\nTP\n26\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-012\nFROM T-203/204\n",
+    "instrumentation": {
+      "has_instruments": false,
+      "instrument_types": [],
+      "control_loops": []
+    },
+    "piping": {
+      "has_piping_specs": true,
+      "line_sizes": [
+        "16\""
+      ],
+      "piping_classes": []
+    },
+    "valves": {
+      "has_valves": false,
+      "valve_types": []
+    },
+    "equipment": {
+      "tags": [],
+      "types": []
+    },
+    "symbols": []
+  },
+  {
+    "filename": "11.5901062 CONDUCT FEASIBILITY STUDY FOR THE CONVERSION OF JET A1 TANK TO UGL-95 at HFZT_5638-E1-150",
+    "text_content": "Option:1 Hookup Point \nfor Jet-A1 \nTank T-504 O/L to Road \nTanker Loading Function\n* ESD Level-2 \nfunctionality will remain \nsame, Operating \nphilosophy of Tank \nT-504 will be matched \nwith other ULG Tanks\nNew ESD Valve is not \nrequired\n16\"-1500-UG-XX3-11051X-V\nFROM STORAGE TANK\nT-504\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-004\nTP\n12\nULG-95\nDemolition scope\nDemolition scope\nTP\n17\nTP\n18\nISSUED FOR COMPANY REVIEW\nISSUED FOR APPROVAL\n0\n1\n19-05-2025\n02-06-2025\nTP\n26\nFOR CONT'N SEE DRG No.\n5638-E1-1500-PRO-PID-012\nFROM T-203/204\n",
+    "instrumentation": {
+      "has_instruments": false,
+      "instrument_types": [],
+      "control_loops": []
+    },
+    "piping": {
+      "has_piping_specs": true,
+      "line_sizes": [
+        "16\""
+      ],
+      "piping_classes": []
+    },
+    "valves": {
+      "has_valves": false,
+      "valve_types": []
+    },
+    "equipment": {
+      "tags": [],
+      "types": []
+    },
+    "symbols": []
+  }
+]

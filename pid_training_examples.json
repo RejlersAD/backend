@@ -1,0 +1,109 @@
+[
+  {
+    "document": "P16093-14-01-08-1602_P&ID.pdf",
+    "instrument_types": [
+      "PSV"
+    ],
+    "valve_types": [
+      "BALL VALVE"
+    ],
+    "has_piping_specs": true,
+    "line_sizes": [
+      "1\"",
+      "3\"",
+      "16\"",
+      "4\"",
+      "18\""
+    ],
+    "extraction_approach": "Focus on ISA 5.1 instrument tags, valve types, line sizes, and piping classes"
+  },
+  {
+    "document": "P16093-14-01-08-1603_P&ID.pdf",
+    "instrument_types": [
+      "LCV",
+      "PSV",
+      "PCV",
+      "PIC",
+      "PT"
+    ],
+    "valve_types": [
+      "CHECK VALVE",
+      "CONTROL VALVE"
+    ],
+    "has_piping_specs": true,
+    "line_sizes": [
+      "20\"",
+      "1\"",
+      "12\"",
+      "3\"",
+      "16\""
+    ],
+    "extraction_approach": "Focus on ISA 5.1 instrument tags, valve types, line sizes, and piping classes"
+  },
+  {
+    "document": "P16093-16-01-08-1689_P&ID1.pdf",
+    "instrument_types": [
+      "PSV",
+      "PCV",
+      "PIC"
+    ],
+    "valve_types": [
+      "BALL VALVE",
+      "CONTROL VALVE",
+      "BLOCK VALVE"
+    ],
+    "has_piping_specs": true,
+    "line_sizes": [
+      "1\"",
+      "12\"",
+      "3\"",
+      "16\"",
+      "4\""
+    ],
+    "extraction_approach": "Focus on ISA 5.1 instrument tags, valve types, line sizes, and piping classes"
+  },
+  {
+    "document": "1.5900837 DEBOTTLENECKING OF STEAM CONDENSATE SYSTEM IN HABS",
+    "instrument_types": [
+      "TIC",
+      "PAH",
+      "PSV",
+      "FIC",
+      "PT"
+    ],
+    "valve_types": [
+      "CONTROL VALVE"
+    ],
+    "has_piping_specs": true,
+    "line_sizes": [
+      "1\"",
+      "14\"",
+      "3\"",
+      "4\"",
+      "8\""
+    ],
+    "extraction_approach": "Focus on ISA 5.1 instrument tags, valve types, line sizes, and piping classes"
+  },
+  {
+    "document": "1.5900837 DEBOTTLENECKING OF STEAM CONDENSATE SYSTEM IN HABS",
+    "instrument_types": [
+      "TIC",
+      "PAH",
+      "PSV",
+      "FIC",
+      "PT"
+    ],
+    "valve_types": [
+      "CONTROL VALVE"
+    ],
+    "has_piping_specs": true,
+    "line_sizes": [
+      "1\"",
+      "3\"",
+      "4\"",
+      "8\"",
+      "2\""
+    ],
+    "extraction_approach": "Focus on ISA 5.1 instrument tags, valve types, line sizes, and piping classes"
+  }
+]

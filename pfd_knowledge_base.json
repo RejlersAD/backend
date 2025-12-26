@@ -1,0 +1,119 @@
+{
+  "documents": [
+    {
+      "filename": "PFD_1601.pdf",
+      "text_content": "",
+      "has_equipment": false,
+      "has_streams": false,
+      "has_flow_info": false,
+      "equipment_types": [],
+      "stream_info": []
+    },
+    {
+      "filename": "1.5900837 DEBOTTLENECKING OF STEAM CONDENSATE SYSTEM IN HABSHAN 5_50196-DW-562-00-20-001_2_0010 PFD.pdf",
+      "text_content": "ADNOC GAS \nDEBOTTLENECKING OF STEAM\nCONDENSATE SYSTEM IN HABSHAN-5\n(MOC 8780)\nUTILITY FLOW DIAGRAM\nONSITE CONDENSATE\nCOLLECTION\nHEAD: 89.36 m\nTSG\nPKG\nPKR\n18.08.2025\nTSG\nPKG\nPKR\nUPDATE\n50196-DW-562-00-20-001_2_0010\nUNIT 545, 575, \n571, 572\nATM\n562-V-202\n562-E-202\n562-P-202 A/B\n 562-V-202\nGRADE-1 ONSITE \nCONDENSATE \nCOLLECTION DRUM\nSIZE: 1300 mm (I.D)\n          4000 mm (T.T.)\n562-P-202 A/B\nGRADE-1 ONSITE \nCONDNESATE \nCOLLECTION PUMP \nCAPACITY: 34.2 m\u00b3/hr\n562-E-202\nGRADE-1 ONSITE CONDENSATE \nCOLLECTION DRUM CONDENSER\nDUTY: 1.518 Gcal/hr\nGRADE 1 STEAM\nCONDENSATE FROM\nUNIT 533, 532, 547, 531,\n530 & 548\nUNIT 510, 521, \n522\nUNIT 513, 513A, \n513B, 520, 549\nUNIT 541 & 540\nTC\nM\n5\n6\n7\n8\nGRADE 1 STEAM\nCONDENSATE\n30201-\nISSUED FOR APPROVAL\nTSG\nPKG\nPKR\n12.09.2025\nB\n1.   HMB FOR PROJECT 30201-50196 IS ATTACHED AS AN ANNEXURE TO \n      SIMULATION REPORT RPT-50196-H5-01-00-20-006.\n6. THE SCOPE CLOUD IS FOR PROJECT P50196. AN ADEQUACY STUDY HAS BEEN CONDUCTED\nFOR CLOUDED PORTION AND SYSTEM MODIFICATIONS",
+      "has_equipment": true,
+      "has_streams": true,
+      "has_flow_info": true,
+      "equipment_types": [
+        "PUMP",
+        "VESSEL",
+        "DRUM"
+      ],
+      "stream_info": []
+    },
+    {
+      "filename": "1.5900837 DEBOTTLENECKING OF STEAM CONDENSATE SYSTEM IN HABSHAN 5_50196-5247-PFD-562-00-20-004PFD.pdf",
+      "text_content": "ADNOC GAS \nDEBOTTLENECKING OF STEAM\nCONDENSATE SYSTEM IN HABSHAN-5\n(MOC 8780)\nUTILITY FLOW DIAGRAM\nUNIT 562\nSTEAM DISTRIBUTION\nTSG\nPKG\nPKR\n50196-\nUPDATE\nTP \n06A\nTP \n05B\nB\nATM\nXXX-P-XXX A/B\nXXX-V-XXX\nXXX-E-XXX\n 562-V-203\nGRADE-2 CONDENSATE \nCOLLECTION DRUM\nSIZE: 1600 mm (I.D)\n          4000 mm (T.T.)\n526-P-203 A/B\nGRADE-2 CONDENSATE \nCOLLECTION PUMP\nCAPACITY:36.4 m\u00b3/hr\n562-E-203\nGRADE-2 CONDENSATE \nCOLLECTION DRUM \nCONDENSER\nDUTY: 1.92 Gcal/hr\nTP \n06B\nTP \n05A\nM\nTC\n562-E-203\n562-V-203\n562-P-203 A/B\n9\n10\n13\n11\n12\n18.08.2025\n13. THE SCOPE CLOUD IS FOR PROJECT P50196. DURING ADEQUACY CHECK,\nREQUIREMENT OF NEW CONDENSATE RECOVERY SYSTEM IS ENVISAGED FOR\nUNIT 558 IN GRADE 2 AND UNIT 555. \n14. IN MODIFIED CONDENSATE RECOVERY SYSTEM, CONDENSATE FLOW RATE\nFROM UNIT 555 AND UNIT 558 IS ROUTED TO NEW CONDENSATE SYSTEM\nWHICH INCLUDES NEW CONDENSATE COLLECTION DRUM (562-V-203), NEW AIR\nCOOLER (562-E-203) AND NEW CONDENSATE PUMPS (562-P-203A/B).\nNOTE 13\n30201-\nISSUED FOR APPROVAL\n12.09.2025\nB\nTSG\nPKG",
+      "has_equipment": true,
+      "has_streams": true,
+      "has_flow_info": true,
+      "equipment_types": [
+        "PUMP",
+        "COOLER",
+        "DRUM"
+      ],
+      "stream_info": []
+    },
+    {
+      "filename": "1.5900837 DEBOTTLENECKING OF STEAM CONDENSATE SYSTEM IN HABSHAN 5_50196-5247-PFD-562-00-20-002PFD.pdf",
+      "text_content": "ADNOC GAS \nDEBOTTLENECKING OF STEAM\nCONDENSATE SYSTEM IN HABSHAN-5\n(MOC 8780)\nUTILITY FLOW DIAGRAM\nUNIT 562\nBFW CONDENSATE & CHEMICAL DOSING SYS\n66.49\n18.08.2025\nTSG\nPKG\nPKR\nPKR\nPKG\nTSG\n50196-\nUPDATE\nNOTE 4\n30201-\n3.   HMB FOR PROJECT 30201-50196 IS ATTACHED AS AN ANNEXURE TO \n      SIMULATION REPORT RPT-50196-H5-01-00-20-006.\nCONDENSATE FROM UNIT 555, ORIGINALLY ROUTED TO GRADE-1 OFFSITE,\nIS NOW REDIRECTED TO THE NEW SYSTEM IN GRADE 2 ALONG WITH\nCONDENSATE FROM UNIT 558.\nTHE SCOPE CLOUD IS FOR PROJECT P50196. AN ADEQUACY CHECK   HAS\nBEEN PERFORMED FOR CLOUDED PORTION; HOWEVER, NO\nMODIFICATIONS ARE REQUIRED IN THE SYSTEM EXCEPT FOR GRADE 1\nOFFSITE CONDENSATE COLLECTION PUMPS (562-P-110A/B/C), WHICH\nNEEDS TO BE REPLACED WITH NEW PUMPS SINCE THE CALCULATED\nPUMP CAPACITY AND HEAD OPERATES OUTSIDE THE EXISTING PUMP'S\nPERFORMANCE CURVE\nB\n12.09.2025\nISSUED FOR APPROVAL\nTSG PKG PKR\n8.53\n4.\n5.\nNOTE 5\nPKR\nPKG\nTSG\nRE-ISSUED FOR APPROVAL\n03.10.2025\nC\nC\n",
+      "has_equipment": true,
+      "has_streams": true,
+      "has_flow_info": true,
+      "equipment_types": [
+        "PUMP"
+      ],
+      "stream_info": []
+    }
+  ],
+  "sfiles2_integration": {
+    "source": "SFILES2 Research Repository",
+    "repository": "https://github.com/process-intelligence-research/SFILES2",
+    "extraction_date": "2025-12-25T09:48:36.019825",
+    "notation_patterns": [
+      {
+        "sfiles_string": "(raw)(pp)<1(splt)[(hex)(flash)<&|(raw)&|[{bout}(v)(dist)[{bout}(prod)]{tout}(dist){bout}1<4{tout}(mix)<3(prod)]{bin}(abs)<2<6[{tout}(prod)]{bout}(flash){tout}5[{bout}(flash)[{tout}(comp)(comp)2<5]{bout}(flash){tout}3{bout}4]](hex){tin}6",
+        "source": "run_demonstration.py",
+        "type": "example"
+      },
+      {
+        "sfiles_string": "(raw)(flash)[{tout}(prod)]{bout}(splt)[(prod)](r)<&|(raw)(flash){tout}&{bout}(prod)|(prod)",
+        "source": "run_demonstration.py",
+        "type": "example"
+      }
+    ],
+    "unit_operation_mappings": {
+      "raw": "RawMaterial",
+      "prod": "OutputProduct",
+      "hex": "HeatExchanger",
+      "reb": "Reboiler",
+      "cond": "Condenser",
+      "blwr": "Blower",
+      "comp": "Compressor",
+      "turb": "Expander",
+      "pipe": "Pipe",
+      "pp": "Pump",
+      "orif": "OrificePlate",
+      "r": "ChemicalReactor",
+      "splt": "SplittingUnit",
+      "mix": "MixingUnit",
+      "tank": "StorageUnit",
+      "sep": "SeparationUnit",
+      "dist": "DistillationSystem",
+      "flash": "FlashUnit",
+      "extr": "ExtractionUnit",
+      "rect": "RectificationSystem",
+      "strip": "StrippingSystem",
+      "abs": "AbsorptionColumn",
+      "lfil": "LiquidFilter",
+      "gfil": "GasFilter",
+      "scrub": "Scrubber",
+      "centr": "CentrifugationUnit",
+      "cycl": "Cyclone",
+      "hcycl": "Hydrocyclone",
+      "egclean": "ElectricalGasCleaningUnit",
+      "v": "Valve",
+      "X": "ms",
+      "C": "Control"
+    },
+    "insights": {
+      "notation_system": "SFILES 2.0 (Simplified Flowsheet Input Line Entry System)",
+      "representation": "Text-based flowsheet representation similar to SMILES for molecules",
+      "applications": [
+        "Automatic flowsheet generation",
+        "Process synthesis",
+        "Process optimization",
+        "Flowsheet pattern recognition"
+      ],
+      "key_concepts": {
+        "nodes": "Unit operations enclosed in parentheses: (pump), (hex), (dist)",
+        "connections": "Sequential connections indicated by adjacency",
+        "branches": "Branches denoted by square brackets [ ]",
+        "recycles": "Material recycles marked with numbers",
+        "heat_integration": "Heat integration tagged with curly braces { }",
+        "control": "Control structure represented with special notation"
+      }
+    }
+  }
+}

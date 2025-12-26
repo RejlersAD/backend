@@ -1,0 +1,30 @@
+[
+  {
+    "document": "1.5900837 DEBOTTLENECKING OF STEAM CONDENSATE SYSTEM IN HABSHAN 5_50196-DW-562-00-20-001_2_0010 PFD.pdf",
+    "equipment_found": [
+      "PUMP",
+      "VESSEL",
+      "DRUM"
+    ],
+    "has_process_data": true,
+    "extraction_approach": "Focus on equipment tags, stream numbers, and process conditions"
+  },
+  {
+    "document": "1.5900837 DEBOTTLENECKING OF STEAM CONDENSATE SYSTEM IN HABSHAN 5_50196-5247-PFD-562-00-20-004PFD.pdf",
+    "equipment_found": [
+      "PUMP",
+      "COOLER",
+      "DRUM"
+    ],
+    "has_process_data": true,
+    "extraction_approach": "Focus on equipment tags, stream numbers, and process conditions"
+  },
+  {
+    "document": "1.5900837 DEBOTTLENECKING OF STEAM CONDENSATE SYSTEM IN HABSHAN 5_50196-5247-PFD-562-00-20-002PFD.pdf",
+    "equipment_found": [
+      "PUMP"
+    ],
+    "has_process_data": true,
+    "extraction_approach": "Focus on equipment tags, stream numbers, and process conditions"
+  }
+]
