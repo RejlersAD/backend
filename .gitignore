@@ -37,6 +37,17 @@ db.sqlite3
 db.sqlite3-journal
 /media
 /staticfiles
+
+# Temporary directories
+temp_sfiles2_*/
+
+# Training samples and generated files
+pfd_training_samples/
+pid_training_samples/
+pid_drawings/
+
+# Analysis scripts (one-off scripts)
+analyze_s3_pfds.py
 /static
 celerybeat-schedule
 celerybeat.pid
