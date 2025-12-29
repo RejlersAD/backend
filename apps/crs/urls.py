@@ -31,9 +31,8 @@ router.register(r'comments', CRSCommentViewSet, basename='crs-comment')
 router.register(r'activities', CRSActivityViewSet, basename='crs-activity')
 router.register(r'google-configs', GoogleSheetConfigViewSet, basename='google-config')
 
-urlpatterns = [
-    path('', include(router.urls)),
-]
+# Start with history endpoints (must come before router.urls to avoid conflicts)
+urlpatterns = []
 
 # Add history endpoints if available
 if HISTORY_AVAILABLE:
@@ -49,3 +48,8 @@ if HISTORY_AVAILABLE:
         path('documents/history/share/', generate_share_link, name='crs-history-share'),
         path('documents/history/metadata/', get_file_metadata, name='crs-history-metadata'),
     ]
+
+# Add router URLs last (less specific patterns)
+urlpatterns += [
+    path('', include(router.urls)),
+]

@@ -9,6 +9,10 @@ from .history_views import (
     user_profile,
     user_activity,
     download_from_history,
+    get_history_config,
+    delete_from_history,
+    generate_share_link,
+    get_file_metadata,
 )
 
 __all__ = [
@@ -18,4 +22,8 @@ __all__ = [
     'user_profile',
     'user_activity',
     'download_from_history',
+    'get_history_config',
+    'delete_from_history',
+    'generate_share_link',
+    'get_file_metadata',
 ]
