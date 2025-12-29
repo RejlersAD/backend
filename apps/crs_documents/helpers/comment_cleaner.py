@@ -79,22 +79,38 @@ class CommentCleanerConfig:
             r"^RACK\s*\.\s*\d+$",  # RACK.100
             r"^-\s*\d+[\.\-]?\d*$",  # -100.5
             r"^\/\s*\d+[\.\-]?\d*$",  # /100.5
+            r"^(text\s*box|Text\s*Box|TEXT\s*BOX)\s*$",  # Just "text box"
+            r"^(callout|Callout|CALLOUT)\s*$",  # Just "callout"
+            r"^(free\s*text|Free\s*Text)\s*$",  # Just "free text"
+            r"^(note|Note|Sticky\s*Note)\s*$",  # Just "note"
         ],
         
         # Patterns to remove from START of comment
         "prefix_patterns": [
             r"^(Mr|Mrs|Ms|Dr|Prof|Miss|Sir|Madam)\s+",  # Titles
-            r"^Typewriter\s*\d+\s+",  # Typewriter with number
-            r"^SHX\s*Text\s+",  # SHX Text prefix
-            r"^AutoCAD\s+SHX\s+Text\s+",  # AutoCAD SHX Text
-            r"^(Text Box|Callout|Call Out|Free Text|Note|Highlight)\s+",  # Annotation types
+            r"^Typewriter\s*\d+\s*[-:]?\s*",  # Typewriter with number
+            r"^SHX\s*Text\s*[-:]?\s*",  # SHX Text prefix
+            r"^AutoCAD\s+SHX\s+Text\s*[-:]?\s*",  # AutoCAD SHX Text
+            r"^(text\s*box|Text\s*Box|TEXT\s*BOX)\s*[-:]?\s*",  # Text box variations
+            r"^(callout|Callout|CALLOUT|Call\s*Out)\s*[-:]?\s*",  # Callout variations
+            r"^(free\s*text|Free\s*Text|FREE\s*TEXT)\s*[-:]?\s*",  # Free text variations
+            r"^(note|Note|NOTE|Sticky\s*Note|sticky\s*note)\s*[-:]?\s*",  # Note variations
+            r"^(highlight|Highlight|HIGHLIGHT)\s*[-:]?\s*",  # Highlight
+            r"^(Comment|comment|COMMENT)\s*[-:]?\s*",  # Comment label
         ],
         
-        # Annotation type labels to remove
+        # Annotation type labels to remove (case-insensitive matching)
         "annotation_labels": [
-            "Text Box", "Callout", "Call Out", "Free Text", "Note",
-            "Highlight", "Underline", "Strikeout", "Squiggly",
-            "Popup", "Rectangle", "Ellipse", "Line", "Polygon"
+            "text box", "Text Box", "TEXT BOX", "textbox", "TextBox",
+            "callout", "Callout", "CALLOUT", "Call Out", "call out",
+            "free text", "Free Text", "FREE TEXT", "FreeText", "freetext",
+            "note", "Note", "NOTE", "Sticky Note", "sticky note", "STICKY NOTE",
+            "highlight", "Highlight", "HIGHLIGHT",
+            "underline", "Underline", "UNDERLINE",
+            "strikeout", "Strikeout", "STRIKEOUT",
+            "squiggly", "Squiggly", "SQUIGGLY",
+            "popup", "Popup", "POPUP",
+            "comment", "Comment", "COMMENT"
         ],
         
         # OpenAI configuration
@@ -331,17 +347,22 @@ class CommentCleaner:
         cleaned = text.strip()
         
         # Pattern: "Name Typewriter NUMBER" with no additional content
-        name_typewriter_pattern = r"^[A-Z][a-z]+\s+[A-Z][a-z]+\s+(Typewriter|Text Box|Callout)\s*\d*$"
+        name_typewriter_pattern = r"^[A-Z][a-z]+\s+[A-Z][a-z]+\s+(Typewriter|Text Box|Callout|text box|callout|Free Text|free text|Note|note)\s*\d*$"
         if re.match(name_typewriter_pattern, cleaned, re.IGNORECASE):
             return True
         
-        # Pattern: Just annotation label with number
-        annotation_only = r"^(Typewriter|Text Box|Callout|SHX Text|AutoCAD)\s*\d*$"
+        # Pattern: Just annotation label with or without number
+        annotation_only = r"^(Typewriter|Text Box|text box|Callout|callout|SHX Text|AutoCAD|Free Text|free text|Note|note|Sticky Note|sticky note)\s*\d*$"
         if re.match(annotation_only, cleaned, re.IGNORECASE):
             return True
         
         # Pattern: Pure coordinate/dimension
         if re.match(r"^[\d\s\.\-\/\,]+$", cleaned):
+            return True
+        
+        # Pattern: Name followed by just annotation type
+        name_annotation_only = r"^[A-Z][a-z]+\s+[A-Z][a-z]+\s+(text box|Text Box|Callout|callout|Free Text|Note|note)\s*[-:]?\s*$"
+        if re.match(name_annotation_only, cleaned, re.IGNORECASE):
             return True
         
         return False
@@ -353,21 +374,39 @@ class CommentCleaner:
         Rules:
         1. Remove names at START only (keep if in middle/end)
         2. Remove Typewriter/annotation prefixes
-        3. Clean up whitespace
+        3. Remove annotation type labels (text box, callout, free text, note, sticky note)
+        4. Clean up whitespace
         """
         cleaned = text.strip()
         original_length = len(cleaned)
         
-        # Step 1: Remove annotation type prefixes with names
-        # Pattern: "Name Name AnnotationType NUMBER actual_comment"
+        # Step 1: Remove annotation type labels at START with optional names
+        # Pattern variations: 
+        # - "Name Name text box: comment"
+        # - "text box comment"
+        # - "Name - text box: comment"
+        # - "Callout: comment"
         all_names = self.config.get_all_names()
         
+        # Remove "Name Name AnnotationType: comment" or "AnnotationType: comment"
         for annotation in self.config.config["annotation_labels"]:
-            # Pattern: "FirstName LastName AnnotationType number"
-            pattern = rf"^([A-Z][a-z]+\s+[A-Z][a-z]+\s+)?{re.escape(annotation)}\s*\d*\s+"
-            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+            # Escape the annotation for regex
+            escaped_annotation = re.escape(annotation)
+            
+            # Pattern 1: "FirstName LastName AnnotationType: comment"
+            pattern1 = rf"^([A-Z][a-z]+\s+[A-Z][a-z]+\s+)?{escaped_annotation}\s*[-:]?\s*"
+            cleaned = re.sub(pattern1, "", cleaned, flags=re.IGNORECASE)
+            
+            # Pattern 2: Just "AnnotationType" at the beginning
+            pattern2 = rf"^{escaped_annotation}\s*"
+            cleaned = re.sub(pattern2, "", cleaned, flags=re.IGNORECASE)
         
-        # Step 2: Remove name prefixes at start
+        # Step 2: Remove common name patterns at START
+        # Pattern: "FirstName LastName - " or "FirstName LastName: "
+        name_with_separator = r"^([A-Z][a-z]+\s+[A-Z][a-z]+(\s+[A-Z][a-z]+)?)\s*[-:–—]\s*"
+        cleaned = re.sub(name_with_separator, "", cleaned)
+        
+        # Pattern: Just names at the start followed by space
         name_at_start = r"^([A-Z][a-z]+\s+[A-Z][a-z]+(\s+[A-Z][a-z]+)?)\s+"
         match = re.match(name_at_start, cleaned)
         if match:
@@ -380,17 +419,27 @@ class CommentCleaner:
                 # Remove name from start
                 cleaned = cleaned[len(match.group(0)):].strip()
         
-        # Step 3: Apply prefix patterns
+        # Step 3: Apply prefix patterns (Typewriter, SHX Text, etc.)
         for pattern in self.config.config["prefix_patterns"]:
             cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
         
-        # Step 4: Clean up whitespace
+        # Step 4: Remove standalone annotation labels at beginning (aggressive cleaning)
+        # Match "text box", "callout", "free text", "note", "sticky note" at start
+        standalone_annotations = r"^(text\s*box|callout|call\s*out|free\s*text|note|sticky\s*note|highlight|comment)\s*[-:]?\s*"
+        cleaned = re.sub(standalone_annotations, "", cleaned, flags=re.IGNORECASE)
+        
+        # Step 5: Clean up whitespace
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
         
-        # Step 5: Remove trailing annotation labels
+        # Step 6: Remove trailing annotation labels
         for annotation in self.config.config["annotation_labels"]:
-            if cleaned.lower().endswith(annotation.lower()):
+            # Case-insensitive check at end
+            if cleaned.lower().strip().endswith(annotation.lower()):
                 cleaned = cleaned[:-len(annotation)].strip()
+        
+        # Step 7: Remove leading/trailing separators that may be left over
+        cleaned = re.sub(r'^[-:–—\s]+', '', cleaned)
+        cleaned = re.sub(r'[-:–—\s]+$', '', cleaned).strip()
         
         # Safety check: if we removed too much, restore original
         if len(cleaned) < original_length * 0.2 and original_length > 20:
@@ -422,24 +471,36 @@ RULES:
    - Pure numbers/coordinates like "100.5" = SKIP
    - Drawing codes with no comment = SKIP
 
-2. REMOVE from START:
-   - Person names (e.g., "Sreejith Rajeev", "John Smith")
-   - Annotation types (e.g., "Typewriter 166", "Text Box", "Callout")
+2. REMOVE from START (but ONLY from start):
+   - Person names (e.g., "Sreejith Rajeev", "John Smith", "Abdullah Ahmed")
+   - Annotation types: "text box", "Text Box", "Callout", "Free Text", "Note", "Sticky Note"
+   - Typewriter labels (e.g., "Typewriter 166")
    - Title prefixes (Mr, Mrs, Dr, etc.)
+   - Any combination like "Name - text box:", "Name Callout:", etc.
 
-3. KEEP names that appear IN THE MIDDLE or END of meaningful comments:
+3. CRITICAL - Remove these annotation labels everywhere they appear:
+   - "text box" or "Text Box" → REMOVE
+   - "Callout" → REMOVE
+   - "Free Text" or "free text" → REMOVE
+   - "Note" or "Sticky Note" → REMOVE
+   - Remove with or without colons/hyphens
+
+4. KEEP names that appear IN THE MIDDLE or END of meaningful comments:
    - "Update design as requested by Sreejith" → KEEP as is
    - "Coordinate with John for approval" → KEEP as is
 
-4. Preserve the ACTUAL COMMENT CONTENT exactly as written.
+5. Preserve the ACTUAL COMMENT CONTENT exactly as written.
 
 EXAMPLES:
-- "Sreejith Rajeev Typewriter 166 Update design" → "Update design"
-- "John Smith Text Box Check valve sizing" → "Check valve sizing"
+- "Sreejith Rajeev text box Update design" → "Update design"
+- "John Smith Callout: Check valve sizing" → "Check valve sizing"
+- "text box Check specifications" → "Check specifications"
 - "Typewriter 166" → "SKIP"
+- "Abdullah - Free Text: Review the calculations" → "Review the calculations"
+- "Note: Verify pressure ratings" → "Verify pressure ratings"
+- "Sticky Note Update P&ID" → "Update P&ID"
 - "Update the P&ID as discussed with Ahmed" → "Update the P&ID as discussed with Ahmed"
 - "AutoCAD SHX Text" → "SKIP"
-- "Please verify with Michael before finalizing" → "Please verify with Michael before finalizing"
 
 INPUT TEXT:
 {text}

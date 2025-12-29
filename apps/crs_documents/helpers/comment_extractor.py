@@ -23,6 +23,33 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _pre_clean_annotation_text(text: str) -> str:
+    """
+    Pre-clean annotation text to remove common annotation type labels
+    Applied before the main comment cleaner runs
+    """
+    cleaned = text.strip()
+    
+    # Remove annotation type labels at the beginning
+    annotation_prefixes = [
+        r'^(text\s*box|Text\s*Box|TEXT\s*BOX)\s*[-:]?\s*',
+        r'^(callout|Callout|CALLOUT)\s*[-:]?\s*',
+        r'^(free\s*text|Free\s*Text|FREE\s*TEXT)\s*[-:]?\s*',
+        r'^(note|Note|NOTE)\s*[-:]?\s*',
+        r'^(sticky\s*note|Sticky\s*Note|STICKY\s*NOTE)\s*[-:]?\s*',
+        r'^(comment|Comment|COMMENT)\s*[-:]?\s*',
+        r'^(highlight|Highlight|HIGHLIGHT)\s*[-:]?\s*',
+    ]
+    
+    for pattern in annotation_prefixes:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+    
+    # Clean up any leftover whitespace
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    
+    return cleaned
+
+
 class ReviewerComment:
     """Data structure for a single reviewer comment"""
     
@@ -93,8 +120,16 @@ def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) 
                         if not content.strip():
                             continue
                         
+                        # Pre-clean the content to remove annotation type labels
+                        content_cleaned = _pre_clean_annotation_text(content.strip())
+                        
+                        # Skip if pre-cleaning removed everything
+                        if not content_cleaned or len(content_cleaned) < 5:
+                            logger.debug(f"Skipped empty after pre-clean: {content[:50]}...")
+                            continue
+                        
                         comment = ReviewerComment()
-                        comment.comment_text = content.strip()
+                        comment.comment_text = content_cleaned
                         comment.page_number = page_num + 1
                         comment.comment_type = _map_annot_type_to_comment_type(annot_type)
                         comment.reviewer_name = title.strip() if title.strip() else "Not Provided"
@@ -132,6 +167,10 @@ def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) 
     # Deduplicate comments
     comments = _deduplicate_comments(comments)
     logger.info(f"After deduplication: {len(comments)} comments")
+    
+    # Filter out incomplete comments
+    comments = _filter_incomplete_comments(comments)
+    logger.info(f"After filtering incomplete: {len(comments)} comments")
     
     # Apply intelligent cleaning if cleaner is available
     if cleaner:
@@ -354,16 +393,126 @@ def _extract_discipline(text: str, reviewer_name: str) -> str:
     return "Not Provided"
 
 
+def _filter_incomplete_comments(comments: List[ReviewerComment]) -> List[ReviewerComment]:
+    """
+    Filter out incomplete or malformed comments
+    
+    Criteria for incomplete comments:
+    - Too short (less than 10 meaningful characters)
+    - Ends abruptly (no proper ending)
+    - Contains only partial sentence fragments
+    - Just names or labels without content
+    """
+    filtered_comments = []
+    
+    for comment in comments:
+        text = comment.comment_text.strip()
+        
+        # Skip if too short
+        if len(text) < 10:
+            logger.debug(f"Skipped too short: {text}")
+            continue
+        
+        # Skip if it's just a name
+        if re.match(r'^[A-Z][a-z]+(\s+[A-Z][a-z]+){0,2}$', text):
+            logger.debug(f"Skipped name only: {text}")
+            continue
+        
+        # Skip if it's just numbers or codes
+        if re.match(r'^[\d\s\.\-\/\,]+$', text):
+            logger.debug(f"Skipped numbers only: {text}")
+            continue
+        
+        # Check for incomplete sentences (very short without punctuation)
+        # But allow imperative sentences like "Update design"
+        words = text.split()
+        if len(words) < 3 and not any(text.endswith(p) for p in '.!?'):
+            # Allow if it starts with action verbs
+            action_verbs = ['update', 'check', 'verify', 'review', 'revise', 'modify', 
+                          'change', 'add', 'remove', 'confirm', 'clarify', 'provide']
+            if not any(text.lower().startswith(verb) for verb in action_verbs):
+                logger.debug(f"Skipped incomplete: {text}")
+                continue
+        
+        # Skip if it's just annotation labels
+        annotation_labels = ['text box', 'callout', 'free text', 'note', 'sticky note', 
+                            'highlight', 'typewriter', 'comment']
+        if text.lower() in annotation_labels:
+            logger.debug(f"Skipped annotation label: {text}")
+            continue
+        
+        # Comment passes all checks
+        filtered_comments.append(comment)
+    
+    return filtered_comments
+
+
 def _deduplicate_comments(comments: List[ReviewerComment]) -> List[ReviewerComment]:
-    """Remove duplicate comments based on text similarity"""
+    """
+    Remove duplicate comments based on text similarity
+    Enhanced to handle near-duplicates and variations
+    """
     unique_comments = []
     seen_texts = set()
     
+    def normalize_for_comparison(text: str) -> str:
+        """Normalize text for duplicate detection"""
+        # Convert to lowercase
+        normalized = text.lower().strip()
+        # Remove extra whitespace
+        normalized = re.sub(r'\s+', ' ', normalized)
+        # Remove common punctuation at start/end
+        normalized = normalized.strip('.,!?;:-')
+        # Remove annotation prefixes if still present
+        for prefix in ['text box', 'callout', 'free text', 'note', 'sticky note', 'typewriter']:
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):].strip()
+                normalized = normalized.lstrip(':-')
+        return normalized
+    
     for comment in comments:
-        # Create a normalized version for comparison
-        normalized = comment.comment_text.lower().strip()[:100]  # First 100 chars
+        # Skip if comment is empty or too short
+        if not comment.comment_text or len(comment.comment_text.strip()) < 5:
+            continue
+            
+        # Create normalized version for comparison
+        normalized = normalize_for_comparison(comment.comment_text)
         
-        if normalized not in seen_texts and len(normalized) > 10:
+        # Skip very short normalized texts
+        if len(normalized) < 5:
+            continue
+        
+        # Check for exact duplicates
+        if normalized in seen_texts:
+            continue
+        
+        # Check for near-duplicates (90% similarity on first 150 chars)
+        is_duplicate = False
+        normalized_prefix = normalized[:150]
+        
+        for seen_text in seen_texts:
+            seen_prefix = seen_text[:150]
+            
+            # Calculate simple similarity (matching chars / total chars)
+            if len(normalized_prefix) > 0 and len(seen_prefix) > 0:
+                # Use Levenshtein-like approach: check if 90% similar
+                min_len = min(len(normalized_prefix), len(seen_prefix))
+                max_len = max(len(normalized_prefix), len(seen_prefix))
+                
+                if min_len > 0:
+                    # Simple character-by-character comparison
+                    matches = sum(1 for i in range(min_len) 
+                                if i < len(normalized_prefix) and 
+                                   i < len(seen_prefix) and 
+                                   normalized_prefix[i] == seen_prefix[i])
+                    
+                    similarity = matches / max_len
+                    
+                    if similarity >= 0.90:  # 90% similar
+                        is_duplicate = True
+                        break
+        
+        if not is_duplicate:
             seen_texts.add(normalized)
             unique_comments.append(comment)
     

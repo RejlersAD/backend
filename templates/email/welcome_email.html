@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome to RADAI</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f4f4f4;">
+    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #f4f4f4; padding: 20px;">
+        <tr>
+            <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0" border="0" style="background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                    <!-- Header -->
+                    <tr>
+                        <td style="background: linear-gradient(135deg, #10B981 0%, #059669 100%); padding: 40px 20px; text-align: center;">
+                            <h1 style="color: #ffffff; margin: 0; font-size: 32px;">🎉 Welcome!</h1>
+                            <p style="color: #D1FAE5; margin: 10px 0 0 0; font-size: 16px;">Your email has been verified successfully</p>
+                        </td>
+                    </tr>
+                    
+                    <!-- Content -->
+                    <tr>
+                        <td style="padding: 40px 30px;">
+                            <p style="font-size: 18px; color: #333333; line-height: 1.6; margin: 0 0 20px 0;">
+                                Hi <strong>{{ user.first_name }} {{ user.last_name }}</strong>!
+                            </p>
+                            
+                            <p style="font-size: 16px; color: #333333; line-height: 1.6; margin: 0 0 20px 0;">
+                                Congratulations! Your email address has been successfully verified. You now have full access to all RADAI features.
+                            </p>
+                            
+                            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0;">
+                                <tr>
+                                    <td align="center">
+                                        <a href="{{ dashboard_url }}" style="display: inline-block; padding: 16px 40px; background: linear-gradient(135deg, #10B981 0%, #059669 100%); color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px;">
+                                            Go to Dashboard
+                                        </a>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <div style="background-color: #F3F4F6; border-radius: 8px; padding: 20px; margin: 30px 0;">
+                                <h3 style="color: #1F2937; margin: 0 0 15px 0; font-size: 18px;">📊 Your Account Details</h3>
+                                <table width="100%" cellpadding="8" cellspacing="0" border="0" style="font-size: 14px; color: #4B5563;">
+                                    <tr>
+                                        <td style="padding: 8px 0;"><strong>Email:</strong></td>
+                                        <td style="padding: 8px 0; color: #2563EB;">{{ user.email }}</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 8px 0;"><strong>Organization:</strong></td>
+                                        <td style="padding: 8px 0;">{{ user_profile.organization.name }}</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 8px 0;"><strong>Department:</strong></td>
+                                        <td style="padding: 8px 0;">{{ user_profile.department|default:"Not specified" }}</td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 8px 0;"><strong>Job Title:</strong></td>
+                                        <td style="padding: 8px 0;">{{ user_profile.job_title|default:"Team Member" }}</td>
+                                    </tr>
+                                </table>
+                            </div>
+                            
+                            <h3 style="color: #1F2937; margin: 30px 0 15px 0; font-size: 18px;">🚀 Get Started</h3>
+                            <ul style="font-size: 14px; color: #4B5563; line-height: 1.8; margin: 0; padding-left: 20px;">
+                                <li><strong>Explore Your Dashboard:</strong> View your personalized statistics and activity</li>
+                                <li><strong>Access Your Modules:</strong> Start using the features assigned to you</li>
+                                <li><strong>Upload Documents:</strong> Begin processing PFD/PID documents</li>
+                                <li><strong>Collaborate:</strong> Work with your team members on projects</li>
+                            </ul>
+                            
+                            <div style="background-color: #DBEAFE; border-left: 4px solid #2563EB; padding: 15px; margin: 30px 0; border-radius: 4px;">
+                                <p style="margin: 0; font-size: 14px; color: #1E40AF;">
+                                    <strong>💡 Tip:</strong> Bookmark your dashboard for quick access!
+                                </p>
+                            </div>
+                        </td>
+                    </tr>
+                    
+                    <!-- Footer -->
+                    <tr>
+                        <td style="background-color: #F9FAFB; padding: 30px; text-align: center; border-top: 1px solid #E5E7EB;">
+                            <p style="font-size: 14px; color: #666666; margin: 0 0 15px 0;">
+                                Need help getting started? Our support team is here for you!
+                            </p>
+                            <p style="font-size: 12px; color: #999999; margin: 0 0 15px 0;">
+                                Contact us at <a href="mailto:{{ support_email }}" style="color: #2563EB; text-decoration: none;">{{ support_email }}</a>
+                            </p>
+                            <p style="font-size: 11px; color: #CCCCCC; margin: 0;">
+                                © 2025 {{ company_name }}. All rights reserved.<br>
+                                Engineering & Design Consultancy
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

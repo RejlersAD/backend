@@ -11,6 +11,9 @@ from .views import (
     SecurityAlertViewSet, PredictiveInsightViewSet, FeatureUsageAnalyticsViewSet,
     ErrorLogAnalyticsViewSet, SystemHealthCheckViewSet
 )
+from .dashboard_views import (
+    user_dashboard_stats, user_files_list, user_activity_timeline
+)
 
 router = DefaultRouter()
 # RBAC Core
@@ -34,4 +37,8 @@ router.register(r'analytics/health-checks', SystemHealthCheckViewSet, basename='
 
 urlpatterns = [
     path('', include(router.urls)),
+    # User Dashboard endpoints
+    path('dashboard/stats/', user_dashboard_stats, name='user-dashboard-stats'),
+    path('dashboard/files/', user_files_list, name='user-files-list'),
+    path('dashboard/activity/', user_activity_timeline, name='user-activity-timeline'),
 ]

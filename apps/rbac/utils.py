@@ -52,6 +52,55 @@ def get_user_modules(user):
         return []
 
 
+def check_user_has_module_access(user, module_code):
+    """
+    Check if user has access to a specific module
+    """
+    if user.is_superuser:
+        return True
+    
+    user_modules = get_user_modules(user)
+    return module_code in user_modules
+
+
+def get_user_accessible_features(user):
+    """
+    Get list of features/routes user has access to based on their modules
+    Returns: dict with feature codes and their accessible status
+    """
+    user_modules = get_user_modules(user)
+    
+    # Map modules to frontend feature routes
+    feature_map = {
+        'PID': {
+            'code': 'PID',
+            'name': 'P&ID Design Verification',
+            'route': '/pid/upload',
+            'accessible': 'PID' in user_modules
+        },
+        'PFD': {
+            'code': 'PFD',
+            'name': 'PFD to P&ID Converter',
+            'route': '/pfd/upload',
+            'accessible': 'PFD' in user_modules
+        },
+        'CRS': {
+            'code': 'CRS',
+            'name': 'CRS Document Management',
+            'route': '/crs/documents',
+            'accessible': 'CRS' in user_modules
+        },
+        'PROJECT_CONTROL': {
+            'code': 'PROJECT_CONTROL',
+            'name': 'Project Control',
+            'route': '/projects',
+            'accessible': 'PROJECT_CONTROL' in user_modules
+        }
+    }
+    
+    return feature_map
+
+
 def check_permission(user, permission_code):
     """
     Check if user has specific permission

@@ -59,6 +59,9 @@ INSTALLED_APPS = [
     'apps.pid_analysis',
     'apps.pfd_converter',
     'apps.crs',
+    
+    # MLflow Model Orchestration (non-invasive tracking)
+    'apps.mlflow_integration',
     # Add new features here - no core changes needed!
 ]
 
@@ -494,17 +497,21 @@ EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
 EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
 EMAIL_USE_SSL = config('EMAIL_USE_SSL', default=False, cast=bool)
 
-# SMTP Credentials (from AWS SES)
-EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')  # SMTP Username
-EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')  # SMTP Password
+# SMTP Credentials (from AWS SES - radai-smtp-v2 IAM user)
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='AKIAQGMP5VCUJICW2YFQ')  # SMTP Username
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='BB5ydU3oC7sjlJmrWpz0VoGzEwLmcLbhwsWBB30xZjCP')  # SMTP Password
 
-# From Email
-DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@rejlers.ae')
-SERVER_EMAIL = config('SERVER_EMAIL', default='admin@rejlers.ae')
+# From Email (using verified email temporarily)
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='tanzeem.agra@rejlers.ae')
+SERVER_EMAIL = config('SERVER_EMAIL', default='tanzeem.agra@rejlers.ae')
 
 # Email settings
 EMAIL_TIMEOUT = 10  # Timeout in seconds
 EMAIL_SUBJECT_PREFIX = config('EMAIL_SUBJECT_PREFIX', default='[RADAI] ')
+
+# Email Verification Settings
+EMAIL_VERIFICATION_REQUIRED = config('EMAIL_VERIFICATION_REQUIRED', default=True, cast=bool)
+EMAIL_VERIFICATION_TOKEN_EXPIRY = config('EMAIL_VERIFICATION_TOKEN_EXPIRY', default=86400, cast=int)  # 24 hours
 
 print("\n" + "=" * 60)
 print("EMAIL CONFIGURATION")

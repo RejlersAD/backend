@@ -223,6 +223,11 @@ class UserRoleSerializer(serializers.ModelSerializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     """User profile serializer with full details"""
     user = UserSerializer(read_only=True)
+    organization = serializers.PrimaryKeyRelatedField(
+        queryset=Organization.objects.all(),
+        required=False,
+        allow_null=True
+    )
     organization_name = serializers.CharField(source='organization.name', read_only=True)
     organization_id = serializers.UUIDField(write_only=True, required=False)
     roles = RoleListSerializer(many=True, read_only=True)
@@ -296,7 +301,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         password = validated_data.pop('password')
         first_name = validated_data.pop('first_name', '')
         last_name = validated_data.pop('last_name', '')
-        phone = validated_data.pop('phone', None)
+        phone = validated_data.pop('phone', None)  # Extract phone but don't add to profile
         
         # Set organization from organization_id if provided
         if organization_id:
@@ -336,13 +341,10 @@ class UserProfileSerializer(serializers.ModelSerializer):
             password=password,
             first_name=first_name,
             last_name=last_name,
+            phone_number=phone,  # Add phone_number to User model
             is_superuser=is_super_admin,
             is_staff=is_super_admin
         )
-        
-        # Set phone if provided
-        if phone:
-            validated_data['phone'] = phone
         
         # Create profile
         profile = UserProfile.objects.create(user=user, **validated_data)
@@ -414,6 +416,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
                         permission=permission,
                         defaults={'granted_by': request_user}
                     )
+        
+        # Send email verification if enabled
+        from django.conf import settings
+        if settings.EMAIL_VERIFICATION_REQUIRED:
+            from apps.rbac.email_verification import send_verification_email
+            try:
+                send_verification_email(profile, self.context.get('request'))
+            except Exception as e:
+                print(f"⚠️ Failed to send verification email: {e}")
         
         return profile
     

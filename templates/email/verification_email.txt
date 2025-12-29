@@ -1,0 +1,26 @@
+Hi {{ user.first_name }} {{ user.last_name }},
+
+Welcome to RADAI! We're excited to have you on board.
+
+To complete your registration and access all features, please verify your email address by clicking the link below:
+
+{{ verification_url }}
+
+⏰ IMPORTANT: This verification link will expire in {{ expiry_hours }} hours.
+
+What's next?
+✅ Verify your email address
+🚀 Access your personalized dashboard
+📊 Start using RADAI features
+👥 Collaborate with your team
+
+If you didn't create an account with {{ company_name }}, please ignore this email.
+
+Need help? Contact us at {{ support_email }}
+
+Best regards,
+The RADAI Team
+{{ company_name }}
+Engineering & Design Consultancy
+
+© 2025 {{ company_name }}. All rights reserved.

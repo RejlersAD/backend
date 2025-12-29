@@ -30,15 +30,25 @@ from .s3_service import S3Service
 class OrganizationViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing organizations
-    Only super admin can manage organizations
+    Admins can view organizations, only super admin can create/edit/delete
     """
     queryset = Organization.objects.all()
     serializer_class = OrganizationSerializer
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    permission_classes = [IsAuthenticated]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['name', 'code', 'primary_contact_email']
     ordering_fields = ['name', 'created_at']
     filterset_fields = ['is_active']
+    
+    def get_permissions(self):
+        """
+        Allow admins to read organizations, only super admin can modify
+        """
+        if self.action in ['list', 'retrieve']:
+            permission_classes = [IsAuthenticated, IsAdmin]
+        else:
+            permission_classes = [IsAuthenticated, IsSuperAdmin]
+        return [permission() for permission in permission_classes]
     
     def perform_create(self, serializer):
         org = serializer.save()
@@ -73,17 +83,27 @@ class OrganizationViewSet(viewsets.ModelViewSet):
 class ModuleViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing application modules
-    Only super admin can create/edit modules
+    Admins can view modules, only super admin can create/edit/delete
     """
     queryset = Module.objects.all()
     serializer_class = ModuleSerializer
-    permission_classes = [IsAuthenticated, IsSuperAdmin]
+    permission_classes = [IsAuthenticated]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['name', 'code']
     ordering_fields = ['order', 'name']
     filterset_fields = ['is_active']
     
-    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def get_permissions(self):
+        """
+        Allow admins to read modules, only super admin can modify
+        """
+        if self.action in ['list', 'retrieve', 'active']:
+            permission_classes = [IsAuthenticated, IsAdmin]
+        else:
+            permission_classes = [IsAuthenticated, IsSuperAdmin]
+        return [permission() for permission in permission_classes]
+    
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated, IsAdmin])
     def active(self, request):
         """Get all active modules"""
         modules = Module.objects.filter(is_active=True).order_by('order', 'name')
@@ -304,6 +324,16 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'user__email', 'last_login_at']
     filterset_fields = ['organization', 'status', 'is_deleted']
     
+    def get_permissions(self):
+        """
+        Custom permissions:
+        - 'me' action only requires authentication
+        - Other actions require user management permissions
+        """
+        if self.action == 'me':
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), CanManageUsers()]
+    
     def get_queryset(self):
         """Filter users based on role"""
         user = self.request.user
@@ -491,6 +521,205 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         
         return Response({'status': 'role revoked', 'count': deleted_count})
     
+    @action(detail=False, methods=['post'])
+    def bulk_upload(self, request):
+        """
+        Bulk upload users from CSV/Excel
+        Expected CSV format: email,first_name,last_name,password,department,job_title,phone_number,role_codes,module_codes
+        role_codes and module_codes should be comma-separated (e.g., "admin,engineer" or "PID,PFD")
+        """
+        import csv
+        import io
+        from django.contrib.auth import get_user_model
+        from django.db import transaction
+        
+        User = get_user_model()
+        
+        if 'file' not in request.FILES:
+            return Response(
+                {'error': 'No file provided'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        file = request.FILES['file']
+        organization_id = request.data.get('organization_id')
+        
+        # Validate file extension
+        if not file.name.endswith(('.csv', '.txt')):
+            return Response(
+                {'error': 'Invalid file format. Please upload a CSV file.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get organization
+        try:
+            organization = Organization.objects.get(id=organization_id) if organization_id else None
+        except Organization.DoesNotExist:
+            return Response(
+                {'error': 'Organization not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Parse CSV
+        try:
+            decoded_file = file.read().decode('utf-8')
+            io_string = io.StringIO(decoded_file)
+            reader = csv.DictReader(io_string)
+            
+            results = {
+                'success': [],
+                'failed': [],
+                'skipped': []
+            }
+            
+            with transaction.atomic():
+                for row_num, row in enumerate(reader, start=2):  # Start at 2 (1 is header)
+                    try:
+                        # Validate required fields
+                        email = row.get('email', '').strip()
+                        if not email:
+                            results['failed'].append({
+                                'row': row_num,
+                                'email': email or 'N/A',
+                                'error': 'Email is required'
+                            })
+                            continue
+                        
+                        # Check if user already exists
+                        if User.objects.filter(email=email).exists():
+                            results['skipped'].append({
+                                'row': row_num,
+                                'email': email,
+                                'reason': 'User already exists'
+                            })
+                            continue
+                        
+                        # Create user
+                        user = User.objects.create_user(
+                            username=email.split('@')[0],
+                            email=email,
+                            first_name=row.get('first_name', '').strip(),
+                            last_name=row.get('last_name', '').strip(),
+                            password=row.get('password', 'TempPass@123').strip()
+                        )
+                        
+                        # Create user profile
+                        profile = UserProfile.objects.create(
+                            user=user,
+                            organization=organization,
+                            department=row.get('department', '').strip(),
+                            job_title=row.get('job_title', '').strip(),
+                            phone_number=row.get('phone_number', '').strip(),
+                            status='active'
+                        )
+                        
+                        # Assign roles
+                        role_codes = row.get('role_codes', '').strip()
+                        if role_codes:
+                            role_code_list = [r.strip() for r in role_codes.split(',')]
+                            roles = Role.objects.filter(code__in=role_code_list, is_active=True)
+                            for idx, role in enumerate(roles):
+                                UserRole.objects.create(
+                                    user_profile=profile,
+                                    role=role,
+                                    assigned_by=request.user,
+                                    is_primary=(idx == 0)
+                                )
+                        
+                        # Assign modules
+                        module_codes = row.get('module_codes', '').strip()
+                        if module_codes:
+                            module_code_list = [m.strip() for m in module_codes.split(',')]
+                            modules = Module.objects.filter(code__in=module_code_list, is_active=True)
+                            for module in modules:
+                                profile.modules.add(module)
+                        
+                        results['success'].append({
+                            'row': row_num,
+                            'email': email,
+                            'name': f"{user.first_name} {user.last_name}".strip()
+                        })
+                        
+                        # Create audit log
+                        create_audit_log(
+                            user=request.user,
+                            action='bulk_create',
+                            resource_type='UserProfile',
+                            resource_id=profile.id,
+                            resource_repr=str(profile),
+                            metadata={'source': 'bulk_upload'},
+                            ip_address=request.META.get('REMOTE_ADDR'),
+                            user_agent=request.META.get('HTTP_USER_AGENT', '')
+                        )
+                        
+                    except Exception as e:
+                        results['failed'].append({
+                            'row': row_num,
+                            'email': row.get('email', 'N/A'),
+                            'error': str(e)
+                        })
+            
+            # Create summary audit log
+            create_audit_log(
+                user=request.user,
+                action='bulk_upload',
+                resource_type='UserProfile',
+                resource_id=None,
+                resource_repr='Bulk User Upload',
+                metadata={
+                    'success_count': len(results['success']),
+                    'failed_count': len(results['failed']),
+                    'skipped_count': len(results['skipped'])
+                },
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+            
+            return Response({
+                'message': 'Bulk upload completed',
+                'summary': {
+                    'total_processed': len(results['success']) + len(results['failed']) + len(results['skipped']),
+                    'successful': len(results['success']),
+                    'failed': len(results['failed']),
+                    'skipped': len(results['skipped'])
+                },
+                'details': results
+            }, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to process file: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['get'])
+    def download_template(self, request):
+        """Download CSV template for bulk upload"""
+        import csv
+        from django.http import HttpResponse
+        
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="user_bulk_upload_template.csv"'
+        
+        writer = csv.writer(response)
+        writer.writerow([
+            'email', 'first_name', 'last_name', 'password', 
+            'department', 'job_title', 'phone_number', 
+            'role_codes', 'module_codes'
+        ])
+        writer.writerow([
+            'john.doe@company.com', 'John', 'Doe', 'SecurePass@123',
+            'Engineering', 'Senior Engineer', '+971501234567',
+            'engineer,reviewer', 'PID,PFD,CRS'
+        ])
+        writer.writerow([
+            'jane.smith@company.com', 'Jane', 'Smith', 'SecurePass@123',
+            'Management', 'Project Manager', '+971507654321',
+            'manager', 'PID,PFD,CRS,PROJECT_CONTROL'
+        ])
+        
+        return response
+    
     @action(detail=False, methods=['get'])
     def me(self, request):
         """Get current user's profile - creates one if it doesn't exist"""
@@ -566,6 +795,17 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         }
         
         return Response(stats)
+    
+    @action(detail=False, methods=['get'])
+    def my_features(self, request):
+        """Get list of features current user has access to"""
+        from .utils import get_user_accessible_features
+        
+        features = get_user_accessible_features(request.user)
+        return Response({
+            'features': list(features.values()),
+            'accessible_count': sum(1 for f in features.values() if f['accessible'])
+        })
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):

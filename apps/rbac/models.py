@@ -249,6 +249,7 @@ class UserProfile(TimeStampedModel):
     employee_id = models.CharField(max_length=50, blank=True)
     department = models.CharField(max_length=100, blank=True)
     job_title = models.CharField(max_length=100, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)  # For email verification tokens, etc.
     manager = models.ForeignKey(
         'self',
         on_delete=models.SET_NULL,
@@ -289,16 +290,20 @@ class UserProfile(TimeStampedModel):
     
     def has_permission(self, permission_code):
         """Check if user has specific permission through any role"""
+        from apps.rbac.models import UserRole
+        user_role_ids = UserRole.objects.filter(user_profile=self).values_list('role_id', flat=True)
         return Permission.objects.filter(
-            roles__userprofile=self,
+            roles__id__in=user_role_ids,
             code=permission_code,
             is_active=True
         ).exists()
     
     def has_module_access(self, module_code):
         """Check if user has access to module through any role"""
+        from apps.rbac.models import UserRole
+        user_role_ids = UserRole.objects.filter(user_profile=self).values_list('role_id', flat=True)
         return Module.objects.filter(
-            roles__userprofile=self,
+            roles__id__in=user_role_ids,
             code=module_code,
             is_active=True
         ).exists()
@@ -312,8 +317,12 @@ class UserProfile(TimeStampedModel):
     
     def get_all_modules(self):
         """Get all accessible modules from all assigned roles"""
+        # Get role IDs through UserRole relationship
+        user_role_ids = UserRole.objects.filter(user_profile=self).values_list('role_id', flat=True)
+        
+        # Get modules linked to these roles through RoleModule
         return Module.objects.filter(
-            roles__in=self.roles.all(),
+            rolemodule__role_id__in=user_role_ids,
             is_active=True
         ).distinct()
 

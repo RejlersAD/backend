@@ -8,6 +8,9 @@ Endpoints:
 - GET /api/v1/crs/documents/history/exports/ - Get user's exported files
 - GET /api/v1/crs/documents/history/profile/ - Get user's storage profile
 - GET /api/v1/crs/documents/history/download/<path>/ - Download a file from history
+- DELETE /api/v1/crs/documents/history/delete/ - Delete a file from storage
+- POST /api/v1/crs/documents/history/share/ - Generate shareable link
+- GET /api/v1/crs/documents/history/config/ - Get history actions configuration
 
 Does NOT modify existing views or core logic
 """
@@ -18,10 +21,26 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.http import HttpResponse
 import logging
+import json
+import os
+from datetime import datetime, timedelta
 
 from apps.crs_documents.helpers.user_storage import get_user_storage, UserStorageManager
 
 logger = logging.getLogger(__name__)
+
+# Load history configuration
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'history_config.json')
+try:
+    with open(CONFIG_PATH, 'r') as f:
+        HISTORY_CONFIG = json.load(f)
+except Exception as e:
+    logger.warning(f"Failed to load history config: {e}, using defaults")
+    HISTORY_CONFIG = {
+        "upload_actions": {"download": {"enabled": True}, "delete": {"enabled": True}},
+        "export_actions": {"download": {"enabled": True}, "delete": {"enabled": True}},
+        "security": {"allow_delete": True, "require_confirmation_for_delete": True}
+    }
 
 
 @api_view(['GET'])
@@ -260,6 +279,209 @@ def download_from_history(request):
         
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_history_config(request):
+    """
+    Get history actions configuration
+    Returns enabled actions and UI preferences
+    """
+    try:
+        return Response({
+            'success': True,
+            'config': HISTORY_CONFIG
+        })
+    except Exception as e:
+        logger.error(f"Error getting history config: {e}")
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_from_history(request):
+    """
+    Delete a file from user's S3 storage
+    
+    Body params:
+        - key: S3 key of the file to delete
+    """
+    try:
+        # Check if delete is allowed
+        if not HISTORY_CONFIG.get('security', {}).get('allow_delete', True):
+            return Response({
+                'success': False,
+                'error': 'Delete operation is disabled'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        s3_key = request.data.get('key', '')
+        
+        if not s3_key:
+            return Response({
+                'success': False,
+                'error': 'Missing s3 key parameter'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        storage = get_user_storage(request.user)
+        
+        # Security check - ensure user can only delete their files
+        if not s3_key.startswith(f"users/{request.user.id}/"):
+            return Response({
+                'success': False,
+                'error': 'Access denied - file does not belong to user'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Delete file from S3
+        result = storage.delete_file(s3_key)
+        
+        if result:
+            # Log activity
+            storage.log_activity('delete', {
+                'file_key': s3_key,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            return Response({
+                'success': True,
+                'message': 'File deleted successfully'
+            })
+        else:
+            return Response({
+                'success': False,
+                'error': 'Failed to delete file'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+    except Exception as e:
+        logger.error(f"Error deleting file: {e}")
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def generate_share_link(request):
+    """
+    Generate a presigned URL for sharing a file
+    
+    Body params:
+        - key: S3 key of the file to share
+        - duration_hours: Link validity duration (default: 1 hour, max: 24 hours)
+    """
+    try:
+        # Check if share links are allowed
+        if not HISTORY_CONFIG.get('security', {}).get('allow_share_links', True):
+            return Response({
+                'success': False,
+                'error': 'Share links are disabled'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        s3_key = request.data.get('key', '')
+        duration_hours = int(request.data.get('duration_hours', 1))
+        
+        # Enforce max duration from config
+        max_duration = HISTORY_CONFIG.get('security', {}).get('max_share_link_duration_hours', 1)
+        duration_hours = min(duration_hours, max_duration)
+        
+        if not s3_key:
+            return Response({
+                'success': False,
+                'error': 'Missing s3 key parameter'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        storage = get_user_storage(request.user)
+        
+        # Security check
+        if not s3_key.startswith(f"users/{request.user.id}/"):
+            return Response({
+                'success': False,
+                'error': 'Access denied - file does not belong to user'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Generate presigned URL
+        share_url = storage.generate_presigned_url(s3_key, expiration=duration_hours * 3600)
+        
+        if share_url:
+            expiration_time = datetime.now() + timedelta(hours=duration_hours)
+            
+            # Log activity
+            storage.log_activity('share', {
+                'file_key': s3_key,
+                'timestamp': datetime.now().isoformat(),
+                'expires_at': expiration_time.isoformat()
+            })
+            
+            return Response({
+                'success': True,
+                'share_url': share_url,
+                'expires_at': expiration_time.isoformat(),
+                'expires_in_hours': duration_hours
+            })
+        else:
+            return Response({
+                'success': False,
+                'error': 'Failed to generate share link'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+    except Exception as e:
+        logger.error(f"Error generating share link: {e}")
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_file_metadata(request):
+    """
+    Get detailed metadata for a file
+    
+    Query params:
+        - key: S3 key of the file
+    """
+    try:
+        s3_key = request.query_params.get('key', '')
+        
+        if not s3_key:
+            return Response({
+                'success': False,
+                'error': 'Missing s3 key parameter'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        storage = get_user_storage(request.user)
+        
+        # Security check
+        if not s3_key.startswith(f"users/{request.user.id}/"):
+            return Response({
+                'success': False,
+                'error': 'Access denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        metadata = storage.get_file_metadata(s3_key)
+        
+        if metadata:
+            return Response({
+                'success': True,
+                'metadata': metadata
+            })
+        else:
+            return Response({
+                'success': False,
+                'error': 'File not found or failed to get metadata'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+    except Exception as e:
+        logger.error(f"Error getting file metadata: {e}")
         return Response({
             'success': False,
             'error': str(e)

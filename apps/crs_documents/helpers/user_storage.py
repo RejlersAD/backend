@@ -566,6 +566,119 @@ class UserStorageManager:
         except Exception as e:
             logger.error(f"Failed to download file: {e}")
             return None
+    
+    def delete_file(self, s3_key: str) -> bool:
+        """
+        Delete a file from user's S3 storage
+        
+        Args:
+            s3_key: S3 key of the file to delete
+            
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        if not self.s3_service:
+            return False
+        
+        # Security: Ensure the key belongs to this user
+        if not s3_key.startswith(self.user_base_path):
+            logger.warning(f"Attempted to delete file outside user folder: {s3_key}")
+            return False
+        
+        try:
+            self.s3_service.s3_client.delete_object(
+                Bucket=self.bucket_name,
+                Key=s3_key
+            )
+            
+            # Log delete activity
+            self.log_activity('delete', {
+                's3_key': s3_key,
+                'filename': s3_key.split('/')[-1]
+            })
+            
+            logger.info(f"Successfully deleted file: {s3_key}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to delete file: {e}")
+            return False
+    
+    def generate_presigned_url(self, s3_key: str, expiration: int = 3600) -> Optional[str]:
+        """
+        Generate a presigned URL for temporary file access
+        
+        Args:
+            s3_key: S3 key of the file
+            expiration: URL validity in seconds (default: 1 hour)
+            
+        Returns:
+            Presigned URL string, or None
+        """
+        if not self.s3_service:
+            return None
+        
+        # Security: Ensure the key belongs to this user
+        if not s3_key.startswith(self.user_base_path):
+            logger.warning(f"Attempted to share file outside user folder: {s3_key}")
+            return None
+        
+        try:
+            url = self.s3_service.s3_client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': self.bucket_name,
+                    'Key': s3_key
+                },
+                ExpiresIn=expiration
+            )
+            
+            return url
+            
+        except Exception as e:
+            logger.error(f"Failed to generate presigned URL: {e}")
+            return None
+    
+    def get_file_metadata(self, s3_key: str) -> Optional[Dict]:
+        """
+        Get detailed metadata for a file
+        
+        Args:
+            s3_key: S3 key of the file
+            
+        Returns:
+            Dict with file metadata, or None
+        """
+        if not self.s3_service:
+            return None
+        
+        # Security: Ensure the key belongs to this user
+        if not s3_key.startswith(self.user_base_path):
+            logger.warning(f"Attempted to access metadata outside user folder: {s3_key}")
+            return None
+        
+        try:
+            response = self.s3_service.s3_client.head_object(
+                Bucket=self.bucket_name,
+                Key=s3_key
+            )
+            
+            metadata = {
+                's3_key': s3_key,
+                'filename': s3_key.split('/')[-1],
+                'size': response.get('ContentLength', 0),
+                'content_type': response.get('ContentType', 'unknown'),
+                'last_modified': response.get('LastModified', '').isoformat() if response.get('LastModified') else None,
+                'etag': response.get('ETag', '').strip('"'),
+                'storage_class': response.get('StorageClass', 'STANDARD'),
+                'metadata': response.get('Metadata', {}),
+            }
+            
+            return metadata
+            
+        except Exception as e:
+            logger.error(f"Failed to get file metadata: {e}")
+            return None
 
 
 def get_user_storage(user) -> UserStorageManager:

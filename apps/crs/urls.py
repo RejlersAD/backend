@@ -16,6 +16,10 @@ try:
         user_profile,
         user_activity,
         download_from_history,
+        get_history_config,
+        delete_from_history,
+        generate_share_link,
+        get_file_metadata,
     )
     HISTORY_AVAILABLE = True
 except ImportError:
@@ -35,9 +39,13 @@ urlpatterns = [
 if HISTORY_AVAILABLE:
     urlpatterns += [
         path('documents/history/', user_history_overview, name='crs-history-overview'),
+        path('documents/history/config/', get_history_config, name='crs-history-config'),
         path('documents/history/uploads/', user_uploads, name='crs-history-uploads'),
         path('documents/history/exports/', user_exports, name='crs-history-exports'),
         path('documents/history/profile/', user_profile, name='crs-history-profile'),
         path('documents/history/activity/', user_activity, name='crs-history-activity'),
         path('documents/history/download/', download_from_history, name='crs-history-download'),
+        path('documents/history/delete/', delete_from_history, name='crs-history-delete'),
+        path('documents/history/share/', generate_share_link, name='crs-history-share'),
+        path('documents/history/metadata/', get_file_metadata, name='crs-history-metadata'),
     ]

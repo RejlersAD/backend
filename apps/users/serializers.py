@@ -25,8 +25,9 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'username', 'email', 'first_name', 'last_name', 
-                  'phone_number', 'avatar', 'bio', 'is_verified', 'profile', 'roles']
-        read_only_fields = ['id', 'is_verified']
+                  'phone_number', 'avatar', 'bio', 'is_verified', 'is_staff', 
+                  'is_superuser', 'profile', 'roles']
+        read_only_fields = ['id', 'is_verified', 'is_staff', 'is_superuser']
     
     def get_roles(self, obj):
         """Get user's RBAC roles."""

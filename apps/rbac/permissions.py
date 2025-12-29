@@ -9,6 +9,7 @@ from .models import UserProfile
 class IsSuperAdmin(permissions.BasePermission):
     """
     Permission class to check if user is super admin
+    Also allows Django superuser as fallback
     """
     message = "You must be a super admin to perform this action."
     
@@ -16,6 +17,11 @@ class IsSuperAdmin(permissions.BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         
+        # Allow Django superuser as fallback
+        if request.user.is_superuser:
+            return True
+        
+        # Check RBAC role
         try:
             profile = request.user.rbac_profile
             return profile.roles.filter(code='super_admin', is_active=True).exists()
@@ -26,6 +32,7 @@ class IsSuperAdmin(permissions.BasePermission):
 class IsAdmin(permissions.BasePermission):
     """
     Permission class to check if user is admin (includes super admin)
+    Also allows Django staff/superuser as fallback
     """
     message = "You must be an admin to perform this action."
     
@@ -33,6 +40,11 @@ class IsAdmin(permissions.BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         
+        # Allow Django superuser/staff as fallback
+        if request.user.is_superuser or request.user.is_staff:
+            return True
+        
+        # Check RBAC roles
         try:
             profile = request.user.rbac_profile
             return profile.roles.filter(
@@ -153,12 +165,17 @@ class SameOrganization(permissions.BasePermission):
 class CanManageUsers(permissions.BasePermission):
     """
     Permission class for user management operations
+    Allows Django superuser/staff as fallback
     """
     message = "You don't have permission to manage users."
     
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
+        
+        # Allow Django superuser/staff as fallback
+        if request.user.is_superuser or request.user.is_staff:
+            return True
         
         try:
             profile = request.user.rbac_profile
@@ -179,12 +196,17 @@ class CanManageUsers(permissions.BasePermission):
 class CanManageRoles(permissions.BasePermission):
     """
     Permission class for role management operations
+    Allows Django superuser as fallback
     """
     message = "You don't have permission to manage roles."
     
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
+        
+        # Allow Django superuser as fallback
+        if request.user.is_superuser:
+            return True
         
         try:
             profile = request.user.rbac_profile

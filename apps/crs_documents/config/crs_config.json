@@ -45,20 +45,37 @@
       "^-\\s*\\d+[\\.\\-]?\\d*$",
       "^\\/\\s*\\d+[\\.\\-]?\\d*$",
       "^EL\\s*\\.?\\s*\\d+$",
-      "^[A-Z]+\\d+[\\-\\d]*$"
+      "^[A-Z]+\\d+[\\-\\d]*$",
+      "^(text\\s*box|Text\\s*Box|TEXT\\s*BOX)\\s*$",
+      "^(callout|Callout|CALLOUT)\\s*$",
+      "^(free\\s*text|Free\\s*Text)\\s*$",
+      "^(note|Note|Sticky\\s*Note)\\s*$"
     ],
     "prefix_patterns": [
       "^(Mr|Mrs|Ms|Dr|Prof|Miss|Sir|Madam)\\s+",
-      "^Typewriter\\s*\\d+\\s+",
-      "^SHX\\s*Text\\s+",
-      "^AutoCAD\\s+SHX\\s+Text\\s+",
-      "^(Text Box|Callout|Call Out|Free Text|Note|Highlight)\\s+"
+      "^Typewriter\\s*\\d+\\s*[-:]?\\s*",
+      "^SHX\\s*Text\\s*[-:]?\\s*",
+      "^AutoCAD\\s+SHX\\s+Text\\s*[-:]?\\s*",
+      "^(text\\s*box|Text\\s*Box|TEXT\\s*BOX)\\s*[-:]?\\s*",
+      "^(callout|Callout|CALLOUT|Call\\s*Out)\\s*[-:]?\\s*",
+      "^(free\\s*text|Free\\s*Text|FREE\\s*TEXT)\\s*[-:]?\\s*",
+      "^(note|Note|NOTE|Sticky\\s*Note|sticky\\s*note)\\s*[-:]?\\s*",
+      "^(highlight|Highlight|HIGHLIGHT)\\s*[-:]?\\s*",
+      "^(Comment|comment|COMMENT)\\s*[-:]?\\s*"
     ],
     "annotation_labels": [
-      "Text Box", "Callout", "Call Out", "Free Text", "Note",
-      "Highlight", "Underline", "Strikeout", "Squiggly",
-      "Popup", "Rectangle", "Ellipse", "Line", "Polygon",
-      "Typewriter", "SHX Text", "AutoCAD SHX Text"
+      "text box", "Text Box", "TEXT BOX", "textbox", "TextBox",
+      "callout", "Callout", "CALLOUT", "Call Out", "call out",
+      "free text", "Free Text", "FREE TEXT", "FreeText", "freetext",
+      "note", "Note", "NOTE", "Sticky Note", "sticky note", "STICKY NOTE",
+      "highlight", "Highlight", "HIGHLIGHT",
+      "underline", "Underline", "UNDERLINE",
+      "strikeout", "Strikeout", "STRIKEOUT",
+      "squiggly", "Squiggly", "SQUIGGLY",
+      "popup", "Popup", "POPUP",
+      "comment", "Comment", "COMMENT",
+      "Typewriter", "typewriter", "TYPEWRITER",
+      "SHX Text", "shx text", "AutoCAD SHX Text"
     ],
     "openai": {
       "model": "gpt-3.5-turbo",
@@ -125,8 +142,8 @@
     }
   },
   "metadata": {
-    "version": "1.2.0",
-    "last_updated": "2025-12-24",
-    "description": "CRS Comment extraction, cleaning, and user storage configuration"
+    "version": "1.3.0",
+    "last_updated": "2025-12-29",
+    "description": "CRS Comment extraction, cleaning, and user storage configuration - Enhanced with improved text cleaning rules"
   }
 }

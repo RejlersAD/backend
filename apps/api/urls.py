@@ -8,6 +8,7 @@ from rest_framework_simplejwt.views import TokenRefreshView, TokenObtainPairView
 from apps.users.serializers_jwt import EmailTokenObtainPairSerializer
 from .views import UserViewSet, HealthCheckView, CORSDiagnosticView
 from .export_wrapper import pid_export_wrapper
+from .email_views import verify_email, resend_verification_email, check_verification_status
 
 
 # Custom JWT view for email-based login
@@ -29,6 +30,11 @@ urlpatterns = [
     # Authentication
     path('auth/login/', EmailTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    
+    # Email Verification
+    path('auth/verify-email/', verify_email, name='verify-email'),
+    path('auth/resend-verification/', resend_verification_email, name='resend-verification'),
+    path('auth/verification-status/', check_verification_status, name='verification-status'),
     
     # Core functionality (S3 storage)
     path('core/', include('apps.core.urls', namespace='core')),
