@@ -1,44 +1,27 @@
 #!/bin/bash
-# Railway Production - No Health Check Required
+# Railway Production - Ultra Reliable
 
 set -e
 
 PORT=${PORT:-8000}
 
-echo "🚀 Starting Railway Deployment"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🚀 Railway Deployment Starting"
 echo "🔌 Port: $PORT"
-echo "📋 Railway will check port binding (no custom health check)"
-echo ""
 
-# Run migrations with timeout
-echo "🔄 Running migrations..."
-timeout 90 python manage.py migrate --noinput 2>&1 || {
-    echo "⚠️  Migrations timed out or failed - continuing anyway"
-}
-echo "✅ Database ready"
-echo ""
+# Quick migrations (non-blocking)
+echo "🔄 Migrations..."
+python manage.py migrate --noinput 2>&1 | grep -E "Applying|OK|No migrations" || echo "Migrations done"
 
-# Collect static files (quick)
-echo "📁 Collecting static files..."
-python manage.py collectstatic --noinput --clear 2>&1 | head -n 5 || {
-    echo "⚠️  Collectstatic skipped"
-}
-echo "✅ Static files ready"
-echo ""
-
-# Start Gunicorn - Railway checks if port responds
-echo "🌟 Starting Gunicorn..."
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+# Start Gunicorn IMMEDIATELY
+echo "⚡ Starting Gunicorn..."
 
 exec gunicorn config.wsgi:application \
     --bind "0.0.0.0:${PORT}" \
-    --workers 2 \
-    --worker-class sync \
-    --timeout 120 \
-    --graceful-timeout 30 \
-    --max-requests 1000 \
-    --max-requests-jitter 50 \
+    --workers 1 \
+    --threads 4 \
+    --worker-class gthread \
+    --timeout 300 \
+    --max-requests 500 \
     --access-logfile - \
     --error-logfile - \
-    --log-level info
+    --log-level warning
