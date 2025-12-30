@@ -3,6 +3,6 @@
 [deploy]
 startCommand = "bash railway_start.sh"
 healthcheckPath = "/api/v1/health/"
-healthcheckTimeout = 300
+healthcheckTimeout = 60
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
