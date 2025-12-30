@@ -59,27 +59,14 @@ class CorsTestView(View):
 def railway_health_check(request):
     """
     Railway deployment health check endpoint
-    Simple endpoint for Railway to verify the application is running
-    Returns 200 even if DB is not ready (for initial startup)
+    Ultra-simple endpoint that always returns 200 OK
+    No database checks, no complex logic - just confirms app is running
     """
-    health_status = {
+    return JsonResponse({
         'status': 'healthy',
         'service': 'radai-backend',
         'timestamp': datetime.datetime.now().isoformat(),
-    }
-    
-    # Try database connection but don't fail if it's not ready
-    try:
-        from django.db import connection
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT 1")
-        health_status['database'] = 'connected'
-    except Exception as e:
-        # Still return 200 but note DB issue
-        health_status['database'] = 'initializing'
-        health_status['db_note'] = str(e)[:100]
-    
-    return JsonResponse(health_status, status=200)
+    }, status=200)
 
 
 @csrf_exempt
