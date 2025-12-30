@@ -4,7 +4,6 @@ from django.conf import settings
 from django.conf.urls.static import static
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from apps.core.cors_test_views import CorsTestView, cors_health_check, railway_health_check
-from config.cors_views import cors_health_check as force_cors_health
 from django.http import HttpResponse
 
 # Import PID analysis models and services for export functionality
@@ -59,12 +58,6 @@ urlpatterns = [
     
     # Railway Health Check (Required for deployment)
     path('api/v1/health/', railway_health_check, name='railway-health'),
-    
-    # CORS Health Check (Forced CORS headers)
-    path('api/v1/cors-health/', force_cors_health, name='cors-health'),
-    
-    # EXPORT ENDPOINT - plain Django view, no DRF
-    path('api/v1/pid/simple-test-pk/<int:pk>/', pid_export_view, name='pid-export'),
     
     # CORS diagnostic endpoints (no auth required)
     path('api/v1/cors-test/', CorsTestView.as_view(), name='cors-test'),
