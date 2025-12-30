@@ -1,27 +1,20 @@
 #!/bin/bash
-# Railway Production - Ultra Reliable
-
-set -e
+# Railway Production - Absolute Minimum
 
 PORT=${PORT:-8000}
 
-echo "🚀 Railway Deployment Starting"
-echo "🔌 Port: $PORT"
+echo "Starting on port $PORT"
 
-# Quick migrations (non-blocking)
-echo "🔄 Migrations..."
-python manage.py migrate --noinput 2>&1 | grep -E "Applying|OK|No migrations" || echo "Migrations done"
+# Try migrations (don't fail if it errors)
+python manage.py migrate --noinput 2>&1 || true
 
-# Start Gunicorn IMMEDIATELY
-echo "⚡ Starting Gunicorn..."
-
+# Start Gunicorn
 exec gunicorn config.wsgi:application \
     --bind "0.0.0.0:${PORT}" \
     --workers 1 \
     --threads 4 \
     --worker-class gthread \
     --timeout 300 \
-    --max-requests 500 \
     --access-logfile - \
     --error-logfile - \
-    --log-level warning
+    --log-level info

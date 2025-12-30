@@ -247,8 +247,8 @@ if additional_origins:
 # Remove duplicates while preserving order
 CORS_ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS))
 
-# Emergency mode - allow all origins (Railway should set this to True)
-CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=True, cast=bool)
+# FORCE allow all origins for production (no environment variable dependency)
+CORS_ALLOW_ALL_ORIGINS = True  # Always True for Railway
 
 # Allow credentials (required for authentication)
 CORS_ALLOW_CREDENTIALS = True
