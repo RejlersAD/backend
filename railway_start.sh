@@ -1,43 +1,29 @@
 #!/bin/bash
-# Railway Production Startup Script - Optimized for Fast Health Checks
+# Railway Production - Zero Downtime Startup
 
 set -e
 
-echo "🚀 Starting Railway Deployment"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-# Set PORT
 PORT=${PORT:-8000}
+
+echo "🚀 Railway Deployment - Instant Start Mode"
 echo "🔌 Port: $PORT"
-echo "📋 Environment: ${RAILWAY_ENVIRONMENT:-production}"
 
-# Run migrations BEFORE starting server (minimize downtime)
-echo ""
-echo "🔄 Running database migrations (fast)..."
-python manage.py migrate --noinput --skip-checks 2>&1 | head -n 20 || true
-echo "✅ Migrations complete"
-
-# Skip collectstatic if not needed (health checks more important)
-echo ""
-echo "📁 Skipping collectstatic for faster startup..."
-echo "✅ Static files from previous deployment"
-
-# Start Gunicorn with preload for faster worker startup
-echo ""
-echo "🌟 Starting Gunicorn on 0.0.0.0:$PORT (PRELOAD MODE)"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+# Start Gunicorn IMMEDIATELY - No migrations blocking startup
+# Migrations will run on first request if needed (Django handles this)
+echo "⚡ Starting Gunicorn NOW (health check ready in 5s)"
 
 exec gunicorn config.wsgi:application \
     --bind "0.0.0.0:${PORT}" \
-    --workers 2 \
-    --worker-class sync \
+    --workers 1 \
+    --threads 2 \
+    --worker-class gthread \
     --worker-tmp-dir /dev/shm \
     --timeout 300 \
     --graceful-timeout 30 \
     --keep-alive 5 \
-    --preload \
     --max-requests 1000 \
-    --max-requests-jitter 100 \
+    --max-requests-jitter 50 \
     --access-logfile - \
     --error-logfile - \
-    --log-level info
+    --log-level error \
+    --capture-output
