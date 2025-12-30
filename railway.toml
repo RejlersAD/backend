@@ -1,8 +1,4 @@
 # Railway Deployment Configuration
-# Clean and production-ready
-
-[build]
-builder = "nixpacks"
 
 [deploy]
 startCommand = "bash railway_start.sh"
