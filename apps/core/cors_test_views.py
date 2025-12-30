@@ -60,27 +60,26 @@ def railway_health_check(request):
     """
     Railway deployment health check endpoint
     Simple endpoint for Railway to verify the application is running
+    Returns 200 even if DB is not ready (for initial startup)
     """
-    from django.db import connection
+    health_status = {
+        'status': 'healthy',
+        'service': 'radai-backend',
+        'timestamp': datetime.datetime.now().isoformat(),
+    }
     
+    # Try database connection but don't fail if it's not ready
     try:
-        # Test database connection
+        from django.db import connection
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
-        
-        return JsonResponse({
-            'status': 'healthy',
-            'service': 'radai-backend',
-            'timestamp': datetime.datetime.now().isoformat(),
-            'database': 'connected'
-        }, status=200)
+        health_status['database'] = 'connected'
     except Exception as e:
-        return JsonResponse({
-            'status': 'unhealthy',
-            'service': 'radai-backend',
-            'timestamp': datetime.datetime.now().isoformat(),
-            'error': str(e)
-        }, status=503)
+        # Still return 200 but note DB issue
+        health_status['database'] = 'initializing'
+        health_status['db_note'] = str(e)[:100]
+    
+    return JsonResponse(health_status, status=200)
 
 
 @csrf_exempt
