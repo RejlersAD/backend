@@ -14,18 +14,17 @@ class ForceCORSMiddleware(MiddlewareMixin):
     def process_response(self, request, response):
         """Add CORS headers to every response"""
         
-        # Get origin from request or use default
-        origin = request.headers.get('Origin', '*')
+        # Get the origin from the request
+        origin = request.META.get('HTTP_ORIGIN')
         
-        # CRITICAL: When using credentials, we MUST return specific origin, not *
-        # This is a CORS security requirement
-        if origin and origin != '*':
+        if origin:
+            # Echo back the specific origin (required for credentials)
             response['Access-Control-Allow-Origin'] = origin
         else:
-            # Fallback to Vercel frontend for production
+            # Default to Vercel if no origin header
             response['Access-Control-Allow-Origin'] = 'https://airflow-frontend.vercel.app'
         
-        # Allow credentials
+        # Allow credentials (needed for JWT auth headers)
         response['Access-Control-Allow-Credentials'] = 'true'
         
         # Allow all methods
@@ -55,7 +54,7 @@ class ForceCORSMiddleware(MiddlewareMixin):
             response = HttpResponse()
             
             # Get origin from request
-            origin = request.headers.get('Origin', 'https://airflow-frontend.vercel.app')
+            origin = request.META.get('HTTP_ORIGIN', 'https://airflow-frontend.vercel.app')
             response['Access-Control-Allow-Origin'] = origin
             response['Access-Control-Allow-Credentials'] = 'true'
             response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
