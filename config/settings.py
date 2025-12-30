@@ -69,7 +69,6 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    'config.cors_middleware.ForceCORSMiddleware',  # FORCE CORS - PERMANENT SOLUTION
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',  # MUST be before CommonMiddleware
@@ -248,15 +247,17 @@ if additional_origins:
 # Remove duplicates while preserving order
 CORS_ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS))
 
-# CRITICAL FIX: Force allow all origins for production
-# Read from environment first, but default to True for Railway
-CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=True, cast=bool)
+# CORS Configuration - Fixed for production
+# NOTE: Cannot use CORS_ALLOW_ALL_ORIGINS=True with CORS_ALLOW_CREDENTIALS=True
+# This is a CORS security restriction
+CORS_ALLOW_ALL_ORIGINS = False  # MUST be False when credentials are enabled
 
 # EXPLICIT: Add Vercel domain to allowed origins as backup
 if 'https://airflow-frontend.vercel.app' not in CORS_ALLOWED_ORIGINS:
     CORS_ALLOWED_ORIGINS.append('https://airflow-frontend.vercel.app')
 
 # Allow credentials (required for authentication)
+# NOTE: Frontend no longer sends withCredentials, but keeping this for future
 CORS_ALLOW_CREDENTIALS = True
 
 # Allowed HTTP methods
