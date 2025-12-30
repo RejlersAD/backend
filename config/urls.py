@@ -3,7 +3,7 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
-from apps.core.cors_test_views import CorsTestView, cors_health_check
+from apps.core.cors_test_views import CorsTestView, cors_health_check, railway_health_check
 from django.http import HttpResponse
 
 # Import PID analysis models and services for export functionality
@@ -55,6 +55,9 @@ def pid_export_view(request, pk):
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    
+    # Railway Health Check (Required for deployment)
+    path('api/v1/health/', railway_health_check, name='railway-health'),
     
     # EXPORT ENDPOINT - plain Django view, no DRF
     path('api/v1/pid/simple-test-pk/<int:pk>/', pid_export_view, name='pid-export'),

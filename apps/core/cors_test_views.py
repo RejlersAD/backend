@@ -55,6 +55,35 @@ class CorsTestView(View):
 
 
 @csrf_exempt
+@require_http_methods(["GET"])
+def railway_health_check(request):
+    """
+    Railway deployment health check endpoint
+    Simple endpoint for Railway to verify the application is running
+    """
+    from django.db import connection
+    
+    try:
+        # Test database connection
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        
+        return JsonResponse({
+            'status': 'healthy',
+            'service': 'radai-backend',
+            'timestamp': datetime.datetime.now().isoformat(),
+            'database': 'connected'
+        }, status=200)
+    except Exception as e:
+        return JsonResponse({
+            'status': 'unhealthy',
+            'service': 'radai-backend',
+            'timestamp': datetime.datetime.now().isoformat(),
+            'error': str(e)
+        }, status=503)
+
+
+@csrf_exempt
 @require_http_methods(["GET", "POST", "OPTIONS"])
 def cors_health_check(request):
     """
