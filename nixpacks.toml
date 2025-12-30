@@ -1,7 +1,8 @@
 # Nixpacks Configuration for Railway
 
-[phases.setup]
 providers = ["python"]
+
+[phases.setup]
 nixPkgs = ["python311", "postgresql", "bash"]
 
 [phases.install]
