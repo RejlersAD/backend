@@ -6,6 +6,13 @@ from .views import (
     CRSActivityViewSet,
     GoogleSheetConfigViewSet
 )
+from .revision_views import (
+    CRSRevisionChainViewSet,
+    CRSRevisionViewSet,
+    CRSCommentLinkViewSet,
+    CRSAIInsightViewSet,
+    CRSRevisionActivityViewSet
+)
 
 # Import history views from crs_documents helper
 try:
@@ -30,6 +37,13 @@ router.register(r'documents', CRSDocumentViewSet, basename='crs-document')
 router.register(r'comments', CRSCommentViewSet, basename='crs-comment')
 router.register(r'activities', CRSActivityViewSet, basename='crs-activity')
 router.register(r'google-configs', GoogleSheetConfigViewSet, basename='google-config')
+
+# CRS Multiple Revision endpoints
+router.register(r'revision-chains', CRSRevisionChainViewSet, basename='crs-revision-chain')
+router.register(r'revisions', CRSRevisionViewSet, basename='crs-revision')
+router.register(r'comment-links', CRSCommentLinkViewSet, basename='crs-comment-link')
+router.register(r'ai-insights', CRSAIInsightViewSet, basename='crs-ai-insight')
+router.register(r'revision-activities', CRSRevisionActivityViewSet, basename='crs-revision-activity')
 
 # Start with history endpoints (must come before router.urls to avoid conflicts)
 urlpatterns = []
