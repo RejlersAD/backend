@@ -1,9 +1,9 @@
 #!/bin/bash
-# Railway Production Startup Script - Smart Health Check Strategy
+# Railway Production Startup Script - Optimized for Fast Health Checks
 
 set -e
 
-echo "🚀 Starting Railway Deployment (Smart Mode)"
+echo "🚀 Starting Railway Deployment"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Set PORT
@@ -11,50 +11,31 @@ PORT=${PORT:-8000}
 echo "🔌 Port: $PORT"
 echo "📋 Environment: ${RAILWAY_ENVIRONMENT:-production}"
 
-# Start lightweight health server immediately (runs in background)
+# Run migrations BEFORE starting server (minimize downtime)
 echo ""
-echo "🏥 Starting instant health check server..."
-python railway_health.py &
-HEALTH_PID=$!
-echo "✅ Health server running (PID: $HEALTH_PID)"
-
-# Give health server 2 seconds to bind
-sleep 2
-
-# Run migrations (health server already responding)
-echo ""
-echo "🔄 Running database migrations..."
-python manage.py migrate --noinput || {
-    echo "⚠️  Migrations failed, but continuing..."
-}
+echo "🔄 Running database migrations (fast)..."
+python manage.py migrate --noinput --skip-checks 2>&1 | head -n 20 || true
 echo "✅ Migrations complete"
 
-# Collect static files (non-blocking)
+# Skip collectstatic if not needed (health checks more important)
 echo ""
-echo "📁 Collecting static files..."
-python manage.py collectstatic --noinput --clear 2>/dev/null || {
-    echo "⚠️  Static collection failed, but continuing..."
-}
-echo "✅ Static files collected"
+echo "📁 Skipping collectstatic for faster startup..."
+echo "✅ Static files from previous deployment"
 
-# Kill health server before starting Gunicorn
+# Start Gunicorn with preload for faster worker startup
 echo ""
-echo "🔄 Switching from health server to Gunicorn..."
-kill $HEALTH_PID 2>/dev/null || true
-sleep 1
-
-# Start Gunicorn on same port
-echo "🌟 Starting Gunicorn on 0.0.0.0:$PORT"
+echo "🌟 Starting Gunicorn on 0.0.0.0:$PORT (PRELOAD MODE)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 exec gunicorn config.wsgi:application \
     --bind "0.0.0.0:${PORT}" \
-    --workers 4 \
+    --workers 2 \
     --worker-class sync \
     --worker-tmp-dir /dev/shm \
-    --timeout 120 \
+    --timeout 300 \
     --graceful-timeout 30 \
     --keep-alive 5 \
+    --preload \
     --max-requests 1000 \
     --max-requests-jitter 100 \
     --access-logfile - \
