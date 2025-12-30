@@ -118,10 +118,10 @@ else:
             'PASSWORD': config('DB_PASSWORD', default='postgres'),
             'HOST': config('DB_HOST', default='db'),
             'PORT': config('DB_PORT', default='5432'),
-            'CONN_MAX_AGE': 600,  # Connection pooling for 10 minutes
+            'CONN_MAX_AGE': 60,
             'OPTIONS': {
-                'connect_timeout': 60,  # Increased to 60 second connection timeout for Railway DB
-                'options': '-c statement_timeout=60000'  # Increased to 60 second query timeout
+                'connect_timeout': 30,
+                'options': '-c statement_timeout=30000'
             }
         }
     }
@@ -437,7 +437,7 @@ OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 # MONGODB CONFIGURATION (NOSQL FOR REPORTS & UNSTRUCTURED DATA)
 # ==============================================================================
 
-# MongoDB Connection (soft-coded for Railway)
+# MongoDB Connection (Railway)
 MONGODB_URI = config(
     'MONGODB_URI',
     default='mongodb://mongo:kpdwrBybTiIyKRoUJmOAMfewZKtWqTeu@shuttle.proxy.rlwy.net:23002'
