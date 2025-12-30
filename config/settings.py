@@ -62,12 +62,11 @@ INSTALLED_APPS = [
     
     # MLflow Model Orchestration (non-invasive tracking)
     'apps.mlflow_integration',
+    
+    # AWS S3 Storage (always include - it's in requirements.txt)
+    'storages',
     # Add new features here - no core changes needed!
 ]
-
-# Add storages only if S3 is enabled (prevents import errors when not needed)
-if config('USE_S3', default=False, cast=bool) and config('AWS_STORAGE_BUCKET_NAME', default=''):
-    INSTALLED_APPS.append('storages')
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',

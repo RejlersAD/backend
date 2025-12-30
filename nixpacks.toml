@@ -1,9 +1,7 @@
 # Nixpacks Configuration for Railway
-# Optimized Python/Django deployment
-
-providers = ["python"]
 
 [phases.setup]
+providers = ["python"]
 nixPkgs = ["python311", "postgresql", "bash"]
 
 [phases.install]
@@ -11,9 +9,6 @@ cmds = [
   "pip install --upgrade pip setuptools wheel",
   "pip install -r requirements.txt"
 ]
-
-[phases.build]
-cmds = ["echo 'Build phase complete'"]
 
 [start]
 cmd = "bash railway_start.sh"

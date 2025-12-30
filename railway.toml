@@ -1,19 +1,12 @@
 # Railway Deployment Configuration
-# Production-ready setup with health monitoring
+# Clean and production-ready
 
 [build]
 builder = "nixpacks"
-buildCommand = "pip install --upgrade pip && pip install -r requirements.txt"
 
 [deploy]
-startCommand = "chmod +x railway_start.sh && bash railway_start.sh"
+startCommand = "bash railway_start.sh"
 healthcheckPath = "/api/v1/health/"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 10
-numReplicas = 1
-
-[deploy.healthcheck]
-path = "/api/v1/health/"
-timeout = 300
-interval = 30
+restartPolicyMaxRetries = 3
