@@ -55,13 +55,21 @@ class CorsTestView(View):
 
 
 @csrf_exempt
-@require_http_methods(["GET"])
+@require_http_methods(["GET", "HEAD"])
 def railway_health_check(request):
     """
     Railway deployment health check endpoint
     Ultra-simple endpoint that always returns 200 OK
     No database checks, no complex logic - just confirms app is running
+    Supports both GET and HEAD methods for health checks
     """
+    from django.http import HttpResponse
+    
+    # For HEAD requests, just return 200 with no body
+    if request.method == "HEAD":
+        return HttpResponse(status=200)
+    
+    # For GET requests, return minimal JSON
     return JsonResponse({
         'status': 'healthy',
         'service': 'radai-backend',
