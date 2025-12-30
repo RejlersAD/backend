@@ -3,36 +3,41 @@ Ultra-simple health check WSGI application
 This is independent of Django and starts immediately
 """
 
-def simple_health_check(environ, start_response):
-    """
-    Simplest possible health check - just returns 200 OK
-    Works even if Django hasn't fully initialized
-    """
-    path = environ.get('PATH_INFO', '')
-    
-    if path == '/health/' or path == '/api/v1/health/':
-        status = '200 OK'
-        headers = [
-            ('Content-Type', 'application/json'),
-            ('Content-Length', '27')
-        ]
-        start_response(status, headers)
-        return [b'{"status":"healthy","ok":true}']
-    
-    # For all other paths, let Django handle it
-    return None
+import os
+
+# Set Django settings module before any Django imports
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+
+# Import Django app at module level to avoid repeated imports
+_django_app = None
+
+
+def get_django_app():
+    """Lazy load Django application"""
+    global _django_app
+    if _django_app is None:
+        from django.core.wsgi import get_wsgi_application
+        _django_app = get_wsgi_application()
+    return _django_app
 
 
 def application(environ, start_response):
     """
-    Combined WSGI application
-    Try simple health check first, then fall back to Django
+    Combined WSGI application with fast health check
     """
-    # Try simple health check first
-    health_response = simple_health_check(environ, start_response)
-    if health_response is not None:
-        return health_response
+    path = environ.get('PATH_INFO', '')
     
-    # Fall back to Django application
-    from config.wsgi import application as django_app
+    # Fast path for health checks - no Django initialization needed
+    if path in ['/health/', '/api/v1/health/']:
+        status = '200 OK'
+        response_body = b'{"status":"healthy","ok":true}'
+        headers = [
+            ('Content-Type', 'application/json'),
+            ('Content-Length', str(len(response_body)))
+        ]
+        start_response(status, headers)
+        return [response_body]
+    
+    # All other paths go through Django
+    django_app = get_django_app()
     return django_app(environ, start_response)
