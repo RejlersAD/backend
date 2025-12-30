@@ -8,5 +8,8 @@ nixPkgs = ["python311", "postgresql"]
 [phases.install]
 cmds = ["pip install --upgrade pip setuptools wheel", "pip install -r requirements.txt"]
 
+[phases.build]
+cmds = ["python manage.py collectstatic --noinput"]
+
 [start]
-cmd = "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 600 --access-logfile - --error-logfile - --log-level info"
+cmd = "python manage.py migrate --noinput && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 3 --timeout 600 --access-logfile - --error-logfile - --log-level debug --preload"
