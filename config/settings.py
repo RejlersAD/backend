@@ -69,6 +69,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'config.cors_middleware.ForceCORSMiddleware',  # FORCE CORS - PERMANENT SOLUTION
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',  # MUST be before CommonMiddleware

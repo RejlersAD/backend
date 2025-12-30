@@ -4,3 +4,10 @@
 startCommand = "bash railway_start.sh"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
+
+[build]
+builder = "nixpacks"
+
+# Permanent CORS Configuration
+[deploy.env]
+CORS_ALLOW_ALL_ORIGINS = "True"
