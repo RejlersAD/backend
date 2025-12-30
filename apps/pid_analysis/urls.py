@@ -6,6 +6,14 @@ from .views import (
     PIDIssueViewSet,
     ReferenceDocumentViewSet,
 )
+from .history_views import (
+    pid_history_overview,
+    pid_all_uploads,
+    pid_all_analyses,
+    download_pid_drawing,
+    download_pid_report,
+    delete_pid_drawing
+)
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework import permissions
 from rest_framework.response import Response
@@ -133,6 +141,14 @@ router.register(r'issues', PIDIssueViewSet, basename='pid-issue')
 router.register(r'reference-documents', ReferenceDocumentViewSet, basename='reference-document')
 
 urlpatterns = [
+    # History endpoints
+    path('history/', pid_history_overview, name='pid-history-overview'),
+    path('history/uploads/', pid_all_uploads, name='pid-history-uploads'),
+    path('history/analyses/', pid_all_analyses, name='pid-history-analyses'),
+    path('history/download/drawing/<int:drawing_id>/', download_pid_drawing, name='pid-history-download-drawing'),
+    path('history/download/report/<int:report_id>/', download_pid_report, name='pid-history-download-report'),
+    path('history/delete/drawing/<int:drawing_id>/', delete_pid_drawing, name='pid-history-delete-drawing'),
+    
     # Export endpoint - using different pattern to avoid router conflict
     path('export/<int:pk>/', export_drawing, name='pid-drawing-export'),
     # Test URL
