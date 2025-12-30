@@ -247,8 +247,13 @@ if additional_origins:
 # Remove duplicates while preserving order
 CORS_ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ORIGINS))
 
-# FORCE allow all origins for production (no environment variable dependency)
-CORS_ALLOW_ALL_ORIGINS = True  # Always True for Railway
+# CRITICAL FIX: Force allow all origins for production
+# Read from environment first, but default to True for Railway
+CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=True, cast=bool)
+
+# EXPLICIT: Add Vercel domain to allowed origins as backup
+if 'https://airflow-frontend.vercel.app' not in CORS_ALLOWED_ORIGINS:
+    CORS_ALLOWED_ORIGINS.append('https://airflow-frontend.vercel.app')
 
 # Allow credentials (required for authentication)
 CORS_ALLOW_CREDENTIALS = True

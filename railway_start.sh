@@ -3,7 +3,11 @@
 
 PORT=${PORT:-8000}
 
+# CRITICAL FIX: Explicitly set CORS to allow all origins
+export CORS_ALLOW_ALL_ORIGINS=True
+
 echo "Starting on port $PORT"
+echo "CORS_ALLOW_ALL_ORIGINS: $CORS_ALLOW_ALL_ORIGINS"
 
 # Try migrations (don't fail if it errors)
 python manage.py migrate --noinput 2>&1 || true
