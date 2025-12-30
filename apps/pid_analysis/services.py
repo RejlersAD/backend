@@ -339,11 +339,12 @@ Before listing issues, you MUST think through:
    - Bypass valves where needed?
    - Three-way valves configured correctly?
 
-✅ SAFETY SYSTEMS
-   - PSV: Set pressure specified?
+✅ SAFETY SYSTEMS (CRITICAL - Pressure Safety Valves MAWP Compliance)
+   - Pressure Safety Valve (PSV): Set pressure specified?
+   - PSV: Set pressure vs Equipment Design Pressure compliance (Must be ≤ MAWP)?
+   - PSV: CRITICAL VERIFICATION - Set pressure must NOT exceed Maximum Allowable Working Pressure
    - PSV: Discharge routed properly?
    - PSV: Sized for duty?
-   - PSV: Set pressure vs Equipment Design Pressure compliance (Must be ≤ Design Pressure)?
    - Rupture disks: Burst pressure noted?
    - Flame arrestors: Type and location correct?
    - ESD valves: Fail position correct?
