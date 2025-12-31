@@ -221,26 +221,32 @@ print(f"[JWT] ===================================")
 # ==============================================================================
 
 # PRODUCTION URLS
-PRODUCTION_FRONTEND = 'https://airflow-frontend.vercel.app'
-PRODUCTION_BACKEND = 'https://aiflowbackend-production.up.railway.app'
+PRODUCTION_FRONTEND = config('FRONTEND_URL', default='https://airflow-frontend.vercel.app')
+PRODUCTION_BACKEND = config('BACKEND_URL', default='https://aiflowbackend-production.up.railway.app')
 
-# Build list of allowed origins
-CORS_ALLOWED_ORIGINS = [
-    # Production
-    PRODUCTION_FRONTEND,
-    PRODUCTION_BACKEND,
-    # Development
-    'http://localhost:3000',
-    'http://localhost:5173',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:5173',
-]
+# Build list of allowed origins from environment variable or use defaults
+CORS_ORIGINS_ENV = config('CORS_ALLOWED_ORIGINS', default='')
+if CORS_ORIGINS_ENV:
+    # If env var is set, use it (comma-separated list)
+    CORS_ALLOWED_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_ENV.split(',')]
+else:
+    # Use default list
+    CORS_ALLOWED_ORIGINS = [
+        # Production
+        PRODUCTION_FRONTEND,
+        PRODUCTION_BACKEND,
+        # Development
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'http://127.0.0.1:3000',
+        'http://127.0.0.1:5173',
+    ]
 
 # IMPORTANT: Must be False - we have specific origins above
-CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=False, cast=bool)
 
 # Allow credentials (for JWT tokens in Authorization header)
-CORS_ALLOW_CREDENTIALS = True  # Must be True for Authorization headers to work properly
+CORS_ALLOW_CREDENTIALS = config('CORS_ALLOW_CREDENTIALS', default=True, cast=bool)
 
 # Allow all standard methods
 CORS_ALLOW_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
@@ -264,7 +270,7 @@ CORS_ALLOW_HEADERS = [
 CORS_EXPOSE_HEADERS = ['content-disposition', 'content-type', 'cache-control']
 
 # Cache preflight for 1 hour
-CORS_PREFLIGHT_MAX_AGE = 3600
+CORS_PREFLIGHT_MAX_AGE = config('CORS_PREFLIGHT_MAX_AGE', default=3600, cast=int)
 
 # Allow regex patterns for Vercel previews and localhost
 CORS_ALLOWED_ORIGIN_REGEXES = [
@@ -277,6 +283,8 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 CORS_ALLOW_PRIVATE_NETWORK = True
 
 print(f"[CORS] Allowed Origins: {len(CORS_ALLOWED_ORIGINS)} origins")
+print(f"[CORS] Origins List: {CORS_ALLOWED_ORIGINS}")
+print(f"[CORS] Allow Credentials: {CORS_ALLOW_CREDENTIALS}")
 print(f"[CORS] Allow Credentials: {CORS_ALLOW_CREDENTIALS}")
 print(f"[CORS] Frontend: {PRODUCTION_FRONTEND}")
 print(f"[CORS] Backend: {PRODUCTION_BACKEND}")
