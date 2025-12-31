@@ -376,7 +376,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             temp_password_created_at=timezone.now()
         )
         
-        # Create profile
+        # Create profile with explicit is_deleted=False
+        validated_data['is_deleted'] = False
         profile = UserProfile.objects.create(user=user, **validated_data)
         
         # Assign roles based on role_ids if provided

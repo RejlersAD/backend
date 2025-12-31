@@ -240,7 +240,7 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_ALL_ORIGINS = False
 
 # Allow credentials (for JWT tokens in Authorization header)
-CORS_ALLOW_CREDENTIALS = False  # Changed to False since we use JWT in headers, not cookies
+CORS_ALLOW_CREDENTIALS = True  # Must be True for Authorization headers to work properly
 
 # Allow all standard methods
 CORS_ALLOW_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
@@ -251,14 +251,17 @@ CORS_ALLOW_HEADERS = [
     'accept-encoding',
     'authorization',
     'content-type',
+    'dnt',
     'origin',
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+    'cache-control',
+    'pragma',
 ]
 
 # Expose headers for downloads
-CORS_EXPOSE_HEADERS = ['content-disposition', 'content-type']
+CORS_EXPOSE_HEADERS = ['content-disposition', 'content-type', 'cache-control']
 
 # Cache preflight for 1 hour
 CORS_PREFLIGHT_MAX_AGE = 3600
@@ -269,6 +272,9 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
     r'^http://localhost:\d+$',
     r'^http://127\.0\.0\.1:\d+$',
 ]
+
+# Additional CORS settings for preflight
+CORS_ALLOW_PRIVATE_NETWORK = True
 
 print(f"[CORS] Allowed Origins: {len(CORS_ALLOWED_ORIGINS)} origins")
 print(f"[CORS] Allow Credentials: {CORS_ALLOW_CREDENTIALS}")
