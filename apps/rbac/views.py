@@ -594,9 +594,17 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                             })
                             continue
                         
+                        # Generate unique username from email
+                        base_username = email.split('@')[0]
+                        username = base_username
+                        counter = 1
+                        while User.objects.filter(username=username).exists():
+                            username = f"{base_username}{counter}"
+                            counter += 1
+                        
                         # Create user
                         user = User.objects.create_user(
-                            username=email.split('@')[0],
+                            username=username,
                             email=email,
                             first_name=row.get('first_name', '').strip(),
                             last_name=row.get('last_name', '').strip(),

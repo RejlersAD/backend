@@ -262,6 +262,18 @@ class UserProfileSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({'first_name': 'First name is required for user creation'})
             if 'last_name' not in attrs:
                 raise serializers.ValidationError({'last_name': 'Last name is required for user creation'})
+            
+            # Check if email already exists
+            email = attrs.get('email')
+            if User.objects.filter(email=email).exists():
+                raise serializers.ValidationError({'email': 'A user with this email already exists'})
+            
+            # Validate email format and deliverability
+            from apps.users.email_service import EmailService
+            validation_result = EmailService.validate_email_deliverability(email)
+            if not validation_result['is_valid']:
+                raise serializers.ValidationError({'email': validation_result['message']})
+        
         return attrs
     
     class Meta:
@@ -334,16 +346,34 @@ class UserProfileSerializer(serializers.ModelSerializer):
             )
             is_super_admin = super_admin_roles.exists()
         
+        # Store the password for welcome email (before hashing)
+        temp_password = password
+        
+        # Generate unique username from email
+        base_username = email.split('@')[0]
+        username = base_username
+        
+        # Check if username exists and make it unique
+        counter = 1
+        while User.objects.filter(username=username).exists():
+            username = f"{base_username}{counter}"
+            counter += 1
+        
         # Create user with appropriate permissions
+        from django.utils import timezone
         user = User.objects.create_user(
-            username=email.split('@')[0],
+            username=username,
             email=email,
             password=password,
             first_name=first_name,
             last_name=last_name,
             phone_number=phone,  # Add phone_number to User model
+            is_active=True,  # Explicitly set user as active
             is_superuser=is_super_admin,
-            is_staff=is_super_admin
+            is_staff=is_super_admin,
+            is_first_login=True,  # Mark as first login
+            must_reset_password=True,  # Require password reset
+            temp_password_created_at=timezone.now()
         )
         
         # Create profile
@@ -425,6 +455,16 @@ class UserProfileSerializer(serializers.ModelSerializer):
                 send_verification_email(profile, self.context.get('request'))
             except Exception as e:
                 print(f"⚠️ Failed to send verification email: {e}")
+        
+        # Send welcome email with login credentials
+        from apps.users.email_service import EmailService
+        try:
+            request = self.context.get('request')
+            EmailService.send_welcome_email(user, temp_password, request)
+            print(f"✅ Welcome email sent to {user.email}")
+        except Exception as e:
+            print(f"⚠️ Failed to send welcome email to {user.email}: {e}")
+            # Don't fail user creation if email fails
         
         return profile
     

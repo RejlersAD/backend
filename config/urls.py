@@ -72,6 +72,7 @@ urlpatterns = [
     # API endpoints - Core
     path('api/v1/', include('apps.api.urls')),
     path('api/v1/rbac/', include('apps.rbac.urls')),
+    path('api/v1/users/', include('apps.users.urls')),  # User management endpoints
     
     # API endpoints - Features (Plugin Architecture)
     path('api/v1/pid/', include('apps.pid_analysis.urls')),

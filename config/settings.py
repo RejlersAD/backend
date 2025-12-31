@@ -442,15 +442,15 @@ REPORT_FOOTER_NOTE_FORMATTED = REPORT_FOOTER_NOTE.format(company=REPORT_COMPANY_
 # Email backend configuration
 EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.smtp.EmailBackend')
 
-# AWS SES SMTP Configuration
-EMAIL_HOST = config('EMAIL_HOST', default='email-smtp.us-east-1.amazonaws.com')
+# AWS SES SMTP Configuration (AP-SOUTH-1 Region - Mumbai)
+EMAIL_HOST = config('EMAIL_HOST', default='email-smtp.ap-south-1.amazonaws.com')
 EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
 EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
 EMAIL_USE_SSL = config('EMAIL_USE_SSL', default=False, cast=bool)
 
-# SMTP Credentials (from AWS SES - radai-smtp-v2 IAM user)
-EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='AKIAQGMP5VCUJICW2YFQ')  # SMTP Username
-EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='BB5ydU3oC7sjlJmrWpz0VoGzEwLmcLbhwsWBB30xZjCP')  # SMTP Password
+# SMTP Credentials (from AWS SES - rejlers-radai IAM user - Production)
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='AKIAQGMP5VCUDN4AZU6O')  # SMTP Username
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='BNkRGHma6/a2j7Z+9E1yDTZWTpYEnQK7lkwo9Ff5S6JG')  # SMTP Password
 
 # From Email (using verified email temporarily)
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='tanzeem.agra@rejlers.ae')
