@@ -11,11 +11,29 @@ import dj_database_url
 # Build paths inside the project
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Helper function to safely cast config values, handling empty strings
+def safe_cast_int(value, default):
+    """Safely cast to int, returning default if value is empty or invalid"""
+    if not value or value == '':
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+def safe_cast_bool(value, default):
+    """Safely cast to bool, returning default if value is empty or invalid"""
+    if not value or value == '':
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in ('true', '1', 'yes', 'on')
+
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-this-in-production')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = config('DEBUG', default=False, cast=bool)
+DEBUG = safe_cast_bool(config('DEBUG', default='False'), False)
 
 # Railway-friendly ALLOWED_HOSTS configuration
 ALLOWED_HOSTS_ENV = config('ALLOWED_HOSTS', default='*')  # Allow all by default for Railway
@@ -243,10 +261,10 @@ else:
     ]
 
 # IMPORTANT: Must be False - we have specific origins above
-CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=False, cast=bool)
+CORS_ALLOW_ALL_ORIGINS = safe_cast_bool(config('CORS_ALLOW_ALL_ORIGINS', default='False'), False)
 
 # Allow credentials (for JWT tokens in Authorization header)
-CORS_ALLOW_CREDENTIALS = config('CORS_ALLOW_CREDENTIALS', default=True, cast=bool)
+CORS_ALLOW_CREDENTIALS = safe_cast_bool(config('CORS_ALLOW_CREDENTIALS', default='True'), True)
 
 # Allow all standard methods
 CORS_ALLOW_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
@@ -270,7 +288,7 @@ CORS_ALLOW_HEADERS = [
 CORS_EXPOSE_HEADERS = ['content-disposition', 'content-type', 'cache-control']
 
 # Cache preflight for 1 hour
-CORS_PREFLIGHT_MAX_AGE = config('CORS_PREFLIGHT_MAX_AGE', default=3600, cast=int)
+CORS_PREFLIGHT_MAX_AGE = safe_cast_int(config('CORS_PREFLIGHT_MAX_AGE', default='3600'), 3600)
 
 # Allow regex patterns for Vercel previews and localhost
 CORS_ALLOWED_ORIGIN_REGEXES = [
@@ -331,7 +349,7 @@ SPECTACULAR_SETTINGS = {
 # ==============================================================================
 
 # Enable S3 storage (set to True to use S3, False to use local storage)
-USE_S3 = config('USE_S3', default=False, cast=bool)
+USE_S3 = safe_cast_bool(config('USE_S3', default='False'), False)
 
 if USE_S3:
     # AWS Credentials - LOADED FROM ENVIRONMENT (NEVER HARDCODE)
@@ -421,10 +439,10 @@ MONGODB_COLLECTIONS = {
 
 # MongoDB Connection Options
 MONGODB_OPTIONS = {
-    'maxPoolSize': config('MONGODB_MAX_POOL_SIZE', default=50, cast=int),
-    'minPoolSize': config('MONGODB_MIN_POOL_SIZE', default=10, cast=int),
-    'serverSelectionTimeoutMS': config('MONGODB_SERVER_TIMEOUT', default=5000, cast=int),
-    'connectTimeoutMS': config('MONGODB_CONNECT_TIMEOUT', default=10000, cast=int),
+    'maxPoolSize': safe_cast_int(config('MONGODB_MAX_POOL_SIZE', default='50'), 50),
+    'minPoolSize': safe_cast_int(config('MONGODB_MIN_POOL_SIZE', default='10'), 10),
+    'serverSelectionTimeoutMS': safe_cast_int(config('MONGODB_SERVER_TIMEOUT', default='5000'), 5000),
+    'connectTimeoutMS': safe_cast_int(config('MONGODB_CONNECT_TIMEOUT', default='10000'), 10000),
 }
 
 # ==============================================================================
@@ -458,9 +476,9 @@ EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.smtp.
 
 # AWS SES SMTP Configuration (AP-SOUTH-1 Region - Mumbai)
 EMAIL_HOST = config('EMAIL_HOST', default='email-smtp.ap-south-1.amazonaws.com')
-EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
-EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
-EMAIL_USE_SSL = config('EMAIL_USE_SSL', default=False, cast=bool)
+EMAIL_PORT = safe_cast_int(config('EMAIL_PORT', default='587'), 587)
+EMAIL_USE_TLS = safe_cast_bool(config('EMAIL_USE_TLS', default='True'), True)
+EMAIL_USE_SSL = safe_cast_bool(config('EMAIL_USE_SSL', default='False'), False)
 
 # SMTP Credentials (from AWS SES - rejlers-radai IAM user - Production)
 EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='AKIAQGMP5VCUDN4AZU6O')  # SMTP Username
@@ -475,8 +493,8 @@ EMAIL_TIMEOUT = 10  # Timeout in seconds
 EMAIL_SUBJECT_PREFIX = config('EMAIL_SUBJECT_PREFIX', default='[RADAI] ')
 
 # Email Verification Settings
-EMAIL_VERIFICATION_REQUIRED = config('EMAIL_VERIFICATION_REQUIRED', default=True, cast=bool)
-EMAIL_VERIFICATION_TOKEN_EXPIRY = config('EMAIL_VERIFICATION_TOKEN_EXPIRY', default=86400, cast=int)  # 24 hours
+EMAIL_VERIFICATION_REQUIRED = safe_cast_bool(config('EMAIL_VERIFICATION_REQUIRED', default='True'), True)
+EMAIL_VERIFICATION_TOKEN_EXPIRY = safe_cast_int(config('EMAIL_VERIFICATION_TOKEN_EXPIRY', default='86400'), 86400)  # 24 hours
 
 print("\n" + "=" * 60)
 print("EMAIL CONFIGURATION")
