@@ -117,6 +117,9 @@ class CRSDocumentDetailSerializer(CRSDocumentSerializer):
     """Detailed serializer with all comments included"""
     comments = CRSCommentSerializer(many=True, read_only=True)
     all_activities = CRSActivitySerializer(source='activities', many=True, read_only=True)
+    
+    class Meta(CRSDocumentSerializer.Meta):
+        fields = CRSDocumentSerializer.Meta.fields + ['comments', 'all_activities']
 
 
 class GoogleSheetConfigSerializer(serializers.ModelSerializer):
