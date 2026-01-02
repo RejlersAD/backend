@@ -6,7 +6,7 @@ Soft-coded email templates with dynamic content
 # Email template configurations
 EMAIL_TEMPLATES = {
     'welcome': {
-        'subject': 'Welcome to AIFlow - Your Account Has Been Created',
+        'subject': 'Welcome to RADAI ! Powered by Rejlers Abu Dhabi',
         'html_template': '''
 <!DOCTYPE html>
 <html>
@@ -25,7 +25,8 @@ EMAIL_TEMPLATES = {
 <body>
     <div class="container">
         <div class="header">
-            <h1>Welcome to AIFlow!</h1>
+            <h1>Welcome to RADAI !</h1>
+            <p style="margin: 5px 0 0 0; font-size: 14px;">Powered by Rejlers Abu Dhabi</p>
         </div>
         <div class="content">
             <h2>Hello {first_name} {last_name},</h2>
@@ -56,18 +57,19 @@ EMAIL_TEMPLATES = {
             
             <p>If you have any questions or need assistance, please don't hesitate to contact our support team.</p>
             
-            <p>Best regards,<br><strong>The AIFlow Team</strong></p>
+            <p>Best regards,<br><strong>RADAI Team</strong><br>Powered by Rejlers Abu Dhabi</p>
         </div>
         <div class="footer">
             <p>This is an automated message. Please do not reply to this email.</p>
-            <p>&copy; 2025 AIFlow. All rights reserved.</p>
+            <p>&copy; 2025 RADAI - Rejlers Abu Dhabi. All rights reserved.</p>
         </div>
     </div>
 </body>
 </html>
         ''',
         'text_template': '''
-Welcome to AIFlow!
+Welcome to RADAI !
+Powered by Rejlers Abu Dhabi
 
 Hello {first_name} {last_name},
 
@@ -92,11 +94,12 @@ WHAT'S NEXT?
 
 If you have any questions or need assistance, please don't hesitate to contact our support team.
 
-Best regards,
-The AIFlow Team
+RADAI Team
+Powered by Rejlers Abu Dhabi
 
 ---
 This is an automated message. Please do not reply to this email.
+© 2025 RADAI - Rejlers Abu Dhabitomated message. Please do not reply to this email.
 © 2025 AIFlow. All rights reserved.
         '''
     },
