@@ -1,31 +1,17 @@
 #!/bin/bash
-# Railway Production - Bulletproof Startup
-
-# Exit on any error
 set -e
-
-# Configuration
-PORT=${PORT:-8000}
-export PYTHONUNBUFFERED=1
 export DJANGO_SETTINGS_MODULE=config.settings
+export PYTHONUNBUFFERED=1
 
-echo "================================"
-echo "Starting Railway Backend"
-echo "Port: $PORT"
-echo "================================"
+echo "Migrating database..."
+python manage.py migrate --noinput
 
-# Database migrations
-python manage.py migrate --noinput || echo "Migration warning (continuing...)"
-
-# Collect static files
-python manage.py collectstatic --noinput --clear || echo "Static files warning (continuing...)"
-
-# Start application
-echo "Starting Gunicorn..."
+echo "Starting server on port ${PORT:-8000}..."
 exec gunicorn config.wsgi:application \
-    --bind 0.0.0.0:$PORT \
+    --bind 0.0.0.0:${PORT:-8000} \
     --workers 1 \
     --timeout 60 \
+    --log-file - \
     --access-logfile - \
     --error-logfile - \
     --log-level debug
