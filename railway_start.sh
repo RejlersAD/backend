@@ -1,33 +1,32 @@
 #!/bin/bash
-# Railway Production Startup - Robust Configuration
-set -e  # Exit on error
+# Railway Production - Bulletproof Startup
 
+# Exit on any error
+set -e
+
+# Configuration
 PORT=${PORT:-8000}
-export DJANGO_SETTINGS_MODULE=config.settings
 export PYTHONUNBUFFERED=1
+export DJANGO_SETTINGS_MODULE=config.settings
 
-echo "=========================================="
-echo "Railway Backend Starting..."
+echo "================================"
+echo "Starting Railway Backend"
 echo "Port: $PORT"
-echo "=========================================="
+echo "================================"
 
-# Quick health check
-python -c "import django; print('Django OK')" || { echo "ERROR: Django import failed"; exit 1; }
+# Database migrations
+python manage.py migrate --noinput || echo "Migration warning (continuing...)"
 
-# Run migrations (allow to continue if fails)
-python manage.py migrate --noinput 2>&1 || echo "Warning: Migrations had issues"
+# Collect static files
+python manage.py collectstatic --noinput --clear || echo "Static files warning (continuing...)"
 
-# Collect static files (allow to continue if fails)
-python manage.py collectstatic --noinput 2>&1 || echo "Warning: Static collection had issues"
-
-echo "Starting Gunicorn on 0.0.0.0:${PORT}..."
-
-# Start with minimal config for reliability
+# Start application
+echo "Starting Gunicorn..."
 exec gunicorn config.wsgi:application \
-    --bind "0.0.0.0:${PORT}" \
-    --workers 2 \
-    --worker-class sync \
-    --timeout 120 \
+    --bind 0.0.0.0:$PORT \
+    --workers 1 \
+    --timeout 60 \
     --access-logfile - \
     --error-logfile - \
-    --log-level info
+    --log-level debug
+

@@ -1,17 +1,7 @@
-# Railway Deployment Configuration
+[build]
+builder = "nixpacks"
 
 [deploy]
 startCommand = "bash railway_start.sh"
 restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 5
-
-[build]
-builder = "nixpacks"
-
-# Speed up deployment by excluding unnecessary files
-[build.env]
-NIXPACKS_NO_CACHE = "1"
-
-# Permanent CORS Configuration
-[deploy.env]
-CORS_ALLOW_ALL_ORIGINS = "True"
+restartPolicyMaxRetries = 3
