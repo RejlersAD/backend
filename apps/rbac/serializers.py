@@ -457,14 +457,23 @@ class UserProfileSerializer(serializers.ModelSerializer):
             except Exception as e:
                 print(f"⚠️ Failed to send verification email: {e}")
         
-        # Send welcome email with login credentials
-        from apps.users.email_service import EmailService
+        # Send welcome email with password setup link (new secure method)
+        from apps.users.password_reset_service import PasswordResetService
         try:
+            # Generate password reset token
+            token, expiry = PasswordResetService.create_reset_token(user)
+            
+            # Send welcome email with setup link
             request = self.context.get('request')
-            EmailService.send_welcome_email(user, temp_password, request)
-            print(f"✅ Welcome email sent to {user.email}")
+            email_sent = PasswordResetService.send_welcome_email_with_reset(user, token, request)
+            
+            if email_sent:
+                print(f"✅ Welcome email with password setup link sent to {user.email}")
+            else:
+                print(f"⚠️ Failed to send welcome email to {user.email}")
+                
         except Exception as e:
-            print(f"⚠️ Failed to send welcome email to {user.email}: {e}")
+            print(f"⚠️ Error sending welcome email to {user.email}: {e}")
             # Don't fail user creation if email fails
         
         return profile

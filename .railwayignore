@@ -1,0 +1,71 @@
+# .railwayignore
+# Exclude files from Railway deployment to speed up snapshot
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+
+# Training samples and large files
+pfd_training_samples/
+pid_training_samples/
+pid_drawings/
+pfd_documents/
+media/
+staticfiles/
+
+# Test files
+test_*.py
+*_test.py
+tests/
+test/
+
+# Development files
+.env
+.env.local
+.env.example
+.env.railway.template
+docker-compose*.yml
+Dockerfile*
+docker-entrypoint*.sh
+
+# Documentation
+README.md
+*.md
+RAILWAY_*.txt
+
+# IDE and OS
+.vscode/
+.idea/
+.git/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.log
+*.swp
+*.swo
+*~
+celerybeat-schedule
+celerybeat.pid
+
+# Analysis and migration scripts
+analyze_*.py
+check_*.py
+create_*.py
+debug_*.py
+fix_*.py
+verify_*.py
+activate_*.py
+extract_*.py
+list_*.py
+
+# Excel templates
+*.xlsx
+*.xls
+
+# Backup files
+*_backup.json
