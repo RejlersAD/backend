@@ -250,7 +250,12 @@ if CORS_ORIGINS_ENV:
 else:
     # Use default list
     CORS_ALLOWED_ORIGINS = [
-        # Production
+        # Production - Custom Domain
+        'https://radai.ae',
+        'https://www.radai.ae',
+        'http://radai.ae',  # Include HTTP for redirects
+        'http://www.radai.ae',
+        # Production - Vercel
         PRODUCTION_FRONTEND,
         PRODUCTION_BACKEND,
         # Development
