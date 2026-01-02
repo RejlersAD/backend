@@ -1,2 +1,2 @@
-# Procfile for Railway
+# Railway Procfile
 web: bash railway_start.sh
