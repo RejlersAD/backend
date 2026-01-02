@@ -1,46 +1,67 @@
 #!/bin/bash
-# Railway Production - Diagnostic Mode
+# Railway Production - Enhanced Diagnostic Mode
+set -e  # Exit on error
+set -x  # Print commands
 
 PORT=${PORT:-8000}
 
-echo "==================================="
-echo "Railway Startup Diagnostics"
-echo "==================================="
+echo "=========================================="
+echo "RAILWAY STARTUP DIAGNOSTICS - ENHANCED"
+echo "=========================================="
+echo "Timestamp: $(date)"
 echo "PORT: $PORT"
-echo "CORS_ALLOW_ALL_ORIGINS: ${CORS_ALLOW_ALL_ORIGINS:-not set}"
-echo "DATABASE_URL: ${DATABASE_URL:0:20}... (truncated)"
+echo "PYTHONUNBUFFERED: ${PYTHONUNBUFFERED:-not set}"
 echo "DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-not set}"
-echo "EMAIL_VERIFICATION_REQUIRED: ${EMAIL_VERIFICATION_REQUIRED:-not set}"
-echo "==================================="
+echo "DATABASE_URL: ${DATABASE_URL:0:30}..."
+echo "MONGODB_URI: ${MONGODB_URI:0:30}..."
+echo "CORS_ALLOW_ALL_ORIGINS: ${CORS_ALLOW_ALL_ORIGINS:-not set}"
+echo "EMAIL_HOST: ${EMAIL_HOST:-not set}"
+echo "SECRET_KEY: ${SECRET_KEY:0:10}..."
+echo "DEBUG: ${DEBUG:-not set}"
+echo "ALLOWED_HOSTS: ${ALLOWED_HOSTS:-not set}"
+echo "=========================================="
 
-# CRITICAL FIX: Explicitly set CORS to allow all origins
-export CORS_ALLOW_ALL_ORIGINS=True
+# Set critical environment variables
 export DJANGO_SETTINGS_MODULE=config.settings
+export PYTHONUNBUFFERED=1
 
 echo ""
-echo "Testing Django configuration..."
-python manage.py check --deploy 2>&1 || echo "Django check failed, continuing anyway..."
+echo "[1/5] Testing Python and Django imports..."
+python -c "import django; print(f'Django version: {django.VERSION}')" || exit 1
+python -c "from config import settings; print('Settings imported successfully')" || exit 1
 
 echo ""
-echo "Running migrations..."
-python manage.py migrate --noinput 2>&1 || echo "Migrations failed, continuing anyway..."
+echo "[2/5] Running Django system check..."
+python manage.py check --deploy 2>&1
 
 echo ""
-echo "Collecting static files..."
-python manage.py collectstatic --noinput 2>&1 || echo "Collectstatic failed, continuing anyway..."
+echo "[3/5] Running database migrations..."
+python manage.py migrate --noinput 2>&1
 
 echo ""
-echo "Starting Gunicorn on 0.0.0.0:${PORT}..."
+echo "[4/5] Collecting static files..."
+python manage.py collectstatic --noinput 2>&1
 
-# Start Gunicorn with more verbose logging
+echo ""
+echo "[5/5] Testing database connection..."
+python manage.py shell -c "from django.db import connection; connection.ensure_connection(); print('✅ Database connected')" 2>&1
+
+echo ""
+echo "=========================================="
+echo "All pre-flight checks passed!"
+echo "Starting Gunicorn on 0.0.0.0:${PORT}"
+echo "=========================================="
+
+# Start Gunicorn with enhanced logging
 exec gunicorn config.wsgi:application \
     --bind "0.0.0.0:${PORT}" \
-    --workers 1 \
+    --workers 2 \
     --threads 4 \
     --worker-class gthread \
     --timeout 300 \
     --access-logfile - \
     --error-logfile - \
-    --log-level debug \
+    --log-level info \
     --capture-output \
-    --enable-stdio-inheritance
+    --enable-stdio-inheritance \
+    2>&1
