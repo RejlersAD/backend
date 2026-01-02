@@ -253,26 +253,42 @@ class UserProfileSerializer(serializers.ModelSerializer):
     
     def validate(self, attrs):
         """Validate required fields for creation"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
         if self.instance is None:
+            logger.info(f"[UserProfile] Validating user creation with attrs: {list(attrs.keys())}")
+            
             if 'email' not in attrs:
+                logger.error("[UserProfile] Validation failed: email is missing")
                 raise serializers.ValidationError({'email': 'Email is required for user creation'})
             if 'password' not in attrs:
+                logger.error("[UserProfile] Validation failed: password is missing")
                 raise serializers.ValidationError({'password': 'Password is required for user creation'})
             if 'first_name' not in attrs:
+                logger.error("[UserProfile] Validation failed: first_name is missing")
                 raise serializers.ValidationError({'first_name': 'First name is required for user creation'})
             if 'last_name' not in attrs:
+                logger.error("[UserProfile] Validation failed: last_name is missing")
                 raise serializers.ValidationError({'last_name': 'Last name is required for user creation'})
             
             # Check if email already exists
             email = attrs.get('email')
             if User.objects.filter(email=email).exists():
+                logger.error(f"[UserProfile] Validation failed: email {email} already exists")
                 raise serializers.ValidationError({'email': 'A user with this email already exists'})
             
             # Validate email format and deliverability
-            from apps.users.email_service import EmailService
-            validation_result = EmailService.validate_email_deliverability(email)
-            if not validation_result['is_valid']:
-                raise serializers.ValidationError({'email': validation_result['message']})
+            try:
+                from apps.users.email_service import EmailService
+                validation_result = EmailService.validate_email_deliverability(email)
+                if not validation_result['is_valid']:
+                    logger.error(f"[UserProfile] Email validation failed: {validation_result['message']}")
+                    raise serializers.ValidationError({'email': validation_result['message']})
+                logger.info(f"[UserProfile] Email validation passed for {email}")
+            except ImportError as e:
+                logger.error(f"[UserProfile] Failed to import EmailService: {e}")
+                pass
         
         return attrs
     
@@ -450,32 +466,42 @@ class UserProfileSerializer(serializers.ModelSerializer):
         
         # Send email verification if enabled
         from django.conf import settings
+        import logging
+        logger = logging.getLogger(__name__)
+        
         if settings.EMAIL_VERIFICATION_REQUIRED:
-            from apps.rbac.email_verification import send_verification_email
             try:
+                from apps.rbac.email_verification import send_verification_email
                 send_verification_email(profile, self.context.get('request'))
+                logger.info(f"[UserProfile] Verification email sent to {user.email}")
+            except ImportError as e:
+                logger.warning(f"[UserProfile] Email verification module not available: {e}")
             except Exception as e:
-                print(f"⚠️ Failed to send verification email: {e}")
+                logger.warning(f"[UserProfile] Failed to send verification email: {e}")
         
         # Send welcome email with password setup link (new secure method)
-        from apps.users.password_reset_service import PasswordResetService
         try:
+            from apps.users.password_reset_service import PasswordResetService
+            
             # Generate password reset token
             token, expiry = PasswordResetService.create_reset_token(user)
+            logger.info(f"[UserProfile] Password reset token created for {user.email}")
             
             # Send welcome email with setup link
             request = self.context.get('request')
             email_sent = PasswordResetService.send_welcome_email_with_reset(user, token, request)
             
             if email_sent:
-                print(f"✅ Welcome email with password setup link sent to {user.email}")
+                logger.info(f"[UserProfile] Welcome email sent to {user.email}")
             else:
-                print(f"⚠️ Failed to send welcome email to {user.email}")
+                logger.warning(f"[UserProfile] Failed to send welcome email to {user.email}")
                 
+        except ImportError as e:
+            logger.warning(f"[UserProfile] PasswordResetService not available: {e}")
         except Exception as e:
-            print(f"⚠️ Error sending welcome email to {user.email}: {e}")
-            # Don't fail user creation if email fails
+            logger.warning(f"[UserProfile] Error sending welcome email: {e}")
         
+        logger.info(f"[UserProfile] User profile created successfully for {user.email}")
         return profile
     
     def update(self, instance, validated_data):
