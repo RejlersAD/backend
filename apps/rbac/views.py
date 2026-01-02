@@ -870,9 +870,9 @@ class StorageViewSet(viewsets.ModelViewSet):
     serializer_class = UserStorageSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
-    search_fields = ['file_name', 'category']
+    search_fields = ['filename', 'file_type']
     ordering_fields = ['-created_at', 'file_size', 'download_count']
-    filterset_fields = ['category', 'mime_type']
+    filterset_fields = ['file_type', 'mime_type']
     
     def get_queryset(self):
         """Filter files based on user and organization"""
