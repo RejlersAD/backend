@@ -132,10 +132,16 @@ WSGI_APPLICATION = 'config.wsgi.application'
 try:
     DATABASE_URL = config('DATABASE_URL', default='')
     if DATABASE_URL:
-        DATABASES = {
-            'default': dj_database_url.parse(DATABASE_URL)
+        db_config = dj_database_url.parse(DATABASE_URL)
+        # Add timeout options to prevent hanging
+        db_config['CONN_MAX_AGE'] = 60
+        db_config['OPTIONS'] = {
+            'connect_timeout': 10,  # Reduced from 30 to 10 seconds
+            'options': '-c statement_timeout=30000'
         }
+        DATABASES = {'default': db_config}
         print(f"[DJANGO] Using DATABASE_URL configuration")
+        print(f"[DJANGO] DB Host: {db_config.get('HOST', 'unknown')}")
     else:
         DATABASES = {
             'default': {
@@ -147,7 +153,7 @@ try:
                 'PORT': config('DB_PORT', default='5432'),
                 'CONN_MAX_AGE': 60,
                 'OPTIONS': {
-                    'connect_timeout': 30,
+                    'connect_timeout': 10,
                     'options': '-c statement_timeout=30000'
                 }
             }
@@ -163,6 +169,7 @@ except Exception as e:
             'NAME': BASE_DIR / 'db.sqlite3',
         }
     }
+    print(f"[WARNING] Falling back to SQLite due to database configuration error")
     print(f"[WARNING] Falling back to SQLite due to database configuration error")
 
 # Password validation
