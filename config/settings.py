@@ -36,22 +36,29 @@ SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-this-in-produc
 DEBUG = safe_cast_bool(config('DEBUG', default='False'), False)
 
 # Railway-friendly ALLOWED_HOSTS configuration
-ALLOWED_HOSTS_ENV = config('ALLOWED_HOSTS', default='*')  # Allow all by default for Railway
-if ALLOWED_HOSTS_ENV == '*':
+try:
+    ALLOWED_HOSTS_ENV = config('ALLOWED_HOSTS', default='*')  # Allow all by default for Railway
+    if ALLOWED_HOSTS_ENV == '*':
+        ALLOWED_HOSTS = ['*']
+    else:
+        ALLOWED_HOSTS = [s.strip() for s in ALLOWED_HOSTS_ENV.split(',')]
+
+    # Add Railway domain automatically
+    RAILWAY_STATIC_URL = config('RAILWAY_STATIC_URL', default='')
+    if RAILWAY_STATIC_URL:
+        railway_domain = RAILWAY_STATIC_URL.replace('https://', '').replace('http://', '')
+        if railway_domain and railway_domain not in ALLOWED_HOSTS and '*' not in ALLOWED_HOSTS:
+            ALLOWED_HOSTS.append(railway_domain)
+
+    # Add .railway.app domains if not using wildcard
+    if '*' not in ALLOWED_HOSTS and not any(host.endswith('.railway.app') for host in ALLOWED_HOSTS):
+        ALLOWED_HOSTS.append('.railway.app')
+    
+    print(f"[DJANGO] ALLOWED_HOSTS: {ALLOWED_HOSTS}")
+except Exception as e:
+    print(f"[ERROR] ALLOWED_HOSTS configuration failed: {e}")
+    # Fallback to allow all hosts to prevent 500 error
     ALLOWED_HOSTS = ['*']
-else:
-    ALLOWED_HOSTS = [s.strip() for s in ALLOWED_HOSTS_ENV.split(',')]
-
-# Add Railway domain automatically
-RAILWAY_STATIC_URL = config('RAILWAY_STATIC_URL', default='')
-if RAILWAY_STATIC_URL:
-    railway_domain = RAILWAY_STATIC_URL.replace('https://', '').replace('http://', '')
-    if railway_domain and railway_domain not in ALLOWED_HOSTS and '*' not in ALLOWED_HOSTS:
-        ALLOWED_HOSTS.append(railway_domain)
-
-# Add .railway.app domains if not using wildcard
-if '*' not in ALLOWED_HOSTS and not any(host.endswith('.railway.app') for host in ALLOWED_HOSTS):
-    ALLOWED_HOSTS.append('.railway.app')
 
 # Application definition
 INSTALLED_APPS = [
@@ -122,27 +129,41 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 # Database
 # Use DATABASE_URL if available (Railway), otherwise use individual DB settings
-DATABASE_URL = config('DATABASE_URL', default='')
-if DATABASE_URL:
-    DATABASES = {
-        'default': dj_database_url.parse(DATABASE_URL)
-    }
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': config('DB_NAME', default='radai_db'),
-            'USER': config('DB_USER', default='postgres'),
-            'PASSWORD': config('DB_PASSWORD', default='postgres'),
-            'HOST': config('DB_HOST', default='db'),
-            'PORT': config('DB_PORT', default='5432'),
-            'CONN_MAX_AGE': 60,
-            'OPTIONS': {
-                'connect_timeout': 30,
-                'options': '-c statement_timeout=30000'
+try:
+    DATABASE_URL = config('DATABASE_URL', default='')
+    if DATABASE_URL:
+        DATABASES = {
+            'default': dj_database_url.parse(DATABASE_URL)
+        }
+        print(f"[DJANGO] Using DATABASE_URL configuration")
+    else:
+        DATABASES = {
+            'default': {
+                'ENGINE': 'django.db.backends.postgresql',
+                'NAME': config('DB_NAME', default='radai_db'),
+                'USER': config('DB_USER', default='postgres'),
+                'PASSWORD': config('DB_PASSWORD', default='postgres'),
+                'HOST': config('DB_HOST', default='db'),
+                'PORT': config('DB_PORT', default='5432'),
+                'CONN_MAX_AGE': 60,
+                'OPTIONS': {
+                    'connect_timeout': 30,
+                    'options': '-c statement_timeout=30000'
+                }
             }
         }
+        print(f"[DJANGO] Using individual DB configuration")
+        print(f"[DJANGO] DB_HOST: {config('DB_HOST', default='db')}")
+except Exception as e:
+    print(f"[ERROR] Database configuration failed: {e}")
+    # Set a minimal database config to prevent crashes
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
     }
+    print(f"[WARNING] Falling back to SQLite due to database configuration error")
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [

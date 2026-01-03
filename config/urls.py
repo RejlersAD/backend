@@ -4,7 +4,9 @@ from django.conf import settings
 from django.conf.urls.static import static
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from apps.core.cors_test_views import CorsTestView, cors_health_check, railway_health_check
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
+from django.db import connection
+from django.core.exceptions import ImproperlyConfigured
 
 # Import PID analysis models and services for export functionality
 from apps.pid_analysis.models import PIDDrawing
@@ -12,6 +14,53 @@ from apps.pid_analysis.export_service import PIDReportExportService
 
 # Import feature registry views
 from apps.api.feature_views import list_features, get_feature, get_categories, get_navigation
+
+
+def railway_diagnostic_health_check(request):
+    """Comprehensive health check for Railway deployment debugging"""
+    status = {
+        'status': 'healthy',
+        'checks': {}
+    }
+    
+    # Check Django settings
+    try:
+        from django.conf import settings
+        status['checks']['django_settings'] = 'OK'
+        status['checks']['debug_mode'] = settings.DEBUG
+        status['checks']['allowed_hosts'] = settings.ALLOWED_HOSTS
+    except Exception as e:
+        status['checks']['django_settings'] = f'ERROR: {str(e)}'
+        status['status'] = 'unhealthy'
+    
+    # Check database connection
+    try:
+        connection.ensure_connection()
+        status['checks']['database'] = 'OK'
+    except Exception as e:
+        status['checks']['database'] = f'ERROR: {str(e)}'
+        status['status'] = 'unhealthy'
+    
+    # Check environment variables
+    import os
+    critical_vars = ['DATABASE_URL', 'SECRET_KEY', 'PORT']
+    missing_vars = [var for var in critical_vars if not os.environ.get(var)]
+    if missing_vars:
+        status['checks']['env_vars'] = f'MISSING: {", ".join(missing_vars)}'
+        status['status'] = 'degraded'
+    else:
+        status['checks']['env_vars'] = 'OK'
+    
+    # Check static files
+    try:
+        from django.contrib.staticfiles.storage import staticfiles_storage
+        staticfiles_storage.exists('admin/css/base.css')
+        status['checks']['static_files'] = 'OK'
+    except Exception as e:
+        status['checks']['static_files'] = f'WARNING: {str(e)}'
+    
+    response_status = 200 if status['status'] == 'healthy' else 503
+    return JsonResponse(status, status=response_status)
 
 
 def pid_export_view(request, pk):
@@ -56,8 +105,10 @@ def pid_export_view(request, pk):
 urlpatterns = [
     path('admin/', admin.site.urls),
     
-    # Railway Health Check (Required for deployment)
+    # Railway Health Checks
     path('api/v1/health/', railway_health_check, name='railway-health'),
+    path('api/v1/health/diagnostic/', railway_diagnostic_health_check, name='railway-diagnostic'),
+    path('health/', railway_diagnostic_health_check, name='health-check'),  # Alternative endpoint
     
     # CORS diagnostic endpoints (no auth required)
     path('api/v1/cors-test/', CorsTestView.as_view(), name='cors-test'),
