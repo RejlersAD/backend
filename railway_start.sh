@@ -4,34 +4,37 @@ export DJANGO_SETTINGS_MODULE=config.settings
 export PYTHONUNBUFFERED=1
 
 echo "================================"
-echo "Railway Deployment Starting..."
+echo "🚀 Railway Deployment Starting..."
 echo "================================"
 echo "PORT: ${PORT:-8000}"
-echo "PYTHONPATH: ${PYTHONPATH}"
+echo "DATABASE_URL: ${DATABASE_URL:0:30}..." 
 echo "================================"
 
-# Check if Django can load settings
+# Test Django settings import
 echo "Testing Django configuration..."
-python -c "import django; django.setup(); print('✅ Django settings loaded successfully')" || {
-    echo "❌ Failed to load Django settings"
+python -c "import django; django.setup(); print('✅ Django loaded successfully')" 2>&1 || {
+    echo "❌ FATAL: Django settings failed to load"
+    echo "Check Railway logs for Python traceback"
     exit 1
 }
 
-# Collect static files
+# Collect static files (don't fail if this errors)
 echo "Collecting static files..."
-python manage.py collectstatic --noinput --clear || {
+python manage.py collectstatic --noinput --clear 2>&1 || {
     echo "⚠️  Static files collection failed, continuing..."
 }
 
 # Run migrations
-echo "Migrating database..."
-python manage.py migrate --noinput || {
-    echo "❌ Database migration failed"
+echo "Running database migrations..."
+python manage.py migrate --noinput 2>&1 || {
+    echo "❌ FATAL: Database migration failed"
+    echo "Check DATABASE_URL and PostgreSQL connection"
     exit 1
 }
 
 echo "================================"
-echo "Starting Gunicorn server..."
+echo "✅ Pre-flight checks passed"
+echo "🚀 Starting Gunicorn server..."
 echo "================================"
 
 exec gunicorn config.wsgi:application \
