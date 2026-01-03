@@ -85,8 +85,9 @@ INSTALLED_APPS = [
     'apps.pfd_converter',
     'apps.crs',
     
-    # MLflow Model Orchestration - DISABLED for Railway
-    # 'apps.mlflow_integration',
+    # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
+    # Enabling this will cause startup hangs (MLflow server not available)
+    # 'apps.mlflow_integration',  # DO NOT UNCOMMENT
     
     # AWS S3 Storage (always include - it's in requirements.txt)
     'storages',
@@ -128,6 +129,8 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 # Database
+# ⚠️ CRITICAL: DATABASE_URL is REQUIRED for Railway deployment
+# Railway Env Var: DATABASE_URL=postgresql://postgres:PASSWORD@HOST:PORT/railway
 # Use DATABASE_URL if available (Railway), otherwise use individual DB settings
 try:
     DATABASE_URL = config('DATABASE_URL', default='')
@@ -270,7 +273,9 @@ print(f"[JWT] ===================================")
 PRODUCTION_FRONTEND = config('FRONTEND_URL', default='https://airflow-frontend.vercel.app')
 PRODUCTION_BACKEND = config('BACKEND_URL', default='https://aiflowbackend-production.up.railway.app')
 
-# CRITICAL: Check if CORS_ALLOW_ALL_ORIGINS is set to True
+# ⚠️ CRITICAL: DO NOT CHANGE - CORS_ALLOW_ALL_ORIGINS MUST BE FALSE
+# Setting this to True will break JWT authentication with credentials
+# Railway Env Var: CORS_ALLOW_ALL_ORIGINS=False (or omit to use default)
 CORS_ALLOW_ALL_ORIGINS = safe_cast_bool(config('CORS_ALLOW_ALL_ORIGINS', default='False'), False)
 
 if CORS_ALLOW_ALL_ORIGINS:
@@ -425,6 +430,8 @@ if USE_S3:
     # AWS_ACCESS_KEY_ID = 'NEVER_HARDCODE_THIS'  ❌ WRONG
     # AWS_SECRET_ACCESS_KEY = 'NEVER_HARDCODE_THIS'  ❌ WRONG
     
+    # ⚠️ CRITICAL: S3 bucket must exist before deployment
+    # Railway Env Var: AWS_STORAGE_BUCKET_NAME=radai-pid-drawings (verified bucket)
     # Only configure S3 if bucket name is set (prevents startup errors)
     AWS_STORAGE_BUCKET_NAME = config('AWS_STORAGE_BUCKET_NAME', default='')
     
