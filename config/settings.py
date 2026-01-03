@@ -85,8 +85,8 @@ INSTALLED_APPS = [
     'apps.pfd_converter',
     'apps.crs',
     
-    # MLflow Model Orchestration (non-invasive tracking)
-    'apps.mlflow_integration',
+    # MLflow Model Orchestration - DISABLED for Railway
+    # 'apps.mlflow_integration',
     
     # AWS S3 Storage (always include - it's in requirements.txt)
     'storages',
