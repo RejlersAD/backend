@@ -256,41 +256,47 @@ print(f"[JWT] ===================================")
 # ==============================================================================
 
 # ==============================================================================
-# CORS CONFIGURATION - CLEAN & SIMPLE
+# CORS CONFIGURATION - RAILWAY PRODUCTION READY
 # ==============================================================================
 
 # PRODUCTION URLS
 PRODUCTION_FRONTEND = config('FRONTEND_URL', default='https://airflow-frontend.vercel.app')
 PRODUCTION_BACKEND = config('BACKEND_URL', default='https://aiflowbackend-production.up.railway.app')
 
-# Build list of allowed origins from environment variable or use defaults
-CORS_ORIGINS_ENV = config('CORS_ALLOWED_ORIGINS', default='')
-if CORS_ORIGINS_ENV:
-    # If env var is set, use it (comma-separated list)
-    CORS_ALLOWED_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_ENV.split(',')]
-else:
-    # Use default list
-    CORS_ALLOWED_ORIGINS = [
-        # Production - Custom Domain
-        'https://radai.ae',
-        'https://www.radai.ae',
-        'http://radai.ae',  # Include HTTP for redirects
-        'http://www.radai.ae',
-        # Production - Vercel
-        PRODUCTION_FRONTEND,
-        PRODUCTION_BACKEND,
-        # Development
-        'http://localhost:3000',
-        'http://localhost:5173',
-        'http://127.0.0.1:3000',
-        'http://127.0.0.1:5173',
-    ]
-
-# IMPORTANT: Must be False - we have specific origins above
+# CRITICAL: Check if CORS_ALLOW_ALL_ORIGINS is set to True
 CORS_ALLOW_ALL_ORIGINS = safe_cast_bool(config('CORS_ALLOW_ALL_ORIGINS', default='False'), False)
 
-# Allow credentials (for JWT tokens in Authorization header)
-CORS_ALLOW_CREDENTIALS = safe_cast_bool(config('CORS_ALLOW_CREDENTIALS', default='True'), True)
+if CORS_ALLOW_ALL_ORIGINS:
+    # If allowing all origins, disable credentials for security
+    CORS_ALLOW_CREDENTIALS = False
+    CORS_ALLOWED_ORIGINS = []  # Not used when allow all is True
+    print("[CORS] ⚠️  WARNING: CORS_ALLOW_ALL_ORIGINS is True - ALL origins allowed!")
+else:
+    # Use specific origins for better security
+    CORS_ORIGINS_ENV = config('CORS_ALLOWED_ORIGINS', default='')
+    if CORS_ORIGINS_ENV:
+        # If env var is set, use it (comma-separated list)
+        CORS_ALLOWED_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_ENV.split(',')]
+    else:
+        # Use default list
+        CORS_ALLOWED_ORIGINS = [
+            # Production - Custom Domain
+            'https://radai.ae',
+            'https://www.radai.ae',
+            'http://radai.ae',  # Include HTTP for redirects
+            'http://www.radai.ae',
+            # Production - Vercel
+            PRODUCTION_FRONTEND,
+            PRODUCTION_BACKEND,
+            # Development
+            'http://localhost:3000',
+            'http://localhost:5173',
+            'http://127.0.0.1:3000',
+            'http://127.0.0.1:5173',
+        ]
+    
+    # Allow credentials (for JWT tokens in Authorization header)
+    CORS_ALLOW_CREDENTIALS = safe_cast_bool(config('CORS_ALLOW_CREDENTIALS', default='True'), True)
 
 # Allow all standard methods
 CORS_ALLOW_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
@@ -316,39 +322,63 @@ CORS_EXPOSE_HEADERS = ['content-disposition', 'content-type', 'cache-control']
 # Cache preflight for 1 hour
 CORS_PREFLIGHT_MAX_AGE = safe_cast_int(config('CORS_PREFLIGHT_MAX_AGE', default='3600'), 3600)
 
-# Allow regex patterns for Vercel previews and localhost
-CORS_ALLOWED_ORIGIN_REGEXES = [
-    r'^https://.*\.vercel\.app$',
-    r'^http://localhost:\d+$',
-    r'^http://127\.0\.0\.1:\d+$',
-]
+# Allow regex patterns for Vercel previews and localhost (only if not allowing all)
+if not CORS_ALLOW_ALL_ORIGINS:
+    CORS_ALLOWED_ORIGIN_REGEXES = [
+        r'^https://.*\.vercel\.app$',
+        r'^http://localhost:\d+$',
+        r'^http://127\.0\.0\.1:\d+$',
+    ]
+else:
+    CORS_ALLOWED_ORIGIN_REGEXES = []
 
 # Additional CORS settings for preflight
 CORS_ALLOW_PRIVATE_NETWORK = True
 
-print(f"[CORS] Allowed Origins: {len(CORS_ALLOWED_ORIGINS)} origins")
-print(f"[CORS] Origins List: {CORS_ALLOWED_ORIGINS}")
+print("\n" + "="*70)
+print("[CORS] ====== CORS CONFIGURATION ======")
+print("="*70)
+print(f"[CORS] Allow All Origins: {CORS_ALLOW_ALL_ORIGINS}")
+if not CORS_ALLOW_ALL_ORIGINS:
+    print(f"[CORS] Allowed Origins Count: {len(CORS_ALLOWED_ORIGINS)}")
+    print(f"[CORS] Allowed Origins:")
+    for origin in CORS_ALLOWED_ORIGINS:
+        print(f"  - {origin}")
 print(f"[CORS] Allow Credentials: {CORS_ALLOW_CREDENTIALS}")
-print(f"[CORS] Allow Credentials: {CORS_ALLOW_CREDENTIALS}")
-print(f"[CORS] Frontend: {PRODUCTION_FRONTEND}")
-print(f"[CORS] Backend: {PRODUCTION_BACKEND}")
+print(f"[CORS] Preflight Max Age: {CORS_PREFLIGHT_MAX_AGE}s")
+print(f"[CORS] Frontend URL: {PRODUCTION_FRONTEND}")
+print(f"[CORS] Backend URL: {PRODUCTION_BACKEND}")
+print("="*70 + "\n")
 
 # ==============================================================================
 # CSRF CONFIGURATION
 # ==============================================================================
 
-# Default trusted origins
+# Build CSRF trusted origins from CORS origins
 CSRF_TRUSTED_ORIGINS = [
+    'https://radai.ae',
+    'https://www.radai.ae',
     PRODUCTION_FRONTEND,
     PRODUCTION_BACKEND,
     'http://localhost:3000',
     'http://localhost:5173',
 ]
 
-# CSRF settings
+# Add any additional origins from environment
+if not CORS_ALLOW_ALL_ORIGINS and CORS_ALLOWED_ORIGINS:
+    for origin in CORS_ALLOWED_ORIGINS:
+        if origin not in CSRF_TRUSTED_ORIGINS and origin.startswith('https'):
+            CSRF_TRUSTED_ORIGINS.append(origin)
+
+# CSRF settings - Important for API endpoints
 CSRF_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SAMESITE = 'None' if not DEBUG else 'Lax'
 CSRF_USE_SESSIONS = False
+CSRF_COOKIE_HTTPONLY = False  # Allow JavaScript to read for API calls
+
+print(f"[CSRF] Trusted Origins: {len(CSRF_TRUSTED_ORIGINS)} domains")
+for origin in CSRF_TRUSTED_ORIGINS:
+    print(f"  - {origin}")
 
 # ==============================================================================
 # End of CORS/CSRF Configuration
