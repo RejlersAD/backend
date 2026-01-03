@@ -53,7 +53,7 @@ def pid_history_overview(request):
         avg_issues = reports.aggregate(Avg('total_issues'))['total_issues__avg'] or 0
         
         # Recent uploads (last 10)
-        recent_uploads = drawings.order_by('-uploaded_at')[:10].values(
+        recent_uploads = drawings.order_by('-created_at')[:10].values(
             'id',
             'original_filename',
             'drawing_number',
@@ -61,13 +61,13 @@ def pid_history_overview(request):
             'revision',
             'project_name',
             'file_size',
-            'uploaded_at',
+            'created_at',
             'status'
         )
         
         # Recent analyses (last 10 completed)
         recent_analyses = []
-        for report in reports.select_related('pid_drawing').order_by('-created_at')[:10]:
+        for report in reports.select_related('pid_drawing').order_by('-generated_at')[:10]:
             recent_analyses.append({
                 'id': report.id,
                 'drawing_id': report.pid_drawing.id,
@@ -75,7 +75,7 @@ def pid_history_overview(request):
                 'drawing_title': report.pid_drawing.drawing_title,
                 'filename': report.pid_drawing.original_filename,
                 'total_issues': report.total_issues,
-                'created_at': report.created_at.isoformat(),
+                'created_at': report.generated_at.isoformat(),
                 'can_download': True
             })
         
@@ -118,7 +118,7 @@ def pid_all_uploads(request):
         offset = (page - 1) * limit
         
         # Get all uploads for user
-        drawings = PIDDrawing.objects.filter(uploaded_by=user).order_by('-uploaded_at')
+        drawings = PIDDrawing.objects.filter(uploaded_by=user).order_by('-created_at')
         total_count = drawings.count()
         
         drawings_page = drawings[offset:offset + limit]
@@ -138,7 +138,7 @@ def pid_all_uploads(request):
                 'revision': drawing.revision,
                 'project_name': drawing.project_name,
                 'file_size': drawing.file_size,
-                'uploaded_at': drawing.uploaded_at.isoformat(),
+                'uploaded_at': drawing.created_at.isoformat(),
                 'status': drawing.status,
                 'has_analysis': has_analysis,
                 'report_id': report_id,
@@ -184,7 +184,7 @@ def pid_all_analyses(request):
         # Get all reports for user
         reports = PIDAnalysisReport.objects.filter(
             pid_drawing__uploaded_by=user
-        ).select_related('pid_drawing').order_by('-created_at')
+        ).select_related('pid_drawing').order_by('-generated_at')
         
         total_count = reports.count()
         reports_page = reports[offset:offset + limit]
@@ -200,7 +200,7 @@ def pid_all_analyses(request):
                 'project_name': report.pid_drawing.project_name,
                 'revision': report.pid_drawing.revision,
                 'total_issues': report.total_issues,
-                'created_at': report.created_at.isoformat(),
+                'created_at': report.generated_at.isoformat(),
                 'analysis_duration': str(report.pid_drawing.analysis_completed_at - report.pid_drawing.analysis_started_at) if report.pid_drawing.analysis_completed_at and report.pid_drawing.analysis_started_at else None,
                 'can_download_pdf': True,
                 'can_download_excel': True,

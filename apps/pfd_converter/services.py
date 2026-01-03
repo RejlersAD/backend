@@ -36,14 +36,18 @@ except Exception as e:
     openai_client = None
     logger.warning(f"⚠️ Failed to initialize OpenAI client: {str(e)}")
 
-# Import RAG-enhanced prompt systems
+# Import RAG-enhanced prompt systems and domain knowledge
 try:
     from .prompt_enhancer import get_enhanced_prompt
     from .pid_prompt_enhancer import get_enhanced_pid_prompt
+    from .domain_knowledge import get_domain_enhanced_extraction_prompt, domain_knowledge
     USE_RAG_PROMPTS = True
+    USE_DOMAIN_KNOWLEDGE = True
     logger.info("✅ RAG-enhanced prompts enabled for PFD extraction and P&ID generation")
+    logger.info("✅ Domain knowledge system loaded (P&ID Legends, Design Basis, Line Standards)")
 except ImportError as e:
     USE_RAG_PROMPTS = False
+    USE_DOMAIN_KNOWLEDGE = False
     logger.warning(f"⚠️ RAG prompts not available: {str(e)}, using default prompts")
 
 # AI Drawing Generation Configuration
@@ -77,28 +81,38 @@ class DrawingConfig:
 class PFDToPIDConverter:
     """
     AI service for converting Process Flow Diagrams to P&ID drawings
-    Uses GPT-4o Vision for intelligent extraction and conversion
+    Enhanced with:
+    - GPT-4o Vision for intelligent extraction
+    - RAG (Retrieval Augmented Generation) for learned patterns
+    - Domain Knowledge (P&ID Legends, Design Basis, Engineering Standards)
+    - 3-Step Process Engineering Workflow
     """
     
-    def __init__(self):
+    def __init__(self, project_id=None):
         self.model = config('OPENAI_MODEL', default='gpt-4o')
+        self.project_id = project_id
         
-    def extract_pfd_data(self, image_file):
+    def extract_pfd_data(self, image_file, project_id=None):
         """
         Extract process flow information from PFD using AI vision
+        Implements Step 1 of PFD to P&ID conversion workflow
         
         Args:
             image_file: File object containing PFD image
+            project_id: Optional project ID for project-specific design basis
             
         Returns:
-            dict: Extracted process flow data
+            dict: Extracted process flow data with 3-step structure
         """
         try:
             # Convert image to base64
             image_data = self._prepare_image(image_file)
             
-            # AI prompt for PFD extraction - Use RAG-enhanced prompt if available
-            if USE_RAG_PROMPTS:
+            # Use domain knowledge enhanced prompt for 3-step process
+            if USE_DOMAIN_KNOWLEDGE:
+                prompt = get_domain_enhanced_extraction_prompt(project_id)
+                logger.info("🚀 Using Domain Knowledge Enhanced Prompt (3-Step Process Engineering)")
+            elif USE_RAG_PROMPTS:
                 prompt = get_enhanced_prompt()
                 logger.info("🚀 Using RAG-enhanced prompt with learned patterns")
             else:

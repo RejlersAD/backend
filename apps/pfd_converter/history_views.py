@@ -35,14 +35,14 @@ def pfd_history_overview(request):
         avg_confidence = completed_conversions.aggregate(Avg('confidence_score'))['confidence_score__avg'] or 0
         
         # Recent uploads
-        recent_uploads = pfd_docs.order_by('-uploaded_at')[:10].values(
+        recent_uploads = pfd_docs.order_by('-created_at')[:10].values(
             'id',
             'document_number',
             'document_title',
             'revision',
             'project_name',
             'file',
-            'uploaded_at',
+            'created_at',
             'file_type'
         )
         
@@ -99,7 +99,7 @@ def pfd_all_uploads(request):
         limit = int(request.query_params.get('limit', 50))
         offset = (page - 1) * limit
         
-        pfd_docs = PFDDocument.objects.filter(uploaded_by=user).order_by('-uploaded_at')
+        pfd_docs = PFDDocument.objects.filter(uploaded_by=user).order_by('-created_at')
         total_count = pfd_docs.count()
         
         docs_page = pfd_docs[offset:offset + limit]
@@ -117,7 +117,7 @@ def pfd_all_uploads(request):
                 'revision': doc.revision,
                 'project_name': doc.project_name,
                 'file_type': doc.file_type,
-                'uploaded_at': doc.uploaded_at.isoformat(),
+                'uploaded_at': doc.created_at.isoformat(),
                 'has_conversion': has_conversion,
                 'conversion_id': latest_conversion.id if latest_conversion else None,
                 'conversion_status': latest_conversion.status if latest_conversion else None,
