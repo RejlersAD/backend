@@ -474,34 +474,6 @@ else:
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 
 # ==============================================================================
-# MONGODB CONFIGURATION (NOSQL FOR REPORTS & UNSTRUCTURED DATA)
-# ==============================================================================
-
-# MongoDB Connection (Railway)
-MONGODB_URI = config(
-    'MONGODB_URI',
-    default='mongodb://mongo:kpdwrBybTiIyKRoUJmOAMfewZKtWqTeu@shuttle.proxy.rlwy.net:23002'
-)
-MONGODB_DATABASE = config('MONGODB_DATABASE', default='radai')
-
-# MongoDB Collections (configurable)
-MONGODB_COLLECTIONS = {
-    'pid_reports': 'pid_analysis_reports',
-    'pid_issues': 'pid_issues',
-    'reference_docs': 'reference_documents',
-    'analysis_logs': 'analysis_logs',
-    'user_activity': 'user_activity',
-}
-
-# MongoDB Connection Options
-MONGODB_OPTIONS = {
-    'maxPoolSize': safe_cast_int(config('MONGODB_MAX_POOL_SIZE', default='50'), 50),
-    'minPoolSize': safe_cast_int(config('MONGODB_MIN_POOL_SIZE', default='10'), 10),
-    'serverSelectionTimeoutMS': safe_cast_int(config('MONGODB_SERVER_TIMEOUT', default='5000'), 5000),
-    'connectTimeoutMS': safe_cast_int(config('MONGODB_CONNECT_TIMEOUT', default='10000'), 10000),
-}
-
-# ==============================================================================
 # REPORT GENERATION CONFIGURATION (SOFT-CODED)
 # ==============================================================================
 

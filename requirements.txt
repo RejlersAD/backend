@@ -26,7 +26,7 @@ google-auth-httplib2>=0.1.1
 google-auth-oauthlib>=1.1.0
 
 # MongoDB - NoSQL database for reports and unstructured data
-pymongo==4.6.1
+# pymongo removed - using PostgreSQL only
 motor==3.3.2
 
 # MLflow - Model orchestration and experiment tracking
