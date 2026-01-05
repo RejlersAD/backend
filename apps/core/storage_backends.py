@@ -13,56 +13,68 @@ logger = logging.getLogger(__name__)
 USE_S3 = os.environ.get('USE_S3', 'False').lower() == 'true'
 
 if USE_S3:
-    from storages.backends.s3boto3 import S3Boto3Storage
-    
-    class MediaStorage(S3Boto3Storage):
-        """
-        S3 storage backend for media files (P&ID drawings, reports, avatars)
+    try:
+        from storages.backends.s3boto3 import S3Boto3Storage
         
-        Security features:
-        - Uses environment variables for configuration
-        - No hardcoded credentials
-        - Supports IAM roles (EC2/ECS/Lambda)
-        - Custom expiration for presigned URLs
-        """
-        
-        location = 'media'
-        default_acl = None  # Disable ACLs (use bucket policy instead)
-        file_overwrite = False   # Don't overwrite files with same name
-        custom_domain = False    # Use presigned URLs instead of public URLs
-        
-        # Security: Use temporary presigned URLs (expires in 1 hour)
-        querystring_expire = 3600  # 1 hour
-        
-        # Performance optimizations
-        object_parameters = {
-            'CacheControl': 'max-age=86400',  # 24 hours
-        }
-        
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            logger.info(f"[MediaStorage] Initialized S3 media storage: {self.bucket_name}/{self.location}")
+        class MediaStorage(S3Boto3Storage):
+            """
+            S3 storage backend for media files (P&ID drawings, reports, avatars)
+            
+            Security features:
+            - Uses environment variables for configuration
+            - No hardcoded credentials
+            - Supports IAM roles (EC2/ECS/Lambda)
+            - Custom expiration for presigned URLs
+            """
+            
+            location = 'media'
+            default_acl = None  # Disable ACLs (use bucket policy instead)
+            file_overwrite = False   # Don't overwrite files with same name
+            custom_domain = False    # Use presigned URLs instead of public URLs
+            
+            # Security: Use temporary presigned URLs (expires in 1 hour)
+            querystring_expire = 3600  # 1 hour
+            
+            # Performance optimizations
+            object_parameters = {
+                'CacheControl': 'max-age=86400',  # 24 hours
+            }
+            
+            def __init__(self, *args, **kwargs):
+                try:
+                    super().__init__(*args, **kwargs)
+                    logger.info(f"[MediaStorage] Initialized S3 media storage: {self.bucket_name}/{self.location}")
+                except Exception as e:
+                    logger.error(f"[MediaStorage] Failed to initialize S3: {str(e)}")
+                    raise
 
 
-    class StaticStorage(S3Boto3Storage):
-        """
-        S3 storage backend for static files (CSS, JS, images)
-        
-        Static files can be public since they don't contain sensitive data
-        """
-        
-        location = 'static'
-        default_acl = None  # Disable ACLs (use bucket policy for public access)
-        file_overwrite = True         # Overwrite on deployment
-        
-        # Cache static files for 1 year (immutable)
-        object_parameters = {
-            'CacheControl': 'max-age=31536000, immutable',
-        }
-        
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            logger.info(f"[StaticStorage] Initialized S3 static storage: {self.bucket_name}/{self.location}")
+        class StaticStorage(S3Boto3Storage):
+            """
+            S3 storage backend for static files (CSS, JS, images)
+            
+            Static files can be public since they don't contain sensitive data
+            """
+            
+            location = 'static'
+            default_acl = None  # Disable ACLs (use bucket policy for public access)
+            file_overwrite = True         # Overwrite on deployment
+            
+            # Cache static files for 1 year (immutable)
+            object_parameters = {
+                'CacheControl': 'max-age=31536000, immutable',
+            }
+            
+            def __init__(self, *args, **kwargs):
+                try:
+                    super().__init__(*args, **kwargs)
+                    logger.info(f"[StaticStorage] Initialized S3 static storage: {self.bucket_name}/{self.location}")
+                except Exception as e:
+                    logger.error(f"[StaticStorage] Failed to initialize S3: {str(e)}")
+                    raise
+    except ImportError as e:
+        logger.error(f"[S3] Failed to import S3Boto3Storage: {str(e)}")
+        USE_S3 = False
 
 
     class PIDDrawingStorage(S3Boto3Storage):
