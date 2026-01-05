@@ -417,21 +417,33 @@ SPECTACULAR_SETTINGS = {
 # ==============================================================================
 
 # Enable S3 storage (set to True to use S3, False to use local storage)
-USE_S3 = safe_cast_bool(config('USE_S3', default='False'), False)
+# IMPORTANT: Requires S3_READY=True to prevent deployment failures with invalid credentials
+USE_S3_CONFIG = safe_cast_bool(config('USE_S3', default='False'), False)
+S3_READY = safe_cast_bool(config('S3_READY', default='False'), False)
 
-# Smart S3 validation: Check if credentials are available before enabling S3
-if USE_S3:
+# Smart S3 validation: Require explicit S3_READY flag to prevent credential errors
+if USE_S3_CONFIG and not S3_READY:
+    print("⚠️  [S3] USE_S3=True but S3_READY=False. Using local storage for safety.")
+    print("    Set S3_READY=True on Railway after updating AWS credentials.")
+    USE_S3 = False
+elif USE_S3_CONFIG and S3_READY:
+    # Double-check credentials are present
     aws_access_key = config('AWS_ACCESS_KEY_ID', default='')
     aws_secret_key = config('AWS_SECRET_ACCESS_KEY', default='')
     aws_bucket_name = config('AWS_STORAGE_BUCKET_NAME', default='')
     
     # Validate that all required S3 configuration is present
     if not aws_access_key or not aws_secret_key or not aws_bucket_name:
-        print("⚠️  [S3] USE_S3=True but credentials incomplete. Falling back to local storage.")
+        print("⚠️  [S3] Credentials incomplete despite S3_READY=True. Falling back to local storage.")
         print(f"    - AWS_ACCESS_KEY_ID: {'✓ Set' if aws_access_key else '✗ Missing'}")
         print(f"    - AWS_SECRET_ACCESS_KEY: {'✓ Set' if aws_secret_key else '✗ Missing'}")
         print(f"    - AWS_STORAGE_BUCKET_NAME: {'✓ Set' if aws_bucket_name else '✗ Missing'}")
         USE_S3 = False  # Disable S3 if credentials are incomplete
+    else:
+        print(f"✅ [S3] Enabled with bucket: {aws_bucket_name}")
+        USE_S3 = True
+else:
+    USE_S3 = False
 
 if USE_S3:
     # AWS Credentials - LOADED FROM ENVIRONMENT (NEVER HARDCODE)
