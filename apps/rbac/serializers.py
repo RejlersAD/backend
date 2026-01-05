@@ -245,6 +245,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     modules = serializers.SerializerMethodField()
     
     # User creation fields
+    username = serializers.CharField(write_only=True, required=False)
     email = serializers.EmailField(write_only=True, required=False)
     password = serializers.CharField(write_only=True, required=False, min_length=8)
     first_name = serializers.CharField(write_only=True, required=False)
@@ -271,6 +272,21 @@ class UserProfileSerializer(serializers.ModelSerializer):
             if 'last_name' not in attrs:
                 logger.error("[UserProfile] Validation failed: last_name is missing")
                 raise serializers.ValidationError({'last_name': 'Last name is required for user creation'})
+            
+            # Auto-generate username from email if not provided
+            if 'username' not in attrs or not attrs.get('username'):
+                email = attrs.get('email', '')
+                base_username = email.split('@')[0] if email else 'user'
+                username = base_username
+                
+                # Check if username exists and make it unique
+                counter = 1
+                while User.objects.filter(username=username).exists():
+                    username = f"{base_username}{counter}"
+                    counter += 1
+                
+                attrs['username'] = username
+                logger.info(f"[UserProfile] Auto-generated username: {username} from email: {email}")
             
             # Check if email already exists
             email = attrs.get('email')
@@ -307,7 +323,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'is_deleted', 'deleted_at', 'deleted_by',
             'created_at', 'updated_at',
             # Write-only fields for user creation
-            'email', 'password', 'first_name', 'last_name', 'phone'
+            'username', 'email', 'password', 'first_name', 'last_name', 'phone'
         ]
         read_only_fields = [
             'id', 'user', 'last_login_ip', 'last_login_at', 'failed_login_attempts',
@@ -329,7 +345,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         module_ids = validated_data.pop('module_ids', [])
         organization_id = validated_data.pop('organization_id', None)
         
-        # Extract user data
+        # Extract user data (username is now validated and generated in validate() method)
+        username = validated_data.pop('username')
         email = validated_data.pop('email')
         password = validated_data.pop('password')
         first_name = validated_data.pop('first_name', '')
@@ -370,17 +387,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         # Store the password for welcome email (before hashing)
         temp_password = password
         
-        # Generate unique username from email
-        base_username = email.split('@')[0]
-        username = base_username
-        
-        # Check if username exists and make it unique
-        counter = 1
-        while User.objects.filter(username=username).exists():
-            username = f"{base_username}{counter}"
-            counter += 1
-        
-        # Create user with appropriate permissions
+        # Create user with appropriate permissions (username already validated and unique)
         from django.utils import timezone
         user = User.objects.create_user(
             username=username,
