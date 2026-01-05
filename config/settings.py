@@ -419,6 +419,20 @@ SPECTACULAR_SETTINGS = {
 # Enable S3 storage (set to True to use S3, False to use local storage)
 USE_S3 = safe_cast_bool(config('USE_S3', default='False'), False)
 
+# Smart S3 validation: Check if credentials are available before enabling S3
+if USE_S3:
+    aws_access_key = config('AWS_ACCESS_KEY_ID', default='')
+    aws_secret_key = config('AWS_SECRET_ACCESS_KEY', default='')
+    aws_bucket_name = config('AWS_STORAGE_BUCKET_NAME', default='')
+    
+    # Validate that all required S3 configuration is present
+    if not aws_access_key or not aws_secret_key or not aws_bucket_name:
+        print("⚠️  [S3] USE_S3=True but credentials incomplete. Falling back to local storage.")
+        print(f"    - AWS_ACCESS_KEY_ID: {'✓ Set' if aws_access_key else '✗ Missing'}")
+        print(f"    - AWS_SECRET_ACCESS_KEY: {'✓ Set' if aws_secret_key else '✗ Missing'}")
+        print(f"    - AWS_STORAGE_BUCKET_NAME: {'✓ Set' if aws_bucket_name else '✗ Missing'}")
+        USE_S3 = False  # Disable S3 if credentials are incomplete
+
 if USE_S3:
     # AWS Credentials - LOADED FROM ENVIRONMENT (NEVER HARDCODE)
     # Boto3 automatically checks:
@@ -431,7 +445,7 @@ if USE_S3:
     # AWS_SECRET_ACCESS_KEY = 'NEVER_HARDCODE_THIS'  ❌ WRONG
     
     # ⚠️ CRITICAL: S3 bucket must exist before deployment
-    # Railway Env Var: AWS_STORAGE_BUCKET_NAME=radai-pid-drawings (verified bucket)
+    # Railway Env Var: AWS_STORAGE_BUCKET_NAME=user-management-rejlers (production bucket)
     # Only configure S3 if bucket name is set (prevents startup errors)
     AWS_STORAGE_BUCKET_NAME = config('AWS_STORAGE_BUCKET_NAME', default='')
     
