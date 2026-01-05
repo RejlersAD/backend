@@ -278,17 +278,22 @@ class UserProfileSerializer(serializers.ModelSerializer):
                 logger.error(f"[UserProfile] Validation failed: email {email} already exists")
                 raise serializers.ValidationError({'email': 'A user with this email already exists'})
             
-            # Validate email format and deliverability
+            # Validate email format and deliverability using soft-coded config
             try:
-                from apps.users.email_service import EmailService
-                validation_result = EmailService.validate_email_deliverability(email)
+                from apps.users.email_validation_config import EmailValidationConfig
+                validation_result = EmailValidationConfig.validate_email_deliverability(email)
                 if not validation_result['is_valid']:
-                    logger.error(f"[UserProfile] Email validation failed: {validation_result['message']}")
+                    logger.warning(f"[UserProfile] Email validation failed for {email}: {validation_result['message']}")
                     raise serializers.ValidationError({'email': validation_result['message']})
                 logger.info(f"[UserProfile] Email validation passed for {email}")
             except ImportError as e:
-                logger.error(f"[UserProfile] Failed to import EmailService: {e}")
-                pass
+                logger.warning(f"[UserProfile] Email validation module not available: {e}")
+                # Fallback: basic email validation if config not available
+                import re
+                email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+                if not re.match(email_pattern, email):
+                    logger.error(f"[UserProfile] Basic email validation failed for {email}")
+                    raise serializers.ValidationError({'email': 'Invalid email format'})
         
         return attrs
     

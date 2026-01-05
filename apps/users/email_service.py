@@ -109,7 +109,7 @@ class EmailService:
     @staticmethod
     def validate_email_deliverability(email):
         """
-        Validate email format and basic deliverability
+        Validate email format and basic deliverability using soft-coded configuration
         
         Args:
             email: Email address to validate
@@ -117,37 +117,7 @@ class EmailService:
         Returns:
             dict: Validation result with is_valid and message
         """
-        import re
+        from .email_validation_config import EmailValidationConfig
         
-        # Basic email regex pattern
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        
-        if not email:
-            return {
-                'is_valid': False,
-                'message': 'Email address is required'
-            }
-        
-        if not re.match(email_pattern, email):
-            return {
-                'is_valid': False,
-                'message': 'Invalid email format'
-            }
-        
-        # Check for common disposable email domains
-        disposable_domains = [
-            'tempmail.com', 'throwaway.email', 'guerrillamail.com',
-            '10minutemail.com', 'mailinator.com', 'trashmail.com'
-        ]
-        
-        domain = email.split('@')[1].lower()
-        if domain in disposable_domains:
-            return {
-                'is_valid': False,
-                'message': 'Disposable email addresses are not allowed'
-            }
-        
-        return {
-            'is_valid': True,
-            'message': 'Email is valid'
-        }
+        # Use the soft-coded validation configuration
+        return EmailValidationConfig.validate_email_deliverability(email)

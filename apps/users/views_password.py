@@ -157,9 +157,9 @@ def validate_email(request):
                 'message': 'Email address is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Validate email format
-        from apps.users.email_service import EmailService
-        validation_result = EmailService.validate_email_deliverability(email)
+        # Validate email format using soft-coded configuration
+        from apps.users.email_validation_config import EmailValidationConfig
+        validation_result = EmailValidationConfig.validate_email_deliverability(email)
         
         if not validation_result['is_valid']:
             return Response({
