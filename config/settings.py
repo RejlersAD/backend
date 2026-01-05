@@ -523,8 +523,8 @@ EMAIL_USE_TLS = safe_cast_bool(config('EMAIL_USE_TLS', default='True'), True)
 EMAIL_USE_SSL = safe_cast_bool(config('EMAIL_USE_SSL', default='False'), False)
 
 # SMTP Credentials (from AWS SES - rejlers-radai IAM user - Production)
-EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='AKIAQGMP5VCUDN4AZU6O')  # SMTP Username
-EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='BNkRGHma6/a2j7Z+9E1yDTZWTpYEnQK7lkwo9Ff5S6JG')  # SMTP Password
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')  # SMTP Username - MUST be set via env var
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')  # SMTP Password - MUST be set via env var
 
 # From Email (using verified email temporarily)
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='tanzeem.agra@rejlers.ae')
