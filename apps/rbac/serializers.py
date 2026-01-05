@@ -288,6 +288,19 @@ class UserProfileSerializer(serializers.ModelSerializer):
                 attrs['username'] = username
                 logger.info(f"[UserProfile] Auto-generated username: {username} from email: {email}")
             
+            # Auto-assign default organization if not provided
+            if 'organization_id' not in attrs or not attrs.get('organization_id'):
+                from apps.rbac.models import Organization
+                default_org = Organization.objects.filter(name__icontains='default').first()
+                if not default_org:
+                    default_org = Organization.objects.first()
+                if default_org:
+                    attrs['organization_id'] = default_org.id
+                    logger.info(f"[UserProfile] Auto-assigned default organization: {default_org.name} ({default_org.id})")
+                else:
+                    logger.error("[UserProfile] No organization found to assign")
+                    raise serializers.ValidationError({'organization_id': 'No organization available. Please contact admin.'})
+            
             # Check if email already exists
             email = attrs.get('email')
             if User.objects.filter(email=email).exists():
