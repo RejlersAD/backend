@@ -25,6 +25,7 @@ from .permissions import (
 )
 from .utils import create_audit_log
 from .s3_service import S3Service
+from .pagination import FlexiblePageNumberPagination
 
 
 class OrganizationViewSet(viewsets.ModelViewSet):
@@ -317,12 +318,21 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     ViewSet for managing user profiles
     Admin can manage users in their organization
     Super admin can manage all users
+    
+    Supports flexible pagination:
+    - GET /api/v1/rbac/users/ - Returns 10 users (default)
+    - GET /api/v1/rbac/users/?page_size=25 - Returns 25 users
+    - GET /api/v1/rbac/users/?page_size=100 - Returns 100 users
+    - GET /api/v1/rbac/users/?page_size=1000 - Returns all users
     """
     permission_classes = [IsAuthenticated, CanManageUsers]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['user__email', 'user__first_name', 'user__last_name', 'employee_id']
     ordering_fields = ['created_at', 'user__email', 'last_login_at']
     filterset_fields = ['organization', 'status', 'is_deleted']
+    
+    # Use custom pagination for flexible page sizes
+    pagination_class = FlexiblePageNumberPagination
     
     def get_permissions(self):
         """
