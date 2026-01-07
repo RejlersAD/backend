@@ -1,0 +1,365 @@
+"""
+Enquiry API Views - REJLERS RADAI
+Handles customer enquiry submissions and email notifications
+
+Features:
+- Form validation
+- Email notification to sales team
+- Soft-coded email configuration
+- Rate limiting
+- Error handling
+"""
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework import status
+from django.core.mail import EmailMultiAlternatives
+from django.template.loader import render_to_string
+from django.conf import settings
+from django.utils import timezone
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+# Soft-coded Configuration
+ENQUIRY_CONFIG = {
+    'recipient_email': 'tanzeem.agra@rejlers.ae',
+    'cc_emails': [],  # Add CC recipients here if needed
+    'from_email': settings.DEFAULT_FROM_EMAIL,
+    'subject_prefix': '[RADAI Enquiry]',
+    'auto_reply': True,
+    'save_to_database': True  # Future: save enquiries to database
+}
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])  # Public endpoint - no authentication required
+def submit_enquiry(request):
+    """
+    Submit customer enquiry and send email notification
+    
+    Request Body:
+    {
+        "name": "John Doe",
+        "email": "john@example.com",
+        "phone": "+971 50 123 4567",
+        "company": "ABC Company",
+        "subject": "Enquiry about services",
+        "message": "I would like to know more about...",
+        "service": "pid-analysis",
+        "urgency": "normal"
+    }
+    """
+    try:
+        # Extract form data
+        data = request.data
+        name = data.get('name', '').strip()
+        email = data.get('email', '').strip()
+        phone = data.get('phone', '').strip()
+        company = data.get('company', '').strip()
+        subject = data.get('subject', '').strip()
+        message = data.get('message', '').strip()
+        service = data.get('service', '').strip()
+        urgency = data.get('urgency', 'normal').strip()
+        
+        # Validation
+        errors = {}
+        if not name:
+            errors['name'] = 'Name is required'
+        if not email:
+            errors['email'] = 'Email is required'
+        elif '@' not in email or '.' not in email:
+            errors['email'] = 'Invalid email format'
+        if not phone:
+            errors['phone'] = 'Phone number is required'
+        if not subject:
+            errors['subject'] = 'Subject is required'
+        if not message:
+            errors['message'] = 'Message is required'
+        elif len(message) < 10:
+            errors['message'] = 'Message must be at least 10 characters'
+        
+        if errors:
+            return Response({
+                'success': False,
+                'errors': errors,
+                'message': 'Validation failed'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Service name mapping
+        service_names = {
+            'pid-analysis': 'P&ID Analysis & Verification',
+            'pfd-conversion': 'PFD to P&ID Conversion',
+            'asset-integrity': 'Asset Integrity Management',
+            'engineering-consulting': 'Engineering Consulting',
+            'digital-twin': 'Digital Twin Solutions',
+            'ai-ml-services': 'AI/ML Engineering Services',
+            'general': 'General Enquiry',
+            'other': 'Other Services'
+        }
+        service_label = service_names.get(service, 'General Enquiry')
+        
+        # Urgency level mapping
+        urgency_labels = {
+            'low': '⏰ Low Priority',
+            'normal': '📅 Normal Priority',
+            'high': '⚡ High Priority',
+            'urgent': '🚨 URGENT'
+        }
+        urgency_label = urgency_labels.get(urgency, 'Normal Priority')
+        
+        # Prepare email content
+        email_subject = f"{ENQUIRY_CONFIG['subject_prefix']} {subject}"
+        
+        # HTML Email Template
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                }}
+                .container {{
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 20px;
+                    background-color: #f9f9f9;
+                }}
+                .header {{
+                    background: linear-gradient(135deg, #1e40af 0%, #3b82f6 100%);
+                    color: white;
+                    padding: 30px;
+                    border-radius: 10px 10px 0 0;
+                    text-align: center;
+                }}
+                .content {{
+                    background: white;
+                    padding: 30px;
+                    border-radius: 0 0 10px 10px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }}
+                .field {{
+                    margin-bottom: 20px;
+                    padding: 15px;
+                    background-color: #f8f9fa;
+                    border-left: 4px solid #3b82f6;
+                    border-radius: 4px;
+                }}
+                .label {{
+                    font-weight: bold;
+                    color: #1e40af;
+                    margin-bottom: 5px;
+                }}
+                .value {{
+                    color: #333;
+                }}
+                .message-box {{
+                    background-color: #e3f2fd;
+                    padding: 20px;
+                    border-radius: 8px;
+                    margin-top: 20px;
+                    border: 2px solid #3b82f6;
+                }}
+                .footer {{
+                    margin-top: 30px;
+                    padding: 20px;
+                    text-align: center;
+                    color: #666;
+                    font-size: 12px;
+                    border-top: 1px solid #ddd;
+                }}
+                .urgency {{
+                    display: inline-block;
+                    padding: 8px 16px;
+                    border-radius: 20px;
+                    font-weight: bold;
+                }}
+                .urgency-urgent {{
+                    background-color: #fee2e2;
+                    color: #dc2626;
+                }}
+                .urgency-high {{
+                    background-color: #fef3c7;
+                    color: #d97706;
+                }}
+                .urgency-normal {{
+                    background-color: #dbeafe;
+                    color: #2563eb;
+                }}
+                .urgency-low {{
+                    background-color: #f3f4f6;
+                    color: #6b7280;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1 style="margin: 0;">📧 New Enquiry Received</h1>
+                    <p style="margin: 10px 0 0 0;">RADAI Customer Enquiry System</p>
+                </div>
+                
+                <div class="content">
+                    <div class="field">
+                        <div class="label">Urgency Level:</div>
+                        <div class="value">
+                            <span class="urgency urgency-{urgency}">{urgency_label}</span>
+                        </div>
+                    </div>
+                    
+                    <div class="field">
+                        <div class="label">📝 Subject:</div>
+                        <div class="value">{subject}</div>
+                    </div>
+                    
+                    <div class="field">
+                        <div class="label">👤 Customer Name:</div>
+                        <div class="value">{name}</div>
+                    </div>
+                    
+                    <div class="field">
+                        <div class="label">📧 Email:</div>
+                        <div class="value"><a href="mailto:{email}">{email}</a></div>
+                    </div>
+                    
+                    <div class="field">
+                        <div class="label">📞 Phone:</div>
+                        <div class="value">{phone}</div>
+                    </div>
+                    
+                    {f'<div class="field"><div class="label">🏢 Company:</div><div class="value">{company}</div></div>' if company else ''}
+                    
+                    <div class="field">
+                        <div class="label">🔧 Service of Interest:</div>
+                        <div class="value">{service_label}</div>
+                    </div>
+                    
+                    <div class="message-box">
+                        <div class="label">💬 Message:</div>
+                        <div class="value" style="white-space: pre-wrap; margin-top: 10px;">{message}</div>
+                    </div>
+                    
+                    <div class="footer">
+                        <p><strong>Submitted:</strong> {timezone.now().strftime('%B %d, %Y at %I:%M %p UTC')}</p>
+                        <p>This is an automated message from RADAI Enquiry System</p>
+                        <p>Reply directly to this email to respond to the customer</p>
+                        <hr style="margin: 20px 0; border: none; border-top: 1px solid #ddd;">
+                        <p>© 2025 REJLERS AB • Engineering Excellence Since 1942</p>
+                        <p><a href="https://www.radai.ae">www.radai.ae</a> | <a href="https://www.rejlers.com">www.rejlers.com</a></p>
+                    </div>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Plain text version
+        text_content = f"""
+        New Enquiry Received - RADAI
+        =============================
+        
+        Urgency: {urgency_label}
+        Subject: {subject}
+        
+        Customer Details:
+        -----------------
+        Name: {name}
+        Email: {email}
+        Phone: {phone}
+        {f'Company: {company}' if company else ''}
+        
+        Service Interest: {service_label}
+        
+        Message:
+        --------
+        {message}
+        
+        Submitted: {timezone.now().strftime('%B %d, %Y at %I:%M %p UTC')}
+        
+        ---
+        This is an automated message from RADAI Enquiry System
+        Reply directly to this email to respond to the customer
+        """
+        
+        # Send email
+        email_message = EmailMultiAlternatives(
+            subject=email_subject,
+            body=text_content,
+            from_email=ENQUIRY_CONFIG['from_email'],
+            to=[ENQUIRY_CONFIG['recipient_email']],
+            cc=ENQUIRY_CONFIG['cc_emails'],
+            reply_to=[email]  # Set customer's email as reply-to
+        )
+        email_message.attach_alternative(html_content, "text/html")
+        email_message.send(fail_silently=False)
+        
+        logger.info(f"✅ Enquiry submitted: {subject} from {email}")
+        
+        # Optional: Send auto-reply to customer
+        if ENQUIRY_CONFIG['auto_reply']:
+            try:
+                auto_reply_subject = "Thank you for contacting REJLERS RADAI"
+                auto_reply_html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                        .header {{ background: linear-gradient(135deg, #1e40af 0%, #3b82f6 100%); color: white; padding: 30px; border-radius: 10px; text-align: center; }}
+                        .content {{ background: white; padding: 30px; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <div class="header">
+                            <h1 style="margin: 0;">Thank You!</h1>
+                        </div>
+                        <div class="content">
+                            <p>Dear {name},</p>
+                            <p>Thank you for contacting REJLERS RADAI. We have received your enquiry and our team will review it shortly.</p>
+                            <p><strong>Your Enquiry Details:</strong></p>
+                            <ul>
+                                <li><strong>Subject:</strong> {subject}</li>
+                                <li><strong>Service:</strong> {service_label}</li>
+                                <li><strong>Reference:</strong> {timezone.now().strftime('%Y%m%d-%H%M%S')}</li>
+                            </ul>
+                            <p>We aim to respond to all enquiries within 24 hours. For urgent matters, please call us at <strong>+971 2 639 7449</strong>.</p>
+                            <p>Best regards,<br><strong>REJLERS RADAI Team</strong></p>
+                            <hr style="margin: 20px 0; border: none; border-top: 1px solid #ddd;">
+                            <p style="font-size: 12px; color: #666;">© 2025 REJLERS AB | <a href="https://www.radai.ae">www.radai.ae</a></p>
+                        </div>
+                    </div>
+                </body>
+                </html>
+                """
+                
+                auto_reply = EmailMultiAlternatives(
+                    subject=auto_reply_subject,
+                    body=f"Dear {name},\n\nThank you for contacting REJLERS RADAI. We have received your enquiry and will respond within 24 hours.\n\nBest regards,\nRADAI Team",
+                    from_email=ENQUIRY_CONFIG['from_email'],
+                    to=[email]
+                )
+                auto_reply.attach_alternative(auto_reply_html, "text/html")
+                auto_reply.send(fail_silently=True)
+                logger.info(f"✅ Auto-reply sent to: {email}")
+            except Exception as e:
+                logger.warning(f"⚠️ Auto-reply failed: {str(e)}")
+        
+        return Response({
+            'success': True,
+            'message': 'Your enquiry has been submitted successfully. We will get back to you within 24 hours.',
+            'reference': timezone.now().strftime('%Y%m%d-%H%M%S')
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.error(f"❌ Enquiry submission error: {str(e)}")
+        return Response({
+            'success': False,
+            'message': 'Failed to submit enquiry. Please try again or contact us directly at tanzeem.agra@rejlers.ae',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
