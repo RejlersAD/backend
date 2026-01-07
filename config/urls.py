@@ -124,6 +124,7 @@ urlpatterns = [
     path('api/v1/', include('apps.api.urls')),
     path('api/v1/rbac/', include('apps.rbac.urls')),
     path('api/v1/users/', include('apps.users.urls')),  # User management endpoints
+    path('api/v1/enquiry/', include('apps.core.urls_enquiry')),  # Public enquiry endpoint
     
     # API endpoints - Features (Plugin Architecture)
     path('api/v1/pid/', include('apps.pid_analysis.urls')),

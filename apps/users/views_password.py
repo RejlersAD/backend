@@ -3,7 +3,7 @@ Views for first-time login and password reset
 Soft-coded authentication and password management
 """
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
@@ -130,6 +130,7 @@ def reset_first_login_password(request):
 
 
 @api_view(['POST'])
+@authentication_classes([])  # Explicitly disable authentication for public endpoint
 @permission_classes([AllowAny])
 def validate_email(request):
     """
@@ -261,6 +262,7 @@ def change_password(request):
 
 
 @api_view(['POST'])
+@authentication_classes([])  # Explicitly disable authentication for public endpoint
 @permission_classes([AllowAny])
 def request_password_reset(request):
     """
@@ -318,6 +320,7 @@ def request_password_reset(request):
 
 
 @api_view(['POST'])
+@authentication_classes([])  # Explicitly disable authentication for public endpoint
 @permission_classes([AllowAny])
 def verify_reset_token(request):
     """
@@ -378,6 +381,7 @@ def verify_reset_token(request):
 
 
 @api_view(['POST'])
+@authentication_classes([])  # Explicitly disable authentication for public endpoint
 @permission_classes([AllowAny])
 def reset_password_with_token(request):
     """

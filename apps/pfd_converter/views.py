@@ -20,6 +20,7 @@ from .serializers import (
     ConversionRequestSerializer
 )
 from .services import PFDToPIDConverter
+from .services_advanced_pipeline import AdvancedPFDToPIDPipeline
 from apps.rbac.permissions import HasModuleAccess
 
 
@@ -76,16 +77,22 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
                 status='processing'
             )
             
-            # Extract PFD data using AI
+            # Extract PFD data using Advanced AI Pipeline
             pfd_doc.processing_started_at = timezone.now()
             pfd_doc.save()
             
             try:
-                converter = PFDToPIDConverter()
+                logger.info(f"🚀 Starting ADVANCED PFD Processing Pipeline for {pfd_doc.file_name}")
+                
+                # Use new advanced pipeline
+                pipeline = AdvancedPFDToPIDPipeline(project_id=pfd_doc.project_code)
                 
                 # Open the saved file for extraction (file pointer is at end after save)
                 pfd_doc.file.open('rb')
-                extracted_data = converter.extract_pfd_data(pfd_doc.file)
+                
+                # Execute Step 1: Computer Vision + OCR
+                extracted_data = pipeline._step1_computer_vision_ocr(pfd_doc.file)
+                
                 pfd_doc.file.close()
                 
                 pfd_doc.extracted_data = extracted_data
@@ -96,7 +103,14 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
                 ).total_seconds()
                 pfd_doc.save()
                 
+                logger.info(f"✅ Advanced PFD extraction completed: {len(extracted_data.get('equipment', []))} equipment items")
+                
             except Exception as e:
+                import traceback
+                error_traceback = traceback.format_exc()
+                logger.error(f"❌ PFD extraction failed: {str(e)}")
+                logger.error(f"Traceback:\n{error_traceback}")
+                
                 pfd_doc.status = 'failed'
                 pfd_doc.error_message = str(e)
                 pfd_doc.processing_completed_at = timezone.now()
@@ -186,49 +200,65 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
                 status='generating'
             )
             
-            # Generate P&ID specifications
+            # Generate P&ID specifications using ADVANCED 6-STEP PIPELINE
             try:
+                logger.info("🚀 Starting ADVANCED 6-Step P&ID Generation Pipeline")
+                
+                # Use advanced pipeline
+                pipeline = AdvancedPFDToPIDPipeline(project_id=pfd_doc.project_code)
+                
+                # Prepare project info
+                project_info = {
+                    'project_name': pfd_doc.project_name,
+                    'project_code': pfd_doc.project_code,
+                    'drawing_number': serializer.validated_data['pid_drawing_number'],
+                    'drawing_title': serializer.validated_data['pid_title'],
+                    'revision': serializer.validated_data['pid_revision']
+                }
+                
+                # Check if we have cached extracted data from upload step
+                if pfd_doc.extracted_data and isinstance(pfd_doc.extracted_data, dict):
+                    logger.info("✅ Using cached vision data from upload (skipping OpenAI call)")
+                    # Execute pipeline with cached data (no need to open file)
+                    pipeline_results = pipeline.convert(
+                        pfd_file=None,
+                        project_info=project_info,
+                        cached_vision_data=pfd_doc.extracted_data
+                    )
+                else:
+                    logger.info("⚠️ No cached data found, re-extracting from PFD file")
+                    # Open PFD file for full pipeline processing
+                    pfd_doc.file.open('rb')
+                    pipeline_results = pipeline.convert(pfd_doc.file, project_info)
+                    pfd_doc.file.close()
+                
+                # Extract results from pipeline
+                pid_specs = pipeline_results['pid_specifications']
+                drawing_path = pipeline_results['drawing_path']
+                
+                # Validate using traditional method
                 converter = PFDToPIDConverter()
-                
-                # Generate specifications
-                pid_specs = converter.generate_pid_specifications(pfd_doc.extracted_data)
-                
-                # Validate conversion
                 validation = converter.validate_conversion(pid_specs, pfd_doc.extracted_data)
                 
-                # Update conversion
+                # Update conversion with pipeline results
                 conversion.equipment_list = pid_specs.get('equipment_list', [])
-                conversion.instrument_list = pid_specs.get('instrumentation_list', [])
+                conversion.instrument_list = pid_specs.get('instrument_list', [])
                 conversion.piping_details = pid_specs.get('piping_specifications', [])
                 conversion.safety_systems = pid_specs.get('safety_devices', [])
-                conversion.design_parameters = pid_specs.get('design_basis', {})
+                conversion.design_parameters = {
+                    'pipeline_version': pipeline_results.get('pipeline_version', '2.0'),
+                    'steps_completed': list(pipeline_results.get('pipeline_steps', {}).keys())
+                }
                 conversion.compliance_checks = validation
                 conversion.confidence_score = validation.get('compliance_score', 0)
                 
-                # 🎨 Generate actual P&ID drawing PDF
-                try:
-                    logger.info("🎨 Generating P&ID visual drawing...")
-                    drawing_path = converter.generate_pid_drawing(
-                        pfd_data=pfd_doc.extracted_data,
-                        pid_specs={
-                            'pid_drawing_number': conversion.pid_drawing_number,
-                            'pid_title': conversion.pid_title,
-                            'pid_revision': conversion.pid_revision,
-                            'equipment_list': conversion.equipment_list,
-                            'instrument_list': conversion.instrument_list,
-                            'piping_specifications': conversion.piping_details,
-                            'safety_devices': conversion.safety_systems,
-                        }
-                    )
-                    
-                    # Save drawing path to conversion record
-                    relative_path = drawing_path.replace(str(settings.MEDIA_ROOT), '').lstrip('/\\')
-                    conversion.pid_file = relative_path
-                    logger.info(f"✅ P&ID drawing saved: {relative_path}")
-                    
-                except Exception as draw_error:
-                    logger.warning(f"⚠️ P&ID drawing generation failed: {str(draw_error)}")
-                    # Continue without drawing - specs are still valid
+                # Save P&ID drawing path
+                relative_path = drawing_path.replace(str(settings.MEDIA_ROOT), '').lstrip('/\\')
+                conversion.pid_file = relative_path
+                logger.info(f"✅ Advanced P&ID generation completed: {relative_path}")
+                logger.info(f"   Equipment: {len(conversion.equipment_list)} items")
+                logger.info(f"   Instruments: {len(conversion.instrument_list)} items")
+                logger.info(f"   Piping Lines: {len(conversion.piping_details)} lines")
                 
                 conversion.status = 'completed'
                 conversion.generation_completed_at = timezone.now()

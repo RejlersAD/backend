@@ -34,21 +34,31 @@ class RBACMiddleware(MiddlewareMixin):
         try:
             request.user_profile = request.user.rbac_profile
         except UserProfile.DoesNotExist:
-            return JsonResponse({
-                'error': 'User profile not found. Please contact administrator.'
-            }, status=403)
+            # User doesn't have RBAC profile - allow request but profile will be None
+            request.user_profile = None
+            return None
+        except Exception as e:
+            # Log any other exception and allow request to continue
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"RBACMiddleware error for user {request.user}: {str(e)}", exc_info=True)
+            request.user_profile = None
+            return None
         
-        # Check if user is active
-        if request.user_profile.status != 'active':
-            return JsonResponse({
-                'error': f'Account is {request.user_profile.status}. Please contact administrator.'
-            }, status=403)
-        
-        # Check if account is locked
-        if request.user_profile.locked_until and request.user_profile.locked_until > timezone.now():
-            return JsonResponse({
-                'error': 'Account is temporarily locked. Please try again later.'
-            }, status=403)
+        # Only check status if profile exists
+        if request.user_profile:
+            # Check if user is active
+            if request.user_profile.status != 'active':
+                return JsonResponse({
+                    'error': f'Account is {request.user_profile.status}. Please contact administrator.'
+                }, status=403)
+            
+            # Check if account is locked
+            from django.utils import timezone
+            if request.user_profile.locked_until and request.user_profile.locked_until > timezone.now():
+                return JsonResponse({
+                    'error': 'Account is temporarily locked. Please try again later.'
+                }, status=403)
         
         return None
     
