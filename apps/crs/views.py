@@ -475,7 +475,8 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                         import logging
                         logging.getLogger(__name__).warning(f"User storage save failed: {storage_error}")
                 
-                comments = extract_reviewer_comments(pdf_buffer)
+                # CRITICAL: Enable cleaning to apply strict CRS_EXTRACTION_LOGIC.md rules
+                comments = extract_reviewer_comments(pdf_buffer, apply_cleaning=True)
                 
                 if not comments:
                     return Response({

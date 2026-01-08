@@ -11,6 +11,7 @@ from django.shortcuts import get_object_or_404
 from django.views.decorators.clickjacking import xframe_options_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
+from django.http import JsonResponse, HttpResponse
 import os
 import uuid
 
@@ -80,8 +81,13 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         """
         invoice = None
         try:
+            logger.info(f"📥 UPLOAD REQUEST RECEIVED from user: {request.user}")
+            logger.info(f"📦 Files: {list(request.FILES.keys())}")
+            logger.info(f"📋 Data: {dict(request.data)}")
+            
             uploaded_file = request.FILES.get('file')
             if not uploaded_file:
+                logger.error("❌ No file in request")
                 return Response(
                     {'error': 'No file provided'},
                     status=status.HTTP_400_BAD_REQUEST
@@ -345,20 +351,362 @@ class ApprovalRouteViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
 
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_approval_details(request, token):
+    """
+    Get approval details for frontend form (no authentication required - token-based)
+    Used by RAD AI approval page
+    """
+    try:
+        approval = get_object_or_404(Approval, approval_token=token)
+        invoice = approval.invoice
+        
+        # Check if already processed
+        already_decided = approval.status != 'pending'
+        
+        return Response({
+            'approval': {
+                'id': approval.id,
+                'approval_token': str(approval.approval_token),
+                'approver_name': approval.approver_name,
+                'approver_email': approval.approver_email,
+                'approval_level': approval.approval_level,
+                'level_name': approval.level_name,
+                'status': approval.status,
+                'already_decided': already_decided,
+                'decision_date': approval.decision_date,
+                'comments': approval.comments
+            },
+            'invoice': {
+                'id': invoice.id,
+                'invoice_number': invoice.invoice_number,
+                'vendor_name': invoice.vendor_name,
+                'total_amount': str(invoice.total_amount) if invoice.total_amount else '0',
+                'currency': invoice.currency,
+                'invoice_type': invoice.invoice_type,
+                'invoice_type_display': invoice.get_invoice_type_display(),
+                'invoice_date': invoice.invoice_date,
+                'status': invoice.status,
+                'file_url': request.build_absolute_uri(invoice.file_path.url) if (invoice.file_path and hasattr(invoice.file_path, 'url')) else None
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error fetching approval details: {e}", exc_info=True)
+        return Response(
+            {'error': 'Invalid or expired approval link'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def submit_approval_decision(request, token):
+    """
+    Submit approval decision from RAD AI frontend form
+    Returns JSON response for frontend to handle
+    """
+    try:
+        approval = get_object_or_404(Approval, approval_token=token)
+        invoice = approval.invoice
+        
+        # Check if already processed
+        if approval.status != 'pending':
+            return Response(
+                {
+                    'error': 'already_processed',
+                    'message': f'This approval has already been {approval.status}.',
+                    'status': approval.status
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get decision and comments from request
+        decision = request.data.get('decision')  # 'approve' or 'reject'
+        comments = request.data.get('comments', '')
+        
+        if decision not in ['approve', 'reject']:
+            return Response(
+                {'error': 'Invalid decision. Must be approve or reject.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Process the approval
+        workflow_service = FinanceWorkflowService()
+        success = workflow_service.process_approval_decision(
+            str(token),
+            decision,
+            comments or f"{decision.title()}d via RAD AI by {approval.approver_name}"
+        )
+        
+        if success:
+            approval.refresh_from_db()
+            invoice.refresh_from_db()
+            
+            # Determine next step info
+            next_level_exists = invoice.approvals.filter(
+                approval_level=approval.approval_level + 1
+            ).exists()
+            
+            if decision == 'approve':
+                if next_level_exists:
+                    next_approvals = invoice.approvals.filter(
+                        approval_level=approval.approval_level + 1,
+                        status='pending'
+                    )
+                    next_level_names = [na.approver_name for na in next_approvals]
+                    next_step = f"Email sent to {', '.join(next_level_names)}"
+                else:
+                    next_step = "Invoice fully approved - All levels complete"
+            else:
+                next_step = "Invoice rejected - Vendor will be notified"
+            
+            return Response({
+                'success': True,
+                'message': f"Invoice {decision}d successfully",
+                'decision': decision,
+                'next_step': next_step,
+                'invoice_status': invoice.status,
+                'approval_status': approval.status
+            })
+        else:
+            return Response(
+                {'error': 'Failed to process approval decision'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+            
+    except Exception as e:
+        logger.error(f"Error processing approval: {e}", exc_info=True)
+        return Response(
+            {'error': 'An error occurred while processing your decision'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
 @api_view(['GET', 'POST'])
 @permission_classes([AllowAny])  # Email links don't have auth
 def approval_action(request, token):
     """
-    Handle approval/rejection via email link
-    GET: Show approval page
-    POST: Process approval decision
+    Legacy endpoint for direct email link approval (now redirects to frontend)
+    Returns HTML page that redirects to RAD AI approval page
     """
     try:
         approval = get_object_or_404(Approval, approval_token=token)
+        invoice = approval.invoice
         
-        if request.method == 'GET':
-            # Return approval details for frontend to display
-            invoice = approval.invoice
+        # Get frontend URL from settings
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173')
+        redirect_url = f"{frontend_url}/finance/approve/{token}"
+        
+        # Return HTML redirect page
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Opening RAD AI...</title>
+            <meta http-equiv="refresh" content="0;url={redirect_url}">
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    min-height: 100vh;
+                    margin: 0;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                }}
+                .container {{
+                    text-align: center;
+                    padding: 40px;
+                }}
+                .spinner {{
+                    border: 4px solid rgba(255,255,255,0.3);
+                    border-radius: 50%;
+                    border-top: 4px solid white;
+                    width: 40px;
+                    height: 40px;
+                    animation: spin 1s linear infinite;
+                    margin: 20px auto;
+                }}
+                @keyframes spin {{
+                    0% {{ transform: rotate(0deg); }}
+                    100% {{ transform: rotate(360deg); }}
+                }}
+                h1 {{
+                    font-size: 28px;
+                    margin-bottom: 20px;
+                }}
+                p {{
+                    font-size: 16px;
+                    opacity: 0.9;
+                }}
+                a {{
+                    color: white;
+                    text-decoration: underline;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="spinner"></div>
+                <h1>🔍 Opening RAD AI Finance...</h1>
+                <p>Redirecting you to the approval form...</p>
+                <p style="margin-top: 30px; font-size: 14px;">
+                    If you're not redirected automatically,<br>
+                    <a href="{redirect_url}">click here to open the approval form</a>
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+        return HttpResponse(html)
+        
+    except Exception as e:
+        logger.error(f"Error in approval_action: {e}", exc_info=True)
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Error</title>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    min-height: 100vh;
+                    margin: 0;
+                    background: #f5f5f5;
+                }}
+                .message {{
+                    background: #f8d7da;
+                    border: 3px solid #dc3545;
+                    color: #721c24;
+                    padding: 40px;
+                    border-radius: 10px;
+                    text-align: center;
+                    max-width: 500px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="message">
+                <h1>❌ Invalid Link</h1>
+                <p>This approval link is invalid or has expired.</p>
+            </div>
+        </body>
+        </html>
+        """
+        return HttpResponse(html, status=404)
+        
+        # Get action from query params
+        action = request.GET.get('action')
+        
+        if action and action in ['approve', 'reject']:
+            # Process the action
+            if approval.status != 'pending':
+                # Already processed
+                html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Already Processed</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; text-align: center; }}
+                        .message {{ background: #fff3cd; border: 2px solid #ffc107; padding: 30px; border-radius: 10px; }}
+                        h1 {{ color: #856404; }}
+                        .info {{ margin: 20px 0; font-size: 16px; color: #555; }}
+                        .button {{ display: inline-block; margin-top: 20px; padding: 12px 30px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="message">
+                        <h1>⚠️ Already Processed</h1>
+                        <p class="info">This approval has already been {approval.status}.</p>
+                        <p class="info"><strong>Invoice:</strong> {invoice.invoice_number}</p>
+                        <p class="info"><strong>Status:</strong> {approval.get_status_display()}</p>
+                        <a href="http://localhost:5173/finance/invoices/{invoice.id}" class="button">View Invoice Details</a>
+                    </div>
+                </body>
+                </html>
+                """
+                return HttpResponse(html)
+            
+            # Process the approval/rejection
+            workflow_service = FinanceWorkflowService()
+            success = workflow_service.process_approval_decision(
+                str(token),
+                action,
+                f"{action.title()}d via email by {approval.approver_name}"
+            )
+            
+            if success:
+                approval.refresh_from_db()
+                
+                # Determine next step message
+                if action == 'approve':
+                    next_step_msg = "Email has been sent to the next approver in the chain."
+                    icon = "✅"
+                    bg_color = "#d4edda"
+                    border_color = "#28a745"
+                    text_color = "#155724"
+                else:
+                    next_step_msg = "The invoice has been rejected and will not proceed further."
+                    icon = "❌"
+                    bg_color = "#f8d7da"
+                    border_color = "#dc3545"
+                    text_color = "#721c24"
+                
+                html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Invoice {action.title()}d</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }}
+                        .message {{ background: {bg_color}; border: 3px solid {border_color}; color: {text_color}; padding: 50px; border-radius: 10px; text-align: center; max-width: 500px; }}
+                        .icon {{ font-size: 72px; margin-bottom: 20px; }}
+                        h1 {{ margin: 20px 0; font-size: 28px; }}
+                        .invoice {{ font-weight: bold; font-size: 20px; margin: 20px 0; }}
+                        .info {{ font-size: 18px; line-height: 1.8; margin: 25px 0; }}
+                        .close-note {{ margin-top: 35px; font-size: 14px; opacity: 0.8; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="message">
+                        <div class="icon">{icon}</div>
+                        <h1>Invoice {action.title()}d</h1>
+                        <div class="invoice">{invoice.invoice_number}</div>
+                        <div class="info">{next_step_msg}</div>
+                        <div class="close-note">You can close this window now.</div>
+                    </div>
+                </body>
+                </html>
+                """
+                return HttpResponse(html)
+            else:
+                html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Error</title>
+                    <style>
+                        body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; text-align: center; }}
+                        .message {{ background: #f8d7da; border: 2px solid #dc3545; padding: 30px; border-radius: 10px; }}
+                        h1 {{ color: #721c24; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="message">
+                        <h1>❌ Error Processing Approval</h1>
+                        <p>Failed to process your decision. Please contact support.</p>
+                    </div>
+                </body>
+                </html>
+                """
+                return HttpResponse(html, status=500)
+        
+        # No action specified - show approval page
+        elif request.method == 'GET':
             return Response({
                 'invoice': InvoiceDetailSerializer(invoice).data,
                 'approval': ApprovalSerializer(approval).data,
@@ -398,11 +746,27 @@ def approval_action(request, token):
                 )
     
     except Exception as e:
-        logger.error(f"Approval action failed: {e}")
-        return Response(
-            {'error': str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        logger.error(f"Approval action failed: {e}", exc_info=True)
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Error</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; text-align: center; }}
+                .message {{ background: #f8d7da; border: 2px solid #dc3545; padding: 30px; border-radius: 10px; }}
+                h1 {{ color: #721c24; }}
+            </style>
+        </head>
+        <body>
+            <div class="message">
+                <h1>❌ Error</h1>
+                <p>An error occurred: {str(e)}</p>
+            </div>
+        </body>
+        </html>
+        """
+        return HttpResponse(html, status=500)
 
 
 @api_view(['GET'])

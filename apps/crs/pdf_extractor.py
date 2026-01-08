@@ -23,7 +23,7 @@ class PDFCommentExtractor:
         self.YELLOW_THRESHOLD = 0.6
     
     def is_red_color(self, color: Tuple[float, float, float]) -> bool:
-        """Detect if color is red with multiple validation checks"""
+        """Detect if color is red - EXACT LOGIC FROM CRS_EXTRACTION_LOGIC.md"""
         if not color or len(color) < 3:
             return False
         
@@ -33,37 +33,19 @@ class PDFCommentExtractor:
         if r > 1.0 or g > 1.0 or b > 1.0:
             r, g, b = r/255.0, g/255.0, b/255.0
         
-        # Skip grayscale
-        if abs(r - g) < 0.05 and abs(g - b) < 0.05:
-            return False
-        
-        # Primary red detection
-        if r > 0.5 and r > g and r > b:
-            if (r - g) > 0.1 and (r - b) > 0.1:
-                return True
-        
-        # Secondary red detection
-        if r > 0.3 and r > g * 1.3 and r > b * 1.3:
-            if (r - g) > 0.08 and (r - b) > 0.08:
-                return True
-        
-        # Bright red
+        # PRIMARY CHECK: R>0.7 && G<0.4 && B<0.4 (bright red)
         if r > 0.7 and g < 0.4 and b < 0.4:
             return True
         
-        # General red tone
-        if r > 0.4 and r > (g + b) / 1.5:
-            if (r - max(g, b)) > 0.15:
+        # SECONDARY CHECK: R>0.5 with dominance checks
+        if r > 0.5:
+            if (r - g) > 0.1 and (r - b) > 0.1:
                 return True
-        
-        # Reddish hue
-        if r > 0.5 and (r - g) > 0.2 and r > b + 0.1:
-            return True
         
         return False
     
     def is_yellow_color(self, color: Tuple[float, float, float]) -> bool:
-        """Detect if color is yellow"""
+        """Detect if color is yellow - EXACT LOGIC FROM CRS_EXTRACTION_LOGIC.md"""
         if not color or len(color) < 3:
             return False
         
@@ -73,17 +55,11 @@ class PDFCommentExtractor:
         if r > 1.0 or g > 1.0 or b > 1.0:
             r, g, b = r/255.0, g/255.0, b/255.0
         
-        # Primary yellow detection
-        if g > self.YELLOW_THRESHOLD and r > self.YELLOW_THRESHOLD:
-            if (r + g) / 2 > b + 0.2:
-                if abs(r - g) < 0.3:
-                    return True
-        
-        # Bright yellow
+        # PRIMARY CHECK: R>0.8 && G>0.8 && B<0.5 (bright yellow)
         if r > 0.8 and g > 0.8 and b < 0.5:
             return True
         
-        # Medium yellow
+        # SECONDARY CHECK: R>0.6 && G>0.6 && B<0.4 && abs(R-G)<0.2 (medium yellow)
         if r > 0.6 and g > 0.6 and b < 0.4:
             if abs(r - g) < 0.2:
                 return True
@@ -91,45 +67,46 @@ class PDFCommentExtractor:
         return False
     
     def is_technical_drawing_element(self, text: str) -> bool:
-        """Filter out technical drawing elements"""
+        """Filter out technical drawing elements - EXACT LOGIC FROM CRS_EXTRACTION_LOGIC.md"""
         if not text or not text.strip():
             return False
         
         text_stripped = text.strip()
         text_lower = text_stripped.lower()
         
-        # AutoCAD elements
-        if 'autocad' in text_lower or 'shx text' in text_lower or 'shx' in text_lower:
+        # AutoCAD patterns - exact matches from documentation
+        if 'autocad' in text_lower:
+            return True
+        if 'shx text' in text_lower or 'shx' in text_lower:
             return True
         
-        # Pure numbers or dimensions
+        # Pure numbers or dimensions (no comment content)
         if re.match(r'^[\d\s\.\/\-]+$', text_stripped):
-            if len(text_stripped.split()) <= 2:
-                return True
-        
-        # Elevation markers
-        if re.search(r'\b(EL|el|El|RACK)\s*\.?\s*\d+', text_stripped, re.IGNORECASE):
-            words = text_stripped.split()
-            if len(words) <= 4:
-                return True
-        
-        # Drawing codes
-        if re.match(r'^[A-Z]+\d+[\-\d]*$', text_stripped):
-            if len(text_stripped) <= 20:
-                return True
-        
-        # Technical codes with elevations
-        if re.match(r'^[A-Z0-9\s\.\/\-]+$', text_stripped):
-            words = text_stripped.split()
-            if len(words) <= 4:
-                if re.search(r'(EL|el|RACK|\.\d+|\d+\.\d+)', text_stripped, re.IGNORECASE):
-                    return True
-                if re.match(r'^[\d\s\.\/\-]+$', text_stripped):
-                    return True
-        
-        # Elevation patterns
-        if re.match(r'^[/\-]?\s*(EL|el|RACK)\s*\.?\s*\d+', text_stripped, re.IGNORECASE):
             return True
+        
+        # Elevation codes: EL.100, /EL.109.000, RACK.100
+        if re.match(r'^[/\-]?\s*(EL|RACK)\s*\.\s*\d+(\.\d+)?$', text_stripped, re.IGNORECASE):
+            return True
+        
+        # Technical codes: P100, MC-42, etc.
+        if re.match(r'^[A-Z]{1,3}\d+[\-\d]*$', text_stripped):
+            return True
+        
+        # Mixed technical patterns with no actual comment
+        # Example: "EL.107.000" or "RACK.100/200"
+        if re.match(r'^[A-Z0-9\s\.\/\-]+$', text_stripped):
+            # Check if it's ONLY technical elements (no alphabetic words that form sentences)
+            words = text_stripped.split()
+            if len(words) <= 3:
+                # Check if all words are technical patterns
+                all_technical = True
+                for word in words:
+                    # Check if word is NOT a regular English word
+                    if not re.match(r'^([A-Z]{1,3}\d+|[\d\.\/\-]+|EL|RACK)$', word, re.IGNORECASE):
+                        all_technical = False
+                        break
+                if all_technical:
+                    return True
         
         return False
     

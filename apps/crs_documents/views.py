@@ -161,7 +161,8 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
             
             # Step 1: Extract comments from PDF
             pdf_buffer = BytesIO(pdf_file.read())
-            comments = extract_reviewer_comments(pdf_buffer)
+            # CRITICAL: Enable cleaning to apply strict CRS_EXTRACTION_LOGIC.md rules
+            comments = extract_reviewer_comments(pdf_buffer, apply_cleaning=True)
             
             if not comments:
                 return Response({
@@ -232,7 +233,8 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
             
             # Extract comments
             pdf_buffer = BytesIO(pdf_file.read())
-            comments = extract_reviewer_comments(pdf_buffer)
+            # CRITICAL: Enable cleaning to apply strict CRS_EXTRACTION_LOGIC.md rules
+            comments = extract_reviewer_comments(pdf_buffer, apply_cleaning=True)
             
             # Get statistics
             stats = get_comment_statistics(comments)
@@ -361,76 +363,55 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                 'contractor': request.POST.get('contractor', ''),
             }
             
-            # Determine file type
+            # Validate PDF file
             file_name = uploaded_file.name.lower()
-            is_pdf = file_name.endswith('.pdf')
-            is_excel = file_name.endswith(('.xlsx', '.xls'))
-            
-            if not (is_pdf or is_excel):
+            if not file_name.endswith('.pdf'):
                 return Response({
-                    'error': 'Invalid file type. Only PDF and Excel files are supported.',
+                    'error': 'Invalid file type. Only PDF files are supported.',
                     'success': False
                 }, status=status.HTTP_400_BAD_REQUEST)
             
-            # Process based on file type
-            if is_pdf:
-                # Extract comments from PDF
-                pdf_buffer = BytesIO(uploaded_file.read())
-                comments = extract_reviewer_comments(pdf_buffer)
-                
-                if not comments:
-                    return Response({
-                        'error': 'No comments found in the PDF file.',
-                        'success': False,
-                        'message': 'The PDF does not contain any extractable reviewer comments.'
-                    }, status=status.HTTP_400_BAD_REQUEST)
-                
-                # Load CRS template
-                template_path = os.path.join(settings.BASE_DIR, 'apps', 'crs_documents', 'helpers', 'CRS template.xlsx')
-                if not os.path.exists(template_path):
-                    return Response({
-                        'error': 'CRS template not found',
-                        'success': False,
-                        'message': 'Server configuration error: CRS template.xlsx is missing.'
-                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-                
-                # Populate template
-                output_buffer = populate_crs_template(
-                    template_path=template_path,
-                    comments=comments,
-                    metadata=metadata
-                )
-                
-                # Get statistics
-                stats = get_comment_statistics(comments)
-                
-                # Create response with Excel file
-                response = HttpResponse(
-                    output_buffer.getvalue(),
-                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                )
-                response['Content-Disposition'] = f'attachment; filename="CRS_Populated_{metadata.get("document_number", "output")}.xlsx"'
-                response['X-Comment-Count'] = str(stats['total'])
-                response['X-Processing-Status'] = 'success'
-                
-                return response
+            # Extract comments from PDF
+            pdf_buffer = BytesIO(uploaded_file.read())
+            # CRITICAL: Enable cleaning to apply strict CRS_EXTRACTION_LOGIC.md rules
+            comments = extract_reviewer_comments(pdf_buffer, apply_cleaning=True)
             
-            elif is_excel:
-                # Excel file uploaded - validate and standardize format
-                excel_buffer = BytesIO(uploaded_file.read())
-                
-                # Try to read the Excel file to check if it's already in correct format
-                # If not, we could extract data and repopulate template
-                # For now, let's assume it needs standardization
-                
-                # TODO: Add logic to extract data from Excel and repopulate template
-                # For MVP, return error asking for PDF or standard template
-                
+            if not comments:
                 return Response({
-                    'error': 'Excel processing coming soon',
+                    'error': 'No comments found in the PDF file.',
                     'success': False,
-                    'message': 'Please upload a PDF file for now. Excel input will be supported soon.'
-                }, status=status.HTTP_501_NOT_IMPLEMENTED)
+                    'message': 'The PDF does not contain any extractable reviewer comments.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Load CRS template
+            template_path = os.path.join(settings.BASE_DIR, 'apps', 'crs_documents', 'helpers', 'CRS template.xlsx')
+            if not os.path.exists(template_path):
+                return Response({
+                    'error': 'CRS template not found',
+                    'success': False,
+                    'message': 'Server configuration error: CRS template.xlsx is missing.'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            # Populate template
+            output_buffer = populate_crs_template(
+                template_path=template_path,
+                comments=comments,
+                metadata=metadata
+            )
+            
+            # Get statistics
+            stats = get_comment_statistics(comments)
+            
+            # Create response with Excel file
+            response = HttpResponse(
+                output_buffer.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="CRS_Populated_{metadata.get("document_number", "output")}.xlsx"'
+            response['X-Comment-Count'] = str(stats['total'])
+            response['X-Processing-Status'] = 'success'
+            
+            return response
             
         except Exception as e:
             import traceback
