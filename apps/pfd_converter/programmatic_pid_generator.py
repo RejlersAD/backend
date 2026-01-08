@@ -186,6 +186,16 @@ class ProgrammaticPIDGenerator:
         # Date
         date_str = datetime.now().strftime('%Y-%m-%d')
         c.drawString(title_block_x + 100*mm, title_block_y + 8*mm, f"Date: {date_str}")
+        
+        # Generation metadata (timestamp + unique ID for tracking)
+        c.setFont("Helvetica", self.text_sizes['notes'] * mm)
+        generation_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        c.drawString(title_block_x + 5*mm, title_block_y + 2*mm, f"Generated: {generation_time}")
+        
+        # Add unique generation ID if provided
+        if 'generation_id' in self.specs:
+            c.setFont("Helvetica", (self.text_sizes['notes'] - 0.5) * mm)
+            c.drawString(title_block_x + 5*mm, title_block_y - 2*mm, f"ID: {self.specs['generation_id'][:16]}")
     
     def _draw_legend(self, c: canvas.Canvas):
         """Draw symbol legend in top-left corner"""

@@ -350,11 +350,76 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
         Download P&ID drawing PDF
         
         GET /api/v1/pfd/conversions/{id}/download_drawing/
+        Query params:
+            - force_regenerate: Set to 'true' to force fresh generation
         """
         try:
             conversion = self.get_object()
+            force_regenerate = request.query_params.get('force_regenerate', 'false').lower() == 'true'
             
-            logger.info(f"Download request for conversion {pk}, pid_file: {conversion.pid_file}")
+            logger.info(f"Download request for conversion {pk}, pid_file: {conversion.pid_file}, force_regenerate: {force_regenerate}")
+            
+            # If force regenerate is requested, regenerate the P&ID
+            if force_regenerate:
+                logger.info("🔄 Force regenerate requested - creating fresh P&ID drawing...")
+                try:
+                    # Delete old file if exists to ensure fresh generation
+                    if conversion.pid_file:
+                        old_path = os.path.join(settings.MEDIA_ROOT, str(conversion.pid_file))
+                        if os.path.exists(old_path):
+                            try:
+                                os.remove(old_path)
+                                logger.info(f"  → Deleted old file: {old_path}")
+                            except Exception as e:
+                                logger.warning(f"  ⚠️ Could not delete old file: {str(e)}")
+                    
+                    # Use advanced pipeline to regenerate
+                    pipeline = AdvancedPFDToPIDPipeline(project_id=conversion.pfd_document.project_code)
+                    
+                    project_info = {
+                        'project_name': conversion.pfd_document.project_name,
+                        'project_code': conversion.pfd_document.project_code,
+                        'drawing_number': conversion.pid_drawing_number,
+                        'drawing_title': conversion.pid_title,
+                        'revision': conversion.pid_revision
+                    }
+                    
+                    # Use cached vision data if available
+                    if conversion.pfd_document.extracted_data:
+                        # Auto-increment revision for regenerated drawings
+                        current_rev = conversion.pid_revision
+                        if current_rev and len(current_rev) == 1 and current_rev.isalpha():
+                            new_rev = chr(ord(current_rev) + 1) if ord(current_rev) < ord('Z') else 'Z+'
+                            project_info['revision'] = new_rev
+                            conversion.pid_revision = new_rev
+                            logger.info(f"  → Auto-incremented revision: {current_rev} → {new_rev}")
+                        
+                        pipeline_results = pipeline.convert(
+                            pfd_file=None,
+                            project_info=project_info,
+                            cached_vision_data=conversion.pfd_document.extracted_data,
+                            pfd_document=conversion.pfd_document
+                        )
+                    else:
+                        conversion.pfd_document.file.open('rb')
+                        pipeline_results = pipeline.convert(conversion.pfd_document.file, project_info)
+                        conversion.pfd_document.file.close()
+                    
+                    # Update conversion with new drawing path and regeneration timestamp
+                    drawing_path = pipeline_results['drawing_path']
+                    relative_path = drawing_path.replace(str(settings.MEDIA_ROOT), '').lstrip('/\\')
+                    conversion.pid_file = relative_path
+                    conversion.generation_completed_at = timezone.now()  # Track when regenerated
+                    conversion.save()
+                    
+                    logger.info(f"✅ Fresh P&ID generated: {relative_path}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Regeneration failed: {str(e)}")
+                    return Response(
+                        {'error': f'Failed to regenerate P&ID: {str(e)}'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
             
             if not conversion.pid_file:
                 logger.warning(f"P&ID drawing not available for conversion {pk}")
@@ -391,11 +456,24 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_404_NOT_FOUND
                 )
             
-            # Serve file
+            # Serve file with cache-busting headers
             from django.http import FileResponse
+            import uuid
             response = FileResponse(open(drawing_path, 'rb'), content_type='application/pdf')
-            response['Content-Disposition'] = f'attachment; filename="{conversion.pid_drawing_number}.pdf"'
-            logger.info(f"Successfully serving file: {drawing_path}")
+            
+            # Add unique timestamp to filename to prevent browser caching
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            unique_name = f"{conversion.pid_drawing_number}_{timestamp}.pdf"
+            response['Content-Disposition'] = f'attachment; filename="{unique_name}"'
+            
+            # Prevent ALL caching at browser/proxy level
+            response['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
+            response['Pragma'] = 'no-cache'
+            response['Expires'] = '0'
+            response['X-Content-Type-Options'] = 'nosniff'
+            
+            logger.info(f"Successfully serving file: {drawing_path} as {unique_name}")
             return response
             
         except Exception as e:
