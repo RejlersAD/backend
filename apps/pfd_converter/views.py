@@ -347,14 +347,62 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def download_drawing(self, request, pk=None):
         """
-        Download P&ID drawing PDF
+        Download P&ID drawing PDF with intelligent caching prevention
         
         GET /api/v1/pfd/conversions/{id}/download_drawing/
+        GET /api/v1/pfd/conversions/{id}/download_drawing/?force_regenerate=true
+        
+        5-Layer Caching Prevention:
+        1. UUID + timestamp filenames
+        2. HTTP cache-control headers
+        3. Old file deletion before regeneration
+        4. Query param timestamps (handled by frontend)
+        5. Unique download filenames with timestamps
         """
         try:
             conversion = self.get_object()
+            force_regenerate = request.query_params.get('force_regenerate', 'false').lower() == 'true'
             
-            logger.info(f"Download request for conversion {pk}, pid_file: {conversion.pid_file}")
+            logger.info(f"Download request for conversion {pk}, force_regenerate={force_regenerate}")
+            
+            # If force regenerate requested
+            if force_regenerate:
+                logger.info(f"🔄 Force regeneration requested for conversion {pk}")
+                
+                # Delete old file if exists
+                if conversion.pid_file:
+                    old_path = os.path.join(settings.MEDIA_ROOT, str(conversion.pid_file))
+                    if os.path.exists(old_path):
+                        os.remove(old_path)
+                        logger.info(f"🗑️ Deleted old file: {old_path}")
+                
+                # Auto-increment revision (A → B → C → D)
+                current_revision = conversion.pid_revision or 'A'
+                if current_revision and len(current_revision) == 1 and current_revision.isalpha():
+                    next_revision = chr(ord(current_revision) + 1)
+                    conversion.pid_revision = next_revision
+                    logger.info(f"📝 Revision updated: {current_revision} → {next_revision}")
+                
+                # Regenerate drawing with new timestamp and UUID
+                from .services_advanced_pipeline import AdvancedPFDToPIDPipeline
+                pipeline = AdvancedPFDToPIDPipeline()
+                
+                # Prepare drawing specs
+                drawing_specs = {
+                    'drawing_number': conversion.pid_drawing_number,
+                    'title': conversion.pid_title,
+                    'revision': conversion.pid_revision,
+                    'equipment': conversion.equipment_list or [],
+                    'instruments': conversion.instrument_list or [],
+                    'piping': conversion.piping_details or [],
+                    'safety_systems': conversion.safety_systems or []
+                }
+                
+                # Generate new P&ID
+                new_pid_path = pipeline.generate_programmatic_pid(drawing_specs)
+                conversion.pid_file = new_pid_path
+                conversion.save()
+                logger.info(f"✅ Generated new P&ID: {new_pid_path}")
             
             if not conversion.pid_file:
                 logger.warning(f"P&ID drawing not available for conversion {pk}")
@@ -391,11 +439,24 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_404_NOT_FOUND
                 )
             
-            # Serve file
+            # Serve file with aggressive cache prevention headers
             from django.http import FileResponse
+            from datetime import datetime
+            
             response = FileResponse(open(drawing_path, 'rb'), content_type='application/pdf')
-            response['Content-Disposition'] = f'attachment; filename="{conversion.pid_drawing_number}.pdf"'
-            logger.info(f"Successfully serving file: {drawing_path}")
+            
+            # Layer 2: HTTP cache-control headers (prevent server/proxy caching)
+            response['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
+            response['Pragma'] = 'no-cache'
+            response['Expires'] = '0'
+            response['X-Content-Type-Options'] = 'nosniff'
+            
+            # Layer 5: Unique download filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"{conversion.pid_drawing_number}_Rev{conversion.pid_revision}_{timestamp}.pdf"
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            
+            logger.info(f"✅ Successfully serving file: {drawing_path} as {filename}")
             return response
             
         except Exception as e:

@@ -62,6 +62,17 @@ class AdvancedPFDToPIDPipeline:
         self.graph_builder = ProcessGraphBuilder()
         self.pid_generator = PIDDraftGenerator()
         
+        # Initialize database-integrated converter
+        try:
+            from .database_integrated_converter import DatabaseIntegratedConverter
+            self.db_converter = DatabaseIntegratedConverter()
+            self.use_database = True
+            logger.info("✅ Database-integrated converter initialized")
+        except Exception as e:
+            logger.warning(f"⚠️ Database converter not available: {str(e)}")
+            self.db_converter = None
+            self.use_database = False
+        
     def convert(self, pfd_file, project_info: dict = None, cached_vision_data: dict = None, pfd_document=None):
         """
         Execute complete 6-step PFD to P&ID conversion pipeline
@@ -447,9 +458,38 @@ RESPOND WITH ONLY THE JSON OBJECT. Extract everything you can see in the PFD."""
         - Safety devices (PSV, rupture disks, flame arrestors)
         - Utility connections
         - Control logic descriptions
+        
+        Enhanced with database integration for superior results
         """
         logger.info("  → Generating ISA-compliant P&ID specifications...")
         
+        # Use database-integrated converter if available
+        if self.use_database and self.db_converter:
+            logger.info("  → Using Database-Integrated Converter with 10,107 legend references")
+            try:
+                # Prepare PFD data from classified data
+                pfd_data = {
+                    'equipment': classified_data.get('equipment', []),
+                    'process_streams': classified_data.get('process_streams', []),
+                    'instruments': classified_data.get('instruments', []),
+                    'text_annotations': classified_data.get('annotations', [])
+                }
+                
+                # Generate enhanced P&ID with database knowledge
+                pid_specs = self.db_converter.enhance_pid_generation_with_db(pfd_data, project_info)
+                
+                logger.info(f"  ✅ Database-enhanced P&ID generated:")
+                logger.info(f"     • Equipment: {len(pid_specs.get('equipment_list', []))}")
+                logger.info(f"     • Instruments: {len(pid_specs.get('instrument_list', []))}")
+                logger.info(f"     • Safety devices: {len(pid_specs.get('safety_devices', []))}")
+                
+                return pid_specs
+                
+            except Exception as e:
+                logger.warning(f"  ⚠️ Database-enhanced generation failed, falling back: {str(e)}")
+                # Fall back to standard generator
+        
+        # Standard generator (fallback)
         return self.pid_generator.generate(classified_data, project_info)
     
     def _run_engineering_validation(self, pid_specs: dict, vision_data: dict):
@@ -530,7 +570,13 @@ RESPOND WITH ONLY THE JSON OBJECT. Extract everything you can see in the PFD."""
         os.makedirs(pid_drawings_dir, exist_ok=True)
         
         drawing_number = pid_specs.get('drawing_info', {}).get('drawing_number', 'PID-DRAFT-001')
-        output_path = os.path.join(pid_drawings_dir, f"{drawing_number}.pdf")
+        # Use UUID for absolute uniqueness - prevents any caching or collision issues
+        import uuid
+        from datetime import datetime
+        unique_id = str(uuid.uuid4())[:8]  # Short UUID for readability
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_path = os.path.join(pid_drawings_dir, f"{drawing_number}_{timestamp}_{unique_id}.pdf")
+        logger.info(f"  → Generating unique P&ID file: {os.path.basename(output_path)}")
         
         # Use programmatic generator (Professional CAD-style)
         logger.info("  → Using professional programmatic P&ID generator...")
@@ -547,7 +593,9 @@ RESPOND WITH ONLY THE JSON OBJECT. Extract everything you can see in the PFD."""
                 'equipment': pid_specs.get('equipment_list', []),
                 'piping': [],
                 'instrumentation': pid_specs.get('instrument_list', []),
-                'valves': []
+                'valves': [],
+                'generation_id': unique_id,  # Add unique ID to make each drawing visually distinct
+                'generation_timestamp': timestamp  # Add timestamp for tracking
             }
             
             # Extract piping from specifications
