@@ -1,0 +1,238 @@
+{
+  "drawing_information": {
+    "number": " - P&ID",
+    "title": "",
+    "revision": "A",
+    "project": "",
+    "standard": "ISA S5.1",
+    "scale": "NTS"
+  },
+  "equipment": [
+    {
+      "tag": "V-3601",
+      "type": "vessel",
+      "name": "Sahil Export Gas KOD",
+      "specifications": {
+        "design_temp": "55\u00c2\u00b0C/-29\u00c2\u00b0C",
+        "design_pressure": "22.4 barg/FV",
+        "height": "7800 mm (T/T)",
+        "diameter": "3300 mm",
+        "material": "CS + SS 316L CLAD"
+      },
+      "nozzles": [
+        {
+          "name": "inlet",
+          "size": "16 inch",
+          "rating": "300#",
+          "orientation": "side"
+        },
+        {
+          "name": "outlet",
+          "size": "16 inch",
+          "rating": "300#",
+          "orientation": "side"
+        },
+        {
+          "name": "drain",
+          "size": "3/4 inch",
+          "rating": "300#",
+          "orientation": "bottom"
+        },
+        {
+          "name": "vent",
+          "size": "3/4 inch",
+          "rating": "300#",
+          "orientation": "top"
+        },
+        {
+          "name": "level_gauge",
+          "size": "1/2 inch",
+          "rating": "300#",
+          "orientation": "top"
+        },
+        {
+          "name": "pressure_gauge",
+          "size": "1/2 inch",
+          "rating": "300#",
+          "orientation": "side"
+        }
+      ],
+      "instruments": [
+        "PT",
+        "LT",
+        "TT"
+      ],
+      "safety_devices": [
+        "PSV"
+      ],
+      "internals": [
+        "demister",
+        "trays",
+        "baffles",
+        "supports"
+      ]
+    }
+  ],
+  "piping": {
+    "lines": [
+      {
+        "line_number": "14-01-08-1602",
+        "size": "16 inch",
+        "class": "300#",
+        "material": "CS",
+        "from": "V-3601",
+        "to": "Gas Export Block Valve Station",
+        "description": "Export Pipeline",
+        "isolation_valves": [
+          {
+            "tag": "HV-1602-01",
+            "type": "gate_valve",
+            "size": "16 inch",
+            "class": "300#",
+            "location": "equipment_inlet",
+            "actuation": "manual"
+          },
+          {
+            "tag": "HV-1602-02",
+            "type": "gate_valve",
+            "size": "16 inch",
+            "class": "300#",
+            "location": "equipment_outlet",
+            "actuation": "manual"
+          }
+        ],
+        "control_valves": [
+          {
+            "tag": "PCV-1602-01",
+            "type": "control_valve",
+            "size": "16 inch",
+            "class": "300#",
+            "location": "downstream",
+            "actuation": "pneumatic",
+            "fail_position": "fail_open",
+            "control_loop": "PIC-3601-01"
+          }
+        ],
+        "check_valves": [
+          {
+            "tag": "CV-1602-01",
+            "type": "check_valve",
+            "size": "16 inch",
+            "class": "300#",
+            "location": "after_control_valve"
+          }
+        ]
+      }
+    ],
+    "valves": [
+      {
+        "tag": "HV-1602-01",
+        "type": "gate_valve",
+        "size": "16 inch",
+        "class": "300#",
+        "location": "equipment_inlet",
+        "actuation": "manual"
+      },
+      {
+        "tag": "HV-1602-02",
+        "type": "gate_valve",
+        "size": "16 inch",
+        "class": "300#",
+        "location": "equipment_outlet",
+        "actuation": "manual"
+      },
+      {
+        "tag": "PCV-1602-01",
+        "type": "control_valve",
+        "size": "16 inch",
+        "class": "300#",
+        "location": "downstream",
+        "actuation": "pneumatic",
+        "fail_position": "fail_open",
+        "control_loop": "PIC-3601-01"
+      },
+      {
+        "tag": "CV-1602-01",
+        "type": "check_valve",
+        "size": "16 inch",
+        "class": "300#",
+        "location": "after_control_valve"
+      }
+    ]
+  },
+  "instrumentation": [
+    {
+      "tag": "PT-V-01",
+      "type": "Pressure Transmitter",
+      "range": "0-25 barg",
+      "location": "V-3601 outlet",
+      "signal_type": "4-20mA",
+      "function": "Pressure monitoring and control",
+      "control_loop": "PIC-V-01"
+    },
+    {
+      "tag": "LT-V-01",
+      "type": "Level Transmitter",
+      "range": "0-100%",
+      "location": "V-3601 side",
+      "signal_type": "4-20mA",
+      "function": "Level monitoring",
+      "control_loop": null
+    },
+    {
+      "tag": "TT-V-01",
+      "type": "Temperature Transmitter",
+      "range": "-40 to 80\u00b0C",
+      "location": "V-3601 bottom",
+      "signal_type": "4-20mA",
+      "function": "Temperature monitoring",
+      "control_loop": null
+    }
+  ],
+  "safety_systems": [
+    {
+      "tag": "PSV-V-01",
+      "type": "Pressure Safety Valve",
+      "set_pressure": "20 barg",
+      "size": "3 inch",
+      "discharge_to": "HP Flare",
+      "location": "V-3601 top",
+      "relief_capacity": "Sized per API 520/521"
+    },
+    {
+      "tag": "SDV-V-01",
+      "type": "Shutdown Valve",
+      "size": "16 inch",
+      "class": "300#",
+      "location": "V-3601 inlet",
+      "actuation": "pneumatic",
+      "fail_position": "fail_closed",
+      "interlock": "High pressure trip, Emergency shutdown"
+    }
+  ],
+  "utilities": {
+    "instrument_air": [],
+    "drains": [
+      {
+        "equipment": "V-3601",
+        "location": "bottom",
+        "size": "3/4 inch"
+      }
+    ],
+    "vents": [
+      {
+        "equipment": "V-3601",
+        "location": "top",
+        "size": "3/4 inch"
+      }
+    ]
+  },
+  "notes": [
+    "All instruments and control valves pneumatically operated",
+    "All pressure ratings at design temperature",
+    "Refer to piping specification for line details",
+    "Safety valves sized per API 520/521",
+    "Control system: DCS with field instruments",
+    "Drawing follows ISA S5.1 standards"
+  ]
+}

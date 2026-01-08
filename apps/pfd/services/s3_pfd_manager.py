@@ -24,13 +24,13 @@ class S3PFDManager:
     """
     Manages PFD and P&ID files in AWS S3
     Bucket: rejlers-edrs-project
-    Region: ap-south-1
+    Region: me-central-1
     """
     
     def __init__(self):
         """Initialize S3 client for the PFD bucket"""
         self.bucket_name = os.environ.get('PFD_S3_BUCKET', 'rejlers-edrs-project')
-        self.region = os.environ.get('PFD_S3_REGION', 'ap-south-1')
+        self.region = os.environ.get('PFD_S3_REGION', 'me-central-1')
         self.base_path = 'PFD_to_PID'
         self.pfd_folder = f'{self.base_path}/PFD'
         self.pid_folder = f'{self.base_path}/PID'

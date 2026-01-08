@@ -52,6 +52,12 @@ class PFDDocument(TimeStampedModel):
         help_text='Extracted process information from PFD'
     )
     
+    # Comprehensive analysis (detailed equipment, piping, instrumentation)
+    comprehensive_analysis = models.JSONField(
+        default=dict,
+        help_text='Comprehensive GPT-4 Vision analysis with equipment specs, line sizes, instruments, etc.'
+    )
+    
     # Conversion metadata
     conversion_notes = models.TextField(blank=True)
     error_message = models.TextField(blank=True)

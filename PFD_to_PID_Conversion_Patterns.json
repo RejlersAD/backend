@@ -1,0 +1,87 @@
+{
+  "equipment_mapping_rules": {
+    "patterns": [
+      {
+        "description": "Each PFD equipment item is represented with additional details in P&ID.",
+        "details": [
+          "Include nozzles and their orientations.",
+          "Add internal components such as trays, baffles, and internals.",
+          "Specify elevations and installation details.",
+          "Use standardized symbols for equipment representation."
+        ]
+      }
+    ]
+  },
+  "piping_rules": {
+    "patterns": [
+      {
+        "description": "Expand PFD single lines into detailed P&ID piping.",
+        "details": [
+          "Assign unique line numbers for each segment.",
+          "Specify line sizes, pressure classes, and materials.",
+          "Place isolation valves at strategic locations for maintenance.",
+          "Add control valves where process control is required.",
+          "Follow typical valve spacing and placement rules, such as placing valves at accessible heights and locations."
+        ]
+      }
+    ]
+  },
+  "instrumentation_rules": {
+    "patterns": [
+      {
+        "description": "Add instruments for each equipment type.",
+        "details": [
+          "Place instruments at typical locations: inlet, outlet, top, bottom.",
+          "Use consistent instrument tag numbering patterns.",
+          "Configure control loops with appropriate instruments.",
+          "Define alarm and trip point settings for critical parameters."
+        ]
+      }
+    ]
+  },
+  "control_patterns": {
+    "patterns": [
+      {
+        "description": "Implement process control strategies.",
+        "details": [
+          "Use feedback, feedforward, and cascade control loops.",
+          "Apply ratio control for blending processes.",
+          "Implement override control for safety and efficiency.",
+          "Define control loop types based on process requirements."
+        ]
+      }
+    ]
+  },
+  "safety_patterns": {
+    "patterns": [
+      {
+        "description": "Integrate safety systems into the design.",
+        "details": [
+          "Place safety valves at pressure relief points.",
+          "Position emergency shutdown valves for quick isolation.",
+          "Set high/low pressure and level trip points.",
+          "Develop interlock logic for critical safety functions."
+        ]
+      }
+    ]
+  },
+  "conversion_workflow": {
+    "steps": [
+      "Identify all equipment and their specifications from the PFD.",
+      "Expand piping details, adding line numbers, sizes, and materials.",
+      "Add necessary instruments and configure control loops.",
+      "Integrate safety systems, including valves and interlocks.",
+      "Ensure utility connections are detailed and correctly placed.",
+      "Review and apply design standards and rules for consistency."
+    ]
+  },
+  "soft_coding_config": {
+    "automation_parameters": {
+      "equipment_symbol_library": "Standardized symbols for equipment types.",
+      "line_numbering_scheme": "Rules for generating unique line numbers.",
+      "instrument_tagging_convention": "Pattern for instrument tag numbers.",
+      "control_loop_templates": "Predefined templates for common control loops.",
+      "safety_device_placement_rules": "Guidelines for placing safety devices."
+    }
+  }
+}
