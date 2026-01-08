@@ -669,12 +669,13 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='load-to-canvas')
     def load_to_canvas(self, request, pk=None):
         """
-        Convert AI-generated P&ID to editable canvas format
+        Convert programmatic P&ID to editable canvas format
         
         GET /api/v1/pfd/conversions/{id}/load-to-canvas/
         
-        Uses GPT-4 Vision to extract elements from the P&ID drawing and
-        converts them to structured data for the 2D Expert Mode canvas editor.
+        Intelligently converts the structured P&ID data directly to canvas format
+        without requiring AI vision analysis. Uses smart layout algorithms to
+        position equipment, instruments, and piping for optimal visualization.
         
         Returns:
             Canvas-compatible JSON with:
@@ -685,57 +686,194 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
             - layout: Drawing metadata and settings
         """
         try:
-            from .pid_to_canvas_converter import PIDToCanvasConverter
-            
             conversion = self.get_object()
             
-            # Check if P&ID drawing exists
-            if not conversion.pid_file:
-                return Response(
-                    {'error': 'P&ID drawing not generated yet. Please generate P&ID first.'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            # Build full path to P&ID file
-            pid_file_path = os.path.join(settings.MEDIA_ROOT, str(conversion.pid_file))
-            
-            if not os.path.exists(pid_file_path):
-                return Response(
-                    {'error': 'P&ID drawing file not found on server.'},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            
-            logger.info(f"📐 Converting P&ID to canvas format: {pid_file_path}")
+            logger.info(f"🎨 Converting P&ID to canvas format (programmatic approach)")
             
             # Extract original PID specifications
-            pid_specs = {
-                'equipment_list': conversion.equipment_list or [],
-                'instrument_list': conversion.instrument_list or [],
-                'piping_specifications': conversion.piping_details or [],
-                'safety_devices': conversion.safety_systems or [],
-                'drawing_info': {
+            equipment_list = conversion.equipment_list or []
+            instrument_list = conversion.instrument_list or []
+            piping_details = conversion.piping_details or []
+            safety_systems = conversion.safety_systems or []
+            
+            logger.info(f"📊 Data to convert: {len(equipment_list)} equipment, {len(instrument_list)} instruments, {len(piping_details)} pipes")
+            
+            # Smart layout algorithm: position equipment in a logical flow
+            canvas_data = {
+                'equipment': [],
+                'instrumentation': [],
+                'piping': [],
+                'annotations': [],
+                'layout': {
+                    'flow_direction': 'left-to-right',
+                    'style': 'process-sequence',
+                    'grid_size': 50
+                },
+                'metadata': {
+                    'conversion_id': str(conversion.id),
                     'drawing_number': conversion.pid_drawing_number,
                     'title': conversion.pid_title,
                     'revision': conversion.pid_revision,
-                    'date': str(conversion.created_at.date()),
-                    'project_name': conversion.pfd_document.project_name if conversion.pfd_document else ''
+                    'generated_at': str(conversion.created_at),
+                    'generator': 'programmatic',
+                    'version': '2.0'
                 }
             }
             
-            # Convert P&ID to canvas data using AI
-            converter = PIDToCanvasConverter()
-            canvas_data = converter.convert_pid_to_canvas_data(pid_file_path, pid_specs)
+            # Layout equipment with smart positioning
+            equipment_positions = {}
+            x_position = 15  # Start at 15% from left
+            y_position = 50  # Center vertically
+            x_spacing = 20   # Spacing between equipment
             
-            logger.info(f"✅ Canvas data created:")
-            logger.info(f"   - Equipment: {len(canvas_data.get('equipment', []))}")
-            logger.info(f"   - Instruments: {len(canvas_data.get('instrumentation', []))}")
-            logger.info(f"   - Pipes: {len(canvas_data.get('piping', []))}")
-            logger.info(f"   - Annotations: {len(canvas_data.get('annotations', []))}")
+            for idx, equipment in enumerate(equipment_list):
+                tag = equipment.get('tag', f'EQUIP-{idx+1}')
+                equip_type = equipment.get('type', 'generic')
+                
+                # Determine equipment type for proper symbol
+                symbol_type = self._normalize_equipment_type(equip_type)
+                
+                # Calculate position (left to right flow)
+                x_pos = x_position + (idx * x_spacing)
+                if x_pos > 85:  # Wrap to next row if too far right
+                    x_pos = 15
+                    y_position += 25
+                
+                equipment_positions[tag] = {'x': x_pos, 'y': y_position}
+                
+                canvas_data['equipment'].append({
+                    'id': tag,
+                    'tag': tag,
+                    'type': symbol_type,
+                    'name': equipment.get('name', ''),
+                    'position': {
+                        'x': x_pos,
+                        'y': y_position
+                    },
+                    'size': 'medium',
+                    'orientation': 'vertical',
+                    'specifications': equipment.get('specifications', {}),
+                    'properties': {
+                        'draggable': True,
+                        'selectable': True
+                    }
+                })
             
-            # Add conversion metadata
-            canvas_data['metadata']['conversion_id'] = str(conversion.id)
-            canvas_data['metadata']['original_pid_file'] = str(conversion.pid_file)
-            canvas_data['metadata']['generated_at'] = str(conversion.created_at)
+            # Add instrumentation near related equipment
+            for idx, instrument in enumerate(instrument_list):
+                tag = instrument.get('tag', f'INST-{idx+1}')
+                inst_type = instrument.get('type', 'indicator')
+                function = instrument.get('function', 'measurement')
+                
+                # Determine connected equipment
+                connected_to = instrument.get('connected_to_equipment', '')
+                if not connected_to and len(equipment_list) > 0:
+                    # Smart connection: associate with nearby equipment
+                    connected_to = equipment_list[idx % len(equipment_list)].get('tag', '')
+                
+                # Position near connected equipment (offset above/below)
+                if connected_to in equipment_positions:
+                    base_pos = equipment_positions[connected_to]
+                    x_pos = base_pos['x']
+                    y_pos = base_pos['y'] - 15 if idx % 2 == 0 else base_pos['y'] + 15
+                else:
+                    x_pos = 20 + (idx * 15)
+                    y_pos = 20
+                
+                canvas_data['instrumentation'].append({
+                    'id': tag,
+                    'tag': tag,
+                    'type': self._normalize_instrument_type(inst_type),
+                    'function': function,
+                    'position': {
+                        'x': x_pos,
+                        'y': y_pos
+                    },
+                    'connected_to': connected_to,
+                    'range': instrument.get('range', ''),
+                    'set_point': instrument.get('set_point', ''),
+                    'properties': {
+                        'draggable': True,
+                        'selectable': True
+                    }
+                })
+            
+            # Add piping connections with waypoints
+            for idx, pipe in enumerate(piping_details):
+                line_number = pipe.get('line_number', f'LINE-{idx+1}')
+                from_equip = pipe.get('from_equipment', '')
+                to_equip = pipe.get('to_equipment', '')
+                
+                # Find positions
+                if from_equip in equipment_positions and to_equip in equipment_positions:
+                    from_pos = equipment_positions[from_equip]
+                    to_pos = equipment_positions[to_equip]
+                    
+                    # Create waypoints for orthogonal routing
+                    mid_x = (from_pos['x'] + to_pos['x']) / 2
+                    waypoints = [
+                        {'x': from_pos['x'], 'y': from_pos['y']},
+                        {'x': mid_x, 'y': from_pos['y']},
+                        {'x': mid_x, 'y': to_pos['y']},
+                        {'x': to_pos['x'], 'y': to_pos['y']}
+                    ]
+                    
+                    canvas_data['piping'].append({
+                        'id': line_number,
+                        'line_number': line_number,
+                        'from': from_equip,
+                        'to': to_equip,
+                        'waypoints': waypoints,
+                        'size': pipe.get('pipe_size', ''),
+                        'specification': pipe.get('pipe_class', ''),
+                        'flow_direction': 'forward',
+                        'fluid': pipe.get('fluid', ''),
+                        'properties': {
+                            'editable': True
+                        }
+                    })
+            
+            # Add safety annotations
+            for idx, safety in enumerate(safety_systems):
+                canvas_data['annotations'].append({
+                    'id': f'SAFETY-{idx+1}',
+                    'type': 'safety',
+                    'text': f"{safety.get('tag', '')}: {safety.get('device_type', '')}",
+                    'position': {
+                        'x': 85,
+                        'y': 10 + (idx * 5)
+                    },
+                    'related_to': safety.get('protected_equipment', ''),
+                    'properties': {
+                        'color': 'red',
+                        'priority': 'high'
+                    }
+                })
+            
+            # Add design notes
+            design_params = conversion.design_parameters or {}
+            if design_params:
+                notes_text = []
+                if design_params.get('design_pressure'):
+                    notes_text.append(f"Design Pressure: {design_params['design_pressure']}")
+                if design_params.get('design_temperature'):
+                    notes_text.append(f"Design Temperature: {design_params['design_temperature']}")
+                
+                if notes_text:
+                    canvas_data['annotations'].append({
+                        'id': 'DESIGN-NOTES',
+                        'type': 'notes',
+                        'text': ' | '.join(notes_text),
+                        'position': {'x': 5, 'y': 95},
+                        'related_to': '',
+                        'properties': {'color': 'blue'}
+                    })
+            
+            logger.info(f"✅ Canvas data created (smart layout):")
+            logger.info(f"   - Equipment: {len(canvas_data['equipment'])}")
+            logger.info(f"   - Instruments: {len(canvas_data['instrumentation'])}")
+            logger.info(f"   - Pipes: {len(canvas_data['piping'])}")
+            logger.info(f"   - Annotations: {len(canvas_data['annotations'])}")
             
             return Response(canvas_data, status=status.HTTP_200_OK)
             
@@ -748,6 +886,48 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+    
+    def _normalize_equipment_type(self, equip_type: str) -> str:
+        """Normalize equipment type to canvas-compatible symbol"""
+        equip_type_lower = equip_type.lower()
+        
+        if 'pump' in equip_type_lower:
+            return 'pump'
+        elif 'vessel' in equip_type_lower or 'tank' in equip_type_lower or 'drum' in equip_type_lower:
+            return 'vessel'
+        elif 'column' in equip_type_lower or 'tower' in equip_type_lower:
+            return 'column'
+        elif 'heat exchanger' in equip_type_lower or 'exchanger' in equip_type_lower:
+            return 'heat_exchanger'
+        elif 'cooler' in equip_type_lower:
+            return 'cooler'
+        elif 'heater' in equip_type_lower:
+            return 'heater'
+        elif 'compressor' in equip_type_lower:
+            return 'compressor'
+        elif 'turbine' in equip_type_lower:
+            return 'turbine'
+        else:
+            return 'vessel'  # Default fallback
+    
+    def _normalize_instrument_type(self, inst_type: str) -> str:
+        """Normalize instrument type to canvas-compatible symbol"""
+        inst_type_lower = inst_type.lower()
+        
+        if 'pressure' in inst_type_lower:
+            return 'pressure_indicator'
+        elif 'temperature' in inst_type_lower:
+            return 'temperature_indicator'
+        elif 'level' in inst_type_lower:
+            return 'level_indicator'
+        elif 'flow' in inst_type_lower:
+            return 'flow_indicator'
+        elif 'control' in inst_type_lower and 'valve' in inst_type_lower:
+            return 'control_valve'
+        elif 'valve' in inst_type_lower:
+            return 'valve'
+        else:
+            return 'indicator'  # Default fallback
 
 
 class ConversionFeedbackViewSet(viewsets.ModelViewSet):
