@@ -54,6 +54,10 @@ except ImportError as e:
 class DrawingConfig:
     """Configuration for AI-powered P&ID drawing generation"""
     
+    # Generation Mode Selection
+    # Options: 'programmatic' (professional CAD-style), 'ai' (DALL-E), 'auto' (try AI first, fallback to programmatic)
+    GENERATION_MODE = config('PID_GENERATION_MODE', default='programmatic')
+    
     # DALL-E 3 Settings (Best Quality)
     DALLE3_MODEL = "dall-e-3"
     DALLE3_SIZE = "1792x1024"  # Landscape HD
@@ -202,12 +206,12 @@ class PFDToPIDConverter:
     
     def generate_pid_drawing(self, pfd_data, pid_specs, output_path=None):
         """
-        Generate visual P&ID drawing from specifications using AI image generation
+        Generate visual P&ID drawing from specifications
         
-        Advanced multi-model approach:
-        1. Try DALL-E 3 (HD quality, best results)
-        2. Fallback to DALL-E 2 (if DALL-E 3 fails)
-        3. Final fallback to programmatic PDF generation
+        Multi-mode approach based on configuration:
+        1. 'programmatic': Use professional programmatic drawing (default, no AI)
+        2. 'ai': Use AI generation (DALL-E 3 → DALL-E 2 → fallback)
+        3. 'auto': Try AI first, then fallback to programmatic
         
         Args:
             pfd_data: Extracted PFD data
@@ -217,7 +221,8 @@ class PFDToPIDConverter:
         Returns:
             str: Path to the generated P&ID drawing PDF
         """
-        logger.info("🎨 Starting AI-powered P&ID diagram generation...")
+        logger.info("🎨 Starting P&ID diagram generation...")
+        logger.info(f"📋 Generation mode: {DrawingConfig.GENERATION_MODE}")
         
         # Determine output path
         if output_path is None:
@@ -228,38 +233,84 @@ class PFDToPIDConverter:
             drawing_number = pid_specs.get('pid_drawing_number', 'PID-001')
             output_path = os.path.join(pid_drawings_dir, f"{drawing_number}.pdf")
         
-        # Validate API key
-        if not DrawingConfig.is_api_key_valid():
-            logger.warning("⚠️ OpenAI API key not configured or invalid. Using programmatic fallback.")
-            return self._create_fallback_pid_drawing(pid_specs, output_path)
+        # Mode 1: Programmatic-first (recommended, no API costs)
+        if DrawingConfig.GENERATION_MODE == 'programmatic':
+            logger.info("🎯 Using programmatic generation (professional CAD-style)")
+            return self._create_programmatic_pid_drawing(pfd_data, pid_specs, output_path)
         
-        # Try DALL-E 3 first (best quality)
-        if DrawingConfig.ENABLE_DALLE3 and openai_client:
-            try:
-                logger.info("🚀 Attempting P&ID generation with DALL-E 3 (HD Quality)...")
-                image = self._generate_with_dalle3(pfd_data, pid_specs)
-                if image:
-                    self._create_pid_pdf(image, pid_specs, output_path)
-                    logger.info(f"✅ P&ID drawing generated successfully with DALL-E 3: {output_path}")
-                    return output_path
-            except Exception as e:
-                logger.warning(f"⚠️ DALL-E 3 generation failed: {str(e)}")
+        # Mode 2: AI-first (requires OpenAI API key)
+        elif DrawingConfig.GENERATION_MODE == 'ai':
+            logger.info("🤖 Using AI generation (DALL-E)")
+            
+            # Validate API key
+            if not DrawingConfig.is_api_key_valid():
+                logger.warning("⚠️ OpenAI API key not configured. Switching to programmatic fallback.")
+                return self._create_programmatic_pid_drawing(pfd_data, pid_specs, output_path)
+            
+            # Try DALL-E 3 first
+            if DrawingConfig.ENABLE_DALLE3 and openai_client:
+                try:
+                    logger.info("🚀 Attempting P&ID generation with DALL-E 3 (HD Quality)...")
+                    image = self._generate_with_dalle3(pfd_data, pid_specs)
+                    if image:
+                        self._create_pid_pdf(image, pid_specs, output_path)
+                        logger.info(f"✅ P&ID drawing generated successfully with DALL-E 3: {output_path}")
+                        return output_path
+                except Exception as e:
+                    logger.warning(f"⚠️ DALL-E 3 generation failed: {str(e)}")
+            
+            # Try DALL-E 2 as fallback
+            if DrawingConfig.ENABLE_DALLE2_FALLBACK:
+                try:
+                    logger.info("🔄 Attempting P&ID generation with DALL-E 2 (Fallback)...")
+                    image = self._generate_with_dalle2(pfd_data, pid_specs)
+                    if image:
+                        self._create_pid_pdf(image, pid_specs, output_path)
+                        logger.info(f"✅ P&ID drawing generated successfully with DALL-E 2: {output_path}")
+                        return output_path
+                except Exception as e:
+                    logger.warning(f"⚠️ DALL-E 2 generation failed: {str(e)}")
+            
+            # Final fallback: Programmatic generation
+            logger.info("🎨 AI generation failed, using professional programmatic generation...")
+            return self._create_programmatic_pid_drawing(pfd_data, pid_specs, output_path)
         
-        # Try DALL-E 2 as fallback
-        if DrawingConfig.ENABLE_DALLE2_FALLBACK:
-            try:
-                logger.info("🔄 Attempting P&ID generation with DALL-E 2 (Fallback)...")
-                image = self._generate_with_dalle2(pfd_data, pid_specs)
-                if image:
-                    self._create_pid_pdf(image, pid_specs, output_path)
-                    logger.info(f"✅ P&ID drawing generated successfully with DALL-E 2: {output_path}")
-                    return output_path
-            except Exception as e:
-                logger.warning(f"⚠️ DALL-E 2 generation failed: {str(e)}")
-        
-        # Final fallback: Programmatic generation
-        logger.info("📄 Using programmatic specification-based P&ID generation (final fallback)...")
-        return self._create_fallback_pid_drawing(pid_specs, output_path)
+        # Mode 3: Auto (try AI, fallback to programmatic)
+        else:  # 'auto' mode or any other value
+            logger.info("🔄 Using auto mode (AI with programmatic fallback)")
+            
+            # Only try AI if API key is valid
+            if DrawingConfig.is_api_key_valid():
+                # Try DALL-E 3 first (best quality)
+                if DrawingConfig.ENABLE_DALLE3 and openai_client:
+                    try:
+                        logger.info("🚀 Attempting P&ID generation with DALL-E 3 (HD Quality)...")
+                        image = self._generate_with_dalle3(pfd_data, pid_specs)
+                        if image:
+                            self._create_pid_pdf(image, pid_specs, output_path)
+                            logger.info(f"✅ P&ID drawing generated successfully with DALL-E 3: {output_path}")
+                            return output_path
+                    except Exception as e:
+                        logger.warning(f"⚠️ DALL-E 3 generation failed: {str(e)}")
+                
+                # Try DALL-E 2 as fallback
+                if DrawingConfig.ENABLE_DALLE2_FALLBACK:
+                    try:
+                        logger.info("🔄 Attempting P&ID generation with DALL-E 2 (Fallback)...")
+                        image = self._generate_with_dalle2(pfd_data, pid_specs)
+                        if image:
+                            self._create_pid_pdf(image, pid_specs, output_path)
+                            logger.info(f"✅ P&ID drawing generated successfully with DALL-E 2: {output_path}")
+                            return output_path
+                    except Exception as e:
+                        logger.warning(f"⚠️ DALL-E 2 generation failed: {str(e)}")
+            else:
+                logger.info("⚠️ OpenAI API key not configured, skipping AI generation")
+            
+            # Final fallback: Programmatic generation (Professional CAD-style)
+            logger.info("🎨 Using professional programmatic generation...")
+            return self._create_programmatic_pid_drawing(pfd_data, pid_specs, output_path)
+        return self._create_programmatic_pid_drawing(pfd_data, pid_specs, output_path)
     
     def _generate_with_dalle3(self, pfd_data, pid_specs):
         """
@@ -556,6 +607,76 @@ Style: Technical engineering drawing, professional P&ID, blueprint quality, blac
             os.remove(temp_image_path)
         
         logger.info(f"✅ P&ID PDF created: {output_path}")
+    
+    def _create_programmatic_pid_drawing(self, pfd_data, pid_specs, output_path):
+        """
+        Create professional P&ID drawing using programmatic approach
+        Uses the new ProgrammaticPIDGenerator for CAD-quality technical drawings
+        
+        Args:
+            pfd_data: Extracted PFD data
+            pid_specs: Generated P&ID specifications
+            output_path: Path to save the PDF
+            
+        Returns:
+            str: Path to generated P&ID drawing
+        """
+        try:
+            logger.info("🎨 Creating professional programmatic P&ID drawing...")
+            
+            from .programmatic_pid_generator import generate_pid_from_specs
+            
+            # Convert pid_specs to drawing_specs format
+            drawing_specs = {
+                'drawing_number': pid_specs.get('pid_drawing_number', 'PID-001'),
+                'drawing_title': pid_specs.get('pid_title', 'P&ID Drawing'),
+                'project_name': pid_specs.get('project_info', {}).get('project_name', 'Project'),
+                'project_code': pid_specs.get('project_info', {}).get('project_code', ''),
+                'revision': pid_specs.get('pid_revision', 'A'),
+                'equipment': pid_specs.get('equipment_list', []),
+                'piping': [],
+                'instrumentation': pid_specs.get('instrument_list', []),
+                'valves': []
+            }
+            
+            # Extract piping connections from specs
+            for equip in pid_specs.get('equipment_list', []):
+                connections = equip.get('connections', [])
+                for conn in connections:
+                    if isinstance(conn, dict):
+                        drawing_specs['piping'].append({
+                            'from_equipment': equip.get('tag'),
+                            'to_equipment': conn.get('to_tag', ''),
+                            'line_number': conn.get('line_number', '')
+                        })
+            
+            # Extract valves from instrument list or dedicated valve list
+            for inst in pid_specs.get('instrument_list', []):
+                inst_type = inst.get('type', '').lower()
+                if 'valve' in inst_type or 'hv' in inst.get('tag', '').lower():
+                    drawing_specs['valves'].append({
+                        'tag': inst.get('tag'),
+                        'type': inst_type
+                    })
+            
+            # Add safety devices as valves
+            for safety in pid_specs.get('safety_devices', []):
+                drawing_specs['valves'].append({
+                    'tag': safety.get('tag'),
+                    'type': 'safety'
+                })
+            
+            # Generate the P&ID using programmatic generator
+            result_path = generate_pid_from_specs(drawing_specs, output_path)
+            
+            logger.info(f"✅ Professional programmatic P&ID created: {result_path}")
+            return result_path
+            
+        except Exception as e:
+            logger.error(f"❌ Programmatic P&ID generation failed: {str(e)}")
+            logger.warning("⚠️ Falling back to specification sheet...")
+            # Fallback to basic spec sheet if programmatic generation fails
+            return self._create_fallback_pid_drawing(pid_specs, output_path)
     
     def _create_fallback_pid_drawing(self, pid_specs, output_path):
         """Create a basic P&ID drawing using programmatic approach (fallback)"""

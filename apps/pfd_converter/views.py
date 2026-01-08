@@ -96,6 +96,49 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
                 pfd_doc.file.close()
                 
                 pfd_doc.extracted_data = extracted_data
+                
+                # NEW: Run comprehensive analysis automatically
+                logger.info(f"🔍 Running comprehensive PFD analysis...")
+                try:
+                    from .comprehensive_analysis_service import analyze_pfd_comprehensive
+                    
+                    # Get full file path
+                    import os
+                    from django.conf import settings
+                    file_path = os.path.join(settings.MEDIA_ROOT, str(pfd_doc.file))
+                    
+                    # Prepare document info
+                    document_info = {
+                        'document_number': pfd_doc.document_number,
+                        'document_title': pfd_doc.document_title,
+                        'revision': pfd_doc.revision,
+                        'project_name': pfd_doc.project_name,
+                        'project_code': pfd_doc.project_code
+                    }
+                    
+                    # Run comprehensive analysis (detailed level)
+                    comprehensive_report = analyze_pfd_comprehensive(
+                        file_path,
+                        document_info=document_info,
+                        analysis_level="detailed"
+                    )
+                    
+                    # Store in database
+                    pfd_doc.comprehensive_analysis = comprehensive_report
+                    
+                    logger.info(f"✅ Comprehensive analysis completed:")
+                    logger.info(f"   - Equipment: {len(comprehensive_report.get('all_equipment', []))}")
+                    logger.info(f"   - Piping: {len(comprehensive_report.get('all_piping', []))}")
+                    logger.info(f"   - Instruments: {len(comprehensive_report.get('all_instruments', []))}")
+                    
+                except Exception as comp_error:
+                    logger.warning(f"⚠️ Comprehensive analysis failed (non-critical): {str(comp_error)}")
+                    # Don't fail the entire upload if comprehensive analysis fails
+                    pfd_doc.comprehensive_analysis = {
+                        "error": str(comp_error),
+                        "status": "failed"
+                    }
+                
                 pfd_doc.status = 'converted'
                 pfd_doc.processing_completed_at = timezone.now()
                 pfd_doc.processing_duration = (
@@ -219,11 +262,12 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
                 # Check if we have cached extracted data from upload step
                 if pfd_doc.extracted_data and isinstance(pfd_doc.extracted_data, dict):
                     logger.info("✅ Using cached vision data from upload (skipping OpenAI call)")
-                    # Execute pipeline with cached data (no need to open file)
+                    # Execute pipeline with cached data and pass pfd_document for AI drawing
                     pipeline_results = pipeline.convert(
                         pfd_file=None,
                         project_info=project_info,
-                        cached_vision_data=pfd_doc.extracted_data
+                        cached_vision_data=pfd_doc.extracted_data,
+                        pfd_document=pfd_doc  # Pass document for accessing stored PFD file
                     )
                 else:
                     logger.info("⚠️ No cached data found, re-extracting from PFD file")
@@ -621,6 +665,89 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
         conversion.save()
         
         return Response(PIDConversionSerializer(conversion).data)
+    
+    @action(detail=True, methods=['get'], url_path='load-to-canvas')
+    def load_to_canvas(self, request, pk=None):
+        """
+        Convert AI-generated P&ID to editable canvas format
+        
+        GET /api/v1/pfd/conversions/{id}/load-to-canvas/
+        
+        Uses GPT-4 Vision to extract elements from the P&ID drawing and
+        converts them to structured data for the 2D Expert Mode canvas editor.
+        
+        Returns:
+            Canvas-compatible JSON with:
+            - equipment: List of equipment items with positions
+            - instrumentation: List of instruments with positions
+            - piping: List of pipe routes and connections
+            - annotations: List of notes and labels
+            - layout: Drawing metadata and settings
+        """
+        try:
+            from .pid_to_canvas_converter import PIDToCanvasConverter
+            
+            conversion = self.get_object()
+            
+            # Check if P&ID drawing exists
+            if not conversion.pid_file:
+                return Response(
+                    {'error': 'P&ID drawing not generated yet. Please generate P&ID first.'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Build full path to P&ID file
+            pid_file_path = os.path.join(settings.MEDIA_ROOT, str(conversion.pid_file))
+            
+            if not os.path.exists(pid_file_path):
+                return Response(
+                    {'error': 'P&ID drawing file not found on server.'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            logger.info(f"📐 Converting P&ID to canvas format: {pid_file_path}")
+            
+            # Extract original PID specifications
+            pid_specs = {
+                'equipment_list': conversion.equipment_list or [],
+                'instrument_list': conversion.instrument_list or [],
+                'piping_specifications': conversion.piping_details or [],
+                'safety_devices': conversion.safety_systems or [],
+                'drawing_info': {
+                    'drawing_number': conversion.pid_drawing_number,
+                    'title': conversion.pid_title,
+                    'revision': conversion.pid_revision,
+                    'date': str(conversion.created_at.date()),
+                    'project_name': conversion.pfd_document.project_name if conversion.pfd_document else ''
+                }
+            }
+            
+            # Convert P&ID to canvas data using AI
+            converter = PIDToCanvasConverter()
+            canvas_data = converter.convert_pid_to_canvas_data(pid_file_path, pid_specs)
+            
+            logger.info(f"✅ Canvas data created:")
+            logger.info(f"   - Equipment: {len(canvas_data.get('equipment', []))}")
+            logger.info(f"   - Instruments: {len(canvas_data.get('instrumentation', []))}")
+            logger.info(f"   - Pipes: {len(canvas_data.get('piping', []))}")
+            logger.info(f"   - Annotations: {len(canvas_data.get('annotations', []))}")
+            
+            # Add conversion metadata
+            canvas_data['metadata']['conversion_id'] = str(conversion.id)
+            canvas_data['metadata']['original_pid_file'] = str(conversion.pid_file)
+            canvas_data['metadata']['generated_at'] = str(conversion.created_at)
+            
+            return Response(canvas_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"❌ Canvas conversion failed: {str(e)}", exc_info=True)
+            return Response(
+                {
+                    'error': 'Failed to convert P&ID to canvas format',
+                    'detail': str(e)
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class ConversionFeedbackViewSet(viewsets.ModelViewSet):

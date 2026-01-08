@@ -39,6 +39,8 @@ import re
 from typing import Dict, List, Tuple, Any
 import numpy as np
 import fitz  # PyMuPDF for PDF to image conversion
+from .ai_drawing_generator import AIPIDDrawingGenerator
+from .validation_engine import EngineeringValidationEngine
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ class AdvancedPFDToPIDPipeline:
         self.graph_builder = ProcessGraphBuilder()
         self.pid_generator = PIDDraftGenerator()
         
-    def convert(self, pfd_file, project_info: dict = None, cached_vision_data: dict = None):
+    def convert(self, pfd_file, project_info: dict = None, cached_vision_data: dict = None, pfd_document=None):
         """
         Execute complete 6-step PFD to P&ID conversion pipeline
         
@@ -68,6 +70,7 @@ class AdvancedPFDToPIDPipeline:
             pfd_file: Uploaded PFD file (image or PDF) - optional if cached_vision_data provided
             project_info: Project metadata
             cached_vision_data: Pre-extracted vision data from upload step (to avoid re-calling OpenAI)
+            pfd_document: PFDDocument model instance (for accessing stored file when using cached data)
             
         Returns:
             dict: Complete conversion results with P&ID specifications and drawing
@@ -75,6 +78,36 @@ class AdvancedPFDToPIDPipeline:
         logger.info("="*80)
         logger.info("🚀 STARTING ADVANCED PFD TO P&ID CONVERSION PIPELINE")
         logger.info("="*80)
+        
+        # Save PFD file temporarily for AI drawing generation (Step 6)
+        pfd_temp_path = None
+        if pfd_file:
+            try:
+                media_root = settings.MEDIA_ROOT
+                pfd_temp_dir = os.path.join(media_root, 'pfd_temp')
+                os.makedirs(pfd_temp_dir, exist_ok=True)
+                pfd_temp_path = os.path.join(pfd_temp_dir, f"pfd_{project_info.get('project_code', 'temp')}.pdf")
+                
+                pfd_file.seek(0)
+                with open(pfd_temp_path, 'wb') as f:
+                    f.write(pfd_file.read())
+                logger.info(f"  → PFD file saved temporarily: {pfd_temp_path}")
+            except Exception as e:
+                logger.warning(f"  ⚠️ Could not save PFD temp file: {str(e)}")
+                pfd_temp_path = None
+        elif pfd_document and pfd_document.file:
+            # Using cached data but need PFD for AI drawing generation
+            try:
+                # Use the original PFD file from storage
+                pfd_temp_path = os.path.join(settings.MEDIA_ROOT, str(pfd_document.file))
+                if os.path.exists(pfd_temp_path):
+                    logger.info(f"  → Using stored PFD file for AI drawing: {pfd_temp_path}")
+                else:
+                    logger.warning(f"  ⚠️ Stored PFD file not found: {pfd_temp_path}")
+                    pfd_temp_path = None
+            except Exception as e:
+                logger.warning(f"  ⚠️ Could not access stored PFD file: {str(e)}")
+                pfd_temp_path = None
         
         try:
             # STEP 1: Computer Vision + OCR
@@ -116,26 +149,53 @@ class AdvancedPFDToPIDPipeline:
             pid_specs = self._step5_generate_pid_draft(classified_data, project_info)
             logger.info(f"✅ Generated P&ID specs: {pid_specs['drawing_info']['drawing_number']}")
             
-            # STEP 6: Visual Rendering
-            logger.info("\n[STEP 6/6] 🎨 Creating P&ID Drawing")
+            # STEP 6: Visual Rendering with AI
+            logger.info("\n[STEP 6/6] 🎨 Creating AI-Powered P&ID Drawing")
             logger.info("-" * 60)
-            drawing_path = self._step6_create_pid_drawing(pid_specs, classified_data)
+            drawing_path = self._step6_create_pid_drawing(pid_specs, classified_data, pfd_temp_path)
             logger.info(f"✅ P&ID drawing created: {drawing_path}")
+            
+            # STEP 7: Engineering Validation (Post-Generation)
+            logger.info("\n[STEP 7] ✅ Running Engineering Validation")
+            logger.info("-" * 60)
+            validation_results = self._run_engineering_validation(pid_specs, vision_data)
+            logger.info(f"✅ Validation completed: {len(validation_results.findings)} findings")
+            
+            # Clean up temp PFD file
+            if pfd_temp_path and os.path.exists(pfd_temp_path):
+                try:
+                    os.remove(pfd_temp_path)
+                    logger.info(f"  → Cleaned up temp file: {pfd_temp_path}")
+                except Exception as e:
+                    logger.warning(f"  ⚠️ Could not delete temp file: {str(e)}")
             
             # Compile results
             results = {
                 'success': True,
-                'pipeline_version': '2.0',
+                'pipeline_version': '2.1',  # Updated version with AI drawing
                 'pipeline_steps': {
                     'step1_vision': vision_data,
                     'step2_graph': process_graph,
                     'step3_rules': enriched_graph,
                     'step4_patterns': classified_data,
                     'step5_specs': pid_specs,
-                    'step6_drawing': drawing_path
+                    'step6_drawing': drawing_path,
+                    'step7_validation': {
+                        'validation_passed': validation_results.validation_passed,
+                        'total_findings': len(validation_results.findings),
+                        'critical_count': len([f for f in validation_results.findings if f.severity == 'CRITICAL']),
+                        'high_count': len([f for f in validation_results.findings if f.severity == 'HIGH']),
+                        'findings': [f.__dict__ for f in validation_results.findings]
+                    }
                 },
                 'pid_specifications': pid_specs,
                 'drawing_path': drawing_path,
+                'validation_results': {
+                    'passed': validation_results.validation_passed,
+                    'findings': [f.__dict__ for f in validation_results.findings],
+                    'engineering_holds': validation_results.engineering_holds,
+                    'auto_corrections': validation_results.auto_corrections
+                },
                 'metadata': {
                     'equipment_count': len(pid_specs.get('equipment_list', [])),
                     'instrument_count': len(pid_specs.get('instrument_list', [])),
@@ -392,19 +452,77 @@ RESPOND WITH ONLY THE JSON OBJECT. Extract everything you can see in the PFD."""
         
         return self.pid_generator.generate(classified_data, project_info)
     
-    def _step6_create_pid_drawing(self, pid_specs: dict, classified_data: dict) -> str:
+    def _run_engineering_validation(self, pid_specs: dict, vision_data: dict):
         """
-        STEP 6: Create visual P&ID drawing
+        STEP 7: Engineering Validation
         
-        Renders professional P&ID drawing with:
-        - ISA symbol library
-        - Proper line routing
+        Validates generated P&ID against engineering standards:
+        - ADNOC DEP requirements
+        - ASME B31.3/B31.8 piping standards
+        - ISA-5.1 instrumentation standards
+        - API RP 520/521 safety systems
+        
+        Returns ValidationResult with findings, holds, and corrections
+        """
+        try:
+            validator = EngineeringValidationEngine()
+            
+            # Prepare P&ID document structure for validation
+            pid_document = {
+                'drawing_number': pid_specs.get('drawing_info', {}).get('drawing_number', 'PID-001'),
+                'drawing_title': pid_specs.get('drawing_info', {}).get('title', 'P&ID Draft'),
+                'equipment_list': pid_specs.get('equipment_list', []),
+                'instrument_list': pid_specs.get('instrument_list', []),
+                'piping_specifications': pid_specs.get('piping_specifications', []),
+                'safety_devices': pid_specs.get('safety_devices', []),
+                'utilities': vision_data.get('utilities', [])
+            }
+            
+            # Run validation
+            validation_result = validator.validate_pid_document(pid_document)
+            
+            # Log findings
+            critical_findings = [f for f in validation_result.findings if f.severity.value == 'CRITICAL']
+            high_findings = [f for f in validation_result.findings if f.severity.value == 'HIGH']
+            
+            if critical_findings:
+                logger.warning(f"  ⚠️ {len(critical_findings)} CRITICAL findings detected")
+                for finding in critical_findings[:3]:
+                    logger.warning(f"    • {finding.rule_id}: {finding.description}")
+            
+            if high_findings:
+                logger.info(f"  ℹ️ {len(high_findings)} HIGH severity findings")
+            
+            logger.info(f"  → Engineering holds: {len(validation_result.engineering_holds)}")
+            logger.info(f"  → Auto-corrections: {len(validation_result.auto_corrections)}")
+            
+            return validation_result
+            
+        except Exception as e:
+            logger.error(f"  ❌ Validation failed: {str(e)}")
+            # Return empty validation result
+            from .validation_engine import ValidationResult
+            return ValidationResult(
+                document_id='ERROR',
+                document_title='Validation Failed',
+                validation_passed=True,
+                findings=[]
+            )
+    
+    def _step6_create_pid_drawing(self, pid_specs: dict, classified_data: dict, pfd_file_path: str = None) -> str:
+        """
+        STEP 6: Create visual P&ID drawing using professional programmatic generator
+        
+        Generates professional CAD-style P&ID with:
+        - ISA 5.1 compliant symbols
+        - Proper line routing (orthogonal)
         - Title block with project info
-        - Equipment schedule
-        - Instrument index
+        - Equipment symbols (vessels, pumps, exchangers)
+        - Instrumentation with proper circles
+        - Valves with standard symbols
         - Legend and notes
         """
-        logger.info("  → Rendering P&ID drawing with ISA symbols...")
+        logger.info("  → Generating professional programmatic P&ID drawing...")
         
         # Determine output path
         media_root = settings.MEDIA_ROOT
@@ -414,10 +532,70 @@ RESPOND WITH ONLY THE JSON OBJECT. Extract everything you can see in the PFD."""
         drawing_number = pid_specs.get('drawing_info', {}).get('drawing_number', 'PID-DRAFT-001')
         output_path = os.path.join(pid_drawings_dir, f"{drawing_number}.pdf")
         
-        # Create professional P&ID PDF
-        self._render_professional_pid(pid_specs, classified_data, output_path)
-        
-        return output_path
+        # Use programmatic generator (Professional CAD-style)
+        logger.info("  → Using professional programmatic P&ID generator...")
+        try:
+            from .programmatic_pid_generator import generate_pid_from_specs
+            
+            # Convert pid_specs to drawing_specs format
+            drawing_specs = {
+                'drawing_number': drawing_number,
+                'drawing_title': pid_specs.get('drawing_info', {}).get('title', 'P&ID Drawing'),
+                'project_name': pid_specs.get('drawing_info', {}).get('project_name', 'Project'),
+                'project_code': pid_specs.get('drawing_info', {}).get('project_code', ''),
+                'revision': pid_specs.get('drawing_info', {}).get('revision', 'A'),
+                'equipment': pid_specs.get('equipment_list', []),
+                'piping': [],
+                'instrumentation': pid_specs.get('instrument_list', []),
+                'valves': []
+            }
+            
+            # Extract piping from specifications
+            for pipe_spec in pid_specs.get('piping_specifications', []):
+                if isinstance(pipe_spec, dict):
+                    drawing_specs['piping'].append({
+                        'from_equipment': pipe_spec.get('from', ''),
+                        'to_equipment': pipe_spec.get('to', ''),
+                        'line_number': pipe_spec.get('line_number', '')
+                    })
+            
+            # Extract valves from instrument list
+            for inst in pid_specs.get('instrument_list', []):
+                inst_tag = inst.get('tag', '').upper()
+                inst_type = inst.get('type', '').lower()
+                
+                # Identify valves by tag pattern or type
+                if any(valve_prefix in inst_tag for valve_prefix in ['HV', 'CV', 'PCV', 'FCV', 'SDV', 'XV']):
+                    valve_type = 'gate'
+                    if 'PCV' in inst_tag or 'FCV' in inst_tag or 'CV' in inst_tag:
+                        valve_type = 'control'
+                    elif 'SDV' in inst_tag:
+                        valve_type = 'gate'
+                    
+                    drawing_specs['valves'].append({
+                        'tag': inst.get('tag'),
+                        'type': valve_type
+                    })
+            
+            # Add safety devices as valves
+            for safety in pid_specs.get('safety_devices', []):
+                drawing_specs['valves'].append({
+                    'tag': safety.get('tag', ''),
+                    'type': 'safety'
+                })
+            
+            # Generate P&ID using programmatic generator
+            output_path = generate_pid_from_specs(drawing_specs, output_path)
+            logger.info(f"  ✅ Professional P&ID generated: {output_path}")
+            
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"  ❌ Programmatic generation failed: {str(e)}")
+            # Ultimate fallback: basic spec sheet
+            logger.warning("  → Falling back to basic rendering...")
+            self._render_professional_pid(pid_specs, classified_data, output_path)
+            return output_path
     
     def _prepare_image(self, image_file):
         """

@@ -542,8 +542,8 @@ REPORT_FOOTER_NOTE_FORMATTED = REPORT_FOOTER_NOTE.format(company=REPORT_COMPANY_
 # Email backend configuration
 EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.smtp.EmailBackend')
 
-# AWS SES SMTP Configuration (AP-SOUTH-1 Region - Mumbai)
-EMAIL_HOST = config('EMAIL_HOST', default='email-smtp.ap-south-1.amazonaws.com')
+# AWS SES SMTP Configuration (ME-CENTRAL-1 Region - Middle East)
+EMAIL_HOST = config('EMAIL_HOST', default='email-smtp.me-central-1.amazonaws.com')
 EMAIL_PORT = safe_cast_int(config('EMAIL_PORT', default='587'), 587)
 EMAIL_USE_TLS = safe_cast_bool(config('EMAIL_USE_TLS', default='True'), True)
 EMAIL_USE_SSL = safe_cast_bool(config('EMAIL_USE_SSL', default='False'), False)
