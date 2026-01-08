@@ -164,9 +164,10 @@ def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) 
             logger.error(f"PyPDF2 fallback also failed: {str(e2)}")
             return []
     
-    # Deduplicate comments
-    comments = _deduplicate_comments(comments)
-    logger.info(f"After deduplication: {len(comments)} comments")
+    # SKIP DEDUPLICATION: Keep all comments including duplicates on same page
+    # comments = _deduplicate_comments(comments)
+    # logger.info(f"After deduplication: {len(comments)} comments")
+    logger.info(f"Keeping all comments including duplicates: {len(comments)} comments")
     
     # Filter out incomplete comments
     comments = _filter_incomplete_comments(comments)
@@ -201,7 +202,32 @@ def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) 
         logger.info(f"✅ Cleaned {len(cleaned_comments)} comments, skipped {skipped_count} technical elements")
         comments = cleaned_comments
     
+    # Filter out comments with "Not Provided" reviewer (no attribution)
+    comments = _filter_not_provided_reviewers(comments)
+    logger.info(f"After filtering 'Not Provided' reviewers: {len(comments)} comments")
+    
     return comments
+
+
+def _filter_not_provided_reviewers(comments: List[ReviewerComment]) -> List[ReviewerComment]:
+    """
+    Filter out comments where reviewer name is 'Not Provided' or similar
+    These are usually technical elements or unattributed annotations
+    """
+    filtered = []
+    not_provided_patterns = ['not provided', 'not_provided', 'unknown', 'n/a', 'na', '']
+    
+    for comment in comments:
+        reviewer = comment.reviewer_name.lower().strip() if comment.reviewer_name else ''
+        
+        # Skip if reviewer matches any "not provided" pattern
+        if reviewer in not_provided_patterns:
+            logger.debug(f"Filtered out comment with 'Not Provided' reviewer: {comment.comment_text[:50]}...")
+            continue
+        
+        filtered.append(comment)
+    
+    return filtered
 
 
 def _map_annot_type_to_comment_type(annot_type: str) -> str:
@@ -395,54 +421,62 @@ def _extract_discipline(text: str, reviewer_name: str) -> str:
 
 def _filter_incomplete_comments(comments: List[ReviewerComment]) -> List[ReviewerComment]:
     """
-    Filter out incomplete or malformed comments
+    Filter out incomplete or malformed comments using intelligent criteria
     
-    Criteria for incomplete comments:
-    - Too short (less than 10 meaningful characters)
-    - Ends abruptly (no proper ending)
-    - Contains only partial sentence fragments
-    - Just names or labels without content
+    SMART FILTERING: Only reject if clearly not a meaningful comment
+    - Has reviewer attribution? Likely meaningful
+    - Has actual words (not just numbers)? Keep it
+    - Not an AutoCAD/technical element? Keep it
     """
     filtered_comments = []
     
     for comment in comments:
         text = comment.comment_text.strip()
+        reviewer = comment.reviewer_name.strip() if comment.reviewer_name else ""
         
-        # Skip if too short
-        if len(text) < 10:
-            logger.debug(f"Skipped too short: {text}")
+        # Minimum length check (3 chars)
+        if len(text) < 3:
+            logger.debug(f"Skipped too short (< 3 chars): {text}")
             continue
         
-        # Skip if it's just a name
-        if re.match(r'^[A-Z][a-z]+(\s+[A-Z][a-z]+){0,2}$', text):
-            logger.debug(f"Skipped name only: {text}")
+        # Skip if it's ONLY numbers/symbols (AutoCAD coordinates/dimensions)
+        if re.match(r'^[\d\s\.\-\/\,\:\(\)\[\]]+$', text):
+            logger.debug(f"Skipped numbers/symbols only: {text}")
             continue
         
-        # Skip if it's just numbers or codes
-        if re.match(r'^[\d\s\.\-\/\,]+$', text):
-            logger.debug(f"Skipped numbers only: {text}")
+        # Skip if it's ONLY a proper name pattern (First Last format with no other content)
+        # But allow if it has punctuation or additional context
+        if len(text) > 5 and re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+$', text) and reviewer.lower() == text.lower():
+            logger.debug(f"Skipped name only (matches reviewer): {text}")
             continue
         
-        # Check for incomplete sentences (very short without punctuation)
-        # But allow imperative sentences like "Update design"
-        words = text.split()
-        if len(words) < 3 and not any(text.endswith(p) for p in '.!?'):
-            # Allow if it starts with action verbs
-            action_verbs = ['update', 'check', 'verify', 'review', 'revise', 'modify', 
-                          'change', 'add', 'remove', 'confirm', 'clarify', 'provide']
-            if not any(text.lower().startswith(verb) for verb in action_verbs):
-                logger.debug(f"Skipped incomplete: {text}")
-                continue
-        
-        # Skip if it's just annotation labels
+        # Skip ONLY if it's exactly an annotation label (nothing else)
         annotation_labels = ['text box', 'callout', 'free text', 'note', 'sticky note', 
-                            'highlight', 'typewriter', 'comment']
-        if text.lower() in annotation_labels:
-            logger.debug(f"Skipped annotation label: {text}")
+                            'highlight', 'typewriter', 'comment', 'annotation']
+        if text.lower().strip() in annotation_labels:
+            logger.debug(f"Skipped annotation label only: {text}")
             continue
         
-        # Comment passes all checks
-        filtered_comments.append(comment)
+        # SMART DECISION: If comment has a reviewer AND contains actual words, keep it
+        # This handles: "no code", "ok", "done", "check", "approved", "rejected", etc.
+        has_letters = bool(re.search(r'[a-zA-Z]{2,}', text))  # At least 2 consecutive letters
+        
+        if has_letters and reviewer and reviewer.lower() != 'not provided':
+            # This is likely a meaningful comment from a real reviewer
+            filtered_comments.append(comment)
+            continue
+        
+        # For comments without clear reviewer, be more selective
+        if not reviewer or reviewer.lower() == 'not provided':
+            # Needs to have some substance (multiple words or punctuation)
+            words = text.split()
+            if len(words) >= 2 or any(text.endswith(p) for p in '.!?,;:'):
+                filtered_comments.append(comment)
+            else:
+                logger.debug(f"Skipped single word without reviewer: {text}")
+        else:
+            # Has reviewer, keep it
+            filtered_comments.append(comment)
     
     return filtered_comments
 

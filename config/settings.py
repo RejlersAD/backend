@@ -72,7 +72,7 @@ INSTALLED_APPS = [
     # Third-party apps
     'rest_framework',
     'corsheaders',
-    # 'drf_spectacular',  # Temporarily disabled due to schema generation errors
+    'drf_spectacular',  # API documentation
     
     # Local apps - Core
     'apps.core',
@@ -84,6 +84,7 @@ INSTALLED_APPS = [
     'apps.pid_analysis',
     'apps.pfd_converter',
     'apps.crs',
+    'apps.finance',  # Finance Invoice Automation
     
     # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
     # Enabling this will cause startup hangs (MLflow server not available)
@@ -272,6 +273,7 @@ print(f"[JWT] ===================================")
 # PRODUCTION URLS
 PRODUCTION_FRONTEND = config('FRONTEND_URL', default='https://airflow-frontend.vercel.app')
 PRODUCTION_BACKEND = config('BACKEND_URL', default='https://aiflowbackend-production.up.railway.app')
+FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:5173')  # For email links
 
 # ⚠️ CRITICAL: DO NOT CHANGE - CORS_ALLOW_ALL_ORIGINS MUST BE FALSE
 # Setting this to True will break JWT authentication with credentials
@@ -574,3 +576,19 @@ print(f"Use TLS: {EMAIL_USE_TLS}")
 print(f"SMTP User Configured: {'Yes' if EMAIL_HOST_USER else 'No'}")
 print(f"Default From Email: {DEFAULT_FROM_EMAIL}")
 print("=" * 60 + "\n")
+
+# ========================================================================
+# Finance Module - Approval Team Email Addresses
+# ========================================================================
+FINANCE_EMAIL = config('FINANCE_EMAIL', default='khanabdullahomar886@gmail.com')
+FINANCE_RICHA_EMAIL = config('FINANCE_RICHA_EMAIL', default='test.user1@rejlers.ae')
+RICHA_EMAIL = FINANCE_RICHA_EMAIL  # Alias for backward compatibility
+JAMAL_EMAIL = config('FINANCE_JAMAL_EMAIL', default='test.user2@rejlers.ae')
+RAFAT_EMAIL = config('FINANCE_RAFAT_EMAIL', default='test.user3@rejlers.ae')
+MOE_EMAIL = config('FINANCE_MOE_EMAIL', default='test.user4@rejlers.ae')
+JARMO_EMAIL = config('FINANCE_JARMO_EMAIL', default='test.user5@rejlers.ae')
+ANEEF_EMAIL = config('FINANCE_ANEEF_EMAIL', default='test.user6@rejlers.ae')
+ALEKSI_EMAIL = config('FINANCE_ALEKSI_EMAIL', default='test.user7@rejlers.ae')
+SHERWIN_EMAIL = config('FINANCE_SHERWIN_EMAIL', default='test.user8@rejlers.ae')
+NIJUM_EMAIL = config('FINANCE_NIJUM_EMAIL', default='test.user9@rejlers.ae')
+HR_ADMIN_EMAIL = config('FINANCE_HR_ADMIN_EMAIL', default='test.user10@rejlers.ae')
