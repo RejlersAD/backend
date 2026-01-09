@@ -438,7 +438,7 @@ This is an automated notification from RAD AI Finance System.
                 
                 msg.send()
                 logger.info(f"✅ Upload notification sent to {recipient} for invoice {invoice.invoice_number}" + 
-                          (" (with approval button)" if approval_button_html else ""))
+                          (" (with approval button)" if approval_section_html else ""))
             
             logger.info(f"📧 EMAIL NOTIFICATION COMPLETE - Sent to {len(recipients)} recipients")
             return True
