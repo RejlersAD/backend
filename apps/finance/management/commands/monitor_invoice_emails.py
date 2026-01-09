@@ -243,7 +243,7 @@ class Command(BaseCommand):
 
             if first_approval:
                 # Send approval request with PDF attachment
-                email_service.send_approval_request(invoice, first_approval)
+                email_service.send_approval_request(first_approval, invoice)
                 self.stdout.write(self.style.SUCCESS(f'Forwarded to Richa: {richa_email}'))
             else:
                 logger.warning(f'No first-level approval found for invoice {invoice.id}')

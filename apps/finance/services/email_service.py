@@ -18,7 +18,7 @@ class EmailService:
     def __init__(self):
         self.from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@radai.com')
     
-    def send_approval_request(self, invoice, approval):
+    def send_approval_request(self, approval, invoice):
         """Send approval request email with approve/reject buttons and PDF attachment"""
         try:
             # Parse approval metadata for CC and title

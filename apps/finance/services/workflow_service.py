@@ -324,7 +324,7 @@ class FinanceWorkflowService:
                 return
             
             for approval in approvals:
-                self.email_service.send_approval_request(invoice, approval)
+                self.email_service.send_approval_request(approval, invoice)
                 self._add_audit_log(invoice, "approval_email_sent", f"Sent to {approval.approver_email}")
             
         except Exception as e:
@@ -434,7 +434,7 @@ class FinanceWorkflowService:
                     for next_approval in next_approvals:
                         try:
                             logger.info(f"📤 Sending to {next_approval.approver_email} ({next_approval.approver_name})...")
-                            result = self.email_service.send_approval_request(invoice, next_approval)
+                            result = self.email_service.send_approval_request(next_approval, invoice)
                             if result:
                                 logger.info(f"✅ Email sent successfully to {next_approval.approver_email}")
                             else:
