@@ -42,11 +42,6 @@ class EmailService:
             
             subject = f"Invoice Approval Required ({level_text}) - {invoice.invoice_number}"
             
-            # CC section for email body
-            cc_text = ""
-            if cc_emails:
-                cc_text = f"<p><strong>CC:</strong> {', '.join(cc_emails)}</p>"
-            
             # Safe display values
             try:
                 amount_display = f"{invoice.total_amount:,.2f}" if invoice.total_amount else "0.00"
@@ -55,60 +50,50 @@ class EmailService:
             
             vendor_display = invoice.vendor_name or "N/A"
             currency_display = invoice.currency or "AED"
+            type_display = invoice.get_invoice_type_display()
+            uploaded_by = f"{invoice.submitted_by.get_full_name()} ({invoice.submitted_by.email})" if invoice.submitted_by else "Unknown User"
+            status_display = invoice.get_status_display()
             
+            # Simple, clean HTML that works
             html_content = f"""
             <html>
-            <body style="font-family: Arial, sans-serif; padding: 20px; background: #f5f5f5;">
-                <div style="max-width: 650px; margin: 0 auto; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-                    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; color: white;">
-                        <h1 style="margin: 0; font-size: 28px;">📋 Invoice Approval Required</h1>
-                        <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">{level_text}</p>
-                    </div>
-                    
-                    <div style="padding: 30px;">
-                        {cc_text}
-                        
-                        <div style="background: #f8f9fa; padding: 25px; border-radius: 8px; margin: 20px 0;">
-                            <h3 style="margin-top: 0; color: #2c3e50;">📄 Invoice Details</h3>
-                            <table style="width: 100%; border-collapse: collapse;">
-                                <tr style="background-color: white;">
-                                    <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: bold; width: 40%;">Invoice Number</td>
-                                    <td style="padding: 12px; border: 1px solid #dee2e6;">{invoice.invoice_number}</td>
-                                </tr>
-                                <tr style="background-color: #f8f9fa;">
-                                    <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: bold;">Vendor</td>
-                                    <td style="padding: 12px; border: 1px solid #dee2e6;">{vendor_display}</td>
-                                </tr>
-                                <tr style="background-color: white;">
-                                    <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: bold;">Amount</td>
-                                    <td style="padding: 12px; border: 1px solid #dee2e6;"><strong style="color: #28a745; font-size: 18px;">{currency_display} {amount_display}</strong></td>
-                                </tr>
-                                <tr style="background-color: #f8f9fa;">
-                                    <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: bold;">Type</td>
-                                    <td style="padding: 12px; border: 1px solid #dee2e6;">{invoice.get_invoice_type_display()}</td>
-                                </tr>
-                                <tr style="background-color: white;">
-                                    <td style="padding: 12px; border: 1px solid #dee2e6; font-weight: bold;">Date</td>
-                                    <td style="padding: 12px; border: 1px solid #dee2e6;">{invoice.invoice_date or 'N/A'}</td>
-                                </tr>
-                            </table>
-                        </div>
-                        
-                        <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; border-radius: 4px;">
-                            <p style="margin: 0; color: #856404;"><strong>📎 Note:</strong> Invoice PDF is attached to this email for your review.</p>
-                        </div>
-                        
-                        <div style="text-align: center; margin: 40px 0 20px 0;">
-                            <a href="{approval_page_url}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 16px 40px; text-decoration: none; border-radius: 8px; font-size: 16px; font-weight: 600; box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3); transition: all 0.3s;">
-                                Click Here to Open Approval Form →
-                            </a>
-                        </div>
-                        
-                        <p style="text-align: center; color: #6c757d; font-size: 14px; margin-top: 15px;">
-                            Review the attached PDF and submit your approval decision in RAD AI
-                        </p>
-                    </div>
-                </div>
+            <body>
+                <h2>Invoice Approval Required</h2>
+                <p><strong>Level:</strong> {level_text}</p>
+                
+                <h3>Invoice Details:</h3>
+                <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; max-width: 600px;">
+                    <tr>
+                        <td><strong>Invoice Number</strong></td>
+                        <td>{invoice.invoice_number}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Vendor</strong></td>
+                        <td>{vendor_display}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Amount</strong></td>
+                        <td><strong>{currency_display} {amount_display}</strong></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Type</strong></td>
+                        <td>{type_display}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Uploaded By</strong></td>
+                        <td>{uploaded_by}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Status</strong></td>
+                        <td>{status_display}</td>
+                    </tr>
+                </table>
+                
+                <p><strong>Note:</strong> Invoice PDF is attached to this email.</p>
+                
+                <p><a href="{approval_page_url}" style="background: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">Click Here to Approve/Reject</a></p>
+                
+                <p>Approval Link: <a href="{approval_page_url}">{approval_page_url}</a></p>
             </body>
             </html>
             """
@@ -335,66 +320,64 @@ class EmailService:
                 if first_approval and first_approval.approver_email == recipient:
                     approval_page_url = f"{frontend_url}/finance/approve/{first_approval.approval_token}"
                     approval_button_html = f"""
-                <div style="background: #e7f3ff; border-left: 4px solid #007bff; padding: 20px; margin: 25px 0; border-radius: 8px;">
-                    <h3 style="margin-top: 0; color: #004085;">⚡ Action Required - Level {first_approval.approval_level} Approval</h3>
-                    <p style="color: #004085; margin: 10px 0;">This invoice requires your approval to proceed in the workflow.</p>
-                    <div style="text-align: center; margin: 20px 0;">
-                        <a href="{approval_page_url}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 16px 40px; text-decoration: none; border-radius: 8px; font-size: 16px; font-weight: 600; box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);">
-                            Click Here to Open Approval Form →
+                <div style="padding: 15px 0;">
+                    <p><strong>⚡ Action Required - Level {first_approval.approval_level} Approval</strong></p>
+                    <p>This invoice requires your approval to proceed in the workflow.</p>
+                    <p style="text-align: center; margin: 15px 0;">
+                        <a href="{approval_page_url}" style="background:#007bff; color:white; padding:12px 30px; text-decoration:none; border-radius:4px; font-weight:bold;">
+                            Click Here to Approve/Reject →
                         </a>
-                    </div>
-                    <p style="text-align: center; color: #004085; font-size: 13px; margin: 5px 0;">
-                        Review the attached PDF and submit your approval decision
                     </p>
+                    <p style="font-size: 12px;">Review the attached PDF and submit your decision</p>
+                    <p style="font-size: 12px;">Or copy this link: {approval_page_url}</p>
                 </div>
                 """
             
-                # Build HTML content with personalized approval button
+                # Build HTML content with personalized approval button - simple format
                 html_content = f"""
             <html>
             <body style="font-family: Arial, sans-serif; padding: 20px;">
-                <h2 style="color: #2c3e50;">📤 New Invoice Uploaded</h2>
+                <h2>📤 New Invoice Uploaded</h2>
                 
                 <p>A new invoice has been uploaded to the system and is ready for processing.</p>
                 
-                <div style="background: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0;">
-                    <h3>Invoice Details:</h3>
-                    <table style="width: 100%; border-collapse: collapse;">
-                        <tr style="background-color: #f8f9fa;">
-                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Invoice Number</td>
-                            <td style="padding: 10px; border: 1px solid #dee2e6;">{invoice.invoice_number}</td>
-                        </tr>
-                        <tr>
-                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Vendor</td>
-                            <td style="padding: 10px; border: 1px solid #dee2e6;">{vendor_display}</td>
-                        </tr>
-                        <tr style="background-color: #f8f9fa;">
-                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Amount</td>
-                            <td style="padding: 10px; border: 1px solid #dee2e6;"><strong>{currency_display} {amount_display}</strong></td>
-                        </tr>
-                        <tr>
-                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Type</td>
-                            <td style="padding: 10px; border: 1px solid #dee2e6;">{type_display}</td>
-                        </tr>
-                        <tr style="background-color: #f8f9fa;">
-                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Uploaded By</td>
-                            <td style="padding: 10px; border: 1px solid #dee2e6;">{uploaded_by}</td>
-                        </tr>
-                        <tr>
-                            <td style="padding: 10px; border: 1px solid #dee2e6; font-weight: bold;">Status</td>
-                            <td style="padding: 10px; border: 1px solid #dee2e6;">{status_display}</td>
-                        </tr>
-                    </table>
-                </div>
+                <h3>Invoice Details:</h3>
+                <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; margin: 15px 0;">
+                    <tr>
+                        <td><strong>Invoice Number</strong></td>
+                        <td>{invoice.invoice_number}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Vendor</strong></td>
+                        <td>{vendor_display}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Amount</strong></td>
+                        <td><strong>{currency_display} {amount_display}</strong></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Type</strong></td>
+                        <td>{type_display}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Uploaded By</strong></td>
+                        <td>{uploaded_by}</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Status</strong></td>
+                        <td>{status_display}</td>
+                    </tr>
+                </table>
                 
                 {approval_button_html}
                 
-                <div style="margin: 30px 0;">
-                    <a href="{invoice_url}" style="background: #007bff; color: white; padding: 15px 40px; text-decoration: none; border-radius: 5px; display: inline-block; font-size: 16px; font-weight: bold;">
+                <p style="margin-top: 20px;">
+                    <a href="{invoice_url}" style="background:#28a745; color:white; padding:10px 25px; text-decoration:none; border-radius:4px; font-weight:bold;">
                         📋 View Invoice Details
                     </a>
-                </div>
-                <p style="color: #6c757d; font-size: 12px; margin-top: 30px;">
+                </p>
+                
+                <p style="color:#666; font-size:12px; margin-top:30px;">
                     The invoice is now in the approval workflow. You will receive approval requests as configured.<br>
                     This is an automated notification from RAD AI Finance System.
                 </p>
