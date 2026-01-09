@@ -5,7 +5,8 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
 from . import views_enhanced
-from . import views_dexpi
+from . import s3_views
+# from . import views_dexpi  # Commented out - file doesn't exist
 from .history_views import (
     pfd_history_overview,
     pfd_all_uploads,
@@ -31,7 +32,13 @@ urlpatterns = [
     
     path('', include(router.urls)),
     
-    # S3 PFD/PID Integration
+    # S3 Document Management (Smart AWS S3 Integration)
+    path('s3/stats/', s3_views.s3_storage_stats, name='s3-storage-stats'),
+    path('s3/documents/', s3_views.list_project_documents, name='s3-list-documents'),
+    path('s3/generate-url/', s3_views.generate_document_url, name='s3-generate-url'),
+    path('s3/delete/<path:s3_key>/', s3_views.delete_s3_document, name='s3-delete-document'),
+    
+    # S3 PFD/PID Integration (existing legacy endpoint)
     path('s3/', include('apps.pfd.urls.s3_urls')),
     
     # AI-Assisted PFD to P&ID Conversion (6-Step Workflow)
@@ -42,9 +49,9 @@ urlpatterns = [
     path('download-valves/<uuid:conversion_id>/', views_enhanced.download_valve_list, name='download-valves'),
     path('conversion-status/<uuid:conversion_id>/', views_enhanced.conversion_status, name='conversion-status'),
     
-    # DEXPI Rule-Based PFD to P&ID Conversion (Deterministic)
-    path('convert-dexpi/', views_dexpi.convert_pfd_to_pid_dexpi, name='convert-dexpi'),
-    path('upload-convert-dexpi/', views_dexpi.convert_pfd_file_to_pid_dexpi, name='upload-convert-dexpi'),
-    path('engineering-rules/', views_dexpi.get_engineering_rules, name='engineering-rules'),
-    path('download-pid/', views_dexpi.download_pid_graph, name='download-pid-graph'),
+    # DEXPI Rule-Based PFD to P&ID Conversion (Deterministic) - Commented out (views_dexpi doesn't exist)
+    # path('convert-dexpi/', views_dexpi.convert_pfd_to_pid_dexpi, name='convert-dexpi'),
+    # path('upload-convert-dexpi/', views_dexpi.convert_pfd_file_to_pid_dexpi, name='upload-convert-dexpi'),
+    # path('engineering-rules/', views_dexpi.get_engineering_rules, name='engineering-rules'),
+    # path('download-pid/', views_dexpi.download_pid_graph, name='download-pid-graph'),
 ]

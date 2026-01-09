@@ -16,6 +16,8 @@ class PFDDocument(TimeStampedModel):
     """
     STATUS_CHOICES = [
         ('uploaded', 'Uploaded'),
+        ('analyzing', 'Analyzing'),
+        ('analyzed', 'Analyzed'),
         ('processing', 'Processing'),
         ('processed', 'Processed'),
         ('converted', 'Converted'),
@@ -39,6 +41,12 @@ class PFDDocument(TimeStampedModel):
     file_name = models.CharField(max_length=255, blank=True)
     file_size = models.BigIntegerField(null=True, blank=True, help_text='File size in bytes')
     file_type = models.CharField(max_length=50, blank=True)
+    
+    # Philosophy document (required companion document)
+    philosophy_file = models.FileField(upload_to='philosophy_documents/%Y/%m/%d/', null=True, blank=True)
+    philosophy_file_name = models.CharField(max_length=255, blank=True)
+    philosophy_file_size = models.BigIntegerField(null=True, blank=True, help_text='File size in bytes')
+    philosophy_file_type = models.CharField(max_length=50, blank=True)
     
     # Processing status
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='uploaded')

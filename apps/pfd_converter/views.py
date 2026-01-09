@@ -11,6 +11,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 import os
 import logging
 
+from .s3_document_manager import get_s3_manager
+
 logger = logging.getLogger(__name__)
 
 from .models import PFDDocument, PIDConversion, ConversionFeedback
@@ -61,21 +63,119 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
         
         try:
             file = serializer.validated_data['file']
+            philosophy_file = serializer.validated_data.get('philosophy_file', None)  # Optional
             
-            # Create PFD document
-            pfd_doc = PFDDocument.objects.create(
-                uploaded_by=request.user,
-                file=file,
-                file_name=file.name,
-                file_size=file.size,
-                file_type=file.content_type,
-                document_title=serializer.validated_data.get('document_title', ''),
-                document_number=serializer.validated_data.get('document_number', ''),
-                revision=serializer.validated_data.get('revision', ''),
-                project_name=serializer.validated_data.get('project_name', ''),
-                project_code=serializer.validated_data.get('project_code', ''),
-                status='processing'
-            )
+            # Get metadata for S3 upload
+            metadata = {
+                'document_title': serializer.validated_data.get('document_title', ''),
+                'document_number': serializer.validated_data.get('document_number', ''),
+                'revision': serializer.validated_data.get('revision', ''),
+                'project_name': serializer.validated_data.get('project_name', ''),
+            }
+            project_code = serializer.validated_data.get('project_code', 'default')
+            
+            # Reset file pointers before processing
+            file.seek(0)
+            if philosophy_file:
+                philosophy_file.seek(0)
+            
+            # Smart S3 Upload: Try S3 first, but don't fail if it doesn't work
+            s3_manager = get_s3_manager()
+            pfd_s3_data = None
+            philosophy_s3_data = None
+            
+            if s3_manager.enabled:
+                try:
+                    logger.info(f"[S3] Attempting to upload documents to S3...")
+                    
+                    # Upload PFD to S3
+                    file.seek(0)
+                    pfd_s3_data = s3_manager.upload_pfd(
+                        file,
+                        file.name,
+                        project_code,
+                        request.user.id,
+                        metadata
+                    )
+                    
+                    # Upload Philosophy to S3 (if provided)
+                    if philosophy_file:
+                        philosophy_file.seek(0)
+                        philosophy_s3_data = s3_manager.upload_philosophy(
+                            philosophy_file,
+                            philosophy_file.name,
+                            project_code,
+                            request.user.id,
+                            metadata
+                        )
+                    
+                    if 'error' not in pfd_s3_data and (not philosophy_file or 'error' not in philosophy_s3_data):
+                        logger.info(f"[S3] ✅ Documents uploaded successfully")
+                        logger.info(f"[S3] PFD: {pfd_s3_data['s3_key']}")
+                        if philosophy_s3_data:
+                            logger.info(f"[S3] Philosophy: {philosophy_s3_data['s3_key']}")
+                    else:
+                        logger.warning(f"[S3] Upload had errors, continuing with local storage")
+                        logger.warning(f"[S3] PFD Error: {pfd_s3_data.get('error', 'None')}")
+                        if philosophy_file:
+                            logger.warning(f"[S3] Philosophy Error: {philosophy_s3_data.get('error', 'None')}")
+                        pfd_s3_data = None
+                        philosophy_s3_data = None
+                except Exception as s3_error:
+                    logger.error(f"[S3] Exception during upload: {str(s3_error)}")
+                    logger.info(f"[S3] Continuing with local storage only")
+                    pfd_s3_data = None
+                    philosophy_s3_data = None
+            
+            # Reset file pointers again before Django save
+            file.seek(0)
+            if philosophy_file:
+                philosophy_file.seek(0)
+            
+            # Create PFD document - Always save locally
+            create_kwargs = {
+                'uploaded_by': request.user,
+                'file': file,
+                'file_name': file.name,
+                'file_size': file.size,
+                'file_type': file.content_type,
+                'document_title': metadata['document_title'],
+                'document_number': metadata['document_number'],
+                'revision': metadata['revision'],
+                'project_name': metadata['project_name'],
+                'project_code': project_code,
+                'status': 'processing'
+            }
+            
+            # Add philosophy file fields only if provided
+            if philosophy_file:
+                create_kwargs.update({
+                    'philosophy_file': philosophy_file,
+                    'philosophy_file_name': philosophy_file.name,
+                    'philosophy_file_size': philosophy_file.size,
+                    'philosophy_file_type': philosophy_file.content_type,
+                })
+            
+            pfd_doc = PFDDocument.objects.create(**create_kwargs)
+            
+            # Store S3 keys in extracted_data if upload was successful
+            if pfd_s3_data and 'error' not in pfd_s3_data and (not philosophy_file or (philosophy_s3_data and 'error' not in philosophy_s3_data)):
+                pfd_doc.extracted_data = {
+                    's3_storage': {
+                        'enabled': True,
+                        'pfd': pfd_s3_data,
+                        'philosophy': philosophy_s3_data,
+                        'uploaded_at': timezone.now().isoformat()
+                    }
+                }
+            else:
+                pfd_doc.extracted_data = {
+                    's3_storage': {
+                        'enabled': False,
+                        'reason': 'S3 upload failed or disabled',
+                        'storage': 'local'
+                    }
+                }
             
             # Extract PFD data using Advanced AI Pipeline
             pfd_doc.processing_started_at = timezone.now()
@@ -180,6 +280,70 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=True, methods=['post'])
+    def analyze(self, request, pk=None):
+        """
+        Phase 1: Analyze PFD to extract modules, connectivity, and complexity
+        
+        POST /api/v1/pfd/documents/{id}/analyze/
+        
+        Returns comprehensive analysis:
+        - Number of modules
+        - Detailed module information
+        - Module connectivity
+        - Recommended P&ID split strategy
+        """
+        pfd_doc = self.get_object()
+        
+        try:
+            from .pfd_analyzer import PFDAnalyzer
+            
+            logger.info(f"[Phase 1] Starting PFD Analysis for: {pfd_doc.file_name}")
+            
+            # Update status
+            pfd_doc.status = 'analyzing'
+            pfd_doc.save()
+            
+            # Run comprehensive analysis
+            analyzer = PFDAnalyzer()
+            analysis_result = analyzer.analyze_pfd_document(pfd_doc)
+            
+            if analysis_result.get('status') == 'failed':
+                return Response(
+                    analysis_result,
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            
+            return Response(analysis_result, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"[Phase 1] Analysis failed: {str(e)}")
+            pfd_doc.status = 'failed'
+            pfd_doc.error_message = f"Analysis failed: {str(e)}"
+            pfd_doc.save()
+            
+            return Response(
+                {'error': 'Analysis failed', 'detail': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['get'])
+    def get_analysis(self, request, pk=None):
+        """
+        Get existing PFD analysis results
+        
+        GET /api/v1/pfd/documents/{id}/get_analysis/
+        """
+        pfd_doc = self.get_object()
+        
+        if pfd_doc.extracted_data and 'pfd_analysis' in pfd_doc.extracted_data:
+            return Response(pfd_doc.extracted_data['pfd_analysis'], status=status.HTTP_200_OK)
+        else:
+            return Response(
+                {'error': 'No analysis found', 'message': 'Run analysis first'},
+                status=status.HTTP_404_NOT_FOUND
             )
 
 
