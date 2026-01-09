@@ -2,7 +2,7 @@
 Email Service for Finance Module
 Sends notifications and approval emails
 """
-from django.core.mail import send_mail, EmailMultiAlternatives
+from django.core.mail import send_mail, EmailMultiAlternatives, EmailMessage
 from django.template.loader import render_to_string
 from django.conf import settings
 from django.urls import reverse
@@ -54,59 +54,37 @@ class EmailService:
             uploaded_by = f"{invoice.submitted_by.get_full_name()} ({invoice.submitted_by.email})" if invoice.submitted_by else "Unknown User"
             status_display = invoice.get_status_display()
             
-            # Simple, clean HTML that works
-            html_content = f"""
-            <html>
-            <body>
-                <h2>Invoice Approval Required</h2>
-                <p><strong>Level:</strong> {level_text}</p>
-                
-                <h3>Invoice Details:</h3>
-                <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; max-width: 600px;">
-                    <tr>
-                        <td><strong>Invoice Number</strong></td>
-                        <td>{invoice.invoice_number}</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Vendor</strong></td>
-                        <td>{vendor_display}</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Amount</strong></td>
-                        <td><strong>{currency_display} {amount_display}</strong></td>
-                    </tr>
-                    <tr>
-                        <td><strong>Type</strong></td>
-                        <td>{type_display}</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Uploaded By</strong></td>
-                        <td>{uploaded_by}</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Status</strong></td>
-                        <td>{status_display}</td>
-                    </tr>
-                </table>
-                
-                <p><strong>Note:</strong> Invoice PDF is attached to this email.</p>
-                
-                <p><a href="{approval_page_url}" style="background: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">Click Here to Approve/Reject</a></p>
-                
-                <p>Approval Link: <a href="{approval_page_url}">{approval_page_url}</a></p>
-            </body>
-            </html>
-            """
+            # Plain text email body - no HTML for better deliverability
+            plain_text_body = f"""Invoice Approval Required - {level_text}
+
+Invoice {invoice.invoice_number} requires your approval.
+
+INVOICE DETAILS:
+================
+Invoice Number: {invoice.invoice_number}
+Vendor: {vendor_display}
+Amount: {currency_display} {amount_display}
+Type: {type_display}
+Uploaded By: {uploaded_by}
+Status: {status_display}
+
+APPROVAL LINK:
+{approval_page_url}
+
+Please review the attached PDF invoice and click the link above to submit your approval decision.
+
+---
+This is an automated notification from RAD AI Finance System.
+"""
             
-            # Create email with attachment
-            msg = EmailMultiAlternatives(
+            # Create email with plain text only - no HTML
+            msg = EmailMessage(
                 subject,
-                f"Invoice {invoice.invoice_number} requires your approval. Amount: {invoice.currency} {invoice.total_amount}",
+                plain_text_body,
                 self.from_email,
                 [approval.approver_email],
                 cc=cc_emails if cc_emails else None
             )
-            msg.attach_alternative(html_content, "text/html")
             
             # Attach PDF if file exists
             if invoice.file_path and os.path.exists(invoice.file_path):
@@ -314,85 +292,52 @@ class EmailService:
             
             # Send individual emails to each recipient with personalized approval button
             for recipient in recipients:
-                approval_button_html = ""
+                approval_section = ""
                 
                 # Check if this recipient has a pending Level 1 approval
                 if first_approval and first_approval.approver_email == recipient:
                     approval_page_url = f"{frontend_url}/finance/approve/{first_approval.approval_token}"
-                    approval_button_html = f"""
-                <div style="padding: 15px 0;">
-                    <p><strong>⚡ Action Required - Level {first_approval.approval_level} Approval</strong></p>
-                    <p>This invoice requires your approval to proceed in the workflow.</p>
-                    <p style="text-align: center; margin: 15px 0;">
-                        <a href="{approval_page_url}" style="background:#007bff; color:white; padding:12px 30px; text-decoration:none; border-radius:4px; font-weight:bold;">
-                            Click Here to Approve/Reject →
-                        </a>
-                    </p>
-                    <p style="font-size: 12px;">Review the attached PDF and submit your decision</p>
-                    <p style="font-size: 12px;">Or copy this link: {approval_page_url}</p>
-                </div>
-                """
+                    approval_section = f"""
+
+** ACTION REQUIRED - Level {first_approval.approval_level} Approval **
+
+This invoice requires your approval to proceed in the workflow.
+
+APPROVAL LINK:
+{approval_page_url}
+
+Please review the attached PDF and submit your approval decision.
+"""
             
-                # Build HTML content with personalized approval button - simple format
-                html_content = f"""
-            <html>
-            <body style="font-family: Arial, sans-serif; padding: 20px;">
-                <h2>📤 New Invoice Uploaded</h2>
+                # Plain text email body - no HTML for better deliverability
+                plain_text_body = f"""New Invoice Uploaded
+
+A new invoice has been uploaded to the system and is ready for processing.
+
+INVOICE DETAILS:
+================
+Invoice Number: {invoice.invoice_number}
+Vendor: {vendor_display}
+Amount: {currency_display} {amount_display}
+Type: {type_display}
+Uploaded By: {uploaded_by}
+Status: {status_display}
+{approval_section}
+
+View Invoice Details: {invoice_url}
+
+---
+The invoice is now in the approval workflow. You will receive approval requests as configured.
+This is an automated notification from RAD AI Finance System.
+"""
                 
-                <p>A new invoice has been uploaded to the system and is ready for processing.</p>
-                
-                <h3>Invoice Details:</h3>
-                <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; margin: 15px 0;">
-                    <tr>
-                        <td><strong>Invoice Number</strong></td>
-                        <td>{invoice.invoice_number}</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Vendor</strong></td>
-                        <td>{vendor_display}</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Amount</strong></td>
-                        <td><strong>{currency_display} {amount_display}</strong></td>
-                    </tr>
-                    <tr>
-                        <td><strong>Type</strong></td>
-                        <td>{type_display}</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Uploaded By</strong></td>
-                        <td>{uploaded_by}</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Status</strong></td>
-                        <td>{status_display}</td>
-                    </tr>
-                </table>
-                
-                {approval_button_html}
-                
-                <p style="margin-top: 20px;">
-                    <a href="{invoice_url}" style="background:#28a745; color:white; padding:10px 25px; text-decoration:none; border-radius:4px; font-weight:bold;">
-                        📋 View Invoice Details
-                    </a>
-                </p>
-                
-                <p style="color:#666; font-size:12px; margin-top:30px;">
-                    The invoice is now in the approval workflow. You will receive approval requests as configured.<br>
-                    This is an automated notification from RAD AI Finance System.
-                </p>
-            </body>
-            </html>
-                """
-                
-                # Send individual email
-                msg = EmailMultiAlternatives(
+                # Send individual email with plain text only
+                msg = EmailMessage(
                     subject,
-                    f"New invoice {invoice.invoice_number} uploaded by {uploaded_by}. Amount: {currency_display} {amount_display}",
+                    plain_text_body,
                     self.from_email,
                     [recipient]
                 )
-                msg.attach_alternative(html_content, "text/html")
                 
                 # Attach PDF if file exists
                 if invoice.file_path and os.path.exists(invoice.file_path):
