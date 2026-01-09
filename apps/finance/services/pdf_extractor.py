@@ -59,16 +59,18 @@ class PDFExtractor:
             logger.error(f"OCR extraction failed: {e}")
             return ""
     
-    def extract_text(self, pdf_path: str, use_ocr: bool = False) -> str:
-        """Extract text from PDF, with optional OCR fallback"""
-        text = self.extract_text_from_pdf(pdf_path)
+    def extract_text(self, pdf_path: str, use_ocr: bool = True) -> str:
+        """Extract text from PDF, ALWAYS try OCR first for better accuracy"""
+        # Try OCR first for maximum accuracy (handles both scanned and digital PDFs)
+        logger.info("🔍 Attempting OCR extraction for best text quality...")
+        text = self.extract_text_with_ocr(pdf_path)
         
-        # If extraction yielded little text and OCR is available, try OCR
-        if (not text or len(text) < 100) and not use_ocr:
-            logger.info("Standard extraction yielded little text, trying OCR...")
-            text = self.extract_text_with_ocr(pdf_path)
-        elif use_ocr:
-            text = self.extract_text_with_ocr(pdf_path)
+        # If OCR fails or yields little text, fallback to PyPDF2
+        if not text or len(text) < 50:
+            logger.info("OCR yielded insufficient text, falling back to PyPDF2...")
+            text = self.extract_text_from_pdf(pdf_path)
+        else:
+            logger.info(f"✅ OCR extraction successful: {len(text)} characters extracted")
         
         return text
     

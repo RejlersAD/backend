@@ -46,12 +46,12 @@ class InvoiceClassifier:
         """Classify using OpenAI API with intelligent data extraction"""
         try:
             prompt = f"""
-You are an expert finance invoice analyzer and classifier.
+You are an expert finance invoice analyzer and classifier. You must be EXTREMELY THOROUGH and ACCURATE in your classification.
 
-Analyze this invoice and extract ALL key information intelligently.
+READ THE ENTIRE INVOICE CAREFULLY before making any decision. Analyze this invoice and extract ALL key information intelligently.
 
 INVOICE TEXT:
-{invoice_text[:2000]}
+{invoice_text[:2500]}
 
 CRITICAL EXTRACTION RULES:
 1. INVOICE NUMBER: Look for these patterns and extract EXACTLY:
@@ -66,13 +66,52 @@ CRITICAL EXTRACTION RULES:
 
 3. TOTAL AMOUNT: Look for "Total", "Amount Due", "Grand Total", "Invoice Total"
 
-4. CLASSIFY into ONE category based on invoice content
+4. CLASSIFICATION - BE VERY CAREFUL AND THOROUGH:
+   Read the ENTIRE invoice text including:
+   - Description of goods/services (most important)
+   - Line items and their descriptions
+   - Vendor business type
+   - Product/service names
+   - Any technical terms or industry-specific language
+   
+   Then classify into ONE category:
 
-Categories:
-- "IT Invoice": Technology, software, cloud services, hardware, IT consulting, SaaS, licenses
-- "Project Invoice": Project expenses, construction, engineering, consultant fees, project materials
-- "Accounts/Finance Invoice": Banking, insurance, accounting, taxes, auditing, financial services
-- "General/Admin Invoice": Office supplies, utilities, HR, admin services, facility management
+Categories with DETAILED criteria:
+- "IT Invoice": ONLY if invoice contains technology-related items:
+  * Software licenses, SaaS subscriptions, cloud services
+  * Computer hardware, servers, networking equipment
+  * IT consulting, programming, software development
+  * Web hosting, domains, SSL certificates, APIs
+  * Examples: Microsoft licenses, AWS services, GitHub, Adobe Creative Cloud
+  
+- "Project Invoice": ONLY if invoice contains project-specific items:
+  * Project consulting fees, engineering services
+  * Construction materials, equipment rental
+  * Architectural/design services for specific projects
+  * Project-based contractor work
+  * Examples: Project management fees, construction supplies, project consultant
+  
+- "Accounts/Finance Invoice": ONLY if invoice contains financial services:
+  * Banking fees, transaction charges
+  * Insurance premiums, policies
+  * Accounting, auditing, bookkeeping services
+  * Tax preparation, financial consulting
+  * Examples: Bank service charges, insurance policies, CPA services
+  
+- "General/Admin Invoice": ONLY if invoice contains general administrative items:
+  * Office supplies, stationery, furniture
+  * Utilities (electricity, water, internet - non-IT)
+  * Facility maintenance, cleaning services
+  * HR services, recruitment, training (non-project specific)
+  * General administrative support
+  * Examples: Paper, pens, cleaning, office rent, general utilities
+
+CLASSIFICATION PROCESS:
+1. Read ALL line items and descriptions carefully
+2. Identify the PRIMARY purpose of the invoice
+3. If invoice has MIXED items, classify based on the MAJORITY (>50%) of items
+4. Be VERY specific - don't misclassify admin items as IT or vice versa
+5. When in doubt, look at the vendor's business type and main products/services
 
 RESPOND ONLY WITH VALID JSON (no markdown, no extra text):
 {{
@@ -82,23 +121,24 @@ RESPOND ONLY WITH VALID JSON (no markdown, no extra text):
     "currency": "currency code (USD/AED/EUR/etc)",
     "invoice_type": "IT Invoice|Project Invoice|Accounts/Finance Invoice|General/Admin Invoice",
     "confidence": 0.95,
-    "reasoning": "brief explanation of classification"
+    "reasoning": "Detailed explanation including: what items were found, why this category was chosen, and what makes this clearly fit this category"
 }}
 
 IMPORTANT: 
+- BE THOROUGH - Read the ENTIRE invoice before deciding
+- BE ACCURATE - Classification errors cause serious workflow problems
 - Invoice number is MANDATORY - extract it carefully from the document
-- Look at the ENTIRE text for invoice number patterns
-- Common locations: top of document, near "Invoice" heading, after "Invoice #" or "Invoice Number"
+- Reasoning MUST explain WHAT items/services were found and WHY they fit the chosen category
 """
             
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are an expert invoice analyzer. Always respond with valid JSON only. Extract exact data from invoices."},
+                    {"role": "system", "content": "You are an expert invoice analyzer. Always respond with valid JSON only. Extract exact data from invoices. BE EXTREMELY THOROUGH and ACCURATE in classification - read ALL invoice details before deciding."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.2,
-                max_tokens=400
+                temperature=0.1,
+                max_tokens=500
             )
             
             result_text = response.choices[0].message.content.strip()
