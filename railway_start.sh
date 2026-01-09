@@ -1,13 +1,22 @@
 #!/bin/bash
 set -e
+
+# Activate virtual environment if it exists
+if [ -f "/opt/venv/bin/activate" ]; then
+    echo "Activating virtual environment..."
+    source /opt/venv/bin/activate
+fi
+
 export DJANGO_SETTINGS_MODULE=config.settings
 export PYTHONUNBUFFERED=1
+export PORT="${PORT:-8000}"
 
 echo "================================"
 echo "🚀 Railway Deployment Starting..."
 echo "================================"
-echo "PORT: ${PORT:-8000}"
+echo "PORT: ${PORT}"
 echo "DATABASE_URL: ${DATABASE_URL:0:30}..." 
+echo "Python: $(which python)"
 echo "================================"
 
 # Test Django settings import
