@@ -347,8 +347,12 @@ class FinanceWorkflowService:
     def process_approval_decision(self, approval_token: str, decision: str, comments: str = '') -> bool:
         """Process approval or rejection decision"""
         try:
+            logger.info(f"🔄 Processing approval decision: token={approval_token}, decision={decision}")
+            
             approval = Approval.objects.get(approval_token=approval_token, status=ApprovalStatus.PENDING)
             invoice = approval.invoice
+            
+            logger.info(f"📋 Found approval: {approval.approver_name} (Level {approval.approval_level}) for invoice {invoice.invoice_number}")
             
             approval.status = ApprovalStatus.APPROVED if decision == 'approve' else ApprovalStatus.REJECTED
             approval.decision = decision
@@ -362,10 +366,14 @@ class FinanceWorkflowService:
                 f"{approval.approver_name} {decision}d at level {approval.approval_level}"
             )
             
-            logger.info(f"✓ {approval.approver_name} {decision}d invoice {invoice.invoice_number} (Level {approval.approval_level})")
+            logger.info(f"✅ {approval.approver_name} {decision}d invoice {invoice.invoice_number} (Level {approval.approval_level})")
             
             # Send notification
-            self.email_service.send_approval_notification(invoice, approval.approver_name, decision)
+            try:
+                self.email_service.send_approval_notification(invoice, approval.approver_name, decision)
+                logger.info(f"📧 Approval notification sent for {decision}")
+            except Exception as notif_error:
+                logger.error(f"❌ Failed to send approval notification: {notif_error}")
             
             # If rejected, mark invoice as rejected and notify vendor
             if decision == 'reject':
@@ -387,7 +395,13 @@ class FinanceWorkflowService:
             current_level = approval.approval_level
             level_approvals = invoice.approvals.filter(approval_level=current_level)
             
+            logger.info(f"📊 Level {current_level} status check: {level_approvals.count()} approvers")
+            for la in level_approvals:
+                logger.info(f"   - {la.approver_name}: {la.status}")
+            
             if all(a.status == ApprovalStatus.APPROVED for a in level_approvals):
+                logger.info(f"✅ All Level {current_level} approvals complete!")
+                
                 # Move to next level or mark as approved
                 next_level_exists = invoice.approvals.filter(approval_level=current_level + 1).exists()
                 
@@ -398,39 +412,60 @@ class FinanceWorkflowService:
                         status=ApprovalStatus.PENDING
                     )
                     
-                    logger.info(f"✓ Level {current_level} complete, sending to {next_approvals.count()} Level {current_level + 1} approvers")
+                    logger.info(f"📧 Sending emails to {next_approvals.count()} Level {current_level + 1} approvers:")
                     
                     # Get next level info for confirmation email
                     next_level_names = [na.approver_name for na in next_approvals]
                     next_level_info = ", ".join(next_level_names) if next_level_names else "Next Level Approvers"
                     
                     # Send confirmation email to current approver
-                    self.email_service.send_approval_confirmation(
-                        invoice, 
-                        approval.approver_email, 
-                        approval.approver_name,
-                        next_level_info
-                    )
+                    try:
+                        self.email_service.send_approval_confirmation(
+                            invoice, 
+                            approval.approver_email, 
+                            approval.approver_name,
+                            next_level_info
+                        )
+                        logger.info(f"✅ Confirmation sent to {approval.approver_email}")
+                    except Exception as conf_error:
+                        logger.error(f"❌ Failed to send confirmation to {approval.approver_email}: {conf_error}")
                     
                     # Send approval requests to next level
                     for next_approval in next_approvals:
-                        self.email_service.send_approval_request(invoice, next_approval)
-                        logger.info(f"  → Email sent to {next_approval.approver_email} ({next_approval.approver_name})")
+                        try:
+                            logger.info(f"📤 Sending to {next_approval.approver_email} ({next_approval.approver_name})...")
+                            result = self.email_service.send_approval_request(invoice, next_approval)
+                            if result:
+                                logger.info(f"✅ Email sent successfully to {next_approval.approver_email}")
+                            else:
+                                logger.error(f"❌ Email send returned False for {next_approval.approver_email}")
+                        except Exception as email_error:
+                            logger.error(f"❌ Failed to send email to {next_approval.approver_email}: {email_error}", exc_info=True)
                 else:
                     # All approvals complete - this was the final approval
                     invoice.status = InvoiceStatus.APPROVED
                     invoice.processed_at = timezone.now()
                     invoice.save()
                     self._add_audit_log(invoice, "fully_approved", "All approvals completed")
-                    logger.info(f"✓✓ Invoice {invoice.invoice_number} FULLY APPROVED - All levels complete")
+                    logger.info(f"✅✅ Invoice {invoice.invoice_number} FULLY APPROVED - All levels complete")
                     
                     # Send final confirmation email to last approver
-                    self.email_service.send_approval_confirmation(
-                        invoice, 
-                        approval.approver_email, 
-                        approval.approver_name,
-                        None  # No next level - this was final
-                    )
+                    try:
+                        self.email_service.send_approval_confirmation(
+                            invoice, 
+                            approval.approver_email, 
+                            approval.approver_name,
+                            None  # No next level - this was final
+                        )
+                        logger.info(f"📧 Final confirmation sent to {approval.approver_email}")
+                    except Exception as final_conf_error:
+                        logger.error(f"❌ Failed to send final confirmation: {final_conf_error}")
+            else:
+                # Not all approvals at this level are complete yet
+                pending_count = level_approvals.filter(status=ApprovalStatus.PENDING).count()
+                logger.info(f"⏳ Level {current_level} not complete yet - {pending_count} approvals still pending")
+                for la in level_approvals.filter(status=ApprovalStatus.PENDING):
+                    logger.info(f"   - Still waiting for: {la.approver_name} ({la.approver_email})")
             
             return True
             

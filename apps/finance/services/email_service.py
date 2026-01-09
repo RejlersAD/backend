@@ -275,6 +275,11 @@ class EmailService:
             richa_email = getattr(settings, 'FINANCE_RICHA_EMAIL', None)
             finance_email = getattr(settings, 'FINANCE_EMAIL', None)
             
+            logger.info(f"📧 EMAIL NOTIFICATION START")
+            logger.info(f"   Richa Email: {richa_email}")
+            logger.info(f"   Finance Email: {finance_email}")
+            logger.info(f"   From Email: {self.from_email}")
+            
             # Collect recipients
             recipients = []
             if richa_email and richa_email.strip():
@@ -282,9 +287,11 @@ class EmailService:
             if finance_email and finance_email.strip() and finance_email != richa_email:
                 recipients.append(finance_email)
             
+            logger.info(f"   Recipients: {recipients}")
+            
             # If no recipients configured, skip
             if not recipients:
-                logger.warning("No notification recipients configured for invoice uploads")
+                logger.warning("❌ No notification recipients configured for invoice uploads")
                 return False
             
             # Build invoice review URL
@@ -293,28 +300,6 @@ class EmailService:
             
             # Build approval button HTML for each recipient
             frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173')
-            
-            # Send individual emails to each recipient with personalized approval button
-            for recipient in recipients:
-                approval_button_html = ""
-                
-                # Check if this recipient has a pending Level 1 approval
-                if first_approval and first_approval.approver_email == recipient:
-                    approval_page_url = f"{frontend_url}/finance/approve/{first_approval.approval_token}"
-                    approval_button_html = f"""
-                <div style="background: #e7f3ff; border-left: 4px solid #007bff; padding: 20px; margin: 25px 0; border-radius: 8px;">
-                    <h3 style="margin-top: 0; color: #004085;">⚡ Action Required - Level {first_approval.approval_level} Approval</h3>
-                    <p style="color: #004085; margin: 10px 0;">This invoice requires your approval to proceed in the workflow.</p>
-                    <div style="text-align: center; margin: 20px 0;">
-                        <a href="{approval_page_url}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 16px 40px; text-decoration: none; border-radius: 8px; font-size: 16px; font-weight: 600; box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);">
-                            Click Here to Open Approval Form →
-                        </a>
-                    </div>
-                    <p style="text-align: center; color: #004085; font-size: 13px; margin: 5px 0;">
-                        Review the attached PDF and submit your approval decision
-                    </p>
-                </div>
-                """
             
             # Safe formatting for amount (handle None, Decimal, string)
             try:
@@ -342,8 +327,30 @@ class EmailService:
             
             subject = f"New Invoice Uploaded - {invoice.invoice_number}"
             
-            # Build HTML content with personalized approval button
-            html_content = f"""
+            # Send individual emails to each recipient with personalized approval button
+            for recipient in recipients:
+                approval_button_html = ""
+                
+                # Check if this recipient has a pending Level 1 approval
+                if first_approval and first_approval.approver_email == recipient:
+                    approval_page_url = f"{frontend_url}/finance/approve/{first_approval.approval_token}"
+                    approval_button_html = f"""
+                <div style="background: #e7f3ff; border-left: 4px solid #007bff; padding: 20px; margin: 25px 0; border-radius: 8px;">
+                    <h3 style="margin-top: 0; color: #004085;">⚡ Action Required - Level {first_approval.approval_level} Approval</h3>
+                    <p style="color: #004085; margin: 10px 0;">This invoice requires your approval to proceed in the workflow.</p>
+                    <div style="text-align: center; margin: 20px 0;">
+                        <a href="{approval_page_url}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 16px 40px; text-decoration: none; border-radius: 8px; font-size: 16px; font-weight: 600; box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);">
+                            Click Here to Open Approval Form →
+                        </a>
+                    </div>
+                    <p style="text-align: center; color: #004085; font-size: 13px; margin: 5px 0;">
+                        Review the attached PDF and submit your approval decision
+                    </p>
+                </div>
+                """
+            
+                # Build HTML content with personalized approval button
+                html_content = f"""
             <html>
             <body style="font-family: Arial, sans-serif; padding: 20px;">
                 <h2 style="color: #2c3e50;">📤 New Invoice Uploaded</h2>
@@ -393,34 +400,35 @@ class EmailService:
                 </p>
             </body>
             </html>
-            """
+                """
+                
+                # Send individual email
+                msg = EmailMultiAlternatives(
+                    subject,
+                    f"New invoice {invoice.invoice_number} uploaded by {uploaded_by}. Amount: {currency_display} {amount_display}",
+                    self.from_email,
+                    [recipient]
+                )
+                msg.attach_alternative(html_content, "text/html")
+                
+                # Attach PDF if file exists
+                if invoice.file_path and os.path.exists(invoice.file_path):
+                    with open(invoice.file_path, 'rb') as pdf_file:
+                        msg.attach(
+                            invoice.original_filename,
+                            pdf_file.read(),
+                            'application/pdf'
+                        )
+                
+                msg.send()
+                logger.info(f"✅ Upload notification sent to {recipient} for invoice {invoice.invoice_number}" + 
+                          (" (with approval button)" if approval_button_html else ""))
             
-            # Send individual email
-            msg = EmailMultiAlternatives(
-                subject,
-                f"New invoice {invoice.invoice_number} uploaded by {uploaded_by}. Amount: {currency_display} {amount_display}",
-                self.from_email,
-                [recipient]
-            )
-            msg.attach_alternative(html_content, "text/html")
-            
-            # Attach PDF if file exists
-            if invoice.file_path and os.path.exists(invoice.file_path):
-                with open(invoice.file_path, 'rb') as pdf_file:
-                    msg.attach(
-                        invoice.original_filename,
-                        pdf_file.read(),
-                        'application/pdf'
-                    )
-            
-            msg.send()
-            logger.info(f"Upload notification sent to {recipient} for invoice {invoice.invoice_number}" + 
-                      (" (with approval button)" if approval_button_html else ""))
-            
+            logger.info(f"📧 EMAIL NOTIFICATION COMPLETE - Sent to {len(recipients)} recipients")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to send upload notification: {e}", exc_info=True)
+            logger.error(f"❌ Failed to send upload notification: {e}", exc_info=True)
             return False
     
     def send_error_notification(self, invoice_number, error_type, error_message):

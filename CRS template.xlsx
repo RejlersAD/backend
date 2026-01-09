@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>PermanentRedirect</Code><Message>The bucket you are attempting to access must be addressed using the specified endpoint. Please send all future requests to this endpoint.</Message><Endpoint>user-management-rejlers.s3.ap-south-1.amazonaws.com</Endpoint><Bucket>user-management-rejlers</Bucket><RequestId>NC6THNX9RKRE13EP</RequestId><HostId>95kwtDYQOa2lIH3lAiWGKvNodw6J+lvgw5Boik9xi7dOrfItss/qB+xSulF3xi4fWKqFkmqGjh0=</HostId></Error>
