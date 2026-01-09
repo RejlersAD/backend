@@ -55,25 +55,37 @@ class EmailService:
             status_display = invoice.get_status_display()
             
             # Plain text email body - no HTML for better deliverability
-            plain_text_body = f"""Invoice Approval Required - {level_text}
+            plain_text_body = f"""
+╔══════════════════════════════════════════════════════════════════════╗
+║               INVOICE APPROVAL REQUIRED - {level_text}                
+╚══════════════════════════════════════════════════════════════════════╝
 
 Invoice {invoice.invoice_number} requires your approval.
 
-INVOICE DETAILS:
-================
-Invoice Number: {invoice.invoice_number}
-Vendor: {vendor_display}
-Amount: {currency_display} {amount_display}
-Type: {type_display}
-Uploaded By: {uploaded_by}
-Status: {status_display}
+┌─────────────────────────────────────────────────────────────────────┐
+│ INVOICE DETAILS                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  Invoice Number:    {invoice.invoice_number}
+│  Vendor:            {vendor_display}
+│  Amount:            {currency_display} {amount_display}
+│  Type:              {type_display}
+│  Uploaded By:       {uploaded_by}
+│  Status:            {status_display}
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 
-APPROVAL LINK:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ACTION REQUIRED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Please review the attached PDF invoice and use the link below to submit 
+your approval decision:
+
+🔗 APPROVAL LINK:
 {approval_page_url}
 
-Please review the attached PDF invoice and click the link above to submit your approval decision.
-
----
+───────────────────────────────────────────────────────────────────────
 This is an automated notification from RAD AI Finance System.
 """
             
@@ -299,35 +311,46 @@ This is an automated notification from RAD AI Finance System.
                     approval_page_url = f"{frontend_url}/finance/approve/{first_approval.approval_token}"
                     approval_section = f"""
 
-** ACTION REQUIRED - Level {first_approval.approval_level} Approval **
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ⚡ ACTION REQUIRED - Level {first_approval.approval_level} Approval
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 This invoice requires your approval to proceed in the workflow.
 
-APPROVAL LINK:
+🔗 APPROVAL LINK:
 {approval_page_url}
 
 Please review the attached PDF and submit your approval decision.
 """
             
                 # Plain text email body - no HTML for better deliverability
-                plain_text_body = f"""New Invoice Uploaded
+                plain_text_body = f"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                    NEW INVOICE UPLOADED                               
+╚══════════════════════════════════════════════════════════════════════╝
 
 A new invoice has been uploaded to the system and is ready for processing.
 
-INVOICE DETAILS:
-================
-Invoice Number: {invoice.invoice_number}
-Vendor: {vendor_display}
-Amount: {currency_display} {amount_display}
-Type: {type_display}
-Uploaded By: {uploaded_by}
-Status: {status_display}
+┌─────────────────────────────────────────────────────────────────────┐
+│ INVOICE DETAILS                                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  Invoice Number:    {invoice.invoice_number}
+│  Vendor:            {vendor_display}
+│  Amount:            {currency_display} {amount_display}
+│  Type:              {type_display}
+│  Uploaded By:       {uploaded_by}
+│  Status:            {status_display}
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 {approval_section}
 
-View Invoice Details: {invoice_url}
+📋 View Invoice Details: {invoice_url}
 
----
-The invoice is now in the approval workflow. You will receive approval requests as configured.
+───────────────────────────────────────────────────────────────────────
+The invoice is now in the approval workflow. You will receive approval 
+requests as configured.
+
 This is an automated notification from RAD AI Finance System.
 """
                 
