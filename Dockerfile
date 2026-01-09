@@ -1,7 +1,5 @@
-# Backend Dockerfile for RAD AI
 FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
 # Install system dependencies
@@ -16,18 +14,24 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy project files
+# Copy application code
 COPY . .
 
-# Create media and static directories
+# Create necessary directories
 RUN mkdir -p /app/media /app/staticfiles /app/media/invoices
 
 # Collect static files
 RUN python manage.py collectstatic --noinput || true
 
+# Make scripts executable
+RUN chmod +x railway_start.sh start.sh
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV DJANGO_SETTINGS_MODULE=config.settings
+
 # Expose port
 EXPOSE 8000
 
-# Run migrations and start server
-CMD python manage.py migrate && \
-    gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --timeout 120 --max-requests 1000 --max-requests-jitter 50
+# Use JSON array format for CMD to prevent signal issues
+CMD ["bash", "railway_start.sh"]
