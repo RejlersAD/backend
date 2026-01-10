@@ -116,14 +116,14 @@ class CommentCleanerConfig:
         # OpenAI configuration
         "openai": {
             "model": "gpt-3.5-turbo",
-            "max_tokens": 150,
+            "max_tokens": 500,  # Increased from 150 to handle long multi-line comments with bullet lists
             "temperature": 0.1,
             "enabled": True,
             "fallback_to_rules": True
         },
         
-        # Minimum meaningful comment length
-        "min_comment_length": 5,
+        # Minimum meaningful comment length - REDUCED from 5 to 3 to capture short comments like "OK", "Done"
+        "min_comment_length": 3,
         
         # Maximum comment length (avoid processing very long texts)
         "max_comment_length": 2000
@@ -342,30 +342,42 @@ class CommentCleaner:
         return (False, None)
     
     def _is_purely_technical(self, text: str) -> bool:
-        """Check if text is purely technical (no real comment content)"""
-        # Remove common prefixes
+        """
+        Check if text is purely technical (no real comment content)
+        
+        SMART DETECTION: Only reject if it's clearly AutoCAD/technical without meaning
+        """
         cleaned = text.strip()
         
-        # Pattern: "Name Typewriter NUMBER" with no additional content
-        name_typewriter_pattern = r"^[A-Z][a-z]+\s+[A-Z][a-z]+\s+(Typewriter|Text Box|Callout|text box|callout|Free Text|free text|Note|note)\s*\d*$"
-        if re.match(name_typewriter_pattern, cleaned, re.IGNORECASE):
+        # Pure numbers/coordinates/dimensions (no letters)
+        if re.match(r'^[\d\s\.\-\/\,\:\(\)\[\]]+$', cleaned):
             return True
         
-        # Pattern: Just annotation label with or without number
-        annotation_only = r"^(Typewriter|Text Box|text box|Callout|callout|SHX Text|AutoCAD|Free Text|free text|Note|note|Sticky Note|sticky note)\s*\d*$"
+        # ONLY annotation label with optional number, nothing else
+        # Examples: "Text Box", "Callout 5", "Free Text 123"
+        annotation_only = r'^(Typewriter|Text Box|text box|Callout|callout|SHX Text|AutoCAD|Free Text|free text|Note|note|Sticky Note|sticky note)\s*\d*$'
         if re.match(annotation_only, cleaned, re.IGNORECASE):
             return True
         
-        # Pattern: Pure coordinate/dimension
-        if re.match(r"^[\d\s\.\-\/\,]+$", cleaned):
+        # Name + Typewriter/annotation type ONLY (no actual content after)
+        # Example: "John Smith Typewriter" or "Jane Doe Text Box 5"
+        name_typewriter_pattern = r'^[A-Z][a-z]+\s+[A-Z][a-z]+\s+(Typewriter|Text Box|Callout|text box|callout|Free Text|free text|Note|note)\s*\d*$'
+        if re.match(name_typewriter_pattern, cleaned, re.IGNORECASE):
             return True
         
-        # Pattern: Name followed by just annotation type
-        name_annotation_only = r"^[A-Z][a-z]+\s+[A-Z][a-z]+\s+(text box|Text Box|Callout|callout|Free Text|Note|note)\s*[-:]?\s*$"
-        if re.match(name_annotation_only, cleaned, re.IGNORECASE):
-            return True
+        # SMART: If it has actual words beyond annotation labels, it's NOT purely technical
+        # Remove common annotation prefixes and check if there's content left
+        for prefix in ['Typewriter', 'Text Box', 'Callout', 'Free Text', 'Note', 'Sticky Note']:
+            if cleaned.lower().startswith(prefix.lower()):
+                # Check what's after the prefix
+                remaining = cleaned[len(prefix):].strip()
+                # If there's actual content (not just numbers), keep it
+                if remaining and not re.match(r'^\d+$', remaining):
+                    # Has actual comment content after annotation label
+                    if len(remaining) > 2 and re.search(r'[a-zA-Z]{2,}', remaining):
+                        return False  # NOT purely technical, has real content
         
-        return False
+        return False  # Default: keep the comment (err on side of inclusion)
     
     def _apply_rule_cleaning(self, text: str) -> str:
         """
@@ -450,68 +462,101 @@ class CommentCleaner:
     def _openai_clean(self, text: str) -> str:
         """
         Use OpenAI to intelligently clean comment text
+        EXACT PROMPT FROM CRS_EXTRACTION_LOGIC.md
         
         Args:
             text: Comment text to clean
             
         Returns:
-            Cleaned text or "SKIP" if should be skipped
+            Cleaned text or SKIP if should be skipped
         """
         if not self.openai_client:
             return text
         
-        prompt = f"""You are a PDF comment text cleaner for engineering documents.
+        # EXACT PROMPT FROM CRS_EXTRACTION_LOGIC.md
+        prompt = f"""CRITICAL: Keep COMPLETE comments. Remove names and AutoCAD/Typewriter patterns.
 
-TASK: Clean the following comment text extracted from a PDF annotation.
+Do TWO things:
+1. If this contains ONLY AutoCAD/technical elements with NO comment content 
+   (like "Typewriter 166", "SHX Text", pure dimensions), return "SKIP"
+2. For everything else, remove from the START: 
+   (a) ALL names
+   (b) ALL Typewriter patterns
+   (c) ALL annotation labels
+   BUT KEEP ENTIRE comment including all lines
 
-RULES:
-1. Return "SKIP" if the text is ONLY technical/AutoCAD elements with NO actual comment content:
-   - Just "Typewriter 166" = SKIP
-   - Just "SHX Text" = SKIP
-   - Pure numbers/coordinates like "100.5" = SKIP
-   - Drawing codes with no comment = SKIP
+AUTOCAD/TECHNICAL ELEMENTS TO REMOVE:
+- "Typewriter" in ANY form: "Typewriter 166", "Typewriter NC", "ttypewriter"
+- "SHX Text", "AutoCAD SHX"
+- Pure numbers/dimensions: "123.45", "100/200"
+- Elevations: "EL.107.000", "/EL.109.000"
 
-2. REMOVE from START (but ONLY from start):
-   - Person names (e.g., "Sreejith Rajeev", "John Smith", "Abdullah Ahmed")
-   - Annotation types: "text box", "Text Box", "Callout", "Free Text", "Note", "Sticky Note"
-   - Typewriter labels (e.g., "Typewriter 166")
-   - Title prefixes (Mr, Mrs, Dr, etc.)
-   - Any combination like "Name - text box:", "Name Callout:", etc.
+CRITICAL RULES:
+1. If text contains ONLY AutoCAD/Typewriter patterns with NO actual comment, return "SKIP"
+2. If text has a comment, remove from START: names + Typewriter + annotation labels
+3. Examples: "Sreejith Rajeev Typewriter 166" → "SKIP" (no comment after removal)
+4. Examples: "Sreejith Rajeev Typewriter 166 Update design" → "Update design"
 
-3. CRITICAL - Remove these annotation labels everywhere they appear:
-   - "text box" or "Text Box" → REMOVE
-   - "Callout" → REMOVE
-   - "Free Text" or "free text" → REMOVE
-   - "Note" or "Sticky Note" → REMOVE
-   - Remove with or without colons/hyphens
+NAME PATTERNS TO RECOGNIZE AND REMOVE (at start only):
+- Hindu names: "Dipak Kantilal", "Sreejith Rajeev", "Manoj Trivedi", "Krishna Das"
+- Muslim names: "Mohammed Al Ammari", "Ahmed Ali", "Hassan Rahman"
+- Indian names: Any Indian name pattern (first + last name)
+- Western names: "John Smith", "Maria Garcia"
 
-4. KEEP names that appear IN THE MIDDLE or END of meaningful comments:
-   - "Update design as requested by Sreejith" → KEEP as is
-   - "Coordinate with John for approval" → KEEP as is
+PATTERNS TO REMOVE (ONLY at the start):
+1. Name prefixes: "Sreejith Rajeev", "Arinya Dashna", "Subrata"
+2. Typewriter patterns: "Typewriter 166", "Typewriter NC", "ttypewriter"
+3. Structured prefixes: "Comment by Subrata (Process):"
+4. With titles: "Mr Manoj Trivedi", "Dr Rajesh Kumar"
+5. Annotation labels: "Callout", "Free Text", "Note", "Text Box"
+6. Combinations: "Sreejith Rajeev Typewriter 166", "Name Callout"
 
-5. Preserve the ACTUAL COMMENT CONTENT exactly as written.
+WHAT TO KEEP:
+- Names in middle/end of comments (they're part of content)
+- All actual comment text after the prefix
+- Technical terms, project names, or any content
 
-EXAMPLES:
-- "Sreejith Rajeev text box Update design" → "Update design"
-- "John Smith Callout: Check valve sizing" → "Check valve sizing"
-- "text box Check specifications" → "Check specifications"
-- "Typewriter 166" → "SKIP"
-- "Abdullah - Free Text: Review the calculations" → "Review the calculations"
-- "Note: Verify pressure ratings" → "Verify pressure ratings"
-- "Sticky Note Update P&ID" → "Update P&ID"
-- "Update the P&ID as discussed with Ahmed" → "Update the P&ID as discussed with Ahmed"
-- "AutoCAD SHX Text" → "SKIP"
+EXAMPLES (remove only START prefix):
+- "Dipak Kantilal Callout Update the design" → "Update the design"
+- "Sreejith Rajeev Typewriter 166 Update design" → "Update design"
+- "Darshna Free Text Please revise" → "Please revise"
+- "Mr Manoj Trivedi: Review document" → "Review document"
 
-INPUT TEXT:
-{text}
+EXAMPLES (filter out - return "SKIP"):
+- "Typewriter 166" → "SKIP" (no comment)
+- "Sreejith Rajeev Typewriter 166" → "SKIP" (no comment)
+- "B" → "SKIP" (single letter)
 
-OUTPUT (cleaned text or SKIP):"""
+EXAMPLES (DO NOT remove names in content):
+- "Update as requested by Sreejith" → "Update as requested by Sreejith"
+- "Contact Manoj for details" → "Contact Manoj for details"
+
+Input: "{text}"
+
+Output: 
+- If ONLY AutoCAD/Typewriter with NO comment: return "SKIP"
+- If has comment: return cleaned text (remove names/Typewriter from START, keep ALL comment content)"""
+
+        # EXACT SYSTEM MESSAGE FROM CRS_EXTRACTION_LOGIC.md
+        system_message = """You are an intelligent text cleaner for PDF comments. 
+Remove ALL Typewriter patterns (Typewriter 166, Typewriter NC, ttypewriter, etc.) from START only.
+Remove ALL names (Hindu names like Sreejith Rajeev, Dipak Kantilal; Muslim names like Mohammed Al Ammari; 
+Indian names, and other name patterns) from START only.
+Remove ALL annotation labels (Callout, Text Box, Sticky Notes, Free Text, Note) from START only.
+
+If after removing names/Typewriter patterns there's NO actual comment content (like just 'B', single letters, 
+or only Typewriter patterns), return 'SKIP'.
+
+If there's actual comment content, return the cleaned text.
+When in doubt about whether it's a comment, KEEP IT.
+Remove ONLY from the beginning.
+Do NOT remove names or labels that appear within the actual comment content."""
 
         try:
             response = self.openai_client.chat.completions.create(
                 model=self.config.config["openai"]["model"],
                 messages=[
-                    {"role": "system", "content": "You clean PDF comment text. Respond with ONLY the cleaned text or 'SKIP'. No explanations."},
+                    {"role": "system", "content": system_message},
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=self.config.config["openai"]["max_tokens"],

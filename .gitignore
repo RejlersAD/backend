@@ -1,3 +1,14 @@
+# ============================================
+# SECURITY: Environment & Credentials
+# ============================================
+# NEVER commit these files!
+.env
+.env.local
+.env.*.local
+*.env
+*credentials*
+*aws_credentials*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

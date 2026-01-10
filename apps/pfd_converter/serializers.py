@@ -111,13 +111,21 @@ class ConversionFeedbackSerializer(serializers.ModelSerializer):
 
 
 class PFDUploadSerializer(serializers.Serializer):
-    """Serializer for PFD file upload"""
-    file = serializers.FileField()
+    """Serializer for PFD file upload with optional philosophy document"""
+    file = serializers.FileField(help_text='PFD document file (required)')
+    philosophy_file = serializers.FileField(help_text='Philosophy document file (optional)', required=False, allow_null=True)
     document_title = serializers.CharField(max_length=255, required=False, allow_blank=True)
     document_number = serializers.CharField(max_length=100, required=False, allow_blank=True)
     revision = serializers.CharField(max_length=50, required=False, allow_blank=True)
     project_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
     project_code = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    
+    def validate(self, data):
+        """Validate that PFD file is present (philosophy is optional)"""
+        if 'file' not in data:
+            raise serializers.ValidationError({'file': 'PFD file is required'})
+        # Philosophy file is now optional - no validation needed
+        return data
 
 
 class ConversionRequestSerializer(serializers.Serializer):

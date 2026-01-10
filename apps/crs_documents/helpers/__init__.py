@@ -26,7 +26,7 @@ except ImportError:
     CLEANER_AVAILABLE = False
 
 __all__ = [
-    # Comment Extraction
+    # PDF Comment Extraction
     'extract_reviewer_comments',
     'classify_comment',
     'get_comment_statistics',
