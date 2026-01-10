@@ -181,6 +181,113 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
                 {'error': str(e)},
                 status=status.HTTP_400_BAD_REQUEST
             )
+    
+    @action(detail=True, methods=['post'])
+    def analyze_five_stages(self, request, pk=None):
+        """
+        Execute 5-stage PFD analysis
+        
+        POST /api/v1/pfd/documents/{id}/analyze_five_stages/
+        
+        Stages:
+        1. Module Identification
+        2. Module Details
+        3. Complexity Analysis
+        4. Module Coverage
+        5. Connectivity Analysis
+        """
+        pfd_doc = self.get_object()
+        
+        # Check if file exists
+        if not pfd_doc.file:
+            return Response(
+                {'error': 'No PFD file found'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            logger.info(f"🚀 Starting 5-stage analysis for {pfd_doc.document_number}")
+            
+            # Update status
+            pfd_doc.status = 'analyzing'
+            pfd_doc.analysis_stage = 0
+            pfd_doc.analysis_progress = 0
+            pfd_doc.save()
+            
+            # Get file path
+            file_path = os.path.join(settings.MEDIA_ROOT, str(pfd_doc.file))
+            
+            # Prepare document info
+            document_info = {
+                'document_number': pfd_doc.document_number,
+                'document_title': pfd_doc.document_title,
+                'revision': pfd_doc.revision,
+                'project_name': pfd_doc.project_name,
+                'project_code': pfd_doc.project_code
+            }
+            
+            # Execute 5-stage analysis
+            from .five_stage_analyzer import analyze_pfd_five_stages
+            
+            results = analyze_pfd_five_stages(file_path, document_info)
+            
+            # Save results to database
+            if results.get('status') == 'completed':
+                pfd_doc.stage1_module_identification = results.get('stage1', {})
+                pfd_doc.stage2_module_details = results.get('stage2', {})
+                pfd_doc.stage3_pid_complexity = results.get('stage3', {})
+                pfd_doc.stage4_module_coverage = results.get('stage4', {})
+                pfd_doc.stage5_connectivity = results.get('stage5', {})
+                pfd_doc.analysis_stage = 5
+                pfd_doc.analysis_progress = 100
+                pfd_doc.status = 'analyzed'
+            else:
+                pfd_doc.error_message = f"Analysis failed: {', '.join(results.get('errors', []))}"
+                pfd_doc.status = 'failed'
+            
+            pfd_doc.save()
+            
+            logger.info(f"✅ 5-stage analysis completed for {pfd_doc.document_number}")
+            
+            return Response({
+                'success': True,
+                'document_id': str(pfd_doc.id),
+                'analysis_status': pfd_doc.status,
+                'results': results
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ 5-stage analysis failed: {str(e)}")
+            pfd_doc.status = 'failed'
+            pfd_doc.error_message = str(e)
+            pfd_doc.save()
+            
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['get'])
+    def get_analysis(self, request, pk=None):
+        """
+        Get 5-stage analysis results
+        
+        GET /api/v1/pfd/documents/{id}/get_analysis/
+        """
+        pfd_doc = self.get_object()
+        
+        return Response({
+            'document_id': str(pfd_doc.id),
+            'document_number': pfd_doc.document_number,
+            'analysis_stage': pfd_doc.analysis_stage,
+            'analysis_progress': pfd_doc.analysis_progress,
+            'status': pfd_doc.status,
+            'stage1_module_identification': pfd_doc.stage1_module_identification,
+            'stage2_module_details': pfd_doc.stage2_module_details,
+            'stage3_pid_complexity': pfd_doc.stage3_pid_complexity,
+            'stage4_module_coverage': pfd_doc.stage4_module_coverage,
+            'stage5_connectivity': pfd_doc.stage5_connectivity
+        })
 
 
 class PIDConversionViewSet(viewsets.ModelViewSet):

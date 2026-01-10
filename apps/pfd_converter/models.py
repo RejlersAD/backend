@@ -66,6 +66,38 @@ class PFDDocument(TimeStampedModel):
         help_text='Comprehensive GPT-4 Vision analysis with equipment specs, line sizes, instruments, etc.'
     )
     
+    # 5-Stage PFD Analysis (New AI-Powered Approach)
+    stage1_module_identification = models.JSONField(
+        default=dict,
+        help_text='Stage 1: Identified modules from PFD (PV, LV, A/B, etc.) with detailed specifications'
+    )
+    stage2_module_details = models.JSONField(
+        default=dict,
+        help_text='Stage 2: Detailed understanding of all modules including equipment, instruments, piping'
+    )
+    stage3_pid_complexity = models.JSONField(
+        default=dict,
+        help_text='Stage 3: Number of P&IDs required based on complexity analysis'
+    )
+    stage4_module_coverage = models.JSONField(
+        default=dict,
+        help_text='Stage 4: Modules covered in each P&ID drawing'
+    )
+    stage5_connectivity = models.JSONField(
+        default=dict,
+        help_text='Stage 5: Connectivity and relationships between modules'
+    )
+    
+    # Analysis status tracking
+    analysis_stage = models.IntegerField(
+        default=0,
+        help_text='Current analysis stage (0-5)'
+    )
+    analysis_progress = models.IntegerField(
+        default=0,
+        help_text='Analysis progress percentage (0-100)'
+    )
+    
     # Conversion metadata
     conversion_notes = models.TextField(blank=True)
     error_message = models.TextField(blank=True)

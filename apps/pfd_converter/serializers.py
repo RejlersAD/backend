@@ -21,12 +21,21 @@ class PFDDocumentSerializer(serializers.ModelSerializer):
             'status', 'processing_started_at', 'processing_completed_at',
             'processing_duration', 'processing_time',
             'extracted_data', 'conversion_notes', 'error_message',
-            'conversion_count', 'created_at', 'updated_at'
+            'conversion_count', 'created_at', 'updated_at',
+            # 5-Stage Analysis fields
+            'analysis_stage', 'analysis_progress',
+            'stage1_module_identification', 'stage2_module_details',
+            'stage3_pid_complexity', 'stage4_module_coverage',
+            'stage5_connectivity'
         ]
         read_only_fields = [
             'id', 'uploaded_by', 'file_size', 'file_type',
             'processing_started_at', 'processing_completed_at',
-            'processing_duration', 'extracted_data', 'created_at', 'updated_at'
+            'processing_duration', 'extracted_data', 'created_at', 'updated_at',
+            'analysis_stage', 'analysis_progress',
+            'stage1_module_identification', 'stage2_module_details',
+            'stage3_pid_complexity', 'stage4_module_coverage',
+            'stage5_connectivity'
         ]
     
     def get_processing_time(self, obj):
