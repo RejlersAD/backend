@@ -397,91 +397,24 @@ class GraphBasedPIDGenerator:
         self.drawing_width = self.page_width - 2*self.margin
         self.drawing_height = self.page_height - 2*self.margin - self.bottom_zone_height
         
-        # PROFESSIONAL TABLE LAYOUT SYSTEM - Soft Coded
-        # All tables calculated from base position with proper spacing
-        table_spacing = 8*mm  # Gap between tables
-        
-        # Table dimensions (professional sizing)
-        self.table_dims = {
-            'legend': {'width': 200*mm, 'height': 60*mm},
-            'general_notes': {'width': 200*mm, 'height': 35*mm},
-            'equipment_schedule': {'width': 200*mm, 'height': 65*mm},
-            'instrument_index': {'width': 200*mm, 'height': 55*mm},
-            'valve_schedule': {'width': 150*mm, 'height': 55*mm},
-            'line_list': {'width': 150*mm, 'height': 55*mm}
-        }
-        
-        # Calculate positions from bottom up
-        # Column 1 (Left): Legend + General Notes
-        col1_x = self.margin
-        
-        # Column 2 (Middle-left): Equipment Schedule + Instrument Index
-        col2_x = col1_x + self.table_dims['legend']['width'] + table_spacing
-        
-        # Column 3 (Middle-right): Valve Schedule + Line List
-        col3_x = col2_x + self.table_dims['equipment_schedule']['width'] + table_spacing
-        
-        # Row calculations (bottom to top)
-        row1_y = self.margin  # Bottom row baseline
-        row2_y = row1_y + self.table_dims['general_notes']['height'] + table_spacing  # Second row
-        row3_y = row2_y + self.table_dims['legend']['height'] + table_spacing  # Third row (unused currently)
-        
-        # STRICT TABLE ALIGNMENT GRID (soft-coded positions)
+        # STRICT TABLE ALIGNMENT GRID (in bottom zone)
+        # Divide bottom zone into precise columns and rows
         self.table_grid = {
-            # Column X positions
-            'col_1_x': col1_x,
-            'col_2_x': col2_x,
-            'col_3_x': col3_x,
+            'col_1_x': self.margin,                    # Left edge (Legend)
+            'col_2_x': self.margin + 210*mm,           # Middle-left (Equipment Schedule)
+            'col_3_x': self.margin + 420*mm,           # Middle-right (Valve Schedule)
             'col_4_x': self.page_width - self.margin - self.title_block_width,  # Title block
             
-            # Row Y positions (base of each table)
-            'row_1_y': row1_y,
-            'row_2_y': row2_y,
-            'row_3_y': row3_y,
-            'row_4_y': self.margin + 150*mm,  # Top row (Title block)
+            'row_1_y': self.margin + 25*mm,            # Bottom row (Notes, Line List)
+            'row_2_y': self.margin + 65*mm,            # Middle-low row (Legend bottom)
+            'row_3_y': self.margin + 115*mm,           # Middle-high row (Equipment/Valve Schedule)
+            'row_4_y': self.margin + 150*mm,           # Top row (Title block)
             
-            # Table spacing
-            'table_spacing': table_spacing
-        }
-        
-        # Table specific positions (calculated for each table)
-        self.table_positions = {
-            'general_notes': {
-                'x': col1_x,
-                'y': row1_y,
-                'width': self.table_dims['general_notes']['width'],
-                'height': self.table_dims['general_notes']['height']
-            },
-            'legend': {
-                'x': col1_x,
-                'y': row2_y,
-                'width': self.table_dims['legend']['width'],
-                'height': self.table_dims['legend']['height']
-            },
-            'instrument_index': {
-                'x': col2_x,
-                'y': row1_y,
-                'width': self.table_dims['instrument_index']['width'],
-                'height': self.table_dims['instrument_index']['height']
-            },
-            'equipment_schedule': {
-                'x': col2_x,
-                'y': row2_y,
-                'width': self.table_dims['equipment_schedule']['width'],
-                'height': self.table_dims['equipment_schedule']['height']
-            },
-            'line_list': {
-                'x': col3_x,
-                'y': row1_y,
-                'width': self.table_dims['line_list']['width'],
-                'height': self.table_dims['line_list']['height']
-            },
-            'valve_schedule': {
-                'x': col3_x,
-                'y': row2_y,
-                'width': self.table_dims['valve_schedule']['width'],
-                'height': self.table_dims['valve_schedule']['height']
-            }
+            'standard_width_small': 200*mm,            # Standard small table width
+            'standard_width_medium': 150*mm,           # Standard medium table width
+            'standard_height_small': 50*mm,            # Small table height
+            'standard_height_medium': 65*mm,           # Medium table height
+            'standard_height_large': 150*mm            # Large table (title block)
         }
         
         # Line weights (ISO standard)
@@ -2042,29 +1975,26 @@ class GraphBasedPIDGenerator:
     
     def _draw_legend(self, c: canvas.Canvas):
         """Draw comprehensive professional symbol legend"""
-        # Use soft-coded positions
-        pos = self.table_positions['legend']
-        legend_x = pos['x']
-        legend_y = pos['y']
-        legend_width = pos['width']
-        legend_height = pos['height']
+        # STRICT ALIGNMENT: Column 1, Row 2 (bottom-left)
+        legend_x = self.table_grid['col_1_x']
+        legend_y = self.table_grid['row_2_y']
+        legend_width = self.table_grid['standard_width_small']
+        legend_height = 60*mm
         
         # Legend box
         c.setLineWidth(0.35*mm)
-        c.rect(legend_x, legend_y, legend_width, legend_height)
+        c.rect(legend_x, legend_y - 55*mm, legend_width, legend_height)
         
         # Title
         c.setFont("Helvetica-Bold", 4*mm)
-        c.drawString(legend_x + 5*mm, legend_y + legend_height - 7*mm, "LEGEND - SYMBOLS AND ABBREVIATIONS")
-        c.setFont("Helvetica-Bold", 4*mm)
-        c.drawString(legend_x + 5*mm, legend_y + legend_height - 7*mm, "LEGEND - SYMBOLS AND ABBREVIATIONS")
+        c.drawString(legend_x + 5*mm, legend_y - 5*mm, "LEGEND - SYMBOLS AND ABBREVIATIONS")
         
         c.setLineWidth(0.25*mm)
-        c.line(legend_x, legend_y + legend_height - 12*mm, legend_x + legend_width, legend_y + legend_height - 12*mm)
+        c.line(legend_x, legend_y - 10*mm, legend_x + legend_width, legend_y - 10*mm)
         
         # Column 1: Line types
         col1_x = legend_x + 5*mm
-        y = legend_y + legend_height - 18*mm
+        y = legend_y - 17*mm
         
         c.setFont("Helvetica-Bold", 2.5*mm)
         c.drawString(col1_x, y, "LINE TYPES:")
@@ -2090,7 +2020,7 @@ class GraphBasedPIDGenerator:
         
         # Column 2: Equipment symbols
         col2_x = legend_x + 65*mm
-        y = legend_y + legend_height - 18*mm
+        y = legend_y - 17*mm
         
         c.setFont("Helvetica-Bold", 2.5*mm)
         c.drawString(col2_x, y, "EQUIPMENT:")
@@ -2113,7 +2043,7 @@ class GraphBasedPIDGenerator:
         
         # Column 3: Abbreviations
         col3_x = legend_x + 125*mm
-        y = legend_y + legend_height - 18*mm
+        y = legend_y - 17*mm
         
         c.setFont("Helvetica-Bold", 2.5*mm)
         c.drawString(col3_x, y, "ABBREVIATIONS:")
@@ -2135,24 +2065,23 @@ class GraphBasedPIDGenerator:
     
     def _draw_equipment_schedule(self, c: canvas.Canvas):
         """Draw comprehensive equipment schedule table"""
-        # Use soft-coded positions
-        pos = self.table_positions['equipment_schedule']
-        table_x = pos['x']
-        table_y = pos['y']
-        table_width = pos['width']
-        table_height = pos['height']
+        # STRICT ALIGNMENT: Column 2, Row 3 (middle-left, upper position)
+        table_x = self.table_grid['col_2_x']
+        table_y = self.table_grid['row_3_y']
+        table_width = self.table_grid['standard_width_small']
+        table_height = self.table_grid['standard_height_medium']
         
         # Table border
         c.setLineWidth(0.35*mm)
-        c.rect(table_x, table_y, table_width, table_height)
+        c.rect(table_x, table_y - 60*mm, table_width, table_height)
         
         # Title
         c.setFont("Helvetica-Bold", 4*mm)
-        c.drawString(table_x + 5*mm, table_y + table_height - 7*mm, "EQUIPMENT SCHEDULE")
+        c.drawString(table_x + 5*mm, table_y, "EQUIPMENT SCHEDULE")
         
         # Table header
         c.setLineWidth(0.25*mm)
-        header_y = table_y + table_height - 12*mm
+        header_y = table_y - 8*mm
         c.line(table_x, header_y, table_x + table_width, header_y)
         
         c.setFont("Helvetica-Bold", 2.5*mm)
@@ -2162,13 +2091,13 @@ class GraphBasedPIDGenerator:
         c.drawString(table_x + 160*mm, header_y - 5*mm, "SIZE/DUTY")
         
         # Vertical lines
-        c.line(table_x + 32*mm, header_y, table_x + 32*mm, table_y)
-        c.line(table_x + 115*mm, header_y, table_x + 115*mm, table_y)
-        c.line(table_x + 155*mm, header_y, table_x + 155*mm, table_y)
+        c.line(table_x + 32*mm, header_y, table_x + 32*mm, table_y - 60*mm)
+        c.line(table_x + 115*mm, header_y, table_x + 115*mm, table_y - 60*mm)
+        c.line(table_x + 155*mm, header_y, table_x + 155*mm, table_y - 60*mm)
         
         # Equipment rows
         equipment = self.specs.get('equipment', [])
-        row_y = header_y - 8*mm
+        row_y = header_y - 10*mm
         
         c.setFont("Helvetica", 2*mm)
         for idx, eq in enumerate(equipment[:7]):  # Max 7 items
@@ -2183,53 +2112,51 @@ class GraphBasedPIDGenerator:
             c.drawString(table_x + 160*mm, row_y, str(size))
             
             row_y -= 6*mm
-            if row_y > table_y + 2*mm:  # Only draw line if space available
-                c.line(table_x, row_y + 2*mm, table_x + table_width, row_y + 2*mm)
+            c.line(table_x, row_y + 2*mm, table_x + table_width, row_y + 2*mm)
     
     def _draw_valve_schedule(self, c: canvas.Canvas):
         """Draw valve schedule table"""
-        # Use soft-coded positions
-        pos = self.table_positions['valve_schedule']
-        table_x = pos['x']
-        table_y = pos['y']
-        table_width = pos['width']
-        table_height = pos['height']
+        # STRICT ALIGNMENT: Column 3, Row 3 (middle-right, aligned with equipment schedule)
+        table_x = self.table_grid['col_3_x']
+        table_y = self.table_grid['row_3_y']
+        table_width = self.table_grid['standard_width_medium']
+        table_height = self.table_grid['standard_height_medium']
         
         valves = self.specs.get('valves', [])
         if not valves:
             return
         
-        # Table border
+        # Table border (aligned to standard height)
         c.setLineWidth(0.35*mm)
-        c.rect(table_x, table_y, table_width, table_height)
+        c.rect(table_x, table_y - 60*mm, table_width, table_height)
         
         # Title
         c.setFont("Helvetica-Bold", 4*mm)
-        c.drawString(table_x + 5*mm, table_y + table_height - 7*mm, "VALVE SCHEDULE")
+        c.drawString(table_x + 5*mm, table_y, "VALVE SCHEDULE")
         
         # Header
-        header_y = table_y + table_height - 12*mm
+        header_y = table_y - 8*mm
         c.setLineWidth(0.25*mm)
         c.line(table_x, header_y, table_x + table_width, header_y)
         
         c.setFont("Helvetica-Bold", 2.5*mm)
         c.drawString(table_x + 3*mm, header_y - 5*mm, "TAG")
-        c.drawString(table_x + 30*mm, header_y - 5*mm, "TYPE")
-        c.drawString(table_x + 70*mm, header_y - 5*mm, "SIZE")
-        c.drawString(table_x + 90*mm, header_y - 5*mm, "ACTUATOR")
-        c.drawString(table_x + 120*mm, header_y - 5*mm, "FAIL ACTION")
+        c.drawString(table_x + 35*mm, header_y - 5*mm, "TYPE")
+        c.drawString(table_x + 85*mm, header_y - 5*mm, "SIZE")
+        c.drawString(table_x + 110*mm, header_y - 5*mm, "ACTUATOR")
+        c.drawString(table_x + 145*mm, header_y - 5*mm, "FAIL ACTION")
         
         # Vertical lines
-        c.line(table_x + 27*mm, header_y, table_x + 27*mm, table_y)
-        c.line(table_x + 67*mm, header_y, table_x + 67*mm, table_y)
-        c.line(table_x + 87*mm, header_y, table_x + 87*mm, table_y)
-        c.line(table_x + 117*mm, header_y, table_x + 117*mm, table_y)
+        c.line(table_x + 32*mm, header_y, table_x + 32*mm, table_y - 40*mm)
+        c.line(table_x + 80*mm, header_y, table_x + 80*mm, table_y - 40*mm)
+        c.line(table_x + 105*mm, header_y, table_x + 105*mm, table_y - 40*mm)
+        c.line(table_x + 140*mm, header_y, table_x + 140*mm, table_y - 40*mm)
         
         # Valve rows
-        row_y = header_y - 8*mm
+        row_y = header_y - 10*mm
         c.setFont("Helvetica", 2*mm)
         
-        for valve in valves[:6]:  # Max 6 valves
+        for valve in valves[:4]:  # Max 4 valves
             tag = valve.get('tag', 'N/A')
             v_type = valve.get('type', 'N/A').replace('_', ' ').title()
             size = valve.get('size', '-')
@@ -2237,34 +2164,32 @@ class GraphBasedPIDGenerator:
             fail = valve.get('fail_position', '-').replace('_', ' ').upper()
             
             c.drawString(table_x + 3*mm, row_y, tag)
-            c.drawString(table_x + 30*mm, row_y, v_type[:15])
-            c.drawString(table_x + 70*mm, row_y, str(size))
-            c.drawString(table_x + 90*mm, row_y, actuator[:12])
-            c.drawString(table_x + 120*mm, row_y, fail)
+            c.drawString(table_x + 35*mm, row_y, v_type[:20])
+            c.drawString(table_x + 85*mm, row_y, str(size))
+            c.drawString(table_x + 110*mm, row_y, actuator[:15])
+            c.drawString(table_x + 145*mm, row_y, fail)
             
             row_y -= 6*mm
-            if row_y > table_y + 2*mm:  # Only draw line if space available
-                c.line(table_x, row_y + 2*mm, table_x + table_width, row_y + 2*mm)
+            c.line(table_x, row_y + 2*mm, table_x + table_width, row_y + 2*mm)
     
     def _draw_general_notes(self, c: canvas.Canvas):
         """Draw general notes section"""
-        # Use soft-coded positions
-        pos = self.table_positions['general_notes']
-        notes_x = pos['x']
-        notes_y = pos['y']
-        notes_width = pos['width']
-        notes_height = pos['height']
+        # STRICT ALIGNMENT: Column 1, Row 1 (bottom-left, below legend)
+        notes_x = self.table_grid['col_1_x']
+        notes_y = self.table_grid['row_1_y']
+        notes_width = self.table_grid['standard_width_small']
+        notes_height = 30*mm  # Compact notes section
         
         # Notes box
         c.setLineWidth(0.35*mm)
-        c.rect(notes_x, notes_y, notes_width, notes_height)
+        c.rect(notes_x, notes_y - 25*mm, notes_width, notes_height)
         
         # Title
         c.setFont("Helvetica-Bold", 4*mm)
-        c.drawString(notes_x + 5*mm, notes_y + notes_height - 7*mm, "GENERAL NOTES")
+        c.drawString(notes_x + 5*mm, notes_y, "GENERAL NOTES")
         
         c.setLineWidth(0.25*mm)
-        c.line(notes_x, notes_y + notes_height - 10*mm, notes_x + notes_width, notes_y + notes_height - 10*mm)
+        c.line(notes_x, notes_y - 8*mm, notes_x + notes_width, notes_y - 8*mm)
         
         # Notes content
         c.setFont("Helvetica", 2*mm)
@@ -2274,37 +2199,40 @@ class GraphBasedPIDGenerator:
             "3. Pipe specifications per project piping class.",
             "4. All instruments per ISA 5.1 standards.",
             "5. Valve actuation: FC=Fail Close, FO=Fail Open, FL=Fail Lock.",
-            "6. This drawing is AI-generated and requires engineering review."
+            "6. Line numbers: L-XXX format per project standards.",
+            "7. Equipment tags per project equipment numbering system.",
+            "8. Refer to P&IDs, PFDs, and equipment datasheets.",
+            "9. This drawing is AI-generated and requires engineering review.",
+            "10. All safety critical items require additional verification."
         ]
         
-        y = notes_y + notes_height - 14*mm
-        for note in notes[:6]:  # Max 6 notes to fit in height
+        y = notes_y - 13*mm
+        for note in notes[:8]:  # Max 8 notes
             c.drawString(notes_x + 3*mm, y, note)
             y -= 4*mm
     
     def _draw_instrument_index(self, c: canvas.Canvas):
         """Draw comprehensive instrument index table"""
-        # Use soft-coded positions
-        pos = self.table_positions['instrument_index']
-        table_x = pos['x']
-        table_y = pos['y']
-        table_width = pos['width']
-        table_height = pos['height']
+        # STRICT ALIGNMENT: Column 2, Row 1 (middle-left, bottom position)
+        table_x = self.table_grid['col_2_x']
+        table_y = self.table_grid['row_1_y'] + 25*mm  # Slightly raised
+        table_width = self.table_grid['standard_width_small']
+        table_height = self.table_grid['standard_height_small']
         
         instruments = self.specs.get('instruments', [])
         if not instruments:
             return
         
-        # Table border
+        # Table border (aligned to standard height)
         c.setLineWidth(0.35*mm)
-        c.rect(table_x, table_y, table_width, table_height)
+        c.rect(table_x, table_y - 45*mm, table_width, table_height)
         
         # Title
         c.setFont("Helvetica-Bold", 4*mm)
-        c.drawString(table_x + 5*mm, table_y + table_height - 7*mm, "INSTRUMENT INDEX")
+        c.drawString(table_x + 5*mm, table_y, "INSTRUMENT INDEX")
         
         # Header
-        header_y = table_y + table_height - 12*mm
+        header_y = table_y - 8*mm
         c.setLineWidth(0.25*mm)
         c.line(table_x, header_y, table_x + table_width, header_y)
         
@@ -2315,15 +2243,15 @@ class GraphBasedPIDGenerator:
         c.drawString(table_x + 160*mm, header_y - 5*mm, "TYPE")
         
         # Vertical lines
-        c.line(table_x + 32*mm, header_y, table_x + 32*mm, table_y)
-        c.line(table_x + 105*mm, header_y, table_x + 105*mm, table_y)
-        c.line(table_x + 155*mm, header_y, table_x + 155*mm, table_y)
+        c.line(table_x + 32*mm, header_y, table_x + 32*mm, table_y - 45*mm)
+        c.line(table_x + 105*mm, header_y, table_x + 105*mm, table_y - 45*mm)
+        c.line(table_x + 155*mm, header_y, table_x + 155*mm, table_y - 45*mm)
         
         # Instrument rows
-        row_y = header_y - 8*mm
+        row_y = header_y - 10*mm
         c.setFont("Helvetica", 2*mm)
         
-        for inst in instruments[:6]:  # Max 6 instruments
+        for inst in instruments[:5]:  # Max 5 instruments
             tag = inst.get('tag', 'N/A')
             service = inst.get('service', inst.get('description', 'Process'))[:35]
             inst_range = inst.get('range', '-')
@@ -2335,64 +2263,61 @@ class GraphBasedPIDGenerator:
             c.drawString(table_x + 160*mm, row_y, inst_type)
             
             row_y -= 6*mm
-            if row_y > table_y + 2*mm:  # Only draw line if space available
-                c.line(table_x, row_y + 2*mm, table_x + table_width, row_y + 2*mm)
+            c.line(table_x, row_y + 2*mm, table_x + table_width, row_y + 2*mm)
     
     def _draw_line_list(self, c: canvas.Canvas):
         """Draw line list table with specifications"""
-        # Use soft-coded positions
-        pos = self.table_positions['line_list']
-        table_x = pos['x']
-        table_y = pos['y']
-        table_width = pos['width']
-        table_height = pos['height']
+        # STRICT ALIGNMENT: Column 3, Row 1 (middle-right, bottom position, aligned with instrument index)
+        table_x = self.table_grid['col_3_x']
+        table_y = self.table_grid['row_1_y'] + 25*mm  # Same height as instrument index
+        table_width = self.table_grid['standard_width_medium']
+        table_height = self.table_grid['standard_height_small']
         
         streams = self.specs.get('process_streams', self.specs.get('piping', []))
         if not streams:
             return
         
-        # Table border
+        # Table border (aligned to standard height)
         c.setLineWidth(0.35*mm)
-        c.rect(table_x, table_y, table_width, table_height)
+        c.rect(table_x, table_y - 45*mm, table_width, table_height)
         
         # Title
         c.setFont("Helvetica-Bold", 4*mm)
-        c.drawString(table_x + 5*mm, table_y + table_height - 7*mm, "LINE LIST")
+        c.drawString(table_x + 5*mm, table_y, "LINE LIST")
         
         # Header
-        header_y = table_y + table_height - 12*mm
+        header_y = table_y - 8*mm
         c.setLineWidth(0.25*mm)
         c.line(table_x, header_y, table_x + table_width, header_y)
         
         c.setFont("Helvetica-Bold", 2.5*mm)
         c.drawString(table_x + 3*mm, header_y - 5*mm, "LINE NO")
-        c.drawString(table_x + 30*mm, header_y - 5*mm, "SIZE")
-        c.drawString(table_x + 55*mm, header_y - 5*mm, "SPEC")
-        c.drawString(table_x + 90*mm, header_y - 5*mm, "FROM/TO")
+        c.drawString(table_x + 35*mm, header_y - 5*mm, "SIZE")
+        c.drawString(table_x + 60*mm, header_y - 5*mm, "SPEC")
+        c.drawString(table_x + 100*mm, header_y - 5*mm, "FROM/TO")
         
         # Vertical lines
-        c.line(table_x + 27*mm, header_y, table_x + 27*mm, table_y)
-        c.line(table_x + 52*mm, header_y, table_x + 52*mm, table_y)
-        c.line(table_x + 87*mm, header_y, table_x + 87*mm, table_y)
+        c.line(table_x + 32*mm, header_y, table_x + 32*mm, table_y - 45*mm)
+        c.line(table_x + 55*mm, header_y, table_x + 55*mm, table_y - 45*mm)
+        c.line(table_x + 95*mm, header_y, table_x + 95*mm, table_y - 45*mm)
         
         # Line rows
-        row_y = header_y - 8*mm
+        row_y = header_y - 10*mm
         c.setFont("Helvetica", 2*mm)
         
-        for i, stream in enumerate(streams[:6]):  # Max 6 lines
+        for i, stream in enumerate(streams[:5]):  # Max 5 lines
             line_no = f"L-{i+1}"
             size = stream.get('line_size', '6 inch')
             spec = f"{size[:1]}\"-CS-150#"
             from_to = f"{stream.get('from', '')[:8]}/{stream.get('to', '')[:8]}"
             
             c.drawString(table_x + 3*mm, row_y, line_no)
-            c.drawString(table_x + 30*mm, row_y, size[:8])
-            c.drawString(table_x + 55*mm, row_y, spec)
-            c.drawString(table_x + 90*mm, row_y, from_to)
+            c.drawString(table_x + 35*mm, row_y, size[:8])
+            c.drawString(table_x + 60*mm, row_y, spec)
+            c.drawString(table_x + 100*mm, row_y, from_to)
             
             row_y -= 6*mm
-            if row_y > table_y + 2*mm:  # Only draw line if space available
-                c.line(table_x, row_y + 2*mm, table_x + table_width, row_y + 2*mm)
+            c.line(table_x, row_y + 2*mm, table_x + table_width, row_y + 2*mm)
     
     def _draw_north_arrow(self, c: canvas.Canvas):
         """Draw north arrow orientation indicator"""
