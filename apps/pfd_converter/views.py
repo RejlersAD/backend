@@ -171,11 +171,46 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
                 ).total_seconds()
                 pfd_doc.save()
                 
+                # Provide user-friendly error messages
+                error_message = str(e)
+                user_message = None
+                suggestions = []
+                
+                # Check for specific error patterns
+                if "I'm sorry, I can't assist" in error_message or "I cannot assist" in error_message:
+                    user_message = "The AI vision system had difficulty processing this document."
+                    suggestions = [
+                        "Ensure the PDF/image is clear and readable",
+                        "Try uploading a higher resolution version",
+                        "Check that the document is a valid Process Flow Diagram",
+                        "Remove any watermarks or overlays that might interfere",
+                        "Try converting the PDF to a high-quality PNG/JPEG first"
+                    ]
+                elif "API key" in error_message or "authentication" in error_message.lower():
+                    user_message = "OpenAI API authentication error."
+                    suggestions = ["Contact system administrator to verify API key configuration"]
+                elif "rate_limit" in error_message.lower() or "quota" in error_message.lower():
+                    user_message = "API rate limit or quota exceeded."
+                    suggestions = ["Please wait a moment and try again", "Contact administrator if problem persists"]
+                elif "timeout" in error_message.lower():
+                    user_message = "Request timed out while processing large document."
+                    suggestions = ["Try with a smaller/simpler PFD", "Ensure document is under 10MB"]
+                else:
+                    user_message = "Document processing failed."
+                    suggestions = [
+                        "Verify the file is a valid PFD document",
+                        "Check file format (PDF, PNG, JPEG supported)",
+                        "Try re-saving/re-exporting the document",
+                        "Contact support if issue continues"
+                    ]
+                
                 return Response(
                     {
-                        'error': 'PFD extraction failed',
-                        'detail': str(e),
-                        'document_id': str(pfd_doc.id)
+                        'error': 'PFD processing failed',
+                        'message': user_message,
+                        'suggestions': suggestions,
+                        'document_id': str(pfd_doc.id),
+                        'technical_detail': error_message[:200]  # Limited technical detail
                     },
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )

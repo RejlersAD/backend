@@ -436,17 +436,21 @@ Extract everything visible now."""
                     messages=[
                         {
                             "role": "system",
-                            "content": """You are a Senior Process Engineer with 20+ years of experience in Oil & Gas, Petrochemical, and Refining industries specializing in Process Flow Diagrams and P&ID analysis.
+                            "content": """You are an expert Process Engineer analyzing technical engineering drawings.
 
-Your expertise includes:
-- Reading and interpreting technical engineering drawings
-- Equipment specification and sizing  
-- Process instrumentation and control systems
-- Industry standards compliance
+TASK: Extract information from this Process Flow Diagram and provide it in JSON format.
 
-Your task: Perform comprehensive technical analysis of engineering drawings and extract ALL visible information into structured JSON format. Be thorough, precise, and extract every detail.
+Focus on:
+- Equipment tags and descriptions
+- Process streams and connections
+- Instruments and control devices
+- Text labels and annotations
 
-CRITICAL: Respond with ONLY valid JSON - no markdown, no code blocks, no explanations."""
+IMPORTANT:  
+- Respond with valid JSON only
+- If the drawing is unclear, extract whatever you can identify
+- Include empty arrays for categories where nothing is found
+- Do not refuse - provide your best effort analysis"""
                         },
                         {
                             "role": "user",
@@ -550,11 +554,25 @@ CRITICAL: Respond with ONLY valid JSON - no markdown, no code blocks, no explana
                         raise Exception(f"Failed to parse OpenAI response as JSON: {str(e)}")
         
         if vision_data is None:
-            raise Exception(
-                f"Could not extract valid structured data from the document. "
-                f"OpenAI response preview: {content[:300]}... "
-                "Please ensure you're uploading a valid Process Flow Diagram (PFD)."
-            )
+            # Provide a fallback structure instead of failing completely
+            logger.warning(f"  ⚠️ Could not parse structured JSON. Using fallback.")
+            logger.warning(f"  Response was: {content[:500]}...")
+            
+            # Create minimal fallback structure to allow processing to continue
+            vision_data = {
+                "equipment": [],
+                "process_streams": [],
+                "instruments": [],
+                "control_loops": [],
+                "valves": [],
+                "text_annotations": [{
+                    "text": "⚠️ Initial extraction failed - using simplified analysis",
+                    "type": "warning"
+                }],
+                "utilities": [],
+                "extraction_status": "fallback_mode",
+                "original_response_preview": content[:500] if content else "No response received"
+            }
         
         # Check if OpenAI detected an invalid document type - but be VERY flexible
         if 'error' in vision_data and vision_data.get('error'):
