@@ -239,129 +239,286 @@ class AdvancedPFDToPIDPipeline:
         # Prepare image
         image_data = self._prepare_image(pfd_file)
         
-        # Enhanced vision prompt for detailed extraction
-        prompt = f"""You are analyzing a Process Flow Diagram (PFD). Your task is to extract ALL visible information and return it as structured JSON.
+        # Enhanced comprehensive prompt for maximum extraction accuracy
+        prompt = f"""Perform comprehensive technical analysis of this engineering drawing. Extract ALL visible information systematically.
 
-CRITICAL: You MUST respond with ONLY valid JSON. No explanations, no markdown, just pure JSON.
+EXTRACTION REQUIREMENTS (BE THOROUGH - Aim for 20-50+ items):
 
-ANALYZE AND EXTRACT:
+1. EQUIPMENT (Extract ALL - major and auxiliary):
+   - Pumps, vessels, tanks, heat exchangers, compressors, reactors, separators
+   - Filters, strainers, coalescers, hydrocyclones, mixers, cyclones
+   - For each: tag number, type, sub-type, description, capacity, power, dimensions
+   - Operating conditions: pressure (barg/psig), temperature (°C/°F), flow (m3/h, kg/h)
+   - Materials: body material, internals, seals
+   - Position coordinates (x: 0.0-1.0, y: 0.0-1.0)
 
-1. **EQUIPMENT** - Every vessel, pump, tank, heat exchanger, compressor:
-   - Equipment tag number (e.g., P-101, V-102, E-103)
-   - Equipment type (pump, vessel, heat exchanger, etc.)
-   - Position on drawing (approximate x, y coordinates 0.0 to 1.0)
-   - Operating conditions if visible (pressure, temperature)
-   - Physical specifications if shown (capacity, size, power)
+2. PROCESS STREAMS (Extract ALL - aim for 2-3x equipment count):
+   - Main process lines, utility lines, bypass lines, vent lines, drain lines
+   - For each: stream ID/number, source tag, destination tag, direction
+   - Conditions: temperature, pressure, flow rate, density, composition
+   - Line specifications: size (inch/mm), schedule, material class
+   - Phase: liquid, gas, two-phase, steam
 
-2. **PROCESS STREAMS** - All flow lines connecting equipment:
-   - Stream number/ID
-   - Source equipment tag
-   - Destination equipment tag
-   - Flow direction
-   - Stream conditions (flow rate, pressure, temperature if labeled)
-   - Stream name/description if shown
+3. INSTRUMENTS (Extract EVERY measurement device):
+   - Flow: FI, FT, FIC, FE, FIT, FQI (flow indicator/transmitter/controller/element)
+   - Pressure: PI, PT, PIC, PIT, PSV, PSH, PSL, PG (pressure gauge)
+   - Temperature: TI, TT, TIC, TIT, TSH, TSL, TW (temperature well)
+   - Level: LI, LT, LIC, LIT, LSH, LSL, LG, LCV
+   - Analytical: AI, AT, AIT, AIC (analyzer indicator/transmitter)
+   - For each: tag, type, measured variable, location, range, connected equipment
 
-3. **TEXT ANNOTATIONS** - All text visible on the drawing:
-   - Equipment labels and tag numbers  
-   - Stream identifiers
-   - Operating parameters
-   - Notes and specifications
-   - Drawing title, number, revision
+4. CONTROL LOOPS (ALL automatic control):
+   - Flow control: FIC→FCV, Pressure: PIC→PCV, Temperature: TIC→TCV, Level: LIC→LCV
+   - For each: controller tag, valve tag, controlled variable, setpoint
+   - Control strategy: cascade, ratio, split-range
 
-4. **UTILITIES** - Support systems:
-   - Cooling water, steam, air, nitrogen
-   - Supply and return lines
-   - Connection points to process equipment
+5. VALVES (ALL types):
+   - Control valves: FCV, PCV, TCV, LCV, HV (hand valve)
+   - Safety valves: PSV, PRV, TSV
+   - Isolation: gate, globe, ball, plug, butterfly
+   - Check valves, 3-way valves, diverter valves
+   - For each: tag/ID, type, size, actuator type, fail position
 
-REQUIRED JSON FORMAT:
+6. TEXT ANNOTATIONS (ALL visible text):
+   - Equipment labels, tag numbers, descriptions
+   - Stream numbers, flow directions, compositions
+   - Operating parameters with units
+   - Design specifications, materials, ratings
+   - Drawing title, number, revision, date, project
+   - Notes, warnings, legends, key symbols
+   - Company names, client names (extract as-is)
+
+7. UTILITIES (Support systems):
+   - Cooling water: supply/return headers, pressure, temperature
+   - Steam: HP/MP/LP steam, condensate return
+   - Compressed air, instrument air, nitrogen
+   - Drain systems, vent systems
+   - Connection points to equipment
+
+RESPONSE FORMAT (Use this exact structure):
 {{
   "equipment": [
     {{
-      "tag": "P-101",
-      "type": "pump",
-      "sub_type": "centrifugal",
-      "position": {{"x": 0.2, "y": 0.5}},
-      "conditions": {{"pressure": "10 barg", "temperature": "40°C", "power": "15 kW"}},
-      "annotations": ["Main feed pump", "Capacity: 100 m3/h"]
+      "tag": "604-P-0101A/B/C",
+      "type": "centrifugal_pump",
+      "description": "Produced Water Transfer Pump",
+      "quantity": "3 (2 operating + 1 standby)",
+      "capacity": "150 m3/h",
+      "head": "50 m",
+      "power": "22 kW",
+      "design_pressure": "16 barg",
+      "design_temperature": "120°C",
+      "operating_pressure": "8 barg",
+      "operating_temperature": "60°C",
+      "materials": "CS body, SS316 impeller",
+      "driver": "22 kW electric motor, 2900 rpm",
+      "position": {{"x": 0.15, "y": 0.6}},
+      "notes": "Spare pump available"
     }}
   ],
   "process_streams": [
     {{
-      "stream_id": "S-101",
-      "name": "Crude Feed",
-      "from": "P-101",
-      "to": "V-101",
-      "conditions": {{"flow_rate": "100 m3/h", "pressure": "12 barg", "temperature": "45°C"}}
+      "stream_id": "1",
+      "name": "Produced Water Feed",
+      "source": "604-P-0101A/B/C",
+      "destination": "604-T-0102",
+      "flow_rate": "150 m3/h",
+      "mass_flow": "150000 kg/h",
+      "pressure": "8 barg",
+      "temperature": "60°C",
+      "density": "1010 kg/m3",
+      "phase": "liquid",
+      "composition": "Water + oil + solids",
+      "line_size": "6 inch",
+      "line_class": "150#",
+      "material": "CS"
+    }}
+  ],
+  "instruments": [
+    {{
+      "tag": "604-FT-0101",
+      "type": "flow_transmitter",
+      "measured_variable": "volumetric_flow",
+      "location": "P-0101 discharge",
+      "connected_to": "604-P-0101",
+      "range": "0-200 m3/h",
+      "signal": "4-20 mA",
+      "service": "Measures produced water flow"
+    }},
+    {{
+      "tag": "604-PT-0102",
+      "type": "pressure_transmitter",
+      "measured_variable": "pressure",
+      "location": "T-0102 inlet",
+      "range": "0-16 barg"
+    }}
+  ],
+  "control_loops": [
+    {{
+      "controller": "604-FIC-0101",
+      "manipulated_variable": "604-FCV-0101",
+      "controlled_variable": "Flow to degasser",
+      "setpoint": "150 m3/h",
+      "control_type": "PID"
+    }}
+  ],
+  "valves": [
+    {{
+      "tag": "604-FCV-0101",
+      "type": "flow_control_valve",
+      "size": "4 inch",
+      "actuator": "pneumatic",
+      "fail_position": "fail_close",
+      "location": "on stream 1"
+    }},
+    {{
+      "type": "check_valve",
+      "size": "6 inch",
+      "location": "pump discharge"
     }}
   ],
   "text_annotations": [
     {{
-      "text": "Design Pressure: 25 barg",
-      "category": "specification"
+      "text": "Design Pressure: 16 barg",
+      "type": "specification",
+      "location": "equipment datasheet area"
+    }},
+    {{
+      "text": "ADNOC OFFSHORE",
+      "type": "company_name"
+    }},
+    {{
+      "text": "PRODUCED WATER TREATMENT",
+      "type": "drawing_title"
     }}
   ],
   "utilities": [
     {{
       "type": "cooling_water",
-      "connections": ["E-101", "E-102"]
+      "supply_header": "CW-SUP",
+      "return_header": "CW-RET",
+      "supply_pressure": "5 barg",
+      "supply_temp": "32°C",
+      "return_temp": "42°C",
+      "connected_equipment": ["604-E-0104"]
     }}
-  ],
-  "drawing_info": {{
-    "title": "",
-    "number": "",
-    "revision": "",
-    "date": ""
-  }}
+  ]
 }}
 
-RESPOND WITH ONLY THE JSON OBJECT. Extract everything you can see in the PFD."""
+CRITICAL INSTRUCTIONS:
+- Scan the ENTIRE drawing systematically (left to right, top to bottom)
+- Extract SMALL details - even minor valves, small instruments, annotations
+- If you see equipment tags, extract them exactly as written
+- If you see numbers, extract them with units
+- Extract company names, project names, drawing information as-is
+- Prefer OVER-EXTRACTING to ensure nothing is missed
+- Aim for 20-50+ total items for a typical engineering drawing
 
-        # Call GPT-4 Vision
-        try:
-            logger.info("  → Calling OpenAI Vision API...")
-            logger.info(f"  → Model: {self.model}")
-            logger.info(f"  → Image data size: {len(image_data)} characters (base64)")
-            
-            response = openai_client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an expert process engineer with deep expertise in Process Flow Diagrams (PFDs). Your task is to analyze PFD images and extract structured data. You MUST respond with valid JSON only."
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{image_data}",
-                                    "detail": "high"
+Extract everything visible now."""
+
+        # Call GPT-4 Vision with multiple retry strategies
+        max_retries = 3
+        retry_count = 0
+        response = None
+        last_error = None
+        
+        while retry_count < max_retries and response is None:
+            try:
+                logger.info(f"  → Calling OpenAI Vision API (Attempt {retry_count + 1}/{max_retries})...")
+                logger.info(f"  → Model: {self.model}")
+                logger.info(f"  → Image data size: {len(image_data)} characters (base64)")
+                
+                # Adjust temperature based on retry
+                temperature = 0.1 + (retry_count * 0.15)  # 0.1, 0.25, 0.4
+                
+                response = openai_client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """You are a Senior Process Engineer with 20+ years of experience in Oil & Gas, Petrochemical, and Refining industries specializing in Process Flow Diagrams and P&ID analysis.
+
+Your expertise includes:
+- Reading and interpreting technical engineering drawings
+- Equipment specification and sizing  
+- Process instrumentation and control systems
+- Industry standards compliance
+
+Your task: Perform comprehensive technical analysis of engineering drawings and extract ALL visible information into structured JSON format. Be thorough, precise, and extract every detail.
+
+CRITICAL: Respond with ONLY valid JSON - no markdown, no code blocks, no explanations."""
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{image_data}",
+                                        "detail": "high"
+                                    }
                                 }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=4000,
-                temperature=0.1
-            )
-            
-            logger.info(f"  ✅ OpenAI Vision API response received")
-            logger.info(f"  → Response length: {len(response.choices[0].message.content)} characters")
-            
-        except Exception as e:
-            logger.error(f"  ❌ OpenAI Vision API call failed: {str(e)}")
-            raise Exception(f"OpenAI Vision API error: {str(e)}")
+                            ]
+                        }
+                    ],
+                    max_tokens=8000,  # Increased for comprehensive extraction
+                    temperature=temperature
+                )
+                
+                logger.info(f"  ✅ OpenAI Vision API response received")
+                break
+                
+            except Exception as e:
+                last_error = e
+                retry_count += 1
+                logger.warning(f"  ⚠️ Attempt {retry_count} failed: {str(e)}")
+                if retry_count < max_retries:
+                    logger.info(f"  → Retrying with adjusted parameters...")
+                    import time
+                    time.sleep(2)  # Brief delay before retry
+                else:
+                    logger.error(f"  ❌ All retry attempts failed")
+                    raise Exception(f"OpenAI Vision API error after {max_retries} attempts: {str(last_error)}")
+        
+        if response is None:
+            raise Exception(f"Failed to get response from OpenAI Vision API: {str(last_error)}")
+        
+        logger.info(f"  → Response length: {len(response.choices[0].message.content)} characters")
         
         # Parse response
         content = response.choices[0].message.content
         
         if not content or content.strip() == "":
             raise Exception("OpenAI Vision API returned empty response")
+            raise Exception("OpenAI Vision API returned empty response")
         
         logger.info(f"  → Parsing response (length: {len(content)} chars)...")
-        logger.info(f"  → Response preview: {content[:300]}...")
+        logger.info(f"  → Response preview: {content[:500]}...")
+        
+        # Log full response for debugging
+        logger.debug(f"  → Full OpenAI response: {content}")
+        
+        # Check if OpenAI refused to process (not a PFD)
+        # Very flexible validation - only reject if image is blank/corrupted
+        refusal_indicators = [
+            "completely blank",
+            "corrupted image",
+            "cannot read",
+            "unreadable",
+            "no visible content"
+        ]
+        
+        content_lower = content.lower()
+        has_refusal = False
+        for indicator in refusal_indicators:
+            if indicator in content_lower:
+                has_refusal = True
+                logger.warning(f"  ⚠️ Possible refusal indicator found: {indicator}")
+                break
+        
+        # Even if refusal indicators found, try to extract JSON
+        # Only fail if JSON parsing fails completely
         
         # Extract JSON from response - try multiple strategies
         vision_data = None
@@ -393,7 +550,57 @@ RESPOND WITH ONLY THE JSON OBJECT. Extract everything you can see in the PFD."""
                         raise Exception(f"Failed to parse OpenAI response as JSON: {str(e)}")
         
         if vision_data is None:
-            raise Exception(f"Could not extract valid JSON from OpenAI response. Content preview: {content[:200]}...")
+            raise Exception(
+                f"Could not extract valid structured data from the document. "
+                f"OpenAI response preview: {content[:300]}... "
+                "Please ensure you're uploading a valid Process Flow Diagram (PFD)."
+            )
+        
+        # Check if OpenAI detected an invalid document type - but be VERY flexible
+        if 'error' in vision_data and vision_data.get('error'):
+            error_msg = vision_data.get('description', vision_data.get('error', 'Invalid document type detected'))
+            
+            logger.warning(f"  ⚠️ OpenAI flagged document: {error_msg}")
+            
+            # Check if there's ANY extracted data in ANY field
+            has_equipment = vision_data.get('equipment') and len(vision_data.get('equipment', [])) > 0
+            has_streams = vision_data.get('process_streams') and len(vision_data.get('process_streams', [])) > 0
+            has_text = vision_data.get('text_annotations') and len(vision_data.get('text_annotations', [])) > 0
+            has_instruments = vision_data.get('instruments') and len(vision_data.get('instruments', [])) > 0
+            has_utilities = vision_data.get('utilities') and len(vision_data.get('utilities', [])) > 0
+            
+            has_any_data = has_equipment or has_streams or has_text or has_instruments or has_utilities
+            
+            if has_any_data:
+                logger.info(f"  ✅ Document flagged BUT contains extractable engineering data")
+                logger.info(f"  → Found: {len(vision_data.get('equipment', []))} equipment, "
+                           f"{len(vision_data.get('process_streams', []))} streams, "
+                           f"{len(vision_data.get('text_annotations', []))} text, "
+                           f"{len(vision_data.get('instruments', []))} instruments")
+                logger.info(f"  → Proceeding with analysis using extracted data")
+                # Remove error field to allow processing
+                vision_data.pop('error', None)
+                vision_data.pop('description', None)
+            else:
+                # Try to create minimal valid structure from error response
+                logger.warning(f"  ⚠️ No structured data extracted, attempting fallback...")
+                
+                # Create minimal valid response structure
+                vision_data = {
+                    'equipment': [],
+                    'process_streams': [],
+                    'text_annotations': [],
+                    'instruments': [],
+                    'control_loops': [],
+                    'utilities': [],
+                    'warnings': [f"Document flagged by AI: {error_msg}"],
+                    'extraction_status': 'partial',
+                    'notes': 'Limited or no engineering content detected. Analysis may be incomplete.'
+                }
+                
+                logger.warning(f"  ⚠️ Created minimal response structure for analysis")
+                logger.warning(f"  → Analysis will proceed with empty/minimal data")
+                # Don't raise exception - let it proceed with empty data
         
         # Add OCR metadata
         vision_data['ocr_metadata'] = {
@@ -401,6 +608,11 @@ RESPOND WITH ONLY THE JSON OBJECT. Extract everything you can see in the PFD."""
             'equipment_identified': len(vision_data.get('equipment', [])),
             'streams_traced': len(vision_data.get('process_streams', []))
         }
+        
+        logger.info(f"  ✅ Vision extraction complete:")
+        logger.info(f"     - Equipment: {len(vision_data.get('equipment', []))}")
+        logger.info(f"     - Process Streams: {len(vision_data.get('process_streams', []))}")
+        logger.info(f"     - Text Annotations: {len(vision_data.get('text_annotations', []))}")
         
         return vision_data
     

@@ -62,6 +62,12 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
         try:
             file = serializer.validated_data['file']
             
+            # Extract all user-provided metadata
+            intelligence_level = serializer.validated_data.get('intelligence_level', 'ultra')
+            drawing_title = serializer.validated_data.get('drawing_title', '')
+            client = serializer.validated_data.get('client', 'SARB Oil & Gas Division')
+            contractor = serializer.validated_data.get('contractor', 'Rejlers Engineering AB')
+            
             # Create PFD document
             pfd_doc = PFDDocument.objects.create(
                 uploaded_by=request.user,
@@ -76,6 +82,9 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
                 project_code=serializer.validated_data.get('project_code', ''),
                 status='processing'
             )
+            
+            # Store metadata for later P&ID generation (in conversion_notes temporarily)
+            pfd_doc.conversion_notes = f"Intelligence: {intelligence_level} | Drawing: {drawing_title} | Client: {client} | Contractor: {contractor}"
             
             # Extract PFD data using Advanced AI Pipeline
             pfd_doc.processing_started_at = timezone.now()
@@ -185,9 +194,14 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def analyze_five_stages(self, request, pk=None):
         """
-        Execute 5-stage PFD analysis
+        Execute 5-stage PFD analysis with RAG (Retrieval Augmented Generation)
         
         POST /api/v1/pfd/documents/{id}/analyze_five_stages/
+        
+        RAG Process:
+        1. Retrieve similar reference PFDs from S3 bucket
+        2. Analyze reference PFDs to learn patterns
+        3. Use reference context to enhance analysis of uploaded PFD
         
         Stages:
         1. Module Identification
@@ -206,7 +220,7 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
             )
         
         try:
-            logger.info(f"🚀 Starting 5-stage analysis for {pfd_doc.document_number}")
+            logger.info(f"🚀 Starting RAG-enhanced 5-stage analysis for {pfd_doc.document_number}")
             
             # Update status
             pfd_doc.status = 'analyzing'
@@ -226,10 +240,11 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
                 'project_code': pfd_doc.project_code
             }
             
-            # Execute 5-stage analysis
-            from .five_stage_analyzer import analyze_pfd_five_stages
+            # Execute RAG-enhanced 5-stage analysis
+            from .rag_service import PFDRAGService
             
-            results = analyze_pfd_five_stages(file_path, document_info)
+            rag_service = PFDRAGService()
+            results = rag_service.analyze_with_rag_context(file_path, document_info)
             
             # Save results to database
             if results.get('status') == 'completed':
@@ -267,27 +282,267 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    @action(detail=True, methods=['get'])
-    def get_analysis(self, request, pk=None):
+    @action(detail=True, methods=['get', 'post'])
+    def analyze(self, request, pk=None):
         """
-        Get 5-stage analysis results
+        Analyze PFD or get existing analysis
         
-        GET /api/v1/pfd/documents/{id}/get_analysis/
+        GET /api/v1/pfd/documents/{id}/analyze/ - Get existing analysis
+        POST /api/v1/pfd/documents/{id}/analyze/ - Run new analysis
         """
         pfd_doc = self.get_object()
         
-        return Response({
-            'document_id': str(pfd_doc.id),
-            'document_number': pfd_doc.document_number,
-            'analysis_stage': pfd_doc.analysis_stage,
-            'analysis_progress': pfd_doc.analysis_progress,
-            'status': pfd_doc.status,
-            'stage1_module_identification': pfd_doc.stage1_module_identification,
-            'stage2_module_details': pfd_doc.stage2_module_details,
-            'stage3_pid_complexity': pfd_doc.stage3_pid_complexity,
-            'stage4_module_coverage': pfd_doc.stage4_module_coverage,
-            'stage5_connectivity': pfd_doc.stage5_connectivity
-        })
+        if request.method == 'POST':
+            # Run analysis if POST
+            return self.analyze_five_stages(request, pk)
+        
+        # GET - Return analysis in format frontend expects
+        # Check if comprehensive_analysis exists (from upload)
+        if pfd_doc.comprehensive_analysis:
+            comp_analysis = pfd_doc.comprehensive_analysis
+            
+            # Transform extracted data to match frontend format
+            equipment_items = comp_analysis.get('all_equipment', [])
+            piping_items = comp_analysis.get('all_piping', [])
+            instruments = comp_analysis.get('all_instruments', [])
+            
+            return Response({
+                'document_id': str(pfd_doc.id),
+                'document_name': pfd_doc.file_name,
+                'document_number': pfd_doc.document_number,
+                'status': pfd_doc.status,
+                'module_count': 1,  # Treat entire PFD as single module for now
+                'complexity_analysis': {
+                    'total_equipment_estimate': len(equipment_items),
+                    'total_instruments': len(instruments),
+                    'total_piping_connections': len(piping_items),
+                    'complexity_score': 'medium',
+                    'estimated_pid_pages': 1
+                },
+                'modules': [{
+                    'module_id': 'main',
+                    'module_name': 'Main Process',
+                    'description': f'Primary process flow from {pfd_doc.document_number}',
+                    'estimated_equipment_count': len(equipment_items),
+                    'key_equipment': [eq.get('tag', eq.get('type', 'Unknown')) for eq in equipment_items[:5]],
+                    'complexity': 'medium',
+                    'priority': 1
+                }],
+                'connectivity': {
+                    'total_connections': len(piping_items),
+                    'connection_types': ['process_line', 'utility_line']
+                },
+                # Include raw extraction data
+                'extracted_data': pfd_doc.extracted_data,
+                'comprehensive_analysis': comp_analysis
+            })
+        
+        # Fallback to 5-stage analysis if available
+        if pfd_doc.stage1_module_identification:
+            return Response({
+                'document_id': str(pfd_doc.id),
+                'document_name': pfd_doc.file_name,
+                'document_number': pfd_doc.document_number,
+                'analysis_stage': pfd_doc.analysis_stage,
+                'analysis_progress': pfd_doc.analysis_progress,
+                'status': pfd_doc.status,
+                'stage1_module_identification': pfd_doc.stage1_module_identification,
+                'stage2_module_details': pfd_doc.stage2_module_details,
+                'stage3_pid_complexity': pfd_doc.stage3_pid_complexity,
+                'stage4_module_coverage': pfd_doc.stage4_module_coverage,
+                'stage5_connectivity': pfd_doc.stage5_connectivity
+            })
+        
+        # No analysis data available
+        return Response(
+            {'error': 'No analysis data available. Please upload a PFD first.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    @action(detail=True, methods=['get'])
+    def get_analysis(self, request, pk=None):
+        """
+        Get 5-stage analysis results (legacy endpoint)
+        
+        GET /api/v1/pfd/documents/{id}/get_analysis/
+        """
+        return self.analyze(request, pk)
+    
+    @action(detail=True, methods=['post'])
+    def reprocess(self, request, pk=None):
+        """
+        Reprocess PFD document with current extraction pipeline
+        
+        POST /api/v1/pfd/documents/{id}/reprocess/
+        """
+        pfd_doc = self.get_object()
+        
+        # Check if file exists
+        if not pfd_doc.file:
+            return Response(
+                {'error': 'No file attached to this document'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            file_path = os.path.join(settings.MEDIA_ROOT, str(pfd_doc.file))
+            
+            if not os.path.exists(file_path):
+                return Response(
+                    {'error': f'File not found: {pfd_doc.file.name}. Please re-upload the document.'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            logger.info(f"🔄 Reprocessing PFD document: {pfd_doc.document_number}")
+            
+            # Update status
+            pfd_doc.status = 'processing'
+            pfd_doc.processing_started_at = timezone.now()
+            pfd_doc.save()
+            
+            # Re-extract using advanced pipeline
+            pipeline = AdvancedPFDToPIDPipeline(project_id=pfd_doc.project_code)
+            
+            pfd_doc.file.open('rb')
+            extracted_data = pipeline._step1_computer_vision_ocr(pfd_doc.file)
+            pfd_doc.file.close()
+            
+            pfd_doc.extracted_data = extracted_data
+            
+            # Run comprehensive analysis
+            logger.info(f"🔍 Running comprehensive PFD analysis...")
+            try:
+                from .comprehensive_analysis_service import analyze_pfd_comprehensive
+                
+                document_info = {
+                    'document_number': pfd_doc.document_number,
+                    'document_title': pfd_doc.document_title,
+                    'revision': pfd_doc.revision,
+                    'project_name': pfd_doc.project_name,
+                    'project_code': pfd_doc.project_code
+                }
+                
+                comprehensive_report = analyze_pfd_comprehensive(
+                    file_path,
+                    document_info=document_info,
+                    analysis_level="detailed"
+                )
+                
+                pfd_doc.comprehensive_analysis = comprehensive_report
+                
+                logger.info(f"✅ Comprehensive analysis completed:")
+                logger.info(f"   - Equipment: {len(comprehensive_report.get('all_equipment', []))}")
+                logger.info(f"   - Piping: {len(comprehensive_report.get('all_piping', []))}")
+                logger.info(f"   - Instruments: {len(comprehensive_report.get('all_instruments', []))}")
+                
+            except Exception as comp_error:
+                logger.warning(f"⚠️ Comprehensive analysis failed: {str(comp_error)}")
+                pfd_doc.comprehensive_analysis = {
+                    "error": str(comp_error),
+                    "status": "failed"
+                }
+            
+            pfd_doc.status = 'converted'
+            pfd_doc.processing_completed_at = timezone.now()
+            pfd_doc.processing_duration = (
+                pfd_doc.processing_completed_at - pfd_doc.processing_started_at
+            ).total_seconds()
+            pfd_doc.save()
+            
+            logger.info(f"✅ Reprocessing completed: {len(extracted_data.get('equipment', []))} equipment items")
+            
+            return Response({
+                'success': True,
+                'document_id': str(pfd_doc.id),
+                'status': pfd_doc.status,
+                'extracted_counts': {
+                    'equipment': len(extracted_data.get('equipment', [])),
+                    'process_streams': len(extracted_data.get('process_streams', [])),
+                    'instruments': len(extracted_data.get('instruments', [])),
+                    'control_loops': len(extracted_data.get('control_loops', [])),
+                    'valves': len(extracted_data.get('valves', [])),
+                    'text_annotations': len(extracted_data.get('text_annotations', [])),
+                    'utilities': len(extracted_data.get('utilities', []))
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Reprocessing failed: {str(e)}")
+            pfd_doc.status = 'failed'
+            pfd_doc.error_message = str(e)
+            pfd_doc.processing_completed_at = timezone.now()
+            pfd_doc.save()
+            
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['post'])
+    def test_with_s3_pfd(self, request):
+        """
+        Test extraction using a reference PFD from S3 bucket
+        
+        POST /api/v1/pfd/documents/test_with_s3_pfd/
+        Body: {"project_code": "P16093"}  (optional, defaults to P16093)
+        """
+        try:
+            from .s3_pfd_service import S3PFDService
+            from .five_stage_analyzer import analyze_pfd_five_stages
+            
+            project_code = request.data.get('project_code', 'P16093')
+            
+            logger.info(f"🧪 Testing with S3 reference PFD from project {project_code}")
+            
+            # Initialize S3 service
+            s3_service = S3PFDService()
+            
+            if not s3_service.s3_enabled:
+                return Response(
+                    {'error': 'S3 service not configured. Please set AWS credentials.'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+            
+            # Get sample PFD
+            pfd_path = s3_service.get_sample_pfd(project=project_code)
+            
+            if not pfd_path:
+                return Response(
+                    {'error': f'No reference PFD found for project {project_code}'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            logger.info(f"✅ Downloaded reference PFD: {pfd_path}")
+            
+            # Run extraction
+            document_info = {
+                'document_number': f'{project_code}-TEST',
+                'document_title': f'S3 Reference PFD Test',
+                'project_code': project_code
+            }
+            
+            results = analyze_pfd_five_stages(pfd_path, document_info)
+            
+            # Clean up downloaded file
+            if os.path.exists(pfd_path):
+                os.remove(pfd_path)
+            
+            return Response({
+                'success': True,
+                'project_code': project_code,
+                'results': results,
+                'message': 'Successfully tested extraction with S3 reference PFD'
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ S3 PFD test failed: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            
+            return Response(
+                {'error': str(e), 'detail': traceback.format_exc()},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class PIDConversionViewSet(viewsets.ModelViewSet):
@@ -352,7 +607,10 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
             
             # Generate P&ID specifications using ADVANCED 6-STEP PIPELINE
             try:
-                logger.info("🚀 Starting ADVANCED 6-Step P&ID Generation Pipeline")
+                logger.info("🚀 Starting ADVANCED P&ID Generation with Graph-Based Layout")
+                
+                # Use graph-based generator for intelligent layout
+                use_graph_layout = True  # Toggle for graph-based vs traditional
                 
                 # Use advanced pipeline
                 pipeline = AdvancedPFDToPIDPipeline(project_id=pfd_doc.project_code)
@@ -386,6 +644,85 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
                 # Extract results from pipeline
                 pid_specs = pipeline_results['pid_specifications']
                 drawing_path = pipeline_results['drawing_path']
+                
+                # Use ULTRA COMPLETE generator (RAG + Graph AI)
+                if use_graph_layout:
+                    try:
+                        from .ultra_complete_service import generate_ultra_complete_pid
+                        
+                        # Prepare drawing info with user-provided metadata
+                        # Extract from conversion_notes if available
+                        notes = pfd_doc.conversion_notes or ''
+                        intelligence_level_stored = 'ultra'
+                        drawing_title_stored = ''
+                        client = 'SARB Oil & Gas Division'
+                        contractor = 'Rejlers Engineering AB'
+                        
+                        if '| Intelligence:' in notes:
+                            intelligence_level_stored = notes.split('| Intelligence:')[1].split('|')[0].strip()
+                        if '| Drawing:' in notes:
+                            drawing_title_stored = notes.split('| Drawing:')[1].split('|')[0].strip()
+                        if '| Client:' in notes:
+                            client = notes.split('| Client:')[1].split('|')[0].strip()
+                        if '| Contractor:' in notes:
+                            contractor = notes.split('| Contractor:')[1].strip()
+                        
+                        # Get intelligence level (prefer from request, fallback to stored)
+                        intelligence_level = serializer.validated_data.get('intelligence_level', intelligence_level_stored)
+                        
+                        logger.info(f"🤖 Generating P&ID with {intelligence_level.upper()} Intelligence...")
+                        logger.info("   Features: RAG Knowledge Base + Advanced Graph Analysis")
+                        
+                        drawing_info = {
+                            'drawing_number': serializer.validated_data['pid_drawing_number'],
+                            'drawing_title': drawing_title_stored or serializer.validated_data['pid_title'],
+                            'revision': serializer.validated_data['pid_revision'],
+                            'project_name': pfd_doc.project_name,
+                            'project_code': pfd_doc.project_code,
+                            'client': client,
+                            'contractor': contractor
+                        }
+                        
+                        # Output path
+                        graph_output_dir = os.path.join(settings.MEDIA_ROOT, 'pid_drawings_ultra')
+                        os.makedirs(graph_output_dir, exist_ok=True)
+                        
+                        graph_output_path = os.path.join(
+                            graph_output_dir,
+                            f"{serializer.validated_data['pid_drawing_number']}_ultra.pdf"
+                        )
+                        
+                        # Generate with ULTRA intelligence
+                        result = generate_ultra_complete_pid(
+                            extracted_data=pfd_doc.extracted_data,
+                            drawing_info=drawing_info,
+                            output_path=graph_output_path,
+                            intelligence_level=intelligence_level
+                        )
+                        
+                        drawing_path = result['output_path']
+                        
+                        logger.info(f"✅ {intelligence_level.upper()} P&ID generated successfully:")
+                        logger.info(f"   Output: {drawing_path}")
+                        logger.info(f"   Elements: {result.get('total_elements', 0)}")
+                        if intelligence_level == 'ultra':
+                            logger.info(f"   Complexity: {result.get('initial_complexity', 0):.1f} → {result.get('final_complexity', 0):.1f}")
+                            logger.info(f"   Missing Found: {result.get('missing_connections_found', 0)}")
+                            logger.info(f"   Utilities: {result.get('utility_connections_generated', 0)}")
+                            logger.info(f"   Control Loops: {result.get('control_loops_generated', 0)}")
+                        
+                        # Store metrics in conversion
+                        conversion.design_parameters = {
+                            'intelligence_level': intelligence_level,
+                            'generation_metrics': result,
+                            'pipeline_version': pipeline_results.get('pipeline_version', '3.0')
+                        }
+                        
+                    except Exception as graph_error:
+                        logger.warning(f"⚠️ Ultra-complete generation failed, using default: {str(graph_error)}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                        # Keep original drawing_path from pipeline
                 
                 # Validate using traditional method
                 converter = PFDToPIDConverter()
@@ -1096,6 +1433,155 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
             return 'valve'
         else:
             return 'indicator'  # Default fallback
+
+
+    @action(detail=False, methods=['post'], url_path='intelligent-generate')
+    def intelligent_generate(self, request):
+        """
+        Generate P&ID using intelligent pattern learning
+        
+        POST /api/v1/pfd/conversions/intelligent-generate/
+        {
+            "pfd_document_id": "uuid",
+            "reference_pid_path": "path/to/reference.pdf",
+            "pid_drawing_number": "PID-001",
+            "pid_title": "Process System",
+            "pid_revision": "A"
+        }
+        """
+        try:
+            from .intelligent_pid_generator import IntelligentPIDGenerator
+            
+            pfd_doc_id = request.data.get('pfd_document_id')
+            reference_pid_path = request.data.get('reference_pid_path')
+            pid_drawing_number = request.data.get('pid_drawing_number', 'PID-INTELLIGENT-001')
+            pid_title = request.data.get('pid_title', 'Intelligent P&ID')
+            pid_revision = request.data.get('pid_revision', 'A')
+            
+            if not pfd_doc_id:
+                return Response(
+                    {'error': 'pfd_document_id is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get PFD document
+            try:
+                pfd_doc = PFDDocument.objects.get(id=pfd_doc_id)
+            except PFDDocument.DoesNotExist:
+                return Response(
+                    {'error': 'PFD document not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Check access
+            if pfd_doc.uploaded_by != request.user:
+                if not hasattr(request.user, 'rbac_profile') or \
+                   not request.user.rbac_profile.roles.filter(code='super_admin').exists():
+                    return Response(
+                        {'error': 'Access denied'},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+            
+            # Create conversion record
+            conversion = PIDConversion.objects.create(
+                pfd_document=pfd_doc,
+                converted_by=request.user,
+                pid_drawing_number=pid_drawing_number,
+                pid_title=pid_title,
+                pid_revision=pid_revision,
+                status='generating'
+            )
+            conversion.generation_started_at = timezone.now()
+            conversion.save()
+            
+            logger.info(f"🤖 Starting intelligent P&ID generation for conversion {conversion.id}")
+            
+            try:
+                # Get reference P&ID path (use default if not provided)
+                if not reference_pid_path:
+                    # Use default reference from media/reference_pids/
+                    reference_dir = os.path.join(settings.MEDIA_ROOT, 'reference_pids')
+                    if os.path.exists(reference_dir):
+                        ref_files = [f for f in os.listdir(reference_dir) if f.endswith('.pdf')]
+                        if ref_files:
+                            reference_pid_path = os.path.join(reference_dir, ref_files[0])
+                            logger.info(f"📁 Using default reference: {ref_files[0]}")
+                
+                if not reference_pid_path or not os.path.exists(reference_pid_path):
+                    raise ValueError("Reference P&ID not found. Please provide a valid reference.")
+                
+                # Get PFD file path
+                pfd_file_path = os.path.join(settings.MEDIA_ROOT, str(pfd_doc.file))
+                
+                # Prepare output path
+                output_dir = os.path.join(settings.MEDIA_ROOT, 'pid_drawings_intelligent')
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(output_dir, f"{pid_drawing_number}_intelligent.png")
+                
+                # Initialize intelligent generator
+                generator = IntelligentPIDGenerator(reference_pid_path)
+                
+                # Generate P&ID with pattern learning
+                results = generator.generate_complete_pid(
+                    pfd_file_path=pfd_file_path,
+                    reference_pid_path=reference_pid_path,
+                    output_path=output_path
+                )
+                
+                # Save results
+                pid_specs = results.get('specifications', {})
+                conversion.equipment_list = pid_specs.get('equipment', [])
+                conversion.instrument_list = pid_specs.get('instrumentation', [])
+                conversion.piping_details = pid_specs.get('piping', [])
+                conversion.design_parameters = {
+                    'generation_method': 'intelligent_pattern_learning',
+                    'reference_pid': os.path.basename(reference_pid_path),
+                    'patterns_learned': len(results.get('patterns', {}))
+                }
+                
+                # Save drawing path
+                relative_path = results['drawing_path'].replace(str(settings.MEDIA_ROOT), '').lstrip('/\\')
+                conversion.pid_file = relative_path
+                
+                conversion.status = 'completed'
+                conversion.generation_completed_at = timezone.now()
+                conversion.generation_duration = (
+                    conversion.generation_completed_at - conversion.generation_started_at
+                ).total_seconds()
+                conversion.confidence_score = 95  # High confidence for intelligent generation
+                conversion.save()
+                
+                logger.info(f"✅ Intelligent P&ID generation completed: {relative_path}")
+                
+                return Response(
+                    PIDConversionSerializer(conversion).data,
+                    status=status.HTTP_201_CREATED
+                )
+                
+            except Exception as e:
+                conversion.status = 'failed'
+                conversion.generation_completed_at = timezone.now()
+                conversion.generation_duration = (
+                    conversion.generation_completed_at - conversion.generation_started_at
+                ).total_seconds()
+                conversion.save()
+                
+                logger.error(f"❌ Intelligent generation failed: {str(e)}")
+                return Response(
+                    {
+                        'error': 'Intelligent P&ID generation failed',
+                        'detail': str(e),
+                        'conversion_id': str(conversion.id)
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+                
+        except Exception as e:
+            logger.error(f"❌ Request processing failed: {str(e)}")
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 
 class ConversionFeedbackViewSet(viewsets.ModelViewSet):

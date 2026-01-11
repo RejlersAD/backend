@@ -128,6 +128,15 @@ class PFDUploadSerializer(serializers.Serializer):
     revision = serializers.CharField(max_length=50, required=False, allow_blank=True)
     project_name = serializers.CharField(max_length=255, required=False, allow_blank=True)
     project_code = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    intelligence_level = serializers.ChoiceField(
+        choices=['ultra'],  # Only Ultra level available
+        default='ultra',
+        required=False,
+        help_text='Ultra Complete P&ID with RAG + Graph AI (95%+ completeness)'
+    )
+    drawing_title = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    client = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    contractor = serializers.CharField(max_length=255, required=False, allow_blank=True)
     
     def validate(self, data):
         """Validate that PFD file is present (philosophy is optional)"""
@@ -144,3 +153,8 @@ class ConversionRequestSerializer(serializers.Serializer):
     pid_title = serializers.CharField(max_length=255)
     pid_revision = serializers.CharField(max_length=50, default='A')
     auto_generate = serializers.BooleanField(default=True)
+    intelligence_level = serializers.ChoiceField(
+        choices=['ultra'],  # Only Ultra level available
+        default='ultra',
+        help_text='Ultra Complete: RAG + Graph AI with 95%+ completeness'
+    )

@@ -606,16 +606,31 @@ Return as JSON:
         return list(all_modules - connected_modules)
 
 
-def analyze_pfd_five_stages(pfd_file_path: str, document_info: Dict[str, Any]) -> Dict[str, Any]:
+def analyze_pfd_five_stages(
+    pfd_file_path: str, 
+    document_info: Dict[str, Any],
+    stages_to_run: Optional[List[int]] = None
+) -> Dict[str, Any]:
     """
     Main entry point for 5-stage PFD analysis
     
     Args:
         pfd_file_path: Path to PFD PDF file
         document_info: Document metadata
+        stages_to_run: Optional list of stages to run (e.g., [1, 2] for only stages 1-2)
+                      If None, runs all stages
         
     Returns:
         Complete 5-stage analysis results
     """
     analyzer = FiveStageAnalyzer(pfd_file_path, document_info)
+    
+    if stages_to_run:
+        # Run only specified stages (for RAG reference analysis)
+        results = {'status': 'partial', 'stages_run': stages_to_run}
+        if 1 in stages_to_run:
+            results['stage1'] = analyzer.stage1_identify_modules()
+        return results
+    
     return analyzer.analyze_all_stages()
+

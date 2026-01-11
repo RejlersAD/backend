@@ -47,7 +47,10 @@ def railway_diagnostic_health_check(request):
     missing_vars = [var for var in critical_vars if not os.environ.get(var)]
     if missing_vars:
         status['checks']['env_vars'] = f'MISSING: {", ".join(missing_vars)}'
-        status['status'] = 'degraded'
+        # In local dev, DATABASE_URL/PORT come from docker-compose, not env vars
+        # Only mark as degraded, not unhealthy
+        if status['status'] != 'unhealthy':
+            status['status'] = 'degraded'
     else:
         status['checks']['env_vars'] = 'OK'
     
@@ -59,7 +62,8 @@ def railway_diagnostic_health_check(request):
     except Exception as e:
         status['checks']['static_files'] = f'WARNING: {str(e)}'
     
-    response_status = 200 if status['status'] == 'healthy' else 503
+    # Return 200 for degraded (local dev) or healthy, only 503 for unhealthy
+    response_status = 503 if status['status'] == 'unhealthy' else 200
     return JsonResponse(status, status=response_status)
 
 
