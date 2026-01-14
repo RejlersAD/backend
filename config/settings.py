@@ -84,7 +84,7 @@ INSTALLED_APPS = [
     'apps.pid_analysis',
     'apps.pfd_converter',
     'apps.crs',
-    'apps.finance',  # Finance Invoice Automation
+    # 'apps.finance',  # Finance Invoice Automation (removed - moved to separate repository)
     
     # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
     # Enabling this will cause startup hangs (MLflow server not available)
