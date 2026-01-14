@@ -458,6 +458,43 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         
         return Response({'status': 'user soft deleted'})
     
+    @action(detail=True, methods=['post'], url_path='reset-password')
+    def reset_password(self, request, pk=None):
+        """
+        Reset user password to default password
+        Admin-only action for security
+        """
+        from django.contrib.auth.hashers import make_password
+        from django.conf import settings
+        
+        profile = self.get_object()
+        user = profile.user
+        
+        # Default password (soft-coded in settings)
+        default_password = getattr(settings, 'DEFAULT_USER_PASSWORD', 'Welcome@123')
+        
+        # Set the password
+        user.password = make_password(default_password)
+        user.save()
+        
+        # Log the action
+        create_audit_log(
+            user=request.user,
+            action='reset_password',
+            resource_type='User',
+            resource_id=user.id,
+            resource_repr=f'{user.email}',
+            changes={'reset_by': request.user.email},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+        
+        return Response({
+            'status': 'password reset successfully',
+            'message': f'Password has been reset to default. User should change it on next login.',
+            'default_password': default_password
+        })
+    
     @action(detail=True, methods=['post'])
     def assign_role(self, request, pk=None):
         """Assign role to user"""

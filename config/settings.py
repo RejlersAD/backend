@@ -35,6 +35,13 @@ SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-this-in-produc
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = safe_cast_bool(config('DEBUG', default='False'), False)
 
+# ================================================================
+# USER MANAGEMENT SECURITY SETTINGS
+# ================================================================
+# Default password for admin-initiated password resets
+# This password should be changed by users on first login
+DEFAULT_USER_PASSWORD = config('DEFAULT_USER_PASSWORD', default='Welcome@123')
+
 # Railway-friendly ALLOWED_HOSTS configuration
 try:
     ALLOWED_HOSTS_ENV = config('ALLOWED_HOSTS', default='*')  # Allow all by default for Railway
