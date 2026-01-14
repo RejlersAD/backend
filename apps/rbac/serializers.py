@@ -371,13 +371,14 @@ class UserProfileSerializer(serializers.ModelSerializer):
                     absolute_uri = absolute_uri.replace('http://backend:8000', 'http://localhost:8000')
                 
                 # Handle Railway internal URLs for production
-                if '.railway.internal' in absolute_uri:
-                    # Get the actual public domain from settings or request
-                    public_domain = getattr(settings, 'PUBLIC_DOMAIN', None)
-                    if public_domain:
-                        # Replace internal Railway URL with public domain
-                        import re
-                        absolute_uri = re.sub(r'https?://[^/]+\.railway\.internal', f'https://{public_domain}', absolute_uri)
+                # Replace Railway internal domains with the actual request host
+                if '.railway.internal' in absolute_uri or 'backend-production' in absolute_uri:
+                    # Get the host from the request (this will be the Railway public URL)
+                    host = request.get_host()
+                    scheme = 'https' if request.is_secure() else 'http'
+                    # Replace the internal URL with the public host
+                    import re
+                    absolute_uri = re.sub(r'https?://[^/]+', f'{scheme}://{host}', absolute_uri)
                 
                 return absolute_uri
             return obj.profile_photo.url
