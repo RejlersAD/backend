@@ -357,15 +357,28 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return [{'id': str(m.id), 'code': m.code, 'name': m.name} for m in modules]
     
     def get_profile_photo(self, obj):
-        """Get absolute URL for profile photo"""
+        """Get absolute URL for profile photo with environment-aware hostname handling"""
         if obj.profile_photo:
+            from django.conf import settings
             request = self.context.get('request')
+            
             if request:
-                # Build absolute URI and fix internal Docker hostname
+                # Build absolute URI
                 absolute_uri = request.build_absolute_uri(obj.profile_photo.url)
-                # Replace internal Docker hostname with accessible URL
+                
+                # Fix internal Docker hostname for local development
                 if 'backend:8000' in absolute_uri:
                     absolute_uri = absolute_uri.replace('http://backend:8000', 'http://localhost:8000')
+                
+                # Handle Railway internal URLs for production
+                if '.railway.internal' in absolute_uri:
+                    # Get the actual public domain from settings or request
+                    public_domain = getattr(settings, 'PUBLIC_DOMAIN', None)
+                    if public_domain:
+                        # Replace internal Railway URL with public domain
+                        import re
+                        absolute_uri = re.sub(r'https?://[^/]+\.railway\.internal', f'https://{public_domain}', absolute_uri)
+                
                 return absolute_uri
             return obj.profile_photo.url
         return None
