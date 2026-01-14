@@ -610,8 +610,8 @@ Style: Technical engineering drawing, professional P&ID, blueprint quality, blac
     
     def _create_programmatic_pid_drawing(self, pfd_data, pid_specs, output_path):
         """
-        Create professional P&ID drawing using programmatic approach
-        Uses the new ProgrammaticPIDGenerator for CAD-quality technical drawings
+        Create professional P&ID drawing using graph-based approach for ADNOC format
+        Uses GraphBasedPIDGenerator for comprehensive title block with CLIENT, CONTRACTOR, etc.
         
         Args:
             pfd_data: Extracted PFD data
@@ -622,19 +622,22 @@ Style: Technical engineering drawing, professional P&ID, blueprint quality, blac
             str: Path to generated P&ID drawing
         """
         try:
-            logger.info("🎨 Creating professional programmatic P&ID drawing...")
+            logger.info("🎨 Creating professional P&ID drawing with ADNOC format...")
             
-            from .programmatic_pid_generator import generate_pid_from_specs
+            # USE GRAPH-BASED GENERATOR FOR FULL ADNOC FORMAT
+            from .graph_based_pid_generator import generate_graph_based_pid
             
-            # Convert pid_specs to drawing_specs format
+            # Convert pid_specs to drawing_specs format for graph-based generator
             drawing_specs = {
                 'drawing_number': pid_specs.get('pid_drawing_number', 'PID-001'),
                 'drawing_title': pid_specs.get('pid_title', 'P&ID Drawing'),
                 'project_name': pid_specs.get('project_info', {}).get('project_name', 'Project'),
-                'project_code': pid_specs.get('project_info', {}).get('project_code', ''),
+                'project_code': pid_specs.get('project_info', {}).get('project_code', 'PROJECT-CODE'),
+                'client': pid_specs.get('project_info', {}).get('client', 'ADNOC - Abu Dhabi National Oil Company'),
+                'contractor': pid_specs.get('project_info', {}).get('contractor', 'Rejlers AB - Engineering Solutions'),
                 'revision': pid_specs.get('pid_revision', 'A'),
                 'equipment': pid_specs.get('equipment_list', []),
-                'piping': [],
+                'process_streams': [],
                 'instrumentation': pid_specs.get('instrument_list', []),
                 'valves': []
             }
@@ -644,13 +647,14 @@ Style: Technical engineering drawing, professional P&ID, blueprint quality, blac
                 connections = equip.get('connections', [])
                 for conn in connections:
                     if isinstance(conn, dict):
-                        drawing_specs['piping'].append({
-                            'from_equipment': equip.get('tag'),
-                            'to_equipment': conn.get('to_tag', ''),
-                            'line_number': conn.get('line_number', '')
+                        drawing_specs['process_streams'].append({
+                            'from': equip.get('tag'),
+                            'to': conn.get('to_tag', ''),
+                            'stream_id': conn.get('line_number', ''),
+                            'line_size': conn.get('size', '')
                         })
             
-            # Extract valves from instrument list or dedicated valve list
+            # Extract valves from instrument list
             for inst in pid_specs.get('instrument_list', []):
                 inst_type = inst.get('type', '').lower()
                 if 'valve' in inst_type or 'hv' in inst.get('tag', '').lower():
@@ -666,16 +670,16 @@ Style: Technical engineering drawing, professional P&ID, blueprint quality, blac
                     'type': 'safety'
                 })
             
-            # Generate the P&ID using programmatic generator
-            result_path = generate_pid_from_specs(drawing_specs, output_path)
+            # Generate the P&ID using graph-based generator (Full ADNOC format)
+            result_path = generate_graph_based_pid(drawing_specs, output_path)
             
-            logger.info(f"✅ Professional programmatic P&ID created: {result_path}")
+            logger.info(f"✅ Professional P&ID created with ADNOC format: {result_path}")
             return result_path
             
         except Exception as e:
-            logger.error(f"❌ Programmatic P&ID generation failed: {str(e)}")
+            logger.error(f"❌ Graph-based P&ID generation failed: {str(e)}")
             logger.warning("⚠️ Falling back to specification sheet...")
-            # Fallback to basic spec sheet if programmatic generation fails
+            # Fallback to basic spec sheet if graph-based generation fails
             return self._create_fallback_pid_drawing(pid_specs, output_path)
     
     def _create_fallback_pid_drawing(self, pid_specs, output_path):

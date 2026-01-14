@@ -488,8 +488,12 @@ Instrumentation:
     "page_size": "A3/A1",
     "scale": "Not to scale",
     "orientation": "Landscape",
+    "view_type": "schematic/elevation",
+    "drawing_perspective": "elevation view (side view) - NOT plan/top view",
     "grid": "enabled",
-    "equipment_arrangement": "left-to-right flow"
+    "equipment_arrangement": "left-to-right horizontal process flow",
+    "vessel_orientation": "vertical (standing upright in elevation view)",
+    "flow_direction": "horizontal left-to-right"
   }},
   "title_block": {{
     "drawing_title": "AI-Assisted Draft P&ID",

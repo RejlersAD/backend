@@ -239,63 +239,195 @@ class AdvancedPFDToPIDPipeline:
         # Prepare image
         image_data = self._prepare_image(pfd_file)
         
-        # Enhanced comprehensive prompt for maximum extraction accuracy
-        prompt = f"""Perform comprehensive technical analysis of this engineering drawing. Extract ALL visible information systematically.
+        # EXPERT-LEVEL PROCESS ENGINEERING ANALYSIS PROMPT
+        # Based on ADNOC/Shell/Aramco standards for PFD to P&ID conversion
+        prompt = f"""🎯 ROLE: You are a SENIOR OIL & GAS PROCESS ENGINEER (ADNOC/Shell/Aramco standard) with expertise in:
+- Gas dehydration & export systems / Long-distance pipelines / PFD/P&ID development
+- Safety & shutdown philosophy / DEXPI and ISO 15926 modeling
 
-EXTRACTION REQUIREMENTS (BE THOROUGH - Aim for 20-50+ items):
+📥 TASK: Analyze this Process Flow Diagram (PFD) as an engineering-level technical document for PFD → P&ID conversion.
 
-1. EQUIPMENT (Extract ALL - major and auxiliary):
-   - Pumps, vessels, tanks, heat exchangers, compressors, reactors, separators
-   - Filters, strainers, coalescers, hydrocyclones, mixers, cyclones
-   - For each: tag number, type, sub-type, description, capacity, power, dimensions
-   - Operating conditions: pressure (barg/psig), temperature (°C/°F), flow (m3/h, kg/h)
-   - Materials: body material, internals, seals
-   - Position coordinates (x: 0.0-1.0, y: 0.0-1.0)
+🔍 EXTRACTION REQUIREMENTS - FOLLOW THIS STRUCTURE:
 
-2. PROCESS STREAMS (Extract ALL - aim for 2-3x equipment count):
-   - Main process lines, utility lines, bypass lines, vent lines, drain lines
-   - For each: stream ID/number, source tag, destination tag, direction
-   - Conditions: temperature, pressure, flow rate, density, composition
-   - Line specifications: size (inch/mm), schedule, material class
-   - Phase: liquid, gas, two-phase, steam
+═══════════════════════════════════════════════════════════
+1️⃣ PFD PURPOSE & PROCESS OVERVIEW
+═══════════════════════════════════════════════════════════
+Extract and explain:
+- System purpose (what does it do?)
+- Process intent (dehydration? export? treatment?)
+- Operating philosophy
+- Project context (e.g., "Sahil CDS to ASAB CDS gas export")
+- Client/Operator name
+- Contractor/EPC name
 
-3. INSTRUMENTS (Extract EVERY measurement device):
-   - Flow: FI, FT, FIC, FE, FIT, FQI (flow indicator/transmitter/controller/element)
-   - Pressure: PI, PT, PIC, PIT, PSV, PSH, PSL, PG (pressure gauge)
-   - Temperature: TI, TT, TIC, TIT, TSH, TSL, TW (temperature well)
-   - Level: LI, LT, LIC, LIT, LSH, LSL, LG, LCV
-   - Analytical: AI, AT, AIT, AIC (analyzer indicator/transmitter)
-   - For each: tag, type, measured variable, location, range, connected equipment
+═══════════════════════════════════════════════════════════
+2️⃣ PROCESS FLOW - STEP BY STEP SEQUENCE
+═══════════════════════════════════════════════════════════
+Describe exact gas/liquid/stream flow path in engineering sequence:
+- Source conditions (pressure, temp, composition)
+- Each equipment function in sequence
+- Shutdown & isolation valve logic
+- Tie-in points to headers/facilities
+Use precise engineering terminology.
 
-4. CONTROL LOOPS (ALL automatic control):
-   - Flow control: FIC→FCV, Pressure: PIC→PCV, Temperature: TIC→TCV, Level: LIC→LCV
-   - For each: controller tag, valve tag, controlled variable, setpoint
-   - Control strategy: cascade, ratio, split-range
+═══════════════════════════════════════════════════════════
+3️⃣ MAJOR EQUIPMENT IDENTIFICATION (COMPLETE TABLE)
+═══════════════════════════════════════════════════════════
+For EVERY piece of equipment, extract:
+- Tag number (e.g., V-101, P-101A/B, E-201)
+- Type (vessel, pump, heat exchanger, KO drum, pig launcher, etc.)
+- Function/Service description
+- Design Pressure (barg/psig)
+- Design Temperature (°C/°F)
+- Operating Pressure & Temperature
+- Size/Capacity (m3, dia×length, flow rate)
+- Material of Construction (CS, SS316, etc.)
+- Quantity (1 operating, 1 spare?)
+- Position (x: 0.0-1.0, y: 0.0-1.0 normalized coordinates)
 
-5. VALVES (ALL types):
-   - Control valves: FCV, PCV, TCV, LCV, HV (hand valve)
-   - Safety valves: PSV, PRV, TSV
-   - Isolation: gate, globe, ball, plug, butterfly
-   - Check valves, 3-way valves, diverter valves
-   - For each: tag/ID, type, size, actuator type, fail position
+═══════════════════════════════════════════════════════════
+4️⃣ PIPELINE ENGINEERING DETAILS
+═══════════════════════════════════════════════════════════
+Extract for each major pipeline:
+- Line number/ID
+- Size (inch, DN)
+- Class/Schedule (150#, Sch 40, etc.)
+- Material (CS, SS, etc.)
+- Design conditions
+- Capacity (MMSCFD, m3/h)
+- Length/routing (on-plot, off-plot, export)
+- Pigging philosophy (if mentioned)
+- Corrosion allowance
+- Insulation requirements
 
-6. TEXT ANNOTATIONS (ALL visible text):
-   - Equipment labels, tag numbers, descriptions
-   - Stream numbers, flow directions, compositions
-   - Operating parameters with units
-   - Design specifications, materials, ratings
-   - Drawing title, number, revision, date, project
-   - Notes, warnings, legends, key symbols
-   - Company names, client names (extract as-is)
+═══════════════════════════════════════════════════════════
+5️⃣ SAFETY, CONTROL & SHUTDOWN PHILOSOPHY
+═══════════════════════════════════════════════════════════
+Extract EVERY safety element:
+- **ESD Logic**: What triggers ESD? Which valves close?
+- **SDV (Shutdown Valves)**: Tag, location, fail position, actuator type
+- **PSV (Pressure Safety Valves)**: Tag, set pressure, relieving capacity, discharge to where?
+- **PSD/LSD/DPSD**: Pressure/Level/Differential Shutdown devices - tag, setpoint, action
+- **Overpressure Protection**: How is system protected?
+- **Blowdown/Depressurization**: BDV tags, routing to flare/vent
+- **Alarms**: PAH, TAH, LAH, FAH (High alarms), PAL, LAL (Low alarms)
 
-7. UTILITIES (Support systems):
-   - Cooling water: supply/return headers, pressure, temperature
-   - Steam: HP/MP/LP steam, condensate return
-   - Compressed air, instrument air, nitrogen
-   - Drain systems, vent systems
-   - Connection points to equipment
+═══════════════════════════════════════════════════════════
+6️⃣ INSTRUMENTS - COMPLETE EXTRACTION (ISA-5.1 COMPLIANT)
+═══════════════════════════════════════════════════════════
+Extract EVERY instrument with full ISA nomenclature:
 
-RESPONSE FORMAT (Use this exact structure):
+**Flow Instruments:**
+- FE (Flow Element - orifice plate)
+- FT (Flow Transmitter)
+- FI (Flow Indicator)
+- FIC (Flow Indicator Controller)
+- FIT (Flow Indicating Transmitter)
+- FQIT (Flow Quantity Integrating Transmitter)
+- FCV (Flow Control Valve)
+- FSH/FSL (Flow Switch High/Low)
+
+**Pressure Instruments:**
+- PT (Pressure Transmitter)
+- PI (Pressure Indicator/Gauge)
+- PIC (Pressure Indicator Controller)
+- PIT (Pressure Indicating Transmitter)
+- PSV (Pressure Safety Valve)
+- PCV (Pressure Control Valve)
+- PSH/PSL (Pressure Switch High/Low)
+- DPIC (Differential Pressure Controller)
+
+**Temperature Instruments:**
+- TT (Temperature Transmitter)
+- TI (Temperature Indicator)
+- TIC (Temperature Indicator Controller)
+- TW (Thermowell)
+- TSH/TSL (Temperature Switch High/Low)
+- TCV (Temperature Control Valve)
+
+**Level Instruments:**
+- LT (Level Transmitter)
+- LI (Level Indicator)
+- LIC (Level Indicator Controller)
+- LG (Level Gauge - visual)
+- LSH/LSL/LSHH/LSLL (Level Switch)
+- LCV (Level Control Valve)
+
+**Analytical Instruments:**
+- AIT (Analyzer Indicating Transmitter)
+- QIT (Quality Indicating Transmitter)
+
+For EACH instrument extracted, specify:
+- Tag number (e.g., FT-101, PT-205A)
+- Type (transmitter, controller, valve, switch)
+- Measured variable
+- Location/Connection point
+- Range (if visible: 0-100 barg, 0-200°C)
+- Signal type (4-20mA, digital)
+- Connected equipment tag
+
+═══════════════════════════════════════════════════════════
+7️⃣ CONTROL LOOPS & AUTOMATION
+═══════════════════════════════════════════════════════════
+Identify complete control loops:
+- **Flow Control**: FIC-101 controls FCV-101 to maintain flow setpoint
+- **Pressure Control**: PIC-201 controls PCV-201 to maintain pressure
+- **Temperature Control**: TIC-301 controls TCV-301 (heating/cooling)
+- **Level Control**: LIC-401 controls LCV-401 (drain valve)
+- Control strategy: PID, cascade, split-range, ratio
+
+═══════════════════════════════════════════════════════════
+8️⃣ FLARE & DRAIN SYSTEM INTEGRATION
+═══════════════════════════════════════════════════════════
+Extract:
+- **Flare Connections**: Which equipment connects to HP/MP/LP flare?
+- **Flare Headers**: Pressure ratings, routing
+- **PSV Discharge**: Where does each PSV discharge to?
+- **Blowdown Valves (BDV)**: Tag, size, manual/auto
+- **Drain System**: HP drain, LP drain, closed drain, open drain
+- **Vent System**: Atmospheric vent, vent header
+- Environmental philosophy (zero flaring? mobile flare?)
+
+═══════════════════════════════════════════════════════════
+9️⃣ UTILITIES & SUPPORT SYSTEMS
+═══════════════════════════════════════════════════════════
+Extract connections to:
+- **Instrument Air (IA)**: Supply header, pressure (typically 7 barg)
+- **Nitrogen (N2)**: Purge/blanketing system
+- **Cooling Water**: Supply/return, temperatures
+- **Steam**: HP/MP/LP steam for heating
+- **Electrical**: Power supply to motors, heaters
+- **Fuel Gas**: If burners/heaters present
+
+═══════════════════════════════════════════════════════════
+🔟 OPERABILITY & MAINTENANCE CONSIDERATIONS
+═══════════════════════════════════════════════════════════
+Extract if visible:
+- **Pigging Operations**: Pig launcher/receiver tags, isolation valves
+- **Maintenance Isolation**: Spectacle blinds, double block & bleed
+- **Startup Philosophy**: Sequence notes
+- **Shutdown Philosophy**: Normal vs emergency
+- **Bypass Lines**: For maintenance or control override
+- **Sampling Points**: For quality control
+
+═══════════════════════════════════════════════════════════
+1️⃣1️⃣ TEXT ANNOTATIONS & ENGINEERING NOTES
+═══════════════════════════════════════════════════════════
+Extract ALL visible text:
+- Drawing title, number, revision, date
+- Project name, client name, contractor name
+- Design basis notes
+- Safety notes (e.g., "PSV sized for fire case")
+- Material specifications
+- Piping class references
+- Legends/symbols key
+- Engineering assumptions
+- Any handwritten notes or stamps
+
+═══════════════════════════════════════════════════════════
+📤 RESPONSE FORMAT - STRUCTURED JSON OUTPUT
+═══════════════════════════════════════════════════════════
+Provide comprehensive extraction in this EXACT JSON structure:
 {{
   "equipment": [
     {{
@@ -724,7 +856,7 @@ IMPORTANT:
     
     def _run_engineering_validation(self, pid_specs: dict, vision_data: dict):
         """
-        STEP 7: Engineering Validation
+        STEP 7: Engineering Validation with Claude AI
         
         Validates generated P&ID against engineering standards:
         - ADNOC DEP requirements
@@ -732,24 +864,35 @@ IMPORTANT:
         - ISA-5.1 instrumentation standards
         - API RP 520/521 safety systems
         
+        Uses Claude 3.5 Sonnet for expert-level engineering review
+        
         Returns ValidationResult with findings, holds, and corrections
         """
         try:
-            validator = EngineeringValidationEngine()
+            # Check if Claude AI validation is available
+            use_claude = config('USE_CLAUDE_VALIDATION', default='true').lower() == 'true'
+            anthropic_key = config('ANTHROPIC_API_KEY', default='')
             
-            # Prepare P&ID document structure for validation
-            pid_document = {
-                'drawing_number': pid_specs.get('drawing_info', {}).get('drawing_number', 'PID-001'),
-                'drawing_title': pid_specs.get('drawing_info', {}).get('title', 'P&ID Draft'),
-                'equipment_list': pid_specs.get('equipment_list', []),
-                'instrument_list': pid_specs.get('instrument_list', []),
-                'piping_specifications': pid_specs.get('piping_specifications', []),
-                'safety_devices': pid_specs.get('safety_devices', []),
-                'utilities': vision_data.get('utilities', [])
-            }
-            
-            # Run validation
-            validation_result = validator.validate_pid_document(pid_document)
+            if use_claude and anthropic_key:
+                logger.info("  🤖 Using Claude 3.5 Sonnet for AI-powered validation")
+                validation_result = self._validate_with_claude(pid_specs, vision_data)
+            else:
+                logger.info("  📋 Using rule-based validation engine")
+                validator = EngineeringValidationEngine()
+                
+                # Prepare P&ID document structure for validation
+                pid_document = {
+                    'drawing_number': pid_specs.get('drawing_info', {}).get('drawing_number', 'PID-001'),
+                    'drawing_title': pid_specs.get('drawing_info', {}).get('title', 'P&ID Draft'),
+                    'equipment_list': pid_specs.get('equipment_list', []),
+                    'instrument_list': pid_specs.get('instrument_list', []),
+                    'piping_specifications': pid_specs.get('piping_specifications', []),
+                    'safety_devices': pid_specs.get('safety_devices', []),
+                    'utilities': vision_data.get('utilities', [])
+                }
+                
+                # Run validation
+                validation_result = validator.validate_pid_document(pid_document)
             
             # Log findings
             critical_findings = [f for f in validation_result.findings if f.severity.value == 'CRITICAL']
@@ -771,6 +914,74 @@ IMPORTANT:
         except Exception as e:
             logger.error(f"  ❌ Validation failed: {str(e)}")
             # Return empty validation result
+            from .validation_engine import ValidationResult
+            return ValidationResult(
+                document_id='ERROR',
+                document_title='Validation Failed',
+                validation_passed=True,
+                findings=[]
+            )
+    
+    def _validate_with_claude(self, pid_specs: dict, vision_data: dict):
+        """
+        Use Claude 3.5 Sonnet for expert-level P&ID validation
+        """
+        try:
+            # Try to import Claude reasoner
+            from .ai_models.claude_reasoner import validate_pid
+            
+            logger.info("  → Running Claude AI engineering validation...")
+            validation_report = validate_pid(
+                pid_specs=pid_specs,
+                pfd_context=vision_data
+            )
+            
+            # Convert Claude validation report to internal format
+            from .validation_engine import ValidationResult, ValidationFinding, FindingSeverity
+            
+            findings = []
+            for finding in validation_report.findings:
+                findings.append(ValidationFinding(
+                    rule_id=f"CLAUDE-{finding.category.upper()}",
+                    severity=FindingSeverity[finding.severity.value],
+                    category=finding.category,
+                    description=finding.title,
+                    location=finding.description,
+                    recommendation=finding.recommendation,
+                    standard_reference=", ".join(validation_report.standards_checked)
+                ))
+            
+            validation_result = ValidationResult(
+                document_id=pid_specs.get('drawing_info', {}).get('drawing_number', 'PID-001'),
+                document_title=pid_specs.get('drawing_info', {}).get('title', 'P&ID Draft'),
+                validation_passed=(validation_report.overall_score >= 70),
+                findings=findings,
+                engineering_holds=[f for f in findings if f.severity == FindingSeverity.CRITICAL],
+                auto_corrections=[]
+            )
+            
+            logger.info(f"  ✅ Claude validation score: {validation_report.overall_score}/100")
+            
+            return validation_result
+            
+        except ImportError as e:
+            logger.warning(f"  ⚠️ Claude reasoner not available: {e}")
+            logger.info("  → Falling back to rule-based validation")
+            # Fallback to rule-based
+            validator = EngineeringValidationEngine()
+            pid_document = {
+                'drawing_number': pid_specs.get('drawing_info', {}).get('drawing_number', 'PID-001'),
+                'drawing_title': pid_specs.get('drawing_info', {}).get('title', 'P&ID Draft'),
+                'equipment_list': pid_specs.get('equipment_list', []),
+                'instrument_list': pid_specs.get('instrument_list', []),
+                'piping_specifications': pid_specs.get('piping_specifications', []),
+                'safety_devices': pid_specs.get('safety_devices', []),
+                'utilities': vision_data.get('utilities', [])
+            }
+            return validator.validate_pid_document(pid_document)
+        except Exception as e:
+            logger.error(f"  ❌ Claude validation failed: {str(e)}")
+            # Fallback
             from .validation_engine import ValidationResult
             return ValidationResult(
                 document_id='ERROR',
@@ -808,33 +1019,36 @@ IMPORTANT:
         output_path = os.path.join(pid_drawings_dir, f"{drawing_number}_{timestamp}_{unique_id}.pdf")
         logger.info(f"  → Generating unique P&ID file: {os.path.basename(output_path)}")
         
-        # Use programmatic generator (Professional CAD-style)
-        logger.info("  → Using professional programmatic P&ID generator...")
+        # Use graph-based generator (Professional ADNOC format)
+        logger.info("  → Using graph-based P&ID generator for ADNOC format...")
         try:
-            from .programmatic_pid_generator import generate_pid_from_specs
+            from .graph_based_pid_generator import generate_graph_based_pid
             
-            # Convert pid_specs to drawing_specs format
+            # Convert pid_specs to drawing_specs format for graph-based generator
             drawing_specs = {
                 'drawing_number': drawing_number,
                 'drawing_title': pid_specs.get('drawing_info', {}).get('title', 'P&ID Drawing'),
                 'project_name': pid_specs.get('drawing_info', {}).get('project_name', 'Project'),
-                'project_code': pid_specs.get('drawing_info', {}).get('project_code', ''),
+                'project_code': pid_specs.get('drawing_info', {}).get('project_code', 'PROJECT-CODE'),
+                'client': pid_specs.get('drawing_info', {}).get('client', 'ADNOC - Abu Dhabi National Oil Company'),
+                'contractor': pid_specs.get('drawing_info', {}).get('contractor', 'Rejlers AB - Engineering Solutions'),
                 'revision': pid_specs.get('drawing_info', {}).get('revision', 'A'),
                 'equipment': pid_specs.get('equipment_list', []),
-                'piping': [],
+                'process_streams': [],
                 'instrumentation': pid_specs.get('instrument_list', []),
                 'valves': [],
                 'generation_id': unique_id,  # Add unique ID to make each drawing visually distinct
                 'generation_timestamp': timestamp  # Add timestamp for tracking
             }
             
-            # Extract piping from specifications
+            # Extract process streams from specifications
             for pipe_spec in pid_specs.get('piping_specifications', []):
                 if isinstance(pipe_spec, dict):
-                    drawing_specs['piping'].append({
-                        'from_equipment': pipe_spec.get('from', ''),
-                        'to_equipment': pipe_spec.get('to', ''),
-                        'line_number': pipe_spec.get('line_number', '')
+                    drawing_specs['process_streams'].append({
+                        'from': pipe_spec.get('from', ''),
+                        'to': pipe_spec.get('to', ''),
+                        'stream_id': pipe_spec.get('line_number', ''),
+                        'line_size': pipe_spec.get('size', '')
                     })
             
             # Extract valves from instrument list
@@ -862,8 +1076,8 @@ IMPORTANT:
                     'type': 'safety'
                 })
             
-            # Generate P&ID using programmatic generator
-            output_path = generate_pid_from_specs(drawing_specs, output_path)
+            # Generate P&ID using graph-based generator (Full ADNOC format)
+            output_path = generate_graph_based_pid(drawing_specs, output_path)
             logger.info(f"  ✅ Professional P&ID generated: {output_path}")
             
             return output_path

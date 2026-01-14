@@ -8,6 +8,7 @@ This module generates real technical drawings (not AI images) with:
 - ISA 5.1 compliant instrument symbols
 - Professional text sizing and layout
 - A1 landscape format with proper title blocks
+- Soft-coded configuration for easy customization
 """
 
 from reportlab.lib.pagesizes import A1, landscape
@@ -19,6 +20,9 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 import os
 
+# Import soft-coded configuration
+from .config.pid_output_config import get_config, merge_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,11 +30,12 @@ class ProgrammaticPIDGenerator:
     """
     Professional P&ID Drawing Generator using ReportLab
     Creates CAD-quality technical drawings programmatically
+    Uses soft-coded configuration for easy customization
     """
     
-    def __init__(self, drawing_specs: Dict):
+    def __init__(self, drawing_specs: Dict, config_name: str = 'default', config_overrides: Dict = None):
         """
-        Initialize generator with drawing specifications
+        Initialize generator with drawing specifications and configuration
         
         Args:
             drawing_specs: Dictionary containing:
@@ -43,45 +48,38 @@ class ProgrammaticPIDGenerator:
                 - piping: List of piping connections
                 - instrumentation: List of instruments
                 - valves: List of valves
+            config_name: Name of configuration to use ('default', 'rejlers', 'a0')
+            config_overrides: Optional dictionary to override specific config values
         """
         self.specs = drawing_specs
         
-        # A1 landscape dimensions (841mm x 594mm)
-        self.page_width, self.page_height = landscape(A1)
+        # Load configuration (soft-coded)
+        base_config = get_config(config_name)
+        if config_overrides:
+            self.config = merge_config(base_config, config_overrides)
+        else:
+            self.config = base_config
         
-        # Drawing margins
-        self.margin = 20 * mm
-        self.drawing_width = self.page_width - 2 * self.margin
-        self.drawing_height = self.page_height - 2 * self.margin
+        # Page settings from config
+        self.page_width, self.page_height = self.config['page_size']
         
-        # Line weights (ISO/ISA standards)
-        self.line_weights = {
-            'border': 1.0,      # Border and title block
-            'equipment': 0.7,   # Equipment outlines
-            'process': 0.5,     # Process lines
-            'instrument': 0.25, # Instrument signals
-            'grid': 0.1         # Grid lines (optional)
-        }
+        # Margins from config
+        margins = self.config['margins']
+        self.margin = margins['left']  # Assuming uniform margins, or use individual
+        self.drawing_width = self.page_width - margins['left'] - margins['right']
+        self.drawing_height = self.page_height - margins['top'] - margins['bottom']
         
-        # Text sizes (in mm)
-        self.text_sizes = {
-            'title': 6,           # Drawing title
-            'equipment_tag': 5,   # Equipment tags (V-3601)
-            'equipment_name': 3,  # Equipment names
-            'line_number': 3,     # Line numbers
-            'instrument': 2.5,    # Instrument tags
-            'notes': 2.5          # General notes
-        }
+        # Line weights from config
+        self.line_weights = self.config['line_weights']
         
-        # Symbol sizes
-        self.symbol_sizes = {
-            'instrument_circle': 15 * mm,  # ISA instrument circle diameter
-            'valve_width': 8 * mm,          # Valve symbol width
-            'valve_height': 8 * mm          # Valve symbol height
-        }
+        # Text sizes from config
+        self.text_sizes = self.config['text_sizes']
         
-        # Colors (all black for technical drawings)
-        self.color_black = colors.black
+        # Symbol sizes from config
+        self.symbol_sizes = self.config['symbol_sizes']
+        
+        # Colors from config
+        self.color_black = self.config['colors']['primary']
         
     def generate(self, output_path: str) -> str:
         """
@@ -139,109 +137,132 @@ class ProgrammaticPIDGenerator:
             raise
     
     def _draw_border_and_title_block(self, c: canvas.Canvas):
-        """Draw main border and title block"""
+        """Draw main border and title block using soft-coded configuration"""
         c.setStrokeColor(self.color_black)
         c.setLineWidth(self.line_weights['border'])
         
         # Main border
         c.rect(self.margin, self.margin, self.drawing_width, self.drawing_height)
         
-        # Title block (200mm x 100mm in bottom-right corner)
-        title_block_width = 200 * mm
-        title_block_height = 100 * mm
-        title_block_x = self.page_width - self.margin - title_block_width
-        title_block_y = self.margin
+        # Title block configuration
+        title_block_config = self.config['title_block']
         
-        c.rect(title_block_x, title_block_y, title_block_width, title_block_height)
+        if not title_block_config['enabled']:
+            return
         
-        # Dividers in title block
-        c.line(title_block_x, title_block_y + 60*mm, 
-               title_block_x + title_block_width, title_block_y + 60*mm)
-        c.line(title_block_x, title_block_y + 40*mm, 
-               title_block_x + title_block_width, title_block_y + 40*mm)
-        c.line(title_block_x, title_block_y + 20*mm, 
-               title_block_x + title_block_width, title_block_y + 20*mm)
+        # Calculate title block position
+        tb_width = title_block_config['width']
+        tb_height = title_block_config['height']
         
-        # Title block text
-        c.setFont("Helvetica-Bold", self.text_sizes['title'] * mm)
+        if title_block_config['position'] == 'bottom-right':
+            title_block_x = self.page_width - self.margin - tb_width
+            title_block_y = self.margin
+        elif title_block_config['position'] == 'bottom-left':
+            title_block_x = self.margin
+            title_block_y = self.margin
+        elif title_block_config['position'] == 'top-right':
+            title_block_x = self.page_width - self.margin - tb_width
+            title_block_y = self.page_height - self.margin - tb_height
+        else:  # top-left
+            title_block_x = self.margin
+            title_block_y = self.page_height - self.margin - tb_height
         
-        # Drawing title
-        title = self.specs.get('drawing_title', 'P&ID Drawing')
-        c.drawString(title_block_x + 5*mm, title_block_y + 75*mm, title)
+        # Draw title block border
+        c.setLineWidth(title_block_config['border_width'])
+        c.rect(title_block_x, title_block_y, tb_width, tb_height)
         
-        # Project info
-        c.setFont("Helvetica", self.text_sizes['equipment_name'] * mm)
-        project = self.specs.get('project_name', 'Project')
-        c.drawString(title_block_x + 5*mm, title_block_y + 50*mm, f"Project: {project}")
+        # Draw divider lines
+        for divider in title_block_config.get('dividers', []):
+            y_pos = title_block_y + divider['y_position']
+            c.line(title_block_x, y_pos, title_block_x + tb_width, y_pos)
         
-        # Drawing number
-        c.setFont("Helvetica-Bold", self.text_sizes['equipment_tag'] * mm)
-        drawing_num = self.specs.get('drawing_number', 'PID-001')
-        c.drawString(title_block_x + 5*mm, title_block_y + 28*mm, f"Drawing No: {drawing_num}")
-        
-        # Revision
-        revision = self.specs.get('revision', 'A')
-        c.drawString(title_block_x + 5*mm, title_block_y + 8*mm, f"Rev: {revision}")
-        
-        # Date
-        date_str = datetime.now().strftime('%Y-%m-%d')
-        c.drawString(title_block_x + 100*mm, title_block_y + 8*mm, f"Date: {date_str}")
-        
-        # Generation metadata (timestamp + unique ID for tracking)
-        c.setFont("Helvetica", self.text_sizes['notes'] * mm)
-        generation_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        c.drawString(title_block_x + 5*mm, title_block_y + 2*mm, f"Generated: {generation_time}")
-        
-        # Add unique generation ID if provided
-        if 'generation_id' in self.specs:
-            c.setFont("Helvetica", (self.text_sizes['notes'] - 0.5) * mm)
-            c.drawString(title_block_x + 5*mm, title_block_y - 2*mm, f"ID: {self.specs['generation_id'][:16]}")
+        # Draw title block fields
+        for field in title_block_config['fields']:
+            field_name = field['name']
+            font = field['font']
+            font_size = field['font_size']
+            y_position = title_block_y + field['y_position']
+            x_position = title_block_x + field['x_offset']
+            formatter = field.get('formatter', lambda x: str(x) if x else '')
+            
+            # Get value from specs
+            value = self.specs.get(field_name, None)
+            
+            # Format the value
+            formatted_value = formatter(value)
+            
+            # Draw text
+            c.setFont(font, font_size)
+            c.drawString(x_position, y_position, formatted_value)
     
     def _draw_legend(self, c: canvas.Canvas):
-        """Draw symbol legend in top-left corner"""
-        legend_x = self.margin + 10*mm
-        legend_y = self.page_height - self.margin - 30*mm
+        """Draw symbol legend using soft-coded configuration"""
+        legend_config = self.config['legend']
         
-        c.setFont("Helvetica-Bold", self.text_sizes['equipment_name'] * mm)
-        c.drawString(legend_x, legend_y, "LEGEND")
+        if not legend_config['enabled']:
+            return
         
-        c.setFont("Helvetica", self.text_sizes['notes'] * mm)
-        y_offset = legend_y - 8*mm
+        # Calculate legend position
+        if legend_config['position'] == 'top-left':
+            legend_x = self.margin + legend_config['x_offset']
+            legend_y = self.page_height - self.margin - legend_config['y_offset']
+        elif legend_config['position'] == 'top-right':
+            legend_x = self.page_width - self.margin - 100 * mm
+            legend_y = self.page_height - self.margin - legend_config['y_offset']
+        elif legend_config['position'] == 'bottom-left':
+            legend_x = self.margin + legend_config['x_offset']
+            legend_y = self.margin + legend_config['y_offset']
+        else:  # bottom-right
+            legend_x = self.page_width - self.margin - 100 * mm
+            legend_y = self.margin + legend_config['y_offset']
         
-        legend_items = [
-            "━━━  Process Line",
-            "- - -  Instrument Signal",
-            "⬡   Gate Valve",
-            "◇   Control Valve",
-            "○   Instrument (Field)",
-            "◯   Instrument (Panel)"
-        ]
+        # Draw legend title
+        c.setFont(legend_config['title_font'], legend_config['title_size'])
+        c.drawString(legend_x, legend_y, legend_config['title'])
         
-        for item in legend_items:
-            c.drawString(legend_x, y_offset, item)
-            y_offset -= 6*mm
+        # Draw legend items
+        c.setFont(legend_config['item_font'], legend_config['item_size'])
+        y_offset = legend_y - legend_config['line_spacing']
+        
+        for item in legend_config['items']:
+            symbol = item.get('symbol', '')
+            description = item.get('description', '')
+            text = f"{symbol}  {description}"
+            c.drawString(legend_x, y_offset, text)
+            y_offset -= legend_config['line_spacing']
     
     def _draw_notes(self, c: canvas.Canvas):
-        """Draw general notes in bottom-left corner"""
-        notes_x = self.margin + 10*mm
-        notes_y = self.margin + 60*mm
+        """Draw general notes using soft-coded configuration"""
+        notes_config = self.config['notes']
         
-        c.setFont("Helvetica-Bold", self.text_sizes['equipment_name'] * mm)
-        c.drawString(notes_x, notes_y, "GENERAL NOTES")
+        if not notes_config['enabled']:
+            return
         
-        c.setFont("Helvetica", self.text_sizes['notes'] * mm)
-        y_offset = notes_y - 8*mm
+        # Calculate notes position
+        if notes_config['position'] == 'top-left':
+            notes_x = self.margin + notes_config['x_offset']
+            notes_y = self.page_height - self.margin - notes_config['y_offset']
+        elif notes_config['position'] == 'top-right':
+            notes_x = self.page_width - self.margin - 200 * mm
+            notes_y = self.page_height - self.margin - notes_config['y_offset']
+        elif notes_config['position'] == 'bottom-left':
+            notes_x = self.margin + notes_config['x_offset']
+            notes_y = self.margin + notes_config['y_offset']
+        else:  # bottom-right
+            notes_x = self.page_width - self.margin - 200 * mm
+            notes_y = self.margin + notes_config['y_offset']
         
-        notes = [
-            "1. All dimensions in millimeters unless noted",
-            "2. All instruments per ISA 5.1 standard",
-            "3. Line numbers indicate: Size-Fluid-Spec-Line Number",
-            "4. Equipment tags per project standards"
-        ]
+        # Draw notes title
+        c.setFont(notes_config['title_font'], notes_config['title_size'])
+        c.drawString(notes_x, notes_y, notes_config['title'])
         
-        for note in notes:
+        # Draw note items
+        c.setFont(notes_config['item_font'], notes_config['item_size'])
+        y_offset = notes_y - notes_config['line_spacing']
+        
+        for note in notes_config['items']:
             c.drawString(notes_x, y_offset, note)
-            y_offset -= 6*mm
+            y_offset -= notes_config['line_spacing']
     
     def _draw_equipment(self, c: canvas.Canvas) -> Dict[str, Tuple[float, float]]:
         """
@@ -586,16 +607,29 @@ class ProgrammaticPIDGenerator:
         c.setDash([])  # Reset to solid
 
 
-def generate_pid_from_specs(drawing_specs: Dict, output_path: str) -> str:
+def generate_pid_from_specs(drawing_specs: Dict, output_path: str, config_name: str = 'default', config_overrides: Dict = None) -> str:
     """
-    Convenience function to generate P&ID from specifications
+    Convenience function to generate P&ID from specifications with soft-coded configuration
     
     Args:
         drawing_specs: Dictionary with drawing specifications
         output_path: Where to save the PDF
+        config_name: Name of configuration to use ('default', 'rejlers', 'a0')
+        config_overrides: Optional dictionary to override specific config values
         
     Returns:
         str: Path to generated PDF
+        
+    Example:
+        # Use default configuration
+        generate_pid_from_specs(specs, "output.pdf")
+        
+        # Use Rejlers configuration
+        generate_pid_from_specs(specs, "output.pdf", config_name='rejlers')
+        
+        # Use default with custom overrides
+        overrides = {'title_block': {'width': 250 * mm}}
+        generate_pid_from_specs(specs, "output.pdf", config_overrides=overrides)
     """
-    generator = ProgrammaticPIDGenerator(drawing_specs)
+    generator = ProgrammaticPIDGenerator(drawing_specs, config_name, config_overrides)
     return generator.generate(output_path)

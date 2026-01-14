@@ -148,6 +148,41 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
                         "status": "failed"
                     }
                 
+                # NEW: Run YOLOv8 symbol detection
+                logger.info(f"🔍 Running YOLOv8 P&ID symbol detection...")
+                try:
+                    from .yolov8_detector import get_yolov8_detector
+                    
+                    detector = get_yolov8_detector()
+                    if detector.is_available():
+                        detection_results = detector.detect_symbols_from_file(file_path, dpi=150)
+                        
+                        if detection_results['success']:
+                            pfd_doc.yolov8_detections = detection_results
+                            logger.info(f"✅ YOLOv8 detection completed:")
+                            logger.info(f"   - Total symbols detected: {detection_results['total_symbols']}")
+                            logger.info(f"   - Average confidence: {detection_results['confidence_avg']:.2%}")
+                            logger.info(f"   - Unique symbol types: {len(detection_results['symbol_counts'])}")
+                            
+                            # Log top 5 detected symbols
+                            sorted_counts = sorted(detection_results['symbol_counts'].items(), 
+                                                 key=lambda x: x[1], reverse=True)[:5]
+                            for symbol, count in sorted_counts:
+                                logger.info(f"      • {symbol}: {count}")
+                        else:
+                            logger.warning(f"⚠️ YOLOv8 detection failed: {detection_results.get('error')}")
+                            pfd_doc.yolov8_detections = {"error": detection_results.get('error'), "status": "failed"}
+                    else:
+                        logger.warning("⚠️ YOLOv8 detector not available (model not loaded)")
+                        pfd_doc.yolov8_detections = {"status": "unavailable", "message": "YOLOv8 model not loaded"}
+                        
+                except Exception as yolo_error:
+                    logger.warning(f"⚠️ YOLOv8 detection failed (non-critical): {str(yolo_error)}")
+                    pfd_doc.yolov8_detections = {
+                        "error": str(yolo_error),
+                        "status": "failed"
+                    }
+                
                 pfd_doc.status = 'converted'
                 pfd_doc.processing_completed_at = timezone.now()
                 pfd_doc.processing_duration = (

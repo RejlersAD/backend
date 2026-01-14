@@ -1,0 +1,15 @@
+artifact_uri: /app/runs/mlflow/841045044098702019/df39bf5dafac4e8ea0cd8444189020a4/artifacts
+end_time: 1768132552555
+entry_point_name: ''
+experiment_id: '841045044098702019'
+lifecycle_stage: active
+run_id: df39bf5dafac4e8ea0cd8444189020a4
+run_name: roboflow_trained
+run_uuid: df39bf5dafac4e8ea0cd8444189020a4
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1768131516895
+status: 3
+tags: []
+user_id: root

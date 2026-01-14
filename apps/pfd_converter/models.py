@@ -66,6 +66,12 @@ class PFDDocument(TimeStampedModel):
         help_text='Comprehensive GPT-4 Vision analysis with equipment specs, line sizes, instruments, etc.'
     )
     
+    # YOLOv8 Symbol Detection Results
+    yolov8_detections = models.JSONField(
+        default=dict,
+        help_text='YOLOv8 detected P&ID symbols with bounding boxes and confidence scores'
+    )
+    
     # 5-Stage PFD Analysis (New AI-Powered Approach)
     stage1_module_identification = models.JSONField(
         default=dict,

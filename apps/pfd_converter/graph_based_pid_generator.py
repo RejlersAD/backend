@@ -10,6 +10,11 @@ This uses graph algorithms for:
 - Professional process flow visualization
 
 Based on 25+ years process engineering best practices
+
+ENHANCED WITH AZURE ALGORITHMS:
+- Hough Transform line detection (from Microsoft Azure P&ID repo)
+- Graph-based connectivity analysis
+- NO Azure account required - 100% local execution!
 """
 
 import networkx as nx
@@ -24,6 +29,18 @@ import logging
 import math
 import os
 from datetime import datetime
+
+# Azure P&ID Algorithm Integration (adapted for local use)
+try:
+    from apps.pfd_converter.azure_algorithms.integration import (
+        integrate_azure_line_detection,
+        AzureIntegrationConfig,
+        check_azure_integration_status
+    )
+    AZURE_ALGORITHMS_AVAILABLE = True
+except ImportError:
+    AZURE_ALGORITHMS_AVAILABLE = False
+    logger.info("Azure algorithms not available (optional enhancement)")
 
 logger = logging.getLogger(__name__)
 
@@ -170,21 +187,29 @@ class ProcessFlowGraph:
             except:
                 pass
             
-            # Try topological sort for process flow direction
+            # Try topological sort for SCHEMATIC PROCESS FLOW (left-to-right)
             layers = list(nx.topological_generations(layout_graph))
             
-            # Calculate positions layer by layer (left to right)
+            # Calculate positions layer by layer (STRICT LEFT-TO-RIGHT FLOW)
+            # This creates SCHEMATIC/ELEVATION view, not plan/top view
             layer_width = width / (len(layers) + 1)
+            
+            # Equipment baseline (horizontal centerline for process flow)
+            baseline_y = height / 2  # Center baseline for schematic view
             
             for layer_idx, layer_nodes in enumerate(layers):
                 x = layer_width * (layer_idx + 1)
                 
-                # Vertical spacing within layer
+                # Minimal vertical spacing (keep equipment near horizontal baseline)
+                # This creates SCHEMATIC FLOW VIEW with equipment in line
                 node_count = len(layer_nodes)
-                vertical_spacing = height / (node_count + 1)
+                vertical_variance = min(height * 0.3, 150)  # Max 30% height variance
+                vertical_spacing = vertical_variance / (node_count + 1) if node_count > 1 else 0
                 
                 for node_idx, node in enumerate(sorted(layer_nodes)):
-                    y = vertical_spacing * (node_idx + 1)
+                    # Center equipment around baseline (schematic view)
+                    y_offset = vertical_spacing * (node_idx - node_count/2 + 0.5)
+                    y = baseline_y + y_offset
                     positions[node] = (x, y)
                     
         except nx.NetworkXError:
@@ -499,6 +524,29 @@ class GraphBasedPIDGenerator:
         # Equipment positions (calculated during generation)
         self.equipment_positions = {}
         
+        # ===== AZURE ALGORITHM INTEGRATION =====
+        # Enable Microsoft Azure's Hough Transform line detection (100% local!)
+        if AZURE_ALGORITHMS_AVAILABLE:
+            try:
+                # Configure Azure algorithms
+                self.azure_config = AzureIntegrationConfig(
+                    enable_hough_lines=True,
+                    hough_threshold=50,
+                    min_line_length=30,
+                    max_line_gap=10
+                )
+                
+                # Integrate Azure line detection
+                integrate_azure_line_detection(
+                    self,
+                    enable_hough=self.azure_config.enable_hough_lines,
+                    hough_config=self.azure_config.hough_config
+                )
+                
+                logger.info("✅ Azure P&ID algorithms integrated (Hough Transform enabled)")
+            except Exception as e:
+                logger.warning(f"⚠️  Azure algorithm integration failed: {e}")
+        
     def generate(self, output_path: str) -> str:
         """
         Generate P&ID using graph-based layout
@@ -589,12 +637,13 @@ class GraphBasedPIDGenerator:
     
     def _calculate_equipment_positions(self) -> Dict[str, Tuple[float, float, float, float]]:
         """
-        Calculate equipment positions using PFD position hints + graph layout
+        Calculate equipment positions for SCHEMATIC/PROCESS FLOW VIEW (elevation view)
         
         Strategy:
-        1. Use position_hint from PFD extraction if available
-        2. Apply minimum spacing constraints (200mm between equipment)
-        3. Fall back to graph layout if no hints
+        1. Use HORIZONTAL LEFT-TO-RIGHT layout (process flow schematic)
+        2. Equipment arranged in ELEVATION VIEW (side view, not top view)
+        3. Vessels shown VERTICALLY (standing), pumps horizontal
+        4. Apply strict left-to-right process flow direction
         
         Returns:
             Dict mapping tag to (x, y, width, height)
@@ -869,8 +918,14 @@ class GraphBasedPIDGenerator:
         c.setFont("Helvetica-Bold", 3*mm)
         c.drawString(tb_x + 100*mm, ident_y - 17*mm, "STATUS: IFA")
         
+        # View type - explicitly indicate SCHEMATIC/ELEVATION VIEW
+        c.setFont("Helvetica-Bold", 3.5*mm)
+        c.setFillColor(colors.HexColor('#0066CC'))  # Blue color for emphasis
+        c.drawString(tb_x + 5*mm, ident_y - 23*mm, "VIEW: SCHEMATIC/ELEVATION")
+        c.setFillColor(colors.black)  # Reset to black
+        
         # === REVISION HISTORY TABLE ===
-        rev_y = ident_y - 23*mm
+        rev_y = ident_y - 28*mm  # Adjusted down to accommodate view type
         c.setLineWidth(0.25*mm)
         c.line(tb_x, rev_y, tb_x + tb_width, rev_y)
         
@@ -1137,7 +1192,11 @@ class GraphBasedPIDGenerator:
 
     
     def _draw_vessel_symbol(self, c, x, y, w, h, tag, desc):
-        """Draw professional vertical vessel with full details"""
+        """Draw professional vertical vessel in ELEVATION VIEW (schematic/process flow view)
+        
+        This draws vessels as STANDING VERTICALLY (elevation/side view)
+        NOT as seen from above (plan/top view)
+        """
         c.setLineWidth(0.7*mm)
         
         # Vessel shell (main body)
@@ -1226,7 +1285,11 @@ class GraphBasedPIDGenerator:
         # Tag is now drawn by _draw_equipment_tag_leader method
     
     def _draw_tank_symbol(self, c, x, y, w, h, tag, desc):
-        """Draw professional storage tank with details"""
+        """Draw professional storage tank in ELEVATION VIEW (schematic view)
+        
+        This draws tanks as STANDING VERTICALLY (elevation/side view)
+        NOT as seen from above (plan/top view)
+        """
         c.setLineWidth(0.7*mm)
         
         # Tank shell
@@ -1303,7 +1366,10 @@ class GraphBasedPIDGenerator:
         # Tag is now drawn by _draw_equipment_tag_leader method
     
     def _draw_pump_symbol(self, c, x, y, w, h, tag, desc):
-        """Draw professional centrifugal pump with motor"""
+        """Draw professional centrifugal pump in SCHEMATIC/ELEVATION VIEW (side view)
+        
+        This shows pump and motor in side view (elevation), not plan view
+        """
         center_x = x + w/2
         center_y = y + h/2
         
@@ -1366,7 +1432,10 @@ class GraphBasedPIDGenerator:
         # Tag is now drawn by _draw_equipment_tag_leader method
     
     def _draw_exchanger_symbol(self, c, x, y, w, h, tag, desc):
-        """Draw shell & tube heat exchanger"""
+        """Draw shell & tube heat exchanger in SCHEMATIC/ELEVATION VIEW
+        
+        Shows exchanger in side/elevation view for process flow schematic
+        """
         # Shell (ellipse approximation with circles)
         c.ellipse(x, y, x + w, y + h)
         
@@ -1420,8 +1489,30 @@ class GraphBasedPIDGenerator:
             start = self._get_outlet_nozzle(src_eq.get('type'), src_x, src_y, src_w, src_h, dst_x)
             end = self._get_inlet_nozzle(dst_eq.get('type'), dst_x, dst_y, dst_w, dst_h, src_x)
             
-            # Route the line
-            route = self.router.route(start, end)
+            # Route the line with Azure-enhanced detection (if available)
+            route = None
+            
+            # Try Azure Hough Transform routing first (better line detection)
+            if hasattr(self, '_azure_enabled') and self._azure_enabled:
+                try:
+                    from apps.pfd_converter.azure_algorithms.integration import enhance_routing_with_hough_transform
+                    
+                    # Try to get reference image path (if available from analysis)
+                    reference_image = self.specs.get('reference_image_path')
+                    
+                    if reference_image:
+                        azure_route = enhance_routing_with_hough_transform(
+                            self, start, end, image_path=reference_image
+                        )
+                        if azure_route and len(azure_route) >= 2:
+                            route = azure_route
+                            logger.debug(f"✅ Using Azure Hough Transform routing for {source}→{dest}")
+                except Exception as e:
+                    logger.debug(f"Azure routing fallback: {e}")
+            
+            # Fallback to standard orthogonal routing
+            if route is None:
+                route = self.router.route(start, end)
             
             # Draw the routed line
             if len(route) >= 2:
@@ -2241,6 +2332,7 @@ class GraphBasedPIDGenerator:
         # Notes content - with proper spacing inside box
         c.setFont("Helvetica", 1.8*mm)  # Slightly smaller font for better fit
         notes = [
+            "• DRAWING TYPE: Schematic/Elevation View (Process Flow)",
             "1. All dimensions in millimeters unless otherwise noted.",
             "2. All elevations relative to plant datum.",
             "3. Pipe specifications per project piping class.",

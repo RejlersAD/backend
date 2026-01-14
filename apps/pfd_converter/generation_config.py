@@ -77,6 +77,9 @@ INTELLIGENCE_LEVELS = {
 # Layout Configuration
 LAYOUT_CONFIG = {
     'page_size': 'A1_landscape',  # A1 landscape for large P&IDs
+    'view_type': 'schematic',  # 'schematic' (elevation/process flow) NOT 'plan' or 'top'
+    'flow_direction': 'left-to-right',  # Horizontal process flow
+    'orientation': 'elevation',  # Elevation/side view, not plan/top view
     'margins': {
         'left': 50,   # mm
         'right': 50,
@@ -89,8 +92,8 @@ LAYOUT_CONFIG = {
         'snap_tolerance': 10  # mm
     },
     'spacing': {
-        'equipment_horizontal': 200,  # mm
-        'equipment_vertical': 150,
+        'equipment_horizontal': 200,  # mm (strict horizontal spacing for process flow)
+        'equipment_vertical': 150,  # mm (minimal vertical variance)
         'instrument_offset': 30,
         'valve_offset': 50
     }

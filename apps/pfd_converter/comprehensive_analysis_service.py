@@ -240,9 +240,11 @@ class ComprehensivePFDAnalyzer:
     def _build_analysis_prompt(self, page_num: int) -> str:
         """Build analysis prompt dynamically from configuration"""
         
-        prompt = f"""Analyze this Process Flow Diagram (PFD) - Page {page_num} in EXTREME DETAIL.
+        prompt = f"""You are a technical document analyzer. Your task is to analyze this Process Flow Diagram (PFD) image and extract structured data.
 
-Extract EVERY piece of information visible on this drawing.
+**IMPORTANT**: You MUST analyze the image and provide the requested data in JSON format. This is a technical engineering drawing analysis task.
+
+Page {page_num} - Extract EVERY piece of information visible on this drawing.
 
 """
         
@@ -324,6 +326,7 @@ Be EXTREMELY thorough. Extract EVERY visible detail, number, and specification."
             return json.loads(json_str)
         except Exception as e:
             logger.error(f"Failed to parse JSON response: {e}")
+            logger.error(f"Response content (first 500 chars): {content[:500]}")
             return {}
     
     def _structure_analysis(self, all_pages: List[Dict], document_info: Dict = None) -> Dict:

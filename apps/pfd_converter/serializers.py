@@ -22,6 +22,8 @@ class PFDDocumentSerializer(serializers.ModelSerializer):
             'processing_duration', 'processing_time',
             'extracted_data', 'conversion_notes', 'error_message',
             'conversion_count', 'created_at', 'updated_at',
+            # YOLOv8 Symbol Detection
+            'yolov8_detections',
             # 5-Stage Analysis fields
             'analysis_stage', 'analysis_progress',
             'stage1_module_identification', 'stage2_module_details',
@@ -32,6 +34,7 @@ class PFDDocumentSerializer(serializers.ModelSerializer):
             'id', 'uploaded_by', 'file_size', 'file_type',
             'processing_started_at', 'processing_completed_at',
             'processing_duration', 'extracted_data', 'created_at', 'updated_at',
+            'yolov8_detections',
             'analysis_stage', 'analysis_progress',
             'stage1_module_identification', 'stage2_module_details',
             'stage3_pid_complexity', 'stage4_module_coverage',
