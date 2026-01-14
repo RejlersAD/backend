@@ -994,6 +994,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             data = serializer.data
             print(f"[DEBUG /rbac/users/me/] Serialization successful")
             print(f"[DEBUG /rbac/users/me/] Roles count: {len(data.get('roles', []))}")
+            print(f"[DEBUG /rbac/users/me/] Phone: {data.get('phone')}, Profile Photo: {data.get('profile_photo')}")
             
             return Response(data)
             
@@ -1081,7 +1082,9 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             
             # Return updated profile
             serializer = self.get_serializer(profile)
-            return Response(serializer.data)
+            response_data = serializer.data
+            print(f"[DEBUG] Profile response - phone: {response_data.get('phone')}, profile_photo: {response_data.get('profile_photo')}")
+            return Response(response_data)
             
         except Exception as e:
             import traceback
