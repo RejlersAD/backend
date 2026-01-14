@@ -1030,40 +1030,51 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_404_NOT_FOUND
                 )
             
+            # Track changes for audit log
+            changes = {}
+            
             # Update User model fields
             user = request.user
             if 'first_name' in request.data:
+                changes['first_name'] = request.data['first_name']
                 user.first_name = request.data['first_name']
             if 'last_name' in request.data:
+                changes['last_name'] = request.data['last_name']
                 user.last_name = request.data['last_name']
             user.save()
             
             # Update UserProfile fields
             if 'phone' in request.data:
+                changes['phone'] = request.data['phone']
                 profile.phone = request.data['phone']
             if 'bio' in request.data:
+                changes['bio'] = request.data['bio']
                 profile.bio = request.data['bio']
             if 'location' in request.data:
+                changes['location'] = request.data['location']
                 profile.location = request.data['location']
             if 'department' in request.data:
+                changes['department'] = request.data['department']
                 profile.department = request.data['department']
             if 'job_title' in request.data:
+                changes['job_title'] = request.data['job_title']
                 profile.job_title = request.data['job_title']
             
             # Handle profile photo upload
             if 'profile_photo' in request.FILES:
                 profile.profile_photo = request.FILES['profile_photo']
+                changes['profile_photo'] = 'uploaded'
             
             profile.save()
             
-            # Create audit log
+            # Create audit log (only with serializable data)
             create_audit_log(
                 user=request.user,
                 action='update_profile',
                 resource_type='UserProfile',
                 resource_id=profile.id,
                 resource_repr=f'{user.email}',
-                changes=request.data,
+                changes=changes,
                 ip_address=request.META.get('REMOTE_ADDR'),
                 user_agent=request.META.get('HTTP_USER_AGENT', '')
             )

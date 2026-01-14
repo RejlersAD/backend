@@ -16,7 +16,7 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
-@api_view(['POST'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def check_first_login(request):
     """
