@@ -949,12 +949,17 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         
         return response
     
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get', 'patch'], url_path='me')
     def me(self, request):
-        """Get current user's profile - creates one if it doesn't exist"""
+        """Get or update current user's profile"""
         import traceback
         
         try:
+            # PATCH - Update profile
+            if request.method == 'PATCH':
+                return self.update_my_profile(request)
+            
+            # GET - Retrieve profile
             # Log the request for debugging
             print(f"\n[DEBUG /rbac/users/me/] User: {request.user}")
             print(f"[DEBUG /rbac/users/me/] User authenticated: {request.user.is_authenticated}")
@@ -1007,6 +1012,72 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     'user': str(request.user),
                     'traceback': traceback.format_exc()
                 },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def update_my_profile(self, request):
+        """Update current user's profile"""
+        try:
+            # Get user profile
+            profile = UserProfile.objects.filter(
+                user=request.user,
+                is_deleted=False
+            ).first()
+            
+            if not profile:
+                return Response(
+                    {'error': 'Profile not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Update User model fields
+            user = request.user
+            if 'first_name' in request.data:
+                user.first_name = request.data['first_name']
+            if 'last_name' in request.data:
+                user.last_name = request.data['last_name']
+            user.save()
+            
+            # Update UserProfile fields
+            if 'phone' in request.data:
+                profile.phone = request.data['phone']
+            if 'bio' in request.data:
+                profile.bio = request.data['bio']
+            if 'location' in request.data:
+                profile.location = request.data['location']
+            if 'department' in request.data:
+                profile.department = request.data['department']
+            if 'job_title' in request.data:
+                profile.job_title = request.data['job_title']
+            
+            # Handle profile photo upload
+            if 'profile_photo' in request.FILES:
+                profile.profile_photo = request.FILES['profile_photo']
+            
+            profile.save()
+            
+            # Create audit log
+            create_audit_log(
+                user=request.user,
+                action='update_profile',
+                resource_type='UserProfile',
+                resource_id=profile.id,
+                resource_repr=f'{user.email}',
+                changes=request.data,
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+            
+            # Return updated profile
+            serializer = self.get_serializer(profile)
+            return Response(serializer.data)
+            
+        except Exception as e:
+            import traceback
+            print(f"[ERROR] Failed to update profile: {str(e)}")
+            print(traceback.format_exc())
+            return Response(
+                {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     

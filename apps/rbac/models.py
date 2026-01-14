@@ -270,6 +270,17 @@ class UserProfile(TimeStampedModel):
         help_text="User must change password on next login"
     )
     
+    # Profile customization
+    profile_photo = models.ImageField(
+        upload_to='profile_photos/',
+        null=True,
+        blank=True,
+        help_text="User profile photo stored in S3"
+    )
+    phone = models.CharField(max_length=20, blank=True)
+    bio = models.TextField(blank=True, max_length=500)
+    location = models.CharField(max_length=100, blank=True)
+    
     # Soft delete
     is_deleted = models.BooleanField(default=False)
     deleted_at = models.DateTimeField(null=True, blank=True)
