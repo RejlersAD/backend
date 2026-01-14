@@ -16,7 +16,8 @@ from .serializers import CRSDocumentSerializer, CRSDocumentVersionSerializer
 
 # NEW: Import helper modules for PDF extraction and CRS population
 try:
-    from .helpers.comment_extractor import extract_reviewer_comments, get_comment_statistics
+    # Use unified extractor - single source of truth
+from apps.core.helpers.unified_comment_extractor import extract_reviewer_comments, convert_comments_to_dict_list, get_comment_statistics
     from .helpers.template_populator import populate_crs_template, validate_template
     from .helpers.template_manager import get_crs_template, get_template_info
     HELPERS_AVAILABLE = True
@@ -340,6 +341,9 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
         
         Returns: Populated CRS template Excel file for download
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         if not HELPERS_AVAILABLE:
             return Response({
                 'error': 'PDF/Excel processing helpers not available. Install PyPDF2 and openpyxl.',
@@ -354,6 +358,17 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                     'error': 'File is required',
                     'success': False
                 }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # SMART: Check file size and warn if too large
+            file_size_mb = uploaded_file.size / (1024 * 1024)
+            logger.info(f"[UPLOAD] File size: {file_size_mb:.2f} MB")
+            
+            if file_size_mb > 50:
+                return Response({
+                    'error': f'File too large ({file_size_mb:.1f} MB). Maximum size is 50 MB.',
+                    'success': False,
+                    'message': 'Please split large PDFs into smaller sections or reduce file size.'
+                }, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
             
             # Get metadata
             metadata = {
@@ -371,10 +386,39 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                     'success': False
                 }, status=status.HTTP_400_BAD_REQUEST)
             
-            # Extract comments from PDF
+            # Extract comments from PDF with intelligent limits
+            import time
+            import fitz  # PyMuPDF for page count check
+            start_time = time.time()
+            logger.info(f"[PERF] Starting PDF processing for file: {uploaded_file.name}")
+            
             pdf_buffer = BytesIO(uploaded_file.read())
+            logger.info(f"[PERF] File read took {time.time() - start_time:.2f}s")
+            
+            # SMART: Check page count and limit processing
+            pdf_buffer.seek(0)
+            pdf_bytes = pdf_buffer.read()
+            pdf_buffer.seek(0)
+            
+            try:
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                page_count = len(doc)
+                doc.close()
+                logger.info(f"[PDF INFO] Pages: {page_count}")
+                
+                if page_count > 200:
+                    return Response({
+                        'error': f'PDF too large ({page_count} pages). Maximum is 200 pages.',
+                        'success': False,
+                        'message': 'Please split the PDF into smaller documents for processing.'
+                    }, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+            except Exception as e:
+                logger.warning(f"Could not check page count: {e}")
+            
             # CRITICAL: Enable cleaning to apply strict CRS_EXTRACTION_LOGIC.md rules
+            extraction_start = time.time()
             comments = extract_reviewer_comments(pdf_buffer, apply_cleaning=True)
+            logger.info(f"[PERF] Comment extraction took {time.time() - extraction_start:.2f}s, found {len(comments)} comments")
             
             if not comments:
                 return Response({
@@ -393,11 +437,14 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
             # Populate template
+            populate_start = time.time()
             output_buffer = populate_crs_template(
                 template_path=template_path,
                 comments=comments,
                 metadata=metadata
             )
+            logger.info(f"[PERF] Template population took {time.time() - populate_start:.2f}s")
+            logger.info(f"[PERF] Total processing time: {time.time() - start_time:.2f}s")
             
             # Get statistics
             stats = get_comment_statistics(comments)

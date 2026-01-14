@@ -67,44 +67,68 @@ class PDFCommentExtractor:
         return False
     
     def is_technical_drawing_element(self, text: str) -> bool:
-        """Filter out technical drawing elements - EXACT LOGIC FROM CRS_EXTRACTION_LOGIC.md"""
+        """Filter out technical drawing elements - OPTIMIZED AutoCAD filtering"""
         if not text or not text.strip():
             return False
         
         text_stripped = text.strip()
         text_lower = text_stripped.lower()
         
-        # AutoCAD patterns - exact matches from documentation
-        if 'autocad' in text_lower:
-            return True
-        if 'shx text' in text_lower or 'shx' in text_lower:
+        # ============================================
+        # AUTOCAD FILTERS - Optimized for performance
+        # ============================================
+        
+        # Quick keyword check (fastest, most common)
+        autocad_keywords = ['autocad', 'autodesk', 'acad', 'dwg', 'dxf', 'shx', 'xref', 'viewport', 'mview']
+        if any(kw in text_lower for kw in autocad_keywords):
             return True
         
-        # Pure numbers or dimensions (no comment content)
+        # Quick special character check
+        if '%%' in text_stripped:
+            return True
+        
+        # Pattern checks - with early exits
+        # AutoCAD layer names (common pattern)
+        if re.match(r'^[A-Z]+-[A-Z]+-[A-Z0-9]+$', text_stripped):
+            return True
+        
+        # AutoCAD text styles (short text only for performance)
+        if len(text_stripped) < 20 and re.match(r'^(STANDARD|ROMANS|ROMAND|SIMPLEX|COMPLEX|ITALIC)\s*$', text_stripped, re.IGNORECASE):
+            return True
+        
+        # Scale annotations
+        if re.match(r'^(SCALE|NTS|NOT TO SCALE)\s*[:=]?\s*[\d:/]*$', text_stripped, re.IGNORECASE):
+            return True
+        
+        # Coordinate text (short text only)
+        if len(text_stripped) < 30 and re.match(r'^[XYZ]\s*[=:]?\s*[\d\.\-]+$', text_stripped, re.IGNORECASE):
+            return True
+        
+        # Drawing numbers
+        if re.match(r'^(DWG|SHT|SHEET)\s*[#:]?\s*[\d\-]+$', text_stripped, re.IGNORECASE):
+            return True
+        
+        # ============================================
+        # EXISTING TECHNICAL FILTERS
+        # ============================================
+        
+        # Pure numbers or dimensions
         if re.match(r'^[\d\s\.\/\-]+$', text_stripped):
             return True
         
-        # Elevation codes: EL.100, /EL.109.000, RACK.100
+        # Elevation codes
         if re.match(r'^[/\-]?\s*(EL|RACK)\s*\.\s*\d+(\.\d+)?$', text_stripped, re.IGNORECASE):
             return True
         
-        # Technical codes: P100, MC-42, etc.
+        # Technical codes
         if re.match(r'^[A-Z]{1,3}\d+[\-\d]*$', text_stripped):
             return True
         
-        # Mixed technical patterns with no actual comment
-        # Example: "EL.107.000" or "RACK.100/200"
-        if re.match(r'^[A-Z0-9\s\.\/\-]+$', text_stripped):
-            # Check if it's ONLY technical elements (no alphabetic words that form sentences)
+        # Mixed technical patterns (only check short text for performance)
+        if len(text_stripped) < 50 and re.match(r'^[A-Z0-9\s\.\/\-]+$', text_stripped):
             words = text_stripped.split()
             if len(words) <= 3:
-                # Check if all words are technical patterns
-                all_technical = True
-                for word in words:
-                    # Check if word is NOT a regular English word
-                    if not re.match(r'^([A-Z]{1,3}\d+|[\d\.\/\-]+|EL|RACK)$', word, re.IGNORECASE):
-                        all_technical = False
-                        break
+                all_technical = all(re.match(r'^([A-Z]{1,3}\d+|[\d\.\/\-]+|EL|RACK)$', word, re.IGNORECASE) for word in words)
                 if all_technical:
                     return True
         
@@ -310,7 +334,9 @@ class PDFCommentExtractor:
                                                 "bbox": bbox,
                                                 "color": rgb if rgb != (0,0,0) else (1.0, 1.0, 0.0) if is_yellow_box else (1.0, 0.0, 0.0),
                                                 "type": comment_type,
-                                                "source": "annotation"
+                                                "source": "annotation",
+                                                "reviewer": title if title and title.strip() else "Not Provided",  # Extract reviewer from annotation title
+                                                "author": title if title and title.strip() else "Not Provided"
                                             })
                                             page_count += 1
                                             type_label = "🟡 Yellow box" if is_yellow_box else "🔴 Red comment" if is_red_annot else f"📌 {annot_type.lower()}" if is_shape_annotation else "💬 Annotation"
@@ -409,7 +435,7 @@ class PDFCommentExtractor:
     def process_extracted_comments(self, comments: List[Dict]) -> List[Dict]:
         """
         Process and clean extracted comments
-        Returns cleaned comments ready for database storage
+        Returns cleaned comments ready for database storage with full fields
         """
         processed_data = []
         
@@ -427,6 +453,12 @@ class PDFCommentExtractor:
             # Parse clause number
             clause = self.parse_clause_number(text)
             
+            # Extract discipline from text
+            discipline = self._extract_discipline_from_text(text)
+            
+            # Get reviewer name (if available in annotations)
+            reviewer = item.get('reviewer', item.get('author', 'Not Provided'))
+            
             processed_data.append({
                 'text': text,
                 'page': item['page'],
@@ -434,7 +466,29 @@ class PDFCommentExtractor:
                 'type': item.get('type', 'unknown'),
                 'color': item.get('color', (0, 0, 0)),
                 'bbox': item.get('bbox', [0, 0, 0, 0]),
-                'source': item.get('source', 'unknown')
+                'source': item.get('source', 'unknown'),
+                'reviewer': reviewer,
+                'discipline': discipline,
+                'section_reference': 'N/A'  # Not extracted from text, set default
             })
         
         return processed_data
+    
+    def _extract_discipline_from_text(self, text: str) -> str:
+        """Extract discipline from comment text"""
+        text_lower = text.lower()
+        
+        disciplines = {
+            'Civil': ['civil', 'structural', 'foundation', 'concrete', 'steel'],
+            'Mechanical': ['mechanical', 'hvac', 'piping', 'equipment', 'pump'],
+            'Electrical': ['electrical', 'power', 'lighting', 'cable', 'panel'],
+            'Instrumentation': ['instrumentation', 'control', 'instrument', 'sensor'],
+            'Process': ['process', 'p&id', 'flow', 'diagram'],
+            'Architectural': ['architectural', 'building', 'layout', 'room']
+        }
+        
+        for discipline, keywords in disciplines.items():
+            if any(keyword in text_lower for keyword in keywords):
+                return discipline
+        
+        return 'Not Provided'

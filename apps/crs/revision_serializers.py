@@ -179,7 +179,7 @@ class CRSRevisionChainCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = CRSRevisionChain
         fields = [
-            'chain_id', 'project_name', 'document_number', 'document_title',
+            'id', 'chain_id', 'project_name', 'document_number', 'document_title',
             'contractor_name', 'department', 'max_allowed_revisions', 'notes'
         ]
     

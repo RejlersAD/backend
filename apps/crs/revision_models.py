@@ -69,6 +69,45 @@ class CRSRevisionChain(models.Model):
         return f"{self.chain_id} - {self.document_title} (Rev {self.current_revision_number}/{self.max_allowed_revisions})"
     
     @property
+    def total_comments_across_revisions(self):
+        """Calculate total comments across all revisions"""
+        return sum(rev.total_comments for rev in self.revisions.all())
+    
+    @property
+    def resolved_comments_count(self):
+        """Calculate total resolved comments across all revisions"""
+        return sum(rev.total_resolved_comments for rev in self.revisions.all())
+    
+    @property
+    def pending_comments_count(self):
+        """Calculate total pending comments across all revisions"""
+        total = self.total_comments_across_revisions
+        resolved = self.resolved_comments_count
+        return max(0, total - resolved)
+    
+    @property
+    def resolution_rate(self):
+        """Calculate overall resolution rate"""
+        total = self.total_comments_across_revisions
+        if total == 0:
+            return 0.0
+        resolved = self.resolved_comments_count
+        return (resolved / total) * 100
+    
+    @property
+    def comment_reduction_rate(self):
+        """Calculate comment reduction from first to last revision"""
+        revisions = list(self.revisions.order_by('revision_number'))
+        if len(revisions) < 2:
+            return 0.0
+        first_rev = revisions[0]
+        last_rev = revisions[-1]
+        if first_rev.total_comments == 0:
+            return 0.0
+        reduction = first_rev.total_comments - last_rev.total_comments
+        return (reduction / first_rev.total_comments) * 100
+    
+    @property
     def is_near_rejection(self):
         """Check if chain is approaching maximum revisions"""
         return self.current_revision_number >= (self.max_allowed_revisions - 1)
