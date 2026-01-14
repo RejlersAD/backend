@@ -243,6 +243,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     )
     permissions = serializers.SerializerMethodField()
     modules = serializers.SerializerMethodField()
+    profile_photo = serializers.SerializerMethodField()
     
     # User creation fields
     username = serializers.CharField(write_only=True, required=False)
@@ -354,6 +355,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
         """Get all accessible modules for user"""
         modules = obj.get_all_modules()
         return [{'id': str(m.id), 'code': m.code, 'name': m.name} for m in modules]
+    
+    def get_profile_photo(self, obj):
+        """Get absolute URL for profile photo"""
+        if obj.profile_photo:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.profile_photo.url)
+            return obj.profile_photo.url
+        return None
     
     def create(self, validated_data):
         role_ids = validated_data.pop('role_ids', [])
