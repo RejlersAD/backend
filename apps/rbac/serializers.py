@@ -333,6 +333,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'roles', 'role_ids', 'module_ids', 'permissions', 'modules',
             'employee_id', 'department', 'job_title', 'manager',
             'last_login_ip', 'last_login_at', 'failed_login_attempts',
+            'must_change_password',  # Password policy field
             'is_deleted', 'deleted_at', 'deleted_by',
             'created_at', 'updated_at',
             # Write-only fields for user creation

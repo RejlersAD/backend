@@ -264,6 +264,12 @@ class UserProfile(TimeStampedModel):
     failed_login_attempts = models.IntegerField(default=0)
     locked_until = models.DateTimeField(null=True, blank=True)
     
+    # Password policy
+    must_change_password = models.BooleanField(
+        default=False, 
+        help_text="User must change password on next login"
+    )
+    
     # Soft delete
     is_deleted = models.BooleanField(default=False)
     deleted_at = models.DateTimeField(null=True, blank=True)

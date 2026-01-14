@@ -477,6 +477,10 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         user.password = make_password(default_password)
         user.save()
         
+        # Set must_change_password flag
+        profile.must_change_password = True
+        profile.save()
+        
         # Log the action
         create_audit_log(
             user=request.user,
@@ -484,15 +488,79 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             resource_type='User',
             resource_id=user.id,
             resource_repr=f'{user.email}',
-            changes={'reset_by': request.user.email},
+            changes={'reset_by': request.user.email, 'must_change_password': True},
             ip_address=request.META.get('REMOTE_ADDR'),
             user_agent=request.META.get('HTTP_USER_AGENT', '')
         )
         
         return Response({
             'status': 'password reset successfully',
-            'message': f'Password has been reset to default. User should change it on next login.',
+            'message': f'Password has been reset to default. User must change it on next login.',
             'default_password': default_password
+        })
+    
+    @action(detail=False, methods=['post'], url_path='change-password')
+    def change_password(self, request):
+        """
+        Change user's own password
+        Required fields: old_password, new_password
+        Clears must_change_password flag on success
+        """
+        from django.contrib.auth.hashers import check_password, make_password
+        
+        user = request.user
+        old_password = request.data.get('old_password')
+        new_password = request.data.get('new_password')
+        
+        # Validation
+        if not old_password or not new_password:
+            return Response(
+                {'error': 'old_password and new_password are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verify old password
+        if not check_password(old_password, user.password):
+            return Response(
+                {'error': 'Invalid old password'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Password strength validation (basic)
+        if len(new_password) < 8:
+            return Response(
+                {'error': 'Password must be at least 8 characters long'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Update password
+        user.password = make_password(new_password)
+        user.save()
+        
+        # Clear must_change_password flag
+        try:
+            profile = user.profile
+            if profile.must_change_password:
+                profile.must_change_password = False
+                profile.save()
+        except:
+            pass
+        
+        # Log the action
+        create_audit_log(
+            user=user,
+            action='change_password',
+            resource_type='User',
+            resource_id=user.id,
+            resource_repr=f'{user.email}',
+            changes={'password_changed': True, 'must_change_password_cleared': True},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+        
+        return Response({
+            'status': 'password changed successfully',
+            'message': 'Your password has been updated'
         })
     
     @action(detail=True, methods=['post'])
