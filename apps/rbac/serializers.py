@@ -361,7 +361,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if obj.profile_photo:
             request = self.context.get('request')
             if request:
-                return request.build_absolute_uri(obj.profile_photo.url)
+                # Build absolute URI and fix internal Docker hostname
+                absolute_uri = request.build_absolute_uri(obj.profile_photo.url)
+                # Replace internal Docker hostname with accessible URL
+                if 'backend:8000' in absolute_uri:
+                    absolute_uri = absolute_uri.replace('http://backend:8000', 'http://localhost:8000')
+                return absolute_uri
             return obj.profile_photo.url
         return None
     
