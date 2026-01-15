@@ -134,6 +134,7 @@ urlpatterns = [
     path('api/v1/pid/', include('apps.pid_analysis.urls')),
     path('api/v1/pfd/', include('apps.pfd_converter.urls')),
     path('api/v1/crs/', include('apps.crs.urls')),
+    path('api/v1/qhse/', include('apps.qhse.urls')),  # QHSE Management API
     path('api/v1/projects/', include('apps.core.project_urls')),
     
     # MLflow Model Orchestration API
