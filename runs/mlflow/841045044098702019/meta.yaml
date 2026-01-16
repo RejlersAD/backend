@@ -1,0 +1,6 @@
+artifact_location: /app/runs/mlflow/841045044098702019
+creation_time: 1768131516580
+experiment_id: '841045044098702019'
+last_update_time: 1768131516580
+lifecycle_stage: active
+name: /app/training_data_cache/yolov8

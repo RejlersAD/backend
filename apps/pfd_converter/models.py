@@ -16,6 +16,8 @@ class PFDDocument(TimeStampedModel):
     """
     STATUS_CHOICES = [
         ('uploaded', 'Uploaded'),
+        ('analyzing', 'Analyzing'),
+        ('analyzed', 'Analyzed'),
         ('processing', 'Processing'),
         ('processed', 'Processed'),
         ('converted', 'Converted'),
@@ -40,6 +42,12 @@ class PFDDocument(TimeStampedModel):
     file_size = models.BigIntegerField(null=True, blank=True, help_text='File size in bytes')
     file_type = models.CharField(max_length=50, blank=True)
     
+    # Philosophy document (required companion document)
+    philosophy_file = models.FileField(upload_to='philosophy_documents/%Y/%m/%d/', null=True, blank=True)
+    philosophy_file_name = models.CharField(max_length=255, blank=True)
+    philosophy_file_size = models.BigIntegerField(null=True, blank=True, help_text='File size in bytes')
+    philosophy_file_type = models.CharField(max_length=50, blank=True)
+    
     # Processing status
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='uploaded')
     processing_started_at = models.DateTimeField(null=True, blank=True)
@@ -50,6 +58,50 @@ class PFDDocument(TimeStampedModel):
     extracted_data = models.JSONField(
         default=dict,
         help_text='Extracted process information from PFD'
+    )
+    
+    # Comprehensive analysis (detailed equipment, piping, instrumentation)
+    comprehensive_analysis = models.JSONField(
+        default=dict,
+        help_text='Comprehensive GPT-4 Vision analysis with equipment specs, line sizes, instruments, etc.'
+    )
+    
+    # YOLOv8 Symbol Detection Results
+    yolov8_detections = models.JSONField(
+        default=dict,
+        help_text='YOLOv8 detected P&ID symbols with bounding boxes and confidence scores'
+    )
+    
+    # 5-Stage PFD Analysis (New AI-Powered Approach)
+    stage1_module_identification = models.JSONField(
+        default=dict,
+        help_text='Stage 1: Identified modules from PFD (PV, LV, A/B, etc.) with detailed specifications'
+    )
+    stage2_module_details = models.JSONField(
+        default=dict,
+        help_text='Stage 2: Detailed understanding of all modules including equipment, instruments, piping'
+    )
+    stage3_pid_complexity = models.JSONField(
+        default=dict,
+        help_text='Stage 3: Number of P&IDs required based on complexity analysis'
+    )
+    stage4_module_coverage = models.JSONField(
+        default=dict,
+        help_text='Stage 4: Modules covered in each P&ID drawing'
+    )
+    stage5_connectivity = models.JSONField(
+        default=dict,
+        help_text='Stage 5: Connectivity and relationships between modules'
+    )
+    
+    # Analysis status tracking
+    analysis_stage = models.IntegerField(
+        default=0,
+        help_text='Current analysis stage (0-5)'
+    )
+    analysis_progress = models.IntegerField(
+        default=0,
+        help_text='Analysis progress percentage (0-100)'
     )
     
     # Conversion metadata

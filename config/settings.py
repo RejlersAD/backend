@@ -35,6 +35,13 @@ SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-this-in-produc
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = safe_cast_bool(config('DEBUG', default='False'), False)
 
+# ================================================================
+# USER MANAGEMENT SECURITY SETTINGS
+# ================================================================
+# Default password for admin-initiated password resets
+# This password should be changed by users on first login
+DEFAULT_USER_PASSWORD = config('DEFAULT_USER_PASSWORD', default='Welcome@123')
+
 # Railway-friendly ALLOWED_HOSTS configuration
 try:
     ALLOWED_HOSTS_ENV = config('ALLOWED_HOSTS', default='*')  # Allow all by default for Railway
@@ -84,7 +91,8 @@ INSTALLED_APPS = [
     'apps.pid_analysis',
     'apps.pfd_converter',
     'apps.crs',
-    'apps.finance',  # Finance Invoice Automation
+    'apps.qhse',  # QHSE Management Module
+    # 'apps.finance',  # Finance Invoice Automation (removed - moved to separate repository)
     
     # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
     # Enabling this will cause startup hangs (MLflow server not available)
@@ -544,8 +552,8 @@ REPORT_FOOTER_NOTE_FORMATTED = REPORT_FOOTER_NOTE.format(company=REPORT_COMPANY_
 # Email backend configuration
 EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.smtp.EmailBackend')
 
-# AWS SES SMTP Configuration (AP-SOUTH-1 Region - Mumbai)
-EMAIL_HOST = config('EMAIL_HOST', default='email-smtp.ap-south-1.amazonaws.com')
+# AWS SES SMTP Configuration (ME-CENTRAL-1 Region - Middle East)
+EMAIL_HOST = config('EMAIL_HOST', default='email-smtp.me-central-1.amazonaws.com')
 EMAIL_PORT = safe_cast_int(config('EMAIL_PORT', default='587'), 587)
 EMAIL_USE_TLS = safe_cast_bool(config('EMAIL_USE_TLS', default='True'), True)
 EMAIL_USE_SSL = safe_cast_bool(config('EMAIL_USE_SSL', default='False'), False)

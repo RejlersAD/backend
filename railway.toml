@@ -2,6 +2,6 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 1 --timeout 60 --log-file=-"
+startCommand = "./railway_start.sh"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3

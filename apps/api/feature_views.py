@@ -20,49 +20,63 @@ def list_features(request):
         - status: Filter by status
         - search: Search query
     """
-    registry = get_registry()
-    
-    # Get user permissions (expand based on your RBAC system)
-    user_permissions = []
-    if hasattr(request.user, 'get_all_permissions'):
-        user_permissions = list(request.user.get_all_permissions())
-    
-    # Get user department if applicable
-    user_department = getattr(request.user, 'department', None)
-    
-    # Get query parameters
-    category_filter = request.query_params.get('category')
-    status_filter = request.query_params.get('status')
-    search_query = request.query_params.get('search')
-    
-    # Get features for user
-    features = registry.get_features_for_user(user_permissions, user_department)
-    
-    # Apply additional filters
-    if category_filter:
-        try:
-            category = FeatureCategory(category_filter)
-            features = [f for f in features if f.category == category]
-        except ValueError:
-            pass
-    
-    if status_filter:
-        try:
-            status_enum = FeatureStatus(status_filter)
-            features = [f for f in features if f.status == status_enum]
-        except ValueError:
-            pass
-    
-    if search_query:
-        search_results = registry.search(search_query)
-        feature_ids = {f.id for f in search_results}
-        features = [f for f in features if f.id in feature_ids]
-    
-    return Response({
-        'success': True,
-        'count': len(features),
-        'features': registry.to_dict_list(features)
-    })
+    try:
+        print(f"[DEBUG list_features] Request from user: {request.user}")
+        registry = get_registry()
+        print(f"[DEBUG list_features] Registry loaded successfully")
+        
+        # Get user permissions (expand based on your RBAC system)
+        user_permissions = []
+        if hasattr(request.user, 'get_all_permissions'):
+            user_permissions = list(request.user.get_all_permissions())
+        
+        # Get user department if applicable
+        user_department = getattr(request.user, 'department', None)
+        
+        # Get query parameters
+        category_filter = request.query_params.get('category')
+        status_filter = request.query_params.get('status')
+        search_query = request.query_params.get('search')
+        
+        # Get features for user
+        features = registry.get_features_for_user(user_permissions, user_department)
+        
+        # Apply additional filters
+        if category_filter:
+            try:
+                category = FeatureCategory(category_filter)
+                features = [f for f in features if f.category == category]
+            except ValueError:
+                pass
+        
+        if status_filter:
+            try:
+                status_enum = FeatureStatus(status_filter)
+                features = [f for f in features if f.status == status_enum]
+            except ValueError:
+                pass
+        
+        if search_query:
+            search_results = registry.search(search_query)
+            feature_ids = {f.id for f in search_results}
+            features = [f for f in features if f.id in feature_ids]
+        
+        print(f"[DEBUG list_features] Returning {len(features)} features")
+        return Response({
+            'success': True,
+            'count': len(features),
+            'features': registry.to_dict_list(features)
+        })
+    except Exception as e:
+        import traceback
+        print(f"[ERROR list_features] Exception: {str(e)}")
+        print(f"[ERROR list_features] Traceback:")
+        traceback.print_exc()
+        return Response({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])

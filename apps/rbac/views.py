@@ -458,6 +458,111 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         
         return Response({'status': 'user soft deleted'})
     
+    @action(detail=True, methods=['post'], url_path='reset-password')
+    def reset_password(self, request, pk=None):
+        """
+        Reset user password to default password
+        Admin-only action for security
+        """
+        from django.contrib.auth.hashers import make_password
+        from django.conf import settings
+        
+        profile = self.get_object()
+        user = profile.user
+        
+        # Default password (soft-coded in settings)
+        default_password = getattr(settings, 'DEFAULT_USER_PASSWORD', 'Welcome@123')
+        
+        # Set the password
+        user.password = make_password(default_password)
+        user.save()
+        
+        # Set must_change_password flag
+        profile.must_change_password = True
+        profile.save()
+        
+        # Log the action
+        create_audit_log(
+            user=request.user,
+            action='reset_password',
+            resource_type='User',
+            resource_id=user.id,
+            resource_repr=f'{user.email}',
+            changes={'reset_by': request.user.email, 'must_change_password': True},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+        
+        return Response({
+            'status': 'password reset successfully',
+            'message': f'Password has been reset to default. User must change it on next login.',
+            'default_password': default_password
+        })
+    
+    @action(detail=False, methods=['post'], url_path='change-password')
+    def change_password(self, request):
+        """
+        Change user's own password
+        Required fields: old_password, new_password
+        Clears must_change_password flag on success
+        """
+        from django.contrib.auth.hashers import check_password, make_password
+        
+        user = request.user
+        old_password = request.data.get('old_password')
+        new_password = request.data.get('new_password')
+        
+        # Validation
+        if not old_password or not new_password:
+            return Response(
+                {'error': 'old_password and new_password are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verify old password
+        if not check_password(old_password, user.password):
+            return Response(
+                {'error': 'Invalid old password'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Password strength validation (basic)
+        if len(new_password) < 8:
+            return Response(
+                {'error': 'Password must be at least 8 characters long'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Update password
+        user.password = make_password(new_password)
+        user.save()
+        
+        # Clear must_change_password flag
+        try:
+            profile = user.profile
+            if profile.must_change_password:
+                profile.must_change_password = False
+                profile.save()
+        except:
+            pass
+        
+        # Log the action
+        create_audit_log(
+            user=user,
+            action='change_password',
+            resource_type='User',
+            resource_id=user.id,
+            resource_repr=f'{user.email}',
+            changes={'password_changed': True, 'must_change_password_cleared': True},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+        
+        return Response({
+            'status': 'password changed successfully',
+            'message': 'Your password has been updated'
+        })
+    
     @action(detail=True, methods=['post'])
     def assign_role(self, request, pk=None):
         """Assign role to user"""
@@ -534,14 +639,24 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def bulk_upload(self, request):
         """
-        Bulk upload users from CSV/Excel
-        Expected CSV format: email,first_name,last_name,password,department,job_title,phone_number,role_codes,module_codes
+        Bulk upload users from CSV/Excel with Email Notifications
+        Expected CSV format: email,first_name,last_name,password,department,job_title,phone,role_codes,module_codes
         role_codes and module_codes should be comma-separated (e.g., "admin,engineer" or "PID,PFD")
+        
+        New Features:
+        - Sends welcome email with credentials to each user
+        - Aligned with registration form fields
+        - Better error handling and reporting
         """
         import csv
         import io
         from django.contrib.auth import get_user_model
         from django.db import transaction
+        from apps.users.email_service import send_email
+        from apps.users.email_templates import get_email_template
+        from django.conf import settings
+        import secrets
+        import string
         
         User = get_user_model()
         
@@ -612,22 +727,38 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                             username = f"{base_username}{counter}"
                             counter += 1
                         
+                        # Get or generate password
+                        password = row.get('password', '').strip()
+                        if not password:
+                            # Generate secure random password
+                            alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+                            password = ''.join(secrets.choice(alphabet) for i in range(12))
+                            # Ensure at least one of each type
+                            password = secrets.choice(string.ascii_uppercase) + \
+                                      secrets.choice(string.ascii_lowercase) + \
+                                      secrets.choice(string.digits) + \
+                                      secrets.choice("!@#$%^&*") + \
+                                      password[4:]
+                        
+                        # Store original password for email
+                        original_password = password
+                        
                         # Create user
                         user = User.objects.create_user(
                             username=username,
                             email=email,
                             first_name=row.get('first_name', '').strip(),
                             last_name=row.get('last_name', '').strip(),
-                            password=row.get('password', 'TempPass@123').strip()
+                            password=password
                         )
                         
-                        # Create user profile
+                        # Create user profile (using 'phone' not 'phone_number' to align with form)
                         profile = UserProfile.objects.create(
                             user=user,
                             organization=organization,
                             department=row.get('department', '').strip(),
                             job_title=row.get('job_title', '').strip(),
-                            phone_number=row.get('phone_number', '').strip(),
+                            phone_number=row.get('phone', '').strip() or row.get('phone_number', '').strip(),
                             status='active'
                         )
                         
@@ -655,8 +786,40 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                         results['success'].append({
                             'row': row_num,
                             'email': email,
-                            'name': f"{user.first_name} {user.last_name}".strip()
+                            'name': f"{user.first_name} {user.last_name}".strip(),
+                            'username': username
                         })
+                        
+                        # Send welcome email with credentials
+                        try:
+                            login_url = f"{settings.FRONTEND_URL}/login" if hasattr(settings, 'FRONTEND_URL') else 'https://radai.ae/login'
+                            
+                            email_context = {
+                                'first_name': user.first_name or 'User',
+                                'last_name': user.last_name or '',
+                                'email': user.email,
+                                'username': username,
+                                'temp_password': original_password,
+                                'login_url': login_url
+                            }
+                            
+                            email_template = get_email_template('welcome', email_context)
+                            
+                            send_email(
+                                to_email=user.email,
+                                subject=email_template['subject'],
+                                html_body=email_template['html_body'],
+                                text_body=email_template['text_body']
+                            )
+                            
+                            # Update result to indicate email sent
+                            results['success'][-1]['email_sent'] = True
+                            
+                        except Exception as email_error:
+                            # Log email error but don't fail user creation
+                            print(f"⚠️ Failed to send welcome email to {email}: {str(email_error)}")
+                            results['success'][-1]['email_sent'] = False
+                            results['success'][-1]['email_error'] = str(email_error)
                         
                         # Create audit log
                         create_audit_log(
@@ -665,7 +828,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                             resource_type='UserProfile',
                             resource_id=profile.id,
                             resource_repr=str(profile),
-                            metadata={'source': 'bulk_upload'},
+                            metadata={'source': 'bulk_upload', 'email_sent': results['success'][-1].get('email_sent', False)},
                             ip_address=request.META.get('REMOTE_ADDR'),
                             user_agent=request.META.get('HTTP_USER_AGENT', '')
                         )
@@ -677,6 +840,10 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                             'error': str(e)
                         })
             
+            # Calculate email statistics
+            emails_sent = sum(1 for item in results['success'] if item.get('email_sent', False))
+            emails_failed = sum(1 for item in results['success'] if not item.get('email_sent', False))
+            
             # Create summary audit log
             create_audit_log(
                 user=request.user,
@@ -687,19 +854,23 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 metadata={
                     'success_count': len(results['success']),
                     'failed_count': len(results['failed']),
-                    'skipped_count': len(results['skipped'])
+                    'skipped_count': len(results['skipped']),
+                    'emails_sent': emails_sent,
+                    'emails_failed': emails_failed
                 },
                 ip_address=request.META.get('REMOTE_ADDR'),
                 user_agent=request.META.get('HTTP_USER_AGENT', '')
             )
             
             return Response({
-                'message': 'Bulk upload completed',
+                'message': 'Bulk upload completed successfully!',
                 'summary': {
                     'total_processed': len(results['success']) + len(results['failed']) + len(results['skipped']),
                     'successful': len(results['success']),
                     'failed': len(results['failed']),
-                    'skipped': len(results['skipped'])
+                    'skipped': len(results['skipped']),
+                    'emails_sent': emails_sent,
+                    'emails_failed': emails_failed
                 },
                 'details': results
             }, status=status.HTTP_201_CREATED)
@@ -712,7 +883,10 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def download_template(self, request):
-        """Download CSV template for bulk upload"""
+        """
+        Download CSV template for bulk upload
+        Template aligned with registration form fields
+        """
         import csv
         from django.http import HttpResponse
         
@@ -720,30 +894,72 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         response['Content-Disposition'] = 'attachment; filename="user_bulk_upload_template.csv"'
         
         writer = csv.writer(response)
+        
+        # Header row - aligned with registration form
         writer.writerow([
-            'email', 'first_name', 'last_name', 'password', 
-            'department', 'job_title', 'phone_number', 
-            'role_codes', 'module_codes'
+            'email',           # Required - User's email address
+            'first_name',      # Required - User's first name
+            'last_name',       # Required - User's last name
+            'password',        # Optional - Leave empty for auto-generated password
+            'department',      # Optional - e.g., Engineering, Finance
+            'job_title',       # Optional - e.g., Senior Engineer
+            'phone',           # Optional - Phone number (aligned with form field name)
+            'role_codes',      # Optional - Comma-separated role codes (e.g., engineer,reviewer)
+            'module_codes'     # Optional - Comma-separated module codes (e.g., PID,PFD,CRS)
         ])
+        
+        # Example row 1 - Engineer with specific password
         writer.writerow([
-            'john.doe@company.com', 'John', 'Doe', 'SecurePass@123',
-            'Engineering', 'Senior Engineer', '+971501234567',
-            'engineer,reviewer', 'PID,PFD,CRS'
+            'john.doe@company.com', 
+            'John', 
+            'Doe', 
+            'SecurePass@123',
+            'Engineering', 
+            'Senior Engineer', 
+            '+971501234567',
+            'engineer,reviewer', 
+            'PID,PFD,CRS'
         ])
+        
+        # Example row 2 - Manager with auto-generated password
         writer.writerow([
-            'jane.smith@company.com', 'Jane', 'Smith', 'SecurePass@123',
-            'Management', 'Project Manager', '+971507654321',
-            'manager', 'PID,PFD,CRS,PROJECT_CONTROL'
+            'jane.smith@company.com', 
+            'Jane', 
+            'Smith', 
+            '',  # Empty password = auto-generated
+            'Management', 
+            'Project Manager', 
+            '+971507654321',
+            'manager', 
+            'PID,PFD,CRS,PROJECT_CONTROL'
+        ])
+        
+        # Example row 3 - Test user with email xerxez.in@gmail.com
+        writer.writerow([
+            'xerxez.in@gmail.com', 
+            'Test', 
+            'User', 
+            '',  # Auto-generated password
+            'Testing', 
+            'Test Engineer', 
+            '+971501112233',
+            'engineer', 
+            'PID,PFD'
         ])
         
         return response
     
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get', 'patch'], url_path='me')
     def me(self, request):
-        """Get current user's profile - creates one if it doesn't exist"""
+        """Get or update current user's profile"""
         import traceback
         
         try:
+            # PATCH - Update profile
+            if request.method == 'PATCH':
+                return self.update_my_profile(request)
+            
+            # GET - Retrieve profile
             # Log the request for debugging
             print(f"\n[DEBUG /rbac/users/me/] User: {request.user}")
             print(f"[DEBUG /rbac/users/me/] User authenticated: {request.user.is_authenticated}")
@@ -778,6 +994,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             data = serializer.data
             print(f"[DEBUG /rbac/users/me/] Serialization successful")
             print(f"[DEBUG /rbac/users/me/] Roles count: {len(data.get('roles', []))}")
+            print(f"[DEBUG /rbac/users/me/] Phone: {data.get('phone')}, Profile Photo: {data.get('profile_photo')}")
             
             return Response(data)
             
@@ -796,6 +1013,85 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     'user': str(request.user),
                     'traceback': traceback.format_exc()
                 },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def update_my_profile(self, request):
+        """Update current user's profile"""
+        try:
+            # Get user profile
+            profile = UserProfile.objects.filter(
+                user=request.user,
+                is_deleted=False
+            ).first()
+            
+            if not profile:
+                return Response(
+                    {'error': 'Profile not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Track changes for audit log
+            changes = {}
+            
+            # Update User model fields
+            user = request.user
+            if 'first_name' in request.data:
+                changes['first_name'] = request.data['first_name']
+                user.first_name = request.data['first_name']
+            if 'last_name' in request.data:
+                changes['last_name'] = request.data['last_name']
+                user.last_name = request.data['last_name']
+            user.save()
+            
+            # Update UserProfile fields
+            if 'phone' in request.data:
+                changes['phone'] = request.data['phone']
+                profile.phone = request.data['phone']
+            if 'bio' in request.data:
+                changes['bio'] = request.data['bio']
+                profile.bio = request.data['bio']
+            if 'location' in request.data:
+                changes['location'] = request.data['location']
+                profile.location = request.data['location']
+            if 'department' in request.data:
+                changes['department'] = request.data['department']
+                profile.department = request.data['department']
+            if 'job_title' in request.data:
+                changes['job_title'] = request.data['job_title']
+                profile.job_title = request.data['job_title']
+            
+            # Handle profile photo upload
+            if 'profile_photo' in request.FILES:
+                profile.profile_photo = request.FILES['profile_photo']
+                changes['profile_photo'] = 'uploaded'
+            
+            profile.save()
+            
+            # Create audit log (only with serializable data)
+            create_audit_log(
+                user=request.user,
+                action='update_profile',
+                resource_type='UserProfile',
+                resource_id=profile.id,
+                resource_repr=f'{user.email}',
+                changes=changes,
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+            
+            # Return updated profile
+            serializer = self.get_serializer(profile)
+            response_data = serializer.data
+            print(f"[DEBUG] Profile response - phone: {response_data.get('phone')}, profile_photo: {response_data.get('profile_photo')}")
+            return Response(response_data)
+            
+        except Exception as e:
+            import traceback
+            print(f"[ERROR] Failed to update profile: {str(e)}")
+            print(traceback.format_exc())
+            return Response(
+                {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     

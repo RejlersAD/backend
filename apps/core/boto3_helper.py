@@ -42,7 +42,7 @@ class Boto3Helper:
         # Determine region
         if not region:
             if bucket_specific:
-                region = os.environ.get('PFD_S3_REGION', 'ap-south-1')
+                region = os.environ.get('PFD_S3_REGION', 'me-central-1')
             else:
                 region = os.environ.get('AWS_S3_REGION_NAME', 'us-east-1')
         
@@ -262,7 +262,7 @@ class Boto3Helper:
         
         # Test PFD bucket
         pfd_bucket = os.environ.get('PFD_S3_BUCKET', 'rejlers-edrs-project')
-        pfd_region = os.environ.get('PFD_S3_REGION', 'ap-south-1')
+        pfd_region = os.environ.get('PFD_S3_REGION', 'me-central-1')
         
         pfd_test = cls.test_bucket_access(pfd_bucket, pfd_region)
         results['pfd_bucket_accessible'] = pfd_test['accessible']
@@ -296,7 +296,7 @@ class Boto3Helper:
             },
             'pfd_bucket': {
                 'name': os.environ.get('PFD_S3_BUCKET', 'rejlers-edrs-project'),
-                'region': os.environ.get('PFD_S3_REGION', 'ap-south-1')
+                'region': os.environ.get('PFD_S3_REGION', 'me-central-1')
             },
             'credentials_configured': bool(
                 os.environ.get('AWS_ACCESS_KEY_ID') and 

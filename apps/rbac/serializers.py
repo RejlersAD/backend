@@ -243,6 +243,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     )
     permissions = serializers.SerializerMethodField()
     modules = serializers.SerializerMethodField()
+    profile_photo = serializers.SerializerMethodField()
     
     # User creation fields
     username = serializers.CharField(write_only=True, required=False)
@@ -333,6 +334,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'roles', 'role_ids', 'module_ids', 'permissions', 'modules',
             'employee_id', 'department', 'job_title', 'manager',
             'last_login_ip', 'last_login_at', 'failed_login_attempts',
+            'must_change_password',  # Password policy field
+            'profile_photo', 'phone', 'bio', 'location',  # Profile customization
             'is_deleted', 'deleted_at', 'deleted_by',
             'created_at', 'updated_at',
             # Write-only fields for user creation
@@ -352,6 +355,34 @@ class UserProfileSerializer(serializers.ModelSerializer):
         """Get all accessible modules for user"""
         modules = obj.get_all_modules()
         return [{'id': str(m.id), 'code': m.code, 'name': m.name} for m in modules]
+    
+    def get_profile_photo(self, obj):
+        """Get absolute URL for profile photo with environment-aware hostname handling"""
+        if obj.profile_photo:
+            from django.conf import settings
+            request = self.context.get('request')
+            
+            if request:
+                # Build absolute URI
+                absolute_uri = request.build_absolute_uri(obj.profile_photo.url)
+                
+                # Fix internal Docker hostname for local development
+                if 'backend:8000' in absolute_uri:
+                    absolute_uri = absolute_uri.replace('http://backend:8000', 'http://localhost:8000')
+                
+                # Handle Railway internal URLs for production
+                # Replace Railway internal domains with the actual request host
+                if '.railway.internal' in absolute_uri or 'backend-production' in absolute_uri:
+                    # Get the host from the request (this will be the Railway public URL)
+                    host = request.get_host()
+                    scheme = 'https' if request.is_secure() else 'http'
+                    # Replace the internal URL with the public host
+                    import re
+                    absolute_uri = re.sub(r'https?://[^/]+', f'{scheme}://{host}', absolute_uri)
+                
+                return absolute_uri
+            return obj.profile_photo.url
+        return None
     
     def create(self, validated_data):
         role_ids = validated_data.pop('role_ids', [])
