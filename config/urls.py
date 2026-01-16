@@ -131,7 +131,7 @@ urlpatterns = [
     path('api/v1/pfd/', include('apps.pfd_converter.urls')),
     path('api/v1/crs/', include('apps.crs.urls')),
     path('api/v1/finance/', include('apps.finance.urls')),  # Finance Invoice Automation
-    path('api/v1/sales/', include('apps.sales.urls')),  # Sales RFP/EOI Automation
+    # path('api/v1/sales/', include('apps.sales.urls')),  # Sales module removed
     path('api/v1/projects/', include('apps.core.project_urls')),
     
     # MLflow Model Orchestration API
