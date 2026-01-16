@@ -24,7 +24,7 @@ from .serializers import (
     CRSCommentBulkCreateSerializer
 )
 from .pdf_extractor import PDFCommentExtractor
-from .google_sheets_service import GoogleSheetsService
+# from .google_sheets_service import GoogleSheetsService  # Removed Google Sheets integration
 
 # Import helpers from crs_documents for PDF processing
 try:
@@ -198,123 +198,10 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    @action(detail=True, methods=['post'])
-    def export_to_google_sheets(self, request, pk=None):
-        """
-        Export CRS data to Google Sheets
-        POST /api/v1/crs/documents/{id}/export_to_google_sheets/
-        Body: { "sheet_id": "optional_sheet_id", "start_row": 9, "auto_export": true }
-        """
-        document = self.get_object()
-        
-        serializer = GoogleSheetExportSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Get active Google Sheet config
-        try:
-            config = GoogleSheetConfig.objects.filter(is_active=True).first()
-            if not config:
-                return Response(
-                    {"error": "No active Google Sheets configuration found. Please configure Google Sheets API first."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        except Exception as e:
-            return Response(
-                {"error": f"Error loading Google Sheets configuration: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-        
-        # Get sheet ID
-        sheet_id = serializer.validated_data.get('sheet_id')
-        if not sheet_id:
-            sheet_id = document.google_sheet_id
-        
-        if not sheet_id:
-            return Response(
-                {"error": "No Google Sheet ID provided and document has no linked sheet"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        try:
-            # Initialize Google Sheets service
-            gs_service = GoogleSheetsService(
-                credentials_json=config.credentials_json,
-                token_json=config.token_json
-            )
-            
-            # Authenticate
-            if not gs_service.authenticate():
-                return Response(
-                    {"error": "Failed to authenticate with Google Sheets API"},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-            
-            # Get comments
-            comments = document.comments.all().order_by('serial_number')
-            
-            if not comments.exists():
-                return Response(
-                    {"error": "No comments to export"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # Prepare data
-            export_data = []
-            for comment in comments:
-                export_data.append({
-                    'page': comment.page_number,
-                    'clause': comment.clause_number or '',
-                    'text': comment.comment_text,
-                    'contractor_response': comment.contractor_response or '',
-                    'company_response': comment.company_response or ''
-                })
-            
-            # Export to sheet
-            start_row = serializer.validated_data.get('start_row', 9)
-            success, result = gs_service.export_to_sheet(
-                spreadsheet_id=sheet_id,
-                data=export_data,
-                start_row=start_row
-            )
-            
-            if success:
-                # Update document
-                document.google_sheet_id = sheet_id
-                document.google_sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-                document.save()
-                
-                # Save updated token if available
-                new_token = gs_service.get_token_json()
-                if new_token and new_token != config.token_json:
-                    config.token_json = new_token
-                    config.save()
-                
-                # Log activity
-                CRSActivity.objects.create(
-                    document=document,
-                    action='exported',
-                    description=f'Exported {len(export_data)} comments to Google Sheets',
-                    performed_by=request.user,
-                    new_value={'sheet_id': sheet_id, 'rows_exported': len(export_data)}
-                )
-                
-                return Response({
-                    "success": True,
-                    "message": f"Successfully exported {len(export_data)} comments to Google Sheets",
-                    "data": result
-                }, status=status.HTTP_200_OK)
-            else:
-                return Response(
-                    {"error": f"Export failed: {result.get('error', 'Unknown error')}"},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-        
-        except Exception as e:
-            return Response(
-                {"error": f"Error exporting to Google Sheets: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+    # Google Sheets export disabled - removed from production
+    # @action(detail=True, methods=['post'])
+    # def export_to_google_sheets(self, request, pk=None):
+    #     pass
     
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
     def statistics(self, request):
@@ -1093,39 +980,7 @@ class GoogleSheetConfigViewSet(viewsets.ModelViewSet):
         """Set created_by to current user"""
         serializer.save(created_by=self.request.user)
     
-    @action(detail=True, methods=['post'])
-    def test_connection(self, request, pk=None):
-        """
-        Test Google Sheets connection
-        POST /api/v1/crs/google-configs/{id}/test_connection/
-        """
-        config = self.get_object()
-        
-        try:
-            gs_service = GoogleSheetsService(
-                credentials_json=config.credentials_json,
-                token_json=config.token_json
-            )
-            
-            if gs_service.authenticate():
-                # Save updated token
-                new_token = gs_service.get_token_json()
-                if new_token:
-                    config.token_json = new_token
-                    config.save()
-                
-                return Response({
-                    "success": True,
-                    "message": "Successfully connected to Google Sheets API"
-                })
-            else:
-                return Response({
-                    "success": False,
-                    "message": "Failed to authenticate with Google Sheets API"
-                }, status=status.HTTP_400_BAD_REQUEST)
-        
-        except Exception as e:
-            return Response({
-                "success": False,
-                "message": f"Error testing connection: {str(e)}"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    # Google Sheets test connection disabled - removed from production
+    # @action(detail=True, methods=['post'])
+    # def test_connection(self, request, pk=None):
+    #     pass
