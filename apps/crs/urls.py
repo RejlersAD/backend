@@ -4,7 +4,8 @@ from .views import (
     CRSDocumentViewSet,
     CRSCommentViewSet,
     CRSActivityViewSet,
-    GoogleSheetConfigViewSet
+    GoogleSheetConfigViewSet,
+    CRSTemplateView
 )
 from .revision_views import (
     CRSRevisionChainViewSet,
@@ -47,6 +48,11 @@ router.register(r'revision-activities', CRSRevisionActivityViewSet, basename='cr
 
 # Start with history endpoints (must come before router.urls to avoid conflicts)
 urlpatterns = []
+
+# Add template management endpoint
+urlpatterns += [
+    path('templates/', CRSTemplateView.as_view(), name='crs-templates'),
+]
 
 # Add history endpoints if available
 if HISTORY_AVAILABLE:
