@@ -22,6 +22,70 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================
+# AUTOCAD FILTERING PATTERNS (Smart Detection)
+# ============================================
+
+# 🚫 AutoCAD detection patterns - compiled for performance
+AUTOCAD_REVIEWER_PATTERNS = [
+    re.compile(r'autocad', re.IGNORECASE),
+    re.compile(r'autodesk', re.IGNORECASE),
+    re.compile(r'\bacad\b', re.IGNORECASE),
+    re.compile(r'\.shx', re.IGNORECASE),
+    re.compile(r'shx\s+text', re.IGNORECASE),
+    re.compile(r'\.dwg', re.IGNORECASE),
+    re.compile(r'\.dxf', re.IGNORECASE),
+]
+
+# 🚫 CAD drawing reference patterns (like AD204-604-D-11154)
+CAD_REFERENCE_PATTERNS = [
+    re.compile(r'^[A-Z]{2}\d{3}-\d{3}-[A-Z]-\d{5}$'),  # AD204-604-D-11154
+    re.compile(r'^[A-Z]{1,3}\d{2,}-\d{2,}-[A-Z]-\d{4,}$'),  # General CAD reference
+    re.compile(r'^[A-Z]{2,4}-\d{3,}-[A-Z]-\d{4,}$'),  # Alternate format
+]
+
+# 🚫 CAD system text patterns (all caps technical terms)
+CAD_SYSTEM_TEXT_PATTERNS = [
+    re.compile(r'^[A-Z\s]{4,50}$'),  # All caps text 4-50 chars (PRODUCED WATER, LP RELIEF GAS)
+]
+
+def is_autocad_comment(reviewer: str, content: str) -> bool:
+    """
+    Smart detection of AutoCAD system comments using multiple heuristics.
+    
+    Returns True if this is likely an AutoCAD system comment that should be filtered.
+    """
+    if not reviewer and not content:
+        return False
+    
+    reviewer_lower = reviewer.lower().strip() if reviewer else ''
+    content_clean = content.strip() if content else ''
+    
+    # CHECK 1: Reviewer name contains AutoCAD keywords
+    if reviewer_lower:
+        for pattern in AUTOCAD_REVIEWER_PATTERNS:
+            if pattern.search(reviewer_lower):
+                logger.info(f"🚫 AutoCAD DETECTED (Reviewer): '{reviewer}' matched pattern")
+                return True
+    
+    # CHECK 2: Content matches CAD drawing reference format
+    if content_clean:
+        for pattern in CAD_REFERENCE_PATTERNS:
+            if pattern.match(content_clean):
+                logger.info(f"🚫 AutoCAD DETECTED (CAD Ref): '{content_clean}' matches CAD reference format")
+                return True
+        
+        # CHECK 3: Content is all-caps technical text (common in CAD)
+        for pattern in CAD_SYSTEM_TEXT_PATTERNS:
+            if pattern.match(content_clean):
+                # Only flag as AutoCAD if ALSO has suspicious reviewer or empty reviewer
+                if not reviewer or any(p.search(reviewer_lower) for p in AUTOCAD_REVIEWER_PATTERNS):
+                    logger.info(f"🚫 AutoCAD DETECTED (All-caps): '{content_clean}' is CAD system text")
+                    return True
+    
+    return False
+
+
+# ============================================
 # DATA STRUCTURES
 # ============================================
 
@@ -162,6 +226,15 @@ def extract_reviewer_comments(
                         title = annot.info.get("title", "") or ""  # Often contains author name
                         subject = annot.info.get("subject", "") or ""
                         
+                        # 🔍 DEBUG: Print raw title to see EXACTLY what we're getting
+                        if title:
+                            logger.info(f"📋 RAW TITLE: '{title}' | len={len(title)} | repr={repr(title)} | Content: '{content[:30]}...'")
+                        
+                        # 🚫 SMART AUTOCAD FILTER: Use intelligent pattern matching
+                        if is_autocad_comment(title, content):
+                            logger.info(f"🚫 SMART FILTER BLOCKED: Reviewer='{title}', Content='{content[:50]}...'")
+                            continue
+                        
                         # Skip empty annotations
                         if not content.strip():
                             # Try to get text from popup or other sources
@@ -174,9 +247,25 @@ def extract_reviewer_comments(
                         
                         # PERFORMANCE: Quick AutoCAD rejection BEFORE processing
                         content_lower = content.lower()
-                        if any(kw in content_lower for kw in ['autocad', 'autodesk', 'acad', 'dwg', 'layer', 'xref']):
+                        title_lower = title.lower() if title else ""
+                        
+                        # Enhanced AutoCAD keyword detection (content and title)
+                        autocad_early_keywords = ['autocad', 'autodesk', 'acad', 'dwg', 'dxf', 'layer', 'xref', '.shx', '.dwg', 'ltypeshp', 'acadiso', 'shx', 'ltypeshp.shx']
+                        if any(kw in content_lower for kw in autocad_early_keywords):
+                            logger.debug(f"🚫 Filtered AutoCAD content: '{content[:50]}'")
                             continue
+                        if any(kw in title_lower for kw in autocad_early_keywords):
+                            logger.debug(f"🚫 Filtered AutoCAD title: '{title}'")
+                            continue
+                        
+                        # Filter AutoCAD special characters and patterns
                         if '%%' in content or content.startswith('A-') or content.startswith('M-'):
+                            continue
+                        
+                        # Filter AutoCAD font file names in content or title
+                        if any(font in content_lower for font in ['romans.shx', 'txt.shx', 'simplex.shx', 'complex.shx', 'italic.shx', 'monotxt', 'isocp']):
+                            continue
+                        if any(font in title_lower for font in ['romans.shx', 'txt.shx', 'simplex.shx', 'complex.shx', 'italic.shx']):
                             continue
                         
                         # Pre-clean the content to remove annotation type labels
@@ -185,6 +274,11 @@ def extract_reviewer_comments(
                         # Skip if pre-cleaning removed everything
                         if not content_cleaned or len(content_cleaned) < 5:
                             continue
+                        
+                        # 🔥 FINAL SAFETY CHECK: Double-check with smart detection before creating comment
+                        if is_autocad_comment(title, content_cleaned):
+                            logger.warning(f"⛔ FINAL SAFETY BLOCK: Reviewer '{title}' - Comment: '{content_cleaned[:50]}...'")
+                            continue  # Skip this annotation completely
                         
                         comment = ReviewerComment()
                         comment.comment_text = content_cleaned
@@ -320,8 +414,14 @@ def _filter_incomplete_comments(comments: List[ReviewerComment]) -> List[Reviewe
     proper_name_pattern = re.compile(r'^[A-Z][a-z]+\s+[A-Z][a-z]+$')
     has_letters_pattern = re.compile(r'[a-zA-Z]{2,}')
     
+    # ENHANCED: AutoCAD SHX font patterns and file references
+    autocad_shx_pattern = re.compile(r'\.shx|\.SHX|\.SHP|\.shp|\.dwg|\.DWG', re.IGNORECASE)
+    autocad_font_pattern = re.compile(r'(txt|TXT|TXTEXP|simplex|complex|romans?d?|italic|monotxt|isocp|isocpeur|greekc|greeks|cyrillic|gothice|gothicg|gothici|scriptc|scripts|standard|arial)\.(shx|SHX)', re.IGNORECASE)
+    autocad_system_pattern = re.compile(r'(text\s*style|layer\s*name|block\s*name|plot\s*style|line\s*type|text\s*font|font\s*file|shx\s*font)', re.IGNORECASE)
+    autocad_text_pattern = re.compile(r'(AutoCAD\s+SHX\s+Text|SHX\s+compiled\s+shape|font\s+definition)', re.IGNORECASE)
+    
     # Pre-defined lists for fast lookup
-    autocad_keywords = {'autocad', 'autodesk', 'acad', 'dwg', 'dxf', 'shx', 'xref', 'viewport', 'mview'}
+    autocad_keywords = {'autocad', 'autodesk', 'acad', 'dwg', 'dxf', 'shx', 'xref', 'viewport', 'mview', 'ltypeshp', 'acadiso'}
     annotation_labels = {'text box', 'callout', 'free text', 'note', 'sticky note', 
                         'highlight', 'typewriter', 'comment', 'annotation'}
     
@@ -329,6 +429,22 @@ def _filter_incomplete_comments(comments: List[ReviewerComment]) -> List[Reviewe
         text = comment.comment_text.strip()
         text_lower = text.lower()
         reviewer = comment.reviewer_name.strip() if comment.reviewer_name else ""
+        reviewer_lower = reviewer.lower() if reviewer else ""
+        
+        # CRITICAL: Filter AutoCAD reviewers FIRST - before ANY other checks
+        if reviewer_lower:
+            # Check for AutoCAD keywords in reviewer name
+            if 'autocad' in reviewer_lower or 'autodesk' in reviewer_lower or 'acad' in reviewer_lower:
+                logger.info(f"🚫 FILTERED AutoCAD reviewer: '{reviewer}' - Comment: '{text[:50]}...'")
+                continue
+            # Check for SHX in reviewer name
+            if 'shx' in reviewer_lower:
+                logger.info(f"🚫 FILTERED SHX reviewer: '{reviewer}' - Comment: '{text[:50]}...'")
+                continue
+            # Check for file extensions in reviewer name
+            if '.shx' in reviewer_lower or '.dwg' in reviewer_lower or '.dxf' in reviewer_lower:
+                logger.info(f"🚫 FILTERED file extension reviewer: '{reviewer}' - Comment: '{text[:50]}...'")
+                continue
         
         # Minimum length check (3 chars)
         if len(text) < 3:
@@ -340,6 +456,26 @@ def _filter_incomplete_comments(comments: List[ReviewerComment]) -> List[Reviewe
         
         # Quick keyword check first (fastest - set lookup is O(1))
         if any(kw in text_lower for kw in autocad_keywords):
+            continue
+        
+        # ENHANCED: Check for AutoCAD SHX font references (new)
+        if autocad_shx_pattern.search(text):
+            continue
+        if autocad_shx_pattern.search(reviewer):
+            continue
+        
+        # ENHANCED: Check for AutoCAD font file names (new)
+        if autocad_font_pattern.search(text):
+            continue
+        if autocad_font_pattern.search(reviewer):
+            continue
+        
+        # ENHANCED: Check for AutoCAD system text (new)
+        if autocad_system_pattern.search(text):
+            continue
+        
+        # ENHANCED: Check for AutoCAD SHX text patterns (new)
+        if autocad_text_pattern.search(text):
             continue
         
         # Quick special character check

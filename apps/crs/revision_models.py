@@ -153,6 +153,10 @@ class CRSRevision(models.Model):
     total_carryover_comments = models.IntegerField(default=0, help_text='Comments from previous revisions')
     total_resolved_comments = models.IntegerField(default=0)
     
+    # S3 Storage for Excel Exports
+    excel_s3_url = models.URLField(max_length=1000, blank=True, null=True, help_text='S3 URL for pre-generated Excel export')
+    excel_generated_at = models.DateTimeField(null=True, blank=True, help_text='Timestamp when excel was generated and uploaded')
+    
     # AI Insights for this revision
     ai_complexity_score = models.FloatField(default=0.0, help_text='AI-calculated complexity (0-100)')
     ai_estimated_resolution_time_hours = models.FloatField(default=0.0)

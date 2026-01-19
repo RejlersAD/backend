@@ -46,6 +46,7 @@ class CRSRevisionSerializer(serializers.ModelSerializer):
     document_details = CRSDocumentSerializer(source='document', read_only=True)
     parent_revision_label = serializers.CharField(source='parent_revision.revision_label', read_only=True, allow_null=True)
     resolution_percentage = serializers.SerializerMethodField()
+    excel_download_url = serializers.SerializerMethodField()
     
     class Meta:
         model = CRSRevision
@@ -55,6 +56,7 @@ class CRSRevisionSerializer(serializers.ModelSerializer):
             'status', 'submitted_date', 'received_date', 'completed_date',
             'total_new_comments', 'total_carryover_comments', 'total_comments',
             'total_resolved_comments', 'resolution_percentage',
+            'excel_s3_url', 'excel_generated_at', 'excel_download_url',
             'ai_complexity_score', 'ai_estimated_resolution_time_hours', 'ai_critical_issues_count',
             'created_at', 'updated_at', 'notes'
         ]
@@ -63,6 +65,17 @@ class CRSRevisionSerializer(serializers.ModelSerializer):
         if obj.total_comments == 0:
             return 0
         return round((obj.total_resolved_comments / obj.total_comments) * 100, 2)
+    
+    def get_excel_download_url(self, obj):
+        """Generate presigned URL for S3 excel download"""
+        if obj.excel_s3_url:
+            from .s3_excel_generator import CRSS3ExcelGenerator
+            try:
+                generator = CRSS3ExcelGenerator()
+                return generator.get_download_url(obj, expiration=3600)  # 1 hour expiration
+            except Exception as e:
+                return None
+        return None
 
 
 class CRSRevisionChainDetailSerializer(serializers.ModelSerializer):
