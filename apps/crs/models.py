@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 
 User = get_user_model()
 
@@ -61,6 +62,21 @@ class CRSDocument(models.Model):
         return self.total_comments > 0 and self.resolved_comments == self.total_comments
 
 
+class CRSCommentManager(models.Manager):
+    """Custom manager to filter out AutoCAD system comments"""
+    
+    def get_queryset(self):
+        """Exclude AutoCAD comments from all queries by default"""
+        return super().get_queryset().exclude(
+            Q(comment_text__iregex=r'^[A-Z]{2}\d{3}-\d{3}-[A-Z]-\d{5}$') |  # CAD references like AD204-604-D-11154
+            Q(comment_text__iregex=r'^[A-Z\s]{4,50}$')  # All-caps system text like PRODUCED WATER
+        )
+    
+    def with_autocad(self):
+        """Include AutoCAD comments if explicitly needed"""
+        return super().get_queryset()
+
+
 class CRSComment(models.Model):
     """Model for individual comments extracted from CRS document"""
     
@@ -116,6 +132,9 @@ class CRSComment(models.Model):
     resolved_at = models.DateTimeField(null=True, blank=True)
     
     notes = models.TextField(blank=True, null=True)
+    
+    # \ud83d\udeab Custom manager to automatically filter AutoCAD comments from ALL queries
+    objects = CRSCommentManager()
     
     class Meta:
         db_table = 'crs_comments'

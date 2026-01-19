@@ -52,6 +52,7 @@ from .revision_serializers import (
     CRSAIInsightFeedbackSerializer, CRSRevisionActivitySerializer
 )
 from .ai_service import CRSRevisionAIService
+from .s3_excel_generator import CRSS3ExcelGenerator
 
 # Use unified extractor - single source of truth
 from apps.core.helpers.unified_comment_extractor import extract_reviewer_comments, convert_comments_to_dict_list
@@ -217,6 +218,65 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
             "data": CRSRevisionSerializer(revision).data
         }, status=status.HTTP_201_CREATED)
     
+    def _filter_autocad_from_response(self, comments_list):
+        """
+        🔥 FINAL RESPONSE FILTER: Remove AutoCAD comments before sending to frontend.
+        This is the absolute last line of defense.
+        
+        Args:
+            comments_list: List of comment dictionaries
+            
+        Returns:
+            list: Filtered comments without AutoCAD entries
+        """
+        import re
+        
+        logger.error(f"🚨🚨🚨 RESPONSE FILTER CALLED with {len(comments_list)} comments")
+        
+        filtered = []
+        removed_count = 0
+        
+        for comment in comments_list:
+            # Check BOTH 'reviewer' and 'reviewer_name' keys
+            reviewer = str(comment.get('reviewer') or comment.get('reviewer_name') or '').strip()
+            text = str(comment.get('text') or comment.get('comment_text') or '').strip()
+            
+            logger.error(f"🔍 FILTER CHECK: Reviewer='{reviewer}' | Text='{text[:30]}'")
+            
+            # Check 1: Reviewer contains AutoCAD (EXACT CHECK FIRST)
+            if reviewer.lower() == 'autocad shx text':
+                removed_count += 1
+                logger.error(f"⛔ RESPONSE FILTER (EXACT): Removed 'AutoCAD SHX Text'")
+                continue
+            
+            # Check 2: Reviewer contains "autocad"
+            if 'autocad' in reviewer.lower():
+                removed_count += 1
+                logger.error(f"⛔ RESPONSE FILTER (KEYWORD): Removed AutoCAD reviewer '{reviewer}'")
+                continue
+            
+            # Check 3: CAD reference pattern (AD204-604-D-11154)
+            if re.match(r'^[A-Z]{2}\d{3}-\d{3}-[A-Z]-\d{5}$', text):
+                removed_count += 1
+                logger.error(f"⛔ RESPONSE FILTER (CAD REF): Removed CAD reference '{text}'")
+                continue
+            
+            # Check 4: All-caps system text (PRODUCED WATER, LP RELIEF GAS)
+            if re.match(r'^[A-Z\s]{4,50}$', text):
+                removed_count += 1
+                logger.error(f"⛔ RESPONSE FILTER (ALL-CAPS): Removed all-caps text '{text}'")
+                continue
+            
+            logger.error(f"✅ PASSED FILTER: Reviewer='{reviewer}'")
+            filtered.append(comment)
+        
+        logger.error(f"🔥🔥🔥 RESPONSE FILTER COMPLETE: Kept {len(filtered)}, Removed {removed_count}")
+        
+        if removed_count > 0:
+            logger.error(f"🔥 RESPONSE FILTER: Removed {removed_count} AutoCAD comments from frontend response!")
+        
+        return filtered
+    
     @action(detail=True, methods=['post'])
     def upload_and_add_revision(self, request, pk=None):
         """
@@ -242,6 +302,7 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
         5. Auto-links comments if parent exists
         6. Runs AI analysis
         """
+        logger.error(f"🚨🚨🚨 UPLOAD_AND_ADD_REVISION CALLED! Chain ID: {pk}, User: {request.user}")
         from django.db import connection
         import os
         
@@ -330,7 +391,54 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
             
             # Convert to dictionary format for processing
             processed_comments = convert_comments_to_dict_list(reviewer_comments)
-            logger.info(f"Processed comments after filtering: {len(processed_comments) if processed_comments else 0}")
+            logger.info(f"Processed comments after OCR filtering: {len(processed_comments) if processed_comments else 0}")
+            
+            # SECOND LAYER: ULTRA-AGGRESSIVE AutoCAD filtering
+            filtered_comments = []
+            autocad_filtered_count = 0
+            for comment_data in processed_comments:
+                reviewer_raw = comment_data.get('reviewer', '') or ''
+                reviewer_lower = reviewer_raw.lower().strip()
+                comment_text = (comment_data.get('text', '') or '').lower().strip()
+                
+                # 🔥 PRIORITY 1: EXACT string match for "AutoCAD SHX Text" (case-insensitive)
+                if reviewer_raw.strip().lower() == 'autocad shx text':
+                    autocad_filtered_count += 1
+                    logger.warning(f"⛔ EXACT MATCH BLOCK: Reviewer='AutoCAD SHX Text' - Comment: '{comment_data.get('text', '')[:50]}...'")
+                    continue
+                
+                # 🔥 PRIORITY 2: Check if reviewer contains AutoCAD keywords
+                if reviewer_lower and any(kw in reviewer_lower for kw in ['autocad', 'autodesk', 'acad', 'shx', '.shx', '.dwg', '.dxf']):
+                    autocad_filtered_count += 1
+                    logger.info(f"🚫 KEYWORD FILTER: Removed AutoCAD reviewer '{reviewer_raw}' - Comment: '{comment_data.get('text', '')[:50]}...'")
+                    continue
+                
+                # 🔥 PRIORITY 3: Check if comment text is CAD reference (AD204-604-D-11154 pattern)
+                import re
+                if re.match(r'^[A-Z]{2}\d{3}-\d{3}-[A-Z]-\d{5}$', comment_data.get('text', '').strip()):
+                    autocad_filtered_count += 1
+                    logger.info(f"🚫 CAD REF FILTER: Blocked CAD reference '{comment_data.get('text', '')[:50]}' - Reviewer: '{reviewer_raw}'")
+                    continue
+                
+                # 🔥 PRIORITY 4: Check if comment is all-caps system text
+                if re.match(r'^[A-Z\s]{4,50}$', comment_data.get('text', '').strip()):
+                    autocad_filtered_count += 1
+                    logger.info(f"🚫 ALL-CAPS FILTER: Blocked system text '{comment_data.get('text', '')[:50]}' - Reviewer: '{reviewer_raw}'")
+                    continue
+                
+                # 🔥 PRIORITY 5: Check comment text for AutoCAD keywords
+                if any(kw in comment_text for kw in ['autocad shx text', 'autocad', 'ltypeshp.shx', '.shx file']):
+                    autocad_filtered_count += 1
+                    logger.info(f"🚫 TEXT FILTER: Removed AutoCAD text - Reviewer: '{reviewer_raw}', Comment: '{comment_data.get('text', '')[:50]}...'")
+                    continue
+                
+                filtered_comments.append(comment_data)
+            
+            if autocad_filtered_count > 0:
+                logger.info(f"✅ SECOND FILTER: Removed {autocad_filtered_count} AutoCAD/SHX comments")
+            
+            processed_comments = filtered_comments
+            logger.info(f"Final comments after second filtering: {len(processed_comments) if processed_comments else 0}")
             
             if not processed_comments:
                 return Response({
@@ -360,6 +468,96 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
                 from django.core.files.base import ContentFile
                 document.pdf_file.save(uploaded_file.name, ContentFile(pdf_content), save=True)
                 
+                # 🔥 THIRD LAYER: Final AutoCAD validation before database save
+                final_filtered_comments = []
+                third_layer_filtered = 0
+                for comment_data in processed_comments:
+                    reviewer = (comment_data.get('reviewer', '') or '').strip()
+                    text = (comment_data.get('text', '') or '').strip()
+                    
+                    # Block EXACT match "AutoCAD SHX Text"
+                    if reviewer.lower() == 'autocad shx text':
+                        third_layer_filtered += 1
+                        logger.error(f"🚨 THIRD LAYER BLOCK: AutoCAD SHX Text found! Text: '{text[:50]}...'")
+                        continue
+                    
+                    # Block any reviewer containing 'autocad'
+                    if 'autocad' in reviewer.lower():
+                        third_layer_filtered += 1
+                        logger.error(f"🚨 THIRD LAYER BLOCK: Reviewer contains 'autocad': '{reviewer}'")
+                        continue
+                    
+                    final_filtered_comments.append(comment_data)
+                
+                if third_layer_filtered > 0:
+                    logger.error(f"🚨 THIRD LAYER: Blocked {third_layer_filtered} AutoCAD comments before database save!")
+                
+                processed_comments = final_filtered_comments
+                
+                if not processed_comments:
+                    return Response({
+                        "error": "All comments were AutoCAD system text",
+                        "success": False,
+                        "message": "No valid reviewer comments found after filtering AutoCAD elements"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                # 🔥🔥🔥 ABSOLUTE FINAL FILTER: Check REVIEWER field before database creation
+                # The screenshot shows "AutoCAD SHX Text: 231" - filter by reviewer!
+                logger.error(f"🔥🔥🔥 ABSOLUTE FILTER STARTING: Processing {len(processed_comments)} comments")
+                
+                import re
+                absolutely_final_comments = []
+                autocad_reviewer_filtered = 0
+                
+                for comment_data in processed_comments:
+                    reviewer = str(comment_data.get('reviewer', '')).strip()
+                    text = str(comment_data.get('text', '')).strip()
+                    
+                    # Log EVERY comment to see what we're getting
+                    logger.error(f"🔍 Checking: Reviewer='{reviewer}' | Text='{text[:40]}'")
+                    
+                    # Check 1: Reviewer contains "AutoCAD"
+                    if reviewer and 'autocad' in reviewer.lower():
+                        autocad_reviewer_filtered += 1
+                        logger.error(f"🔥 ABSOLUTE FILTER (REVIEWER): Blocked '{reviewer}' - Text: '{text[:30]}'")
+                        continue
+                    
+                    # Check 2: Reviewer is "AutoCAD SHX Text" (exact)
+                    if reviewer.lower() == 'autocad shx text':
+                        autocad_reviewer_filtered += 1
+                        logger.error(f"🔥 ABSOLUTE FILTER (EXACT): Blocked 'AutoCAD SHX Text' - Text: '{text[:30]}'")
+                        continue
+                    
+                    # Check 3: Empty/None reviewer with CAD patterns
+                    if not reviewer or reviewer.lower() in ['not provided', 'n/a', '']:
+                        # If no reviewer, check if text is CAD pattern
+                        if re.match(r'^[A-Z]{2}\d{3}-\d{3}-[A-Z]-\d{5}$', text):
+                            autocad_reviewer_filtered += 1
+                            logger.error(f"🔥 ABSOLUTE FILTER (NO REVIEWER + CAD): Blocked '{text[:30]}'")
+                            continue
+                        if re.match(r'^[A-Z\s]{4,50}$', text):
+                            autocad_reviewer_filtered += 1
+                            logger.error(f"🔥 ABSOLUTE FILTER (NO REVIEWER + CAPS): Blocked '{text[:30]}'")
+                            continue
+                    
+                    # This comment passed all checks
+                    absolutely_final_comments.append(comment_data)
+                
+                if autocad_reviewer_filtered > 0:
+                    logger.error(f"🔥🔥🔥 ABSOLUTE FILTER: Removed {autocad_reviewer_filtered} comments with AutoCAD reviewers!")
+                
+                # Update processed_comments to only include filtered list
+                processed_comments = absolutely_final_comments
+                
+                if not processed_comments:
+                    return Response({
+                        "error": "All comments had AutoCAD reviewer names",
+                        "success": False,
+                        "message": f"Filtered out {autocad_reviewer_filtered} AutoCAD system comments. No human reviewer comments found."
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                logger.info(f"✅ FINAL COUNT: {len(processed_comments)} comments with REAL reviewers (filtered out {autocad_reviewer_filtered} AutoCAD)")
+                
                 # Create comments
                 created_comments = []
                 for idx, comment_data in enumerate(processed_comments, start=1):
@@ -373,6 +571,25 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
                         status='open'
                     )
                     created_comments.append(comment)
+                
+                # 🔥🔥🔥 POST-SAVE CLEANUP: Delete any AutoCAD comments that got saved
+                import re
+                deleted_count = 0
+                for comment in list(created_comments):  # Use list() to avoid modification during iteration
+                    comment_text = (comment.comment_text or '').strip()
+                    
+                    # Check if this is AutoCAD pattern
+                    is_cad_ref = bool(re.match(r'^[A-Z]{2}\d{3}-\d{3}-[A-Z]-\d{5}$', comment_text))
+                    is_all_caps = bool(re.match(r'^[A-Z\s]{4,50}$', comment_text))
+                    
+                    if is_cad_ref or is_all_caps:
+                        logger.error(f"🔥🔥🔥 POST-SAVE DELETE: Removing AutoCAD comment from DB: '{comment_text[:50]}'")
+                        comment.delete()  # DELETE from database
+                        created_comments.remove(comment)  # Remove from list
+                        deleted_count += 1
+                
+                if deleted_count > 0:
+                    logger.error(f"🔥🔥🔥 POST-SAVE CLEANUP: Deleted {deleted_count} AutoCAD comments from database!")
                 
                 # Calculate revision number
                 revision_number = chain.total_revisions + 1
@@ -410,6 +627,17 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
                 except Exception as ai_error:
                     logger.warning(f"Error calculating AI metrics (non-critical): {ai_error}")
                 
+                # Generate and upload Excel to S3 (with error handling)
+                try:
+                    excel_generator = CRSS3ExcelGenerator()
+                    s3_url = excel_generator.generate_and_upload_revision_excel(revision)
+                    if s3_url:
+                        logger.info(f"Excel generated and uploaded to S3 for revision {revision.id}")
+                    else:
+                        logger.warning(f"Excel not uploaded to S3 for revision {revision.id} (S3 may be disabled)")
+                except Exception as excel_error:
+                    logger.warning(f"Error generating/uploading excel to S3 (non-critical): {excel_error}")
+                
                 # Log activity (with error handling)
                 try:
                     self._safe_create_activity(
@@ -426,6 +654,9 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
                     )
                 except Exception as activity_error:
                     logger.warning(f"Could not log activity (non-critical): {activity_error}")
+            
+            # 🔥 FINAL RESPONSE FILTER: Remove AutoCAD comments from frontend response
+            final_comments_for_frontend = self._filter_autocad_from_response(processed_comments)
             
             return Response({
                 "success": True,
@@ -446,13 +677,13 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
                             "discipline": c.get('discipline', 'Not Provided'),
                             "drawing_ref": c.get('section_reference', 'N/A'),
                             "status": "Open"
-                        } for c in processed_comments
+                        } for c in final_comments_for_frontend
                     ],
                     "extraction_summary": {
-                        "total_comments": len(created_comments),
-                        "red_comments": sum(1 for c in processed_comments if c['type'] == 'red_comment'),
-                        "yellow_boxes": sum(1 for c in processed_comments if c['type'] == 'yellow_box'),
-                        "pages_with_comments": len(set(c['page'] for c in processed_comments))
+                        "total_comments": len(final_comments_for_frontend),
+                        "red_comments": sum(1 for c in final_comments_for_frontend if c['type'] == 'red_comment'),
+                        "yellow_boxes": sum(1 for c in final_comments_for_frontend if c['type'] == 'yellow_box'),
+                        "pages_with_comments": len(set(c['page'] for c in final_comments_for_frontend))
                     }
                 }
             }, status=status.HTTP_201_CREATED)
@@ -679,18 +910,32 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
             comments = CRSComment.objects.filter(document=rev.document).order_by('comment_number')
             
             for comment in comments:
+                # 🚫 FILTER: Skip AutoCAD comments at display time
+                comment_text = (comment.comment_text or '').strip()
+                
+                # Skip CAD reference patterns (AD204-604-D-11154)
+                import re
+                if re.match(r'^[A-Z]{2}\d{3}-\d{3}-[A-Z]-\d{5}$', comment_text):
+                    logger.info(f"🚫 EXCEL EXPORT FILTER: Skipping CAD reference '{comment_text[:30]}...'")
+                    continue
+                
+                # Skip all-caps system text (PRODUCED WATER, LP RELIEF GAS)
+                if re.match(r'^[A-Z\s]{4,50}$', comment_text):
+                    logger.info(f"🚫 EXCEL EXPORT FILTER: Skipping all-caps system text '{comment_text[:30]}...'")
+                    continue
+                
                 ws_comments.append([
                     rev.revision_label,
-                    comment.comment_number,
+                    comment.comment_number if hasattr(comment, 'comment_number') else comment.serial_number,
                     comment.page_number,
                     comment.clause or "",
                     comment.get_comment_type_display(),
                     comment.comment_text,
-                    comment.reviewer_name or "",
-                    comment.discipline or "",
+                    "",  # reviewer_name doesn't exist
+                    comment.discipline if hasattr(comment, 'discipline') else "",
                     comment.get_status_display(),
                     comment.contractor_response or "",
-                    comment.action_taken or ""
+                    comment.action_taken if hasattr(comment, 'action_taken') else ""
                 ])
                 
                 # Color code by comment type
@@ -936,11 +1181,30 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
             total_comments = 0
             for rev in revisions:
                 comments = CRSComment.objects.filter(document=rev.document).order_by('serial_number')
-                comment_count = comments.count()
-                total_comments += comment_count
-                logger.info(f"[EXPORT] Rev {rev.revision_number}: {comment_count} comments")
                 
+                # 🚫 FILTER: Remove AutoCAD comments before display
+                filtered_comments = []
                 for comment in comments:
+                    comment_text = (comment.comment_text or '').strip()
+                    
+                    # Skip CAD reference patterns (AD204-604-D-11154)
+                    import re
+                    if re.match(r'^[A-Z]{2}\d{3}-\d{3}-[A-Z]-\d{5}$', comment_text):
+                        logger.info(f"🚫 HTML EXPORT FILTER: Skipping CAD reference '{comment_text[:30]}...'")
+                        continue
+                    
+                    # Skip all-caps system text (PRODUCED WATER, LP RELIEF GAS)
+                    if re.match(r'^[A-Z\s]{4,50}$', comment_text):
+                        logger.info(f"🚫 HTML EXPORT FILTER: Skipping all-caps system text '{comment_text[:30]}...'")
+                        continue
+                    
+                    filtered_comments.append(comment)
+                
+                comment_count = len(filtered_comments)
+                total_comments += comment_count
+                logger.info(f"[EXPORT] Rev {rev.revision_number}: {comment_count} comments (after AutoCAD filtering)")
+                
+                for comment in filtered_comments:
                     comment_text = escape(comment.comment_text or "")
                     # Truncate long comments for readability
                     if len(comment_text) > 300:
@@ -1470,6 +1734,65 @@ class CRSAIInsightViewSet(viewsets.ReadOnlyModelViewSet):
             "success": True,
             "message": "Insight dismissed"
         })
+    
+    def _filter_autocad_from_response(self, comments_list):
+        """
+        🔥 FINAL RESPONSE FILTER: Remove AutoCAD comments before sending to frontend.
+        This is the absolute last line of defense.
+        
+        Args:
+            comments_list: List of comment dictionaries
+            
+        Returns:
+            list: Filtered comments without AutoCAD entries
+        """
+        import re
+        
+        logger.error(f"🚨🚨🚨 RESPONSE FILTER CALLED with {len(comments_list)} comments")
+        
+        filtered = []
+        removed_count = 0
+        
+        for comment in comments_list:
+            # Check BOTH 'reviewer' and 'reviewer_name' keys
+            reviewer = str(comment.get('reviewer') or comment.get('reviewer_name') or '').strip()
+            text = str(comment.get('text') or comment.get('comment_text') or '').strip()
+            
+            logger.error(f"🔍 FILTER CHECK: Reviewer='{reviewer}' | Text='{text[:30]}'")
+            
+            # Check 1: Reviewer contains AutoCAD (EXACT CHECK FIRST)
+            if reviewer.lower() == 'autocad shx text':
+                removed_count += 1
+                logger.error(f"⛔ RESPONSE FILTER (EXACT): Removed 'AutoCAD SHX Text'")
+                continue
+            
+            # Check 2: Reviewer contains "autocad"
+            if 'autocad' in reviewer.lower():
+                removed_count += 1
+                logger.error(f"⛔ RESPONSE FILTER (KEYWORD): Removed AutoCAD reviewer '{reviewer}'")
+                continue
+            
+            # Check 3: CAD reference pattern (AD204-604-D-11154)
+            if re.match(r'^[A-Z]{2}\d{3}-\d{3}-[A-Z]-\d{5}$', text):
+                removed_count += 1
+                logger.error(f"⛔ RESPONSE FILTER (CAD REF): Removed CAD reference '{text}'")
+                continue
+            
+            # Check 4: All-caps system text (PRODUCED WATER, LP RELIEF GAS)
+            if re.match(r'^[A-Z\s]{4,50}$', text):
+                removed_count += 1
+                logger.error(f"⛔ RESPONSE FILTER (ALL-CAPS): Removed all-caps text '{text}'")
+                continue
+            
+            logger.error(f"✅ PASSED FILTER: Reviewer='{reviewer}'")
+            filtered.append(comment)
+        
+        logger.error(f"🔥🔥🔥 RESPONSE FILTER COMPLETE: Kept {len(filtered)}, Removed {removed_count}")
+        
+        if removed_count > 0:
+            logger.error(f"🔥 RESPONSE FILTER: Removed {removed_count} AutoCAD comments from frontend response!")
+        
+        return filtered
 
 
 class CRSRevisionActivityViewSet(viewsets.ReadOnlyModelViewSet):

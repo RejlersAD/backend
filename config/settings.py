@@ -506,13 +506,15 @@ if USE_S3:
         
         # Storage backends
         DEFAULT_FILE_STORAGE = 'apps.core.storage_backends.MediaStorage'
-        STATICFILES_STORAGE = 'apps.core.storage_backends.StaticStorage'
+        # Keep static files local, only use S3 for media/documents
+        STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
         
-        # Media files (uploaded by users)
+        # Media files (uploaded by users) - use S3
         MEDIA_URL = f'https://{AWS_STORAGE_BUCKET_NAME}.s3.{AWS_S3_REGION_NAME}.amazonaws.com/media/'
         
-        # Static files
-        STATIC_URL = f'https://{AWS_STORAGE_BUCKET_NAME}.s3.{AWS_S3_REGION_NAME}.amazonaws.com/static/'
+        # Static files (CSS/JS) - use local storage
+        STATIC_ROOT = BASE_DIR / 'staticfiles'
+        STATIC_URL = '/static/'
     else:
         # S3 enabled but bucket not configured - use local storage
         print("⚠️  USE_S3=True but AWS_STORAGE_BUCKET_NAME not set. Using local storage.")
