@@ -3,6 +3,7 @@ Email Service for Finance Module
 Sends notifications and approval emails
 """
 from django.core.mail import send_mail, EmailMultiAlternatives, EmailMessage
+from django.core.files.storage import default_storage
 from django.template.loader import render_to_string
 from django.conf import settings
 from django.urls import reverse
@@ -127,8 +128,8 @@ This is an automated notification from RAD AI Finance System.
             msg.attach_alternative(html_content, "text/html")
             
             # Attach PDF if file exists
-            if invoice.file_path and os.path.exists(invoice.file_path):
-                with open(invoice.file_path, 'rb') as pdf_file:
+            if invoice.file_path and default_storage.exists(invoice.file_path):
+                with default_storage.open(invoice.file_path, 'rb') as pdf_file:
                     msg.attach(
                         invoice.original_filename,
                         pdf_file.read(),
@@ -428,8 +429,8 @@ This is an automated notification from RAD AI Finance System.
                 msg.attach_alternative(html_content, "text/html")
                 
                 # Attach PDF if file exists
-                if invoice.file_path and os.path.exists(invoice.file_path):
-                    with open(invoice.file_path, 'rb') as pdf_file:
+                if invoice.file_path and default_storage.exists(invoice.file_path):
+                    with default_storage.open(invoice.file_path, 'rb') as pdf_file:
                         msg.attach(
                             invoice.original_filename,
                             pdf_file.read(),

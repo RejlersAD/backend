@@ -91,14 +91,27 @@ class FinanceWorkflowService:
         """Extract data from PDF"""
         try:
             file_path = invoice.file_path
-            if not os.path.exists(file_path):
+            if not default_storage.exists(file_path):
                 invoice.status = InvoiceStatus.EXTRACTION_FAILED
                 invoice.save()
                 self._add_audit_log(invoice, "extraction_failed", "File not found")
                 return False
             
-            # Extract invoice data
-            extracted_data = self.pdf_extractor.process_invoice(file_path)
+            # Extract invoice data - get local path for processing
+            # For S3, this will download to temp file automatically
+            with default_storage.open(file_path, 'rb') as f:
+                # Save to temp file for PDF extraction (PDFExtractor expects file path)
+                import tempfile
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                    tmp.write(f.read())
+                    tmp_path = tmp.name
+            
+            try:
+                extracted_data = self.pdf_extractor.process_invoice(tmp_path)
+            finally:
+                # Clean up temp file
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
             
             if not extracted_data:
                 invoice.status = InvoiceStatus.EXTRACTION_FAILED

@@ -113,7 +113,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             
             # Save file
             file_path = default_storage.save(f'invoices/{filename}', uploaded_file)
-            full_path = default_storage.path(file_path)
+            # Use relative path (works with both filesystem and S3 storage)
+            # Don't use default_storage.path() - it fails with S3 backend
             
             # Create invoice record
             invoice = Invoice.objects.create(
@@ -122,7 +123,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 total_amount=request.data.get('total_amount'),
                 currency=request.data.get('currency', 'AED'),
                 original_filename=uploaded_file.name[:500],  # Truncate to field limit
-                file_path=full_path[:1000],  # Truncate to field limit
+                file_path=file_path[:1000],  # Use relative path (works with both S3 and filesystem)
                 status=InvoiceStatus.PENDING_EXTRACTION,
                 submitted_by=request.user
             )
@@ -216,7 +217,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        if not invoice.file_path or not os.path.exists(invoice.file_path):
+        if not invoice.file_path or not default_storage.exists(invoice.file_path):
             return Response(
                 {'error': 'PDF file not found'},
                 status=status.HTTP_404_NOT_FOUND
@@ -224,7 +225,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 
         try:
             return FileResponse(
-                open(invoice.file_path, 'rb'),
+                default_storage.open(invoice.file_path, 'rb'),
                 content_type='application/pdf'
             )
         except Exception as e:
@@ -238,7 +239,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     def download(self, request, pk=None):
         invoice = self.get_object()
         
-        if not os.path.exists(invoice.file_path):
+        if not default_storage.exists(invoice.file_path):
             return Response(
                 {'error': 'File not found'},
                 status=status.HTTP_404_NOT_FOUND
@@ -246,7 +247,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         
         from django.http import FileResponse
         return FileResponse(
-            open(invoice.file_path, 'rb'),
+            default_storage.open(invoice.file_path, 'rb'),
             content_type='application/pdf',
             as_attachment=True,
             filename=invoice.original_filename
