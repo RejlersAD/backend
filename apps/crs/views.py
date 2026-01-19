@@ -280,6 +280,63 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                 'error': f'Config error: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
+    def _filter_autocad_comments(self, comments):
+        """
+        🔥 FILTER: Remove AutoCAD SHX Text comments from extracted comments.
+        Uses same logic as CRS revision chain filtering.
+        
+        Args:
+            comments: List of ReviewerComment objects
+            
+        Returns:
+            list: Filtered comments without AutoCAD entries
+        """
+        import re
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.error(f"🚨🚨🚨 CRS DOC MANAGER FILTER: Processing {len(comments)} comments")
+        
+        filtered = []
+        removed_count = 0
+        
+        for comment in comments:
+            reviewer = str(getattr(comment, 'reviewer_name', '') or '').strip()
+            text = str(getattr(comment, 'comment_text', '') or '').strip()
+            
+            logger.error(f"🔍 DOC CHECK: Reviewer='{reviewer}' | Text='{text[:30]}'")
+            
+            # Check 1: Exact match "AutoCAD SHX Text"
+            if reviewer.lower() == 'autocad shx text':
+                removed_count += 1
+                logger.error(f"⛔ DOC FILTER (EXACT): Removed 'AutoCAD SHX Text'")
+                continue
+            
+            # Check 2: Reviewer contains "autocad"
+            if 'autocad' in reviewer.lower():
+                removed_count += 1
+                logger.error(f"⛔ DOC FILTER (KEYWORD): Removed AutoCAD reviewer '{reviewer}'")
+                continue
+            
+            # Check 3: CAD reference pattern (AD204-604-D-11154)
+            if re.match(r'^[A-Z]{2}\d{3}-\d{3}-[A-Z]-\d{5}$', text):
+                removed_count += 1
+                logger.error(f"⛔ DOC FILTER (CAD REF): Removed CAD reference '{text}'")
+                continue
+            
+            # Check 4: All-caps system text (PRODUCED WATER, LP RELIEF GAS)
+            if re.match(r'^[A-Z\s]{4,50}$', text):
+                removed_count += 1
+                logger.error(f"⛔ DOC FILTER (ALL-CAPS): Removed all-caps text '{text}'")
+                continue
+            
+            logger.error(f"✅ DOC PASSED: Reviewer='{reviewer}'")
+            filtered.append(comment)
+        
+        logger.error(f"🔥🔥🔥 DOC FILTER COMPLETE: Kept {len(filtered)}, Removed {removed_count}")
+        
+        return filtered
+    
     @action(detail=False, methods=['post'], url_path='upload-and-process')
     def upload_and_process(self, request):
         """
@@ -364,6 +421,9 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                 
                 # CRITICAL: Enable cleaning to apply strict CRS_EXTRACTION_LOGIC.md rules
                 comments = extract_reviewer_comments(pdf_buffer, apply_cleaning=True)
+                
+                # 🔥 APPLY AUTOCAD FILTER: Remove AutoCAD SHX Text comments
+                comments = self._filter_autocad_comments(comments)
                 
                 if not comments:
                     return Response({
@@ -504,205 +564,237 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
                 
                 elif download_format == 'pdf':
                     # Generate PDF report using ReportLab
-                    from reportlab.lib import colors
-                    from reportlab.lib.pagesizes import A4, landscape
-                    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-                    from reportlab.lib.units import inch
-                    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-                    from reportlab.lib.enums import TA_LEFT, TA_CENTER
-                    
-                    pdf_buffer = BytesIO()
-                    doc = SimpleDocTemplate(
-                        pdf_buffer,
-                        pagesize=landscape(A4),
-                        rightMargin=30,
-                        leftMargin=30,
-                        topMargin=30,
-                        bottomMargin=30
-                    )
-                    
-                    elements = []
-                    styles = getSampleStyleSheet()
-                    
-                    # Title
-                    title_style = ParagraphStyle(
-                        'CustomTitle',
-                        parent=styles['Heading1'],
-                        fontSize=16,
-                        alignment=TA_CENTER,
-                        spaceAfter=20
-                    )
-                    elements.append(Paragraph("Comment Resolution Sheet", title_style))
-                    
-                    # Metadata
-                    meta_style = ParagraphStyle(
-                        'Meta',
-                        parent=styles['Normal'],
-                        fontSize=10,
-                        spaceAfter=5
-                    )
-                    if metadata.get('project_name'):
-                        elements.append(Paragraph(f"<b>Project:</b> {metadata['project_name']}", meta_style))
-                    if metadata.get('document_number'):
-                        elements.append(Paragraph(f"<b>Document:</b> {metadata['document_number']}", meta_style))
-                    if metadata.get('revision'):
-                        elements.append(Paragraph(f"<b>Revision:</b> {metadata['revision']}", meta_style))
-                    elements.append(Paragraph(f"<b>Total Comments:</b> {len(comments_data)}", meta_style))
-                    elements.append(Spacer(1, 20))
-                    
-                    # Table data
-                    table_data = [['#', 'Page', 'Type', 'Comment', 'Reviewer', 'Discipline']]
-                    
-                    cell_style = ParagraphStyle(
-                        'Cell',
-                        parent=styles['Normal'],
-                        fontSize=8,
-                        leading=10
-                    )
-                    
-                    for c in comments_data:
-                        # Truncate long comments for PDF
-                        comment_text = c['comment_text'] or ''
-                        if len(comment_text) > 200:
-                            comment_text = comment_text[:200] + '...'
+                    try:
+                        from reportlab.lib import colors
+                        from reportlab.lib.pagesizes import A4, landscape
+                        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+                        from reportlab.lib.units import inch
+                        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+                        from reportlab.lib.enums import TA_LEFT, TA_CENTER
                         
-                        table_data.append([
-                            str(c['index']),
-                            str(c['page_number'] or '-'),
-                            c['comment_type'] or 'GENERAL',
-                            Paragraph(comment_text, cell_style),
-                            c['reviewer_name'] or '-',
-                            c['discipline'] or '-'
-                        ])
-                    
-                    # Create table
-                    col_widths = [0.4*inch, 0.5*inch, 0.8*inch, 4.5*inch, 1.2*inch, 1*inch]
-                    table = Table(table_data, colWidths=col_widths, repeatRows=1)
-                    
-                    table.setStyle(TableStyle([
-                        # Header
-                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4F46E5')),
-                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                        ('FONTSIZE', (0, 0), (-1, 0), 9),
-                        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-                        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-                        ('TOPPADDING', (0, 0), (-1, 0), 8),
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.error(f"🔥 PDF GENERATION: Starting for {len(comments_data)} comments")
                         
-                        # Body
-                        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-                        ('FONTSIZE', (0, 1), (-1, -1), 8),
-                        ('ALIGN', (0, 1), (0, -1), 'CENTER'),
-                        ('ALIGN', (1, 1), (1, -1), 'CENTER'),
-                        ('ALIGN', (2, 1), (2, -1), 'CENTER'),
-                        ('VALIGN', (0, 1), (-1, -1), 'TOP'),
-                        ('TOPPADDING', (0, 1), (-1, -1), 6),
-                        ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+                        pdf_buffer = BytesIO()
+                        doc = SimpleDocTemplate(
+                            pdf_buffer,
+                            pagesize=landscape(A4),
+                            rightMargin=30,
+                            leftMargin=30,
+                            topMargin=30,
+                            bottomMargin=30
+                        )
                         
-                        # Grid
-                        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F3F4F6')]),
-                    ]))
-                    
-                    elements.append(table)
-                    doc.build(elements)
-                    
-                    pdf_buffer.seek(0)
-                    pdf_content = pdf_buffer.read()
-                    
-                    # Save to user storage
-                    save_export_to_user_storage(pdf_content, 'pdf', safe_filename)
-                    
-                    response = HttpResponse(
-                        pdf_content,
-                        content_type='application/pdf'
-                    )
-                    response['Content-Disposition'] = f'attachment; filename="CRS_{safe_filename}.pdf"'
-                    response['Content-Length'] = len(pdf_content)
-                    return response
+                        elements = []
+                        styles = getSampleStyleSheet()
+                        
+                        # Title
+                        title_style = ParagraphStyle(
+                            'CustomTitle',
+                            parent=styles['Heading1'],
+                            fontSize=16,
+                            alignment=TA_CENTER,
+                            spaceAfter=20
+                        )
+                        elements.append(Paragraph("Comment Resolution Sheet", title_style))
+                        
+                        # Metadata
+                        meta_style = ParagraphStyle(
+                            'Meta',
+                            parent=styles['Normal'],
+                            fontSize=10,
+                            spaceAfter=5
+                        )
+                        if metadata.get('project_name'):
+                            elements.append(Paragraph(f"<b>Project:</b> {metadata['project_name']}", meta_style))
+                        if metadata.get('document_number'):
+                            elements.append(Paragraph(f"<b>Document:</b> {metadata['document_number']}", meta_style))
+                        if metadata.get('revision'):
+                            elements.append(Paragraph(f"<b>Revision:</b> {metadata['revision']}", meta_style))
+                        elements.append(Paragraph(f"<b>Total Comments:</b> {len(comments_data)}", meta_style))
+                        elements.append(Spacer(1, 20))
+                        
+                        # Table data
+                        table_data = [['#', 'Page', 'Type', 'Comment', 'Reviewer', 'Discipline']]
+                        
+                        cell_style = ParagraphStyle(
+                            'Cell',
+                            parent=styles['Normal'],
+                            fontSize=8,
+                            leading=10
+                        )
+                        
+                        for c in comments_data:
+                            # Truncate long comments for PDF
+                            comment_text = c['comment_text'] or ''
+                            if len(comment_text) > 200:
+                                comment_text = comment_text[:200] + '...'
+                            
+                            table_data.append([
+                                str(c['index']),
+                                str(c['page_number'] or '-'),
+                                c['comment_type'] or 'GENERAL',
+                                Paragraph(comment_text, cell_style),
+                                c['reviewer_name'] or '-',
+                                c['discipline'] or '-'
+                            ])
+                        
+                        # Create table
+                        col_widths = [0.4*inch, 0.5*inch, 0.8*inch, 4.5*inch, 1.2*inch, 1*inch]
+                        table = Table(table_data, colWidths=col_widths, repeatRows=1)
+                        
+                        table.setStyle(TableStyle([
+                            # Header
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4F46E5')),
+                            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                            ('FONTSIZE', (0, 0), (-1, 0), 9),
+                            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                            ('TOPPADDING', (0, 0), (-1, 0), 8),
+                            
+                            # Body
+                            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                            ('FONTSIZE', (0, 1), (-1, -1), 8),
+                            ('ALIGN', (0, 1), (0, -1), 'CENTER'),
+                            ('ALIGN', (1, 1), (1, -1), 'CENTER'),
+                            ('ALIGN', (2, 1), (2, -1), 'CENTER'),
+                            ('VALIGN', (0, 1), (-1, -1), 'TOP'),
+                            ('TOPPADDING', (0, 1), (-1, -1), 6),
+                            ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+                            
+                            # Grid
+                            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F3F4F6')]),
+                        ]))
+                        
+                        elements.append(table)
+                        doc.build(elements)
+                        
+                        pdf_buffer.seek(0)
+                        pdf_content = pdf_buffer.read()
+                        
+                        logger.error(f"✅ PDF GENERATION: Complete, size={len(pdf_content)} bytes")
+                        
+                        # Save to user storage
+                        save_export_to_user_storage(pdf_content, 'pdf', safe_filename)
+                        
+                        response = HttpResponse(
+                            pdf_content,
+                            content_type='application/pdf'
+                        )
+                        response['Content-Disposition'] = f'attachment; filename="CRS_{safe_filename}.pdf"'
+                        response['Content-Length'] = len(pdf_content)
+                        return response
+                        
+                    except Exception as pdf_error:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.error(f"❌ PDF GENERATION ERROR: {pdf_error}", exc_info=True)
+                        return Response({
+                            'error': f'PDF generation failed: {str(pdf_error)}',
+                            'success': False
+                        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
                 
                 elif download_format == 'docx':
                     # Generate Word document using python-docx
-                    from docx import Document
-                    from docx.shared import Inches, Pt, RGBColor
-                    from docx.enum.text import WD_ALIGN_PARAGRAPH
-                    from docx.enum.table import WD_TABLE_ALIGNMENT
-                    from docx.oxml.ns import nsdecls
-                    from docx.oxml import parse_xml
+                    try:
+                        from docx import Document
+                        from docx.shared import Inches, Pt, RGBColor
+                        from docx.enum.text import WD_ALIGN_PARAGRAPH
+                        from docx.enum.table import WD_TABLE_ALIGNMENT
+                        from docx.oxml.ns import nsdecls
+                        from docx.oxml import parse_xml
+                        
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.error(f"🔥 DOCX GENERATION: Starting for {len(comments_data)} comments")
+                        
+                        doc = Document()
+                        
+                        # Title
+                        title = doc.add_heading('Comment Resolution Sheet', 0)
+                        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        
+                        # Metadata section
+                        if metadata.get('project_name'):
+                            doc.add_paragraph(f"Project: {metadata['project_name']}")
+                        if metadata.get('document_number'):
+                            doc.add_paragraph(f"Document Number: {metadata['document_number']}")
+                        if metadata.get('revision'):
+                            doc.add_paragraph(f"Revision: {metadata['revision']}")
+                        if metadata.get('contractor'):
+                            doc.add_paragraph(f"Contractor: {metadata['contractor']}")
+                        if metadata.get('department'):
+                            doc.add_paragraph(f"Department: {metadata['department']}")
+                        doc.add_paragraph(f"Total Comments: {len(comments_data)}")
+                        doc.add_paragraph()  # Empty line
+                        
+                        # Create table
+                        table = doc.add_table(rows=1, cols=6)
+                        table.style = 'Table Grid'
+                        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                        
+                        # Header row
+                        header_cells = table.rows[0].cells
+                        headers = ['#', 'Page', 'Type', 'Comment', 'Reviewer', 'Discipline']
+                        for i, header in enumerate(headers):
+                            header_cells[i].text = header
+                            # Make header bold
+                            for paragraph in header_cells[i].paragraphs:
+                                for run in paragraph.runs:
+                                    run.bold = True
+                            # Header background color (indigo)
+                            shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="4F46E5"/>')
+                            header_cells[i]._tc.get_or_add_tcPr().append(shading)
+                            for paragraph in header_cells[i].paragraphs:
+                                for run in paragraph.runs:
+                                    run.font.color.rgb = RGBColor(255, 255, 255)
+                        
+                        # Data rows
+                        for c in comments_data:
+                            row_cells = table.add_row().cells
+                            row_cells[0].text = str(c['index'])
+                            row_cells[1].text = str(c['page_number'] or '-')
+                            row_cells[2].text = c['comment_type'] or 'GENERAL'
+                            row_cells[3].text = c['comment_text'] or '-'
+                            row_cells[4].text = c['reviewer_name'] or '-'
+                            row_cells[5].text = c['discipline'] or '-'
+                        
+                        # Set column widths
+                        widths = [Inches(0.4), Inches(0.5), Inches(0.8), Inches(4.0), Inches(1.2), Inches(1.0)]
+                        for row in table.rows:
+                            for idx, cell in enumerate(row.cells):
+                                cell.width = widths[idx]
+                        
+                        # Save to buffer
+                        docx_buffer = BytesIO()
+                        doc.save(docx_buffer)
+                        docx_buffer.seek(0)
+                        docx_content = docx_buffer.read()
+                        
+                        logger.error(f"✅ DOCX GENERATION: Complete, size={len(docx_content)} bytes")
+                        
+                        # Save to user storage
+                        save_export_to_user_storage(docx_content, 'docx', safe_filename)
+                        
+                        response = HttpResponse(
+                            docx_content,
+                            content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                        )
+                        response['Content-Disposition'] = f'attachment; filename="CRS_{safe_filename}.docx"'
+                        response['Content-Length'] = len(docx_content)
+                        return response
                     
-                    doc = Document()
-                    
-                    # Title
-                    title = doc.add_heading('Comment Resolution Sheet', 0)
-                    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    
-                    # Metadata section
-                    if metadata.get('project_name'):
-                        doc.add_paragraph(f"Project: {metadata['project_name']}")
-                    if metadata.get('document_number'):
-                        doc.add_paragraph(f"Document Number: {metadata['document_number']}")
-                    if metadata.get('revision'):
-                        doc.add_paragraph(f"Revision: {metadata['revision']}")
-                    if metadata.get('contractor'):
-                        doc.add_paragraph(f"Contractor: {metadata['contractor']}")
-                    if metadata.get('department'):
-                        doc.add_paragraph(f"Department: {metadata['department']}")
-                    doc.add_paragraph(f"Total Comments: {len(comments_data)}")
-                    doc.add_paragraph()  # Empty line
-                    
-                    # Create table
-                    table = doc.add_table(rows=1, cols=6)
-                    table.style = 'Table Grid'
-                    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-                    
-                    # Header row
-                    header_cells = table.rows[0].cells
-                    headers = ['#', 'Page', 'Type', 'Comment', 'Reviewer', 'Discipline']
-                    for i, header in enumerate(headers):
-                        header_cells[i].text = header
-                        # Make header bold
-                        for paragraph in header_cells[i].paragraphs:
-                            for run in paragraph.runs:
-                                run.bold = True
-                        # Header background color (indigo)
-                        shading = parse_xml(f'<w:shd {nsdecls("w")} w:fill="4F46E5"/>')
-                        header_cells[i]._tc.get_or_add_tcPr().append(shading)
-                        for paragraph in header_cells[i].paragraphs:
-                            for run in paragraph.runs:
-                                run.font.color.rgb = RGBColor(255, 255, 255)
-                    
-                    # Data rows
-                    for c in comments_data:
-                        row_cells = table.add_row().cells
-                        row_cells[0].text = str(c['index'])
-                        row_cells[1].text = str(c['page_number'] or '-')
-                        row_cells[2].text = c['comment_type'] or 'GENERAL'
-                        row_cells[3].text = c['comment_text'] or '-'
-                        row_cells[4].text = c['reviewer_name'] or '-'
-                        row_cells[5].text = c['discipline'] or '-'
-                    
-                    # Set column widths
-                    widths = [Inches(0.4), Inches(0.5), Inches(0.8), Inches(4.0), Inches(1.2), Inches(1.0)]
-                    for row in table.rows:
-                        for idx, cell in enumerate(row.cells):
-                            cell.width = widths[idx]
-                    
-                    # Save to buffer
-                    docx_buffer = BytesIO()
-                    doc.save(docx_buffer)
-                    docx_buffer.seek(0)
-                    docx_content = docx_buffer.read()
-                    
-                    # Save to user storage
-                    save_export_to_user_storage(docx_content, 'docx', safe_filename)
-                    
-                    response = HttpResponse(
-                        docx_content,
-                        content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                    )
-                    response['Content-Disposition'] = f'attachment; filename="CRS_{safe_filename}.docx"'
-                    response['Content-Length'] = len(docx_content)
-                    return response
+                    except Exception as docx_error:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.error(f"❌ DOCX GENERATION ERROR: {docx_error}", exc_info=True)
+                        return Response({
+                            'error': f'Word document generation failed: {str(docx_error)}',
+                            'success': False
+                        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
                 
                 else:  # xlsx (default)
                     # Populate template
