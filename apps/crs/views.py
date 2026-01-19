@@ -1076,3 +1076,89 @@ class GoogleSheetConfigViewSet(viewsets.ModelViewSet):
     # @action(detail=True, methods=['post'])
     # def test_connection(self, request, pk=None):
     #     pass
+
+
+# ============================================
+# CRS TEMPLATE MANAGEMENT (S3 Integration)
+# ============================================
+
+from rest_framework.views import APIView
+from .s3_template_manager import template_manager
+
+class CRSTemplateView(APIView):
+    """
+    API View for CRS Template Management
+    Handles project types and S3 template operations
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        """
+        GET /api/v1/crs/templates/
+        Returns available project types and their templates
+        
+        Query params:
+        - project_type: Filter templates by project type (optional)
+        """
+        project_type = request.query_params.get('project_type')
+        
+        if project_type:
+            # Get templates for specific project type
+            templates = template_manager.list_templates(project_type)
+            
+            # Generate presigned URLs for direct download
+            for template in templates:
+                presigned_url = template_manager.get_presigned_url(template['key'])
+                template['download_url'] = presigned_url
+            
+            return Response({
+                'success': True,
+                'project_type': project_type,
+                'templates': templates,
+                'count': len(templates)
+            })
+        else:
+            # Get all project types
+            project_types = template_manager.get_project_types()
+            
+            return Response({
+                'success': True,
+                'project_types': project_types,
+                'message': 'Use ?project_type=<code> to list templates for a specific project'
+            })
+    
+    def post(self, request):
+        """
+        POST /api/v1/crs/templates/
+        Upload a new template to S3
+        
+        Body:
+        - file: Template file (Excel)
+        - project_type: Project type code
+        - filename: Template filename
+        """
+        uploaded_file = request.FILES.get('file')
+        project_type = request.POST.get('project_type')
+        filename = request.POST.get('filename') or uploaded_file.name
+        
+        if not uploaded_file or not project_type:
+            return Response({
+                'success': False,
+                'error': 'Both file and project_type are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Upload to S3
+        file_content = uploaded_file.read()
+        success = template_manager.upload_template(file_content, project_type, filename)
+        
+        if success:
+            return Response({
+                'success': True,
+                'message': f'Template uploaded successfully to {project_type}',
+                'filename': filename
+            })
+        else:
+            return Response({
+                'success': False,
+                'error': 'Failed to upload template to S3'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
