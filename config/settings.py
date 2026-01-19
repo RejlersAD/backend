@@ -92,7 +92,7 @@ INSTALLED_APPS = [
     'apps.pfd_converter',
     'apps.crs',
     'apps.qhse',  # QHSE Management Module
-    # 'apps.finance',  # Finance Invoice Automation (removed - moved to separate repository)
+    'apps.finance',  # Finance Invoice Automation
     
     # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
     # Enabling this will cause startup hangs (MLflow server not available)
@@ -118,6 +118,15 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = 'config.urls'
+
+# ==============================================================================
+# HOST HEADER HANDLING (Fix for Docker internal hostnames in API responses)
+# ==============================================================================
+# When running in Docker, the request.get_host() may return 'backend:8000'
+# which is not accessible from the browser. These settings ensure proper hostname.
+USE_X_FORWARDED_HOST = True  # Use X-Forwarded-Host header if present
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')  # For HTTPS detection
+# ==============================================================================
 
 TEMPLATES = [
     {

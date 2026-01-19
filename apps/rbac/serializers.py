@@ -2,6 +2,7 @@
 RBAC Serializers
 Enterprise-grade serializers for Role-Based Access Control
 """
+import logging
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -11,6 +12,7 @@ from .models import (
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 class OrganizationSerializer(serializers.ModelSerializer):
@@ -302,11 +304,19 @@ class UserProfileSerializer(serializers.ModelSerializer):
                     logger.error("[UserProfile] No organization found to assign")
                     raise serializers.ValidationError({'organization_id': 'No organization available. Please contact admin.'})
             
-            # Check if email already exists
+            # Check if email already exists (exclude soft-deleted users)
             email = attrs.get('email')
-            if User.objects.filter(email=email).exists():
+            # Check if there's an active (non-deleted) user profile with this email
+            if UserProfile.objects.filter(user__email=email, is_deleted=False).exists():
                 logger.error(f"[UserProfile] Validation failed: email {email} already exists")
                 raise serializers.ValidationError({'email': 'A user with this email already exists'})
+            
+            # Also check if User exists but has a deleted profile - allow reuse
+            existing_user = User.objects.filter(email=email).first()
+            if existing_user:
+                deleted_profile = UserProfile.objects.filter(user=existing_user, is_deleted=True).first()
+                if deleted_profile:
+                    logger.info(f"[UserProfile] Email {email} was previously deleted, allowing reuse")
             
             # Validate email format and deliverability using soft-coded config
             try:
@@ -431,26 +441,67 @@ class UserProfileSerializer(serializers.ModelSerializer):
         # Store the password for welcome email (before hashing)
         temp_password = password
         
-        # Create user with appropriate permissions (username already validated and unique)
+        # Check if User exists with a deleted profile (reuse scenario)
         from django.utils import timezone
-        user = User.objects.create_user(
-            username=username,
-            email=email,
-            password=password,
-            first_name=first_name,
-            last_name=last_name,
-            phone_number=phone,  # Add phone_number to User model
-            is_active=True,  # Explicitly set user as active
-            is_superuser=is_super_admin,
-            is_staff=is_super_admin,
-            is_first_login=True,  # Mark as first login
-            must_reset_password=True,  # Require password reset
-            temp_password_created_at=timezone.now()
-        )
+        existing_user = User.objects.filter(email=email).first()
+        existing_deleted_profile = None
         
-        # Create profile with explicit is_deleted=False
+        if existing_user:
+            # Check if the existing user has a deleted profile
+            existing_deleted_profile = UserProfile.objects.filter(
+                user=existing_user, 
+                is_deleted=True
+            ).first()
+        
+        if existing_user and existing_deleted_profile:
+            # Reuse existing User object and update its details
+            user = existing_user
+            user.username = username
+            user.first_name = first_name
+            user.last_name = last_name
+            user.set_password(password)
+            user.phone_number = phone
+            user.is_active = True
+            user.is_superuser = is_super_admin
+            user.is_staff = is_super_admin
+            user.is_first_login = True
+            user.must_reset_password = True
+            user.temp_password_created_at = timezone.now()
+            user.save()
+            
+            logger.info(f"[UserProfile] Reusing existing User {email} with deleted profile")
+        else:
+            # Create new user with appropriate permissions (username already validated and unique)
+            user = User.objects.create_user(
+                username=username,
+                email=email,
+                password=password,
+                first_name=first_name,
+                last_name=last_name,
+                phone_number=phone,  # Add phone_number to User model
+                is_active=True,  # Explicitly set user as active
+                is_superuser=is_super_admin,
+                is_staff=is_super_admin,
+                is_first_login=True,  # Mark as first login
+                must_reset_password=True,  # Require password reset
+                temp_password_created_at=timezone.now()
+            )
+        
+        # Create or reactivate profile with explicit is_deleted=False
         validated_data['is_deleted'] = False
-        profile = UserProfile.objects.create(user=user, **validated_data)
+        
+        if existing_deleted_profile:
+            # Reactivate the deleted profile instead of creating a new one
+            for key, value in validated_data.items():
+                setattr(existing_deleted_profile, key, value)
+            existing_deleted_profile.deleted_at = None
+            existing_deleted_profile.deleted_by = None
+            existing_deleted_profile.save()
+            profile = existing_deleted_profile
+            logger.info(f"[UserProfile] Reactivated deleted profile for {email}")
+        else:
+            # Create new profile
+            profile = UserProfile.objects.create(user=user, **validated_data)
         
         # Assign roles based on role_ids if provided
         if role_ids:

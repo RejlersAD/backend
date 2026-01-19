@@ -710,8 +710,13 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                             })
                             continue
                         
-                        # Check if user already exists
-                        if User.objects.filter(email=email).exists():
+                        # Check if user already exists (exclude soft-deleted users)
+                        existing_profile = UserProfile.objects.filter(
+                            user__email=email, 
+                            is_deleted=False
+                        ).first()
+                        
+                        if existing_profile:
                             results['skipped'].append({
                                 'row': row_num,
                                 'email': email,

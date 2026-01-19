@@ -157,14 +157,13 @@ def create_approval_routes(apps, schema_editor):
         ApprovalRoute.objects.update_or_create(
             invoice_type=route_config['invoice_type'],
             defaults={
-                'name': route_config['name'],
                 'approval_chain': route_config['approval_chain'],
                 'is_active': True,
                 'priority': route_config['priority']
             }
         )
     
-    print("✅ Successfully created/updated 4 approval routes (IT, Admin, Finance, Project)")
+    print(f"✅ Successfully created/updated approval route: {route_config['name']}")
 
 
 def remove_approval_routes(apps, schema_editor):
