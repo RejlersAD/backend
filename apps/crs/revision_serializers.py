@@ -197,10 +197,31 @@ class CRSRevisionChainCreateSerializer(serializers.ModelSerializer):
         ]
     
     def validate_chain_id(self, value):
-        """Ensure chain_id is unique"""
+        """Ensure chain_id is unique and not empty"""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Chain ID cannot be empty")
+        value = value.strip()
         if CRSRevisionChain.objects.filter(chain_id=value).exists():
             raise serializers.ValidationError("Chain ID already exists")
         return value
+    
+    def validate_project_name(self, value):
+        """Ensure project name is not empty"""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Project name is required")
+        return value.strip()
+    
+    def validate_document_number(self, value):
+        """Ensure document number is not empty"""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Document number is required")
+        return value.strip()
+    
+    def validate_document_title(self, value):
+        """Ensure document title is not empty"""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Document title is required")
+        return value.strip()
 
 
 class CRSRevisionCreateSerializer(serializers.ModelSerializer):
