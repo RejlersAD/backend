@@ -1,0 +1,1 @@
+{"detail":"Authorization header must contain two space-delimited values","code":"bad_authorization_header"}
