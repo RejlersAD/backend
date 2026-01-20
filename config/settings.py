@@ -93,6 +93,7 @@ INSTALLED_APPS = [
     'apps.crs',
     'apps.qhse',  # QHSE Management Module
     'apps.finance',  # Finance Invoice Automation
+    'apps.designiq',  # DesignIQ - AI-Powered Engineering Design Intelligence
     
     # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
     # Enabling this will cause startup hangs (MLflow server not available)
