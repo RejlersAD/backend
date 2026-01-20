@@ -1,0 +1,69 @@
+{
+  "EquipmentSymbols": [
+    {
+      "tag": "E-101",
+      "type": "Pump",
+      "symbolStyle": "Circle with arrow",
+      "position": "X:100, Y:200",
+      "size": "Standard",
+      "lineWeights": "0.5mm",
+      "connections": [
+        "P-101",
+        "V-101"
+      ]
+    }
+  ],
+  "Instrumentation": [
+    {
+      "fullTag": "PT-101",
+      "type": "Pressure Transmitter",
+      "function": "Measure pressure",
+      "symbolStyle": "Circle with line",
+      "position": "X:150, Y:250",
+      "connectionStyles": "Dashed line"
+    }
+  ],
+  "Piping": [
+    {
+      "lineNumber": "L-101",
+      "size": "4 inches",
+      "material": "Carbon Steel",
+      "routing": "Horizontal",
+      "valves": [
+        "V-101"
+      ],
+      "specialtyItems": [
+        "Strainer"
+      ]
+    }
+  ],
+  "Valves": [
+    {
+      "tag": "V-101",
+      "type": "Gate Valve",
+      "symbol": "Rectangle",
+      "position": "X:200, Y:300",
+      "actuators": "Manual"
+    }
+  ],
+  "Annotations": [
+    {
+      "processData": "Pressure: 100 psi",
+      "position": "X:250, Y:350",
+      "specifications": "Standard",
+      "notes": "Check pressure daily"
+    }
+  ],
+  "DrawingStandards": {
+    "symbolSet": "ISA",
+    "lineThickness": "0.5mm",
+    "fonts": "Arial",
+    "spacing": "10mm",
+    "titleBlock": "Standard"
+  },
+  "LayoutRules": {
+    "equipmentSpacing": "1 meter",
+    "routingRules": "Avoid crossing",
+    "instrumentPlacementConventions": "Top of line"
+  }
+}

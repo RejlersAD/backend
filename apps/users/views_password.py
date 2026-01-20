@@ -16,7 +16,7 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
-@api_view(['POST'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def check_first_login(request):
     """
@@ -169,8 +169,9 @@ def validate_email(request):
                 'message': validation_result['message']
             })
         
-        # Check if email is already in use
-        email_exists = User.objects.filter(email=email).exists()
+        # Check if email is already in use by an active (non-deleted) user
+        from apps.rbac.models import UserProfile
+        email_exists = UserProfile.objects.filter(user__email=email, is_deleted=False).exists()
         
         if email_exists:
             return Response({

@@ -1,0 +1,192 @@
+{
+  "drawing_info": {
+    "number": "P&ID-001",
+    "title": "Heat Exchanger and Pump System",
+    "revision": "A",
+    "area": "Process Area 1"
+  },
+  "equipment": [
+    {
+      "tag": "E-101",
+      "type": "Heat Exchanger",
+      "symbol": "HEX",
+      "position": {
+        "x": 50,
+        "y": 30
+      },
+      "size": {
+        "width": 10,
+        "height": 5
+      },
+      "orientation": "horizontal",
+      "nozzles": [
+        {
+          "id": "N1",
+          "position": "inlet"
+        },
+        {
+          "id": "N2",
+          "position": "outlet"
+        }
+      ],
+      "instrumentation_points": [
+        {
+          "type": "temperature",
+          "location": "inlet",
+          "required": true
+        },
+        {
+          "type": "temperature",
+          "location": "outlet",
+          "required": true
+        },
+        {
+          "type": "pressure_drop",
+          "location": "across",
+          "required": true
+        }
+      ]
+    },
+    {
+      "tag": "P-101",
+      "type": "Pump",
+      "symbol": "PMP",
+      "position": {
+        "x": 70,
+        "y": 30
+      },
+      "size": {
+        "width": 5,
+        "height": 5
+      },
+      "orientation": "vertical",
+      "nozzles": [
+        {
+          "id": "N1",
+          "position": "suction"
+        },
+        {
+          "id": "N2",
+          "position": "discharge"
+        }
+      ],
+      "instrumentation_points": [
+        {
+          "type": "discharge_pressure",
+          "location": "discharge",
+          "required": true
+        },
+        {
+          "type": "suction_pressure",
+          "location": "suction",
+          "required": true
+        },
+        {
+          "type": "flow",
+          "location": "discharge",
+          "required": true
+        },
+        {
+          "type": "motor_current",
+          "location": "motor",
+          "optional": true
+        }
+      ]
+    }
+  ],
+  "instrumentation": [
+    {
+      "tag": "TI-101",
+      "type": "Temperature Indicator",
+      "position": {
+        "x": 55,
+        "y": 30
+      },
+      "connections": [
+        "E-101 N1"
+      ],
+      "control_loops": []
+    },
+    {
+      "tag": "PI-101",
+      "type": "Pressure Indicator",
+      "position": {
+        "x": 75,
+        "y": 30
+      },
+      "connections": [
+        "P-101 N2"
+      ],
+      "control_loops": []
+    },
+    {
+      "tag": "FCV-101",
+      "type": "Flow Control Valve",
+      "position": {
+        "x": 65,
+        "y": 30
+      },
+      "connections": [
+        "P-101 N2"
+      ],
+      "control_loops": [
+        "flow_control"
+      ]
+    }
+  ],
+  "piping": [
+    {
+      "line_number": "L-101",
+      "size": "4 inch",
+      "material": "Carbon Steel",
+      "routing": [
+        {
+          "x": 50,
+          "y": 30
+        },
+        {
+          "x": 60,
+          "y": 30
+        }
+      ],
+      "valves": [
+        {
+          "type": "FCV",
+          "tag": "FCV-101",
+          "placement": "discharge"
+        }
+      ],
+      "instruments": [
+        "TI-101",
+        "PI-101"
+      ]
+    }
+  ],
+  "annotations": [
+    {
+      "process_data": {
+        "location": {
+          "x": 55,
+          "y": 30
+        },
+        "temperature": "150 C",
+        "pressure": "10 bar",
+        "flow_rate": "100 m3/h",
+        "composition": {
+          "component1": "80%",
+          "component2": "20%"
+        }
+      }
+    },
+    {
+      "notes": [
+        "Note 1: Ensure all valves are closed before maintenance."
+      ]
+    }
+  ],
+  "layout": {
+    "spacing": "standard",
+    "arrangement": "linear",
+    "flow_direction": "right"
+  }
+}
