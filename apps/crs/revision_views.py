@@ -111,21 +111,29 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         """Create chain with detailed error handling"""
         try:
+            logger.info(f"[CRS] Creating revision chain with data: {request.data}")
             serializer = self.get_serializer(data=request.data)
+            
             if not serializer.is_valid():
-                # Return detailed validation errors
+                # Log validation errors for debugging
+                logger.error(f"[CRS] Validation errors: {serializer.errors}")
+                
+                # Return errors in DRF's standard format (no wrapping)
+                # This makes it compatible with frontend error handling
                 return Response(
-                    {'detail': 'Validation failed', 'errors': serializer.errors},
+                    serializer.errors,
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
             self.perform_create(serializer)
             headers = self.get_success_headers(serializer.data)
+            logger.info(f"[CRS] Successfully created chain: {serializer.data.get('chain_id')}")
             return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+            
         except Exception as e:
-            logger.error(f"Error creating revision chain: {str(e)}")
+            logger.error(f"[CRS] Exception creating revision chain: {str(e)}", exc_info=True)
             return Response(
-                {'detail': str(e)},
+                {'detail': str(e), 'error': 'Internal server error'},
                 status=status.HTTP_400_BAD_REQUEST
             )
     
