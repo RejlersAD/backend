@@ -1140,6 +1140,193 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             'features': list(features.values()),
             'accessible_count': sum(1 for f in features.values() if f['accessible'])
         })
+    
+    @action(detail=True, methods=['post'], url_path='assign-modules')
+    def assign_modules(self, request, pk=None):
+        """
+        Assign modules to a user by updating their role's module access
+        Body: { "module_codes": ["pid_analysis", "pfd", "qhse"] }
+        """
+        profile = self.get_object()
+        module_codes = request.data.get('module_codes', [])
+        
+        if not module_codes:
+            return Response(
+                {'error': 'module_codes is required (array of module codes)'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get modules
+        modules = Module.objects.filter(code__in=module_codes, is_active=True)
+        if modules.count() != len(module_codes):
+            found_codes = set(modules.values_list('code', flat=True))
+            missing_codes = set(module_codes) - found_codes
+            return Response(
+                {'error': f'Some modules not found: {list(missing_codes)}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get user's primary role (or create custom role)
+        user_roles = UserRole.objects.filter(user_profile=profile, is_primary=True)
+        
+        if not user_roles.exists():
+            # No primary role - find any role
+            user_roles = UserRole.objects.filter(user_profile=profile)
+        
+        if not user_roles.exists():
+            return Response(
+                {'error': 'User has no roles assigned. Please assign a role first.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Assign modules to all user's roles
+        assigned_count = 0
+        for user_role in user_roles:
+            role = user_role.role
+            for module in modules:
+                role_module, created = RoleModule.objects.get_or_create(
+                    role=role,
+                    module=module,
+                    defaults={'granted_by': request.user}
+                )
+                if created:
+                    assigned_count += 1
+        
+        create_audit_log(
+            user=request.user,
+            action='modules_assign',
+            resource_type='UserProfile',
+            resource_id=profile.id,
+            resource_repr=str(profile),
+            metadata={'module_codes': module_codes, 'assigned_count': assigned_count},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+        
+        return Response({
+            'status': 'modules assigned',
+            'user': profile.user.email,
+            'modules': [m.name for m in modules],
+            'assigned_count': assigned_count
+        })
+    
+    @action(detail=False, methods=['post'], url_path='bulk-assign-modules')
+    def bulk_assign_modules(self, request):
+        """
+        Bulk assign modules to multiple users
+        Body: {
+            "user_ids": ["uuid1", "uuid2"],  // or "user_emails": ["email1", "email2"]
+            "module_codes": ["pid_analysis", "pfd", "qhse"]
+        }
+        """
+        user_ids = request.data.get('user_ids', [])
+        user_emails = request.data.get('user_emails', [])
+        module_codes = request.data.get('module_codes', [])
+        
+        if not module_codes:
+            return Response(
+                {'error': 'module_codes is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not user_ids and not user_emails:
+            return Response(
+                {'error': 'Either user_ids or user_emails is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get modules
+        modules = Module.objects.filter(code__in=module_codes, is_active=True)
+        if modules.count() != len(module_codes):
+            found_codes = set(modules.values_list('code', flat=True))
+            missing_codes = set(module_codes) - found_codes
+            return Response(
+                {'error': f'Some modules not found: {list(missing_codes)}'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get user profiles
+        if user_ids:
+            profiles = UserProfile.objects.filter(id__in=user_ids, is_deleted=False)
+        else:
+            profiles = UserProfile.objects.filter(user__email__in=user_emails, is_deleted=False)
+        
+        if not profiles.exists():
+            return Response(
+                {'error': 'No users found matching criteria'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Assign modules to each user's roles
+        results = {
+            'success': [],
+            'failed': [],
+            'total_assignments': 0
+        }
+        
+        for profile in profiles:
+            try:
+                user_roles = UserRole.objects.filter(user_profile=profile)
+                
+                if not user_roles.exists():
+                    results['failed'].append({
+                        'user': profile.user.email,
+                        'reason': 'No roles assigned'
+                    })
+                    continue
+                
+                assigned_count = 0
+                for user_role in user_roles:
+                    role = user_role.role
+                    for module in modules:
+                        role_module, created = RoleModule.objects.get_or_create(
+                            role=role,
+                            module=module,
+                            defaults={'granted_by': request.user}
+                        )
+                        if created:
+                            assigned_count += 1
+                
+                results['success'].append({
+                    'user': profile.user.email,
+                    'user_id': str(profile.id),
+                    'modules_assigned': assigned_count
+                })
+                results['total_assignments'] += assigned_count
+                
+            except Exception as e:
+                results['failed'].append({
+                    'user': profile.user.email,
+                    'reason': str(e)
+                })
+        
+        # Create audit log
+        create_audit_log(
+            user=request.user,
+            action='bulk_modules_assign',
+            resource_type='UserProfile',
+            resource_id=None,
+            resource_repr='Bulk Module Assignment',
+            metadata={
+                'module_codes': module_codes,
+                'success_count': len(results['success']),
+                'failed_count': len(results['failed']),
+                'total_assignments': results['total_assignments']
+            },
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+        
+        return Response({
+            'message': 'Bulk module assignment completed',
+            'summary': {
+                'total_users_processed': len(results['success']) + len(results['failed']),
+                'successful': len(results['success']),
+                'failed': len(results['failed']),
+                'total_module_assignments': results['total_assignments']
+            },
+            'details': results
+        })
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
