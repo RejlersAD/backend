@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 def check_first_login(request):
     """
     Check if current user needs to reset password on first login
+    Soft-coded with safe attribute checking
     
     Returns:
         {
@@ -32,10 +33,14 @@ def check_first_login(request):
     try:
         user = request.user
         
+        # Safe attribute access with defaults
+        is_first_login = getattr(user, 'is_first_login', False)
+        must_reset_password = getattr(user, 'must_reset_password', False)
+        
         return Response({
-            'is_first_login': user.is_first_login,
-            'must_reset_password': user.must_reset_password,
-            'message': 'Password reset required' if user.must_reset_password else 'No action needed'
+            'is_first_login': is_first_login,
+            'must_reset_password': must_reset_password,
+            'message': 'Password reset required' if must_reset_password else 'No action needed'
         })
     except Exception as e:
         logger.error(f"Error checking first login: {str(e)}")

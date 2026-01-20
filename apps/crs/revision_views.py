@@ -108,6 +108,27 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
             return CRSRevisionChainCreateSerializer
         return CRSRevisionChainListSerializer
     
+    def create(self, request, *args, **kwargs):
+        """Create chain with detailed error handling"""
+        try:
+            serializer = self.get_serializer(data=request.data)
+            if not serializer.is_valid():
+                # Return detailed validation errors
+                return Response(
+                    {'detail': 'Validation failed', 'errors': serializer.errors},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            self.perform_create(serializer)
+            headers = self.get_success_headers(serializer.data)
+            return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+        except Exception as e:
+            logger.error(f"Error creating revision chain: {str(e)}")
+            return Response(
+                {'detail': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
     def perform_create(self, serializer):
         """Create chain and log activity"""
         chain = serializer.save(created_by=self.request.user)
