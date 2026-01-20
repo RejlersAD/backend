@@ -137,6 +137,7 @@ urlpatterns = [
     path('api/v1/qhse/', include('apps.qhse.urls')),  # QHSE Management API
     path('api/v1/finance/', include('apps.finance.urls')),  # Finance Invoice Automation
     path('api/v1/designiq/', include('apps.designiq.urls')),  # DesignIQ - AI Design Intelligence
+    path('api/v1/procurement/', include('apps.procurement.urls')),  # Procurement Management - Vendor & PO Tracking
     # path('api/v1/sales/', include('apps.sales.urls')),  # Sales module removed
     path('api/v1/projects/', include('apps.core.project_urls')),
     
