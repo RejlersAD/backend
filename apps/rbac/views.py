@@ -1216,12 +1216,14 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         Bulk assign modules to multiple users
         Body: {
             "user_ids": ["uuid1", "uuid2"],  // or "user_emails": ["email1", "email2"]
-            "module_codes": ["pid_analysis", "pfd", "qhse"]
+            "module_codes": ["pid_analysis", "pfd", "qhse"],
+            "all_users": true  // Optional: assign to ALL users in system
         }
         """
         user_ids = request.data.get('user_ids', [])
         user_emails = request.data.get('user_emails', [])
         module_codes = request.data.get('module_codes', [])
+        all_users = request.data.get('all_users', False)
         
         if not module_codes:
             return Response(
@@ -1229,9 +1231,10 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        if not user_ids and not user_emails:
+        # If all_users is True, ignore user_ids and user_emails
+        if not all_users and not user_ids and not user_emails:
             return Response(
-                {'error': 'Either user_ids or user_emails is required'},
+                {'error': 'Either user_ids, user_emails, or all_users=true is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -1246,7 +1249,10 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             )
         
         # Get user profiles
-        if user_ids:
+        if all_users:
+            # Assign to ALL active users in the system
+            profiles = UserProfile.objects.filter(is_deleted=False)
+        elif user_ids:
             profiles = UserProfile.objects.filter(id__in=user_ids, is_deleted=False)
         else:
             profiles = UserProfile.objects.filter(user__email__in=user_emails, is_deleted=False)
