@@ -493,4 +493,124 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             "count": queryset.count(),
             "items": serializer.data
         })
-
+    
+    @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser])
+    def upload_pid(self, request):
+        """
+        Upload P&ID PDF and extract line list items using OCR
+        Intelligently detects line numbers in horizontal/vertical orientations
+        Parses components: size, fluid, sequence, class, insulation, connections
+        """
+        pid_file = request.FILES.get('pid_file')
+        list_type = request.data.get('list_type', 'line_list')
+        
+        if not pid_file:
+            return Response({
+                "error": "No P&ID file provided"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not pid_file.name.endswith('.pdf'):
+            return Response({
+                "error": "Only PDF files are supported"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if list_type not in LIST_TYPES:
+            return Response({
+                "error": f"Invalid list_type. Must be one of: {', '.join(LIST_TYPES.keys())}"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            import tempfile
+            import os
+            from django.core.files.storage import default_storage
+            from .pid_ocr_extractor import PIDLineExtractor
+            from .models import DesignProject
+            
+            # Get or create project
+            project, _ = DesignProject.objects.get_or_create(
+                project_name="P&ID Upload Project",
+                defaults={
+                    'created_by': request.user,
+                    'design_type': 'pid',
+                    'status': 'active'
+                }
+            )
+            
+            # Save PDF file
+            file_path = f"designiq/pid_uploads/{timezone.now().strftime('%Y/%m/%d')}/{pid_file.name}"
+            saved_path = default_storage.save(file_path, pid_file)
+            
+            # Save to temp file for OCR processing
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                pid_file.seek(0)
+                tmp.write(pid_file.read())
+                tmp_path = tmp.name
+            
+            try:
+                # Extract line numbers using OCR
+                extractor = PIDLineExtractor()
+                line_items = extractor.extract_from_pdf(tmp_path, rotate_detection=True)
+                table_data = extractor.format_as_table_data(line_items)
+                
+                logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")
+                
+                # Create EngineeringListItem for each detected line
+                created_items = []
+                for idx, line_data in enumerate(table_data):
+                    item = EngineeringListItem.objects.create(
+                        list_type=list_type,
+                        project=project,
+                        item_tag=line_data['line_number'],
+                        description=f"{line_data['fluid_description']} Line - {line_data['size']}",
+                        status='pending',
+                        is_validated=False,
+                        data={
+                            'source': 'pid_ocr',
+                            'filename': pid_file.name,
+                            'page_number': line_data.get('page', 1),
+                            'fluid_code': line_data['fluid_code'],
+                            'fluid_description': line_data['fluid_description'],
+                            'size': line_data['size'],
+                            'sequence_no': line_data['sequence_no'],
+                            'pipr_class': line_data['pipr_class'],
+                            'insulation': line_data['insulation'],
+                            'from_equipment': line_data.get('from_equipment', ''),
+                            'to_equipment': line_data.get('to_equipment', ''),
+                            'upload_timestamp': timezone.now().isoformat()
+                        },
+                        attachments=[{
+                            'type': 'pid_pdf',
+                            'filename': pid_file.name,
+                            'path': saved_path,
+                            'uploaded_at': timezone.now().isoformat()
+                        }],
+                        created_by=request.user
+                    )
+                    created_items.append(item)
+                
+                logger.info(f"✅ Created {len(created_items)} line items from P&ID OCR")
+                
+                return Response({
+                    "message": "P&ID processed successfully using OCR",
+                    "filename": pid_file.name,
+                    "items_created": len(created_items),
+                    "extracted_lines": table_data,
+                    "note": "Line numbers detected using smart OCR (horizontal/vertical text supported)"
+                }, status=status.HTTP_201_CREATED)
+                
+            finally:
+                # Clean up temp file
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            
+        except Exception as e:
+            logger.error(f"❌ Error processing P&ID: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to process P&ID: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        except Exception as e:
+            logger.error(f"Error uploading P&ID: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to upload P&ID: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
