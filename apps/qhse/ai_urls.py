@@ -2,7 +2,7 @@
 QHSE AI URLs - URL routing for AI/ML endpoints
 """
 from django.urls import path
-from . import ai_views
+from . import ai_views, ai_models_registry
 
 app_name = 'qhse_ai'
 
@@ -52,6 +52,18 @@ urlpatterns = [
         'models/status/',
         ai_views.ai_models_status,
         name='ai_models_status'
+    ),
+    
+    # AI Models Registry (Real-time dynamic tracking)
+    path(
+        'models/registry/',
+        ai_models_registry.get_all_ai_models_registry,
+        name='models_registry'
+    ),
+    path(
+        'models/registry/<str:model_id>/',
+        ai_models_registry.get_model_detail,
+        name='model_detail'
     ),
     
     # NLP Analysis

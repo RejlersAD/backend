@@ -95,6 +95,7 @@ INSTALLED_APPS = [
     'apps.finance',  # Finance Invoice Automation
     'apps.designiq',  # DesignIQ - AI-Powered Engineering Design Intelligence
     'apps.procurement',  # Procurement Management - Vendor & PO Tracking
+    'apps.notifications',  # Notification System - Multi-Channel Alerts & Email
     
     # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
     # Enabling this will cause startup hangs (MLflow server not available)
