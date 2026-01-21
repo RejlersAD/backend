@@ -523,7 +523,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             import tempfile
             import os
             from django.core.files.storage import default_storage
-            from .pid_ocr_extractor import PIDLineExtractor
+            from .pid_ocr_extractor_v2 import PIDLineExtractorV2
             from .models import DesignProject
             
             # Get or create project
@@ -547,24 +547,24 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 tmp_path = tmp.name
             
             try:
-                # Extract line numbers using OCR
-                extractor = PIDLineExtractor()
-                line_items = extractor.extract_from_pdf(tmp_path, rotate_detection=True)
+                # Extract line numbers using Multi-Engine OCR + AI
+                extractor = PIDLineExtractorV2()
+                line_items = extractor.extract_from_pdf(tmp_path)
                 table_data = extractor.format_as_table_data(line_items)
                 
                 logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")
+                logger.info(f"🎯 Using Multi-Engine OCR (Tesseract + EasyOCR + PaddleOCR) + OpenAI")
                 
-                # Create EngineeringListItem for each detected line
+                # Create or update EngineeringListItem for each detected line
                 created_items = []
+                updated_items = []
                 for idx, line_data in enumerate(table_data):
-                    item = EngineeringListItem.objects.create(
-                        list_type=list_type,
-                        project=project,
-                        item_tag=line_data['line_number'],
-                        description=f"{line_data['fluid_description']} Line - {line_data['size']}",
-                        status='pending',
-                        is_validated=False,
-                        data={
+                    # Use update_or_create to handle duplicates gracefully
+                    item_data = {
+                        'description': f"{line_data['fluid_description']} Line - {line_data['size']}",
+                        'status': 'pending',
+                        'is_validated': False,
+                        'data': {
                             'source': 'pid_ocr',
                             'filename': pid_file.name,
                             'page_number': line_data.get('page', 1),
@@ -578,24 +578,43 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                             'to_equipment': line_data.get('to_equipment', ''),
                             'upload_timestamp': timezone.now().isoformat()
                         },
-                        attachments=[{
+                        'attachments': [{
                             'type': 'pid_pdf',
                             'filename': pid_file.name,
                             'path': saved_path,
                             'uploaded_at': timezone.now().isoformat()
-                        }],
-                        created_by=request.user
+                        }]
+                    }
+                    
+                    # Only set created_by on new items
+                    item, created = EngineeringListItem.objects.update_or_create(
+                        list_type=list_type,
+                        project=project,
+                        item_tag=line_data['line_number'],
+                        defaults=item_data
                     )
-                    created_items.append(item)
+                    
+                    # Set created_by if this is a new item
+                    if created and not item.created_by:
+                        item.created_by = request.user
+                        item.save(update_fields=['created_by'])
+                    
+                    if created:
+                        created_items.append(item)
+                    else:
+                        updated_items.append(item)
                 
-                logger.info(f"✅ Created {len(created_items)} line items from P&ID OCR")
+                total_items = len(created_items) + len(updated_items)
+                logger.info(f"✅ Created {len(created_items)} new items, updated {len(updated_items)} existing items from P&ID OCR")
                 
                 return Response({
                     "message": "P&ID processed successfully using OCR",
                     "filename": pid_file.name,
                     "items_created": len(created_items),
+                    "items_updated": len(updated_items),
+                    "total_items": total_items,
                     "extracted_lines": table_data,
-                    "note": "Line numbers detected using smart OCR (horizontal/vertical text supported)"
+                    "note": "Multi-engine OCR detection (Tesseract + EasyOCR + PaddleOCR + OpenAI GPT-4)"
                 }, status=status.HTTP_201_CREATED)
                 
             finally:
