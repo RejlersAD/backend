@@ -12,10 +12,10 @@ from django.db.models.functions import TruncMonth
 from datetime import datetime, timedelta
 import pandas as pd
 from decimal import Decimal
-from .models import QHSERunningProject, QHSESpotCheckRegister, QHSEAudit
+from .models import QHSERunningProject, QHSEAudit  # QHSESpotCheckRegister - Disabled
 from .serializers import (
     QHSERunningProjectSerializer, 
-    QHSESpotCheckRegisterSerializer,
+    # QHSESpotCheckRegisterSerializer,  # Disabled per QHSE Manager decision
     QHSEAuditSerializer,
     QHSEDashboardStatsSerializer
 )
@@ -274,73 +274,77 @@ class QHSERunningProjectViewSet(viewsets.ModelViewSet):
             )
 
 
-class QHSESpotCheckRegisterViewSet(viewsets.ModelViewSet):
-    """
-    QHSE Spot Check Register API ViewSet
-    """
-    queryset = QHSESpotCheckRegister.objects.filter(is_active=True)
-    serializer_class = QHSESpotCheckRegisterSerializer
-    permission_classes = [IsAuthenticated]
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['project_no', 'project_title', 'qhse_engineer', 'document_no']
-    ordering_fields = ['date_of_spot_check', 'sr_no']
-    ordering = ['-date_of_spot_check']
-    
-    def get_queryset(self):
-        """
-        Soft-coded filtering
-        """
-        queryset = super().get_queryset()
-        
-        # Filter by project
-        project_no = self.request.query_params.get('project_no', None)
-        if project_no:
-            queryset = queryset.filter(project_no=project_no)
-        
-        # Filter by engineer
-        engineer = self.request.query_params.get('engineer', None)
-        if engineer:
-            queryset = queryset.filter(qhse_engineer__icontains=engineer)
-        
-        # Filter by status
-        spot_status = self.request.query_params.get('status', None)
-        if spot_status:
-            queryset = queryset.filter(status=spot_status)
-        
-        # Filter by category
-        category = self.request.query_params.get('category', None)
-        if category:
-            queryset = queryset.filter(category=category)
-        
-        # Filter by date range
-        start_date = self.request.query_params.get('start_date', None)
-        end_date = self.request.query_params.get('end_date', None)
-        if start_date:
-            queryset = queryset.filter(date_of_spot_check__gte=start_date)
-        if end_date:
-            queryset = queryset.filter(date_of_spot_check__lte=end_date)
-        
-        return queryset
-    
-    @action(detail=False, methods=['get'])
-    def by_project(self, request):
-        """Get spot checks grouped by project"""
-        queryset = self.get_queryset()
-        projects = {}
-        
-        for spot_check in queryset:
-            project_no = spot_check.project_no
-            if project_no not in projects:
-                projects[project_no] = {
-                    'project_no': project_no,
-                    'project_title': spot_check.project_title,
-                    'client': spot_check.client,
-                    'spot_checks': []
-                }
-            serializer = self.get_serializer(spot_check)
-            projects[project_no]['spot_checks'].append(serializer.data)
-        
-        return Response(list(projects.values()))
+# ============================================================================
+# QHSESpotCheckRegisterViewSet - DISABLED per QHSE Manager decision
+# ============================================================================
+# class QHSESpotCheckRegisterViewSet(viewsets.ModelViewSet):
+#     """
+#     QHSE Spot Check Register API ViewSet
+#     """
+#     queryset = QHSESpotCheckRegister.objects.filter(is_active=True)
+#     serializer_class = QHSESpotCheckRegisterSerializer
+#     permission_classes = [IsAuthenticated]
+#     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+#     search_fields = ['project_no', 'project_title', 'qhse_engineer', 'document_no']
+#     ordering_fields = ['date_of_spot_check', 'sr_no']
+#     ordering = ['-date_of_spot_check']
+#     
+#     def get_queryset(self):
+#         """
+#         Soft-coded filtering
+#         """
+#         queryset = super().get_queryset()
+#         
+#         # Filter by project
+#         project_no = self.request.query_params.get('project_no', None)
+#         if project_no:
+#             queryset = queryset.filter(project_no=project_no)
+#         
+#         # Filter by engineer
+#         engineer = self.request.query_params.get('engineer', None)
+#         if engineer:
+#             queryset = queryset.filter(qhse_engineer__icontains=engineer)
+#         
+#         # Filter by status
+#         spot_status = self.request.query_params.get('status', None)
+#         if spot_status:
+#             queryset = queryset.filter(status=spot_status)
+#         
+#         # Filter by category
+#         category = self.request.query_params.get('category', None)
+#         if category:
+#             queryset = queryset.filter(category=category)
+#         
+#         # Filter by date range
+#         start_date = self.request.query_params.get('start_date', None)
+#         end_date = self.request.query_params.get('end_date', None)
+#         if start_date:
+#             queryset = queryset.filter(date_of_spot_check__gte=start_date)
+#         if end_date:
+#             queryset = queryset.filter(date_of_spot_check__lte=end_date)
+#         
+#         return queryset
+#     
+#     @action(detail=False, methods=['get'])
+#     def by_project(self, request):
+#         """Get spot checks grouped by project"""
+#         queryset = self.get_queryset()
+#         projects = {}
+#         
+#         for spot_check in queryset:
+#             project_no = spot_check.project_no
+#             if project_no not in projects:
+#                 projects[project_no] = {
+#                     'project_no': project_no,
+#                     'project_title': spot_check.project_title,
+#                     'client': spot_check.client,
+#                     'spot_checks': []
+#                 }
+#             serializer = self.get_serializer(spot_check)
+#             projects[project_no]['spot_checks'].append(serializer.data)
+#         
+#         return Response(list(projects.values()))
+# ============================================================================
 
 
 class QHSEAuditViewSet(viewsets.ModelViewSet):

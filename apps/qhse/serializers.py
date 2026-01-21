@@ -3,7 +3,7 @@ QHSE Serializers - Soft-coded serialization for API responses
 Maintains compatibility with existing frontend structure
 """
 from rest_framework import serializers
-from .models import QHSERunningProject, QHSESpotCheckRegister, QHSEAudit
+from .models import QHSERunningProject, QHSEAudit  # QHSESpotCheckRegister - Disabled
 
 
 class QHSERunningProjectSerializer(serializers.ModelSerializer):
@@ -84,53 +84,57 @@ class QHSERunningProjectSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
-class QHSESpotCheckRegisterSerializer(serializers.ModelSerializer):
-    """
-    Spot Check Register Serializer - Frontend-compatible format
-    """
-    srNo = serializers.IntegerField(source='sr_no')
-    projectNo = serializers.CharField(source='project_no')
-    projectTitle = serializers.CharField(source='project_title')
-    client = serializers.CharField()
-    qhseEngineer = serializers.CharField(source='qhse_engineer')
-    dateOfSpotCheck = serializers.DateField(source='date_of_spot_check')
-    time = serializers.TimeField(allow_null=True)
-    documentNo = serializers.CharField(source='document_no', allow_blank=True, allow_null=True)
-    documentTitle = serializers.CharField(source='document_title', allow_blank=True, allow_null=True)
-    originatorLead = serializers.CharField(source='originator_lead', allow_blank=True, allow_null=True)
-    comments = serializers.CharField(allow_blank=True, allow_null=True)
-    category = serializers.CharField(allow_blank=True, allow_null=True)
-    remarks = serializers.CharField(allow_blank=True, allow_null=True)
-    status = serializers.CharField()
-    resolutionDate = serializers.DateField(source='resolution_date', allow_null=True)
-    resolutionComments = serializers.CharField(source='resolution_comments', allow_blank=True, allow_null=True)
-    
-    # Computed fields
-    isOverdue = serializers.BooleanField(source='is_overdue', read_only=True)
-    
-    class Meta:
-        model = QHSESpotCheckRegister
-        fields = [
-            'srNo', 'projectNo', 'projectTitle', 'client', 'qhseEngineer',
-            'dateOfSpotCheck', 'time', 'documentNo', 'documentTitle', 'originatorLead',
-            'comments', 'category', 'remarks', 'status', 'resolutionDate', 'resolutionComments',
-            'isOverdue'
-        ]
-    
-    def create(self, validated_data):
-        """Auto-set created_by if user is available"""
-        request = self.context.get('request')
-        if request and hasattr(request, 'user'):
-            validated_data['created_by'] = request.user
-            validated_data['updated_by'] = request.user
-        return super().create(validated_data)
-    
-    def update(self, instance, validated_data):
-        """Auto-set updated_by if user is available"""
-        request = self.context.get('request')
-        if request and hasattr(request, 'user'):
-            validated_data['updated_by'] = request.user
-        return super().update(instance, validated_data)
+# ============================================================================
+# QHSESpotCheckRegisterSerializer - DISABLED per QHSE Manager decision
+# ============================================================================
+# class QHSESpotCheckRegisterSerializer(serializers.ModelSerializer):
+#     """
+#     Spot Check Register Serializer - Frontend-compatible format
+#     """
+#     srNo = serializers.IntegerField(source='sr_no')
+#     projectNo = serializers.CharField(source='project_no')
+#     projectTitle = serializers.CharField(source='project_title')
+#     client = serializers.CharField()
+#     qhseEngineer = serializers.CharField(source='qhse_engineer')
+#     dateOfSpotCheck = serializers.DateField(source='date_of_spot_check')
+#     time = serializers.TimeField(allow_null=True)
+#     documentNo = serializers.CharField(source='document_no', allow_blank=True, allow_null=True)
+#     documentTitle = serializers.CharField(source='document_title', allow_blank=True, allow_null=True)
+#     originatorLead = serializers.CharField(source='originator_lead', allow_blank=True, allow_null=True)
+#     comments = serializers.CharField(allow_blank=True, allow_null=True)
+#     category = serializers.CharField(allow_blank=True, allow_null=True)
+#     remarks = serializers.CharField(allow_blank=True, allow_null=True)
+#     status = serializers.CharField()
+#     resolutionDate = serializers.DateField(source='resolution_date', allow_null=True)
+#     resolutionComments = serializers.CharField(source='resolution_comments', allow_blank=True, allow_null=True)
+#     
+#     # Computed fields
+#     isOverdue = serializers.BooleanField(source='is_overdue', read_only=True)
+#     
+#     class Meta:
+#         model = QHSESpotCheckRegister
+#         fields = [
+#             'srNo', 'projectNo', 'projectTitle', 'client', 'qhseEngineer',
+#             'dateOfSpotCheck', 'time', 'documentNo', 'documentTitle', 'originatorLead',
+#             'comments', 'category', 'remarks', 'status', 'resolutionDate', 'resolutionComments',
+#             'isOverdue'
+#         ]
+#     
+#     def create(self, validated_data):
+#         """Auto-set created_by if user is available"""
+#         request = self.context.get('request')
+#         if request and hasattr(request, 'user'):
+#             validated_data['created_by'] = request.user
+#             validated_data['updated_by'] = request.user
+#         return super().create(validated_data)
+#     
+#     def update(self, instance, validated_data):
+#         """Auto-set updated_by if user is available"""
+#         request = self.context.get('request')
+#         if request and hasattr(request, 'user'):
+#             validated_data['updated_by'] = request.user
+#         return super().update(instance, validated_data)
+# ============================================================================
 
 
 class QHSEAuditSerializer(serializers.ModelSerializer):
