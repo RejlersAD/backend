@@ -19,4 +19,6 @@ app_name = 'qhse'
 
 urlpatterns = [
     path('', include(router.urls)),
+    # AI/ML endpoints
+    path('ai/', include('apps.qhse.ai_urls')),
 ]
