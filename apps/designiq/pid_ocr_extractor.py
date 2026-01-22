@@ -1,6 +1,7 @@
 """
-P&ID OCR Extractor - Smart Line Number Detection
-Extracts piping line numbers from P&ID PDFs using OCR
+P&ID OCR Extractor - Multi-Engine Smart Line Number Detection
+Extracts piping line numbers from P&ID PDFs using multiple OCR engines
+Uses Tesseract, EasyOCR, PaddleOCR + OpenAI for intelligent categorization
 Handles both horizontal and vertical text orientations
 """
 
@@ -10,17 +11,41 @@ from PIL import Image
 import pytesseract
 import io
 import logging
+import json
 from typing import List, Dict, Optional
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
 class PIDLineExtractor:
     """
-    Intelligent P&ID line number extractor
+    Multi-Engine P&ID line number extractor with AI intelligence
+    Uses: Tesseract + EasyOCR + PaddleOCR -> OpenAI for smart categorization
     Detects line numbers like: 20"-PG-12340-A1B02-N
     Format: [size]-[fluid]-[sequence]-[class]-[insulation]
     """
+    
+    def __init__(self):
+        self.easyocr_reader = None
+        self.paddleocr_reader = None
+        self._init_ocr_engines()
+    
+    def _init_ocr_engines(self):
+        """Initialize EasyOCR and PaddleOCR engines"""
+        try:
+            import easyocr
+            self.easyocr_reader = easyocr.Reader(['en'], gpu=False)
+            logger.info("✅ EasyOCR initialized")
+        except Exception as e:
+            logger.warning(f"⚠️ EasyOCR not available: {e}")
+        
+        try:
+            from paddleocr import PaddleOCR
+            self.paddleocr_reader = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+            logger.info("✅ PaddleOCR initialized")
+        except Exception as e:
+            logger.warning(f"⚠️ PaddleOCR not available: {e}")
     
     # Regex pattern for line numbers - more flexible
     LINE_NUMBER_PATTERN = re.compile(

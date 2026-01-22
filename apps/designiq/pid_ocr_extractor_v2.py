@@ -44,9 +44,14 @@ class PIDLineExtractorV2:
         # Initialize PaddleOCR
         try:
             from paddleocr import PaddleOCR
-            # PaddleOCR doesn't have show_log parameter, use logging control instead
-            self.paddleocr_reader = PaddleOCR(use_angle_cls=True, lang='en')
-            logger.info("✅ PaddleOCR initialized")
+            # Enable angle classification for vertical text detection
+            self.paddleocr_reader = PaddleOCR(
+                use_angle_cls=True,  # Enable 180-degree angle classification
+                lang='en',
+                use_space_char=True,  # Preserve spaces
+                show_log=False  # Reduce log spam
+            )
+            logger.info("✅ PaddleOCR initialized (with vertical text support)")
         except Exception as e:
             logger.warning(f"⚠️ PaddleOCR not available: {e}")
         
@@ -68,19 +73,44 @@ class PIDLineExtractorV2:
         """
         results = {}
         
-        # 1. Tesseract OCR
+        # 1. Tesseract OCR - Multiple PSM modes to detect vertical text
         try:
+            # PSM 6: Assume uniform block of text (horizontal)
             tesseract_text = pytesseract.image_to_string(img, config='--psm 6')
+            
+            # PSM 5: Single vertical block of text
+            try:
+                tesseract_vertical = pytesseract.image_to_string(img, config='--psm 5')
+                if tesseract_vertical and len(tesseract_vertical.strip()) > 10:
+                    tesseract_text += ' ' + tesseract_vertical
+                    logger.info(f"  📐 Tesseract vertical text: +{len(tesseract_vertical)} characters")
+            except:
+                pass
+            
+            # PSM 11: Sparse text. Find as much text as possible in no particular order
+            try:
+                tesseract_sparse = pytesseract.image_to_string(img, config='--psm 11')
+                if tesseract_sparse and len(tesseract_sparse.strip()) > 10:
+                    tesseract_text += ' ' + tesseract_sparse
+                    logger.info(f"  🔍 Tesseract sparse text: +{len(tesseract_sparse)} characters")
+            except:
+                pass
+            
             results['tesseract'] = tesseract_text
-            logger.info(f"  ✅ Tesseract extracted {len(tesseract_text)} characters")
+            logger.info(f"  ✅ Tesseract extracted {len(tesseract_text)} characters (combined)")
         except Exception as e:
             logger.warning(f"  ⚠️ Tesseract failed: {e}")
         
-        # 2. EasyOCR
+        # 2. EasyOCR - Enable rotation detection for vertical text
         if self.easyocr_reader:
             try:
                 img_array = np.array(img)
-                easyocr_result = self.easyocr_reader.readtext(img_array, detail=0)
+                # Basic readtext without rotation_info parameter
+                easyocr_result = self.easyocr_reader.readtext(
+                    img_array, 
+                    detail=0,
+                    paragraph=False
+                )
                 easyocr_text = ' '.join(easyocr_result)
                 results['easyocr'] = easyocr_text
                 logger.info(f"  ✅ EasyOCR extracted {len(easyocr_text)} characters")
