@@ -41,4 +41,6 @@ urlpatterns = [
     path('dashboard/stats/', user_dashboard_stats, name='user-dashboard-stats'),
     path('dashboard/files/', user_files_list, name='user-files-list'),
     path('dashboard/activity/', user_activity_timeline, name='user-activity-timeline'),
+    # Subscription Management (7.3)
+    path('subscriptions/', include('apps.rbac.subscription_urls')),
 ]

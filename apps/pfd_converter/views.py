@@ -13,6 +13,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Import Data Visibility for Row-Level Security
+from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
+
 from .models import PFDDocument, PIDConversion, ConversionFeedback
 from .serializers import (
     PFDDocumentSerializer, PIDConversionSerializer,
@@ -24,10 +27,19 @@ from .services_advanced_pipeline import AdvancedPFDToPIDPipeline
 from apps.rbac.permissions import HasModuleAccess
 
 
-class PFDDocumentViewSet(viewsets.ModelViewSet):
+class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     """
     ViewSet for PFD document management
+    
+    🔐 Data Visibility:
+    - PFD team members (with pfd_converter module) see all PFD documents for collaboration
+    - Users without PFD module see only their own documents
+    - Admins see everything
     """
+    # Data visibility configuration
+    visibility_module_code = 'pfd_converter'
+    visibility_owner_field = 'uploaded_by'
+    
     queryset = PFDDocument.objects.all()
     serializer_class = PFDDocumentSerializer
     permission_classes = [IsAuthenticated]
@@ -615,10 +627,19 @@ class PFDDocumentViewSet(viewsets.ModelViewSet):
             )
 
 
-class PIDConversionViewSet(viewsets.ModelViewSet):
+class PIDConversionViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     """
     ViewSet for P&ID conversion management
+    
+    🔐 Data Visibility:
+    - PID team members (with pid_analysis module) see all conversions for collaboration
+    - Users without PID module see only their own conversions
+    - Admins see everything
     """
+    # Data visibility configuration
+    visibility_module_code = 'pid_analysis'
+    visibility_owner_field = 'converted_by'
+    
     queryset = PIDConversion.objects.all()
     serializer_class = PIDConversionSerializer
     permission_classes = [IsAuthenticated]
@@ -626,18 +647,6 @@ class PIDConversionViewSet(viewsets.ModelViewSet):
     search_fields = ['pid_drawing_number', 'pid_title']
     ordering_fields = ['created_at', 'status', 'confidence_score']
     filterset_fields = ['status', 'pfd_document']
-    
-    def get_queryset(self):
-        """Filter conversions by user"""
-        user = self.request.user
-        
-        # Super admin sees all
-        if hasattr(user, 'rbac_profile'):
-            if user.rbac_profile.roles.filter(code='super_admin', is_active=True).exists():
-                return PIDConversion.objects.all()
-        
-        # Others see only their conversions
-        return PIDConversion.objects.filter(converted_by=user)
     
     @action(detail=False, methods=['post'])
     def generate(self, request):

@@ -15,6 +15,9 @@ from django.http import JsonResponse, HttpResponse
 import os
 import uuid
 
+# Import Data Visibility for Row-Level Security
+from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
+
 from .models import Invoice, Approval, ApprovalRoute, InvoiceStatus
 from .serializers import (
     InvoiceListSerializer, InvoiceDetailSerializer, InvoiceUploadSerializer,
@@ -28,10 +31,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class InvoiceViewSet(viewsets.ModelViewSet):
+class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     """
     Invoice management API
+    
+    🔐 Data Visibility:
+    - Finance team members (with finance module) see all invoices for collaboration
+    - Users without finance module have no access
+    - Admins see everything
     """
+    # Data visibility configuration
+    visibility_module_code = 'finance'
+    visibility_owner_field = 'created_by'
+    
     queryset = Invoice.objects.all().order_by('-created_at')
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]

@@ -12,6 +12,10 @@ from django.db.models.functions import TruncMonth
 from datetime import datetime, timedelta
 import pandas as pd
 from decimal import Decimal
+
+# Import Data Visibility for Row-Level Security
+from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
+
 from .models import QHSERunningProject, QHSEAudit  # QHSESpotCheckRegister - Disabled
 from .serializers import (
     QHSERunningProjectSerializer, 
@@ -21,11 +25,20 @@ from .serializers import (
 )
 
 
-class QHSERunningProjectViewSet(viewsets.ModelViewSet):
+class QHSERunningProjectViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     """
     QHSE Running Projects API ViewSet
     Provides CRUD operations and custom actions
+    
+    🔐 Data Visibility:
+    - QHSE team members (with qhse module) see all QHSE projects for collaboration
+    - Users without QHSE module have no access (team-only module)
+    - Admins see everything
     """
+    # Data visibility configuration
+    visibility_module_code = 'qhse'
+    # No visibility_owner_field - team-based collaboration (no personal ownership)
+    
     queryset = QHSERunningProject.objects.filter(is_active=True)
     serializer_class = QHSERunningProjectSerializer
     permission_classes = [IsAuthenticated]

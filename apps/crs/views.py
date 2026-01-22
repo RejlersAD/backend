@@ -26,6 +26,9 @@ from .serializers import (
 from .pdf_extractor import PDFCommentExtractor
 # from .google_sheets_service import GoogleSheetsService  # Removed Google Sheets integration
 
+# Import Data Visibility for Row-Level Security
+from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
+
 # Import helpers from crs_documents for PDF processing
 try:
     from apps.crs_documents.helpers.comment_extractor import extract_reviewer_comments, get_comment_statistics
@@ -43,8 +46,19 @@ except ImportError:
     USER_STORAGE_AVAILABLE = False
 
 
-class CRSDocumentViewSet(viewsets.ModelViewSet):
-    """ViewSet for CRS Document management"""
+class CRSDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
+    """
+    ViewSet for CRS Document management
+    
+    🔐 Data Visibility:
+    - CRS team members (with crs_documents module) see all CRS documents for collaboration
+    - Users without CRS module see only their own documents
+    - Admins see everything
+    """
+    # Data visibility configuration
+    visibility_module_code = 'crs_documents'
+    visibility_owner_field = 'uploaded_by'
+    
     queryset = CRSDocument.objects.all()
     permission_classes = [IsAuthenticated]
     

@@ -20,10 +20,18 @@ from .serializers import (
 )
 from .services import NotificationService
 
+# Import Data Visibility for Row-Level Security
+from apps.rbac.data_visibility_mixin import PersonalDataMixin
 
-class NotificationViewSet(viewsets.ModelViewSet):
+
+class NotificationViewSet(PersonalDataMixin, viewsets.ModelViewSet):
     """
     API endpoints for notifications
+    
+    🔐 Data Visibility:
+    - Users see only their own notifications (personal data)
+    - No team sharing
+    - Admins see all notifications
     
     list: Get all notifications for current user
     retrieve: Get specific notification
@@ -32,23 +40,20 @@ class NotificationViewSet(viewsets.ModelViewSet):
     unread_count: Get count of unread notifications
     stats: Get notification statistics
     """
+    # Data visibility configuration
+    visibility_owner_field = 'recipient'
+    
     permission_classes = [IsAuthenticated]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['title', 'message']
     ordering_fields = ['created_at', 'priority', 'is_read']
     ordering = ['-created_at']
+    queryset = Notification.objects.all()
     
     def get_serializer_class(self):
         if self.action == 'list':
             return NotificationListSerializer
         return NotificationSerializer
-    
-    def get_queryset(self):
-        """Get notifications for current user only"""
-        user = self.request.user
-        queryset = Notification.objects.filter(recipient=user).select_related(
-            'category', 'sender', 'recipient'
-        )
         
         # Filter by status
         status_filter = self.request.query_params.get('status')
