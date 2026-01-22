@@ -571,12 +571,20 @@ class UserProfileSerializer(serializers.ModelSerializer):
                         defaults={'granted_by': request_user}
                     )
         
-        # Send email verification if enabled
+        # Send email verification if enabled (fail gracefully - don't block user creation)
         from django.conf import settings
         import logging
         logger = logging.getLogger(__name__)
         
-        if settings.EMAIL_VERIFICATION_REQUIRED:
+        # Email configuration check
+        email_configured = bool(
+            getattr(settings, 'EMAIL_HOST_USER', None) and 
+            getattr(settings, 'EMAIL_HOST_PASSWORD', None)
+        )
+        
+        if not email_configured:
+            logger.warning(f"[UserProfile] Email not configured. Skipping email sending for {user.email}")
+        elif settings.EMAIL_VERIFICATION_REQUIRED:
             try:
                 from apps.rbac.email_verification import send_verification_email
                 send_verification_email(profile, self.context.get('request'))
@@ -584,29 +592,32 @@ class UserProfileSerializer(serializers.ModelSerializer):
             except ImportError as e:
                 logger.warning(f"[UserProfile] Email verification module not available: {e}")
             except Exception as e:
-                logger.warning(f"[UserProfile] Failed to send verification email: {e}")
+                logger.error(f"[UserProfile] Failed to send verification email to {user.email}: {str(e)}", exc_info=True)
         
-        # Send welcome email with password setup link (new secure method)
-        try:
-            from apps.users.password_reset_service import PasswordResetService
-            
-            # Generate password reset token
-            token, expiry = PasswordResetService.create_reset_token(user)
-            logger.info(f"[UserProfile] Password reset token created for {user.email}")
-            
-            # Send welcome email with setup link
-            request = self.context.get('request')
-            email_sent = PasswordResetService.send_welcome_email_with_reset(user, token, request)
-            
-            if email_sent:
-                logger.info(f"[UserProfile] Welcome email sent to {user.email}")
-            else:
-                logger.warning(f"[UserProfile] Failed to send welcome email to {user.email}")
+        # Send welcome email with password setup link (fail gracefully - don't block user creation)
+        if email_configured:
+            try:
+                from apps.users.password_reset_service import PasswordResetService
                 
-        except ImportError as e:
-            logger.warning(f"[UserProfile] PasswordResetService not available: {e}")
-        except Exception as e:
-            logger.warning(f"[UserProfile] Error sending welcome email: {e}")
+                # Generate password reset token
+                token, expiry = PasswordResetService.create_reset_token(user)
+                logger.info(f"[UserProfile] Password reset token created for {user.email}")
+                
+                # Send welcome email with setup link
+                request = self.context.get('request')
+                email_sent = PasswordResetService.send_welcome_email_with_reset(user, token, request)
+                
+                if email_sent:
+                    logger.info(f"[UserProfile] Welcome email sent to {user.email}")
+                else:
+                    logger.warning(f"[UserProfile] Failed to send welcome email to {user.email}")
+                    
+            except ImportError as e:
+                logger.warning(f"[UserProfile] PasswordResetService not available: {e}")
+            except Exception as e:
+                logger.error(f"[UserProfile] Error sending welcome email to {user.email}: {str(e)}", exc_info=True)
+        else:
+            logger.info(f"[UserProfile] Skipping welcome email for {user.email} (email not configured)")
         
         logger.info(f"[UserProfile] User profile created successfully for {user.email}")
         return profile

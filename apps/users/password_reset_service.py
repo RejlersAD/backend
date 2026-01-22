@@ -188,9 +188,19 @@ class PasswordResetService:
             request: HTTP request object (optional, for building absolute URL)
             
         Returns:
-            bool: True if email sent successfully
+            bool: True if email sent successfully, False otherwise
         """
         try:
+            # Check if email is configured
+            email_configured = bool(
+                getattr(settings, 'EMAIL_HOST_USER', None) and 
+                getattr(settings, 'EMAIL_HOST_PASSWORD', None)
+            )
+            
+            if not email_configured:
+                logger.warning(f"Email not configured. Cannot send password reset email to {user.email}")
+                return False
+            
             # Build reset URL
             if request:
                 base_url = request.build_absolute_uri('/')[:-1]
@@ -220,7 +230,7 @@ class PasswordResetService:
             html_message = template['html_template'].format(**context)
             text_message = template['text_template'].format(**context)
             
-            # Send email
+            # Send email with error handling
             send_mail(
                 subject=subject,
                 message=text_message,
@@ -234,7 +244,7 @@ class PasswordResetService:
             return True
             
         except Exception as e:
-            logger.error(f"Error sending password reset email: {e}")
+            logger.error(f"Error sending password reset email to {user.email}: {str(e)}", exc_info=True)
             return False
     
     @staticmethod
@@ -248,9 +258,19 @@ class PasswordResetService:
             request: HTTP request object (optional)
             
         Returns:
-            bool: True if email sent successfully
+            bool: True if email sent successfully, False otherwise
         """
         try:
+            # Check if email is configured
+            email_configured = bool(
+                getattr(settings, 'EMAIL_HOST_USER', None) and 
+                getattr(settings, 'EMAIL_HOST_PASSWORD', None)
+            )
+            
+            if not email_configured:
+                logger.warning(f"Email not configured. Cannot send welcome email to {user.email}")
+                return False
+            
             # Build setup URL
             if request:
                 base_url = request.build_absolute_uri('/')[:-1]
@@ -280,7 +300,7 @@ class PasswordResetService:
             html_message = template['html_template'].format(**context)
             text_message = template['text_template'].format(**context)
             
-            # Send email
+            # Send email with error handling
             send_mail(
                 subject=subject,
                 message=text_message,
@@ -294,5 +314,5 @@ class PasswordResetService:
             return True
             
         except Exception as e:
-            logger.error(f"Error sending welcome email with setup: {e}")
+            logger.error(f"Error sending welcome email to {user.email}: {str(e)}", exc_info=True)
             return False

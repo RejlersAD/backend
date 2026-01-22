@@ -28,6 +28,16 @@ def send_verification_email(user_profile, request=None):
         bool: True if email sent successfully, False otherwise
     """
     try:
+        # Check if email is configured
+        email_configured = bool(
+            getattr(settings, 'EMAIL_HOST_USER', None) and 
+            getattr(settings, 'EMAIL_HOST_PASSWORD', None)
+        )
+        
+        if not email_configured:
+            print(f"⚠️  Email not configured. Cannot send verification email to {user_profile.user.email}")
+            return False
+        
         # Generate verification token
         token = generate_verification_token()
         expiry = timezone.now() + timedelta(seconds=settings.EMAIL_VERIFICATION_TOKEN_EXPIRY)
@@ -63,7 +73,7 @@ def send_verification_email(user_profile, request=None):
         html_message = render_to_string('email/verification_email.html', context)
         plain_message = render_to_string('email/verification_email.txt', context)
         
-        # Send email
+        # Send email with error handling
         send_mail(
             subject=subject,
             message=plain_message,
@@ -77,7 +87,9 @@ def send_verification_email(user_profile, request=None):
         return True
         
     except Exception as e:
-        print(f"❌ Failed to send verification email: {e}")
+        print(f"❌ Failed to send verification email to {user_profile.user.email}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
