@@ -11,14 +11,56 @@ import uuid
 User = get_user_model()
 
 
-# Soft-coded configuration for procurement categories
+# Soft-coded configuration for procurement categories - Oil & Gas Industry
 PROCUREMENT_CATEGORIES = {
-    'equipment': {'name': 'Equipment', 'icon': 'CubeIcon', 'color': 'blue'},
-    'materials': {'name': 'Materials', 'icon': 'ArchiveBoxIcon', 'color': 'green'},
-    'services': {'name': 'Services', 'icon': 'WrenchIcon', 'color': 'purple'},
-    'software': {'name': 'Software & Licenses', 'icon': 'ComputerDesktopIcon', 'color': 'indigo'},
-    'consumables': {'name': 'Consumables', 'icon': 'ShoppingCartIcon', 'color': 'yellow'},
-    'other': {'name': 'Other', 'icon': 'EllipsisHorizontalIcon', 'color': 'gray'},
+    # Core Equipment
+    'rotating_equipment': {'name': 'Rotating Equipment (Pumps, Compressors)', 'icon': 'CogIcon', 'color': 'blue', 'standards': ['API 610', 'API 617', 'ASME']},
+    'static_equipment': {'name': 'Static Equipment (Vessels, Tanks)', 'icon': 'CubeIcon', 'color': 'indigo', 'standards': ['ASME VIII', 'API 650', 'API 620']},
+    'instrumentation': {'name': 'Instrumentation & Control', 'icon': 'CircuitBoardIcon', 'color': 'purple', 'standards': ['ISA', 'IEC 61511']},
+    'valves_fittings': {'name': 'Valves & Fittings', 'icon': 'AdjustmentsIcon', 'color': 'cyan', 'standards': ['API 6D', 'ASME B16.5', 'ASME B16.34']},
+    
+    # Materials & Spares
+    'piping_materials': {'name': 'Piping & Pipeline Materials', 'icon': 'ArrowsRightLeftIcon', 'color': 'green', 'standards': ['ASME B31.3', 'API 5L']},
+    'electrical_materials': {'name': 'Electrical Materials', 'icon': 'BoltIcon', 'color': 'amber', 'standards': ['IEC', 'IEEE', 'NEC']},
+    'spare_parts': {'name': 'Spare Parts & Components', 'icon': 'WrenchScrewdriverIcon', 'color': 'orange', 'standards': ['OEM Specs']},
+    'chemicals': {'name': 'Chemicals & Additives', 'icon': 'BeakerIcon', 'color': 'red', 'standards': ['MSDS', 'API']},
+    
+    # Services
+    'maintenance_services': {'name': 'Maintenance & Repair Services', 'icon': 'WrenchIcon', 'color': 'purple', 'standards': ['ISO 55000']},
+    'inspection_testing': {'name': 'Inspection & Testing Services', 'icon': 'MagnifyingGlassIcon', 'color': 'blue', 'standards': ['ASNT', 'API 570', 'API 510']},
+    'engineering_services': {'name': 'Engineering & Consulting', 'icon': 'AcademicCapIcon', 'color': 'indigo', 'standards': ['ISO 9001']},
+    
+    # Others
+    'safety_equipment': {'name': 'Safety & PPE', 'icon': 'ShieldCheckIcon', 'color': 'green', 'standards': ['OSHA', 'ANSI']},
+    'consumables': {'name': 'Consumables & Supplies', 'icon': 'ShoppingCartIcon', 'color': 'yellow', 'standards': []},
+    'software_licenses': {'name': 'Software & Licenses', 'icon': 'ComputerDesktopIcon', 'color': 'teal', 'standards': []},
+    'other': {'name': 'Other', 'icon': 'EllipsisHorizontalIcon', 'color': 'gray', 'standards': []},
+}
+
+# Material certifications required for oil & gas
+MATERIAL_CERTIFICATIONS = {
+    'mtc': 'Material Test Certificate (3.1)',
+    'mtr': 'Material Test Report',
+    'coc': 'Certificate of Conformance',
+    'mds': 'Material Data Sheet',
+    'msds': 'Material Safety Data Sheet',
+    'pqr': 'Procedure Qualification Record',
+    'wps': 'Welding Procedure Specification',
+    'ndt': 'Non-Destructive Testing Report',
+    'hydro': 'Hydrostatic Test Certificate',
+    'pmi': 'Positive Material Identification',
+}
+
+# Quality standards for oil & gas procurement
+QUALITY_STANDARDS = {
+    'api': 'American Petroleum Institute',
+    'asme': 'ASME Boiler & Pressure Vessel Code',
+    'astm': 'ASTM International Standards',
+    'iso': 'ISO Quality Standards',
+    'nace': 'NACE International (Corrosion)',
+    'ansi': 'American National Standards Institute',
+    'iec': 'International Electrotechnical Commission',
+    'ieee': 'Institute of Electrical and Electronics Engineers',
 }
 
 
@@ -63,6 +105,18 @@ class Vendor(TimeStampedModel):
     
     # Categories handled
     categories = models.JSONField(default=list, blank=True)  # List of category codes
+    
+    # Oil & Gas Industry Specific Fields
+    certifications = models.JSONField(default=list, blank=True)  # ISO, API, ASME certifications
+    quality_standards = models.JSONField(default=list, blank=True)  # API, ASME, ASTM compliance
+    approved_materials = models.JSONField(default=list, blank=True)  # Approved material grades
+    inspection_authority = models.CharField(max_length=200, blank=True)  # Third-party inspection agency
+    
+    # HSE Compliance
+    hse_rating = models.CharField(max_length=50, blank=True)  # Health, Safety, Environment rating
+    safety_certifications = models.JSONField(default=list, blank=True)  # OSHA, ISO 45001, etc.
+    last_audit_date = models.DateField(null=True, blank=True)
+    audit_status = models.CharField(max_length=50, blank=True)  # Passed, Failed, Pending
     
     # Metadata
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='vendors_created')
@@ -190,6 +244,20 @@ class PurchaseOrder(TimeStampedModel):
     expected_delivery = models.DateField(null=True, blank=True)
     actual_delivery = models.DateField(null=True, blank=True)
     
+    # Oil & Gas Industry Specific
+    material_specifications = models.JSONField(default=dict, blank=True)  # Material grades, standards
+    required_certifications = models.JSONField(default=list, blank=True)  # MTC, MTR, COC, etc.
+    inspection_requirements = models.TextField(blank=True)  # Third-party inspection requirements
+    witness_inspection = models.BooleanField(default=False)  # Client witness inspection required
+    heat_numbers_required = models.BooleanField(default=False)  # Material traceability
+    ndt_requirements = models.TextField(blank=True)  # Non-destructive testing requirements
+    
+    # Compliance & Standards
+    applicable_standards = models.JSONField(default=list, blank=True)  # API, ASME, ASTM standards
+    material_grade = models.CharField(max_length=100, blank=True)  # e.g., API 5L X65, ASTM A106 Gr. B
+    pressure_rating = models.CharField(max_length=50, blank=True)  # Pressure class/rating
+    temperature_rating = models.CharField(max_length=50, blank=True)  # Temperature range
+    
     # People
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='pos_created')
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='pos_approved')
@@ -241,6 +309,18 @@ class Receipt(TimeStampedModel):
     # Quality check
     quality_check_passed = models.BooleanField(default=True)
     inspection_notes = models.TextField(blank=True)
+    
+    # Oil & Gas Quality & Compliance
+    certificates_received = models.JSONField(default=list, blank=True)  # MTC, MTR, COC received
+    heat_numbers = models.JSONField(default=list, blank=True)  # Material heat numbers for traceability
+    inspector_name = models.CharField(max_length=200, blank=True)  # Third-party inspector
+    inspection_agency = models.CharField(max_length=200, blank=True)  # SGS, Bureau Veritas, etc.
+    inspection_report_number = models.CharField(max_length=100, blank=True)
+    ndt_performed = models.BooleanField(default=False)  # Non-destructive testing performed
+    ndt_results = models.TextField(blank=True)  # NDT test results
+    dimensional_check_passed = models.BooleanField(default=True)
+    visual_inspection_passed = models.BooleanField(default=True)
+    material_verification_passed = models.BooleanField(default=True)  # PMI test passed
     
     # Metadata
     delivery_note_number = models.CharField(max_length=100, blank=True)
