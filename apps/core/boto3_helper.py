@@ -260,9 +260,10 @@ class Boto3Helper:
             'status': main_test
         }
         
-        # Test PFD bucket
-        pfd_bucket = os.environ.get('PFD_S3_BUCKET', 'rejlers-edrs-project')
-        pfd_region = os.environ.get('PFD_S3_REGION', 'me-central-1')
+        # Test PFD bucket (defaults to main bucket if not specified)
+        main_bucket_name = os.environ.get('AWS_STORAGE_BUCKET_NAME', 'rejlers-engineering-data')
+        pfd_bucket = os.environ.get('PFD_S3_BUCKET', main_bucket_name)
+        pfd_region = os.environ.get('PFD_S3_REGION', main_region)
         
         pfd_test = cls.test_bucket_access(pfd_bucket, pfd_region)
         results['pfd_bucket_accessible'] = pfd_test['accessible']
@@ -295,8 +296,8 @@ class Boto3Helper:
                 'region': os.environ.get('AWS_S3_REGION_NAME', 'us-east-1')
             },
             'pfd_bucket': {
-                'name': os.environ.get('PFD_S3_BUCKET', 'rejlers-edrs-project'),
-                'region': os.environ.get('PFD_S3_REGION', 'me-central-1')
+                'name': os.environ.get('PFD_S3_BUCKET', os.environ.get('AWS_STORAGE_BUCKET_NAME', 'rejlers-engineering-data')),
+                'region': os.environ.get('PFD_S3_REGION', os.environ.get('AWS_S3_REGION_NAME', 'me-central-1'))
             },
             'credentials_configured': bool(
                 os.environ.get('AWS_ACCESS_KEY_ID') and 

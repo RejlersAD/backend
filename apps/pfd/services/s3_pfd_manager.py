@@ -23,15 +23,19 @@ logger = logging.getLogger(__name__)
 class S3PFDManager:
     """
     Manages PFD and P&ID files in AWS S3
-    Bucket: rejlers-edrs-project
-    Region: me-central-1
+    Bucket: Configurable via PFD_S3_BUCKET (defaults to main bucket)
+    Region: Configurable via PFD_S3_REGION
     """
     
     def __init__(self):
         """Initialize S3 client for the PFD bucket"""
-        self.bucket_name = os.environ.get('PFD_S3_BUCKET', 'rejlers-edrs-project')
+        # Use main bucket as default fallback
+        main_bucket = os.environ.get('AWS_STORAGE_BUCKET_NAME', 'rejlers-engineering-data')
+        self.bucket_name = os.environ.get('PFD_S3_BUCKET', main_bucket)
         self.region = os.environ.get('PFD_S3_REGION', 'me-central-1')
-        self.base_path = 'PFD_to_PID'
+        
+        # Allow configurable base path, with fallback to existing folder structure
+        self.base_path = os.environ.get('PFD_BASE_PATH', 'PFD to P&ID')
         self.pfd_folder = f'{self.base_path}/PFD'
         self.pid_folder = f'{self.base_path}/PID'
         
