@@ -118,6 +118,13 @@ class Vendor(TimeStampedModel):
     last_audit_date = models.DateField(null=True, blank=True)
     audit_status = models.CharField(max_length=50, blank=True)  # Passed, Failed, Pending
     
+    # ICV (In-Country Value) - Mandatory for Abu Dhabi Market
+    icv_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="In-Country Value percentage (0-100)")
+    icv_certificate = models.CharField(max_length=100, blank=True, help_text="ICV Certificate Number")
+    icv_expiry_date = models.DateField(null=True, blank=True, help_text="ICV Certificate Expiry Date")
+    icv_issuing_authority = models.CharField(max_length=200, blank=True, default="ADDED", help_text="ICV Issuing Authority (e.g., ADDED)")
+    is_icv_certified = models.BooleanField(default=False, help_text="ICV Certification Status")
+    
     # Metadata
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='vendors_created')
     notes = models.TextField(blank=True)
