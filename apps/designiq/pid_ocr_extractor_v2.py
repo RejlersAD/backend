@@ -91,162 +91,414 @@ class PIDLineExtractorV2:
         if self.paddleocr_reader:
             try:
                 img_array = np.array(img)
-                paddle_result = self.paddleocr_reader.ocr(img_array, cls=True)
+                # PaddleOCR returns nested list structure
+                paddle_result = self.paddleocr_reader.ocr(img_array)
                 paddle_texts = []
-                if paddle_result and paddle_result[0]:
-                    for line in paddle_result[0]:
-                        if line and len(line) > 1:
-                            paddle_texts.append(line[1][0])
-                paddle_text = ' '.join(paddle_texts)
-                results['paddleocr'] = paddle_text
-                logger.info(f"  ✅ PaddleOCR extracted {len(paddle_text)} characters")
+                
+                # Handle different result structures
+                if paddle_result:
+                    # PaddleOCR returns [[line1_data, line2_data, ...]] or None
+                    if isinstance(paddle_result, list) and len(paddle_result) > 0:
+                        first_page = paddle_result[0]
+                        if first_page and isinstance(first_page, list):
+                            for line in first_page:
+                                # Each line is [bbox, (text, confidence)]
+                                if line and isinstance(line, (list, tuple)) and len(line) >= 2:
+                                    text_data = line[1]
+                                    if isinstance(text_data, (list, tuple)) and len(text_data) > 0:
+                                        paddle_texts.append(str(text_data[0]))
+                
+                if paddle_texts:
+                    paddle_text = ' '.join(paddle_texts)
+                    results['paddleocr'] = paddle_text
+                    logger.info(f"  ✅ PaddleOCR extracted {len(paddle_text)} characters")
+                else:
+                    logger.warning(f"  ⚠️ PaddleOCR: No text extracted")
             except Exception as e:
                 logger.warning(f"  ⚠️ PaddleOCR failed: {e}")
+                import traceback
+                logger.debug(f"PaddleOCR traceback: {traceback.format_exc()}")
         
         return results
     
     def combine_and_deduplicate_text(self, ocr_results: Dict[str, str]) -> str:
         """
-        Combine text from all OCR engines and remove duplicates intelligently
-        """
-        all_words = set()
-        for engine, text in ocr_results.items():
-            words = text.split()
-            all_words.update(words)
+        🧩 INTELLIGENT TEXT COMBINATION:
+        Combine text from all OCR engines smartly
         
-        combined = ' '.join(sorted(all_words))
-        logger.info(f"  📝 Combined text: {len(combined)} characters, {len(all_words)} unique words")
+        Strategy: Keep ALL text from all engines - don't lose variations!
+        Why? Different OCR engines see different things:
+        - Tesseract might see "12-D-5777"
+        - EasyOCR might see "12 D 5777"  
+        - PaddleOCR might see "12.D.5777"
+        
+        OpenAI is smart enough to recognize these are the same line!
+        """
+        if not ocr_results:
+            return ""
+        
+        # Combine ALL text with engine labels for debugging
+        combined_parts = []
+        for engine, text in ocr_results.items():
+            if text and text.strip():
+                combined_parts.append(text.strip())
+        
+        combined = '\n\n'.join(combined_parts)
+        
+        total_chars = sum(len(t) for t in ocr_results.values())
+        logger.info(f"  📝 Combined: {total_chars} total characters from {len(ocr_results)} engines")
+        logger.info(f"  📝 Final text length: {len(combined)} characters")
+        
         return combined
+    
+    def parse_with_regex(self, extracted_text: str, page_num: int) -> List[Dict]:
+        """
+        🎯 RELIABLE REGEX-BASED APPROACH:
+        Use pure Python regex to find line number patterns directly in OCR text.
+        
+        Line format: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+        Example: 12-D-5777-033842-N
+        
+        This is MORE RELIABLE than OpenAI because:
+        - Deterministic pattern matching
+        - No API failures or hallucinations
+        - Faster processing
+        - Consistent results
+        """
+        logger.info("  🔍 Using REGEX pattern matching on OCR text")
+        
+        # First, normalize the text - replace all dash-like characters with standard hyphen
+        # OCR often sees: = ~ — – ― ─ | / as separators
+        normalized_text = extracted_text
+        for char in ['=', '~', '—', '–', '―', '─', '|', '/', '°', '″', '\'', '"']:
+            normalized_text = normalized_text.replace(char, '-')
+        
+        # Remove multiple consecutive hyphens (replace with single hyphen)
+        normalized_text = re.sub(r'-{2,}', '-', normalized_text)
+        
+        # Remove extra spaces around hyphens
+        normalized_text = re.sub(r'\s+-\s+', '-', normalized_text)
+        
+        # Add spaces around hyphens for better word boundary detection
+        normalized_text_spaced = normalized_text.replace('-', ' - ')
+        
+        logger.info(f"  📝 Normalized text sample (first 500 chars): {normalized_text[:500]}")
+        
+        # SMART FLEXIBLE REGEX PATTERNS
+        # Format: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+        # Examples: 6-VG-4952-011505-X, 16-PG-4005-011441-X, 6-PG-5143-031440
+        
+        patterns = [
+            # Pattern 1: Standard with word boundaries (most reliable)
+            r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
+            
+            # Pattern 2: With optional quote after size
+            r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
+            
+            # Pattern 3: More lenient spacing
+            r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
+            
+            # Pattern 4: Compact (no spaces at all)
+            r'\b(\d{1,2})-([A-Z]{1,2})-(\d{4})-(\d{5,6})(?:-([A-Z]{1,2}))?\b',
+            
+            # Pattern 5: With flexible separators (space or hyphen)
+            r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z]{1,2}))?\b',
+            
+            # Pattern 6: Case insensitive with word boundaries
+            r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+        ]
+        
+        found_lines = []
+        seen_lines = set()
+        rejected = []
+        
+        for pattern_idx, pattern in enumerate(patterns, 1):
+            matches = re.finditer(pattern, normalized_text, re.IGNORECASE)
+            
+            for match in matches:
+                # Extract and clean components
+                size = match.group(1).strip()
+                fluid = match.group(2).upper().strip()
+                sequence = match.group(3).strip()
+                pipe_class = match.group(4).strip()
+                insulation = match.group(5).upper().strip() if match.group(5) else ''
+                
+                # Smart cleaning: remove any non-alphanumeric from edges
+                size = re.sub(r'[^0-9]', '', size)
+                fluid = re.sub(r'[^A-Z]', '', fluid)
+                sequence = re.sub(r'[^0-9]', '', sequence)
+                pipe_class = re.sub(r'[^0-9]', '', pipe_class)
+                if insulation:
+                    insulation = re.sub(r'[^A-Z]', '', insulation)
+                
+                # Validate components (more lenient)
+                # Size: 1-2 digits (common sizes: 1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 30, 36)
+                if not size or not size.isdigit() or len(size) > 2:
+                    rejected.append(f"Invalid size: {size}")
+                    continue
+                
+                # Fluid: 1-2 letters only (common: D, PG, VG, CW, ST, PC, PO, etc.)
+                if not fluid or not fluid.isalpha() or len(fluid) > 2:
+                    rejected.append(f"Invalid fluid: {fluid}")
+                    continue
+                
+                # Sequence: exactly 4 digits
+                if len(sequence) != 4 or not sequence.isdigit():
+                    rejected.append(f"Invalid sequence: {sequence} (need 4 digits)")
+                    continue
+                
+                # Pipe class: 5 or 6 digits
+                if len(pipe_class) not in [5, 6] or not pipe_class.isdigit():
+                    rejected.append(f"Invalid pipe_class: {pipe_class} (need 5-6 digits)")
+                    continue
+                
+                # Insulation: optional, 1-2 letters if present
+                if insulation and (not insulation.isalpha() or len(insulation) > 2):
+                    rejected.append(f"Invalid insulation: {insulation}")
+                    continue
+                
+                # Build line number
+                line_number = f"{size}-{fluid}-{sequence}-{pipe_class}"
+                if insulation:
+                    line_number += f"-{insulation}"
+                
+                # Deduplicate
+                if line_number in seen_lines:
+                    continue
+                seen_lines.add(line_number)
+                
+                # Create line entry
+                line_entry = {
+                    'line_number': line_number,
+                    'size': f'{size}"',
+                    'fluid_code': fluid,
+                    'sequence_no': sequence,
+                    'pipr_class': pipe_class,
+                    'insulation': insulation,
+                    'page': page_num,
+                    'from_equipment': '',
+                    'to_equipment': '',
+                    'extraction_method': 'regex_direct',
+                    'original_detection': match.group(0).strip()
+                }
+                
+                found_lines.append(line_entry)
+        
+        # Log summary with debugging info
+        if rejected and len(rejected) <= 20:
+            logger.info(f"  ⚠️ Rejected {len(rejected)} potential matches: {rejected[:10]}")
+        elif rejected:
+            logger.info(f"  ⚠️ Rejected {len(rejected)} potential matches (showing first 10): {rejected[:10]}")
+        
+        logger.info(f"  🎯 REGEX found {len(found_lines)} unique line numbers from {len(patterns)} patterns")
+        return found_lines
     
     def parse_with_openai(self, extracted_text: str, page_num: int) -> List[Dict]:
         """
-        Use OpenAI to intelligently parse line numbers
-        
-        Line number format: 12-D-5777-033842-N
-        - SIZE: 1-2 digits (MANDATORY)
-        - FLUID: 1-2 LETTERS only (MANDATORY)
-        - SEQUENCE: exactly 4 digits (MANDATORY)
-        - PIPECLASS: exactly 6 digits (MANDATORY)
-        - INSULATION: OPTIONAL 1-2 characters
+        DEPRECATED: OpenAI is unreliable, use parse_with_regex instead
         """
-        if not self.openai_client:
-            logger.warning("⚠️ OpenAI not available, falling back to regex parsing")
-            return self._fallback_regex_parse(extracted_text, page_num)
+        logger.warning("  ⚠️ OpenAI method is deprecated, using REGEX instead")
+        return self.parse_with_regex(extracted_text, page_num)
         
-        prompt = f"""You are an expert P&ID line number extractor. Extract ALL piping line numbers from the text.
+        # Use full text for maximum extraction
+        text_chunk = extracted_text[:12000]  # Increased from 8000
+        
+        prompt = f"""🎯 MISSION: Extract ALL P&ID line numbers from OCR text (may be messy!)
 
-**CRITICAL RULES:**
-1. ALL 4 components are MANDATORY: SIZE, FLUID, SEQUENCE, PIPECLASS
-2. REJECT any line missing SIZE, FLUID, SEQUENCE, or PIPECLASS
-3. INSULATION is the ONLY optional component
+📋 **LINE FORMAT:** SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
 
-**REQUIRED LINE FORMAT:**
-SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+🔍 **SEARCH STRATEGY:**
+1. Look for patterns with ALL 4 mandatory components
+2. Accept ANY separator: hyphens, spaces, periods, underscores, or mixed
+3. Ignore extra whitespace, quotes, or OCR noise
+4. Extract variations like:
+   - "12-D-5777-033842-N" (standard)
+   - "12 D 5777 033842 N" (spaces)
+   - "12"-D-5777-033842" (with quote)
+   - "12.D.5777.033842.N" (periods)
+   - "12  D  5777  033842" (multiple spaces)
+   - "12_D_5777_033842_N" (underscores)
+   - Even "12D 5777033842N" (minimal separators)
 
-**MANDATORY COMPONENTS (ALL MUST BE PRESENT):**
-- SIZE: 1-2 digits ONLY (e.g., 6, 12, 20, 24) - NOT 05, NOT 40, NOT 4003
-- FLUID: 1-2 LETTERS ONLY (e.g., D, PG, CW, ST) - NOT numbers like 03, NOT missing
-- SEQUENCE: EXACTLY 4 digits (e.g., 5777, 0003, 1234) - NOT 5 digits like 31441, NOT 011441
-- PIPECLASS: EXACTLY 6 digits (e.g., 033842, 011441, 123456)
+✅ **MANDATORY COMPONENTS (ALL 4 REQUIRED):**
+- **SIZE:** 1-2 digits ONLY (6, 8, 10, 12, 16, 20, 24, etc.)
+  ❌ REJECT: 05 (leading zero invalid), 4003 (3-4 digits invalid)
+  
+- **FLUID:** 1-2 LETTERS ONLY (D, PG, CW, ST, W, etc.)
+  ❌ REJECT: Numbers like 03, or missing entirely
+  
+- **SEQUENCE:** EXACTLY 4 digits (0001, 5777, 1234, 9999)
+  ❌ REJECT: 011441 (6 digits), 31441 (5 digits), 123 (3 digits)
+  
+- **PIPECLASS:** 5 OR 6 digits (01701, 033842, 011441, 11440, 123456)
+  ✅ ACCEPT: Both 5-digit (01701, 11440) and 6-digit (033842, 011441)
+  ❌ REJECT: Wrong length (1-4 or 7+ digits)
 
-**OPTIONAL COMPONENT:**
-- INSULATION: ONLY these exact codes: H, PP, X, N, E, FP, AA (case insensitive)
-- NOT fluid codes like PG, D, CW, ST - these are FLUID not INSULATION
+🎨 **OPTIONAL (5th component):**
+- **INSULATION:** ONLY these codes: H, PP, X, N, E, FP, AA
+  ❌ NOT fluid codes (PG, D, CW are FLUID not insulation!)
 
-**VALID EXAMPLES (All 4 components present):**
-✅ "12-D-5777-033842-N" → size:12, fluid:D, seq:5777, pipr_class:033842, insulation:N
-✅ "16-PG-4105-011441-X" → size:16, fluid:PG, seq:4105, pipr_class:011441, insulation:X
-✅ "10-PG-0003-033842" → size:10, fluid:PG, seq:0003, pipr_class:033842, insulation:""
-✅ "20-CW-1234-123456-H" → size:20, fluid:CW, seq:1234, pipr_class:123456, insulation:H
-✅ "6-D-0001-011440-PP" → size:6, fluid:D, seq:0001, pipr_class:011440, insulation:PP
-✅ "8-ST-9999-888888-FP" → size:8, fluid:ST, seq:9999, pipr_class:888888, insulation:FP
-✅ "24-CW-0050-033842-AA" → size:24, fluid:CW, seq:0050, pipr_class:033842, insulation:AA
+✅ **VALID EXAMPLES:**
+"12-D-5777-033842-N" → Extract as: size:12, fluid:D, seq:5777, class:033842, insul:N
+"16 PG 4105 011441 X" → Extract as: size:16, fluid:PG, seq:4105, class:011441, insul:X
+"10.PG.0003.033842" → Extract as: size:10, fluid:PG, seq:0003, class:033842, insul:""
+"4-D-6013-01701" → Extract as: size:4, fluid:D, seq:6013, class:01701 (5 digits OK!), insul:""
+"24-CW-1234-123456-H" → Extract as: size:24, fluid:CW, seq:1234, class:123456, insul:H
+"8  ST  9999  11440  FP" → Extract as: size:8, fluid:ST, seq:9999, class:11440 (5 digits), insul:FP
 
-**INVALID - REJECT THESE (Missing required components):**
-❌ "05-011441-X" (MISSING FLUID and SEQUENCE - only has size-pipeclass-insulation)
-❌ "4003-031441-X" (SIZE wrong: 4003 is 4 digits, SEQUENCE wrong: 31441 is 5 digits)
-❌ "40-03-31441" (FLUID is number 03 not letters, SEQUENCE is 5 digits)
-❌ "4005-011441" (MISSING FLUID and SEQUENCE)
-❌ "12-1234-123456" (MISSING FLUID - has size-sequence-pipeclass but no fluid)
-❌ Any line missing SIZE, FLUID, SEQUENCE, or PIPECLASS
+❌ **INVALID - MUST REJECT:**
+"05-011441-X" → MISSING FLUID+SEQUENCE (only 3 components)
+"4003-031441-X" → SIZE wrong (4 digits), SEQUENCE wrong (5 digits)
+"40-03-31441" → FLUID is number (invalid), SEQUENCE 5 digits
+"12-1234-123456" → MISSING FLUID (only 3 components)
+"PG-5777-033842" → MISSING SIZE (only 3 components)
 
-**OUTPUT JSON:**
-Return ONLY a JSON array:
+📤 **OUTPUT FORMAT (JSON only):**
 [
   {{
-    "line_number": "complete line (e.g., 12-D-5777-033842-N)",
-    "size": "with quote (e.g., 12\\")",
-    "fluid_code": "uppercase (e.g., D or PG)",
-    "sequence_no": "4 digits (e.g., 5777)",
-    "pipr_class": "6 digits (e.g., 033842)",
-    "insulation": "char or empty (e.g., N or empty)",
+    "line_number": "12-D-5777-033842-N",
+    "size": "12",
+    "fluid_code": "D",
+    "sequence_no": "5777",
+    "pipr_class": "033842",
+    "insulation": "N",
     "from_equipment": "",
     "to_equipment": "",
-    "confidence": "high | medium | low"
+    "confidence": "high"
   }}
 ]
 
-**TEXT TO ANALYZE:**
-{extracted_text[:8000]}
+**CRITICAL OUTPUT RULES:**
+1. "size" - NUMBERS ONLY (no quotes): "12" not "12\""
+2. "pipr_class" - NUMBERS ONLY: "033842" not "033842-X" or "01701+YN"
+3. "insulation" - SINGLE CODE ONLY: "N" not "X-N" or "+YN"
+4. If you see "033842-X-N", split it: pipr_class="033842", insulation="X"
+5. If you see "01701+YN", split it: pipr_class="01701", insulation="N"
 
-**EXTRACTION RULES:**
-- Extract EVERY occurrence of SIZE-FLUID-SEQ-PIPECLASS pattern
-- Insulation is OPTIONAL (can be present or absent)
-- If you see variations like "12 D 5777 033842" extract it!
-- If you see "12.D.5777.033842" extract it!
-- If you see "12-D-5777-033842" extract it!
-- Look for patterns across ENTIRE document
-- Don't skip partial patterns - we validate later
+🔥 **CRITICAL INSTRUCTIONS:**
+1. ONLY extract line numbers that are ACTUALLY PRESENT in the text
+2. DO NOT make up, guess, or invent any line numbers
+3. DO NOT extrapolate or create patterns
+4. If you're unsure, DON'T extract it
+5. Better to extract ZERO lines than extract FAKE lines
+6. Return EMPTY array [] if you don't see clear line numbers
 
-Extract ALL valid line numbers. Return JSON only."""
+Extract ALL line numbers now! 🚀"""
 
         try:
             response = self.openai_client.chat.completions.create(
                 model="gpt-4-turbo-preview",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,  # Slightly higher for more variation detection
-                max_tokens=4000
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a strict P&ID line number extractor. You ONLY extract text that is clearly visible. You NEVER hallucinate, guess, or make up data. If unsure, return empty array."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.1,  # Very low creativity but not zero - allows pattern recognition
+                max_tokens=4096  # Increased for more extractions
             )
             
             result_text = response.choices[0].message.content.strip()
             
-            # Remove markdown code blocks if present
-            if result_text.startswith('```'):
-                result_text = result_text.split('```')[1]
-                if result_text.startswith('json'):
-                    result_text = result_text[4:]
-                result_text = result_text.strip()
+            # Clean markdown code blocks
+            if '```' in result_text:
+                parts = result_text.split('```')
+                for part in parts:
+                    if part.strip().startswith('json') or part.strip().startswith('['):
+                        result_text = part.replace('json', '').strip()
+                        break
             
             parsed_lines = json.loads(result_text)
             
-            # Add page number to each item
+            # CRITICAL: Validate each extraction strictly
+            valid_lines = []
+            rejected = []
+            
             for line in parsed_lines:
-                line['page'] = page_num
+                # Extract components
+                size = str(line.get('size', '')).replace('"', '').strip()
+                fluid = str(line.get('fluid_code', '')).strip().upper()
+                seq = str(line.get('sequence_no', '')).strip()
+                pipr_class = str(line.get('pipr_class', '')).strip()
+                insul = str(line.get('insulation', '')).strip().upper()
+                
+                # SMART CLEANING: Handle merged components
+                # Sometimes OCR merges pipe_class with insulation like "033842-X-N" or "01701+YN"
+                if pipr_class and not pipr_class.isdigit():
+                    # Extract only the numeric part from beginning
+                    import re
+                    match = re.match(r'^(\d+)', pipr_class)
+                    if match:
+                        clean_pipr = match.group(1)
+                        # Extract insulation from the rest
+                        remainder = pipr_class[len(clean_pipr):].strip('-+_. ')
+                        if remainder and remainder.replace('-', '').replace('+', '').isalpha():
+                            # Found insulation in pipe class
+                            if not insul or insul == remainder[:2].upper():
+                                insul = remainder[:2].upper() if len(remainder) >= 2 else remainder.upper()
+                        pipr_class = clean_pipr
+                
+                # STRICT VALIDATION
+                try:
+                    # Size: 1-2 digits ONLY
+                    if not size or not size.isdigit() or len(size) > 2 or int(size) < 1 or int(size) > 99:
+                        rejected.append(f"{line.get('line_number', 'N/A')} - Invalid size: {size}")
+                        continue
+                    
+                    # Fluid: 1-2 LETTERS ONLY
+                    if not fluid or not fluid.isalpha() or len(fluid) > 2:
+                        rejected.append(f"{line.get('line_number', 'N/A')} - Invalid fluid: {fluid}")
+                        continue
+                    
+                    # Sequence: EXACTLY 4 digits
+                    if not seq or not seq.isdigit() or len(seq) != 4:
+                        rejected.append(f"{line.get('line_number', 'N/A')} - Invalid sequence: {seq}")
+                        continue
+                    
+                    # Pipe Class: 5 OR 6 digits (real PDFs have both!)
+                    if not pipr_class or not pipr_class.isdigit() or len(pipr_class) not in [5, 6]:
+                        rejected.append(f"{line.get('line_number', 'N/A')} - Invalid pipe class: {pipr_class}")
+                        continue
+                    
+                    # Insulation: OPTIONAL but must be 1-2 letters if present
+                    if insul and (not insul.isalpha() or len(insul) > 2):
+                        rejected.append(f"{line.get('line_number', 'N/A')} - Invalid insulation: {insul}")
+                        continue
+                    
+                    # Update with cleaned values
+                    line['size'] = size + '"'
+                    line['fluid_code'] = fluid
+                    line['sequence_no'] = seq
+                    line['pipr_class'] = pipr_class
+                    line['insulation'] = insul
+                    line['line_number'] = f"{size}-{fluid}-{seq}-{pipr_class}{'-' + insul if insul else ''}"
+                    line['page'] = page_num
+                    line['extraction_method'] = 'openai_intelligent'
+                    
+                    valid_lines.append(line)
+                    
+                except Exception as e:
+                    rejected.append(f"{line.get('line_number', 'N/A')} - Validation error: {e}")
             
-            logger.info(f"  ✅ OpenAI found {len(parsed_lines)} line numbers")
+            if rejected:
+                logger.info(f"  ⚠️ Rejected {len(rejected)} invalid extractions")
+                for r in rejected[:5]:  # Log first 5
+                    logger.info(f"    ❌ {r}")
             
-            # Also run regex as backup and combine results
-            regex_lines = self._fallback_regex_parse(extracted_text, page_num)
-            logger.info(f"  ✅ Regex found {len(regex_lines)} line numbers")
+            logger.info(f"  🧠 OpenAI extracted {len(valid_lines)} VALID line numbers (rejected {len(rejected)})")
+            return valid_lines
             
-            # Combine both results
-            all_lines = parsed_lines + regex_lines
-            
-            # Deduplicate by line_number
-            seen = set()
-            unique = []
-            for item in all_lines:
-                key = item.get('line_number', '')
-                if key and key not in seen:
-                    seen.add(key)
-                    unique.append(item)
-            
-            logger.info(f"  🎯 Combined total: {len(unique)} unique line numbers")
-            return unique
-            
+        except json.JSONDecodeError as e:
+            logger.error(f"  ❌ OpenAI returned invalid JSON: {e}")
+            logger.error(f"  Response was: {result_text[:200]}...")
+            return []
         except Exception as e:
-            logger.error(f"  ❌ OpenAI parsing failed: {e}")
-            return self._fallback_regex_parse(extracted_text, page_num)
+            logger.error(f"  ❌ OpenAI failed: {e}")
+            return []
         
         prompt = f"""You are an expert P&ID (Piping and Instrumentation Diagram) analyst specializing in piping line number extraction.
 
@@ -606,59 +858,97 @@ Example 4: "10\"-PG-0003-033842-X-H"
     
     def extract_from_pdf(self, pdf_path: str) -> List[Dict]:
         """
-        Main extraction method - Process PDF with multi-engine OCR + AI
-        HIGH QUALITY MODE: Maximum resolution, all pages, OpenAI + Regex
+        🚀 INTELLIGENT AI-FIRST EXTRACTION:
+        
+        PHASE 1: COMPREHENSIVE TEXT EXTRACTION
+        - Tesseract OCR: Fast and reliable
+        - EasyOCR: Good with varied fonts
+        - PaddleOCR: Excellent with Asian characters and complex layouts
+        - ALL THREE combined = Maximum text coverage
+        
+        PHASE 2: AI INTELLIGENCE
+        - OpenAI GPT-4 searches through ALL text
+        - Finds line numbers in ANY format (hyphens, spaces, periods, etc.)
+        - Understands context better than rigid regex
+        - Adapts to OCR variations automatically
+        
+        PHASE 3: STRICT VALIDATION
+        - Validates ALL 4 mandatory components
+        - Rejects invalid patterns
+        - Ensures data quality
         
         Args:
             pdf_path: Path to P&ID PDF file
             
         Returns:
-            List of extracted line items with all components
+            List of validated line items
         """
         try:
             doc = fitz.open(pdf_path)
             all_line_items = []
             
-            logger.info(f"📄 Processing P&ID PDF: {pdf_path}")
-            logger.info(f"📄 Total pages: {len(doc)}")
-            logger.info(f"🎯 HIGH QUALITY MODE: Processing ALL pages with maximum OCR")
+            logger.info(f"🚀 STARTING AI-FIRST P&ID EXTRACTION")
+            logger.info(f"📄 File: {pdf_path}")
+            logger.info(f"📄 Pages: {len(doc)}")
+            logger.info(f"🧠 Strategy: OCR ALL TEXT → AI INTELLIGENCE → STRICT VALIDATION")
             
-            # Process ALL pages for complete extraction
             for page_num in range(len(doc)):
                 page = doc[page_num]
-                logger.info(f"📄 Processing page {page_num + 1}/{len(doc)}")
+                logger.info(f"\n{'='*60}")
+                logger.info(f"📄 PAGE {page_num + 1}/{len(doc)}")
+                logger.info(f"{'='*60}")
                 
-                # Convert page to HIGH RESOLUTION image for best OCR (2.5x)
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))  # High quality
+                # High-resolution rendering (2.5x for crisp text)
+                pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
+                img = img.convert('L')  # Grayscale for better OCR
                 
-                # Convert to grayscale for better OCR
-                img = img.convert('L')
-                
-                # Step 1: Extract text with ALL OCR engines
-                logger.info("  🔍 Extracting text with Tesseract + EasyOCR + PaddleOCR...")
+                # PHASE 1: Extract ALL text with 3 OCR engines
+                logger.info("🔍 PHASE 1: Multi-Engine Text Extraction")
                 ocr_results = self.extract_all_text_from_image(img)
                 
-                # Step 2: Combine and deduplicate
+                if not ocr_results:
+                    logger.warning("  ⚠️ No text extracted from any OCR engine")
+                    continue
+                
+                # Combine text from all engines
                 combined_text = self.combine_and_deduplicate_text(ocr_results)
                 
-                # Step 3: Parse with OpenAI + Regex (combined approach)
-                logger.info("  🤖 Parsing with OpenAI + Regex (dual approach)...")
-                line_items = self.parse_with_openai(combined_text, page_num + 1)
+                if not combined_text or len(combined_text) < 10:
+                    logger.warning("  ⚠️ Combined text too short, skipping page")
+                    continue
+                
+                # PHASE 2: REGEX Pattern Matching (Reliable & Fast)
+                logger.info("🔍 PHASE 2: REGEX Pattern Recognition")
+                logger.info(f"  📝 OCR Text Sample (first 500 chars): {combined_text[:500]}")
+                line_items = self.parse_with_regex(combined_text, page_num + 1)
+                
+                if not line_items:
+                    logger.warning("  ⚠️ No line numbers found on this page")
+                    continue
                 
                 all_line_items.extend(line_items)
-                logger.info(f"  ✅ Page {page_num + 1}: Found {len(line_items)} line numbers")
+                logger.info(f"✅ PAGE {page_num + 1} COMPLETE: {len(line_items)} line numbers extracted")
             
             doc.close()
             
-            # Deduplicate final results
-            unique_items = self._deduplicate_items(all_line_items)
+            # PHASE 3: Final deduplication and validation
+            logger.info(f"\n{'='*60}")
+            logger.info("🎯 PHASE 3: Final Validation & Deduplication")
+            logger.info(f"{'='*60}")
+            logger.info(f"  📊 Raw extractions: {len(all_line_items)}")
             
-            logger.info(f"🎉 TOTAL EXTRACTED: {len(unique_items)} unique line numbers")
+            unique_items = self._deduplicate_items(all_line_items)
+            logger.info(f"  📊 After deduplication: {len(unique_items)}")
+            
+            logger.info(f"\n{'='*60}")
+            logger.info(f"🎉 EXTRACTION COMPLETE: {len(unique_items)} UNIQUE LINE NUMBERS")
+            logger.info(f"{'='*60}\n")
+            
             return unique_items
             
         except Exception as e:
-            logger.error(f"❌ Error processing PDF: {str(e)}", exc_info=True)
+            logger.error(f"❌ EXTRACTION FAILED: {str(e)}", exc_info=True)
             return []
     
     def _deduplicate_items(self, items: List[Dict]) -> List[Dict]:
@@ -705,9 +995,11 @@ Example 4: "10\"-PG-0003-033842-X-H"
         for item in line_items:
             fluid_code = item.get('fluid_code', '')
             insulation = item.get('insulation', '')
+            line_number = item.get('line_number', '')
             
             table_data.append({
-                'line_number': item.get('line_number', ''),
+                'original_detection': line_number,  # Full line as detected (FIRST COLUMN)
+                'line_number': line_number,
                 'fluid_code': fluid_code,
                 'fluid_description': fluid_code_names.get(fluid_code, 'Unknown'),
                 'size': item.get('size', ''),
