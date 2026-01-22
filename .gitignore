@@ -136,3 +136,8 @@ test-results/
 *.swp
 *.tmp
 *~
+
+# Test files
+test_*.py
+*.md
+*.txt
