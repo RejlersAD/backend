@@ -148,6 +148,11 @@ class PurchaseRequisition(TimeStampedModel):
     Purchase Requisition (PR) - Internal request for procurement
     """
     
+    TYPE_CHOICES = [
+        ('general', 'General'),
+        ('project', 'Project'),
+    ]
+    
     STATUS_CHOICES = [
         ('draft', 'Draft'),
         ('submitted', 'Submitted'),
@@ -166,6 +171,7 @@ class PurchaseRequisition(TimeStampedModel):
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     pr_number = models.CharField(max_length=50, unique=True, db_index=True)
+    requisition_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='general')
     title = models.CharField(max_length=300)
     description = models.TextField(blank=True)
     category = models.CharField(max_length=50)  # From PROCUREMENT_CATEGORIES
