@@ -8,7 +8,7 @@ from rest_framework_simplejwt.views import TokenRefreshView, TokenObtainPairView
 from rest_framework.response import Response
 from rest_framework import status
 from apps.users.serializers_jwt import EmailTokenObtainPairSerializer
-from .views import UserViewSet, HealthCheckView, CORSDiagnosticView
+from .views import UserViewSet, HealthCheckView, CORSDiagnosticView, dashboard_metrics, recent_activity, predictive_analytics
 from .export_wrapper import pid_export_wrapper
 from .email_views import verify_email, resend_verification_email, check_verification_status
 
@@ -45,6 +45,15 @@ urlpatterns = [
     
     # CORS diagnostic endpoint
     path('cors-diagnostic/', CORSDiagnosticView.as_view(), name='cors-diagnostic'),
+    
+    # Dashboard metrics (Advanced Intelligence)
+    path('dashboard/metrics/', dashboard_metrics, name='dashboard-metrics'),
+    
+    # Real-time activity feed (Database & S3 History)
+    path('activity/recent/', recent_activity, name='recent-activity'),
+    
+    # Predictive Analytics (ML-Powered Forecasting)
+    path('analytics/predictions/', predictive_analytics, name='predictive-analytics'),
     
     # Authentication
     path('auth/login/', EmailTokenObtainPairView.as_view(), name='token_obtain_pair'),
