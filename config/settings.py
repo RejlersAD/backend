@@ -91,11 +91,11 @@ INSTALLED_APPS = [
     'apps.pid_analysis',
     'apps.pfd_converter',
     'apps.crs',
-    'apps.qhse',  # QHSE Management Module
+    # 'apps.qhse',  # TEMP DISABLED - Testing worker hang
     'apps.finance',  # Finance Invoice Automation
     'apps.designiq',  # DesignIQ - AI-Powered Engineering Design Intelligence
-    'apps.procurement',  # Procurement Management - Vendor & PO Tracking
-    'apps.notifications',  # Notification System - Multi-Channel Alerts & Email
+    # 'apps.procurement',  # TEMP DISABLED - Testing worker hang
+    # 'apps.notifications',  # TEMP DISABLED - Signals causing worker hang
     
     # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
     # Enabling this will cause startup hangs (MLflow server not available)

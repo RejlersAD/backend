@@ -13,14 +13,20 @@ echo "🚀 Starting on port: $PORT"
 python manage.py migrate --noinput 
 
 # Collect static files
-python manage.py collectstatic --noinput --clear
+# python manage.py collectstatic --noinput --clear  # TEMP DISABLED
 
 echo "✅ Pre-flight complete - Starting Gunicorn..."
 
-# Start Gunicorn
+# Start Gunicorn with preload to avoid worker hangs
 exec gunicorn config.wsgi:application \
     --bind "0.0.0.0:${PORT}" \
-    --workers 1 \
-    --timeout 60 \
+    --workers 2 \
+    --threads 2 \
+    --timeout 120 \
+    --worker-class gthread \
+    --worker-tmp-dir /dev/shm \
+    --preload \
+    --log-level info \
     --access-logfile - \
-    --error-logfile -
+    --error-logfile - \
+    --capture-output
