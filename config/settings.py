@@ -276,11 +276,11 @@ SIMPLE_JWT = {
     'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
 }
 
-print(f"[JWT] ====== Configuration Loaded ======")
-print(f"[JWT] Access Token Lifetime: {SIMPLE_JWT['ACCESS_TOKEN_LIFETIME']}")
-print(f"[JWT] Refresh Token Lifetime: {SIMPLE_JWT['REFRESH_TOKEN_LIFETIME']}")
-print(f"[JWT] Rotate Refresh Tokens: {SIMPLE_JWT['ROTATE_REFRESH_TOKENS']}")
-print(f"[JWT] ===================================")
+# print(f"[JWT] ====== Configuration Loaded ======")
+# print(f"[JWT] Access Token Lifetime: {SIMPLE_JWT['ACCESS_TOKEN_LIFETIME']}")
+# print(f"[JWT] Refresh Token Lifetime: {SIMPLE_JWT['REFRESH_TOKEN_LIFETIME']}")
+# print(f"[JWT] Rotate Refresh Tokens: {SIMPLE_JWT['ROTATE_REFRESH_TOKENS']}")
+# print(f"[JWT] ===================================")
 
 # ==============================================================================
 # End of JWT Configuration
@@ -370,7 +370,7 @@ else:
 CORS_ALLOW_PRIVATE_NETWORK = True
 
 print("\n" + "="*70)
-print("[CORS] ====== CORS CONFIGURATION ======")
+# print("[CORS] ====== CORS CONFIGURATION ======")
 print("="*70)
 print(f"[CORS] Allow All Origins: {CORS_ALLOW_ALL_ORIGINS}")
 if not CORS_ALLOW_ALL_ORIGINS:
@@ -590,7 +590,7 @@ EMAIL_VERIFICATION_REQUIRED = safe_cast_bool(config('EMAIL_VERIFICATION_REQUIRED
 EMAIL_VERIFICATION_TOKEN_EXPIRY = safe_cast_int(config('EMAIL_VERIFICATION_TOKEN_EXPIRY', default='86400'), 86400)  # 24 hours
 
 print("\n" + "=" * 60)
-print("EMAIL CONFIGURATION")
+# print("EMAIL CONFIGURATION")
 print("=" * 60)
 print(f"Email Backend: {EMAIL_BACKEND}")
 print(f"Email Host: {EMAIL_HOST}")

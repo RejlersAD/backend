@@ -11,6 +11,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Q, Count
 from django.utils import timezone
 import logging
+import json
 
 from .models import DesignProject, DesignAnalysis, DesignOptimization, DesignTemplate, EngineeringListItem, LIST_TYPES
 from .serializers import (
@@ -503,6 +504,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
         """
         pid_file = request.FILES.get('pid_file')
         list_type = request.data.get('list_type', 'line_list')
+        line_format_config = request.data.get('line_format_config')
         
         if not pid_file:
             return Response({
@@ -547,9 +549,19 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 tmp_path = tmp.name
             
             try:
+                # Parse line format config if provided
+                if line_format_config:
+                    try:
+                        line_format_config = json.loads(line_format_config)
+                    except Exception:
+                        logger.warning("⚠️ Invalid line_format_config JSON; ignoring custom format")
+                        line_format_config = None
+                else:
+                    line_format_config = None
+
                 # Extract line numbers using Multi-Engine OCR + AI
                 extractor = PIDLineExtractorV2()
-                line_items = extractor.extract_from_pdf(tmp_path)
+                line_items = extractor.extract_from_pdf(tmp_path, line_format_config=line_format_config)
                 table_data = extractor.format_as_table_data(line_items)
                 
                 logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")

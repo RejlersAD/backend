@@ -14,6 +14,7 @@ from typing import List, Dict, Optional
 import numpy as np
 from openai import OpenAI
 from django.conf import settings
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class PIDLineExtractorV2:
         self.easyocr_reader = None
         self.paddleocr_reader = None
         self.openai_client = None
+        self.fast_mode = getattr(settings, 'PID_OCR_FAST_MODE', True)
         self._init_engines()
     
     def _init_engines(self):
@@ -75,6 +77,7 @@ class PIDLineExtractorV2:
         
         # 1. Tesseract OCR - Multiple PSM modes to detect vertical text
         try:
+            t0 = time.time()
             # PSM 6: Assume uniform block of text (horizontal)
             tesseract_text = pytesseract.image_to_string(img, config='--psm 6')
             
@@ -97,13 +100,14 @@ class PIDLineExtractorV2:
                 pass
             
             results['tesseract'] = tesseract_text
-            logger.info(f"  ✅ Tesseract extracted {len(tesseract_text)} characters (combined)")
+            logger.info(f"  ✅ Tesseract extracted {len(tesseract_text)} characters (combined) in {time.time() - t0:.2f}s")
         except Exception as e:
             logger.warning(f"  ⚠️ Tesseract failed: {e}")
         
         # 2. EasyOCR - Enable rotation detection for vertical text
         if self.easyocr_reader:
             try:
+                t0 = time.time()
                 img_array = np.array(img)
                 # Basic readtext without rotation_info parameter
                 easyocr_result = self.easyocr_reader.readtext(
@@ -113,13 +117,14 @@ class PIDLineExtractorV2:
                 )
                 easyocr_text = ' '.join(easyocr_result)
                 results['easyocr'] = easyocr_text
-                logger.info(f"  ✅ EasyOCR extracted {len(easyocr_text)} characters")
+                logger.info(f"  ✅ EasyOCR extracted {len(easyocr_text)} characters in {time.time() - t0:.2f}s")
             except Exception as e:
                 logger.warning(f"  ⚠️ EasyOCR failed: {e}")
         
         # 3. PaddleOCR
         if self.paddleocr_reader:
             try:
+                t0 = time.time()
                 img_array = np.array(img)
                 # PaddleOCR returns nested list structure
                 paddle_result = self.paddleocr_reader.ocr(img_array)
@@ -141,7 +146,7 @@ class PIDLineExtractorV2:
                 if paddle_texts:
                     paddle_text = ' '.join(paddle_texts)
                     results['paddleocr'] = paddle_text
-                    logger.info(f"  ✅ PaddleOCR extracted {len(paddle_text)} characters")
+                    logger.info(f"  ✅ PaddleOCR extracted {len(paddle_text)} characters in {time.time() - t0:.2f}s")
                 else:
                     logger.warning(f"  ⚠️ PaddleOCR: No text extracted")
             except Exception as e:
@@ -180,6 +185,424 @@ class PIDLineExtractorV2:
         logger.info(f"  📝 Final text length: {len(combined)} characters")
         
         return combined
+
+    def _normalize_text(self, text: str, separator: Optional[str] = None, allow_variable: bool = True) -> str:
+        """Normalize OCR text by standardizing separators and spacing."""
+        normalized = text
+
+        # Remove quotes that often appear after size (e.g., 20")
+        normalized = normalized.replace('"', '').replace("'", '')
+
+        # Replace OCR noise and common separators with a standard hyphen
+        replace_chars = ['=', '~', '—', '–', '―', '─', '|', '/', '°', '″', '_', '.']
+        if allow_variable and separator and separator not in ['-', '']:
+            replace_chars.append(separator)
+
+        for char in replace_chars:
+            normalized = normalized.replace(char, '-')
+
+        # Collapse multiple hyphens and trim surrounding spaces
+        normalized = re.sub(r'-{2,}', '-', normalized)
+        normalized = re.sub(r'\s*-\s*', '-', normalized)
+        return normalized
+
+    def parse_with_custom_format(self, extracted_text: str, page_num: int, format_config: Dict) -> List[Dict]:
+        """
+        Parse line numbers using a user-defined component order and patterns.
+        """
+        logger.info("  🧩 Using CUSTOM line format configuration")
+
+        try:
+            components = format_config.get('components') or []
+            separator = format_config.get('separator', '-') or '-'
+            allow_variable = bool(format_config.get('allowVariableSeparators', True))
+        except Exception:
+            logger.warning("  ⚠️ Invalid format config; falling back to default regex")
+            return self.parse_with_regex(extracted_text, page_num)
+
+        if not components:
+            logger.warning("  ⚠️ Empty format config; falling back to default regex")
+            return self.parse_with_regex(extracted_text, page_num)
+
+        # Sort components by order
+        ordered_components = sorted(components, key=lambda c: c.get('order', 0))
+
+        # Default component patterns (max digits/letters per requirement)
+        default_patterns = {
+            'line_size': r'\d{1,2}',
+            'area': r'\d{2,3}',
+            'fluid_code': r'[A-Z]{1,2}',
+            'sequence_no': r'\d{3,5}',
+            'pipe_class': r'\d{3,6}[0-9][A-Z]',
+            'insulation': r'[A-Z]{1,2}',
+        }
+        relaxed_patterns = {
+            **default_patterns,
+            'pipe_class': r'\d{3,6}'
+        }
+
+        # Build regex with ordered capture groups
+        group_patterns = []
+        component_ids = []
+        component_defs = []
+        for comp in ordered_components:
+            comp_id = comp.get('id')
+            if not comp_id:
+                continue
+            pattern = comp.get('pattern') or default_patterns.get(comp_id)
+            if not pattern:
+                continue
+            group_patterns.append(f"({pattern})")
+            component_ids.append(comp_id)
+            component_defs.append(comp)
+
+        if not group_patterns:
+            logger.warning("  ⚠️ No valid components in format config; falling back to default regex")
+            return self.parse_with_regex(extracted_text, page_num)
+
+        # Normalize text if variable separators are allowed
+        normalized_text = self._normalize_text(extracted_text, separator, allow_variable=allow_variable)
+
+        if allow_variable:
+            sep_pattern = r'\s*[-–—_./]*\s*'
+        else:
+            sep_pattern = rf'\s*{re.escape(separator)}\s*'
+
+        pattern = re.compile(
+            r'(?<![A-Z0-9])' + sep_pattern.join(group_patterns) + r'(?![A-Z0-9])',
+            re.IGNORECASE
+        )
+
+        found_lines = []
+        seen_lines = set()
+
+        for match in pattern.finditer(normalized_text):
+            component_values = {}
+            valid = True
+
+            for idx, comp_id in enumerate(component_ids, 1):
+                raw_value = match.group(idx).strip()
+                if not raw_value:
+                    valid = False
+                    break
+
+                expected_pattern = default_patterns.get(comp_id)
+                override_pattern = component_defs[idx - 1].get('pattern')
+                validate_pattern = override_pattern or expected_pattern
+                if validate_pattern and not re.fullmatch(validate_pattern, raw_value, flags=re.IGNORECASE):
+                    valid = False
+                    break
+
+                # Normalize casing
+                if comp_id in ['fluid_code', 'insulation', 'pipe_class']:
+                    raw_value = raw_value.upper()
+
+                component_values[comp_id] = raw_value
+
+            if not valid:
+                continue
+
+            # Build line_number using configured order
+            line_parts = [component_values.get(cid, '') for cid in component_ids]
+            line_number = '-'.join([p for p in line_parts if p])
+
+            if line_number in seen_lines:
+                continue
+            seen_lines.add(line_number)
+
+            line_entry = {
+                'line_number': line_number,
+                'size': f"{component_values.get('line_size', '')}\"" if component_values.get('line_size') else '',
+                'area': component_values.get('area', ''),
+                'fluid_code': component_values.get('fluid_code', ''),
+                'sequence_no': component_values.get('sequence_no', ''),
+                'pipr_class': component_values.get('pipe_class', ''),
+                'insulation': component_values.get('insulation', ''),
+                'page': page_num,
+                'from_equipment': '',
+                'to_equipment': '',
+                'extraction_method': 'custom_format',
+                'original_detection': match.group(0).strip()
+            }
+
+            found_lines.append(line_entry)
+
+        # Relaxed pass for pipe_class if strict found nothing
+        if not found_lines:
+            logger.info("  🧩 CUSTOM format strict=0; trying relaxed pipe_class")
+            relaxed_group_patterns = []
+            for comp in ordered_components:
+                comp_id = comp.get('id')
+                if not comp_id:
+                    continue
+                pattern_override = comp.get('pattern')
+                pattern_relaxed = pattern_override or relaxed_patterns.get(comp_id)
+                if not pattern_relaxed:
+                    continue
+                relaxed_group_patterns.append(f"({pattern_relaxed})")
+
+            if relaxed_group_patterns:
+                relaxed_pattern = re.compile(
+                    r'(?<![A-Z0-9])' + sep_pattern.join(relaxed_group_patterns) + r'(?![A-Z0-9])',
+                    re.IGNORECASE
+                )
+
+                for match in relaxed_pattern.finditer(normalized_text):
+                    component_values = {}
+                    valid = True
+
+                    for idx, comp_id in enumerate(component_ids, 1):
+                        raw_value = match.group(idx).strip()
+                        if not raw_value:
+                            valid = False
+                            break
+
+                        expected_pattern = relaxed_patterns.get(comp_id)
+                        override_pattern = component_defs[idx - 1].get('pattern')
+                        if comp_id == 'pipe_class':
+                            validate_pattern = expected_pattern
+                        else:
+                            validate_pattern = override_pattern or expected_pattern
+                        if validate_pattern and not re.fullmatch(validate_pattern, raw_value, flags=re.IGNORECASE):
+                            valid = False
+                            break
+
+                        if comp_id in ['fluid_code', 'insulation', 'pipe_class']:
+                            raw_value = raw_value.upper()
+
+                        component_values[comp_id] = raw_value
+
+                    if not valid:
+                        continue
+
+                    line_parts = [component_values.get(cid, '') for cid in component_ids]
+                    line_number = '-'.join([p for p in line_parts if p])
+
+                    if line_number in seen_lines:
+                        continue
+                    seen_lines.add(line_number)
+
+                    found_lines.append({
+                        'line_number': line_number,
+                        'size': f"{component_values.get('line_size', '')}\"" if component_values.get('line_size') else '',
+                        'area': component_values.get('area', ''),
+                        'fluid_code': component_values.get('fluid_code', ''),
+                        'sequence_no': component_values.get('sequence_no', ''),
+                        'pipr_class': component_values.get('pipe_class', ''),
+                        'insulation': component_values.get('insulation', ''),
+                        'page': page_num,
+                        'from_equipment': '',
+                        'to_equipment': '',
+                        'extraction_method': 'custom_format_relaxed',
+                        'original_detection': match.group(0).strip()
+                    })
+
+        # Fallback: token-based matching if strict regex found nothing
+        if not found_lines:
+            logger.info("  🧩 CUSTOM format fallback: token-based matching")
+            tokens = re.findall(r'[A-Z0-9]+', normalized_text.upper())
+            window_size = len(component_ids)
+
+            for i in range(0, max(0, len(tokens) - window_size + 1)):
+                window = tokens[i:i + window_size]
+                component_values = {}
+                valid = True
+
+                for idx, comp_id in enumerate(component_ids):
+                    token = window[idx]
+                    expected_pattern = relaxed_patterns.get(comp_id)
+                    override_pattern = component_defs[idx].get('pattern')
+                    if comp_id == 'pipe_class':
+                        validate_pattern = expected_pattern
+                    else:
+                        validate_pattern = override_pattern or expected_pattern
+
+                    if not validate_pattern:
+                        valid = False
+                        break
+
+                    if not re.fullmatch(validate_pattern, token, flags=re.IGNORECASE):
+                        valid = False
+                        break
+
+                    if comp_id in ['fluid_code', 'insulation', 'pipe_class']:
+                        token = token.upper()
+
+                    component_values[comp_id] = token
+
+                if not valid:
+                    continue
+
+                line_parts = [component_values.get(cid, '') for cid in component_ids]
+                line_number = '-'.join([p for p in line_parts if p])
+
+                if line_number in seen_lines:
+                    continue
+                seen_lines.add(line_number)
+
+                found_lines.append({
+                    'line_number': line_number,
+                    'size': f"{component_values.get('line_size', '')}\"" if component_values.get('line_size') else '',
+                    'area': component_values.get('area', ''),
+                    'fluid_code': component_values.get('fluid_code', ''),
+                    'sequence_no': component_values.get('sequence_no', ''),
+                    'pipr_class': component_values.get('pipe_class', ''),
+                    'insulation': component_values.get('insulation', ''),
+                    'page': page_num,
+                    'from_equipment': '',
+                    'to_equipment': '',
+                    'extraction_method': 'custom_format_tokens',
+                    'original_detection': ' '.join(window)
+                })
+
+        # Fallback: token-based matching with optional AREA (if enabled)
+        if not found_lines and 'area' in component_ids:
+            logger.info("  🧩 CUSTOM format fallback: token-based with optional AREA")
+            tokens = re.findall(r'[A-Z0-9]+', normalized_text.upper())
+
+            reduced_ids = [cid for cid in component_ids if cid != 'area']
+            reduced_size = len(reduced_ids)
+
+            for i in range(0, max(0, len(tokens) - reduced_size + 1)):
+                window = tokens[i:i + reduced_size]
+                component_values = {}
+                valid = True
+
+                # Try to pick area from the token immediately before the window
+                area_value = ''
+                if i - 1 >= 0:
+                    candidate_area = tokens[i - 1]
+                    if re.fullmatch(relaxed_patterns.get('area', r'\d{2,3}'), candidate_area):
+                        area_value = candidate_area
+
+                for idx, comp_id in enumerate(reduced_ids):
+                    token = window[idx]
+                    expected_pattern = relaxed_patterns.get(comp_id)
+                    override_pattern = component_defs[idx].get('pattern') if idx < len(component_defs) else None
+                    if comp_id == 'pipe_class':
+                        validate_pattern = expected_pattern
+                    else:
+                        validate_pattern = override_pattern or expected_pattern
+
+                    if not validate_pattern:
+                        valid = False
+                        break
+
+                    if not re.fullmatch(validate_pattern, token, flags=re.IGNORECASE):
+                        valid = False
+                        break
+
+                    if comp_id in ['fluid_code', 'insulation', 'pipe_class']:
+                        token = token.upper()
+
+                    component_values[comp_id] = token
+
+                if not valid:
+                    continue
+
+                if area_value:
+                    component_values['area'] = area_value
+
+                line_parts = [component_values.get(cid, '') for cid in component_ids]
+                line_number = '-'.join([p for p in line_parts if p])
+
+                if line_number in seen_lines:
+                    continue
+                seen_lines.add(line_number)
+
+                found_lines.append({
+                    'line_number': line_number,
+                    'size': f"{component_values.get('line_size', '')}\"" if component_values.get('line_size') else '',
+                    'area': component_values.get('area', ''),
+                    'fluid_code': component_values.get('fluid_code', ''),
+                    'sequence_no': component_values.get('sequence_no', ''),
+                    'pipr_class': component_values.get('pipe_class', ''),
+                    'insulation': component_values.get('insulation', ''),
+                    'page': page_num,
+                    'from_equipment': '',
+                    'to_equipment': '',
+                    'extraction_method': 'custom_format_tokens_area',
+                    'original_detection': ' '.join(window)
+                })
+
+        # Fallback: ignore AREA if configured but not present
+        if not found_lines and 'area' in component_ids:
+            logger.info("  🧩 CUSTOM format fallback: ignore AREA")
+            reduced_components = [c for c in ordered_components if c.get('id') != 'area']
+            reduced_group_patterns = []
+            reduced_component_ids = []
+            reduced_component_defs = []
+
+            for comp in reduced_components:
+                comp_id = comp.get('id')
+                if not comp_id:
+                    continue
+                pattern_override = comp.get('pattern')
+                pattern_relaxed = pattern_override or relaxed_patterns.get(comp_id)
+                if not pattern_relaxed:
+                    continue
+                reduced_group_patterns.append(f"({pattern_relaxed})")
+                reduced_component_ids.append(comp_id)
+                reduced_component_defs.append(comp)
+
+            if reduced_group_patterns:
+                reduced_pattern = re.compile(
+                    r'(?<![A-Z0-9])' + sep_pattern.join(reduced_group_patterns) + r'(?![A-Z0-9])',
+                    re.IGNORECASE
+                )
+
+                for match in reduced_pattern.finditer(normalized_text):
+                    component_values = {}
+                    valid = True
+
+                    for idx, comp_id in enumerate(reduced_component_ids, 1):
+                        raw_value = match.group(idx).strip()
+                        if not raw_value:
+                            valid = False
+                            break
+
+                        expected_pattern = relaxed_patterns.get(comp_id)
+                        override_pattern = reduced_component_defs[idx - 1].get('pattern')
+                        if comp_id == 'pipe_class':
+                            validate_pattern = expected_pattern
+                        else:
+                            validate_pattern = override_pattern or expected_pattern
+                        if validate_pattern and not re.fullmatch(validate_pattern, raw_value, flags=re.IGNORECASE):
+                            valid = False
+                            break
+
+                        if comp_id in ['fluid_code', 'insulation', 'pipe_class']:
+                            raw_value = raw_value.upper()
+
+                        component_values[comp_id] = raw_value
+
+                    if not valid:
+                        continue
+
+                    line_parts = [component_values.get(cid, '') for cid in reduced_component_ids]
+                    line_number = '-'.join([p for p in line_parts if p])
+
+                    if line_number in seen_lines:
+                        continue
+                    seen_lines.add(line_number)
+
+                    found_lines.append({
+                        'line_number': line_number,
+                        'size': f"{component_values.get('line_size', '')}\"" if component_values.get('line_size') else '',
+                        'area': '',
+                        'fluid_code': component_values.get('fluid_code', ''),
+                        'sequence_no': component_values.get('sequence_no', ''),
+                        'pipr_class': component_values.get('pipe_class', ''),
+                        'insulation': component_values.get('insulation', ''),
+                        'page': page_num,
+                        'from_equipment': '',
+                        'to_equipment': '',
+                        'extraction_method': 'custom_format_no_area',
+                        'original_detection': match.group(0).strip()
+                    })
+
+        logger.info(f"  🧩 CUSTOM format found {len(found_lines)} unique line numbers")
+        return found_lines
     
     def parse_with_regex(self, extracted_text: str, page_num: int) -> List[Dict]:
         """
@@ -220,22 +643,22 @@ class PIDLineExtractorV2:
         
         patterns = [
             # Pattern 1: Standard with word boundaries (most reliable)
-            r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
+            r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{3,5})\s*-\s*(\d{3,6}[0-9][A-Z])(?:\s*-\s*([A-Z]{1,2}))?\b',
             
             # Pattern 2: With optional quote after size
-            r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
+            r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{3,5})\s*-\s*(\d{3,6}[0-9][A-Z])(?:\s*-\s*([A-Z]{1,2}))?\b',
             
             # Pattern 3: More lenient spacing
-            r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
+            r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{3,5})\s*-+\s*(\d{3,6}[0-9][A-Z])(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
             
             # Pattern 4: Compact (no spaces at all)
-            r'\b(\d{1,2})-([A-Z]{1,2})-(\d{4})-(\d{5,6})(?:-([A-Z]{1,2}))?\b',
+            r'\b(\d{1,2})-([A-Z]{1,2})-(\d{3,5})-(\d{3,6}[0-9][A-Z])(?:-([A-Z]{1,2}))?\b',
             
             # Pattern 5: With flexible separators (space or hyphen)
-            r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z]{1,2}))?\b',
+            r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{3,5})[\s-]+(\d{3,6}[0-9][A-Z])(?:[\s-]+([A-Z]{1,2}))?\b',
             
             # Pattern 6: Case insensitive with word boundaries
-            r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+            r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{3,5})\s*-\s*(\d{3,6}[0-9][A-Z])(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
         ]
         
         found_lines = []
@@ -257,7 +680,7 @@ class PIDLineExtractorV2:
                 size = re.sub(r'[^0-9]', '', size)
                 fluid = re.sub(r'[^A-Z]', '', fluid)
                 sequence = re.sub(r'[^0-9]', '', sequence)
-                pipe_class = re.sub(r'[^0-9]', '', pipe_class)
+                pipe_class = re.sub(r'[^0-9A-Z]', '', pipe_class).upper()
                 if insulation:
                     insulation = re.sub(r'[^A-Z]', '', insulation)
                 
@@ -272,14 +695,14 @@ class PIDLineExtractorV2:
                     rejected.append(f"Invalid fluid: {fluid}")
                     continue
                 
-                # Sequence: exactly 4 digits
-                if len(sequence) != 4 or not sequence.isdigit():
-                    rejected.append(f"Invalid sequence: {sequence} (need 4 digits)")
+                # Sequence: 3-5 digits
+                if len(sequence) < 3 or len(sequence) > 5 or not sequence.isdigit():
+                    rejected.append(f"Invalid sequence: {sequence} (need 3-5 digits)")
                     continue
                 
-                # Pipe class: 5 or 6 digits
-                if len(pipe_class) not in [5, 6] or not pipe_class.isdigit():
-                    rejected.append(f"Invalid pipe_class: {pipe_class} (need 5-6 digits)")
+                # Pipe class: 3-6 digits followed by digit+letter
+                if not re.fullmatch(r'\d{3,6}[0-9][A-Z]', pipe_class):
+                    rejected.append(f"Invalid pipe_class: {pipe_class} (need 3-6 digits + digit+letter)")
                     continue
                 
                 # Insulation: optional, 1-2 letters if present
@@ -313,6 +736,67 @@ class PIDLineExtractorV2:
                 }
                 
                 found_lines.append(line_entry)
+
+        if not found_lines:
+            logger.info("  🎯 REGEX strict=0; trying relaxed pipe_class")
+            relaxed_patterns = [
+                r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{3,5})\s*-\s*(\d{3,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
+                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{3,5})\s*-\s*(\d{3,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
+                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{3,5})\s*-+\s*(\d{3,6})(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
+                r'\b(\d{1,2})-([A-Z]{1,2})-(\d{3,5})-(\d{3,6})(?:-([A-Z]{1,2}))?\b',
+                r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{3,5})[\s-]+(\d{3,6})(?:[\s-]+([A-Z]{1,2}))?\b',
+                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{3,5})\s*-\s*(\d{3,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+            ]
+
+            for pattern_idx, pattern in enumerate(relaxed_patterns, 1):
+                matches = re.finditer(pattern, normalized_text, re.IGNORECASE)
+
+                for match in matches:
+                    size = match.group(1).strip()
+                    fluid = match.group(2).upper().strip()
+                    sequence = match.group(3).strip()
+                    pipe_class = match.group(4).strip()
+                    insulation = match.group(5).upper().strip() if match.group(5) else ''
+
+                    size = re.sub(r'[^0-9]', '', size)
+                    fluid = re.sub(r'[^A-Z]', '', fluid)
+                    sequence = re.sub(r'[^0-9]', '', sequence)
+                    pipe_class = re.sub(r'[^0-9A-Z]', '', pipe_class).upper()
+                    if insulation:
+                        insulation = re.sub(r'[^A-Z]', '', insulation)
+
+                    if not size or not size.isdigit() or len(size) > 2:
+                        continue
+                    if not fluid or not fluid.isalpha() or len(fluid) > 2:
+                        continue
+                    if len(sequence) < 3 or len(sequence) > 5 or not sequence.isdigit():
+                        continue
+                    if not re.fullmatch(r'\d{3,6}', pipe_class):
+                        continue
+                    if insulation and (not insulation.isalpha() or len(insulation) > 2):
+                        continue
+
+                    line_number = f"{size}-{fluid}-{sequence}-{pipe_class}"
+                    if insulation:
+                        line_number += f"-{insulation}"
+
+                    if line_number in seen_lines:
+                        continue
+                    seen_lines.add(line_number)
+
+                    found_lines.append({
+                        'line_number': line_number,
+                        'size': f'{size}"',
+                        'fluid_code': fluid,
+                        'sequence_no': sequence,
+                        'pipr_class': pipe_class,
+                        'insulation': insulation,
+                        'page': page_num,
+                        'from_equipment': '',
+                        'to_equipment': '',
+                        'extraction_method': 'regex_relaxed',
+                        'original_detection': match.group(0).strip()
+                    })
         
         # Log summary with debugging info
         if rejected and len(rejected) <= 20:
@@ -886,7 +1370,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
         logger.info(f"  📝 Regex found {len(results)} unique valid line numbers from {len(all_matches)} total matches")
         return results
     
-    def extract_from_pdf(self, pdf_path: str) -> List[Dict]:
+    def extract_from_pdf(self, pdf_path: str, line_format_config: Optional[Dict] = None) -> List[Dict]:
         """
         🚀 INTELLIGENT AI-FIRST EXTRACTION:
         
@@ -928,6 +1412,35 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 logger.info(f"📄 PAGE {page_num + 1}/{len(doc)}")
                 logger.info(f"{'='*60}")
                 
+                # FAST PATH: Try vector/text layer first (much faster than OCR)
+                try:
+                    pdf_text = page.get_text("text") or ""
+                except Exception:
+                    pdf_text = ""
+
+                if pdf_text and len(pdf_text.strip()) >= 50:
+                    logger.info(f"⚡ Using PDF text layer on page {page_num + 1} (len={len(pdf_text)})")
+                    logger.info(f"🧪 PDF text sample (first 800 chars): {pdf_text[:800]}")
+                    logger.info(f"🧪 PDF text sample (last 800 chars): {pdf_text[-800:] if len(pdf_text) > 800 else pdf_text}")
+                    ocr_results = {'pdf_text': pdf_text}
+                    combined_text = self.combine_and_deduplicate_text(ocr_results)
+
+                    logger.info("🔍 PHASE 2: REGEX Pattern Recognition (PDF text layer)")
+                    logger.info(f"  📝 PDF Text Sample (first 500 chars): {combined_text[:500]}")
+                    if line_format_config:
+                        line_items = self.parse_with_custom_format(combined_text, page_num + 1, line_format_config)
+                        if not line_items:
+                            logger.info("🔁 CUSTOM format yielded 0, falling back to REGEX")
+                            line_items = self.parse_with_regex(combined_text, page_num + 1)
+                    else:
+                        line_items = self.parse_with_regex(combined_text, page_num + 1)
+
+                    if line_items:
+                        all_line_items.extend(line_items)
+                        logger.info(f"✅ PAGE {page_num + 1} COMPLETE (PDF text): {len(line_items)} line numbers extracted")
+                        if self.fast_mode:
+                            continue
+
                 # High-resolution rendering (2.5x for crisp text)
                 pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
@@ -943,6 +1456,8 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 
                 # Combine text from all engines
                 combined_text = self.combine_and_deduplicate_text(ocr_results)
+                logger.info(f"🧪 OCR combined sample (first 800 chars): {combined_text[:800]}")
+                logger.info(f"🧪 OCR combined sample (last 800 chars): {combined_text[-800:] if len(combined_text) > 800 else combined_text}")
                 
                 if not combined_text or len(combined_text) < 10:
                     logger.warning("  ⚠️ Combined text too short, skipping page")
@@ -951,7 +1466,13 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 # PHASE 2: REGEX Pattern Matching (Reliable & Fast)
                 logger.info("🔍 PHASE 2: REGEX Pattern Recognition")
                 logger.info(f"  📝 OCR Text Sample (first 500 chars): {combined_text[:500]}")
-                line_items = self.parse_with_regex(combined_text, page_num + 1)
+                if line_format_config:
+                    line_items = self.parse_with_custom_format(combined_text, page_num + 1, line_format_config)
+                    if not line_items:
+                        logger.info("🔁 CUSTOM format yielded 0, falling back to REGEX")
+                        line_items = self.parse_with_regex(combined_text, page_num + 1)
+                else:
+                    line_items = self.parse_with_regex(combined_text, page_num + 1)
                 
                 if not line_items:
                     logger.warning("  ⚠️ No line numbers found on this page")
@@ -1033,6 +1554,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 'fluid_code': fluid_code,
                 'fluid_description': fluid_code_names.get(fluid_code, 'Unknown'),
                 'size': item.get('size', ''),
+                'area': item.get('area', ''),
                 'sequence_no': item.get('sequence_no', ''),
                 'pipr_class': item.get('pipr_class', ''),
                 'insulation': insulation,
