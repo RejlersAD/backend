@@ -1,6 +1,6 @@
 """
-P&ID OCR Extractor V2 - Multi-Engine + AI Intelligence
-Uses Tesseract, EasyOCR, PaddleOCR + OpenAI for accurate line detection
+P&ID OCR Extractor V2 - Multi-Engine OCR
+Uses Tesseract, EasyOCR, PaddleOCR for text extraction + Regex for line parsing
 """
 
 import re
@@ -21,9 +21,9 @@ logger = logging.getLogger(__name__)
 
 class PIDLineExtractorV2:
     """
-    Multi-Engine P&ID line number extractor with AI intelligence
+    Multi-Engine P&ID line number extractor
     Step 1: Extract ALL text using Tesseract, EasyOCR, PaddleOCR
-    Step 2: Use OpenAI to intelligently categorize into table format
+    Step 2: Parse line numbers using regex patterns from user configuration
     """
     
     def __init__(self):
@@ -1372,7 +1372,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
     
     def extract_from_pdf(self, pdf_path: str, line_format_config: Optional[Dict] = None) -> List[Dict]:
         """
-        🚀 INTELLIGENT AI-FIRST EXTRACTION:
+        P&ID Line Number Extraction using OCR + Regex
         
         PHASE 1: COMPREHENSIVE TEXT EXTRACTION
         - Tesseract OCR: Fast and reliable
@@ -1380,31 +1380,30 @@ Example 4: "10\"-PG-0003-033842-X-H"
         - PaddleOCR: Excellent with Asian characters and complex layouts
         - ALL THREE combined = Maximum text coverage
         
-        PHASE 2: AI INTELLIGENCE
-        - OpenAI GPT-4 searches through ALL text
-        - Finds line numbers in ANY format (hyphens, spaces, periods, etc.)
-        - Understands context better than rigid regex
-        - Adapts to OCR variations automatically
+        PHASE 2: REGEX PARSING
+        - Uses line_format_config patterns provided by user
+        - Extracts only actual text from OCR
+        - No AI generation or assumptions
         
-        PHASE 3: STRICT VALIDATION
-        - Validates ALL 4 mandatory components
-        - Rejects invalid patterns
-        - Ensures data quality
+        PHASE 3: VALIDATION
+        - Validates components match user's format
+        - Returns only what was actually detected
         
         Args:
             pdf_path: Path to P&ID PDF file
+            line_format_config: User's line number format configuration
             
         Returns:
-            List of validated line items
+            List of extracted line items with actual OCR data only
         """
         try:
             doc = fitz.open(pdf_path)
             all_line_items = []
             
-            logger.info(f"🚀 STARTING AI-FIRST P&ID EXTRACTION")
+            logger.info(f"🚀 STARTING P&ID EXTRACTION")
             logger.info(f"📄 File: {pdf_path}")
             logger.info(f"📄 Pages: {len(doc)}")
-            logger.info(f"🧠 Strategy: OCR ALL TEXT → AI INTELLIGENCE → STRICT VALIDATION")
+            logger.info(f"🔧 Strategy: Multi-Engine OCR → Regex Parsing → Validation")
             
             for page_num in range(len(doc)):
                 page = doc[page_num]
@@ -1518,51 +1517,21 @@ Example 4: "10\"-PG-0003-033842-X-H"
     def format_as_table_data(self, line_items: List[Dict]) -> List[Dict]:
         """
         Format extracted line items for frontend table display
+        Returns ONLY actual OCR data - no generated/assumed descriptions
         """
-        fluid_code_names = {
-            'PG': 'Process Gas',
-            'PL': 'Process Liquid',
-            'CW': 'Cooling Water',
-            'SW': 'Sea Water',
-            'ST': 'Steam',
-            'CO': 'Condensate',
-            'AI': 'Instrument Air',
-            'PA': 'Plant Air',
-            'N2': 'Nitrogen',
-            'FW': 'Fire Water',
-            'DW': 'Drinking Water',
-            'WW': 'Waste Water'
-        }
-        
-        insulation_names = {
-            'N': 'None',
-            'C': 'Cold',
-            'H': 'Hot',
-            'P': 'Personnel Protection',
-            'A': 'Acoustic'
-        }
-        
         table_data = []
         for item in line_items:
-            fluid_code = item.get('fluid_code', '')
-            insulation = item.get('insulation', '')
-            line_number = item.get('line_number', '')
-            
             table_data.append({
-                'original_detection': line_number,  # Full line as detected (FIRST COLUMN)
-                'line_number': line_number,
-                'fluid_code': fluid_code,
-                'fluid_description': fluid_code_names.get(fluid_code, 'Unknown'),
+                'line_number': item.get('line_number', ''),
                 'size': item.get('size', ''),
                 'area': item.get('area', ''),
+                'fluid_code': item.get('fluid_code', ''),
                 'sequence_no': item.get('sequence_no', ''),
                 'pipr_class': item.get('pipr_class', ''),
-                'insulation': insulation,
-                'insulation_description': insulation_names.get(insulation, 'Unknown'),
+                'insulation': item.get('insulation', ''),
                 'from_equipment': item.get('from_equipment', ''),
                 'to_equipment': item.get('to_equipment', ''),
-                'page': item.get('page', 1),
-                'confidence': item.get('confidence', 'medium')
+                'page': item.get('page', 1)
             })
         
         return table_data
