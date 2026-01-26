@@ -93,6 +93,7 @@ class ModuleViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'code']
     ordering_fields = ['order', 'name']
     filterset_fields = ['is_active']
+    pagination_class = None  # Disable pagination - modules are a small dataset
     
     def get_permissions(self):
         """
@@ -1334,6 +1335,46 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 'total_module_assignments': results['total_assignments']
             },
             'details': results
+        })
+    
+    @action(detail=False, methods=['get'], url_path='departments')
+    def get_departments(self, request):
+        """
+        Get unique list of departments from UserProfile
+        Returns: {
+            "departments": ["Engineering", "Sales", ...]
+        }
+        """
+        departments = UserProfile.objects.filter(
+            is_deleted=False,
+            department__isnull=False
+        ).exclude(
+            department__exact=''
+        ).values_list('department', flat=True).distinct().order_by('department')
+        
+        return Response({
+            'departments': list(departments),
+            'count': len(departments)
+        })
+    
+    @action(detail=False, methods=['get'], url_path='job-titles')
+    def get_job_titles(self, request):
+        """
+        Get unique list of job titles from UserProfile
+        Returns: {
+            "job_titles": ["Engineer", "Manager", ...]
+        }
+        """
+        job_titles = UserProfile.objects.filter(
+            is_deleted=False,
+            job_title__isnull=False
+        ).exclude(
+            job_title__exact=''
+        ).values_list('job_title', flat=True).distinct().order_by('job_title')
+        
+        return Response({
+            'job_titles': list(job_titles),
+            'count': len(job_titles)
         })
 
 

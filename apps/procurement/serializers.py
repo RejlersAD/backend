@@ -32,6 +32,7 @@ class VendorSerializer(serializers.ModelSerializer):
 class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     """Serializer for Purchase Requisition"""
     
+    requisition_type_display = serializers.CharField(source='get_requisition_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     requested_by_name = serializers.CharField(source='requested_by.get_full_name', read_only=True, allow_null=True)
@@ -41,7 +42,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     class Meta:
         model = PurchaseRequisition
         fields = [
-            'id', 'pr_number', 'title', 'description', 'category', 'category_display',
+            'id', 'pr_number', 'requisition_type', 'requisition_type_display', 'title', 'description', 'category', 'category_display',
             'requested_by', 'requested_by_name', 'department', 'project', 'status',
             'status_display', 'priority', 'priority_display', 'required_date',
             'estimated_budget', 'items', 'approved_by', 'approved_by_name',
