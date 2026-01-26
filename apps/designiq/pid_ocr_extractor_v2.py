@@ -231,14 +231,14 @@ class PIDLineExtractorV2:
         default_patterns = {
             'line_size': r'\d{1,2}',
             'area': r'\d{2,3}',
-            'fluid_code': r'[A-Z]{1,2}',
+            'fluid_code': r'[A-Z]{1,3}',
             'sequence_no': r'\d{3,5}',
-            'pipe_class': r'\d{3,6}[0-9][A-Z]',
+            'pipe_class': r'[A-Z0-9]{3,6}',
             'insulation': r'[A-Z]{1,2}',
         }
         relaxed_patterns = {
             **default_patterns,
-            'pipe_class': r'\d{3,6}'
+            'pipe_class': r'[A-Z0-9]{3,8}'
         }
 
         # Build regex with ordered capture groups
