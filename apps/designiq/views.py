@@ -567,67 +567,16 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")
                 logger.info(f"🎯 Using Multi-Engine OCR (Tesseract + EasyOCR + PaddleOCR) + OpenAI")
                 
-                # Create or update EngineeringListItem for each detected line
-                created_items = []
-                updated_items = []
-                for idx, line_data in enumerate(table_data):
-                    # Use update_or_create to handle duplicates gracefully
-                    item_data = {
-                        'description': f"{line_data['fluid_description']} Line - {line_data['size']}",
-                        'status': 'pending',
-                        'is_validated': False,
-                        'data': {
-                            'source': 'pid_ocr',
-                            'filename': pid_file.name,
-                            'page_number': line_data.get('page', 1),
-                            'fluid_code': line_data['fluid_code'],
-                            'fluid_description': line_data['fluid_description'],
-                            'size': line_data['size'],
-                            'sequence_no': line_data['sequence_no'],
-                            'pipr_class': line_data['pipr_class'],
-                            'insulation': line_data['insulation'],
-                            'from_equipment': line_data.get('from_equipment', ''),
-                            'to_equipment': line_data.get('to_equipment', ''),
-                            'upload_timestamp': timezone.now().isoformat()
-                        },
-                        'attachments': [{
-                            'type': 'pid_pdf',
-                            'filename': pid_file.name,
-                            'path': saved_path,
-                            'uploaded_at': timezone.now().isoformat()
-                        }]
-                    }
-                    
-                    # Only set created_by on new items
-                    item, created = EngineeringListItem.objects.update_or_create(
-                        list_type=list_type,
-                        project=project,
-                        item_tag=line_data['line_number'],
-                        defaults=item_data
-                    )
-                    
-                    # Set created_by if this is a new item
-                    if created and not item.created_by:
-                        item.created_by = request.user
-                        item.save(update_fields=['created_by'])
-                    
-                    if created:
-                        created_items.append(item)
-                    else:
-                        updated_items.append(item)
-                
-                total_items = len(created_items) + len(updated_items)
-                logger.info(f"✅ Created {len(created_items)} new items, updated {len(updated_items)} existing items from P&ID OCR")
-                
+                # Return extracted data without creating database items
+                # Frontend will display in table for user review
                 return Response({
                     "message": "P&ID processed successfully using OCR",
                     "filename": pid_file.name,
-                    "items_created": len(created_items),
-                    "items_updated": len(updated_items),
-                    "total_items": total_items,
+                    "total_items": len(table_data),
                     "extracted_lines": table_data,
-                    "note": "Multi-engine OCR detection (Tesseract + EasyOCR + PaddleOCR + OpenAI GPT-4)"
-                }, status=status.HTTP_201_CREATED)
+                    "pdf_path": saved_path,
+                    "note": "Multi-engine OCR detection (Tesseract + EasyOCR + PaddleOCR + OpenAI GPT-4). Data displayed for review - not saved to database."
+                }, status=status.HTTP_200_OK)
                 
             finally:
                 # Clean up temp file
