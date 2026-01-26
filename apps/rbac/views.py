@@ -1334,6 +1334,46 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             },
             'details': results
         })
+    
+    @action(detail=False, methods=['get'], url_path='departments')
+    def get_departments(self, request):
+        """
+        Get unique list of departments from UserProfile
+        Returns: {
+            "departments": ["Engineering", "Sales", ...]
+        }
+        """
+        departments = UserProfile.objects.filter(
+            is_deleted=False,
+            department__isnull=False
+        ).exclude(
+            department__exact=''
+        ).values_list('department', flat=True).distinct().order_by('department')
+        
+        return Response({
+            'departments': list(departments),
+            'count': len(departments)
+        })
+    
+    @action(detail=False, methods=['get'], url_path='job-titles')
+    def get_job_titles(self, request):
+        """
+        Get unique list of job titles from UserProfile
+        Returns: {
+            "job_titles": ["Engineer", "Manager", ...]
+        }
+        """
+        job_titles = UserProfile.objects.filter(
+            is_deleted=False,
+            job_title__isnull=False
+        ).exclude(
+            job_title__exact=''
+        ).values_list('job_title', flat=True).distinct().order_by('job_title')
+        
+        return Response({
+            'job_titles': list(job_titles),
+            'count': len(job_titles)
+        })
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
