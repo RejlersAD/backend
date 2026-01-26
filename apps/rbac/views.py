@@ -93,6 +93,7 @@ class ModuleViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'code']
     ordering_fields = ['order', 'name']
     filterset_fields = ['is_active']
+    pagination_class = None  # Disable pagination - modules are a small dataset
     
     def get_permissions(self):
         """
