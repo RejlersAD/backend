@@ -52,6 +52,13 @@ class PIDLineExtractor:
         r'(\d+(?:\.\d+)?)\s*["\']?\s*[-–—]\s*([A-Z]{1,4})\s*[-–—]\s*(\d{4,6})\s*[-–—]\s*([A-Z]\d[A-Z]\d{1,2})\s*[-–—]\s*([A-Z])',
         re.IGNORECASE
     )
+
+    # New 6-part format: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS-INSULATION(optional)
+    # Example: 4"-41-SW-6432-1ABCDE-X
+    NEW_LINE_NUMBER_PATTERN = re.compile(
+        r'(\d{1,2})\s*["\']?\s*[-–—]\s*(\d{1,2})\s*[-–—]\s*([A-Z]{1,2})\s*[-–—]\s*(\d{4})\s*[-–—]\s*([0-9][A-Z0-9]{5})\s*(?:[-–—]\s*([A-Z]{1,2}))?',
+        re.IGNORECASE
+    )
     
     # Common fluid codes
     FLUID_CODES = {
@@ -198,6 +205,33 @@ class PIDLineExtractor:
                 'raw_text_snippet': text[max(0, text.find(line_number) - 50):text.find(line_number) + 100]
             }
             
+            line_items.append(item)
+
+        # Additional parsing for new 6-part format (size-area-fluid-sequence-pipeclass-insulation optional)
+        new_matches = self.NEW_LINE_NUMBER_PATTERN.findall(text)
+        for match in new_matches:
+            size, area, fluid, sequence, pipe_class, insulation = match
+
+            line_number = f'{size}"-{area}-{fluid.upper()}-{sequence}-{pipe_class.upper()}'
+            if insulation:
+                line_number += f'-{insulation.upper()}'
+
+            item = {
+                'line_number': line_number,
+                'size': f'{size}"',
+                'fluid_code': fluid.upper(),
+                'fluid_description': self.FLUID_CODES.get(fluid.upper(), 'Unknown'),
+                'sequence_no': sequence,
+                'pipr_class': pipe_class.upper(),
+                'insulation_code': insulation.upper() if insulation else '',
+                'insulation_type': self.INSULATION_CODES.get(insulation.upper(), 'Unknown') if insulation else 'Unknown',
+                'from_equipment': self._extract_connection(text, line_number, 'from'),
+                'to_equipment': self._extract_connection(text, line_number, 'to'),
+                'page_number': page_num,
+                'detection_source': source,
+                'raw_text_snippet': text[max(0, text.find(line_number) - 50):text.find(line_number) + 100]
+            }
+
             line_items.append(item)
         
         return line_items

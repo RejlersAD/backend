@@ -7,6 +7,7 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView, TokenObtainPairView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.exceptions import ValidationError, AuthenticationFailed
 from apps.users.serializers_jwt import EmailTokenObtainPairSerializer
 from .views import UserViewSet, HealthCheckView, CORSDiagnosticView
 from .export_wrapper import pid_export_wrapper
@@ -23,6 +24,9 @@ class EmailTokenObtainPairView(TokenObtainPairView):
             response = super().post(request, *args, **kwargs)
             print(f"[LOGIN] Login successful for: {request.data.get('email')}")
             return response
+        except (ValidationError, AuthenticationFailed):
+            # Let DRF handle proper 400/401 responses
+            raise
         except Exception as e:
             import traceback
             print(f"[LOGIN ERROR] Exception: {str(e)}")

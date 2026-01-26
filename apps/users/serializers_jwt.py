@@ -4,6 +4,9 @@ Custom JWT serializers for email-based authentication.
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework import serializers
 from django.contrib.auth import authenticate
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -25,11 +28,18 @@ class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
         
         if email and password:
             # Authenticate using email
-            user = authenticate(
-                request=self.context.get('request'),
-                username=email,  # Django's authenticate expects 'username' parameter
-                password=password
-            )
+            try:
+                user = authenticate(
+                    request=self.context.get('request'),
+                    username=email,  # Django's authenticate expects 'username' parameter
+                    password=password
+                )
+            except Exception as e:
+                logger.exception(f"Authentication error for {email}: {e}")
+                raise serializers.ValidationError(
+                    'Authentication failed. Please try again.',
+                    code='authorization'
+                )
             
             if not user:
                 raise serializers.ValidationError(

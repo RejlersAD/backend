@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.db.models import Q, Count
 from django.shortcuts import get_object_or_404
+import logging
 
 from .models import Notification, NotificationCategory, NotificationPreference, NotificationLog
 from .serializers import (
@@ -19,6 +20,8 @@ from .serializers import (
     BulkNotificationSerializer, NotificationStatsSerializer
 )
 from .services import NotificationService
+
+logger = logging.getLogger(__name__)
 
 # Import Data Visibility for Row-Level Security
 from apps.rbac.data_visibility_mixin import PersonalDataMixin
@@ -151,25 +154,33 @@ class NotificationViewSet(PersonalDataMixin, viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def unread_count(self, request):
         """Get count of unread notifications"""
-        count = Notification.objects.filter(
-            recipient=request.user,
-            is_read=False,
-            status='SENT'
-        ).exclude(
-            expires_at__lt=timezone.now()
-        ).count()
-        
-        # Count by priority
-        by_priority = Notification.objects.filter(
-            recipient=request.user,
-            is_read=False,
-            status='SENT'
-        ).values('priority').annotate(count=Count('id'))
-        
-        return Response({
-            'total': count,
-            'by_priority': {item['priority']: item['count'] for item in by_priority}
-        })
+        try:
+            count = Notification.objects.filter(
+                recipient=request.user,
+                is_read=False,
+                status='SENT'
+            ).exclude(
+                expires_at__lt=timezone.now()
+            ).count()
+            
+            # Count by priority
+            by_priority = Notification.objects.filter(
+                recipient=request.user,
+                is_read=False,
+                status='SENT'
+            ).values('priority').annotate(count=Count('id'))
+            
+            return Response({
+                'total': count,
+                'by_priority': {item['priority']: item['count'] for item in by_priority}
+            })
+        except Exception as e:
+            logger.error(f"Unread count error: {str(e)}", exc_info=True)
+            return Response({
+                'total': 0,
+                'by_priority': {},
+                'message': 'Unable to fetch unread count'
+            })
     
     @action(detail=False, methods=['get'])
     def stats(self, request):

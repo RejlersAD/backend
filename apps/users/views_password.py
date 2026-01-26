@@ -31,6 +31,13 @@ def check_first_login(request):
         }
     """
     try:
+        if not request.user or not request.user.is_authenticated:
+            return Response({
+                'is_first_login': False,
+                'must_reset_password': False,
+                'message': 'User not authenticated'
+            })
+
         user = request.user
         
         # Safe attribute access with defaults

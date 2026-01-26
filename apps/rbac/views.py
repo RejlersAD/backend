@@ -1025,16 +1025,18 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             print(f"[ERROR /rbac/users/me/] Traceback:")
             traceback.print_exc()
             
-            # Return detailed error in response
-            return Response(
-                {
-                    'error': f'Server error: {str(e)}',
-                    'error_type': type(e).__name__,
-                    'user': str(request.user),
-                    'traceback': traceback.format_exc()
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            # Return safe fallback data to avoid breaking the UI
+            return Response({
+                'id': str(getattr(request.user, 'id', '')),
+                'email': getattr(request.user, 'email', ''),
+                'username': getattr(request.user, 'username', ''),
+                'first_name': getattr(request.user, 'first_name', ''),
+                'last_name': getattr(request.user, 'last_name', ''),
+                'roles': [],
+                'organization': None,
+                'status': 'pending',
+                'message': 'Profile temporarily unavailable'
+            })
     
     def update_my_profile(self, request):
         """Update current user's profile"""
