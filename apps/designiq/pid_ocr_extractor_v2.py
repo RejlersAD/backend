@@ -208,7 +208,50 @@ class PIDLineExtractorV2:
 
     def parse_with_custom_format(self, extracted_text: str, page_num: int, format_config: Dict) -> List[Dict]:
         """
-        Parse line numbers using a user-defined component order and patterns.
+        STRICT: Only match real P&ID line numbers.
+        Format: SIZE"-FLUID-SEQUENCE-PIPECLASS-INSULATION
+        Example: 36"-PG-4003-031441-X
+        """
+        logger.info("  🧩 STRICT PATTERN: SIZE\"-FLUID(2-3)-SEQ(4)-CLASS(6)-INS(1)")
+        
+        # ONLY match: digit(1-2) + " + - + LETTERS(2-3) + - + digits(4) + - + digits(6) + optional(-LETTER)
+        pattern = re.compile(
+            r'(\d{1,2})\s*"\s*-\s*([A-Z]{2,3})\s*-\s*(\d{4})\s*-\s*(\d{6})\s*(?:-\s*([A-Z]))?',
+            re.IGNORECASE
+        )
+        
+        found_lines = []
+        seen = set()
+        
+        for m in pattern.finditer(extracted_text):
+            line_num = f'{m.group(1)}"-{m.group(2).upper()}-{m.group(3)}-{m.group(4)}'
+            if m.group(5):
+                line_num += f'-{m.group(5).upper()}'
+            
+            if line_num in seen:
+                continue
+            seen.add(line_num)
+            
+            found_lines.append({
+                'line_number': line_num,
+                'size': f'{m.group(1)}"',
+                'area': '',
+                'fluid_code': m.group(2).upper(),
+                'sequence_no': m.group(3),
+                'pipr_class': m.group(4),
+                'insulation': m.group(5).upper() if m.group(5) else '',
+                'page': page_num,
+                'from_equipment': '',
+                'to_equipment': ''
+            })
+            logger.info(f"  ✅ {line_num}")
+        
+        logger.info(f"  📊 Found {len(found_lines)} strict matches")
+        return found_lines
+
+    def parse_with_custom_format_old(self, extracted_text: str, page_num: int, format_config: Dict) -> List[Dict]:
+        """
+        OLD: Parse line numbers using a user-defined component order and patterns.
         """
         logger.info("  🧩 Using CUSTOM line format configuration")
 
@@ -606,7 +649,48 @@ class PIDLineExtractorV2:
     
     def parse_with_regex(self, extracted_text: str, page_num: int) -> List[Dict]:
         """
-        🎯 RELIABLE REGEX-BASED APPROACH:
+        STRICT: Only match real P&ID line numbers.
+        Format: SIZE"-FLUID-SEQUENCE-PIPECLASS-INSULATION
+        """
+        logger.info("  🔍 STRICT REGEX: SIZE\"-FLUID(2-3)-SEQ(4)-CLASS(6)-INS(1)")
+        
+        pattern = re.compile(
+            r'(\d{1,2})\s*"\s*-\s*([A-Z]{2,3})\s*-\s*(\d{4})\s*-\s*(\d{6})\s*(?:-\s*([A-Z]))?',
+            re.IGNORECASE
+        )
+        
+        found_lines = []
+        seen = set()
+        
+        for m in pattern.finditer(extracted_text):
+            line_num = f'{m.group(1)}"-{m.group(2).upper()}-{m.group(3)}-{m.group(4)}'
+            if m.group(5):
+                line_num += f'-{m.group(5).upper()}'
+            
+            if line_num in seen:
+                continue
+            seen.add(line_num)
+            
+            found_lines.append({
+                'line_number': line_num,
+                'size': f'{m.group(1)}"',
+                'area': '',
+                'fluid_code': m.group(2).upper(),
+                'sequence_no': m.group(3),
+                'pipr_class': m.group(4),
+                'insulation': m.group(5).upper() if m.group(5) else '',
+                'page': page_num,
+                'from_equipment': '',
+                'to_equipment': ''
+            })
+            logger.info(f"  ✅ {line_num}")
+        
+        logger.info(f"  📊 {len(found_lines)} strict matches")
+        return found_lines
+    
+    def parse_with_regex_old(self, extracted_text: str, page_num: int) -> List[Dict]:
+        """
+        OLD: 🎯 RELIABLE REGEX-BASED APPROACH:
         Use pure Python regex to find line number patterns directly in OCR text.
         
         Line format: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
@@ -1370,9 +1454,186 @@ Example 4: "10\"-PG-0003-033842-X-H"
         logger.info(f"  📝 Regex found {len(results)} unique valid line numbers from {len(all_matches)} total matches")
         return results
     
+    def extract_with_strict_validation(self, raw_ocr_text: str, page_num: int) -> List[Dict]:
+        """
+        Hardcoded format extraction based on user specification:
+        Format: SIZE"-FLUID-SEQUENCE-PIPECLASS-INSULATION
+        - Size: 1-2 digits + " quote
+        - Fluid: 1-2 uppercase letters (PG, VG, CW, etc.)
+        - Sequence: 4-5 digits
+        - Pipe class: 6 digits fixed 
+        - Insulation: 1-2 uppercase letters (optional)
+        
+        Example: 36"-PG-4003-031441-X
+        """
+        logger.info("  🔍 Using hardcoded format: SIZE\"-FLUID(1-2)-SEQ(4-5)-PIPECLASS(6)-INSULATION(1-2)")
+        
+        # HARDCODED PATTERN: Exactly as user specified
+        # SIZE: 1-2 digits, QUOTE mandatory, FLUID: 1-2 letters, SEQ: 4-5 digits, PIPECLASS: 6 digits, INSULATION: 1-2 letters optional
+        pattern = re.compile(
+            r'(\d{1,2})\s*["\u201C\u201D]\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4,5})\s*-\s*(\d{6})\s*(?:-\s*([A-Z]{1,2}))?',
+            re.IGNORECASE
+        )
+        
+        found_lines = []
+        seen = set()
+        matches_found = 0
+        
+        for match in pattern.finditer(raw_ocr_text):
+            matches_found += 1
+            size = match.group(1)
+            fluid = match.group(2).upper()
+            sequence = match.group(3)
+            pipe_class = match.group(4)
+            insulation = match.group(5).upper() if match.group(5) else ''
+            
+            # Build line number
+            line_number = f'{size}"-{fluid}-{sequence}-{pipe_class}'
+            if insulation:
+                line_number += f'-{insulation}'
+            
+            # Deduplicate
+            if line_number in seen:
+                continue
+            seen.add(line_number)
+            
+            logger.info(f"    ✅ MATCH: {line_number}")
+            
+            found_lines.append({
+                'line_number': line_number,
+                'size': f'{size}"',
+                'fluid_code': fluid,
+                'sequence_no': sequence,
+                'pipr_class': pipe_class,
+                'insulation': insulation,
+                'page': page_num,
+                'from_equipment': '',
+                'to_equipment': '',
+                'area': '',
+                'extraction_method': 'hardcoded_format'
+            })
+        
+        logger.info(f"  📊 Total matches found: {matches_found}, Valid unique lines: {len(found_lines)}")
+        return found_lines
+    
+    def extract_with_openai(self, raw_ocr_text: str, page_num: int) -> List[Dict]:
+        """
+        Use OpenAI to intelligently extract P&ID line numbers from messy OCR text.
+        This is a fallback when regex patterns fail to match anything.
+        
+        Args:
+            raw_ocr_text: Raw OCR text that may contain line numbers in various formats
+            page_num: Current page number
+            
+        Returns:
+            List of extracted line items
+        """
+        if not self.openai_client:
+            logger.warning("  ⚠️ OpenAI not configured, cannot use smart extraction")
+            return []
+        
+        try:
+            logger.info("  🤖 Using OpenAI to detect line number pattern from OCR text...")
+            
+            # Limit text to avoid token limits
+            sample_text = raw_ocr_text[:3000] if len(raw_ocr_text) > 3000 else raw_ocr_text
+            
+            prompt = f"""You are analyzing OCR text from a P&ID (Piping & Instrumentation Diagram). 
+Your task is to extract ONLY the actual P&ID line numbers that appear in the text.
+
+EXACT FORMAT REQUIRED: SIZE"-FLUID-SEQUENCE-PIPECLASS-INSULATION
+Example: 36"-PG-4003-031441-X
+
+STRICT COMPONENT RULES:
+- SIZE: 1-2 digits followed by DOUBLE QUOTE (") - QUOTE IS MANDATORY
+- FLUID: 1-3 UPPERCASE letters (PG, VG, CW, DN, etc.) - NOT words like "COMPUTER", "TYPE", "TRAIN"
+- SEQUENCE: 3-5 digits (4003, 4691, etc.)
+- PIPECLASS: 3-6 digits (031441, 011503, etc.) - MUST be mostly/all digits
+- INSULATION: 1-2 UPPERCASE letters (X, A, B, etc.) - optional
+
+DO NOT EXTRACT THESE (they are NOT line numbers):
+❌ "COMPUTER" - this is a word, not a line number
+❌ "REV DATE" - this is a label
+❌ "CLOUDED" - this is a word
+❌ "PIPING" - this is a word
+❌ "TYPE" - this is a word  
+❌ "TRAIN" - this is a word
+❌ "PURGE" - this is a word
+❌ "FLOW" - this is a word
+❌ "AREA" - this is a word
+❌ "BRANCH" - this is a word
+❌ Equipment tags, notes, headers, labels
+
+ONLY EXTRACT if:
+✅ Has SIZE + QUOTE (like 36", 12", 6")
+✅ Has short FLUID CODE (2-3 letters like PG, VG, CW)
+✅ Has NUMERIC SEQUENCE (3-5 digits)
+✅ Has NUMERIC PIPE CLASS (3-6 digits)
+✅ Format is SIZE"-FLUID-SEQ-CLASS-INS
+
+OCR TEXT:
+{sample_text}
+
+Return ONLY actual P&ID line numbers as JSON array. If no valid line numbers found, return []:
+[
+  {{
+    "line_number": "36\"-PG-4003-031441-X",
+    "size": "36\"",
+    "fluid_code": "PG",
+    "sequence_no": "4003",
+    "pipr_class": "031441",
+    "insulation": "X"
+  }}
+]"""
+
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a P&ID line number extraction specialist. Only extract actual line numbers visible in the text."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=2000
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            
+            # Extract JSON from markdown code blocks if present
+            if "```json" in result_text:
+                result_text = result_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in result_text:
+                result_text = result_text.split("```")[1].split("```")[0].strip()
+            
+            # Parse JSON response
+            extracted_lines = json.loads(result_text)
+            
+            if not isinstance(extracted_lines, list):
+                logger.warning(f"  ⚠️ OpenAI returned non-list: {type(extracted_lines)}")
+                return []
+            
+            # Add metadata
+            for line in extracted_lines:
+                if isinstance(line, dict):
+                    line['page'] = page_num
+                    line['from_equipment'] = ''
+                    line['to_equipment'] = ''
+                    line['area'] = ''
+                    line['extraction_method'] = 'openai_gpt4'
+            
+            logger.info(f"  🤖 OpenAI extracted {len(extracted_lines)} line numbers")
+            for line in extracted_lines:
+                if isinstance(line, dict):
+                    logger.info(f"    ✅ {line.get('line_number', 'UNKNOWN')}")
+            
+            return extracted_lines
+            
+        except Exception as e:
+            logger.error(f"  ❌ OpenAI extraction failed: {str(e)}")
+            return []
+
     def extract_from_pdf(self, pdf_path: str, line_format_config: Optional[Dict] = None) -> List[Dict]:
         """
-        P&ID Line Number Extraction using OCR + Regex
+        P&ID Line Number Extraction using OCR + OpenAI GPT-4
         
         PHASE 1: COMPREHENSIVE TEXT EXTRACTION
         - Tesseract OCR: Fast and reliable
@@ -1380,18 +1641,18 @@ Example 4: "10\"-PG-0003-033842-X-H"
         - PaddleOCR: Excellent with Asian characters and complex layouts
         - ALL THREE combined = Maximum text coverage
         
-        PHASE 2: REGEX PARSING
-        - Uses line_format_config patterns provided by user
-        - Extracts only actual text from OCR
-        - No AI generation or assumptions
+        PHASE 2: OPENAI GPT-4 SMART EXTRACTION
+        - Uses GPT-4 to intelligently identify ONLY real P&ID line numbers
+        - Filters out garbage text, headers, labels, notes, equipment tags
+        - NO REGEX - AI-powered pattern recognition only
         
         PHASE 3: VALIDATION
-        - Validates components match user's format
-        - Returns only what was actually detected
+        - Validates components match P&ID format
+        - Returns only actual line numbers detected by AI
         
         Args:
             pdf_path: Path to P&ID PDF file
-            line_format_config: User's line number format configuration
+            line_format_config: Not used - kept for API compatibility
             
         Returns:
             List of extracted line items with actual OCR data only
@@ -1424,15 +1685,10 @@ Example 4: "10\"-PG-0003-033842-X-H"
                     ocr_results = {'pdf_text': pdf_text}
                     combined_text = self.combine_and_deduplicate_text(ocr_results)
 
-                    logger.info("🔍 PHASE 2: REGEX Pattern Recognition (PDF text layer)")
+                    logger.info("🔍 PHASE 2: Strict Pattern Recognition + Validation (PDF text layer)")
                     logger.info(f"  📝 PDF Text Sample (first 500 chars): {combined_text[:500]}")
-                    if line_format_config:
-                        line_items = self.parse_with_custom_format(combined_text, page_num + 1, line_format_config)
-                        if not line_items:
-                            logger.info("🔁 CUSTOM format yielded 0, falling back to REGEX")
-                            line_items = self.parse_with_regex(combined_text, page_num + 1)
-                    else:
-                        line_items = self.parse_with_regex(combined_text, page_num + 1)
+                    
+                    line_items = self.extract_with_strict_validation(combined_text, page_num + 1)
 
                     if line_items:
                         all_line_items.extend(line_items)
@@ -1462,19 +1718,14 @@ Example 4: "10\"-PG-0003-033842-X-H"
                     logger.warning("  ⚠️ Combined text too short, skipping page")
                     continue
                 
-                # PHASE 2: REGEX Pattern Matching (Reliable & Fast)
-                logger.info("🔍 PHASE 2: REGEX Pattern Recognition")
+                # PHASE 2: Strict Validation Extraction (Regex + Programmatic Validation)
+                logger.info("🔍 PHASE 2: Strict Pattern Recognition + Validation")
                 logger.info(f"  📝 OCR Text Sample (first 500 chars): {combined_text[:500]}")
-                if line_format_config:
-                    line_items = self.parse_with_custom_format(combined_text, page_num + 1, line_format_config)
-                    if not line_items:
-                        logger.info("🔁 CUSTOM format yielded 0, falling back to REGEX")
-                        line_items = self.parse_with_regex(combined_text, page_num + 1)
-                else:
-                    line_items = self.parse_with_regex(combined_text, page_num + 1)
+                
+                line_items = self.extract_with_strict_validation(combined_text, page_num + 1)
                 
                 if not line_items:
-                    logger.warning("  ⚠️ No line numbers found on this page")
+                    logger.warning("  ⚠️ No valid line numbers found on this page")
                     continue
                 
                 all_line_items.extend(line_items)

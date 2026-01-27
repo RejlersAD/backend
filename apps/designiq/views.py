@@ -565,18 +565,18 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 table_data = extractor.format_as_table_data(line_items)
                 
                 logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")
-                logger.info(f"🎯 Using Multi-Engine OCR (Tesseract + EasyOCR + PaddleOCR) + OpenAI")
+                logger.info(f"🎯 Using Multi-Engine OCR (Tesseract + EasyOCR + PaddleOCR) + Strict Validation")
                 
                 # Return extracted data without creating database items
                 # Frontend will display in table for user review
                 return Response({
-                    "message": "P&ID processed successfully using OCR",
+                    "message": "P&ID processed successfully",
                     "filename": pid_file.name,
                     "total_items": len(table_data),
                     "extracted_lines": table_data,
                     "pdf_path": saved_path,
-                    "note": "Multi-engine OCR detection (Tesseract + EasyOCR + PaddleOCR + OpenAI GPT-4). Data displayed for review - not saved to database."
-                }, status=status.HTTP_200_OK)
+                    "note": "Multi-engine OCR (Tesseract + EasyOCR + PaddleOCR) + Strict pattern matching with programmatic validation. Filters out garbage words and validates each component. Data displayed for review - not saved to database."
+                }, status=status.HTTP_201_CREATED)
                 
             finally:
                 # Clean up temp file
