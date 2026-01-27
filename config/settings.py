@@ -29,6 +29,29 @@ def safe_cast_bool(value, default):
         return value
     return str(value).lower() in ('true', '1', 'yes', 'on')
 
+def app_exists(app_path):
+    """
+    Check if a Django app exists before loading it.
+    Prevents ModuleNotFoundError during deployment.
+    
+    Args:
+        app_path (str): Django app path (e.g., 'apps.ml_detection')
+    
+    Returns:
+        bool: True if app directory exists with __init__.py
+    """
+    try:
+        # Convert app path to file system path
+        # e.g., 'apps.ml_detection' -> BASE_DIR/apps/ml_detection
+        parts = app_path.split('.')
+        app_dir = BASE_DIR.joinpath(*parts)
+        
+        # Check if directory exists and has __init__.py
+        return app_dir.is_dir() and app_dir.joinpath('__init__.py').exists()
+    except Exception as e:
+        print(f"[WARNING] Could not check app existence for '{app_path}': {e}")
+        return False
+
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-this-in-production')
 
@@ -97,9 +120,23 @@ INSTALLED_APPS = [
     'apps.designiq',  # DesignIQ - AI-Powered Engineering Design Intelligence
     'apps.procurement',  # Procurement Management - Vendor & PO Tracking
     'apps.notifications',  # Notification System - Multi-Channel Alerts & Email
+]
+
+# ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
+OPTIONAL_APPS = [
     'apps.ml_detection',  # ML Detection & Real-time Alerts
     'apps.activity',  # Real-time Activity Tracking
-    
+]
+
+for app in OPTIONAL_APPS:
+    if app_exists(app):
+        INSTALLED_APPS.append(app)
+        print(f"[✓] Loaded optional app: {app}")
+    else:
+        print(f"[⚠] Skipped missing app: {app}")
+
+# Add remaining apps
+INSTALLED_APPS.extend([
     # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
     # Enabling this will cause startup hangs (MLflow server not available)
     # 'apps.mlflow_integration',  # DO NOT UNCOMMENT
@@ -107,7 +144,7 @@ INSTALLED_APPS = [
     # AWS S3 Storage (always include - it's in requirements.txt)
     'storages',
     # Add new features here - no core changes needed!
-]
+])
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
