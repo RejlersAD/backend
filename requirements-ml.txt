@@ -1,0 +1,13 @@
+# Heavy ML packages for local development
+# NOT INSTALLED ON RAILWAY (reduces image from 4.8GB to <1GB)
+
+# OCR Dependencies
+easyocr==1.7.2
+paddlepaddle==3.3.0
+paddleocr==3.3.3
+opencv-python-headless==4.10.0.84
+
+# MLflow
+mlflow==2.10.0
+mongoengine==0.28.2
+scipy>=1.11.0
