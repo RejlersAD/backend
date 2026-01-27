@@ -188,6 +188,45 @@ class QHSERunningProjectViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         project.save()
         serializer = self.get_serializer(project)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
+    def destroy(self, request, *args, **kwargs):
+        """
+        Smart delete implementation
+        Supports both hard delete and soft delete (set is_active=False)
+        Uses query parameter 'hard_delete=true' for permanent deletion
+        """
+        try:
+            # Get the instance - use unfiltered queryset to find even inactive ones
+            instance = QHSERunningProject.objects.get(pk=kwargs.get('pk'))
+            
+            # Check for hard delete parameter
+            hard_delete = request.query_params.get('hard_delete', 'false').lower() == 'true'
+            
+            if hard_delete:
+                # Permanent deletion from database
+                instance.delete()
+                return Response(
+                    {'message': 'Project permanently deleted from database'},
+                    status=status.HTTP_204_NO_CONTENT
+                )
+            else:
+                # Soft delete - set is_active to False
+                instance.is_active = False
+                instance.save()
+                return Response(
+                    {'message': 'Project marked as inactive (soft delete)'},
+                    status=status.HTTP_200_OK
+                )
+        except QHSERunningProject.DoesNotExist:
+            return Response(
+                {'error': 'Project not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser])
     def bulk_upload(self, request):

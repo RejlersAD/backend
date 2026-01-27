@@ -55,7 +55,7 @@ class QHSERunningProjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = QHSERunningProject
         fields = [
-            'srNo', 'projectNo', 'projectTitle', 'projectTitleKey', 'client',
+            'id', 'srNo', 'projectNo', 'projectTitle', 'projectTitleKey', 'client',
             'projectManager', 'projectStartingDate', 'projectClosingDate', 'projectExtension',
             'projectQualityEng', 'manHourForQuality', 'manhoursUsed', 'manhoursBalance',
             'qualityBillabilityPercent', 'projectQualityPlanStatusRev', 'projectQualityPlanStatusIssueDate',
