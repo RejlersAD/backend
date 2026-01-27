@@ -5,6 +5,7 @@ from django.conf.urls.static import static
 from django.apps import apps
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from apps.core.cors_test_views import CorsTestView, cors_health_check, railway_health_check
+from apps.core.health_check import comprehensive_health_check, database_connectivity_check
 from django.http import HttpResponse, JsonResponse
 from django.db import connection
 from django.core.exceptions import ImproperlyConfigured
@@ -118,6 +119,10 @@ urlpatterns = [
     # Railway Health Checks
     path('api/v1/health/', railway_health_check, name='railway-health'),
     path('api/v1/health/diagnostic/', railway_diagnostic_health_check, name='railway-diagnostic'),
+    
+    # Comprehensive System Health Checks
+    path('api/v1/system-health/', comprehensive_health_check, name='system-health'),
+    path('api/v1/database-check/', database_connectivity_check, name='database-check'),
     path('health/', railway_diagnostic_health_check, name='health-check'),  # Alternative endpoint
     
     # CORS diagnostic endpoints (no auth required)
