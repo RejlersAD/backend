@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
+from django.apps import apps
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from apps.core.cors_test_views import CorsTestView, cors_health_check, railway_health_check
 from django.http import HttpResponse, JsonResponse
@@ -14,6 +15,11 @@ from apps.pid_analysis.export_service import PIDReportExportService
 
 # Import feature registry views
 from apps.api.feature_views import list_features, get_feature, get_categories, get_navigation
+
+
+def is_app_installed(app_label):
+    """Check if a Django app is installed - for safe URL inclusion"""
+    return apps.is_installed(app_label)
 
 
 def railway_diagnostic_health_check(request):
@@ -134,23 +140,37 @@ urlpatterns = [
     path('api/v1/pid/', include('apps.pid_analysis.urls')),
     path('api/v1/pfd/', include('apps.pfd_converter.urls')),
     path('api/v1/crs/', include('apps.crs.urls')),
-    # path('api/v1/qhse/', include('apps.qhse.urls')),  # TEMP DISABLED
     path('api/v1/finance/', include('apps.finance.urls')),  # Finance Invoice Automation
     path('api/v1/designiq/', include('apps.designiq.urls')),  # DesignIQ - AI Design Intelligence
-    # path('api/v1/procurement/', include('apps.procurement.urls')),  # TEMP DISABLED
-    # path('api/v1/notifications/', include('apps.notifications.urls')),  # TEMP DISABLED
-    # path('api/v1/sales/', include('apps.sales.urls')),  # Sales module removed
     path('api/v1/projects/', include('apps.core.project_urls')),
-    path('api/v1/activity/', include('apps.activity.urls')),  # Real-time Activity Tracking
-    
-    # MLflow Model Orchestration API
+]
+
+# ✨ SMART URL LOADING - Conditionally include optional app URLs
+if is_app_installed('apps.qhse'):
+    urlpatterns.append(path('api/v1/qhse/', include('apps.qhse.urls')))
+    print("[URL] ✅ QHSE URLs registered")
+
+if is_app_installed('apps.procurement'):
+    urlpatterns.append(path('api/v1/procurement/', include('apps.procurement.urls')))
+    print("[URL] ✅ Procurement URLs registered")
+
+if is_app_installed('apps.notifications'):
+    urlpatterns.append(path('api/v1/notifications/', include('apps.notifications.urls')))
+    print("[URL] ✅ Notifications URLs registered")
+
+if is_app_installed('apps.activity'):
+    urlpatterns.append(path('api/v1/activity/', include('apps.activity.urls')))
+    print("[URL] ✅ Activity URLs registered")
+
+# MLflow Model Orchestration API (always include)
+urlpatterns.extend([
     path('api/v1/mlflow/', include('apps.mlflow_integration.urls')),
     # Add new feature URLs here - no routing changes needed!
     
     # API Documentation
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='swagger-ui'),  name='swagger-ui'),
-]
+])
 
 # Serve media files in development
 if settings.DEBUG:

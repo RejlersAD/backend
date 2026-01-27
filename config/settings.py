@@ -115,7 +115,6 @@ INSTALLED_APPS = [
     'apps.pid_analysis',
     'apps.pfd_converter',
     'apps.crs',
-    # 'apps.qhse',  # TEMP DISABLED - Testing worker hang
     'apps.finance',  # Finance Invoice Automation
     'apps.designiq',  # DesignIQ - AI-Powered Engineering Design Intelligence
     'apps.procurement',  # Procurement Management - Vendor & PO Tracking
@@ -124,6 +123,7 @@ INSTALLED_APPS = [
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
 OPTIONAL_APPS = [
+    'apps.qhse',  # QHSE Management - Quality, Health, Safety, Environment
     'apps.ml_detection',  # ML Detection & Real-time Alerts
     'apps.activity',  # Real-time Activity Tracking
 ]
