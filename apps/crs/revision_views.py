@@ -687,6 +687,20 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
             # 🔥 FINAL RESPONSE FILTER: Remove AutoCAD comments from frontend response
             final_comments_for_frontend = self._filter_autocad_from_response(processed_comments)
             
+            # Build response with actual database comment IDs
+            comment_response_data = []
+            for db_comment in created_comments:
+                comment_response_data.append({
+                    "id": db_comment.id,  # Critical: Include database ID for status updates
+                    "page_number": db_comment.page_number,
+                    "reviewer_name": "Not Provided",  # No reviewer field in model
+                    "comment_text": db_comment.comment_text,
+                    "comment_type": db_comment.comment_type or "GENERAL",
+                    "discipline": "Not Provided",
+                    "drawing_ref": db_comment.clause_number or "N/A",
+                    "status": db_comment.status  # Include actual status from database
+                })
+            
             return Response({
                 "success": True,
                 "message": f"Revision {revision_label} uploaded and processed successfully",
@@ -697,22 +711,12 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
                         "title": document.document_name,
                         "document_number": document.document_number
                     },
-                    "comments": [  # Full ReviewerComment data structure
-                        {
-                            "page_number": c.get('page'),
-                            "reviewer_name": c.get('reviewer', 'Not Provided'),
-                            "comment_text": c.get('text', ''),
-                            "comment_type": c.get('type', 'GENERAL'),
-                            "discipline": c.get('discipline', 'Not Provided'),
-                            "drawing_ref": c.get('section_reference', 'N/A'),
-                            "status": "Open"
-                        } for c in final_comments_for_frontend
-                    ],
+                    "comments": comment_response_data,  # Use database comments with IDs
                     "extraction_summary": {
-                        "total_comments": len(final_comments_for_frontend),
-                        "red_comments": sum(1 for c in final_comments_for_frontend if c['type'] == 'red_comment'),
-                        "yellow_boxes": sum(1 for c in final_comments_for_frontend if c['type'] == 'yellow_box'),
-                        "pages_with_comments": len(set(c['page'] for c in final_comments_for_frontend))
+                        "total_comments": len(created_comments),
+                        "red_comments": sum(1 for c in created_comments if c.comment_type == 'red_comment'),
+                        "yellow_boxes": sum(1 for c in created_comments if c.comment_type == 'yellow_box'),
+                        "pages_with_comments": len(set(c.page_number for c in created_comments))
                     }
                 }
             }, status=status.HTTP_201_CREATED)
@@ -1581,6 +1585,181 @@ class CRSRevisionChainViewSet(viewsets.ModelViewSet):
                     )
         
         return insights
+    
+    @action(detail=True, methods=['post'])
+    def close_comment(self, request, pk=None):
+        """
+        Update comment status (smart endpoint supporting all statuses)
+        POST /api/v1/crs/revision-chains/{id}/close_comment/
+        Body: { "comment_id": 123, "status": "closed" } 
+        Supports: open, in_progress, resolved, closed, rejected
+        """
+        chain = self.get_object()
+        comment_id = request.data.get('comment_id')
+        new_status = request.data.get('status', 'closed')  # Default to 'closed' for backward compatibility
+        
+        if not comment_id:
+            return Response(
+                {"error": "comment_id is required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate status
+        valid_statuses = ['open', 'in_progress', 'resolved', 'closed', 'rejected']
+        if new_status not in valid_statuses:
+            return Response(
+                {"error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Find the comment
+            comment = CRSComment.objects.get(id=comment_id)
+            
+            # Verify comment belongs to this chain
+            if comment.document.id not in chain.revisions.values_list('document_id', flat=True):
+                return Response(
+                    {"error": "Comment does not belong to this revision chain"},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Update comment status
+            old_status = comment.status
+            comment.status = new_status
+            comment.save()
+            
+            # Log activity
+            CRSRevisionActivity.objects.create(
+                chain=chain,
+                action='comment_status_changed',
+                description=f'Comment #{comment.serial_number} status changed from "{old_status}" to "{new_status}"',
+                performed_by=request.user,
+                old_value={'status': old_status, 'comment_id': comment_id},
+                new_value={'status': new_status, 'comment_id': comment_id}
+            )
+            
+            return Response({
+                "success": True,
+                "message": f"Comment #{comment.serial_number} status updated to '{new_status}' successfully",
+                "data": {
+                    "comment_id": comment.id,
+                    "status": comment.status
+                }
+            })
+            
+        except CRSComment.DoesNotExist:
+            return Response(
+                {"error": "Comment not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+    
+    @action(detail=True, methods=['post'])
+    def bulk_close_comments(self, request, pk=None):
+        """
+        Close multiple comments from previous revisions
+        POST /api/v1/crs/revision-chains/{id}/bulk_close_comments/
+        Body: { "comment_ids": [1, 2, 3] }
+        """
+        chain = self.get_object()
+        comment_ids = request.data.get('comment_ids', [])
+        
+        if not comment_ids or not isinstance(comment_ids, list):
+            return Response(
+                {"error": "comment_ids must be a non-empty array"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get all document IDs in this chain
+        chain_document_ids = list(chain.revisions.values_list('document_id', flat=True))
+        
+        # Update comments
+        updated_comments = CRSComment.objects.filter(
+            id__in=comment_ids,
+            document_id__in=chain_document_ids
+        ).update(status='closed')
+        
+        # Log activity
+        if updated_comments > 0:
+            CRSRevisionActivity.objects.create(
+                chain=chain,
+                action='comments_bulk_closed',
+                description=f'Closed {updated_comments} comments in bulk',
+                performed_by=request.user,
+                new_value={'closed_count': updated_comments, 'comment_ids': comment_ids}
+            )
+        
+        return Response({
+            "success": True,
+            "message": f"{updated_comments} comments closed successfully",
+            "data": {
+                "closed_count": updated_comments
+            }
+        })
+    
+    @action(detail=True, methods=['get'])
+    def check_previous_comments_status(self, request, pk=None):
+        """
+        Check if all previous revision comments are closed
+        GET /api/v1/crs/revision-chains/{id}/check_previous_comments_status/
+        Returns: { "all_closed": true/false, "open_count": N, "open_comments": [...] }
+        """
+        chain = self.get_object()
+        
+        # Get all revisions except the latest
+        all_revisions = chain.revisions.all().order_by('revision_number')
+        
+        if all_revisions.count() == 0:
+            return Response({
+                "all_closed": True,
+                "open_count": 0,
+                "open_comments": [],
+                "message": "No revisions uploaded yet"
+            })
+        
+        # Get all previous revisions (exclude current/latest)
+        previous_revisions = all_revisions[:-1] if all_revisions.count() > 1 else []
+        
+        if not previous_revisions:
+            return Response({
+                "all_closed": True,
+                "open_count": 0,
+                "open_comments": [],
+                "message": "Only one revision exists, no previous comments to check"
+            })
+        
+        # Get document IDs from previous revisions
+        previous_document_ids = [rev.document_id for rev in previous_revisions]
+        
+        # Find open comments from previous revisions
+        open_comments = CRSComment.objects.filter(
+            document_id__in=previous_document_ids,
+            status='open'
+        ).select_related('document').order_by('document_id', 'page_number')
+        
+        open_count = open_comments.count()
+        all_closed = (open_count == 0)
+        
+        # Build response with comment details
+        comment_data = []
+        for comment in open_comments:
+            revision = CRSRevision.objects.filter(document_id=comment.document_id, chain=chain).first()
+            comment_data.append({
+                'id': comment.id,
+                'serial_number': comment.serial_number,
+                'page_number': comment.page_number,
+                'comment_text': comment.comment_text,
+                'comment_type': comment.comment_type,
+                'status': comment.status,
+                'revision_label': revision.revision_label if revision else 'Unknown',
+                'revision_number': revision.revision_number if revision else 0
+            })
+        
+        return Response({
+            "all_closed": all_closed,
+            "open_count": open_count,
+            "open_comments": comment_data,
+            "message": f"{open_count} open comments found in previous revisions" if open_count > 0 else "All previous comments are closed"
+        })
 
 
 class CRSRevisionViewSet(viewsets.ModelViewSet):

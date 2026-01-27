@@ -10,6 +10,9 @@ gunicorn==21.2.0
 whitenoise==6.6.0
 celery==5.3.4
 redis==5.0.1
+channels==4.0.0  # Django Channels for WebSocket support
+channels-redis==4.1.0  # Redis channel layer for WebSocket
+daphne==4.0.0  # ASGI server for Django Channels
 djangorestframework-simplejwt==5.3.1
 drf-spectacular==0.27.0
 pillow==10.1.0
@@ -39,6 +42,7 @@ google-auth-oauthlib>=1.1.0
 mlflow==2.10.0
 scikit-learn==1.3.2  # Required by MLflow
 pandas>=2.1.0  # Required by MLflow
+scipy>=1.11.0  # Required for ML algorithms
 mongoengine==0.28.2
 
 # AWS S3 Storage

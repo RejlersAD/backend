@@ -141,6 +141,7 @@ urlpatterns = [
     # path('api/v1/notifications/', include('apps.notifications.urls')),  # TEMP DISABLED
     # path('api/v1/sales/', include('apps.sales.urls')),  # Sales module removed
     path('api/v1/projects/', include('apps.core.project_urls')),
+    path('api/v1/activity/', include('apps.activity.urls')),  # Real-time Activity Tracking
     
     # MLflow Model Orchestration API
     path('api/v1/mlflow/', include('apps.mlflow_integration.urls')),

@@ -80,6 +80,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'drf_spectacular',  # API documentation
+    'channels',  # Django Channels for WebSocket support
     
     # Local apps - Core
     'apps.core',
@@ -94,8 +95,10 @@ INSTALLED_APPS = [
     # 'apps.qhse',  # TEMP DISABLED - Testing worker hang
     'apps.finance',  # Finance Invoice Automation
     'apps.designiq',  # DesignIQ - AI-Powered Engineering Design Intelligence
-    # 'apps.procurement',  # TEMP DISABLED - Testing worker hang
-    # 'apps.notifications',  # TEMP DISABLED - Signals causing worker hang
+    'apps.procurement',  # Procurement Management - Vendor & PO Tracking
+    'apps.notifications',  # Notification System - Multi-Channel Alerts & Email
+    'apps.ml_detection',  # ML Detection & Real-time Alerts
+    'apps.activity',  # Real-time Activity Tracking
     
     # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
     # Enabling this will cause startup hangs (MLflow server not available)
@@ -116,6 +119,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'apps.rbac.middleware.LoginTrackingMiddleware',
     'apps.rbac.middleware.RBACMiddleware',
+    'apps.activity.tracker.ActivityMiddleware',  # Activity tracking middleware
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -148,6 +152,19 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'config.wsgi.application'
+ASGI_APPLICATION = 'config.asgi.application'
+
+# Channel Layers Configuration (for WebSocket support)
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {
+            'hosts': [(config('REDIS_HOST', default='redis'), config('REDIS_PORT', default=6379, cast=int))],
+            'capacity': 1500,  # Maximum messages in channel
+            'expiry': 10,  # Message expiry time in seconds
+        },
+    },
+}
 
 # Database
 # ⚠️ CRITICAL: DATABASE_URL is REQUIRED for Railway deployment
