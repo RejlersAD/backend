@@ -547,13 +547,17 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 tmp_path = tmp.name
             
             try:
+                # Get format preference from request (default: without area)
+                include_area = request.POST.get('include_area', 'false').lower() == 'true'
+                
                 # Extract line numbers using Multi-Engine OCR + AI
                 extractor = PIDLineExtractorV2()
-                line_items = extractor.extract_from_pdf(tmp_path)
+                line_items = extractor.extract_from_pdf(tmp_path, include_area=include_area)
                 table_data = extractor.format_as_table_data(line_items)
                 
                 logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")
                 logger.info(f"🎯 Using Multi-Engine OCR (Tesseract + EasyOCR + PaddleOCR) + OpenAI")
+                logger.info(f"📍 Format: {'WITH AREA' if include_area else 'WITHOUT AREA'}")
                 
                 # Create or update EngineeringListItem for each detected line
                 created_items = []

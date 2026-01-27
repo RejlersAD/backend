@@ -181,13 +181,16 @@ class PIDLineExtractorV2:
         
         return combined
     
-    def parse_with_regex(self, extracted_text: str, page_num: int) -> List[Dict]:
+    def parse_with_regex(self, extracted_text: str, page_num: int, include_area: bool = False) -> List[Dict]:
         """
         🎯 RELIABLE REGEX-BASED APPROACH:
         Use pure Python regex to find line number patterns directly in OCR text.
         
-        Line format: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+        Line format (without area): SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
         Example: 12-D-5777-033842-N
+        
+        Line format (with area): SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+        Example: 4"-41-SWR-64313-A2AU16-V
         
         This is MORE RELIABLE than OpenAI because:
         - Deterministic pattern matching
@@ -195,7 +198,7 @@ class PIDLineExtractorV2:
         - Faster processing
         - Consistent results
         """
-        logger.info("  🔍 Using REGEX pattern matching on OCR text")
+        logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({'WITH AREA' if include_area else 'WITHOUT AREA'})")
         
         # First, normalize the text - replace all dash-like characters with standard hyphen
         # OCR often sees: = ~ — – ― ─ | / as separators
@@ -215,28 +218,51 @@ class PIDLineExtractorV2:
         logger.info(f"  📝 Normalized text sample (first 500 chars): {normalized_text[:500]}")
         
         # SMART FLEXIBLE REGEX PATTERNS
-        # Format: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+        # Format WITHOUT AREA: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
         # Examples: 6-VG-4952-011505-X, 16-PG-4005-011441-X, 6-PG-5143-031440
+        #
+        # Format WITH AREA: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+        # Examples: 4"-41-SWR-64313-A2AU16-V, 16"-25-PG-4667-031441-X
         
-        patterns = [
-            # Pattern 1: Standard with word boundaries (most reliable)
-            r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
+        if include_area:
+            # WITH AREA PATTERNS: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+            patterns = [
+                # Pattern 1: With quote after size (most common with area)
+                r'\b(\d{1,2})"?\s*-\s*(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{4,5})\s*-\s*([A-Z0-9]{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
+                
+                # Pattern 2: Flexible spacing with quote
+                r'\b(\d{1,2})"\s*-+\s*(\d{2,3})\s*-+\s*([A-Z]{1,3})\s*-+\s*(\d{4,5})\s*-+\s*([A-Z0-9]{5,6})(?:\s*-+\s*([A-Z]{1,2}))?\b',
+                
+                # Pattern 3: Compact format
+                r'\b(\d{1,2})"-(\d{2,3})-([A-Z]{1,3})-(\d{4,5})-([A-Z0-9]{5,6})(?:-([A-Z]{1,2}))?\b',
+                
+                # Pattern 4: With spaces
+                r'(?:^|\s)(\d{1,2})"?\s*-+\s*(\d{2,3})\s+-+\s*([A-Z]{1,3})\s+-+\s*(\d{4,5})\s+-+\s*([A-Z0-9]{5,6})(?:\s*-+\s*([A-Z]{1,2}))?(?=\s|$|-)',
+                
+                # Pattern 5: Case insensitive
+                r'(?:^|\s)(\d{1,2})"?\s*-\s*(\d{2,3})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{4,5})\s*-\s*([A-Za-z0-9]{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+            ]
+        else:
+            # WITHOUT AREA PATTERNS (ORIGINAL): SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+            patterns = [
+                # Pattern 1: Standard with word boundaries (most reliable)
+                r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
             
-            # Pattern 2: With optional quote after size
-            r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
+                # Pattern 2: With optional quote after size
+                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
             
-            # Pattern 3: More lenient spacing
-            r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
+                # Pattern 3: More lenient spacing
+                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
             
-            # Pattern 4: Compact (no spaces at all)
-            r'\b(\d{1,2})-([A-Z]{1,2})-(\d{4})-(\d{5,6})(?:-([A-Z]{1,2}))?\b',
+                # Pattern 4: Compact (no spaces at all)
+                r'\b(\d{1,2})-([A-Z]{1,2})-(\d{4})-(\d{5,6})(?:-([A-Z]{1,2}))?\b',
             
-            # Pattern 5: With flexible separators (space or hyphen)
-            r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z]{1,2}))?\b',
+                # Pattern 5: With flexible separators (space or hyphen)
+                r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z]{1,2}))?\b',
             
-            # Pattern 6: Case insensitive with word boundaries
-            r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
-        ]
+                # Pattern 6: Case insensitive with word boundaries
+                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+            ]
         
         found_lines = []
         seen_lines = set()
@@ -247,50 +273,90 @@ class PIDLineExtractorV2:
             
             for match in matches:
                 # Extract and clean components
-                size = match.group(1).strip()
-                fluid = match.group(2).upper().strip()
-                sequence = match.group(3).strip()
-                pipe_class = match.group(4).strip()
-                insulation = match.group(5).upper().strip() if match.group(5) else ''
+                if include_area:
+                    # With area: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+                    size = match.group(1).strip()
+                    area = match.group(2).strip()
+                    fluid = match.group(3).strip().upper()
+                    seq = match.group(4).strip()
+                    pipr_class = match.group(5).strip()
+                    insulation = match.group(6).strip().upper() if match.lastindex >= 6 and match.group(6) else ''
+                else:
+                    # Without area: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+                    size = match.group(1).strip()
+                    area = ''
+                    fluid = match.group(2).strip().upper()
+                    seq = match.group(3).strip()
+                    pipr_class = match.group(4).strip()
+                    insulation = match.group(5).strip().upper() if match.lastindex >= 5 and match.group(5) else ''
                 
                 # Smart cleaning: remove any non-alphanumeric from edges
                 size = re.sub(r'[^0-9]', '', size)
                 fluid = re.sub(r'[^A-Z]', '', fluid)
-                sequence = re.sub(r'[^0-9]', '', sequence)
-                pipe_class = re.sub(r'[^0-9]', '', pipe_class)
+                seq = re.sub(r'[^0-9]', '', seq)
                 if insulation:
                     insulation = re.sub(r'[^A-Z]', '', insulation)
                 
-                # Validate components (more lenient)
-                # Size: 1-2 digits (common sizes: 1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 30, 36)
+                # STRICT VALIDATION
+                # 1. SIZE: Must be 1-2 digits
                 if not size or not size.isdigit() or len(size) > 2:
                     rejected.append(f"Invalid size: {size}")
                     continue
                 
-                # Fluid: 1-2 letters only (common: D, PG, VG, CW, ST, PC, PO, etc.)
-                if not fluid or not fluid.isalpha() or len(fluid) > 2:
+                # 2. AREA: If include_area=True, must be 2-3 digits; otherwise should be empty
+                if include_area:
+                    if not area or not area.isdigit() or len(area) not in [2, 3]:
+                        rejected.append(f"Invalid area: {area}")
+                        continue
+                else:
+                    area = ''  # Ensure area is empty for without-area format
+                
+                # 3. FLUID: Must be 1-3 uppercase letters (allow 3 for area format like SWR)
+                max_fluid_len = 3 if include_area else 2
+                if not fluid or not fluid.isalpha() or len(fluid) > max_fluid_len:
                     rejected.append(f"Invalid fluid: {fluid}")
                     continue
                 
-                # Sequence: exactly 4 digits
-                if len(sequence) != 4 or not sequence.isdigit():
-                    rejected.append(f"Invalid sequence: {sequence} (need 4 digits)")
+                # 4. SEQUENCE: Must be 4-5 digits (5 for some area formats)
+                seq_lengths = [4, 5] if include_area else [4]
+                if not seq or not seq.isdigit() or len(seq) not in seq_lengths:
+                    rejected.append(f"Invalid sequence: {seq}")
                     continue
                 
-                # Pipe class: 5 or 6 digits
-                if len(pipe_class) not in [5, 6] or not pipe_class.isdigit():
-                    rejected.append(f"Invalid pipe_class: {pipe_class} (need 5-6 digits)")
+                # 5. PIPE CLASS: Can be 5-6 characters, alphanumeric with area format
+                if not pipr_class or len(pipr_class) not in [5, 6]:
+                    rejected.append(f"Invalid pipe class: {pipr_class}")
                     continue
+                if include_area:
+                    # With area, pipe class can be alphanumeric (e.g., A2AU16)
+                    if not pipr_class.isalnum():
+                        rejected.append(f"Invalid pipe class (not alphanumeric): {pipr_class}")
+                        continue
+                else:
+                    # Without area, pipe class must be all digits
+                    pipr_class = re.sub(r'[^0-9]', '', pipr_class)
+                    if not pipr_class.isdigit():
+                        rejected.append(f"Invalid pipe class (not numeric): {pipr_class}")
+                        continue
                 
-                # Insulation: optional, 1-2 letters if present
+                # 6. INSULATION: Optional, must be 1-2 letters if present
                 if insulation and (not insulation.isalpha() or len(insulation) > 2):
                     rejected.append(f"Invalid insulation: {insulation}")
                     continue
                 
-                # Build line number
-                line_number = f"{size}-{fluid}-{sequence}-{pipe_class}"
-                if insulation:
-                    line_number += f"-{insulation}"
+                # Build line number string
+                if include_area:
+                    # With area format: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+                    if insulation:
+                        line_number = f"{size}\"-{area}-{fluid}-{seq}-{pipr_class}-{insulation}"
+                    else:
+                        line_number = f"{size}\"-{area}-{fluid}-{seq}-{pipr_class}"
+                else:
+                    # Without area format: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+                    if insulation:
+                        line_number = f"{size}-{fluid}-{seq}-{pipr_class}-{insulation}"
+                    else:
+                        line_number = f"{size}-{fluid}-{seq}-{pipr_class}"
                 
                 # Deduplicate
                 if line_number in seen_lines:
@@ -302,8 +368,8 @@ class PIDLineExtractorV2:
                     'line_number': line_number,
                     'size': f'{size}"',
                     'fluid_code': fluid,
-                    'sequence_no': sequence,
-                    'pipr_class': pipe_class,
+                    'sequence_no': seq,
+                    'pipr_class': pipr_class,
                     'insulation': insulation,
                     'page': page_num,
                     'from_equipment': '',
@@ -311,6 +377,10 @@ class PIDLineExtractorV2:
                     'extraction_method': 'regex_direct',
                     'original_detection': match.group(0).strip()
                 }
+                
+                # Add area field if with-area format
+                if include_area:
+                    line_entry['area'] = area
                 
                 found_lines.append(line_entry)
         
@@ -886,7 +956,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
         logger.info(f"  📝 Regex found {len(results)} unique valid line numbers from {len(all_matches)} total matches")
         return results
     
-    def extract_from_pdf(self, pdf_path: str) -> List[Dict]:
+    def extract_from_pdf(self, pdf_path: str, include_area: bool = False) -> List[Dict]:
         """
         🚀 INTELLIGENT AI-FIRST EXTRACTION:
         
@@ -909,6 +979,8 @@ Example 4: "10\"-PG-0003-033842-X-H"
         
         Args:
             pdf_path: Path to P&ID PDF file
+            include_area: If True, detect format with Area (SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS)
+                         If False, detect standard format (SIZE-FLUID-SEQUENCE-PIPECLASS)
             
         Returns:
             List of validated line items
@@ -917,10 +989,14 @@ Example 4: "10\"-PG-0003-033842-X-H"
             doc = fitz.open(pdf_path)
             all_line_items = []
             
+            all_line_items = []
+            
             logger.info(f"🚀 STARTING AI-FIRST P&ID EXTRACTION")
             logger.info(f"📄 File: {pdf_path}")
             logger.info(f"📄 Pages: {len(doc)}")
             logger.info(f"🧠 Strategy: OCR ALL TEXT → AI INTELLIGENCE → STRICT VALIDATION")
+            format_msg = 'WITH AREA (SIZE"-AREA-FLUID-SEQ-PIPECLASS)' if include_area else 'WITHOUT AREA (SIZE-FLUID-SEQ-PIPECLASS)'
+            logger.info(f"📍 Format: {format_msg}")
             
             for page_num in range(len(doc)):
                 page = doc[page_num]
@@ -951,7 +1027,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 # PHASE 2: REGEX Pattern Matching (Reliable & Fast)
                 logger.info("🔍 PHASE 2: REGEX Pattern Recognition")
                 logger.info(f"  📝 OCR Text Sample (first 500 chars): {combined_text[:500]}")
-                line_items = self.parse_with_regex(combined_text, page_num + 1)
+                line_items = self.parse_with_regex(combined_text, page_num + 1, include_area=include_area)
                 
                 if not line_items:
                     logger.warning("  ⚠️ No line numbers found on this page")
