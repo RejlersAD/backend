@@ -547,17 +547,25 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 tmp_path = tmp.name
             
             try:
-                # Get format preference from request (default: without area)
+                # Get format preference from request
+                # - include_area: for ADNOC Onshore with area format
+                # - format_type: 'onshore' (default) or 'offshore' for ADNOC Offshore
                 include_area = request.POST.get('include_area', 'false').lower() == 'true'
+                format_type = request.POST.get('format_type', 'onshore').lower()
                 
                 # Extract line numbers using Multi-Engine OCR + AI
                 extractor = PIDLineExtractorV2()
-                line_items = extractor.extract_from_pdf(tmp_path, include_area=include_area)
+                line_items = extractor.extract_from_pdf(tmp_path, include_area=include_area, format_type=format_type)
                 table_data = extractor.format_as_table_data(line_items)
                 
                 logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")
                 logger.info(f"🎯 Using Multi-Engine OCR (Tesseract + EasyOCR + PaddleOCR) + OpenAI")
-                logger.info(f"📍 Format: {'WITH AREA' if include_area else 'WITHOUT AREA'}")
+                if format_type == 'offshore':
+                    logger.info(f"📍 Format: ADNOC OFFSHORE (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)")
+                elif include_area:
+                    logger.info(f"📍 Format: ADNOC ONSHORE WITH AREA (SIZE\"-AREA-FLUID-SEQ-PIPECLASS)")
+                else:
+                    logger.info(f"📍 Format: GENERAL (SIZE-FLUID-SEQ-PIPECLASS)")
                 
                 # Create or update EngineeringListItem for each detected line
                 created_items = []

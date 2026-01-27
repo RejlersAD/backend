@@ -10,10 +10,19 @@ import pytesseract
 import io
 import logging
 import json
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import numpy as np
 from openai import OpenAI
 from django.conf import settings
+import base64
+
+# Import OpenCV-based FROM-TO detector
+try:
+    from apps.designiq.from_to_detector import FromToDetector
+    FROM_TO_DETECTOR_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"⚠️ FromToDetector not available: {e}")
+    FROM_TO_DETECTOR_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +38,33 @@ class PIDLineExtractorV2:
         self.easyocr_reader = None
         self.paddleocr_reader = None
         self.openai_client = None
+        self.from_to_detector = None
         self._init_engines()
+        self._init_from_to_detector()
+    
+    def _init_from_to_detector(self):
+        """Initialize OpenCV-based FROM-TO detector"""
+        if FROM_TO_DETECTOR_AVAILABLE:
+            try:
+                # Configure with tuned defaults for P&ID diagrams
+                config = {
+                    'min_symbol_area': 50,
+                    'max_symbol_area': 5000,
+                    'epsilon_factor': 0.02,
+                    'min_vertices': 3,
+                    'max_vertices': 7,
+                    'canny_low': 50,
+                    'canny_high': 150,
+                    'endpoint_radius': 0.05,
+                    'max_ocr_distance': 0.1,
+                    'line_number_pattern': r'\b\d{1,2}["\']?-[A-Z]{2,3}-\d{4}\b'
+                }
+                self.from_to_detector = FromToDetector(config=config)
+                logger.info("✅ OpenCV FROM-TO Detector initialized")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize FROM-TO detector: {e}")
+        else:
+            logger.warning("⚠️ OpenCV FROM-TO detection not available")
     
     def _init_engines(self):
         """Initialize all OCR engines and OpenAI"""
@@ -181,16 +216,66 @@ class PIDLineExtractorV2:
         
         return combined
     
-    def parse_with_regex(self, extracted_text: str, page_num: int, include_area: bool = False) -> List[Dict]:
+    def extract_spatial_data(self, img: Image.Image) -> List[Dict]:
+        """
+        📍 Extract spatial/position data from PaddleOCR for FROM-TO detection
+        
+        Returns list of text items with bounding boxes and positions:
+        [{'text': str, 'bbox': list, 'center_x': float, 'center_y': float, 'confidence': float}]
+        """
+        spatial_data = []
+        
+        if not self.paddleocr_reader:
+            logger.warning("  ⚠️ PaddleOCR not available for spatial extraction")
+            return spatial_data
+        
+        try:
+            img_array = np.array(img)
+            paddle_result = self.paddleocr_reader.ocr(img_array)
+            
+            if paddle_result and isinstance(paddle_result, list) and len(paddle_result) > 0:
+                first_page = paddle_result[0]
+                if first_page and isinstance(first_page, list):
+                    for line in first_page:
+                        if line and isinstance(line, (list, tuple)) and len(line) >= 2:
+                            bbox = line[0]  # [[x0,y0], [x1,y0], [x1,y1], [x0,y1]]
+                            text_data = line[1]  # (text, confidence)
+                            
+                            if isinstance(text_data, (list, tuple)) and len(text_data) >= 2:
+                                text = str(text_data[0])
+                                confidence = float(text_data[1])
+                                
+                                # Calculate center point of bounding box
+                                x_coords = [point[0] for point in bbox]
+                                y_coords = [point[1] for point in bbox]
+                                center_x = sum(x_coords) / 4
+                                center_y = sum(y_coords) / 4
+                                
+                                spatial_data.append({
+                                    'text': text,
+                                    'bbox': bbox,
+                                    'center_x': center_x,
+                                    'center_y': center_y,
+                                    'confidence': confidence
+                                })
+        except Exception as e:
+            logger.warning(f"  ⚠️ Spatial data extraction failed: {e}")
+        
+        return spatial_data
+    
+    def parse_with_regex(self, extracted_text: str, page_num: int, include_area: bool = False, format_type: str = 'onshore') -> List[Dict]:
         """
         🎯 RELIABLE REGEX-BASED APPROACH:
         Use pure Python regex to find line number patterns directly in OCR text.
         
-        Line format (without area): SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+        Line format (onshore without area): SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
         Example: 12-D-5777-033842-N
         
-        Line format (with area): SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+        Line format (onshore with area): SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
         Example: 4"-41-SWR-64313-A2AU16-V
+        
+        Line format (offshore): AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
+        Example: 604-HO-8-BC2GA0-1071-H
         
         This is MORE RELIABLE than OpenAI because:
         - Deterministic pattern matching
@@ -198,7 +283,8 @@ class PIDLineExtractorV2:
         - Faster processing
         - Consistent results
         """
-        logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({'WITH AREA' if include_area else 'WITHOUT AREA'})")
+        format_label = 'OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA')
+        logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({format_label})")
         
         # First, normalize the text - replace all dash-like characters with standard hyphen
         # OCR often sees: = ~ — – ― ─ | / as separators
@@ -223,8 +309,30 @@ class PIDLineExtractorV2:
         #
         # Format WITH AREA: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
         # Examples: 4"-41-SWR-64313-A2AU16-V, 16"-25-PG-4667-031441-X
+        #
+        # Format OFFSHORE: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
+        # Examples: 604-HO-8-BC2GA0-1071-H, 41-SWR-16-A2AU16-64313-V
         
-        if include_area:
+        if format_type == 'offshore':
+            # ADNOC OFFSHORE PATTERNS: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
+            # Same methodology as onshore with area - flexible patterns, same validation
+            patterns = [
+                # Pattern 1: Standard with word boundaries (most reliable)
+                r'\b(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Z0-9]{5,6})\s*-\s*(\d{4,5})(?:\s*-\s*([A-Z]{1,2}))?\b',
+                
+                # Pattern 2: With flexible spacing
+                r'\b(\d{2,3})\s*-+\s*([A-Z]{1,3})\s*-+\s*(\d{1,2})"?\s*-+\s*([A-Z0-9]{5,6})\s*-+\s*(\d{4,5})(?:\s*-+\s*([A-Z]{1,2}))?\b',
+                
+                # Pattern 3: Compact format (no spaces)
+                r'\b(\d{2,3})-([A-Z]{1,3})-(\d{1,2})"?-([A-Z0-9]{5,6})-(\d{4,5})(?:-([A-Z]{1,2}))?\b',
+                
+                # Pattern 4: With spaces and lookahead
+                r'(?:^|\s)(\d{2,3})\s*-+\s*([A-Z]{1,3})\s+-+\s*(\d{1,2})"?\s+-+\s*([A-Z0-9]{5,6})\s+-+\s*(\d{4,5})(?:\s*-+\s*([A-Z]{1,2}))?(?=\s|$|-)',
+                
+                # Pattern 5: Case insensitive
+                r'(?:^|\s)(\d{2,3})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Za-z0-9]{5,6})\s*-\s*(\d{4,5})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+            ]
+        elif include_area:
             # WITH AREA PATTERNS: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
             patterns = [
                 # Pattern 1: With quote after size (most common with area)
@@ -273,7 +381,15 @@ class PIDLineExtractorV2:
             
             for match in matches:
                 # Extract and clean components
-                if include_area:
+                if format_type == 'offshore':
+                    # Offshore: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
+                    area = match.group(1).strip()
+                    fluid = match.group(2).strip().upper()
+                    size = match.group(3).strip()
+                    pipr_class = match.group(4).strip()
+                    seq = match.group(5).strip()
+                    insulation = match.group(6).strip().upper() if match.lastindex >= 6 and match.group(6) else ''
+                elif include_area:
                     # With area: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
                     size = match.group(1).strip()
                     area = match.group(2).strip()
@@ -303,8 +419,8 @@ class PIDLineExtractorV2:
                     rejected.append(f"Invalid size: {size}")
                     continue
                 
-                # 2. AREA: If include_area=True, must be 2-3 digits; otherwise should be empty
-                if include_area:
+                # 2. AREA: For offshore and include_area formats, must be 2-3 digits
+                if format_type == 'offshore' or include_area:
                     if not area or not area.isdigit() or len(area) not in [2, 3]:
                         rejected.append(f"Invalid area: {area}")
                         continue
@@ -312,28 +428,34 @@ class PIDLineExtractorV2:
                     area = ''  # Ensure area is empty for without-area format
                 
                 # 3. FLUID: Must be 1-3 uppercase letters (allow 3 for area format like SWR)
-                max_fluid_len = 3 if include_area else 2
+                max_fluid_len = 3 if (include_area or format_type == 'offshore') else 2
                 if not fluid or not fluid.isalpha() or len(fluid) > max_fluid_len:
                     rejected.append(f"Invalid fluid: {fluid}")
                     continue
                 
-                # 4. SEQUENCE: Must be 4-5 digits (5 for some area formats)
-                seq_lengths = [4, 5] if include_area else [4]
+                # 4. SEQUENCE: Must be 4-5 digits for offshore/area formats, 4 for standard
+                if format_type == 'offshore' or include_area:
+                    seq_lengths = [4, 5]
+                else:
+                    seq_lengths = [4]
                 if not seq or not seq.isdigit() or len(seq) not in seq_lengths:
                     rejected.append(f"Invalid sequence: {seq}")
                     continue
                 
-                # 5. PIPE CLASS: Can be 5-6 characters, alphanumeric with area format
-                if not pipr_class or len(pipr_class) not in [5, 6]:
-                    rejected.append(f"Invalid pipe class: {pipr_class}")
-                    continue
-                if include_area:
-                    # With area, pipe class can be alphanumeric (e.g., A2AU16)
+                # 5. PIPE CLASS: Same validation for offshore and area formats (5-6 chars)
+                if format_type == 'offshore' or include_area:
+                    # Offshore/Area format: 5-6 alphanumeric characters (e.g., A2AU16, BC2GA0, AC2NL1)
+                    if not pipr_class or len(pipr_class) not in [5, 6]:
+                        rejected.append(f"Invalid pipe class: {pipr_class}")
+                        continue
                     if not pipr_class.isalnum():
                         rejected.append(f"Invalid pipe class (not alphanumeric): {pipr_class}")
                         continue
                 else:
-                    # Without area, pipe class must be all digits
+                    # Without area: 5-6 digits only
+                    if not pipr_class or len(pipr_class) not in [5, 6]:
+                        rejected.append(f"Invalid pipe class: {pipr_class}")
+                        continue
                     pipr_class = re.sub(r'[^0-9]', '', pipr_class)
                     if not pipr_class.isdigit():
                         rejected.append(f"Invalid pipe class (not numeric): {pipr_class}")
@@ -345,7 +467,13 @@ class PIDLineExtractorV2:
                     continue
                 
                 # Build line number string
-                if include_area:
+                if format_type == 'offshore':
+                    # Offshore format: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
+                    if insulation:
+                        line_number = f"{area}-{fluid}-{size}-{pipr_class}-{seq}-{insulation}"
+                    else:
+                        line_number = f"{area}-{fluid}-{size}-{pipr_class}-{seq}"
+                elif include_area:
                     # With area format: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
                     if insulation:
                         line_number = f"{size}\"-{area}-{fluid}-{seq}-{pipr_class}-{insulation}"
@@ -371,16 +499,13 @@ class PIDLineExtractorV2:
                     'sequence_no': seq,
                     'pipr_class': pipr_class,
                     'insulation': insulation,
+                    'area': area if (format_type == 'offshore' or include_area) else '',
                     'page': page_num,
                     'from_equipment': '',
                     'to_equipment': '',
                     'extraction_method': 'regex_direct',
                     'original_detection': match.group(0).strip()
                 }
-                
-                # Add area field if with-area format
-                if include_area:
-                    line_entry['area'] = area
                 
                 found_lines.append(line_entry)
         
@@ -956,7 +1081,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
         logger.info(f"  📝 Regex found {len(results)} unique valid line numbers from {len(all_matches)} total matches")
         return results
     
-    def extract_from_pdf(self, pdf_path: str, include_area: bool = False) -> List[Dict]:
+    def extract_from_pdf(self, pdf_path: str, include_area: bool = False, format_type: str = 'onshore') -> List[Dict]:
         """
         🚀 INTELLIGENT AI-FIRST EXTRACTION:
         
@@ -981,6 +1106,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
             pdf_path: Path to P&ID PDF file
             include_area: If True, detect format with Area (SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS)
                          If False, detect standard format (SIZE-FLUID-SEQUENCE-PIPECLASS)
+            format_type: 'onshore' (default) or 'offshore' (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)
             
         Returns:
             List of validated line items
@@ -995,7 +1121,12 @@ Example 4: "10\"-PG-0003-033842-X-H"
             logger.info(f"📄 File: {pdf_path}")
             logger.info(f"📄 Pages: {len(doc)}")
             logger.info(f"🧠 Strategy: OCR ALL TEXT → AI INTELLIGENCE → STRICT VALIDATION")
-            format_msg = 'WITH AREA (SIZE"-AREA-FLUID-SEQ-PIPECLASS)' if include_area else 'WITHOUT AREA (SIZE-FLUID-SEQ-PIPECLASS)'
+            if format_type == 'offshore':
+                format_msg = 'OFFSHORE (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)'
+            elif include_area:
+                format_msg = 'WITH AREA (SIZE"-AREA-FLUID-SEQ-PIPECLASS)'
+            else:
+                format_msg = 'WITHOUT AREA (SIZE-FLUID-SEQ-PIPECLASS)'
             logger.info(f"📍 Format: {format_msg}")
             
             for page_num in range(len(doc)):
@@ -1027,14 +1158,36 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 # PHASE 2: REGEX Pattern Matching (Reliable & Fast)
                 logger.info("🔍 PHASE 2: REGEX Pattern Recognition")
                 logger.info(f"  📝 OCR Text Sample (first 500 chars): {combined_text[:500]}")
-                line_items = self.parse_with_regex(combined_text, page_num + 1, include_area=include_area)
+                line_items = self.parse_with_regex(combined_text, page_num + 1, include_area=include_area, format_type=format_type)
                 
                 if not line_items:
                     logger.warning("  ⚠️ No line numbers found on this page")
                     continue
                 
+                # SUCCESS: Add basic line items first
                 all_line_items.extend(line_items)
-                logger.info(f"✅ PAGE {page_num + 1} COMPLETE: {len(line_items)} line numbers extracted")
+                logger.info(f"✅ PAGE {page_num + 1} BASIC EXTRACTION: {len(line_items)} line numbers extracted")
+                
+                # PHASE 3: Flow Direction Detection (OPTIONAL - Vision-Based Enhancement)
+                # This is a post-processing step that won't break if it fails
+                try:
+                    logger.info("🔺 PHASE 3: Smart Vision Flow Direction Detection (Optional)")
+                    
+                    # Try vision-based detection directly (doesn't need spatial data from PaddleOCR)
+                    if line_items:
+                        enhanced_items = self.enhance_with_flow_direction(
+                            line_items.copy(), img, None, page_num + 1
+                        )
+                        # Update the items in all_line_items with enhanced versions
+                        if enhanced_items:
+                            # Remove the basic items we just added
+                            all_line_items = all_line_items[:-len(line_items)]
+                            # Add enhanced items
+                            all_line_items.extend(enhanced_items)
+                            logger.info(f"  ✅ Flow direction enhancement completed")
+                except Exception as e:
+                    logger.warning(f"  ⚠️ Flow direction detection failed (non-critical): {e}")
+                    logger.warning(f"  → Continuing with basic line items only")
             
             doc.close()
             
@@ -1069,6 +1222,393 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 unique.append(item)
         
         return unique
+    
+    def detect_flow_with_vision(self, img: Image.Image, page_num: int) -> Dict:
+        """
+        🔺 SMART VISION: Use GPT-4 Vision to detect arrows with positions
+        
+        Returns structured data with:
+        - arrows: [{'bbox_normalized': [x1,y1,x2,y2], 'orientation': str, 'center': [x,y]}]
+        """
+        logger.info(f"  🔺 detect_flow_with_vision called for page {page_num}")
+        logger.info(f"  🔑 OpenAI client available: {self.openai_client is not None}")
+        
+        if not self.openai_client:
+            logger.warning("  ⚠️ OpenAI not available for vision detection")
+            return {'arrows': []}
+        
+        try:
+            logger.info(f"  🔺 Running arrow detection with GPT-4 Vision on page {page_num}")
+            
+            # Get image dimensions for normalization
+            img_width, img_height = img.size
+            
+            # Convert image to base64
+            buffered = io.BytesIO()
+            img.save(buffered, format="PNG")
+            img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            
+            prompt = f"""You are a P&ID diagram expert. Detect ALL flow direction arrows/triangles on pipeline lines.
+
+IMAGE DIMENSIONS: {img_width}x{img_height} pixels
+
+OUTPUT FORMAT (JSON only):
+{{
+    "arrows": [
+        {{
+            "bbox_normalized": [x1, y1, x2, y2],
+            "center_normalized": [x, y],
+            "orientation": "up|down|left|right|unknown",
+            "confidence": "high|medium|low"
+        }}
+    ]
+}}
+
+RULES:
+- Find ALL arrows/triangles on pipelines
+- bbox_normalized: [x1/width, y1/height, x2/width, y2/height] (values 0-1)
+- center_normalized: [(x1+x2)/(2*width), (y1+y2)/(2*height)] (values 0-1)
+- orientation: direction arrow POINTS TO (downstream)
+- Return ONLY valid JSON, no explanations
+
+Analyze and return JSON:"""
+            
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o",  # GPT-4 Omni with vision
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{img_base64}",
+                                    "detail": "high"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                temperature=0.1,
+                max_tokens=3000
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            logger.info(f"  📝 GPT-4 Vision raw response: {result_text[:500]}...")  # Log first 500 chars
+            
+            # Clean markdown code blocks if present
+            if '```' in result_text:
+                parts = result_text.split('```')
+                for part in parts:
+                    if part.strip().startswith('json') or part.strip().startswith('{'):
+                        result_text = part.replace('json', '').strip()
+                        break
+            
+            vision_data = json.loads(result_text)
+            
+            # Log results
+            arrows = vision_data.get('arrows', [])
+            
+            logger.info(f"  ✅ Detected {len(arrows)} arrows with positions")
+            
+            return vision_data
+            
+        except json.JSONDecodeError as e:
+            logger.warning(f"  ⚠️ JSON decode error in vision response: {e}")
+            logger.warning(f"  📄 Raw response was: {result_text[:1000] if 'result_text' in locals() else 'No response'}")
+            return {'arrows': []}
+        except Exception as e:
+            logger.warning(f"  ⚠️ Vision detection failed: {e}")
+            return {'arrows': []}
+    
+    def find_line_endpoints(self, spatial_data: List[Dict], line_number: str) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """
+        🎯 Find the two endpoints of a detected line based on spatial data
+        
+        Returns (start_point, end_point) where each point is:
+        {'x': float, 'y': float, 'text': str}
+        """
+        # Find all spatial items that contain this line number
+        line_occurrences = []
+        for item in spatial_data:
+            if line_number in item.get('text', ''):
+                line_occurrences.append({
+                    'x': item['center_x'],
+                    'y': item['center_y'],
+                    'text': item['text']
+                })
+        
+        if len(line_occurrences) < 2:
+            # Line only appears once or not enough spatial data
+            return None, None
+        
+        # Sort by position to find extremes (leftmost/rightmost or topmost/bottommost)
+        # Try horizontal first (x-axis)
+        x_sorted = sorted(line_occurrences, key=lambda p: p['x'])
+        x_spread = x_sorted[-1]['x'] - x_sorted[0]['x']
+        
+        # Try vertical (y-axis)
+        y_sorted = sorted(line_occurrences, key=lambda p: p['y'])
+        y_spread = y_sorted[-1]['y'] - y_sorted[0]['y']
+        
+        # Use the axis with greater spread
+        if x_spread > y_spread:
+            # Horizontal line
+            return x_sorted[0], x_sorted[-1]
+        else:
+            # Vertical line
+            return y_sorted[0], y_sorted[-1]
+    
+    def associate_symbols_to_endpoints(
+        self, 
+        endpoint1: Dict, 
+        endpoint2: Dict, 
+        symbols: List[Dict],
+        search_radius: float = 150.0
+    ) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """
+        🔗 Associate flow symbols to line endpoints
+        
+        Returns (symbol_at_endpoint1, symbol_at_endpoint2)
+        """
+        def distance(p1, p2):
+            return np.sqrt((p1['x'] - p2['center_x'])**2 + (p1['y'] - p2['center_y'])**2)
+        
+        # Find closest symbol to each endpoint
+        symbol1 = None
+        min_dist1 = search_radius
+        
+        for symbol in symbols:
+            dist = distance(endpoint1, symbol)
+            if dist < min_dist1:
+                min_dist1 = dist
+                symbol1 = symbol
+        
+        symbol2 = None
+        min_dist2 = search_radius
+        
+        for symbol in symbols:
+            dist = distance(endpoint2, symbol)
+            if dist < min_dist2:
+                min_dist2 = dist
+                symbol2 = symbol
+        
+        return symbol1, symbol2
+    
+    def determine_from_to(
+        self,
+        endpoint1: Dict,
+        endpoint2: Dict,
+        symbol1: Optional[Dict],
+        symbol2: Optional[Dict]
+    ) -> Tuple[str, str]:
+        """
+        🎯 Determine FROM→TO direction based on symbol orientation
+        
+        LOGIC:
+        - If both endpoints have symbols:
+          - Symbol pointing AWAY from line = FROM (upstream)
+          - Symbol pointing INTO line = TO (downstream)
+        
+        - If only one endpoint has symbol:
+          - Endpoint WITH symbol = TO (downstream)
+          - Endpoint WITHOUT symbol = FROM (upstream)
+        
+        - If no symbols:
+          - Use positional heuristic (left→right, top→bottom)
+        
+        Returns (from_text, to_text) extracted from endpoint texts
+        """
+        def extract_equipment_tag(text: str) -> str:
+            """Extract equipment tag from text like 'V-201' or 'P-101'"""
+            # Look for patterns like: LETTER-NUMBER or LETTER-NUMBER-LETTER
+            match = re.search(r'\b([A-Z])-(\d+)([A-Z])?\b', text, re.IGNORECASE)
+            if match:
+                return match.group(0)
+            return text.strip()
+        
+        from_endpoint = None
+        to_endpoint = None
+        
+        if symbol1 and symbol2:
+            # Both have symbols - use orientation
+            # Symbols typically point TOWARD downstream (TO)
+            # So endpoint with symbol pointing AWAY is FROM
+            
+            # Simple heuristic: if symbols point toward each other, 
+            # the "upstream" symbol orientation indicates FROM
+            orientation1 = symbol1.get('orientation', 'unknown')
+            orientation2 = symbol2.get('orientation', 'unknown')
+            
+            # For now, use position-based fallback if orientation unclear
+            if endpoint1['x'] < endpoint2['x']:
+                # Horizontal: left is FROM, right is TO
+                from_endpoint, to_endpoint = endpoint1, endpoint2
+            else:
+                from_endpoint, to_endpoint = endpoint2, endpoint1
+                
+        elif symbol1 or symbol2:
+            # Only one has symbol - endpoint WITH symbol is usually TO (downstream)
+            if symbol1:
+                from_endpoint, to_endpoint = endpoint2, endpoint1
+            else:
+                from_endpoint, to_endpoint = endpoint1, endpoint2
+        else:
+            # No symbols - use positional heuristic
+            # Left→Right or Top→Bottom convention
+            if abs(endpoint1['x'] - endpoint2['x']) > abs(endpoint1['y'] - endpoint2['y']):
+                # More horizontal
+                if endpoint1['x'] < endpoint2['x']:
+                    from_endpoint, to_endpoint = endpoint1, endpoint2
+                else:
+                    from_endpoint, to_endpoint = endpoint2, endpoint1
+            else:
+                # More vertical
+                if endpoint1['y'] < endpoint2['y']:
+                    from_endpoint, to_endpoint = endpoint1, endpoint2
+                else:
+                    from_endpoint, to_endpoint = endpoint2, endpoint1
+        
+        from_text = extract_equipment_tag(from_endpoint['text']) if from_endpoint else ''
+        to_text = extract_equipment_tag(to_endpoint['text']) if to_endpoint else ''
+        
+        return from_text, to_text
+    
+    def enhance_with_flow_direction(
+        self,
+        line_items: List[Dict],
+        img: Image.Image,
+        spatial_data: Optional[List[Dict]],
+        page_num: int
+    ) -> List[Dict]:
+        """
+        🚀 OpenCV-Based FROM-TO Detection: Detect arrow symbols and connect line numbers
+        
+        Strategy:
+        1. Detect arrow/triangle symbols using OpenCV (Canny edges + contours + PCA)
+        2. Get OCR positions for all detected line numbers
+        3. Create virtual "lines" from line number positions
+        4. Associate symbols to line endpoints via proximity
+        5. Infer FROM/TO roles using orientation analysis
+        6. Map endpoints to line numbers with intelligent scoring
+        """
+        logger.info(f"  🔺 PHASE 3: OpenCV-Based FROM-TO Detection")
+        
+        # Check if detector available
+        if not self.from_to_detector:
+            logger.warning(f"  ⚠️ FROM-TO detector not available, skipping")
+            return line_items
+        
+        # Step 1: Get image dimensions
+        img_width, img_height = img.size
+        img_array = np.array(img)
+        
+        # Step 2: Extract OCR positions using EasyOCR
+        ocr_positions = []
+        if self.easyocr_reader:
+            try:
+                easyocr_result = self.easyocr_reader.readtext(img_array, detail=1)
+                
+                for detection in easyocr_result:
+                    bbox, text, conf = detection
+                    # Calculate bbox and center
+                    x_coords = [point[0] for point in bbox]
+                    y_coords = [point[1] for point in bbox]
+                    center_x = sum(x_coords) / 4
+                    center_y = sum(y_coords) / 4
+                    
+                    # Normalize coordinates (0-1 range)
+                    x1_norm = min(x_coords) / img_width
+                    y1_norm = min(y_coords) / img_height
+                    x2_norm = max(x_coords) / img_width
+                    y2_norm = max(y_coords) / img_height
+                    center_x_norm = center_x / img_width
+                    center_y_norm = center_y / img_height
+                    
+                    ocr_positions.append({
+                        'id': f'ocr_{len(ocr_positions)}',
+                        'text': text.upper().strip(),
+                        'bbox': (x1_norm, y1_norm, x2_norm, y2_norm),
+                        'center_x_norm': center_x_norm,
+                        'center_y_norm': center_y_norm,
+                        'confidence': conf
+                    })
+                
+                logger.info(f"  📍 Extracted {len(ocr_positions)} OCR items with positions")
+            except Exception as e:
+                logger.warning(f"  ⚠️ Could not extract spatial OCR data: {e}")
+                return line_items
+        else:
+            logger.warning(f"  ⚠️ EasyOCR not available for spatial extraction")
+            return line_items
+        
+        # Step 3: Build position map and create virtual "lines" from line number positions
+        line_position_map = {}  # {line_number: (avg_x, avg_y)}
+        virtual_lines = []
+        
+        for line_item in line_items:
+            line_number = line_item['line_number'].upper().strip()
+            line_positions = []
+            
+            # Find all OCR occurrences of this line number
+            for pos in ocr_positions:
+                if line_number in pos['text']:
+                    line_positions.append({
+                        'x': pos['center_x_norm'],
+                        'y': pos['center_y_norm'],
+                        'confidence': pos['confidence']
+                    })
+            
+            if line_positions:
+                # Calculate average position
+                avg_x = sum(p['x'] for p in line_positions) / len(line_positions)
+                avg_y = sum(p['y'] for p in line_positions) / len(line_positions)
+                line_position_map[line_number] = (avg_x, avg_y)
+                
+                # Create virtual "line" for FROM-TO detector
+                # (single point, will be used for symbol proximity matching)
+                virtual_lines.append({
+                    'id': line_number,
+                    'points': [(avg_x, avg_y)]  # Single point representing line position
+                })
+        
+        logger.info(f"  🗺️ Created {len(virtual_lines)} virtual lines from OCR positions")
+        
+        # Step 4: Run OpenCV FROM-TO detection
+        try:
+            from_to_map = self.from_to_detector.detect_from_to(
+                image=img_array,
+                lines=virtual_lines,
+                ocr_items=ocr_positions
+            )
+            
+            logger.info(f"  ✅ OpenCV detection completed: {len(from_to_map)} mappings")
+        except Exception as e:
+            logger.warning(f"  ⚠️ OpenCV FROM-TO detection failed: {e}")
+            return line_items
+        
+        # Step 5: Apply FROM-TO results to line items
+        enhanced_items = []
+        for line_item in line_items:
+            line_number = line_item['line_number'].upper().strip()
+            
+            if line_number in from_to_map:
+                mapping = from_to_map[line_number]
+                line_item['from_line'] = mapping.get('from_line', '')
+                line_item['to_line'] = mapping.get('to_line', '')
+                line_item['flow_detection_method'] = 'opencv_cv'
+                line_item['flow_confidence'] = 'high'
+                
+                if mapping.get('from_line') or mapping.get('to_line'):
+                    logger.info(f"  ✅ {line_number}: FROM={mapping.get('from_line', 'N/A')} → TO={mapping.get('to_line', 'N/A')}")
+            
+            enhanced_items.append(line_item)
+        
+        detected_count = sum(1 for item in enhanced_items if item.get('from_line') or item.get('to_line'))
+        logger.info(f"  ✅ Mapped FROM/TO for {detected_count}/{len(line_items)} lines using OpenCV")
+        
+        return enhanced_items
     
     def format_as_table_data(self, line_items: List[Dict]) -> List[Dict]:
         """
@@ -1115,6 +1655,10 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 'insulation_description': insulation_names.get(insulation, 'Unknown'),
                 'from_equipment': item.get('from_equipment', ''),
                 'to_equipment': item.get('to_equipment', ''),
+                'from_line': item.get('from_line', ''),  # NEW: Symbol-based FROM detection
+                'to_line': item.get('to_line', ''),      # NEW: Symbol-based TO detection
+                'flow_detection_method': item.get('flow_detection_method', ''),
+                'flow_confidence': item.get('flow_confidence', ''),
                 'page': item.get('page', 1),
                 'confidence': item.get('confidence', 'medium')
             })
