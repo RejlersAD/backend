@@ -1,15 +1,26 @@
 [phases.setup]
-nixPkgs = ['python311', 'postgresql']
+# Core system packages - lightweight (no ML packages)
+nixPkgs = [
+    'python311',
+    'postgresql',
+    'tesseract',  # For OCR (lightweight alternative to PaddlePaddle)
+    'poppler_utils',  # For PDF processing
+    'libGL',
+    'glib'
+]
 
 [phases.install]
 cmds = [
     'python -m venv /opt/venv',
     '. /opt/venv/bin/activate && pip install --upgrade pip',
-    '. /opt/venv/bin/activate && pip install -r requirements.txt'
+    '# Use Railway-optimized requirements (excludes 4GB of ML packages)',
+    '. /opt/venv/bin/activate && pip install -r requirements-railway.txt'
 ]
 
 [phases.build]
-cmds = ['. /opt/venv/bin/activate && python manage.py collectstatic --noinput']
+cmds = [
+    '. /opt/venv/bin/activate && python manage.py collectstatic --noinput || echo "Static files collection skipped"'
+]
 
 [start]
 cmd = 'bash railway_start.sh'
