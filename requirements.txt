@@ -38,12 +38,12 @@ google-auth-oauthlib>=1.1.0
 # MongoDB - NoSQL database for reports and unstructured data
 # MongoDB removed - using PostgreSQL only
 
-# MLflow - Model orchestration and experiment tracking
-mlflow==2.10.0
-scikit-learn==1.3.2  # Required by MLflow
-pandas>=2.1.0  # Required by MLflow
-scipy>=1.11.0  # Required for ML algorithms
-mongoengine==0.28.2
+# MLflow - REMOVED (Not used in application)
+# mlflow==2.10.0
+# scikit-learn==1.3.2  # Required by MLflow
+# pandas>=2.1.0  # Required by MLflow
+# scipy>=1.11.0  # Required for ML algorithms
+# mongoengine==0.28.2
 
 # AWS S3 Storage
 boto3==1.34.21

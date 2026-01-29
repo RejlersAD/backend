@@ -147,6 +147,7 @@ urlpatterns = [
     path('api/v1/crs/', include('apps.crs.urls')),
     path('api/v1/finance/', include('apps.finance.urls')),  # Finance Invoice Automation
     path('api/v1/designiq/', include('apps.designiq.urls')),  # DesignIQ - AI Design Intelligence
+    path('api/v1/process-datasheet/', include('apps.process_datasheet.urls')),  # Process Datasheet
     path('api/v1/projects/', include('apps.core.project_urls')),
 ]
 
@@ -167,9 +168,12 @@ if is_app_installed('apps.activity'):
     urlpatterns.append(path('api/v1/activity/', include('apps.activity.urls')))
     print("[URL] ✅ Activity URLs registered")
 
-# MLflow Model Orchestration API (always include)
+# MLflow Model Orchestration API (DISABLED - not in use)
+# urlpatterns.extend([
+#     path('api/v1/mlflow/', include('apps.mlflow_integration.urls')),
+# ])
+
 urlpatterns.extend([
-    path('api/v1/mlflow/', include('apps.mlflow_integration.urls')),
     # Add new feature URLs here - no routing changes needed!
     
     # API Documentation
