@@ -17,7 +17,8 @@ User = get_user_model()
 # Soft-coded user list - easily maintainable
 USERS_TO_GRANT = [
     'rajasekhar.pasumarthi@rejlers.ae',
-    'shaju.chacko@rejlers.ae'
+    'shaju.chacko@rejlers.ae',
+    'ravikumar.naickar@rejlers.ae'
 ]
 
 # Soft-coded module configuration
