@@ -41,7 +41,8 @@ class EmailTokenObtainPairView(TokenObtainPairView):
 
 # Create router for viewsets
 router = DefaultRouter()
-router.register(r'users', UserViewSet, basename='user')
+# Changed from 'users' to 'user-management' to avoid conflict with apps.users.urls
+router.register(r'user-management', UserViewSet, basename='user')
 
 urlpatterns = [
     # Health check
