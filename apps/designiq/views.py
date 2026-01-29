@@ -588,6 +588,10 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                             'insulation': line_data['insulation'],
                             'from_equipment': line_data.get('from_equipment', ''),
                             'to_equipment': line_data.get('to_equipment', ''),
+                            'from_line': line_data.get('from_line', ''),  # NEW: FROM line number
+                            'to_line': line_data.get('to_line', ''),      # NEW: TO line number
+                            'flow_detection_method': line_data.get('flow_detection_method', ''),
+                            'flow_confidence': line_data.get('flow_confidence', ''),
                             'upload_timestamp': timezone.now().isoformat()
                         },
                         'attachments': [{
@@ -635,13 +639,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     os.unlink(tmp_path)
             
         except Exception as e:
-            logger.error(f"❌ Error processing P&ID: {str(e)}", exc_info=True)
-            return Response({
-                "error": f"Failed to process P&ID: {str(e)}"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            
-        except Exception as e:
-            logger.error(f"Error uploading P&ID: {str(e)}", exc_info=True)
+            logger.error(f"❌ Error uploading/processing P&ID: {str(e)}", exc_info=True)
             return Response({
                 "error": f"Failed to upload P&ID: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
