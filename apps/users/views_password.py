@@ -11,6 +11,11 @@ from django.utils import timezone
 from django.db import transaction
 import logging
 from .password_reset_service import PasswordResetService
+from config.password_policy import (
+    get_password_expiry_status,
+    validate_password_strength,
+    PASSWORD_EXPIRY_DAYS
+)
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -96,10 +101,11 @@ def reset_first_login_password(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Validate password strength
-        if len(new_password) < 8:
+        # Validate password strength using policy
+        is_valid, errors = validate_password_strength(new_password)
+        if not is_valid:
             return Response(
-                {'error': 'Password must be at least 8 characters long'},
+                {'error': errors[0] if errors else 'Password does not meet policy requirements'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -137,6 +143,64 @@ def reset_first_login_password(request):
         logger.error(f"Error resetting first login password: {str(e)}")
         return Response(
             {'error': 'Failed to reset password'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def check_password_expiry(request):
+    """
+    Check password expiry status for current user
+    Returns detailed expiry information and warnings
+    
+    Returns:
+        {
+            "expired": bool,
+            "days_until_expiry": int,
+            "requires_change": bool,
+            "in_grace_period": bool,
+            "in_warning_period": bool,
+            "exempt": bool,
+            "policy_days": int,
+            "last_change_date": str,
+            "message": str
+        }
+    """
+    try:
+        user = request.user
+        
+        # Get password expiry status
+        expiry_status = get_password_expiry_status(user)
+        
+        # Format last password change date
+        last_change = getattr(user, 'last_password_change', None)
+        if not last_change:
+            last_change = user.date_joined
+        
+        # Build response message
+        if expiry_status.get('exempt'):
+            message = "You are exempt from password expiry policy"
+        elif expiry_status.get('requires_change'):
+            message = f"Your password expired {abs(expiry_status['days_until_expiry'])} days ago. Please change it immediately."
+        elif expiry_status.get('in_grace_period'):
+            message = f"Your password expired {abs(expiry_status['days_until_expiry'])} days ago. Please change it soon."
+        elif expiry_status.get('in_warning_period'):
+            message = f"Your password will expire in {expiry_status['days_until_expiry']} days. Please change it soon."
+        else:
+            message = f"Your password is valid for {expiry_status['days_until_expiry']} more days"
+        
+        return Response({
+            **expiry_status,
+            'policy_days': PASSWORD_EXPIRY_DAYS,
+            'last_change_date': last_change.isoformat(),
+            'message': message
+        })
+        
+    except Exception as e:
+        logger.error(f"Error checking password expiry: {str(e)}")
+        return Response(
+            {'error': 'Failed to check password expiry status'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -239,10 +303,11 @@ def change_password(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Validate password strength
-        if len(new_password) < 8:
+        # Validate password strength using policy
+        is_valid, errors = validate_password_strength(new_password)
+        if not is_valid:
             return Response(
-                {'error': 'Password must be at least 8 characters long'},
+                {'error': errors[0] if errors else 'Password does not meet policy requirements'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -253,17 +318,27 @@ def change_password(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # Check if new password is same as current
+        if current_password == new_password:
+            return Response(
+                {'error': 'New password must be different from current password'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         # Update password
         with transaction.atomic():
             user.set_password(new_password)
             user.last_password_change = timezone.now()
+            user.must_reset_password = False
+            user.is_first_login = False
             user.save()
         
         logger.info(f"User {user.email} successfully changed password")
         
         return Response({
             'success': True,
-            'message': 'Password successfully updated'
+            'message': 'Password successfully updated',
+            'password_expiry_days': PASSWORD_EXPIRY_DAYS
         })
         
     except Exception as e:

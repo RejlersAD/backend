@@ -119,6 +119,7 @@ INSTALLED_APPS = [
     'apps.designiq',  # DesignIQ - AI-Powered Engineering Design Intelligence
     'apps.procurement',  # Procurement Management - Vendor & PO Tracking
     'apps.notifications',  # Notification System - Multi-Channel Alerts & Email
+    'apps.process_datasheet',  # Process Datasheet - AI-Powered Equipment Datasheet Generation
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
@@ -155,6 +156,7 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'apps.rbac.middleware.LoginTrackingMiddleware',
+    'apps.users.middleware.PasswordExpiryMiddleware',  # Password expiry checking
     'apps.rbac.middleware.RBACMiddleware',
     'apps.activity.tracker.ActivityMiddleware',  # Activity tracking middleware
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -479,6 +481,11 @@ CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
+
+# Process Datasheet - Dynamic Retry Configuration
+DATASHEET_MAX_RETRIES = config('DATASHEET_MAX_RETRIES', default=5, cast=int)
+DATASHEET_TASK_TIMEOUT = config('DATASHEET_TASK_TIMEOUT', default=600, cast=int)  # 10 minutes
+DATASHEET_RETRY_BACKOFF = config('DATASHEET_RETRY_BACKOFF', default=2, cast=int)  # Exponential backoff multiplier
 
 # API Documentation
 SPECTACULAR_SETTINGS = {
