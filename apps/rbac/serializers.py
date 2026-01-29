@@ -376,9 +376,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
                 # Build absolute URI
                 absolute_uri = request.build_absolute_uri(obj.profile_photo.url)
                 
+                # Fix Vite proxy issue - frontend port in URL should be backend port
+                if ':5173' in absolute_uri:
+                    absolute_uri = absolute_uri.replace('http://localhost:5173', 'http://localhost:8000')
+                    absolute_uri = absolute_uri.replace('https://localhost:5173', 'http://localhost:8000')
+                
                 # Fix internal Docker hostname for local development
-                if 'backend:8000' in absolute_uri:
+                if 'backend:8000' in absolute_uri or 'backend_local:8000' in absolute_uri:
                     absolute_uri = absolute_uri.replace('http://backend:8000', 'http://localhost:8000')
+                    absolute_uri = absolute_uri.replace('http://backend_local:8000', 'http://localhost:8000')
                 
                 # Handle Railway internal URLs for production
                 # Replace Railway internal domains with the actual request host
@@ -391,7 +397,11 @@ class UserProfileSerializer(serializers.ModelSerializer):
                     absolute_uri = re.sub(r'https?://[^/]+', f'{scheme}://{host}', absolute_uri)
                 
                 return absolute_uri
-            return obj.profile_photo.url
+            
+            # Fallback: construct URL manually
+            from django.conf import settings
+            base_url = getattr(settings, 'BACKEND_URL', 'http://localhost:8000')
+            return f"{base_url}{obj.profile_photo.url}"
         return None
     
     def create(self, validated_data):
