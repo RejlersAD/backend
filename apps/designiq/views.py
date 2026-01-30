@@ -605,13 +605,14 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser])
     def upload_pid(self, request):
         """
-        Upload P&ID PDF and extract line list items using OCR
-        Intelligently detects line numbers in horizontal/vertical orientations
-        Parses components: size, fluid, sequence, class, insulation, connections
+        Upload P&ID PDF and extract line list items using OCR (Background Processing)
+        Uses Celery task for async processing with progress tracking
+        Returns task_id for status polling
         """
         pid_file = request.FILES.get('pid_file')
         list_type = request.data.get('list_type', 'line_list')
         line_format_config = request.data.get('line_format_config')
+        use_async = request.data.get('use_async', 'true').lower() == 'true'
         
         if not pid_file:
             return Response({
@@ -632,8 +633,9 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             import tempfile
             import os
             from django.core.files.storage import default_storage
-            from .pid_ocr_extractor_v2 import PIDLineExtractorV2
+            from .pid_ocr_extractor_v2 import get_pid_extractor
             from .models import DesignProject
+            from .tasks import process_pid_upload
             
             # Get or create project
             project, _ = DesignProject.objects.get_or_create(
@@ -666,18 +668,45 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 else:
                     line_format_config = None
 
-                # Extract line numbers using Multi-Engine OCR + AI
-                extractor = PIDLineExtractorV2()
-                line_items = extractor.extract_from_pdf(tmp_path, line_format_config=line_format_config)
-                table_data = extractor.format_as_table_data(line_items)
+                # For async processing (default), use Celery task
+                if use_async:
+                    # Queue background task
+                    task = process_pid_upload.delay(
+                        tmp_path,
+                        line_format_config=line_format_config,
+                        user_id=request.user.id,
+                        list_type=list_type
+                    )
+                    
+                    logger.info(f"📤 [P&ID Upload] Queued background task: {task.id}")
+                    
+                    return Response({
+                        "message": "P&ID upload queued for processing",
+                        "task_id": task.id,
+                        "filename": pid_file.name,
+                        "status": "queued",
+                        "note": "Use /designiq/lists/upload_pid_status/{task_id}/ to check progress"
+                    }, status=status.HTTP_202_ACCEPTED)
                 
-                logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")
-                logger.info(f"🎯 Using Multi-Engine OCR (Tesseract + EasyOCR + PaddleOCR) + Strict Validation")
-                
-                # Return extracted data without creating database items
-                # Frontend will display in table for user review
-                return Response({
-                    "message": "P&ID processed successfully",
+                # For synchronous processing (fallback or testing)
+                else:
+                    # Extract line numbers using singleton extractor (fast, reuses models)
+                    extractor = get_pid_extractor()
+                    line_items = extractor.extract_from_pdf(tmp_path, line_format_config=line_format_config)
+                    table_data = extractor.format_as_table_data(line_items)
+                    
+                    logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")
+                    logger.info(f"🎯 Using Multi-Engine OCR (Tesseract + EasyOCR + PaddleOCR) + Strict Validation")
+                    
+                    # Return extracted data immediately
+                    return Response({
+                        "message": "P&ID processed successfully",
+                        "filename": pid_file.name,
+                        "total_items": len(table_data),
+                        "extracted_lines": table_data,
+                        "pdf_path": saved_path,
+                        "note": "Multi-engine OCR (Tesseract + EasyOCR + PaddleOCR) + Strict pattern matching with programmatic validation. Filters out garbage words and validates each component. Data displayed for review - not saved to database."
+                    }, status=status.HTTP_201_CREATED)
                     "filename": pid_file.name,
                     "total_items": len(table_data),
                     "extracted_lines": table_data,
@@ -686,8 +715,8 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_201_CREATED)
                 
             finally:
-                # Clean up temp file
-                if os.path.exists(tmp_path):
+                # Clean up temp file (only for sync mode)
+                if not use_async and os.path.exists(tmp_path):
                     os.unlink(tmp_path)
             
         except Exception as e:
@@ -695,8 +724,66 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             return Response({
                 "error": f"Failed to process P&ID: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['get'], url_path='upload_pid_status/(?P<task_id>[^/.]+)')
+    def upload_pid_status(self, request, task_id=None):
+        """
+        Check status of P&ID upload background task
+        GET /api/v1/designiq/lists/upload_pid_status/{task_id}/
+        
+        Returns:
+            - state: PENDING, PROGRESS, SUCCESS, FAILURE
+            - current/total: Progress percentage
+            - status: Human-readable status message
+            - result: Final result if SUCCESS
+        """
+        from celery.result import AsyncResult
+        
+        if not task_id:
+            return Response({
+                "error": "No task_id provided"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            task = AsyncResult(task_id)
+            
+            if task.state == 'PENDING':
+                response = {
+                    'state': task.state,
+                    'status': 'Task is waiting in queue...',
+                    'current': 0,
+                    'total': 100
+                }
+            elif task.state == 'PROGRESS':
+                response = {
+                    'state': task.state,
+                    'current': task.info.get('current', 0),
+                    'total': task.info.get('total', 100),
+                    'status': task.info.get('status', 'Processing...')
+                }
+            elif task.state == 'SUCCESS':
+                result = task.result
+                response = {
+                    'state': task.state,
+                    'status': 'Completed successfully!',
+                    'current': 100,
+                    'total': 100,
+                    'result': result
+                }
+            else:
+                # FAILURE or other states
+                response = {
+                    'state': task.state,
+                    'status': str(task.info),
+                    'error': str(task.info) if task.failed() else None
+                }
+            
+            return Response(response, status=status.HTTP_200_OK)
             
         except Exception as e:
+            logger.error(f"❌ Error checking task status: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to check task status: {str(e)}"
             logger.error(f"Error uploading P&ID: {str(e)}", exc_info=True)
             return Response({
                 "error": f"Failed to upload P&ID: {str(e)}"

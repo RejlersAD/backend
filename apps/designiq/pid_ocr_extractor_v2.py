@@ -27,11 +27,39 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+# Singleton instance for OCR engines (initialized once, reused)
+_extractor_instance = None
+_extractor_lock = None
+
+
+def get_pid_extractor():
+    """
+    Get singleton instance of PIDLineExtractorV2
+    Ensures OCR engines are initialized only once and reused across requests
+    """
+    global _extractor_instance, _extractor_lock
+    
+    if _extractor_lock is None:
+        import threading
+        _extractor_lock = threading.Lock()
+    
+    if _extractor_instance is None:
+        with _extractor_lock:
+            if _extractor_instance is None:
+                logger.info("🔧 Initializing singleton PIDLineExtractorV2 instance...")
+                _extractor_instance = PIDLineExtractorV2()
+                logger.info("✅ Singleton PIDLineExtractorV2 initialized and cached")
+    
+    return _extractor_instance
+
+
 class PIDLineExtractorV2:
     """
     Multi-Engine P&ID line number extractor
     Step 1: Extract ALL text using Tesseract, EasyOCR, PaddleOCR
     Step 2: Parse line numbers using regex patterns from user configuration
+    
+    NOTE: Use get_pid_extractor() to get singleton instance instead of direct instantiation
     """
     
     def __init__(self):
