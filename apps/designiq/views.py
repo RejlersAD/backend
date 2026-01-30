@@ -668,28 +668,34 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 else:
                     line_format_config = None
 
-                # For async processing (default), use Celery task
+                # For async processing (default), use Celery task if available
                 if use_async:
-                    # Queue background task
-                    task = process_pid_upload.delay(
-                        tmp_path,
-                        line_format_config=line_format_config,
-                        user_id=request.user.id,
-                        list_type=list_type
-                    )
+                    try:
+                        # Try to queue background task
+                        task = process_pid_upload.delay(
+                            tmp_path,
+                            line_format_config=line_format_config,
+                            user_id=request.user.id,
+                            list_type=list_type
+                        )
+                        
+                        logger.info(f"📤 [P&ID Upload] Queued background task: {task.id}")
+                        
+                        return Response({
+                            "message": "P&ID upload queued for processing",
+                            "task_id": task.id,
+                            "filename": pid_file.name,
+                            "status": "queued",
+                            "note": "Use /designiq/lists/upload_pid_status/{task_id}/ to check progress"
+                        }, status=status.HTTP_202_ACCEPTED)
                     
-                    logger.info(f"📤 [P&ID Upload] Queued background task: {task.id}")
-                    
-                    return Response({
-                        "message": "P&ID upload queued for processing",
-                        "task_id": task.id,
-                        "filename": pid_file.name,
-                        "status": "queued",
-                        "note": "Use /designiq/lists/upload_pid_status/{task_id}/ to check progress"
-                    }, status=status.HTTP_202_ACCEPTED)
+                    except Exception as celery_error:
+                        # Celery/Redis not available, fall back to synchronous processing
+                        logger.warning(f"⚠️ Celery not available ({str(celery_error)}), falling back to sync processing")
+                        use_async = False
                 
-                # For synchronous processing (fallback or testing)
-                else:
+                # For synchronous processing (fallback when Redis unavailable or use_async=false)
+                if not use_async:
                     # Extract line numbers using singleton extractor (fast, reuses models)
                     extractor = get_pid_extractor()
                     line_items = extractor.extract_from_pdf(tmp_path, line_format_config=line_format_config)
