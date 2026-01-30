@@ -28,8 +28,12 @@ PyPDF2==3.0.1
 pdf2image==1.17.0
 pymupdf==1.24.0
 
-# Lightweight OCR (Tesseract only - no PaddlePaddle)
+# Full OCR Stack (All Engines Enabled)
 pytesseract==0.3.13
+easyocr==1.7.2
+paddlepaddle==3.3.0
+paddleocr==3.3.3
+opencv-python-headless==4.10.0.84
 
 # Google Sheets API
 google-api-python-client>=2.100.0
@@ -53,15 +57,14 @@ scikit-learn>=1.3.0
 pandas>=2.1.0
 
 # ==========================================
-# HEAVY PACKAGES REMOVED FOR RAILWAY
+# FULL OCR STACK ENABLED
 # ==========================================
-# These packages add 3-4 GB to the image:
-# - paddlepaddle (2GB)
-# - paddleocr (500MB)
-# - easyocr (500MB+)
-# - mlflow (300MB+)
-# - opencv-python-headless (200MB+)
+# All OCR engines installed for production:
+# ✅ Tesseract OCR (pytesseract + tesseract binary)
+# ✅ EasyOCR (1.7.2) - ~500MB
+# ✅ PaddleOCR (3.3.3) + PaddlePaddle (3.3.0) - ~2GB
+# ✅ OpenCV (opencv-python-headless) - ~200MB
 #
-# Install locally if needed:
-# pip install -r requirements-ml.txt
+# Total size impact: ~3-4 GB
+# Requires Railway Pro plan or optimization
 # ==========================================
