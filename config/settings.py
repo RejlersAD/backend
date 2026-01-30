@@ -116,6 +116,7 @@ INSTALLED_APPS = [
     'apps.pfd_converter',
     'apps.crs',
     'apps.finance',  # Finance Invoice Automation
+    'apps.sales',  # Sales Management - CRM, Pipeline, AI-Powered Insights
     'apps.designiq',  # DesignIQ - AI-Powered Engineering Design Intelligence
     'apps.procurement',  # Procurement Management - Vendor & PO Tracking
     'apps.notifications',  # Notification System - Multi-Channel Alerts & Email

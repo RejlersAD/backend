@@ -17,6 +17,10 @@ class FeatureCategory(Enum):
     COMPLIANCE = "compliance"
     OPERATIONS = "operations"
     ANALYTICS = "analytics"
+    FINANCE = "finance"
+    SALES = "sales"
+    PROJECT_CONTROL = "project_control"
+    PROCUREMENT = "procurement"
     OTHER = "other"
 
 
@@ -263,6 +267,121 @@ class FeatureRegistry:
             has_dashboard=True,
             required_permissions=["users.view_user_management"],
             order=11,
+            version="1.0.0"
+        ))
+        
+        # Sales Management Features
+        self.register(FeatureConfig(
+            id="sales_dashboard",
+            name="Sales Dashboard",
+            description="Comprehensive sales overview with AI-powered insights and analytics",
+            icon="📊",
+            category=FeatureCategory.SALES,
+            status=FeatureStatus.ACTIVE,
+            frontend_route="/sales",
+            backend_url_pattern="api/v1/sales/",
+            color_scheme={
+                "primary": "cyan",
+                "secondary": "blue",
+                "gradient": "from-cyan-500 to-blue-600"
+            },
+            capabilities=[
+                "Real-time sales metrics & KPIs",
+                "Revenue & pipeline tracking",
+                "Deal performance analytics",
+                "AI-powered forecasting"
+            ],
+            keywords=["sales", "revenue", "pipeline", "dashboard", "analytics"],
+            app_name="sales",
+            has_dashboard=True,
+            has_export=True,
+            order=4,
+            is_new=True,
+            version="1.0.0"
+        ))
+        
+        self.register(FeatureConfig(
+            id="sales_crm",
+            name="Client Management (CRM)",
+            description="Complete customer relationship management with AI insights",
+            icon="👥",
+            category=FeatureCategory.SALES,
+            status=FeatureStatus.ACTIVE,
+            frontend_route="/sales",
+            backend_url_pattern="api/v1/sales/clients/",
+            color_scheme={
+                "primary": "cyan",
+                "secondary": "blue",
+                "gradient": "from-cyan-500 to-blue-600"
+            },
+            capabilities=[
+                "Client & contact management",
+                "Interaction history tracking",
+                "AI-powered lead scoring",
+                "Relationship analytics"
+            ],
+            keywords=["crm", "clients", "contacts", "customers", "relationships"],
+            app_name="sales",
+            has_dashboard=True,
+            order=4,
+            is_new=True,
+            version="1.0.0"
+        ))
+        
+        self.register(FeatureConfig(
+            id="sales_pipeline",
+            name="Sales Pipeline",
+            description="Visual deal tracking and pipeline management",
+            icon="🎯",
+            category=FeatureCategory.SALES,
+            status=FeatureStatus.ACTIVE,
+            frontend_route="/sales",
+            backend_url_pattern="api/v1/sales/deals/",
+            color_scheme={
+                "primary": "cyan",
+                "secondary": "blue",
+                "gradient": "from-cyan-500 to-blue-600"
+            },
+            capabilities=[
+                "Deal stage management",
+                "Win/loss probability tracking",
+                "Pipeline value analytics",
+                "Automated stage updates"
+            ],
+            keywords=["pipeline", "deals", "opportunities", "stages"],
+            app_name="sales",
+            has_dashboard=True,
+            has_export=True,
+            order=4,
+            is_new=True,
+            version="1.0.0"
+        ))
+        
+        self.register(FeatureConfig(
+            id="sales_ai_insights",
+            name="AI Sales Insights",
+            description="Machine learning powered sales intelligence and recommendations",
+            icon="🤖",
+            category=FeatureCategory.SALES,
+            status=FeatureStatus.ACTIVE,
+            frontend_route="/sales",
+            backend_url_pattern="api/v1/sales/ai/",
+            color_scheme={
+                "primary": "purple",
+                "secondary": "cyan",
+                "gradient": "from-purple-500 to-cyan-600"
+            },
+            capabilities=[
+                "Predictive sales forecasting",
+                "Deal prioritization AI",
+                "Churn risk analysis",
+                "Next best action recommendations"
+            ],
+            keywords=["ai", "insights", "forecasting", "predictions", "intelligence"],
+            app_name="sales",
+            has_dashboard=True,
+            order=4,
+            is_new=True,
             version="1.0.0"
         ))
     

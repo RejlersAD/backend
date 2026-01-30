@@ -62,6 +62,8 @@ def list_features(request):
             features = [f for f in features if f.id in feature_ids]
         
         print(f"[DEBUG list_features] Returning {len(features)} features")
+        for f in features:
+            print(f"[DEBUG] Feature: {f.id}, Category: {f.category.value}")
         return Response({
             'success': True,
             'count': len(features),

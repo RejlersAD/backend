@@ -23,12 +23,15 @@ PyPDF2==3.0.1
 pdf2image==1.17.0
 pymupdf==1.24.0
 
-# OCR Dependencies for P&ID Processing
-pytesseract==0.3.13
-easyocr==1.7.2
-paddlepaddle==3.3.0
-paddleocr==3.3.3
-opencv-python-headless==4.10.0.84
+# OCR Dependencies for P&ID Processing - MOVED TO requirements-ml.txt (Heavy: 1.5GB+)
+# pytesseract==0.3.13
+# easyocr==1.7.2
+# paddlepaddle==3.3.0
+# paddleocr==3.3.3
+# opencv-python-headless==4.10.0.84
+
+# Lightweight alternatives for Sales/Finance modules (no heavy ML needed)
+# Sales module uses rule-based AI - statistical calculations only
 
 # Google Sheets API
 google-api-python-client>=2.100.0

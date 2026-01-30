@@ -10,7 +10,11 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from django.db.models import Sum, Avg, Count, Q, Max
 from django.db.models.functions import TruncMonth
 from datetime import datetime, timedelta
-import pandas as pd
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
 from decimal import Decimal
 
 # Import Data Visibility for Row-Level Security

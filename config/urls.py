@@ -168,6 +168,10 @@ if is_app_installed('apps.activity'):
     urlpatterns.append(path('api/v1/activity/', include('apps.activity.urls')))
     print("[URL] ✅ Activity URLs registered")
 
+if is_app_installed('apps.sales'):
+    urlpatterns.append(path('api/v1/sales/', include('apps.sales.urls')))
+    print("[URL] ✅ Sales URLs registered")
+
 # MLflow Model Orchestration API (DISABLED - not in use)
 # urlpatterns.extend([
 #     path('api/v1/mlflow/', include('apps.mlflow_integration.urls')),
