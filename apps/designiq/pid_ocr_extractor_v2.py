@@ -1,6 +1,7 @@
 """
 P&ID OCR Extractor V2 - Multi-Engine OCR
 Uses Tesseract, EasyOCR, PaddleOCR for text extraction + Regex for line parsing
+Last Updated: 2026-01-30 - Production deployment with area field support
 """
 
 import re
