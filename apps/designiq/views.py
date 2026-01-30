@@ -707,12 +707,6 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                         "pdf_path": saved_path,
                         "note": "Multi-engine OCR (Tesseract + EasyOCR + PaddleOCR) + Strict pattern matching with programmatic validation. Filters out garbage words and validates each component. Data displayed for review - not saved to database."
                     }, status=status.HTTP_201_CREATED)
-                    "filename": pid_file.name,
-                    "total_items": len(table_data),
-                    "extracted_lines": table_data,
-                    "pdf_path": saved_path,
-                    "note": "Multi-engine OCR (Tesseract + EasyOCR + PaddleOCR) + Strict pattern matching with programmatic validation. Filters out garbage words and validates each component. Data displayed for review - not saved to database."
-                }, status=status.HTTP_201_CREATED)
                 
             finally:
                 # Clean up temp file (only for sync mode)
