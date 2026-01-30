@@ -8,12 +8,19 @@ Handles both horizontal and vertical text orientations
 import re
 import fitz  # PyMuPDF
 from PIL import Image
-import pytesseract
 import io
 import logging
 import json
 from typing import List, Dict, Optional
 import numpy as np
+
+# Conditional import for pytesseract (graceful fallback if not installed)
+try:
+    import pytesseract
+    PYTESSERACT_AVAILABLE = True
+except ImportError:
+    pytesseract = None
+    PYTESSERACT_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -134,13 +141,17 @@ class PIDLineExtractor:
                             rotated_img = img
                         
                         # OCR with custom config for better accuracy
-                        custom_config = r'--oem 3 --psm 6'  # PSM 6 = Assume uniform block of text
-                        ocr_text = pytesseract.image_to_string(rotated_img, config=custom_config)
-                        
-                        # Also try PSM 11 (sparse text) for better line detection
-                        if not ocr_text.strip():
-                            custom_config = r'--oem 3 --psm 11'
+                        if PYTESSERACT_AVAILABLE and pytesseract:
+                            custom_config = r'--oem 3 --psm 6'  # PSM 6 = Assume uniform block of text
                             ocr_text = pytesseract.image_to_string(rotated_img, config=custom_config)
+                            
+                            # Also try PSM 11 (sparse text) for better line detection
+                            if not ocr_text.strip():
+                                custom_config = r'--oem 3 --psm 11'
+                                ocr_text = pytesseract.image_to_string(rotated_img, config=custom_config)
+                        else:
+                            logger.warning("  ⚠️ Pytesseract not available, skipping OCR")
+                            ocr_text = ""
                         
                         logger.info(f"  → OCR extracted {len(ocr_text)} characters")
                         ocr_items = self._parse_line_numbers(ocr_text, page_num + 1, f'ocr_{angle}°')
