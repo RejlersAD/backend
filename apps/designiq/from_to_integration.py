@@ -12,8 +12,7 @@ import io
 from PIL import Image
 
 from .from_to_direction import (
-    Line, Arrow, OcrItem,
-    compute_from_to_for_lines
+    LineRecord, ArrowInfo
 )
 
 logger = logging.getLogger(__name__)
@@ -22,9 +21,9 @@ logger = logging.getLogger(__name__)
 def convert_geometric_lines_to_line_objects(
     normalized_lines: List[Dict],
     line_connectivity: Dict[int, List[int]],
-) -> List[Line]:
+) -> List[LineRecord]:
     """
-    Convert OpenCV-detected geometric lines to Line objects with ordered points.
+    Convert OpenCV-detected geometric lines to LineRecord objects with ordered points.
     
     Uses connectivity graph to chain line segments together into continuous pipes.
     
@@ -33,9 +32,9 @@ def convert_geometric_lines_to_line_objects(
         line_connectivity: Dict mapping line_id to list of connected line_ids
     
     Returns:
-        List of Line objects with ordered points along the pipe
+        List of LineRecord objects with ordered points along the pipe
     """
-    logger.info(f"  🔄 Converting {len(normalized_lines)} geometric segments to Line objects")
+    logger.info(f"  🔄 Converting {len(normalized_lines)} geometric segments to LineRecord objects")
     
     lines = []
     
@@ -49,9 +48,9 @@ def convert_geometric_lines_to_line_objects(
             (geom_line['x2'], geom_line['y2'])
         ]
         
-        lines.append(Line(id=line_id, points=points))
-    
-    logger.info(f"  ✅ Converted to {len(lines)} Line objects")
+        lines.append(LineRecord(id=line_id, points=points))
+
+    logger.info(f"  ✅ Converted to {len(lines)} LineRecord objects")
     
     return lines
 
@@ -60,9 +59,9 @@ def convert_vision_arrows_to_arrow_objects(
     vision_data: Dict,
     img_width: int,
     img_height: int,
-) -> List[Arrow]:
+) -> List[ArrowInfo]:
     """
-    Convert GPT-4 Vision arrow detection results to Arrow objects.
+    Convert GPT-4 Vision arrow detection results to ArrowInfo objects.
     
     Vision data format:
     {
@@ -81,7 +80,7 @@ def convert_vision_arrows_to_arrow_objects(
         img_height: Image height in pixels
     
     Returns:
-        List of Arrow objects with normalized coordinates
+        List of ArrowInfo objects with normalized coordinates
     """
     arrows_data = vision_data.get('arrows', [])
     
@@ -89,7 +88,7 @@ def convert_vision_arrows_to_arrow_objects(
         logger.info("  ℹ️ No arrows found in vision data")
         return []
     
-    logger.info(f"  🔄 Converting {len(arrows_data)} vision arrows to Arrow objects")
+    logger.info(f"  🔄 Converting {len(arrows_data)} vision arrows to ArrowInfo objects")
     
     arrows = []
     orientation_vectors = {
@@ -120,7 +119,7 @@ def convert_vision_arrows_to_arrow_objects(
             tip_x = centroid_x + direction_vec[0] * offset_distance
             tip_y = centroid_y + direction_vec[1] * offset_distance
             
-            arrow = Arrow(
+            arrow = ArrowInfo(
                 id=f"vision_arrow_{idx}",
                 centroid=(centroid_x, centroid_y),
                 tip=(tip_x, tip_y)
@@ -140,9 +139,9 @@ def convert_vision_arrows_to_arrow_objects(
 
 def convert_contour_arrows_to_arrow_objects(
     arrow_symbols: List[Dict],
-) -> List[Arrow]:
+) -> List[ArrowInfo]:
     """
-    Convert OpenCV contour-detected arrows to Arrow objects.
+    Convert OpenCV contour-detected arrows to ArrowInfo objects.
     
     Arrow symbol format:
     {
@@ -155,13 +154,13 @@ def convert_contour_arrows_to_arrow_objects(
         arrow_symbols: List of arrow dicts from OpenCV contour detection
     
     Returns:
-        List of Arrow objects
+        List of ArrowInfo objects
     """
     if not arrow_symbols:
         logger.info("  ℹ️ No contour arrows provided")
         return []
     
-    logger.info(f"  🔄 Converting {len(arrow_symbols)} contour arrows to Arrow objects")
+    logger.info(f"  🔄 Converting {len(arrow_symbols)} contour arrows to ArrowInfo objects")
     
     arrows = []
     
@@ -175,7 +174,7 @@ def convert_contour_arrows_to_arrow_objects(
             tip_x = centroid[0] + np.cos(orientation) * offset_distance
             tip_y = centroid[1] + np.sin(orientation) * offset_distance
             
-            arrow = Arrow(
+            arrow = ArrowInfo(
                 id=f"contour_arrow_{idx}",
                 centroid=centroid,
                 tip=(tip_x, tip_y)
@@ -361,18 +360,18 @@ def determine_from_to_with_openai_vision(
 def convert_ocr_results_to_ocr_items(
     line_items: List[Dict],
     ocr_positions: Dict[str, List[Tuple[float, float]]],
-) -> List[OcrItem]:
+) -> List[Dict]:
     """
-    Convert OCR detection results to OcrItem objects.
+    Convert OCR detection results to dict objects (OcrItem not needed).
     
     Args:
         line_items: List of extracted line item dicts with 'line_number' field
         ocr_positions: Dict mapping line_number to list of (norm_x, norm_y) positions
     
     Returns:
-        List of OcrItem objects with estimated bounding boxes
+        List of dict objects with estimated bounding boxes
     """
-    logger.info(f"  🔄 Converting {len(ocr_positions)} OCR detections to OcrItem objects")
+    logger.info(f"  🔄 Converting {len(ocr_positions)} OCR detections to dict objects")
     
     ocr_items = []
     bbox_half_width = 30  # Half-width of estimated bbox (normalized units)
@@ -391,15 +390,15 @@ def convert_ocr_results_to_ocr_items(
                 cy + bbox_half_height   # y_max
             )
             
-            ocr_item = OcrItem(
-                id=f"ocr_{line_number}",
-                text=line_number,
-                bbox=bbox
-            )
+            ocr_item = {
+                'id': f"ocr_{line_number}",
+                'text': line_number,
+                'bbox': bbox
+            }
             
             ocr_items.append(ocr_item)
     
-    logger.info(f"  ✅ Created {len(ocr_items)} OcrItem objects")
+    logger.info(f"  ✅ Created {len(ocr_items)} dict objects")
     
     return ocr_items
 
@@ -435,7 +434,7 @@ def integrate_from_to_detection(
     try:
         # Step 1: Convert data structures
         lines = convert_geometric_lines_to_line_objects(normalized_lines, line_connectivity)
-        ocr_items = convert_ocr_results_to_ocr_items(line_items, ocr_positions)
+        # ocr_items = convert_ocr_results_to_ocr_items(line_items, ocr_positions)  # NOT USED
         
         # Step 2: Collect arrows from multiple sources
         arrows = []
@@ -455,13 +454,16 @@ def integrate_from_to_detection(
         
         # Step 3: Run FROM-TO detection pipeline
         # Convert from normalized (0-1000) to decimal (0.0-1.0)
-        from_to_map = compute_from_to_for_lines(
-            lines=lines,
-            arrows=arrows,
-            ocr_items=ocr_items,
-            arrow_association_radius=0.05,  # 5% in decimal units (50 pixels)
-            ocr_association_max_distance=0.15,  # 15% in decimal units (150 pixels)
-        )
+        # from_to_map = compute_from_to_for_lines(  # FUNCTION DOESN'T EXIST - disabled
+        #     lines=lines,
+        #     arrows=arrows,
+        #     ocr_items=ocr_items,
+        #     arrow_association_radius=0.05,  # 5% in decimal units (50 pixels)
+        #     ocr_association_max_distance=0.15,  # 15% in decimal units (150 pixels)
+        # )
+        
+        logger.warning("  ⚠️ integrate_from_to_detection is disabled - function not implemented")
+        return line_items  # Return unchanged
         
         # Step 4: Update line items with FROM-TO data
         logger.info(f"  📝 Updating {len(line_items)} line items with FROM-TO data")

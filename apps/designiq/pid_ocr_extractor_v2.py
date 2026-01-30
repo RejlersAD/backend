@@ -16,13 +16,14 @@ from openai import OpenAI
 from django.conf import settings
 import base64
 
-# Import OpenCV-based FROM-TO detector
+# Import Geometric FROM-TO detector
 try:
-    from apps.designiq.from_to_detector import FromToDetector
-    FROM_TO_DETECTOR_AVAILABLE = True
+    from apps.designiq.geometric_from_to_detector import GeometricFromToDetector
+    GEOMETRIC_DETECTOR_AVAILABLE = True
 except ImportError as e:
-    logger.warning(f"⚠️ FromToDetector not available: {e}")
-    FROM_TO_DETECTOR_AVAILABLE = False
+    GEOMETRIC_DETECTOR_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning(f"⚠️ GeometricFromToDetector not available: {e}")
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +39,28 @@ class PIDLineExtractorV2:
         self.easyocr_reader = None
         self.paddleocr_reader = None
         self.openai_client = None
-        self.from_to_detector = None
+        self.geometric_detector = None
         self._init_engines()
-        self._init_from_to_detector()
+        self._init_geometric_detector()
     
-    def _init_from_to_detector(self):
-        """Initialize OpenCV-based FROM-TO detector"""
-        # DISABLED: Using geometric line detection only (not symbol-based)
-        self.from_to_detector = None
-        logger.info("✅ Using geometric line-based FROM-TO detection (symbol detection disabled)")
+    def _init_geometric_detector(self):
+        """Initialize Geometric Line-based FROM-TO detector"""
+        if GEOMETRIC_DETECTOR_AVAILABLE:
+            try:
+                self.geometric_detector = GeometricFromToDetector(
+                    line_detection_threshold=50,
+                    min_line_length=30,
+                    max_line_gap=10,
+                    association_threshold=0.03
+                )
+                logger.info("✅ Geometric FROM-TO Detector initialized")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize geometric detector: {e}")
+                self.geometric_detector = None
+        else:
+            self.geometric_detector = None
+            logger.info("ℹ️ Geometric detector not available (missing dependencies)")
+
     
     def _init_engines(self):
         """Initialize all OCR engines and OpenAI"""
@@ -1157,44 +1171,60 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 all_line_items.extend(line_items)
                 logger.info(f"✅ PAGE {page_num + 1} BASIC EXTRACTION: {len(line_items)} line numbers extracted")
                 
-                # PHASE 3A: OpenAI Vision-Based FROM-TO Detection (PRIMARY METHOD)
-                vision_from_to_success = False
+                # PHASE 3A: Spatial Matching FROM-TO Detection (PRIMARY METHOD - from research paper)
+                spatial_from_to_success = False
                 try:
-                    if self.openai_client:
-                        logger.info("🧠 PHASE 3A: OpenAI Vision-Based FROM-TO Detection")
-                        logger.info("  📍 Method: AI Process Engineer - Visual flow analysis")
+                    logger.info("🔬 PHASE 3A: Spatial Matching FROM-TO Detection (Research Paper Method)")
+                    logger.info("  📍 Method: Correlate text positions with line endpoints")
+                    logger.info("  📄 Reference: 'Automated counting of P&ID using AI' (2025)")
+                    
+                    # Import spatial matching module
+                    from apps.designiq.spatial_matching import SpatialLineDetector
+                    
+                    # Initialize detector
+                    spatial_detector = SpatialLineDetector()
+                    
+                    # Convert PIL Image to numpy array for OpenCV
+                    import numpy as np
+                    img_np = np.array(img)
+                    
+                    # Step 1: Detect line geometries
+                    logger.info(f"  🔍 Step 1: Detecting line geometries on page {page_num + 1}...")
+                    line_geometries = spatial_detector.detect_line_geometries(img_np)
+                    
+                    if line_geometries and len(line_geometries) > 0:
+                        logger.info(f"  ✅ Detected {len(line_geometries)} line geometries")
                         
-                        # Import the new function
-                        from apps.designiq.from_to_integration import determine_from_to_with_openai_vision
+                        # Step 2: Prepare line number data with bounding boxes
+                        logger.info(f"  🔍 Step 2: Preparing {len(line_items)} line numbers for spatial matching...")
                         
-                        # Extract just the line numbers for the prompt
-                        line_numbers = [item['line_number'] for item in line_items]
+                        # Get image dimensions
+                        image_height, image_width = img_np.shape[:2]
                         
-                        logger.info(f"  🔍 Sending {len(line_numbers)} line numbers to OpenAI Vision...")
-                        
-                        # Call OpenAI Vision
-                        vision_from_to_map = determine_from_to_with_openai_vision(
-                            ocr_line_numbers=line_numbers,
-                            pdf_image=img,
-                            page_number=page_num + 1,
-                            openai_client=self.openai_client
+                        # Step 3: Perform spatial matching
+                        logger.info(f"  🔍 Step 3: Matching text positions to line endpoints...")
+                        spatial_from_to_map = spatial_detector.spatial_matching_from_to(
+                            line_numbers=line_items,  # Already has 'bbox' from OCR
+                            line_geometries=line_geometries,
+                            image_width=image_width,
+                            image_height=image_height
                         )
                         
-                        if vision_from_to_map:
-                            # Update line items with OpenAI Vision results
+                        if spatial_from_to_map:
+                            # Update line items with spatial matching results
                             for item in line_items:
                                 line_num = item['line_number']
-                                if line_num in vision_from_to_map:
-                                    from_line = vision_from_to_map[line_num].get('from')
-                                    to_line = vision_from_to_map[line_num].get('to')
+                                if line_num in spatial_from_to_map:
+                                    from_line = spatial_from_to_map[line_num].get('from_line')
+                                    to_line = spatial_from_to_map[line_num].get('to_line')
                                     
-                                    if from_line:
+                                    if from_line and from_line != '-':
                                         item['from_line'] = from_line
-                                    if to_line:
+                                    if to_line and to_line != '-':
                                         item['to_line'] = to_line
                                     
-                                    item['flow_detection_method'] = 'openai_vision'
-                                    item['flow_confidence'] = 'high'
+                                    item['flow_detection_method'] = 'spatial_matching'
+                                    item['flow_confidence'] = spatial_from_to_map[line_num].get('confidence', 'high')
                             
                             # Update the items in all_line_items
                             all_line_items = all_line_items[:-len(line_items)]
@@ -1202,46 +1232,124 @@ Example 4: "10\"-PG-0003-033842-X-H"
                             
                             # Count success
                             with_from_to = sum(1 for item in line_items if item.get('from_line') or item.get('to_line'))
-                            logger.info(f"  ✅ OpenAI Vision FROM-TO detection completed: {with_from_to}/{len(line_items)} items have FROM-TO")
+                            logger.info(f"  ✅ Spatial matching completed: {with_from_to}/{len(line_items)} items have FROM-TO")
                             
                             if with_from_to > 0:
-                                vision_from_to_success = True
+                                spatial_from_to_success = True
                         else:
-                            logger.warning(f"  ⚠️ OpenAI Vision returned empty results")
+                            logger.warning(f"  ⚠️ Spatial matching returned empty results")
                     else:
-                        logger.info("  ℹ️ OpenAI client not available, skipping Vision-based detection")
-                except Exception as e:
-                    logger.error(f"  ❌ OpenAI Vision FROM-TO detection FAILED: {e}", exc_info=True)
-                    logger.info(f"  → Falling back to geometric detection")
-                
-                # PHASE 3B: Distance-Based FROM-TO Detection (FALLBACK - only if Vision failed)
-                if not vision_from_to_success:
-                    try:
-                        logger.info("🔺 PHASE 3B: Geometric Line-Based FROM-TO Detection (Fallback)")
-                        logger.info("  📍 Method: OpenCV line detection + connectivity graph")
+                        logger.warning(f"  ⚠️ No line geometries detected, skipping spatial matching")
                         
-                        # Geometric line analysis approach
-                        if line_items:
-                            logger.info(f"  🔍 Processing {len(line_items)} line items...")
-                            enhanced_items = self._detect_from_to_by_distance(
-                                line_items.copy(), img, page_num + 1
+                except Exception as e:
+                    logger.error(f"  ❌ Spatial matching FAILED: {e}", exc_info=True)
+                    logger.info(f"  → Falling back to OpenAI Vision")
+                
+                # PHASE 3B: OpenAI Vision-Based FROM-TO Detection (FALLBACK if spatial matching fails)
+                vision_from_to_success = False
+                if not spatial_from_to_success:
+                    try:
+                        if self.openai_client:
+                            logger.info("🧠 PHASE 3B: OpenAI Vision-Based FROM-TO Detection (Fallback)")
+                            logger.info("  📍 Method: AI Process Engineer - Visual flow analysis")
+                            
+                            # Import the new function
+                            from apps.designiq.from_to_integration import determine_from_to_with_openai_vision
+                            
+                            # Extract just the line numbers for the prompt
+                            line_numbers = [item['line_number'] for item in line_items]
+                            
+                            logger.info(f"  🔍 Sending {len(line_numbers)} line numbers to OpenAI Vision...")
+                            
+                            # Call OpenAI Vision
+                            vision_from_to_map = determine_from_to_with_openai_vision(
+                                ocr_line_numbers=line_numbers,
+                                pdf_image=img,
+                                page_number=page_num + 1,
+                                openai_client=self.openai_client
                             )
-                            # Update the items in all_line_items with enhanced versions
-                            if enhanced_items and len(enhanced_items) > 0:
-                                # Remove the basic items we just added
+                        
+                            if vision_from_to_map:
+                                # Update line items with OpenAI Vision results
+                                for item in line_items:
+                                    line_num = item['line_number']
+                                    if line_num in vision_from_to_map:
+                                        from_line = vision_from_to_map[line_num].get('from')
+                                        to_line = vision_from_to_map[line_num].get('to')
+                                        
+                                        if from_line:
+                                            item['from_line'] = from_line
+                                        if to_line:
+                                            item['to_line'] = to_line
+                                        
+                                        item['flow_detection_method'] = 'openai_vision'
+                                        item['flow_confidence'] = 'high'
+                                
+                                # Update the items in all_line_items
                                 all_line_items = all_line_items[:-len(line_items)]
-                                # Add enhanced items
-                                all_line_items.extend(enhanced_items)
+                                all_line_items.extend(line_items)
+                                
+                                # Count success
+                                with_from_to = sum(1 for item in line_items if item.get('from_line') or item.get('to_line'))
+                                logger.info(f"  ✅ OpenAI Vision FROM-TO detection completed: {with_from_to}/{len(line_items)} items have FROM-TO")
+                                
+                                if with_from_to > 0:
+                                    vision_from_to_success = True
+                            else:
+                                logger.warning(f"  ⚠️ OpenAI Vision returned empty results")
+                        else:
+                            logger.info("  ℹ️ OpenAI client not available, skipping Vision-based detection")
+                    except Exception as e:
+                        logger.error(f"  ❌ OpenAI Vision FROM-TO detection FAILED: {e}", exc_info=True)
+                        logger.info(f"  → Falling back to geometric detection")
+                
+                # PHASE 3C: Geometric Line-Based FROM-TO Detection (LAST FALLBACK - only if both failed)
+                if not spatial_from_to_success and not vision_from_to_success:
+                    try:
+                        logger.info("🔺 PHASE 3C: Geometric Line-Based FROM-TO Detection (Last Fallback)")
+                        logger.info("  📍 Method: OpenCV line detection + connectivity graph")
+                        logger.info("  📍 Strategy: Normalize coordinates → Detect lines → Build graph → Infer FROM-TO")
+                        
+                        # Use the new geometric detector
+                        if self.geometric_detector and line_items:
+                            logger.info(f"  🔍 Processing {len(line_items)} line items with geometric detection...")
+                            
+                            # Run geometric detection on this PDF page
+                            geometric_from_to_map = self.geometric_detector.process_pdf_page(
+                                pdf_path=pdf_path,
+                                page_num=page_num,
+                                line_numbers=line_items  # Pass items with bbox data
+                            )
+                            
+                            if geometric_from_to_map:
+                                # Update line items with geometric detection results
+                                for item in line_items:
+                                    line_num = item['line_number']
+                                    if line_num in geometric_from_to_map:
+                                        from_line = geometric_from_to_map[line_num].get('from_line')
+                                        to_line = geometric_from_to_map[line_num].get('to_line')
+                                        
+                                        if from_line and from_line != '-':
+                                            item['from_line'] = from_line
+                                        if to_line and to_line != '-':
+                                            item['to_line'] = to_line
+                                        
+                                        item['flow_detection_method'] = geometric_from_to_map[line_num].get('method', 'geometric_detection')
+                                        item['flow_confidence'] = geometric_from_to_map[line_num].get('confidence', 'medium')
+                                
+                                # Update the items in all_line_items
+                                all_line_items = all_line_items[:-len(line_items)]
+                                all_line_items.extend(line_items)
                                 
                                 # Count how many have FROM-TO data
-                                with_from_to = sum(1 for item in enhanced_items if item.get('from_line') or item.get('to_line'))
-                                logger.info(f"  ✅ FROM-TO detection completed: {with_from_to}/{len(enhanced_items)} items have FROM-TO")
+                                with_from_to = sum(1 for item in line_items if item.get('from_line') or item.get('to_line'))
+                                logger.info(f"  ✅ Geometric FROM-TO detection completed: {with_from_to}/{len(line_items)} items have FROM-TO")
                             else:
-                                logger.warning(f"  ⚠️ Geometric detection returned no enhanced items, keeping basic items")
+                                logger.warning(f"  ⚠️ Geometric detection returned no results, keeping basic items")
                         else:
-                            logger.warning(f"  ⚠️ No line items to process")
+                            logger.warning(f"  ⚠️ Geometric detector not available or no line items to process")
                     except Exception as e:
-                        logger.error(f"  ❌ FROM-TO detection FAILED: {e}", exc_info=True)
+                        logger.error(f"  ❌ Geometric FROM-TO detection FAILED: {e}", exc_info=True)
                         logger.error(f"  → Continuing with basic line items only")
             
             doc.close()

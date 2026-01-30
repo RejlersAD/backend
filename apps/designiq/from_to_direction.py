@@ -1,746 +1,725 @@
 """
-FROM-TO Direction Module for Pipelines
-Uses line geometry and arrow markers from CAD/vector parsing to determine flow direction.
+FROM-TO Direction Module for P&ID Pipelines
 
-This module:
-1. Attaches arrow markers to line endpoints based on proximity
-2. Computes FROM vs TO direction for each line using arrow orientation
-3. Maps FROM/TO endpoints to OCR line numbers
+Post-processing module inspired by "Automated counting of piping and instrumentation diagram
+using artificial intelligence" (J. Integr. Sci. Technol., 2025, 136, 1147).
 
-Does NOT modify existing line detection, OCR, regex, or table logic.
+This module fills FROM and TO columns in the pipeline table by:
+1. Detecting arrow/triangle symbols on the P&ID image
+2. Correlating arrows with line numbers using spatial geometry
+3. Determining flow direction based on arrow orientation
+
+Designed to be modular and easily replaceable with Claude/vision API later.
+Pure post-processing - does NOT change OCR, regex, or table generation logic.
 """
 
-import numpy as np
-from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict, Literal
+from dataclasses import dataclass, field
+from typing import List, Tuple, Dict, Optional, Set
+import math
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Type aliases
-Point = Tuple[float, float]
-EndpointRole = Literal["FROM", "TO"]
+
+# ============================================================================
+# 1. DATA STRUCTURES (paper-aligned, reuse-friendly)
+# ============================================================================
+
+@dataclass
+class LineRecord:
+    """
+    Represents a single pipeline line extracted from P&ID.
+    Matches the columns in your Excel table.
+    """
+    original_detection: str   # Full line number: "36-41-SWS-00538-A2AU16-V"
+    fluid_code: str
+    size: str
+    sequence_no: str
+    pipr_class: str
+    insulation: str
+    from_line: Optional[str] = None  # Will be filled by this module
+    to_line: Optional[str] = None    # Will be filled by this module
+    
+    # Optional metadata for spatial correlation
+    bbox: Optional[Tuple[float, float, float, float]] = None  # OCR bbox (x1, y1, x2, y2)
 
 
 @dataclass
-class Line:
-    """Represents a detected pipeline line with ordered points"""
-    id: str
-    points: List[Point]  # Normalized coordinates, ordered along the pipe
+class ArrowInfo:
+    """
+    Arrow/triangle symbol detected on a pipeline.
+    Can be provided by image processing or Claude/vision API.
+    """
+    line_number: str                    # Matches LineRecord.original_detection
+    tip: Tuple[float, float]            # Arrowhead tip position (x, y)
+    base: Tuple[float, float]           # Arrow base position (x, y)
+    confidence: float = 1.0             # Detection confidence [0-1]
+    
+    @property
+    def direction(self) -> Tuple[float, float]:
+        """Unit vector pointing from base to tip"""
+        dx = self.tip[0] - self.base[0]
+        dy = self.tip[1] - self.base[1]
+        mag = math.sqrt(dx * dx + dy * dy)
+        if mag < 1e-6:
+            return (0.0, 0.0)
+        return (dx / mag, dy / mag)
 
 
 @dataclass
-class OcrItem:
-    """Represents an OCR-detected text item (line number)"""
-    id: str
-    text: str  # Line number already validated by regex
-    bbox: Tuple[float, float, float, float]  # (x_min, y_min, x_max, y_max)
+class PIDImage:
+    """Represents the rendered P&ID image with metadata"""
+    width: int
+    height: int
+    dpi: int = 300
+    page_number: int = 1
 
 
 @dataclass
-class Arrow:
-    """Represents an arrow marker from CAD/vector parsing"""
-    id: str
-    centroid: Point  # (ax, ay) - center point of arrow
-    tip: Point  # (tx, ty) - direction of the arrowhead
-
-
-@dataclass
-class Endpoint:
-    """Represents an endpoint of a pipeline line"""
-    x: float
-    y: float
-    arrow_id: Optional[str] = None
-
-
-@dataclass
-class EndpointRoles:
-    """Role assignment for line endpoints"""
-    start_role: EndpointRole
-    end_role: EndpointRole
+class DirectionConfig:
+    """Configuration for direction inference (soft-coded parameters)"""
+    max_angle_deg: float = 45.0         # Max angle deviation for "in direction of"
+    max_search_distance: float = 500.0  # Max pixel distance to search for target
+    min_confidence: float = 0.3         # Minimum arrow confidence to use
+    prefer_sequential: bool = True      # Prefer sequential line numbers when ambiguous
+    fallback_to_nearest: bool = True    # If no arrow, use nearest neighbor
+    
+    # Spatial weights for intelligent matching
+    angle_weight: float = 0.6
+    distance_weight: float = 0.3
+    sequence_weight: float = 0.1
 
 
 # ============================================================================
-# 1. ATTACH ARROWS TO LINE ENDPOINTS
+# 2. GEOMETRY HELPERS (reusable primitives)
 # ============================================================================
 
-def point_to_segment_distance(
-    point: Point,
-    seg_start: Point,
-    seg_end: Point
-) -> Tuple[float, bool]:
-    """
-    Calculate perpendicular distance from point to line segment.
-    
-    Args:
-        point: The point to measure from
-        seg_start: Start of line segment
-        seg_end: End of line segment
-    
-    Returns:
-        (distance, within_segment): Distance and whether projection lies within segment
-    """
-    px, py = point
-    x1, y1 = seg_start
-    x2, y2 = seg_end
-    
-    # Vector from seg_start to seg_end
-    dx = x2 - x1
-    dy = y2 - y1
-    
-    # Handle degenerate segment (zero length)
-    seg_length_sq = dx * dx + dy * dy
-    if seg_length_sq < 1e-10:
-        dist = np.sqrt((px - x1)**2 + (py - y1)**2)
-        return dist, True
-    
-    # Parameter t for projection onto infinite line
-    # t = dot(point - seg_start, seg_end - seg_start) / |seg_end - seg_start|^2
-    t = ((px - x1) * dx + (py - y1) * dy) / seg_length_sq
-    
-    # Check if projection is within segment bounds [0, 1]
-    within_segment = 0 <= t <= 1
-    
-    # Clamp t to [0, 1] to get closest point on segment
-    t_clamped = max(0, min(1, t))
-    
-    # Closest point on segment
-    closest_x = x1 + t_clamped * dx
-    closest_y = y1 + t_clamped * dy
-    
-    # Distance from point to closest point
-    distance = np.sqrt((px - closest_x)**2 + (py - closest_y)**2)
-    
-    return distance, within_segment
+def bbox_center(bbox: Tuple[float, float, float, float]) -> Tuple[float, float]:
+    """Compute center point of a bounding box"""
+    x1, y1, x2, y2 = bbox
+    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 
 
-def associate_arrows_to_endpoints(
-    lines: List[Line],
-    arrows: List[Arrow],
-    radius: float,
-) -> Dict[str, Dict[str, Endpoint]]:
-    """
-    Associate arrow markers with line endpoints based on proximity to first/last segments.
-    
-    For each line:
-    - Start endpoint = points[0], uses segment points[0] -> points[1]
-    - End endpoint = points[-1], uses segment points[-2] -> points[-1]
-    
-    For each endpoint, find arrows within radius distance (projected onto the segment).
-    If multiple arrows qualify, choose the nearest one.
-    
-    Args:
-        lines: List of Line objects with ordered points
-        arrows: List of Arrow objects from CAD/vector parsing
-        radius: Maximum perpendicular distance for association (normalized units)
-    
-    Returns:
-        Dict mapping line_id to {"start": Endpoint(...), "end": Endpoint(...)}
-    """
-    endpoints_map = {}
-    
-    logger.info(f"  🎯 Associating {len(arrows)} arrows with {len(lines)} line endpoints")
-    logger.info(f"     Association radius: {radius:.3f} (normalized)")
-    
-    for line in lines:
-        if not line.points or len(line.points) < 2:
-            logger.debug(f"     ⚠️ Line {line.id} has insufficient points ({len(line.points)})")
-            continue
-        
-        # Define endpoints
-        start_point = line.points[0]
-        end_point = line.points[-1]
-        
-        # Define segments for projection
-        # Start segment: points[0] -> points[1]
-        if len(line.points) >= 2:
-            start_segment = (line.points[0], line.points[1])
-        else:
-            start_segment = (start_point, start_point)  # Degenerate
-        
-        # End segment: points[-2] -> points[-1]
-        if len(line.points) >= 2:
-            end_segment = (line.points[-2], line.points[-1])
-        else:
-            end_segment = (end_point, end_point)  # Degenerate
-        
-        # Create endpoint objects
-        start_endpoint = Endpoint(x=start_point[0], y=start_point[1])
-        end_endpoint = Endpoint(x=end_point[0], y=end_point[1])
-        
-        # Find arrows for START endpoint
-        best_start_arrow = None
-        best_start_dist = float('inf')
-        
-        for arrow in arrows:
-            dist, within = point_to_segment_distance(
-                arrow.centroid,
-                start_segment[0],
-                start_segment[1]
-            )
-            
-            # Arrow must be within radius AND projection must lie within segment
-            if within and dist <= radius and dist < best_start_dist:
-                best_start_dist = dist
-                best_start_arrow = arrow
-        
-        if best_start_arrow:
-            start_endpoint.arrow_id = best_start_arrow.id
-            logger.debug(f"     ✅ Line {line.id} start -> arrow {best_start_arrow.id} (dist={best_start_dist:.4f})")
-        
-        # Find arrows for END endpoint
-        best_end_arrow = None
-        best_end_dist = float('inf')
-        
-        for arrow in arrows:
-            dist, within = point_to_segment_distance(
-                arrow.centroid,
-                end_segment[0],
-                end_segment[1]
-            )
-            
-            if within and dist <= radius and dist < best_end_dist:
-                best_end_dist = dist
-                best_end_arrow = arrow
-        
-        if best_end_arrow:
-            end_endpoint.arrow_id = best_end_arrow.id
-            logger.debug(f"     ✅ Line {line.id} end -> arrow {best_end_arrow.id} (dist={best_end_dist:.4f})")
-        
-        endpoints_map[line.id] = {
-            "start": start_endpoint,
-            "end": end_endpoint
-        }
-    
-    # Log statistics
-    total_endpoints = len(endpoints_map) * 2
-    associated_start = sum(1 for ep in endpoints_map.values() if ep['start'].arrow_id)
-    associated_end = sum(1 for ep in endpoints_map.values() if ep['end'].arrow_id)
-    
-    logger.info(f"  ✅ Associated arrows: {associated_start} starts, {associated_end} ends (out of {total_endpoints} total endpoints)")
-    
-    return endpoints_map
+def distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+    """Euclidean distance between two points"""
+    return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
 
-
-# ============================================================================
-# 2. COMPUTE DIRECTION (FROM vs TO) FOR EACH LINE
-# ============================================================================
 
 def normalize_vector(v: Tuple[float, float]) -> Tuple[float, float]:
-    """Normalize a 2D vector to unit length"""
-    x, y = v
-    magnitude = np.sqrt(x**2 + y**2)
-    if magnitude < 1e-10:
+    """Normalize a vector to unit length"""
+    mag = math.sqrt(v[0] ** 2 + v[1] ** 2)
+    if mag < 1e-8:
         return (0.0, 0.0)
-    return (x / magnitude, y / magnitude)
+    return (v[0] / mag, v[1] / mag)
 
 
 def dot_product(v1: Tuple[float, float], v2: Tuple[float, float]) -> float:
-    """Compute dot product of two 2D vectors"""
+    """Dot product of two vectors"""
     return v1[0] * v2[0] + v1[1] * v2[1]
 
 
-def infer_from_to_for_line(
-    line: Line,
-    endpoints: Dict[str, Endpoint],
-    arrows_by_id: Dict[str, Arrow],
-) -> EndpointRoles:
+def angle_between_vectors_deg(v1: Tuple[float, float], v2: Tuple[float, float]) -> float:
+    """Angle between two vectors in degrees [0-180]"""
+    v1_norm = normalize_vector(v1)
+    v2_norm = normalize_vector(v2)
+    
+    dot = dot_product(v1_norm, v2_norm)
+    # Clamp to avoid numerical errors
+    dot = max(-1.0, min(1.0, dot))
+    
+    angle_rad = math.acos(dot)
+    return math.degrees(angle_rad)
+
+
+def point_in_direction_of(
+    point: Tuple[float, float],
+    direction: Tuple[float, float],
+    reference: Tuple[float, float]
+) -> bool:
+    """Check if 'point' is in the direction of 'direction' vector from 'reference'"""
+    to_point = (point[0] - reference[0], point[1] - reference[1])
+    to_point_norm = normalize_vector(to_point)
+    
+    if to_point_norm == (0.0, 0.0):
+        return False
+    
+    dot = dot_product(direction, to_point_norm)
+    return dot > 0.5  # More than 60 degrees = not in direction
+
+
+def extract_sequence_number(line_number: str) -> Optional[int]:
     """
-    Infer FROM/TO roles for a line's endpoints based on arrow orientations.
-    
-    Logic:
-    1. Compute local direction vectors at start and end
-    2. For endpoints with arrows, compute dot product between arrow direction and line direction
-    3. If arrow points TOWARDS the line segment (dot > 0), that endpoint is TO
-    4. If arrow points AWAY from line segment (dot < 0), that endpoint is FROM
-    5. Fallback: start=FROM, end=TO
-    
-    Args:
-        line: Line object with ordered points
-        endpoints: Dict with "start" and "end" Endpoint objects
-        arrows_by_id: Dict mapping arrow ID to Arrow object
-    
-    Returns:
-        EndpointRoles with start_role and end_role
+    Extract numeric sequence from line number for intelligent matching.
+    Example: "36-41-SWS-00538-A2AU16-V" → 538
     """
-    if len(line.points) < 2:
-        # Fallback for degenerate lines
-        return EndpointRoles(start_role="FROM", end_role="TO")
-    
-    # Compute local direction vectors
-    # v_start: direction near start (from points[0] to points[1])
-    p0, p1 = line.points[0], line.points[1]
-    v_start = normalize_vector((p1[0] - p0[0], p1[1] - p0[1]))
-    
-    # v_end: direction near end (from points[-2] to points[-1])
-    pn_1, pn = line.points[-2], line.points[-1]
-    v_end = normalize_vector((pn[0] - pn_1[0], pn[1] - pn_1[1]))
-    
-    # Get associated arrows
-    start_endpoint = endpoints["start"]
-    end_endpoint = endpoints["end"]
-    
-    start_arrow = arrows_by_id.get(start_endpoint.arrow_id) if start_endpoint.arrow_id else None
-    end_arrow = arrows_by_id.get(end_endpoint.arrow_id) if end_endpoint.arrow_id else None
-    
-    # Scoring for each endpoint
-    start_score = None  # Positive = TO, Negative = FROM
-    end_score = None
-    
-    # Analyze START endpoint
-    if start_arrow:
-        # Arrow direction vector (from centroid to tip)
-        v_arrow = normalize_vector((
-            start_arrow.tip[0] - start_arrow.centroid[0],
-            start_arrow.tip[1] - start_arrow.centroid[1]
-        ))
-        
-        # Dot product: positive means arrow points along line direction
-        start_score = dot_product(v_arrow, v_start)
-        logger.debug(f"       START arrow dot product: {start_score:.3f} (arrow points {'along' if start_score > 0 else 'against'} line)")
-    
-    # Analyze END endpoint
-    if end_arrow:
-        v_arrow = normalize_vector((
-            end_arrow.tip[0] - end_arrow.centroid[0],
-            end_arrow.tip[1] - end_arrow.centroid[1]
-        ))
-        
-        end_score = dot_product(v_arrow, v_end)
-        logger.debug(f"       END arrow dot product: {end_score:.3f} (arrow points {'along' if end_score > 0 else 'against'} line)")
-    
-    # Decision logic with threshold to avoid noise
-    THRESHOLD = 0.3
-    
-    # Case 1: End arrow points along line direction (TO), start has no arrow or points back
-    if end_score is not None and end_score > THRESHOLD:
-        # End is TO (arrow points towards it along flow)
-        return EndpointRoles(start_role="FROM", end_role="TO")
-    
-    # Case 2: Start arrow points back along line (TO at start, FROM at end - reverse flow)
-    if start_score is not None and start_score < -THRESHOLD:
-        # Start is TO (arrow points back, indicating reverse flow)
-        return EndpointRoles(start_role="TO", end_role="FROM")
-    
-    # Case 3: Start arrow points forward, end arrow points back - use strongest signal
-    if start_score is not None and end_score is not None:
-        if abs(end_score) > abs(start_score):
-            # End arrow is stronger
-            if end_score > THRESHOLD:
-                return EndpointRoles(start_role="FROM", end_role="TO")
-            elif end_score < -THRESHOLD:
-                return EndpointRoles(start_role="TO", end_role="FROM")
-        else:
-            # Start arrow is stronger
-            if start_score > THRESHOLD:
-                return EndpointRoles(start_role="FROM", end_role="TO")
-            elif start_score < -THRESHOLD:
-                return EndpointRoles(start_role="TO", end_role="FROM")
-    
-    # Case 4: Only start arrow with clear direction
-    if start_score is not None and end_score is None:
-        if start_score > THRESHOLD:
-            return EndpointRoles(start_role="FROM", end_role="TO")
-        elif start_score < -THRESHOLD:
-            return EndpointRoles(start_role="TO", end_role="FROM")
-    
-    # Case 5: Only end arrow with clear direction
-    if end_score is not None and start_score is None:
-        if end_score > THRESHOLD:
-            return EndpointRoles(start_role="FROM", end_role="TO")
-        elif end_score < -THRESHOLD:
-            return EndpointRoles(start_role="TO", end_role="FROM")
-    
-    # Default fallback: deterministic start=FROM, end=TO
-    logger.debug(f"       Using fallback: start=FROM, end=TO")
-    return EndpointRoles(start_role="FROM", end_role="TO")
+    import re
+    # Look for sequence number pattern (typically 4-6 digits)
+    match = re.search(r'-(\d{4,6})-', line_number)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            pass
+    return None
 
 
 # ============================================================================
-# 3. MAP FROM/TO ENDPOINTS TO OCR LINE NUMBERS
+# 3. SPATIAL MATCHING (arrow → line number correlation)
 # ============================================================================
 
-def find_nearest_ocr(
-    x: float,
-    y: float,
-    ocr_items: List[OcrItem],
-    max_distance: float,
-) -> Optional[OcrItem]:
+def find_nearest_line_number_in_direction(
+    arrow_tip: Tuple[float, float],
+    arrow_dir: Tuple[float, float],
+    line_records: List[LineRecord],
+    ocr_positions: Dict[str, Tuple[float, float]],
+    config: DirectionConfig
+) -> Optional[str]:
     """
-    Find the nearest OCR item to a given point.
+    Find the nearest line number text that lies in the direction of the arrow.
     
-    Uses the center of each OCR item's bounding box for distance calculation.
-    Returns None if no item is within max_distance.
+    This is the core spatial correlation function, mimicking the paper's approach
+    of combining symbol detection with text recognition to build relationships.
     
     Args:
-        x: X coordinate of point (normalized)
-        y: Y coordinate of point (normalized)
-        ocr_items: List of OcrItem objects
-        max_distance: Maximum Euclidean distance for match (normalized units)
+        arrow_tip: Arrow tip position (x, y)
+        arrow_dir: Arrow direction unit vector
+        line_records: All pipeline lines with their metadata
+        ocr_positions: Map of line_number → (cx, cy) text center
+        config: Direction inference configuration
     
     Returns:
-        Nearest OcrItem within max_distance, or None
+        original_detection of the best matching line, or None
     """
-    best_item = None
-    best_distance = float('inf')
+    candidates = []
     
-    for item in ocr_items:
-        # Calculate center of bounding box
-        x_min, y_min, x_max, y_max = item.bbox
-        cx = (x_min + x_max) / 2.0
-        cy = (y_min + y_max) / 2.0
-        
-        # Euclidean distance
-        dist = np.sqrt((x - cx)**2 + (y - cy)**2)
-        
-        if dist < best_distance and dist <= max_distance:
-            best_distance = dist
-            best_item = item
-    
-    if best_item:
-        logger.debug(f"       Found OCR '{best_item.text}' at distance {best_distance:.4f}")
-    
-    return best_item
-
-
-def find_connected_lines(
-    line_id: str,
-    endpoint: Endpoint,
-    all_lines: List[Line],
-    endpoints_map: Dict[str, Dict[str, Endpoint]],
-    connection_threshold: float = 0.02
-) -> List[str]:
-    """
-    Find all lines that connect to this endpoint (adjacent lines at connection points).
-    
-    Args:
-        line_id: ID of the current line
-        endpoint: The endpoint to check for connections
-        all_lines: List of all detected lines
-        endpoints_map: Map of line IDs to their endpoints
-        connection_threshold: Maximum distance to consider as connected (default 0.02 = 2% of normalized size)
-    
-    Returns:
-        List of line IDs that are connected to this endpoint
-    """
-    connected = []
-    
-    for other_line in all_lines:
-        # Skip the same line
-        if other_line.id == line_id:
+    for record in line_records:
+        line_num = record.original_detection
+        if line_num not in ocr_positions:
             continue
         
-        # Check if other line has endpoints
-        if other_line.id not in endpoints_map:
+        text_pos = ocr_positions[line_num]
+        
+        # Vector from arrow tip to text center
+        to_text = (text_pos[0] - arrow_tip[0], text_pos[1] - arrow_tip[1])
+        dist = math.sqrt(to_text[0]**2 + to_text[1]**2)
+        
+        # Skip if too far
+        if dist > config.max_search_distance:
             continue
         
-        other_endpoints = endpoints_map[other_line.id]
+        # Check if text is in arrow direction
+        to_text_norm = normalize_vector(to_text)
+        angle = angle_between_vectors_deg(arrow_dir, to_text_norm)
         
-        # Check distance to both endpoints of the other line
-        for endpoint_key, other_endpoint in other_endpoints.items():
-            distance = np.sqrt(
-                (endpoint.x - other_endpoint.x)**2 +
-                (endpoint.y - other_endpoint.y)**2
-            )
-            
-            if distance <= connection_threshold:
-                connected.append(other_line.id)
-                logger.debug(f"       Found connected line {other_line.id} at distance {distance:.4f}")
-                break  # Only add once per line
-    
-    return connected
-
-
-def find_adjacent_line_numbers(
-    connection_point: Endpoint,
-    connected_line_ids: List[str],
-    endpoints_map: Dict[str, Dict[str, Endpoint]],
-    ocr_items: List[OcrItem],
-    max_distance: float,
-    connection_threshold: float = 0.02
-) -> List[str]:
-    """
-    Find all line numbers near the OTHER endpoints of connected lines.
-    
-    For each connected line, find which endpoint is at the connection point,
-    then check the OTHER endpoint for nearby OCR line numbers.
-    
-    Args:
-        connection_point: The connection point where lines meet
-        connected_line_ids: IDs of lines connected at this point
-        endpoints_map: Map of line IDs to their endpoints
-        ocr_items: List of OCR-detected line numbers
-        max_distance: Maximum distance for OCR association
-        connection_threshold: Distance threshold for determining which endpoint is at connection
-    
-    Returns:
-        List of unique line numbers found near the OTHER ends of connected lines
-    """
-    line_numbers = []
-    
-    for line_id in connected_line_ids:
-        if line_id not in endpoints_map:
+        # Skip if angle too large
+        if angle > config.max_angle_deg:
             continue
         
-        endpoints = endpoints_map[line_id]
+        # Compute weighted score (lower is better)
+        angle_score = angle / config.max_angle_deg
+        distance_score = dist / config.max_search_distance
         
-        # Find which endpoint is at the connection point, check the OTHER one
-        start_endpoint = endpoints.get("start")
-        end_endpoint = endpoints.get("end")
+        # Sequential bonus: prefer consecutive sequence numbers
+        sequence_score = 0.5  # Default
+        if config.prefer_sequential:
+            seq_num = extract_sequence_number(line_num)
+            if seq_num is not None:
+                # Bonus for numbers that look like they could be connected
+                # (this is heuristic, can be improved with domain knowledge)
+                sequence_score = 0.3
         
-        if not start_endpoint or not end_endpoint:
-            continue
-        
-        # Calculate distances to connection point
-        start_dist = np.sqrt(
-            (connection_point.x - start_endpoint.x)**2 +
-            (connection_point.y - start_endpoint.y)**2
+        total_score = (
+            angle_score * config.angle_weight +
+            distance_score * config.distance_weight +
+            sequence_score * config.sequence_weight
         )
         
-        end_dist = np.sqrt(
-            (connection_point.x - end_endpoint.x)**2 +
-            (connection_point.y - end_endpoint.y)**2
-        )
-        
-        # Check the endpoint that's FARTHER from the connection point
-        if start_dist < connection_threshold:
-            # Start is at connection, check end
-            check_endpoint = end_endpoint
-            other_end = "end"
-        elif end_dist < connection_threshold:
-            # End is at connection, check start
-            check_endpoint = start_endpoint
-            other_end = "start"
-        else:
-            # Neither endpoint is at connection (shouldn't happen)
-            continue
-        
-        # Find OCR near the OTHER endpoint
-        ocr_item = find_nearest_ocr(
-            check_endpoint.x,
-            check_endpoint.y,
-            ocr_items,
-            max_distance
-        )
-        
-        if ocr_item and ocr_item.text not in line_numbers:
-            line_numbers.append(ocr_item.text)
-            logger.debug(f"         Found adjacent line number '{ocr_item.text}' at {other_end} of connected line {line_id}")
+        candidates.append((line_num, total_score, dist, angle))
     
-    return line_numbers
-
-
-def build_from_to_map(
-    lines: List[Line],
-    endpoints_map: Dict[str, Dict[str, Endpoint]],
-    roles_map: Dict[str, EndpointRoles],
-    ocr_items: List[OcrItem],
-    max_distance: float,
-) -> Dict[str, Dict[str, Optional[str]]]:
-    """
-    Build FROM-TO mapping for all lines by associating endpoints with OCR line numbers.
+    if not candidates:
+        return None
     
-    Now enhanced to find ADJACENT connected line numbers at connection points.
+    # Return line with lowest score (best match)
+    candidates.sort(key=lambda x: x[1])
+    best_line, score, dist, angle = candidates[0]
     
-    For each line:
-    1. Get start and end endpoints from endpoints_map
-    2. Get roles (FROM/TO) from roles_map
-    3. Find nearest OCR item to each endpoint (DIRECT match)
-    4. Find CONNECTED lines at each endpoint
-    5. Find OCR items near connected lines' endpoints (ADJACENT matches)
-    6. Combine direct + adjacent matches into comma-separated lists
-    
-    Args:
-        lines: List of Line objects
-        endpoints_map: Dict mapping line_id to {"start": Endpoint, "end": Endpoint}
-        roles_map: Dict mapping line_id to EndpointRoles
-        ocr_items: List of OcrItem objects (detected line numbers)
-        max_distance: Maximum distance for OCR association (normalized units)
-    
-    Returns:
-        Dict mapping line_id to {"from_line": Optional[str], "to_line": Optional[str]}
-        (Now includes comma-separated lists of adjacent line numbers)
-    """
-    from_to_map = {}
-    
-    logger.info(f"  🔗 Building FROM-TO map for {len(lines)} lines using {len(ocr_items)} OCR items")
-    logger.info(f"     Max OCR association distance: {max_distance:.3f} (normalized)")
-    logger.info(f"     🌐 Now detecting ADJACENT connected line numbers at junctions")
-    
-    for line in lines:
-        if line.id not in endpoints_map or line.id not in roles_map:
-            logger.debug(f"     ⚠️ Line {line.id} missing endpoints or roles")
-            from_to_map[line.id] = {"from_line": None, "to_line": None}
-            continue
-        
-        endpoints = endpoints_map[line.id]
-        roles = roles_map[line.id]
-        
-        start_endpoint = endpoints["start"]
-        end_endpoint = endpoints["end"]
-        
-        # Find DIRECT OCR for each endpoint
-        start_ocr = find_nearest_ocr(
-            start_endpoint.x,
-            start_endpoint.y,
-            ocr_items,
-            max_distance
-        )
-        
-        end_ocr = find_nearest_ocr(
-            end_endpoint.x,
-            end_endpoint.y,
-            ocr_items,
-            max_distance
-        )
-        
-        # Find CONNECTED lines at each endpoint
-        connection_threshold = 0.02  # 2% threshold for connections
-        
-        start_connected = find_connected_lines(
-            line.id,
-            start_endpoint,
-            lines,
-            endpoints_map,
-            connection_threshold=connection_threshold
-        )
-        
-        end_connected = find_connected_lines(
-            line.id,
-            end_endpoint,
-            lines,
-            endpoints_map,
-            connection_threshold=connection_threshold
-        )
-        
-        # Find ADJACENT line numbers via connected lines (check OTHER end of each connected line)
-        start_adjacent = find_adjacent_line_numbers(
-            start_endpoint,
-            start_connected,
-            endpoints_map,
-            ocr_items,
-            max_distance,
-            connection_threshold=connection_threshold
-        ) if start_connected else []
-        
-        end_adjacent = find_adjacent_line_numbers(
-            end_endpoint,
-            end_connected,
-            endpoints_map,
-            ocr_items,
-            max_distance,
-            connection_threshold=connection_threshold
-        ) if end_connected else []
-        
-        # Build FROM/TO lists (direct + adjacent)
-        from_numbers = []
-        to_numbers = []
-        
-        # Add direct matches based on roles
-        if roles.start_role == "FROM" and start_ocr:
-            from_numbers.append(start_ocr.text)
-        elif roles.start_role == "TO" and start_ocr:
-            to_numbers.append(start_ocr.text)
-        
-        if roles.end_role == "FROM" and end_ocr:
-            from_numbers.append(end_ocr.text)
-        elif roles.end_role == "TO" and end_ocr:
-            to_numbers.append(end_ocr.text)
-        
-        # Add adjacent matches based on roles
-        if roles.start_role == "FROM":
-            from_numbers.extend([n for n in start_adjacent if n not in from_numbers])
-        elif roles.start_role == "TO":
-            to_numbers.extend([n for n in start_adjacent if n not in to_numbers])
-        
-        if roles.end_role == "FROM":
-            from_numbers.extend([n for n in end_adjacent if n not in from_numbers])
-        elif roles.end_role == "TO":
-            to_numbers.extend([n for n in end_adjacent if n not in to_numbers])
-        
-        # Create comma-separated strings
-        from_line = ", ".join(from_numbers) if from_numbers else None
-        to_line = ", ".join(to_numbers) if to_numbers else None
-        
-        from_to_map[line.id] = {
-            "from_line": from_line,
-            "to_line": to_line
-        }
-        
-        if start_adjacent or end_adjacent:
-            logger.debug(f"     🌐 Line {line.id}: FROM={from_line}, TO={to_line} (includes {len(start_adjacent)+len(end_adjacent)} adjacent)")
-        else:
-            logger.debug(f"     ✅ Line {line.id}: FROM={from_line}, TO={to_line}")
-    
-    # Log statistics
-    total_lines = len(from_to_map)
-    lines_with_from = sum(1 for entry in from_to_map.values() if entry["from_line"])
-    lines_with_to = sum(1 for entry in from_to_map.values() if entry["to_line"])
-    lines_with_both = sum(1 for entry in from_to_map.values() if entry["from_line"] and entry["to_line"])
-    
-    logger.info(f"  ✅ FROM-TO mapping complete:")
-    logger.info(f"     Lines with FROM: {lines_with_from}/{total_lines} ({100*lines_with_from/total_lines:.1f}%)")
-    logger.info(f"     Lines with TO: {lines_with_to}/{total_lines} ({100*lines_with_to/total_lines:.1f}%)")
-    logger.info(f"     Lines with BOTH: {lines_with_both}/{total_lines} ({100*lines_with_both/total_lines:.1f}%)")
-    
-    return from_to_map
-
-
-# ============================================================================
-# 4. MAIN PIPELINE FUNCTION
-# ============================================================================
-
-def compute_from_to_for_lines(
-    lines: List[Line],
-    arrows: List[Arrow],
-    ocr_items: List[OcrItem],
-    arrow_association_radius: float = 0.05,
-    ocr_association_max_distance: float = 0.08,
-) -> Dict[str, Dict[str, Optional[str]]]:
-    """
-    Complete FROM-TO detection pipeline.
-    
-    Pipeline:
-    1. Associate arrows with line endpoints (using perpendicular distance to first/last segments)
-    2. Infer FROM/TO roles for each line based on arrow orientations
-    3. Map FROM/TO endpoints to OCR line numbers
-    
-    Args:
-        lines: List of Line objects with ordered points
-        arrows: List of Arrow objects from CAD/vector parsing
-        ocr_items: List of OcrItem objects (detected line numbers)
-        arrow_association_radius: Max distance for arrow-endpoint association (default 0.05 = 5% of normalized size)
-        ocr_association_max_distance: Max distance for OCR-endpoint association (default 0.08 = 8%)
-    
-    Returns:
-        Dict mapping line_id to {"from_line": Optional[str], "to_line": Optional[str]}
-    """
-    logger.info("🚀 Starting FROM-TO direction detection pipeline")
-    logger.info(f"   Input: {len(lines)} lines, {len(arrows)} arrows, {len(ocr_items)} OCR items")
-    
-    # Step 1: Associate arrows with endpoints
-    endpoints_map = associate_arrows_to_endpoints(lines, arrows, arrow_association_radius)
-    
-    # Step 2: Infer FROM/TO roles
-    logger.info(f"  🧭 Inferring FROM/TO roles for {len(endpoints_map)} lines")
-    arrows_by_id = {arrow.id: arrow for arrow in arrows}
-    roles_map = {}
-    
-    for line in lines:
-        if line.id in endpoints_map:
-            roles = infer_from_to_for_line(line, endpoints_map[line.id], arrows_by_id)
-            roles_map[line.id] = roles
-            logger.debug(f"     Line {line.id}: start={roles.start_role}, end={roles.end_role}")
-    
-    # Step 3: Build FROM-TO map
-    from_to_map = build_from_to_map(
-        lines,
-        endpoints_map,
-        roles_map,
-        ocr_items,
-        ocr_association_max_distance
+    logger.debug(
+        f"Arrow matched to {best_line}: "
+        f"score={score:.3f}, dist={dist:.1f}px, angle={angle:.1f}°"
     )
     
-    logger.info("✅ FROM-TO direction detection pipeline complete")
+    return best_line
+
+
+def find_nearest_neighbor(
+    line_number: str,
+    line_records: List[LineRecord],
+    ocr_positions: Dict[str, Tuple[float, float]],
+    max_distance: float
+) -> Optional[str]:
+    """
+    Fallback: find the spatially nearest line number (no direction constraint).
+    Used when no arrow is available.
+    """
+    if line_number not in ocr_positions:
+        return None
     
-    return from_to_map
+    my_pos = ocr_positions[line_number]
+    min_dist = float('inf')
+    nearest = None
+    
+    for record in line_records:
+        other_line = record.original_detection
+        if other_line == line_number:
+            continue
+        
+        if other_line not in ocr_positions:
+            continue
+        
+        other_pos = ocr_positions[other_line]
+        dist = distance(my_pos, other_pos)
+        
+        if dist < min_dist and dist <= max_distance:
+            min_dist = dist
+            nearest = other_line
+    
+    return nearest
+
+
+# ============================================================================
+# 4. DIRECTION INFERENCE (core logic)
+# ============================================================================
+
+def infer_direction_from_arrow(
+    arrow: ArrowInfo,
+    line_records: List[LineRecord],
+    ocr_positions: Dict[str, Tuple[float, float]],
+    config: DirectionConfig
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Infer FROM and TO for a single arrow.
+    
+    Logic:
+    - FROM = arrow.line_number (the line the arrow is on)
+    - TO = nearest line number in the direction of the arrow tip
+    
+    Args:
+        arrow: Arrow information
+        line_records: All pipeline lines
+        ocr_positions: OCR text positions
+        config: Configuration
+    
+    Returns:
+        (from_line, to_line) tuple
+    """
+    if arrow.confidence < config.min_confidence:
+        logger.debug(f"Arrow on {arrow.line_number} below confidence threshold")
+        return (None, None)
+    
+    # FROM is the line the arrow is on
+    from_line = arrow.line_number
+    
+    # TO is the target the arrow points to
+    to_line = find_nearest_line_number_in_direction(
+        arrow_tip=arrow.tip,
+        arrow_dir=arrow.direction,
+        line_records=line_records,
+        ocr_positions=ocr_positions,
+        config=config
+    )
+    
+    if to_line is None:
+        logger.debug(f"Arrow on {from_line} points to no clear target")
+        to_line = "UNKNOWN"
+    
+    return (from_line, to_line)
+
+
+def infer_from_to_for_pid(
+    pdf_bytes: bytes,
+    line_records: List[LineRecord],
+    arrows: Optional[List[ArrowInfo]] = None,
+    config: Optional[DirectionConfig] = None
+) -> List[LineRecord]:
+    """
+    Main entry point: Infer FROM-TO for all lines in a P&ID.
+    
+    This function is designed to be called AFTER OCR/regex extraction
+    and BEFORE writing the final Excel/CSV table.
+    
+    Args:
+        pdf_bytes: Original P&ID PDF (single sheet)
+        line_records: List of lines extracted by OCR/regex
+        arrows: Optional list of detected arrows (if None, will attempt detection)
+        config: Direction inference configuration
+    
+    Returns:
+        Same line_records list with from_line and to_line populated
+    """
+    if config is None:
+        config = DirectionConfig()
+    
+    logger.info(f"🎯 Starting FROM-TO inference for {len(line_records)} lines")
+    
+    # Step 1: Build OCR positions map
+    ocr_positions = {}
+    for record in line_records:
+        if record.bbox:
+            ocr_positions[record.original_detection] = bbox_center(record.bbox)
+    
+    logger.info(f"   📍 Built OCR position map for {len(ocr_positions)} lines")
+    
+    # Step 2: If no arrows provided, attempt detection or use fallback
+    if arrows is None or len(arrows) == 0:
+        logger.warning("⚠️ No arrows provided - attempting image-based detection")
+        arrows = detect_arrows_from_pdf(pdf_bytes, line_records, ocr_positions)
+        
+        if not arrows:
+            logger.warning("   No arrows detected - using fallback (nearest neighbor)")
+            return apply_fallback_strategy(line_records, ocr_positions, config)
+    
+    logger.info(f"   🎯 Processing {len(arrows)} arrows")
+    
+    # Step 3: Build arrow map (line_number → list of arrows)
+    arrow_map: Dict[str, List[ArrowInfo]] = {}
+    for arrow in arrows:
+        if arrow.line_number not in arrow_map:
+            arrow_map[arrow.line_number] = []
+        arrow_map[arrow.line_number].append(arrow)
+    
+    # Step 4: Process each line
+    processed_count = 0
+    
+    for record in line_records:
+        line_num = record.original_detection
+        
+        if line_num in arrow_map:
+            # Has arrow(s) - use direction inference
+            line_arrows = arrow_map[line_num]
+            
+            # If multiple arrows, use the one with highest confidence
+            best_arrow = max(line_arrows, key=lambda a: a.confidence)
+            
+            from_line, to_line = infer_direction_from_arrow(
+                best_arrow, line_records, ocr_positions, config
+            )
+            
+            record.from_line = from_line
+            record.to_line = to_line
+            processed_count += 1
+            
+        elif config.fallback_to_nearest:
+            # No arrow - use nearest neighbor fallback
+            nearest = find_nearest_neighbor(
+                line_num, line_records, ocr_positions, config.max_search_distance
+            )
+            
+            if nearest:
+                record.from_line = line_num
+                record.to_line = nearest
+                logger.debug(f"Fallback: {line_num} → {nearest}")
+    
+    logger.info(f"✅ Processed {processed_count} lines with arrows")
+    logger.info(f"   📊 FROM-TO inference complete")
+    
+    return line_records
+
+
+def apply_fallback_strategy(
+    line_records: List[LineRecord],
+    ocr_positions: Dict[str, Tuple[float, float]],
+    config: DirectionConfig
+) -> List[LineRecord]:
+    """
+    Fallback strategy when no arrows detected.
+    Uses spatial proximity and sequential numbering.
+    """
+    logger.info("   Applying fallback strategy (spatial + sequential)")
+    
+    for record in line_records:
+        line_num = record.original_detection
+        
+        # Try to find nearest neighbor
+        nearest = find_nearest_neighbor(
+            line_num, line_records, ocr_positions, config.max_search_distance
+        )
+        
+        if nearest:
+            # Simple heuristic: FROM = current, TO = nearest
+            record.from_line = line_num
+            record.to_line = nearest
+        else:
+            # No neighbors found
+            record.from_line = line_num
+            record.to_line = "UNKNOWN"
+    
+    return line_records
+
+
+# ============================================================================
+# 5. ARROW DETECTION (placeholder for future enhancement)
+# ============================================================================
+
+def detect_arrows_from_pdf(
+    pdf_bytes: bytes,
+    line_records: List[LineRecord],
+    ocr_positions: Dict[str, Tuple[float, float]]
+) -> List[ArrowInfo]:
+    """
+    Detect arrows from P&ID image.
+    
+    THIS IS A PLACEHOLDER for future implementation.
+    Can be replaced with:
+    1. OpenCV-based triangle detection
+    2. Claude/vision API call (mimicking the paper's approach)
+    3. YOLOv8 arrow detector
+    
+    For now, returns empty list to trigger fallback strategy.
+    
+    Future Claude/vision integration example:
+    ```python
+    import anthropic
+    
+    # Render PDF to image
+    image = render_pdf_page(pdf_bytes, dpi=300)
+    image_b64 = encode_image_base64(image)
+    
+    # Prepare prompt
+    prompt = f'''
+    Analyze this P&ID drawing and detect all arrow/triangle symbols on pipeline lines.
+    
+    For each arrow, return:
+    - line_number: Which pipeline line it's on (choose from: {[r.original_detection for r in line_records]})
+    - tip: (x, y) coordinates of arrow tip
+    - base: (x, y) coordinates of arrow base
+    - confidence: 0-1 confidence score
+    
+    Return as JSON array of arrows.
+    '''
+    
+    response = client.messages.create(
+        model="claude-3-sonnet-20240229",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "data": image_b64}},
+                {"type": "text", "text": prompt}
+            ]
+        }]
+    )
+    
+    arrows_json = parse_json_response(response.content[0].text)
+    return [ArrowInfo(**a) for a in arrows_json]
+    ```
+    """
+    logger.info("   🔍 Arrow detection not yet implemented - using fallback")
+    return []
+
+
+def render_pdf_page(pdf_bytes: bytes, dpi: int = 300) -> 'PILImage':
+    """
+    Render PDF first page to PIL Image.
+    
+    Args:
+        pdf_bytes: PDF file bytes
+        dpi: Resolution for rendering
+    
+    Returns:
+        PIL Image object
+    """
+    try:
+        from pdf2image import convert_from_bytes
+        
+        images = convert_from_bytes(pdf_bytes, dpi=dpi, first_page=1, last_page=1)
+        if images:
+            return images[0]
+        else:
+            raise ValueError("PDF rendering returned no images")
+            
+    except ImportError:
+        logger.error("pdf2image not installed. Install with: pip install pdf2image")
+        raise
+    except Exception as e:
+        logger.error(f"PDF rendering failed: {str(e)}")
+        raise
+
+
+# ============================================================================
+# 6. INTEGRATION HELPERS (for existing pipeline)
+# ============================================================================
+
+def convert_table_data_to_line_records(
+    table_data: List[Dict],
+    ocr_bboxes: Optional[Dict[str, Tuple[float, float, float, float]]] = None
+) -> List[LineRecord]:
+    """
+    Convert existing table_data format to LineRecord objects.
+    
+    Args:
+        table_data: List of dicts from format_as_table_data()
+        ocr_bboxes: Optional map of line_number → bbox
+    
+    Returns:
+        List of LineRecord objects
+    """
+    records = []
+    
+    for item in table_data:
+        line_num = item.get('line_number', '')
+        if not line_num:
+            continue
+        
+        bbox = None
+        if ocr_bboxes and line_num in ocr_bboxes:
+            bbox = ocr_bboxes[line_num]
+        
+        record = LineRecord(
+            original_detection=line_num,
+            fluid_code=item.get('fluid_code', ''),
+            size=item.get('size', ''),
+            sequence_no=item.get('sequence_no', ''),
+            pipr_class=item.get('pipr_class', ''),
+            insulation=item.get('insulation', ''),
+            from_line=item.get('from_line'),
+            to_line=item.get('to_line'),
+            bbox=bbox
+        )
+        records.append(record)
+    
+    return records
+
+
+def apply_line_records_to_table_data(
+    line_records: List[LineRecord],
+    table_data: List[Dict]
+) -> List[Dict]:
+    """
+    Apply FROM-TO results from LineRecords back to table_data.
+    
+    Args:
+        line_records: LineRecords with filled from_line/to_line
+        table_data: Original table_data to update
+    
+    Returns:
+        Updated table_data with FROM-TO populated
+    """
+    # Build lookup map
+    record_map = {r.original_detection: r for r in line_records}
+    
+    # Update table_data in place
+    for item in table_data:
+        line_num = item.get('line_number', '')
+        if line_num in record_map:
+            record = record_map[line_num]
+            item['from_line'] = record.from_line
+            item['to_line'] = record.to_line
+            item['flow_detection_method'] = 'geometric_direction'
+            item['flow_confidence'] = 'medium'
+    
+    return table_data
+
+
+# ============================================================================
+# 7. EXAMPLE USAGE
+# ============================================================================
+
+def example_integration_with_existing_pipeline():
+    """
+    Example showing how to integrate this module with existing upload_pid view.
+    
+    This demonstrates the paper's approach: separate stages that can be
+    independently developed and tested.
+    """
+    
+    # Existing code (UNCHANGED):
+    # -----------------------------
+    # extractor = PIDLineExtractorV2()
+    # line_items = extractor.extract_from_pdf(tmp_path)
+    # table_data = extractor.format_as_table_data(line_items)
+    
+    # NEW: Add FROM-TO detection
+    # -----------------------------
+    try:
+        from .from_to_direction import (
+            convert_table_data_to_line_records,
+            infer_from_to_for_pid,
+            apply_line_records_to_table_data,
+            DirectionConfig
+        )
+        
+        # Read PDF bytes
+        with open('path/to/pid.pdf', 'rb') as f:
+            pdf_bytes = f.read()
+        
+        # Convert existing table_data to LineRecords
+        # (assumes table_data already has line_number, fluid_code, etc.)
+        line_records = convert_table_data_to_line_records(
+            table_data=[],  # Your existing table_data
+            ocr_bboxes={}   # Optional: bbox map from OCR engine
+        )
+        
+        # Configure direction inference
+        config = DirectionConfig(
+            max_angle_deg=45.0,
+            max_search_distance=500.0,
+            prefer_sequential=True,
+            fallback_to_nearest=True
+        )
+        
+        # Infer FROM-TO
+        line_records = infer_from_to_for_pid(
+            pdf_bytes=pdf_bytes,
+            line_records=line_records,
+            arrows=None,  # Will trigger detection or fallback
+            config=config
+        )
+        
+        # Apply results back to table_data
+        table_data = apply_line_records_to_table_data(line_records, [])
+        
+        logger.info(f"✅ FROM-TO populated for {len(table_data)} lines")
+        
+    except Exception as e:
+        logger.warning(f"⚠️ FROM-TO detection failed: {str(e)}", exc_info=True)
+        # Continue without FROM-TO data - existing columns unaffected
+    
+    # Rest of existing code (UNCHANGED):
+    # -----------------------------
+    # Save to database, return response, etc.
+
+
+if __name__ == "__main__":
+    # Quick test
+    logging.basicConfig(level=logging.INFO)
+    
+    test_records = [
+        LineRecord("36-41-SWS-00538-A2AU16-V", "SWS", "36", "00538", "A2AU16", "V",
+                  bbox=(100, 100, 200, 120)),
+        LineRecord("12-41-SWS-00539-A2AU16-V", "SWS", "12", "00539", "A2AU16", "V",
+                  bbox=(300, 100, 400, 120)),
+        LineRecord("8-41-SWS-00540-A2AU16-V", "SWS", "8", "00540", "A2AU16", "V",
+                  bbox=(500, 100, 600, 120)),
+    ]
+    
+    # Simulate arrow detection
+    test_arrows = [
+        ArrowInfo("36-41-SWS-00538-A2AU16-V", tip=(250, 110), base=(180, 110), confidence=0.9),
+        ArrowInfo("12-41-SWS-00539-A2AU16-V", tip=(450, 110), base=(380, 110), confidence=0.85),
+    ]
+    
+    config = DirectionConfig()
+    
+    # Test without PDF (will use fallback)
+    result = infer_from_to_for_pid(
+        pdf_bytes=b"",  # Empty for testing
+        line_records=test_records,
+        arrows=test_arrows,
+        config=config
+    )
+    
+    print("\n=== FROM-TO Detection Results ===")
+    for r in result:
+        print(f"{r.original_detection}:")
+        print(f"  FROM: {r.from_line}")
+        print(f"  TO: {r.to_line}")
+        print()
