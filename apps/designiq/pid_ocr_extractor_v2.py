@@ -1475,13 +1475,33 @@ Example 4: "10\"-PG-0003-033842-X-H"
         - Insulation: 1-2 uppercase letters (optional)
         
         Example: 36"-PG-4003-031441-X
+        
+        Also supports alternative project-based format without size:
+        - P[PROJECT]-[NUMBERS]-[NUMBERS]-...
+        Example: P16093-14-01-08-1604-1
         """
         logger.info("  🔍 Using hardcoded format: SIZE\"-FLUID(1-2)-SEQ(4-5)-PIPECLASS(6)-INSULATION(1-2)")
+        logger.info(f"  📝 OCR Text Length: {len(raw_ocr_text)} characters")
+        logger.info(f"  📝 OCR Text Sample (first 1000 chars):\n{raw_ocr_text[:1000]}")
         
-        # HARDCODED PATTERN: Exactly as user specified
+        # PATTERN 1: Standard SIZE"-FLUID-SEQUENCE-PIPECLASS format
         # SIZE: 1-2 digits, QUOTE mandatory, FLUID: 1-2 letters, SEQ: 4-5 digits, PIPECLASS: 6 digits, INSULATION: 1-2 letters optional
-        pattern = re.compile(
+        pattern1 = re.compile(
             r'(\d{1,2})\s*["\u201C\u201D]\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4,5})\s*-\s*(\d{6})\s*(?:-\s*([A-Z]{1,2}))?',
+            re.IGNORECASE
+        )
+        
+        # PATTERN 2: Project-based format P[PROJECT]-[SECTIONS] (e.g., P16093-14-01-08-1604-1)
+        # Matches lines starting with P followed by numbers and dashes
+        pattern2 = re.compile(
+            r'\b(P\d{4,6}(?:-\d{2,4}){2,})\b',
+            re.IGNORECASE
+        )
+        
+        # PATTERN 3: More flexible - any line-like pattern with dashes
+        # Catches patterns like: 2-digit - 2-letter - digits - digits
+        pattern3 = re.compile(
+            r'(\d{1,2})\s*["\u201C\u201D]?\s*-\s*([A-Z]{1,3})\s*-\s*(\d{2,6})\s*-\s*(\d{4,8})(?:\s*-\s*([A-Z\d]{1,3}))?',
             re.IGNORECASE
         )
         
@@ -1489,7 +1509,8 @@ Example 4: "10\"-PG-0003-033842-X-H"
         seen = set()
         matches_found = 0
         
-        for match in pattern.finditer(raw_ocr_text):
+        # Try Pattern 1 (strict format)
+        for match in pattern1.finditer(raw_ocr_text):
             matches_found += 1
             size = match.group(1)
             fluid = match.group(2).upper()
@@ -1507,7 +1528,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 continue
             seen.add(line_number)
             
-            logger.info(f"    ✅ MATCH: {line_number}")
+            logger.info(f"    ✅ MATCH (Pattern 1): {line_number}")
             
             found_lines.append({
                 'line_number': line_number,
@@ -1520,10 +1541,83 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 'from_equipment': '',
                 'to_equipment': '',
                 'area': '',
-                'extraction_method': 'hardcoded_format'
+                'extraction_method': 'standard_format'
             })
         
+        # Try Pattern 2 (project-based format) if Pattern 1 found nothing
+        if not found_lines:
+            logger.info("  🔍 Pattern 1 found nothing, trying Pattern 2 (project-based)")
+            for match in pattern2.finditer(raw_ocr_text):
+                matches_found += 1
+                line_number = match.group(1).upper()
+                
+                # Deduplicate
+                if line_number in seen:
+                    continue
+                seen.add(line_number)
+                
+                logger.info(f"    ✅ MATCH (Pattern 2): {line_number}")
+                
+                # Parse components from project format
+                parts = line_number.split('-')
+                found_lines.append({
+                    'line_number': line_number,
+                    'size': '',
+                    'fluid_code': '',
+                    'sequence_no': parts[1] if len(parts) > 1 else '',
+                    'pipr_class': '-'.join(parts[2:]) if len(parts) > 2 else '',
+                    'insulation': '',
+                    'page': page_num,
+                    'from_equipment': '',
+                    'to_equipment': '',
+                    'area': parts[0] if parts else '',
+                    'extraction_method': 'project_format'
+                })
+        
+        # Try Pattern 3 (flexible format) if still nothing found
+        if not found_lines:
+            logger.info("  🔍 Pattern 2 found nothing, trying Pattern 3 (flexible)")
+            for match in pattern3.finditer(raw_ocr_text):
+                matches_found += 1
+                size = match.group(1)
+                fluid = match.group(2).upper()
+                sequence = match.group(3)
+                pipe_class = match.group(4)
+                insulation = match.group(5).upper() if match.group(5) else ''
+                
+                # Build line number (without quote if not in original pattern)
+                line_number = f'{size}-{fluid}-{sequence}-{pipe_class}'
+                if insulation:
+                    line_number += f'-{insulation}'
+                
+                # Deduplicate
+                if line_number in seen:
+                    continue
+                seen.add(line_number)
+                
+                logger.info(f"    ✅ MATCH (Pattern 3): {line_number}")
+                
+                found_lines.append({
+                    'line_number': line_number,
+                    'size': f'{size}"' if size else '',
+                    'fluid_code': fluid,
+                    'sequence_no': sequence,
+                    'pipr_class': pipe_class,
+                    'insulation': insulation,
+                    'page': page_num,
+                    'from_equipment': '',
+                    'to_equipment': '',
+                    'area': '',
+                    'extraction_method': 'flexible_format'
+                })
+        
         logger.info(f"  📊 Total matches found: {matches_found}, Valid unique lines: {len(found_lines)}")
+        
+        # Log sample of OCR text if no matches found for debugging
+        if not found_lines:
+            logger.warning("  ⚠️ NO MATCHES FOUND IN OCR TEXT!")
+            logger.warning(f"  📝 Full OCR text for debugging:\n{raw_ocr_text}")
+        
         return found_lines
     
     def extract_with_openai(self, raw_ocr_text: str, page_num: int) -> List[Dict]:
