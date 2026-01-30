@@ -495,6 +495,113 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             "items": serializer.data
         })
     
+    @action(detail=False, methods=['post'])
+    def clear_history(self, request):
+        """
+        Clear all history documents for a specific list type
+        Soft-coded approach with safety checks
+        """
+        list_type = request.data.get('list_type')
+        confirm = request.data.get('confirm', False)
+        
+        # Validation
+        if not list_type:
+            return Response({
+                "error": "list_type is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if list_type not in LIST_TYPES:
+            return Response({
+                "error": f"Invalid list_type. Must be one of: {', '.join(LIST_TYPES.keys())}"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not confirm:
+            return Response({
+                "error": "Confirmation required. Set 'confirm': true"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get queryset for specific list type
+        queryset = EngineeringListItem.objects.filter(list_type=list_type)
+        
+        # Optional: Filter by project if specified
+        project_id = request.data.get('project_id')
+        if project_id:
+            queryset = queryset.filter(project_id=project_id)
+        
+        # Count before deletion
+        count = queryset.count()
+        
+        if count == 0:
+            return Response({
+                "message": "No items found to delete",
+                "deleted_count": 0,
+                "list_type": list_type
+            })
+        
+        # Perform deletion
+        try:
+            deleted_count, _ = queryset.delete()
+            
+            logger.info(f"🗑️ User {request.user.username} deleted {deleted_count} items from {LIST_TYPES[list_type]['name']}")
+            
+            return Response({
+                "message": f"Successfully deleted all {LIST_TYPES[list_type]['name']} items",
+                "deleted_count": deleted_count,
+                "list_type": list_type,
+                "list_type_name": LIST_TYPES[list_type]['name']
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"❌ Error deleting items: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to delete items: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['delete'])
+    def bulk_delete(self, request):
+        """
+        Delete multiple items by IDs
+        Soft-coded bulk deletion with validation
+        """
+        item_ids = request.data.get('item_ids', [])
+        
+        if not item_ids or not isinstance(item_ids, list):
+            return Response({
+                "error": "item_ids (array) is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate IDs exist and user has permission
+        queryset = EngineeringListItem.objects.filter(id__in=item_ids)
+        count = queryset.count()
+        
+        if count == 0:
+            return Response({
+                "error": "No items found with provided IDs"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        if count != len(item_ids):
+            return Response({
+                "warning": f"Only {count} of {len(item_ids)} items found",
+                "found_count": count
+            })
+        
+        try:
+            deleted_count, details = queryset.delete()
+            
+            logger.info(f"🗑️ User {request.user.username} bulk deleted {deleted_count} items")
+            
+            return Response({
+                "message": f"Successfully deleted {deleted_count} items",
+                "deleted_count": deleted_count,
+                "details": details
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"❌ Error bulk deleting items: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to delete items: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
     @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser])
     def upload_pid(self, request):
         """
