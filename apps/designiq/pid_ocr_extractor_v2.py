@@ -1,6 +1,7 @@
 """
 P&ID OCR Extractor V2 - Multi-Engine + AI Intelligence
 Uses Tesseract, EasyOCR, PaddleOCR + OpenAI for accurate line detection
+Last Updated: 2026-01-30 - Area field support for preview modal
 """
 
 import re
@@ -2923,6 +2924,7 @@ Analyze and return JSON:"""
                 'fluid_code': fluid_code,
                 'fluid_description': fluid_code_names.get(fluid_code, 'Unknown'),
                 'size': item.get('size', ''),
+                'area': item.get('area', ''),  # AREA CODE: 2-3 digits (Offshore=604, General=41, Onshore='')
                 'sequence_no': item.get('sequence_no', ''),
                 'pipr_class': item.get('pipr_class', ''),
                 'insulation': insulation,
