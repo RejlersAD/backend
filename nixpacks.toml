@@ -3,10 +3,10 @@
 nixPkgs = [
     'python311',
     'postgresql',
-    'tesseract',  # For OCR (lightweight alternative to PaddlePaddle)
-    'poppler_utils',  # For PDF processing
-    'libGL',
-    'glib'
+    'tesseract',  # Tesseract OCR binary for P&ID processing
+    'poppler_utils',  # For PDF processing (pdf2image)
+    'libGL',  # Required for image processing
+    'glib'  # Required for image processing
 ]
 
 [phases.install]
@@ -14,7 +14,10 @@ cmds = [
     'python -m venv /opt/venv',
     '. /opt/venv/bin/activate && pip install --upgrade pip',
     '# Use Railway-optimized requirements (excludes 4GB of ML packages)',
-    '. /opt/venv/bin/activate && pip install -r requirements-railway.txt'
+    '. /opt/venv/bin/activate && pip install -r requirements-railway.txt',
+    '# Verify tesseract installation',
+    'which tesseract || echo "❌ Tesseract not found"',
+    'tesseract --version || echo "❌ Tesseract version check failed"'
 ]
 
 [phases.build]
