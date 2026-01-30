@@ -591,6 +591,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                                 'fluid_code': line_data['fluid_code'],
                                 'fluid_description': line_data['fluid_description'],
                                 'size': line_data['size'],
+                                'area': line_data.get('area', ''),  # AREA CODE: 2-3 digits (Offshore/Onshore with area)
                                 'sequence_no': line_data['sequence_no'],
                                 'pipr_class': line_data['pipr_class'],
                                 'insulation': line_data['insulation'],
