@@ -279,7 +279,12 @@ class PIDLineExtractorV2:
         - Faster processing
         - Consistent results
         """
-        format_label = 'OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA')
+        # Normalize format_type: 'general' is same as 'onshore' without area
+        if format_type == 'general':
+            format_type = 'onshore'
+            include_area = False  # General format doesn't have area code
+        
+        format_label = 'OFFSHORE' if format_type == 'offshore' else ('GENERAL/ONSHORE WITH AREA' if include_area else 'GENERAL/ONSHORE WITHOUT AREA')
         logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({format_label})")
         
         # First, normalize the text - replace all dash-like characters with standard hyphen
