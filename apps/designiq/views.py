@@ -778,7 +778,4 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             logger.error(f"❌ Error checking task status: {str(e)}", exc_info=True)
             return Response({
                 "error": f"Failed to check task status: {str(e)}"
-            logger.error(f"Error uploading P&ID: {str(e)}", exc_info=True)
-            return Response({
-                "error": f"Failed to upload P&ID: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
