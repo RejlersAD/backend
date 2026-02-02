@@ -188,7 +188,7 @@ class EngineeringListItemListSerializer(serializers.ModelSerializer):
         model = EngineeringListItem
         fields = [
             'id', 'project', 'list_type', 'list_type_display', 'item_tag',
-            'description', 'status', 'status_display', 'created_by_name',
+            'description', 'status', 'status_display', 'data', 'created_by_name',
             'is_validated', 'version', 'created_at', 'updated_at'
         ]
     

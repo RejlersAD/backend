@@ -51,6 +51,40 @@ class QHSERunningProjectViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     ordering_fields = ['sr_no', 'project_starting_date', 'project_closing_date', 'updated_at']
     ordering = ['sr_no']
     
+    def perform_create(self, serializer):
+        """
+        Override perform_create to add logging and ensure data is saved
+        """
+        print(f"[QHSE ViewSet] Creating new project")
+        print(f"[QHSE ViewSet] Request data keys: {list(self.request.data.keys())}")
+        print(f"[QHSE ViewSet] User: {self.request.user.email if self.request.user.is_authenticated else 'Anonymous'}")
+        
+        instance = serializer.save()
+        
+        print(f"[QHSE ViewSet] Successfully created project ID: {instance.id}, sr_no: {instance.sr_no}")
+        return instance
+    
+    def perform_update(self, serializer):
+        """
+        Override perform_update to add logging and ensure data is saved to database
+        """
+        print(f"[QHSE ViewSet] Updating project")
+        print(f"[QHSE ViewSet] Project ID: {self.kwargs.get('pk')}")
+        print(f"[QHSE ViewSet] Request data keys: {list(self.request.data.keys())}")
+        print(f"[QHSE ViewSet] Request method: {self.request.method}")
+        print(f"[QHSE ViewSet] User: {self.request.user.email if self.request.user.is_authenticated else 'Anonymous'}")
+        
+        # Save the instance
+        instance = serializer.save()
+        
+        # Verify the save by refreshing from database
+        instance.refresh_from_db()
+        
+        print(f"[QHSE ViewSet] Successfully updated project ID: {instance.id}")
+        print(f"[QHSE ViewSet] Verified from DB - sr_no: {instance.sr_no}, updated_at: {instance.updated_at}")
+        
+        return instance
+    
     def get_queryset(self):
         """
         Soft-coded filtering based on query parameters

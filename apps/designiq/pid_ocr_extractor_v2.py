@@ -57,7 +57,6 @@ class PIDLineExtractorV2:
             self.paddleocr_reader = PaddleOCR(
                 use_angle_cls=True,  # Enable 180-degree angle classification
                 lang='en',
-                use_space_char=True,  # Preserve spaces
                 show_log=False  # Reduce log spam
             )
             logger.info("✅ PaddleOCR initialized (with vertical text support)")
@@ -1466,64 +1465,122 @@ Example 4: "10\"-PG-0003-033842-X-H"
     
     def extract_with_strict_validation(self, raw_ocr_text: str, page_num: int) -> List[Dict]:
         """
-        Hardcoded format extraction based on user specification:
-        Format: SIZE"-FLUID-SEQUENCE-PIPECLASS-INSULATION
-        - Size: 1-2 digits + " quote
-        - Fluid: 1-2 uppercase letters (PG, VG, CW, etc.)
-        - Sequence: 4-5 digits
-        - Pipe class: 6 digits fixed 
-        - Insulation: 1-2 uppercase letters (optional)
+        Multi-format pattern extraction for P&ID line numbers.
+        Tries multiple common P&ID formats in sequence.
         
-        Example: 36"-PG-4003-031441-X
+        Common formats:
+        1. SIZE"-FLUID-SEQUENCE-PIPECLASS-INSULATION (e.g., 36"-PG-4003-031441-X)
+        2. SIZE-AREA-FLUID-SEQUENCE-CLASS-INS (e.g., 12-604-PG-4003-150-X) 
+        3. AREA-SIZE-FLUID-SEQUENCE-CLASS (e.g., 604-36-PG-4003-150)
+        4. SIZE"-FLUID-SEQUENCE-CLASS (no insulation)
+        5. Flexible format with variable components
         """
-        logger.info("  🔍 Using hardcoded format: SIZE\"-FLUID(1-2)-SEQ(4-5)-PIPECLASS(6)-INSULATION(1-2)")
-        
-        # HARDCODED PATTERN: Exactly as user specified
-        # SIZE: 1-2 digits, QUOTE mandatory, FLUID: 1-2 letters, SEQ: 4-5 digits, PIPECLASS: 6 digits, INSULATION: 1-2 letters optional
-        pattern = re.compile(
-            r'(\d{1,2})\s*["\u201C\u201D]\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4,5})\s*-\s*(\d{6})\s*(?:-\s*([A-Z]{1,2}))?',
-            re.IGNORECASE
-        )
+        logger.info("  🔍 Trying multiple P&ID line number formats...")
         
         found_lines = []
         seen = set()
-        matches_found = 0
         
-        for match in pattern.finditer(raw_ocr_text):
-            matches_found += 1
-            size = match.group(1)
-            fluid = match.group(2).upper()
-            sequence = match.group(3)
-            pipe_class = match.group(4)
-            insulation = match.group(5).upper() if match.group(5) else ''
-            
-            # Build line number
-            line_number = f'{size}"-{fluid}-{sequence}-{pipe_class}'
-            if insulation:
-                line_number += f'-{insulation}'
-            
-            # Deduplicate
-            if line_number in seen:
-                continue
-            seen.add(line_number)
-            
-            logger.info(f"    ✅ MATCH: {line_number}")
-            
-            found_lines.append({
-                'line_number': line_number,
-                'size': f'{size}"',
-                'fluid_code': fluid,
-                'sequence_no': sequence,
-                'pipr_class': pipe_class,
-                'insulation': insulation,
-                'page': page_num,
-                'from_equipment': '',
-                'to_equipment': '',
-                'area': '',
-                'extraction_method': 'hardcoded_format'
-            })
+        # Pattern 1: Standard format with quote SIZE"-FLUID-SEQUENCE-PIPECLASS-INSULATION
+        pattern1 = re.compile(
+            r'(\d{1,2})\s*["\u201C\u201D]\s*-\s*([A-Z]{1,3})\s*-\s*(\d{3,5})\s*-\s*(\d{3,6})\s*(?:-\s*([A-Z]{1,2}))?',
+            re.IGNORECASE
+        )
         
-        logger.info(f"  📊 Total matches found: {matches_found}, Valid unique lines: {len(found_lines)}")
+        # Pattern 2: With area code SIZE-AREA-FLUID-SEQUENCE-CLASS-INS
+        pattern2 = re.compile(
+            r'(\d{1,2})\s*-\s*(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{3,5})\s*-\s*(\d{3,6})\s*(?:-\s*([A-Z]{1,2}))?',
+            re.IGNORECASE
+        )
+        
+        # Pattern 3: Area first AREA-SIZE-FLUID-SEQUENCE-CLASS
+        pattern3 = re.compile(
+            r'(\d{2,3})\s*-\s*(\d{1,2})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{3,5})\s*-\s*(\d{3,6})\s*(?:-\s*([A-Z]{1,2}))?',
+            re.IGNORECASE
+        )
+        
+        # Pattern 4: Flexible with slashes SIZE/FLUID/SEQUENCE/CLASS
+        pattern4 = re.compile(
+            r'(\d{1,2})\s*[/\-]\s*([A-Z]{1,3})\s*[/\-]\s*(\d{3,5})\s*[/\-]\s*(\d{3,6})\s*(?:[/\-]\s*([A-Z]{1,2}))?',
+            re.IGNORECASE
+        )
+        
+        patterns = [
+            (pattern1, 'standard_with_quote', ['size', 'fluid', 'sequence', 'class', 'insulation']),
+            (pattern2, 'with_area_code', ['size', 'area', 'fluid', 'sequence', 'class', 'insulation']),
+            (pattern3, 'area_first', ['area', 'size', 'fluid', 'sequence', 'class', 'insulation']),
+            (pattern4, 'flexible_separator', ['size', 'fluid', 'sequence', 'class', 'insulation'])
+        ]
+        
+        for pattern, format_name, component_order in patterns:
+            matches_found = 0
+            logger.info(f"  🔍 Trying pattern: {format_name}")
+            
+            for match in pattern.finditer(raw_ocr_text):
+                matches_found += 1
+                groups = match.groups()
+                
+                # Parse based on component order
+                line_data = {}
+                area = ''
+                size = ''
+                fluid = ''
+                sequence = ''
+                pipe_class = ''
+                insulation = ''
+                
+                if format_name == 'with_area_code':
+                    size, area, fluid, sequence, pipe_class = groups[0], groups[1], groups[2], groups[3], groups[4]
+                    insulation = groups[5].upper() if groups[5] else ''
+                    line_number = f'{size}-{area}-{fluid.upper()}-{sequence}-{pipe_class}'
+                elif format_name == 'area_first':
+                    area, size, fluid, sequence, pipe_class = groups[0], groups[1], groups[2], groups[3], groups[4]
+                    insulation = groups[5].upper() if groups[5] else ''
+                    line_number = f'{area}-{size}-{fluid.upper()}-{sequence}-{pipe_class}'
+                else:
+                    size, fluid, sequence, pipe_class = groups[0], groups[1], groups[2], groups[3]
+                    insulation = groups[4].upper() if groups[4] else ''
+                    if format_name == 'standard_with_quote':
+                        line_number = f'{size}"-{fluid.upper()}-{sequence}-{pipe_class}'
+                    else:
+                        line_number = f'{size}-{fluid.upper()}-{sequence}-{pipe_class}'
+                
+                if insulation:
+                    line_number += f'-{insulation}'
+                
+                # Deduplicate
+                if line_number in seen:
+                    continue
+                seen.add(line_number)
+                
+                logger.info(f"    ✅ MATCH ({format_name}): {line_number}")
+                
+                found_lines.append({
+                    'line_number': line_number,
+                    'size': f'{size}"' if format_name == 'standard_with_quote' else size,
+                    'area': area,
+                    'fluid_code': fluid.upper(),
+                    'sequence_no': sequence,
+                    'pipr_class': pipe_class,
+                    'insulation': insulation,
+                    'page': page_num,
+                    'from_equipment': '',
+                    'to_equipment': '',
+                    'extraction_method': format_name
+                })
+            
+            if matches_found > 0:
+                logger.info(f"  ✅ Pattern {format_name} found {matches_found} matches")
+            
+            # If we found matches with this pattern, continue searching with it
+            # but also try other patterns to catch all formats
+        
+        logger.info(f"  📊 Total unique lines extracted: {len(found_lines)}")
+        
+        # If no matches found, try OpenAI fallback
+        if len(found_lines) == 0:
+            logger.info("  🤖 No regex matches - trying OpenAI fallback...")
+            return self.extract_with_openai(raw_ocr_text, page_num)
+        
         return found_lines
     
     def extract_with_openai(self, raw_ocr_text: str, page_num: int) -> List[Dict]:
