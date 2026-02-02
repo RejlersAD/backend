@@ -487,7 +487,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         user = profile.user
         
         # Default password (soft-coded in settings)
-        default_password = getattr(settings, 'DEFAULT_USER_PASSWORD', 'Welcome@123')
+        default_password = getattr(settings, 'DEFAULT_USER_PASSWORD', 'Rejlers@123')
         
         # Set the password
         user.password = make_password(default_password)

@@ -74,14 +74,29 @@ class QHSERunningProjectSerializer(serializers.ModelSerializer):
         if request and hasattr(request, 'user'):
             validated_data['created_by'] = request.user
             validated_data['updated_by'] = request.user
-        return super().create(validated_data)
+        
+        print(f"[QHSE Serializer] Creating project with data: {list(validated_data.keys())}")
+        instance = super().create(validated_data)
+        print(f"[QHSE Serializer] Successfully created project ID: {instance.id}")
+        return instance
     
     def update(self, instance, validated_data):
         """Auto-set updated_by if user is available"""
         request = self.context.get('request')
         if request and hasattr(request, 'user'):
             validated_data['updated_by'] = request.user
-        return super().update(instance, validated_data)
+        
+        print(f"[QHSE Serializer] Updating project ID: {instance.id}")
+        print(f"[QHSE Serializer] Fields to update: {list(validated_data.keys())}")
+        print(f"[QHSE Serializer] Before update - sr_no: {instance.sr_no}, project_no: {instance.project_no}")
+        
+        # Perform the update
+        instance = super().update(instance, validated_data)
+        
+        print(f"[QHSE Serializer] After update - sr_no: {instance.sr_no}, project_no: {instance.project_no}")
+        print(f"[QHSE Serializer] Successfully updated project ID: {instance.id}")
+        
+        return instance
 
 
 # ============================================================================

@@ -63,7 +63,7 @@ DEBUG = safe_cast_bool(config('DEBUG', default='False'), False)
 # ================================================================
 # Default password for admin-initiated password resets
 # This password should be changed by users on first login
-DEFAULT_USER_PASSWORD = config('DEFAULT_USER_PASSWORD', default='Welcome@123')
+DEFAULT_USER_PASSWORD = config('DEFAULT_USER_PASSWORD', default='Rejlers@123')
 
 # Railway-friendly ALLOWED_HOSTS configuration
 try:
@@ -292,7 +292,7 @@ REST_FRAMEWORK = {
         'rest_framework.parsers.FormParser',
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 10,
+    'PAGE_SIZE': 100,  # Increased from 10 to show more items per page
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
 }
