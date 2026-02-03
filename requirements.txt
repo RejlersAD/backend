@@ -50,7 +50,7 @@ google-auth-oauthlib>=1.1.0
 # mongoengine==0.28.2
 
 # AWS S3 Storage
-boto3==1.34.21
+# boto3==1.34.21  # REMOVED: Duplicate - using boto3==1.34.69 from line 22
 django-storages==1.14.2
 
 # Report Export
