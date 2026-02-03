@@ -82,6 +82,12 @@ const DesignIQLists = () => {
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [extractedData, setExtractedData] = useState(null);
   
+  // Document management states
+  const [showDocumentsView, setShowDocumentsView] = useState(true);
+  const [documents, setDocuments] = useState([]);
+  const [loadingDocuments, setLoadingDocuments] = useState(true);
+  const [exportingDocId, setExportingDocId] = useState(null);
+  
   // Line Number Format Configuration
   const STRICT_LINE_PATTERNS = {
     line_size: '\\d{1,2}',
@@ -136,8 +142,47 @@ const DesignIQLists = () => {
   }, []);
 
   useEffect(() => {
-    fetchData();
-  }, [selectedListType, statusFilter]);
+    if (selectedListType === 'line_list') {
+      if (showDocumentsView) {
+        fetchDocuments();
+      } else {
+        fetchData();
+      }
+    } else {
+      fetchData();
+    }
+  }, [selectedListType, statusFilter, showDocumentsView]);
+
+  const fetchDocuments = async (isAutoRefresh = false) => {
+    if (isAutoRefresh) setIsRefreshing(true);
+    else setLoadingDocuments(true);
+    
+    try {
+      const token = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN);
+      const response = await fetch(
+        `${API_BASE_URL}/designiq/lists/documents/?list_type=${selectedListType}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      if (response.ok) {
+        const data = await response.json();
+        setDocuments(data.documents || []);
+      } else {
+        setDocuments([]);
+      }
+    } catch (error) {
+      console.error('Error fetching documents:', error);
+      setDocuments([]);
+    } finally {
+      setLoadingDocuments(false);
+      setIsRefreshing(false);
+    }
+  };
 
   const fetchData = async (isAutoRefresh = false) => {
     if (isAutoRefresh) setIsRefreshing(true);
@@ -306,7 +351,7 @@ const DesignIQLists = () => {
       setShowPreviewModal(true);
       setUploadResult({
         success: true,
-        message: `Successfully extracted ${data.extracted_lines?.length || 0} line numbers from ${file.name}`,
+        message: `Successfully uploaded document ${data.document_id || file.name} with ${data.extracted_lines?.length || 0} line items`,
         data: data
       });
       setUploadingPID(false);
@@ -336,6 +381,154 @@ const DesignIQLists = () => {
       setProcessing(false);
       setUploadingPID(false);
       event.target.value = '';
+    }
+  };
+
+  // View PDF functionality removed - users can download Excel directly from the table
+
+  const handleExportDocumentExcel = async (documentId, filename) => {
+    // CRS MULTI-REVISION PATTERN: Backend generates Excel, frontend downloads it
+    try {
+      console.log('📊 Excel export request for:', { documentId, filename });
+      
+      const token = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN);
+      
+      if (!token) {
+        alert('Authentication required. Please log in again.');
+        return;
+      }
+      
+      setExportingDocId(documentId);
+      
+      // URL encode document ID for query parameter
+      const encodedDocId = encodeURIComponent(documentId);
+      const exportUrl = `${API_BASE_URL}/designiq/lists/export-document-excel/?document_id=${encodedDocId}`;
+      
+      console.log('📡 Calling backend export endpoint:', exportUrl);
+      
+      // Call backend endpoint to generate Excel
+      const response = await fetch(exportUrl, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorMsg;
+        try {
+          const error = JSON.parse(errorText);
+          errorMsg = error.error || error.detail || error.message;
+        } catch {
+          errorMsg = errorText || `HTTP ${response.status}`;
+        }
+        
+        console.error('❌ Export failed:', { status: response.status, error: errorMsg });
+        alert(`Failed to export Excel:\n${errorMsg}\n\nStatus: ${response.status}`);
+        return;
+      }
+      
+      // Get item count from response header
+      const itemCount = response.headers.get('X-Item-Count') || '?';
+      
+      // Download the Excel file
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      
+      // Extract filename from Content-Disposition or use default
+      const contentDisposition = response.headers.get('Content-Disposition');
+      let downloadFilename = `${filename || documentId}_line_list.xlsx`;
+      
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+        if (filenameMatch) {
+          downloadFilename = filenameMatch[1];
+        }
+      }
+      
+      a.download = downloadFilename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      
+      console.log('✅ Excel downloaded:', downloadFilename);
+      alert(`✅ Excel exported successfully!\n\n${itemCount} line items downloaded`);
+      
+    } catch (error) {
+      console.error('❌ Error exporting document:', error);
+      alert(`Failed to export Excel file: ${error.message}\n\nCheck console for details.`);
+    } finally {
+      setExportingDocId(null);
+    }
+  };
+
+  const handleDeleteDocument = async (documentId, filename, lineCount) => {
+    if (!confirm(`⚠️ Delete Document\n\nAre you sure you want to delete "${filename}"?\n\nThis will remove:\n• The document entry\n• All ${lineCount} extracted line items\n• Cannot be undone\n\nClick OK to proceed with deletion.`)) {
+      return;
+    }
+
+    try {
+      const token = localStorage.getItem(STORAGE_KEYS.ACCESS_TOKEN);
+      
+      // Optimistically remove from UI
+      setDocuments(prev => prev.filter(doc => doc.document_id !== documentId));
+      
+      // Properly encode the document_id for URL
+      const encodedDocId = encodeURIComponent(documentId);
+      
+      console.log('🗑️ Deleting document:', {
+        original: documentId,
+        encoded: encodedDocId,
+        url: `${API_BASE_URL}/designiq/lists/documents/${encodedDocId}/`
+      });
+      
+      const response = await fetch(
+        `${API_BASE_URL}/designiq/lists/documents/${encodedDocId}/`,
+        {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      if (response.ok) {
+        const result = await response.json();
+        console.log('✅ Document deleted:', result);
+        // Refresh to ensure sync with backend
+        fetchDocuments();
+        // Show success notification
+        alert(`✅ Successfully deleted "${filename}"\n\n${result.items_deleted} line items removed from database`);
+      } else {
+        const errorText = await response.text();
+        let errorMsg;
+        try {
+          const error = JSON.parse(errorText);
+          errorMsg = error.message || error.detail || error.error || 'Unknown error';
+        } catch {
+          errorMsg = errorText || `HTTP ${response.status}`;
+        }
+        
+        console.error('❌ Delete failed:', {
+          status: response.status,
+          statusText: response.statusText,
+          error: errorMsg
+        });
+        
+        // Revert optimistic update on error
+        fetchDocuments();
+        alert(`❌ Failed to delete document:\n${errorMsg}\n\nStatus: ${response.status}`);
+      }
+    } catch (error) {
+      console.error('❌ Error deleting document:', error);
+      // Revert optimistic update on error
+      fetchDocuments();
+      alert(`❌ Failed to delete document:\n${error.message}\n\nPlease check your connection and try again.`);
     }
   };
 
@@ -408,6 +601,19 @@ const DesignIQLists = () => {
             })}
           </nav>
         </div>
+
+        {/* Toggle Button for Documents View (Line List only) */}
+        {selectedListType === 'line_list' && (
+          <div className="px-6 py-3 bg-gray-50 border-b border-gray-200">
+            <button
+              onClick={() => setShowDocumentsView(!showDocumentsView)}
+              className="flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+            >
+              <ViewColumnsIcon className="w-5 h-5 mr-2" />
+              {showDocumentsView ? 'View Line Items' : 'View Documents'}
+            </button>
+          </div>
+        )}
 
         {/* Stats Cards */}
         {stats && (
@@ -593,10 +799,116 @@ const DesignIQLists = () => {
 
       {/* Items Table */}
       <div className="bg-white rounded-lg shadow-sm overflow-hidden">
-        {loading ? (
+        {(loading || loadingDocuments) ? (
           <div className="p-12 text-center">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
-            <p className="mt-4 text-gray-600">Loading items...</p>
+            <p className="mt-4 text-gray-600">{loadingDocuments ? 'Loading documents...' : 'Loading items...'}</p>
+          </div>
+        ) : showDocumentsView && selectedListType === 'line_list' ? (
+          // Documents View
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Document ID
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Filename
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Upload Date
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Uploaded By
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Format
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Line Count
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {documents.length === 0 ? (
+                  <tr>
+                    <td colSpan="7" className="px-6 py-12 text-center text-gray-500">
+                      No documents found. Upload a P&ID to get started.
+                    </td>
+                  </tr>
+                ) : (
+                  documents.map((doc) => (
+                    <tr key={doc.document_id} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-indigo-600">
+                        {doc.document_id}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-900">
+                        {doc.original_filename || doc.document_id}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {new Date(doc.created_at).toLocaleDateString('en-US', {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {doc.created_by || 'Unknown'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">
+                          {doc.format_type || 'ADNOC'}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                        {doc.line_count} lines
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                        <button
+                          onClick={() => handleExportDocumentExcel(doc.document_id, doc.original_filename)}
+                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                          title="Download Excel with all line items"
+                          disabled={exportingDocId === doc.document_id}
+                        >
+                          {exportingDocId === doc.document_id ? (
+                            <>
+                              <svg className="animate-spin -ml-0.5 mr-1.5 h-4 w-4" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                              </svg>
+                              Exporting...
+                            </>
+                          ) : (
+                            <>
+                              <svg className="-ml-0.5 mr-1.5 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                              </svg>
+                              Download Excel
+                            </>
+                          )}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteDocument(doc.document_id, doc.original_filename, doc.line_count)}
+                          className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                          title="Delete document and all line items"
+                        >
+                          <svg className="-ml-0.5 mr-1.5 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         ) : items.length === 0 ? (
           <div className="p-12 text-center">
@@ -1292,6 +1604,8 @@ const DesignIQLists = () => {
           </div>
         </div>
       )}
+
+      {/* PDF Viewer Modal removed - Excel download available directly from table */}
     </div>
   );
 };

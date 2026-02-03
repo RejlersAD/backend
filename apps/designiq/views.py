@@ -10,9 +10,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Q, Count
 from django.utils import timezone
+from django.http import HttpResponse
 import logging
 
 from .models import DesignProject, DesignAnalysis, DesignOptimization, DesignTemplate, EngineeringListItem, LIST_TYPES
+from .s3_utils import s3_storage  # S3 document storage
 from .serializers import (
     DesignProjectListSerializer, DesignProjectDetailSerializer,
     DesignProjectCreateSerializer, DesignAnalysisSerializer,
@@ -536,14 +538,59 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 }
             )
             
-            # Save PDF file
-            file_path = f"designiq/pid_uploads/{timezone.now().strftime('%Y/%m/%d')}/{pid_file.name}"
-            saved_path = default_storage.save(file_path, pid_file)
+            # 🆔 GENERATE UNIQUE 4-DIGIT DOCUMENT ID
+            # Find the highest existing document ID from all line items
+            last_doc_id = 0
+            existing_items = EngineeringListItem.objects.filter(
+                data__has_key='document_id'
+            ).order_by('-created_at').first()
             
-            # Save to temp file for OCR processing
+            if existing_items and existing_items.data.get('document_id'):
+                try:
+                    # Extract the 4-digit number from format "0001-filename.pdf"
+                    doc_id_str = existing_items.data['document_id'].split('-')[0]
+                    last_doc_id = int(doc_id_str)
+                except (ValueError, IndexError):
+                    pass
+            
+            # Generate new 4-digit ID (increment)
+            new_doc_id = last_doc_id + 1
+            document_id = f"{new_doc_id:04d}-{pid_file.name}"
+            
+            logger.info(f"🆔 Generated Document ID: {document_id}")
+            
+            # Read file content once to avoid file pointer issues
+            pid_file.seek(0)
+            file_content = pid_file.read()
+            
+            # 📤 UPLOAD TO S3 (if configured)
+            from io import BytesIO
+            s3_file = BytesIO(file_content)
+            s3_result = s3_storage.upload_document(
+                file_obj=s3_file,
+                document_id=document_id,
+                original_filename=pid_file.name
+            )
+            
+            if s3_result['success']:
+                logger.info(f"☁️ Uploaded to S3: {s3_result['s3_key']}")
+                saved_path = s3_result['s3_key']  # Use S3 key as path
+                storage_type = 's3'
+                s3_url = s3_result['s3_url']
+            else:
+                logger.warning(f"⚠️ S3 upload failed: {s3_result['error']}, falling back to local storage")
+                # Fallback to local storage - recreate file object with content
+                from django.core.files.uploadedfile import InMemoryUploadedFile
+                local_file = BytesIO(file_content)
+                local_file.seek(0)
+                file_path = f"designiq/pid_uploads/{timezone.now().strftime('%Y/%m/%d')}/{document_id}"
+                saved_path = default_storage.save(file_path, local_file)
+                storage_type = 'local'
+                s3_url = None
+            
+            # Save to temp file for OCR processing using the content we already read
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
-                pid_file.seek(0)
-                tmp.write(pid_file.read())
+                tmp.write(file_content)
                 tmp_path = tmp.name
             
             try:
@@ -587,10 +634,18 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                             'data': {
                                 'source': 'pid_ocr',
                                 'filename': pid_file.name,
+                                'document_id': document_id,  # 🆔 UNIQUE DOCUMENT ID
+                                'document_path': saved_path,  # 📄 S3 KEY or LOCAL PATH
+                                'storage_type': storage_type,  # 's3' or 'local'
+                                's3_url': s3_url,  # Direct S3 URL (if applicable)
+                                'upload_timestamp': timezone.now().isoformat(),
+                                'format_type': format_type,
+                                'include_area': include_area,
                                 'page_number': line_data.get('page', 1),
                                 'fluid_code': line_data['fluid_code'],
                                 'fluid_description': line_data['fluid_description'],
                                 'size': line_data['size'],
+                                'area': line_data.get('area', ''),  # AREA field
                                 'sequence_no': line_data['sequence_no'],
                                 'pipr_class': line_data['pipr_class'],
                                 'insulation': line_data['insulation'],
@@ -599,13 +654,15 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                                 'from_line': line_data.get('from_line', ''),  # NEW: FROM line number
                                 'to_line': line_data.get('to_line', ''),      # NEW: TO line number
                                 'flow_detection_method': line_data.get('flow_detection_method', ''),
-                                'flow_confidence': line_data.get('flow_confidence', ''),
-                                'upload_timestamp': timezone.now().isoformat()
+                                'flow_confidence': line_data.get('flow_confidence', '')
                             },
                             'attachments': [{
                                 'type': 'pid_pdf',
                                 'filename': pid_file.name,
+                                'document_id': document_id,
                                 'path': saved_path,
+                                'storage_type': storage_type,
+                                's3_url': s3_url,
                                 'uploaded_at': timezone.now().isoformat()
                             }]
                         }
@@ -642,6 +699,8 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 return Response({
                     "message": "P&ID processed successfully using OCR",
                     "filename": pid_file.name,
+                    "document_id": document_id,  # 🆔 RETURN DOCUMENT ID
+                    "document_path": saved_path,  # 📄 RETURN FILE PATH
                     "items_created": len(created_items),
                     "items_updated": len(updated_items),
                     "total_items": total_items,
@@ -658,4 +717,279 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             logger.error(f"❌ Error uploading/processing P&ID: {str(e)}", exc_info=True)
             return Response({
                 "error": f"Failed to upload P&ID: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)    
+    @action(detail=False, methods=['get'], url_path='documents')
+    def list_documents(self, request):
+        """
+        List all uploaded P&ID documents with their unique IDs
+        Groups line items by document_id
+        """
+        try:
+            list_type = request.query_params.get('list_type', 'line_list')
+            
+            # Get all items with document IDs
+            items = EngineeringListItem.objects.filter(
+                list_type=list_type,
+                data__has_key='document_id'
+            ).order_by('-created_at')
+            
+            # Group by document_id
+            documents_map = {}
+            for item in items:
+                doc_id = item.data.get('document_id')
+                if not doc_id:
+                    continue
+                
+                if doc_id not in documents_map:
+                    documents_map[doc_id] = {
+                        'document_id': doc_id,
+                        'filename': item.data.get('filename', 'Unknown'),
+                        'original_filename': item.data.get('filename', 'Unknown'),
+                        'document_path': item.data.get('document_path', ''),
+                        'storage_type': item.data.get('storage_type', 'local'),
+                        's3_url': item.data.get('s3_url'),
+                        'upload_date': item.data.get('upload_timestamp', item.created_at.isoformat()),
+                        'uploaded_by': item.created_by.get_full_name() if item.created_by else 'Unknown',
+                        'format_type': item.data.get('format_type', 'general'),
+                        'line_count': 0,
+                        'item_ids': []
+                    }
+                
+                documents_map[doc_id]['line_count'] += 1
+                documents_map[doc_id]['item_ids'].append(item.id)
+            
+            documents_list = list(documents_map.values())
+            
+            return Response({
+                'documents': documents_list,
+                'total_documents': len(documents_list)
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error listing documents: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to list documents: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['get'], url_path='documents/(?P<document_id>.+)/download')
+    def download_document(self, request, document_id=None):
+        """
+        Download P&ID document by document_id
+        Supports both S3 and local storage
+        """
+        try:
+            logger.info(f"📥 Download request for document_id: {document_id}")
+            
+            # Find an item with this document_id to get the storage info
+            item = EngineeringListItem.objects.filter(
+                data__document_id=document_id
+            ).first()
+            
+            if not item:
+                logger.warning(f"❌ Document not found in database: {document_id}")
+                return Response({
+                    "error": f"Document not found: {document_id}"
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            storage_type = item.data.get('storage_type', 'local')
+            document_path = item.data.get('document_path', '')
+            filename = item.data.get('filename', document_id)
+            
+            if storage_type == 's3':
+                # Generate presigned URL for S3 (1 hour expiration)
+                presigned_url = s3_storage.generate_presigned_url(
+                    s3_key=document_path,
+                    expiration=3600
+                )
+                
+                if presigned_url:
+                    # Return presigned URL
+                    return Response({
+                        'url': presigned_url,
+                        'filename': filename,
+                        'storage_type': 's3',
+                        'expires_in': 3600
+                    }, status=status.HTTP_200_OK)
+                else:
+                    return Response({
+                        "error": "Failed to generate download URL"
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            else:
+                # Local storage - serve file directly
+                from django.core.files.storage import default_storage
+                
+                if not default_storage.exists(document_path):
+                    return Response({
+                        "error": f"Document file not found: {document_path}"
+                    }, status=status.HTTP_404_NOT_FOUND)
+                
+                file = default_storage.open(document_path, 'rb')
+                response = HttpResponse(file.read(), content_type='application/pdf')
+                response['Content-Disposition'] = f'inline; filename="{filename}"'
+                file.close()
+                
+                return response
+            
+        except Exception as e:
+            logger.error(f"Error downloading document: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to download document: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['delete'], url_path='documents/(?P<document_id>.+)')
+    def delete_document(self, request, document_id=None):
+        """
+        Delete all line items associated with a document ID
+        """
+        try:
+            logger.info(f"🗑️ Delete request for document_id: {document_id}")
+            
+            # Find all items with this document_id
+            items = EngineeringListItem.objects.filter(
+                data__document_id=document_id
+            )
+            
+            count = items.count()
+            if count == 0:
+                logger.warning(f"❌ No items found for document: {document_id}")
+                return Response({
+                    "error": f"No items found for document ID: {document_id}"
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Delete all items
+            items.delete()
+            
+            logger.info(f"🗑️ Deleted document {document_id} with {count} line items")
+            
+            return Response({
+                "message": f"Successfully deleted document {document_id}",
+                "items_deleted": count
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error deleting document: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to delete document: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['get'], url_path='export-document-excel')
+    def export_document_excel(self, request):
+        """
+        Export document line items to Excel (CRS multi-revision pattern)
+        GET /api/v1/designiq/lists/export-document-excel/?document_id={document_id}
+        
+        Query Parameters:
+            document_id: The document ID to export (required)
+        
+        Returns Excel file with line items
+        """
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
+            from openpyxl.utils import get_column_letter
+            from io import BytesIO
+            
+            # Get document_id from query parameters
+            document_id = request.query_params.get('document_id')
+            if not document_id:
+                return Response({
+                    "error": "document_id query parameter is required"
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            logger.info(f"📊 Excel export request for document: {document_id}")
+            
+            # Find all items with this document_id
+            items = EngineeringListItem.objects.filter(
+                list_type='line_list',
+                data__document_id=document_id
+            ).order_by('item_tag')
+            
+            if not items.exists():
+                logger.warning(f"❌ No items found for document: {document_id}")
+                return Response({
+                    "error": f"No line items found for document ID: {document_id}"
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Create workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Line List"
+            
+            # Header style
+            header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+            header_font = Font(color="FFFFFF", bold=True, size=11)
+            
+            # Define headers
+            headers = [
+                'Line Number', 'Size', 'Fluid Code', 'Fluid Description',
+                'Sequence No', 'Pipe Class', 'Insulation', 'Area',
+                'FROM', 'TO', 'Status', 'Validated'
+            ]
+            
+            ws.append(headers)
+            
+            # Style headers
+            for col_num, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col_num)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            
+            # Add data rows
+            for item in items:
+                ws.append([
+                    item.item_tag,
+                    item.data.get('size', ''),
+                    item.data.get('fluid_code', ''),
+                    item.data.get('fluid_description', ''),
+                    item.data.get('sequence_no', ''),
+                    item.data.get('pipr_class', ''),
+                    item.data.get('insulation', ''),
+                    item.data.get('area', ''),
+                    item.data.get('from_line', ''),
+                    item.data.get('to_line', ''),
+                    item.status,
+                    'Yes' if item.is_validated else 'No'
+                ])
+            
+            # Auto-size columns
+            for col_num in range(1, len(headers) + 1):
+                col_letter = get_column_letter(col_num)
+                max_length = len(headers[col_num - 1])
+                for cell in ws[col_letter]:
+                    try:
+                        cell_length = len(str(cell.value))
+                        if cell_length > max_length:
+                            max_length = min(cell_length, 50)
+                    except:
+                        pass
+                ws.column_dimensions[col_letter].width = max_length + 2
+            
+            # Save to BytesIO
+            output = BytesIO()
+            wb.save(output)
+            output.seek(0)
+            
+            # Get filename from first item
+            filename = items.first().data.get('filename', document_id)
+            safe_filename = "".join(c for c in filename if c.isalnum() or c in "-_.").strip() or "line_list"
+            excel_filename = f"{safe_filename}_line_list.xlsx"
+            
+            logger.info(f"✅ Generated Excel with {items.count()} line items")
+            
+            # Create response
+            response = HttpResponse(
+                output.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="{excel_filename}"'
+            response['X-Item-Count'] = str(items.count())
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error exporting Excel: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to export Excel: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

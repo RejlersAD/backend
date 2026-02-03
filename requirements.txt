@@ -19,6 +19,7 @@ pillow==10.1.0
 openai==1.54.3
 httpx==0.27.2
 requests>=2.31.0  # For AWS S3 template downloads
+boto3==1.34.69  # AWS S3 for P&ID document storage
 PyPDF2==3.0.1
 pdf2image==1.17.0
 pymupdf==1.24.0
