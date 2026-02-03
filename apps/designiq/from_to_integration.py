@@ -276,32 +276,38 @@ def determine_from_to_with_openai_vision(
 
 **⚡ RETURN JSON NOW** - Analyze the diagram and provide FROM-TO for ALL {len(ocr_line_numbers)} lines:"""
         
-        logger.info(f"  🔍 Calling OpenAI Vision API with gpt-4o (max_tokens=4000)...")
+        logger.info(f"  🔍 Calling OpenAI Vision API with gpt-4o (max_tokens=4000, timeout=180s)...")
         
         # Use gpt-4o - the current vision-capable model (gpt-4-vision-preview is deprecated)
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",  # ✅ Current vision model (supports images natively)
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{img_base64}",
-                                "detail": "high"  # High detail for P&ID diagram analysis
+        try:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o",  # ✅ Current vision model (supports images natively)
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{img_base64}",
+                                    "detail": "high"  # High detail for P&ID diagram analysis
+                                }
                             }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=4000,  # Increased for comprehensive FROM-TO results
-            temperature=0.1,  # Low temperature for consistent engineering analysis
-        )
+                        ]
+                    }
+                ],
+                max_tokens=4000,  # Increased for comprehensive FROM-TO results
+                temperature=0.1,  # Low temperature for consistent engineering analysis
+                timeout=180  # 3 minute timeout to prevent indefinite hangs
+            )
+        except Exception as api_err:
+            logger.error(f"  ❌ OpenAI Vision API call failed: {str(api_err)}")
+            logger.info(f"  ⏭️ Falling back to empty FROM-TO results (will use geometric fallback)")
+            return {}
         
         # Parse the response
         content = response.choices[0].message.content.strip()
