@@ -11,7 +11,6 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Q, Count
 from django.utils import timezone
 import logging
-import json
 
 from .models import DesignProject, DesignAnalysis, DesignOptimization, DesignTemplate, EngineeringListItem, LIST_TYPES
 from .serializers import (
@@ -495,124 +494,15 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             "items": serializer.data
         })
     
-    @action(detail=False, methods=['post'])
-    def clear_history(self, request):
-        """
-        Clear all history documents for a specific list type
-        Soft-coded approach with safety checks
-        """
-        list_type = request.data.get('list_type')
-        confirm = request.data.get('confirm', False)
-        
-        # Validation
-        if not list_type:
-            return Response({
-                "error": "list_type is required"
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        if list_type not in LIST_TYPES:
-            return Response({
-                "error": f"Invalid list_type. Must be one of: {', '.join(LIST_TYPES.keys())}"
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        if not confirm:
-            return Response({
-                "error": "Confirmation required. Set 'confirm': true"
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Get queryset for specific list type
-        queryset = EngineeringListItem.objects.filter(list_type=list_type)
-        
-        # Optional: Filter by project if specified
-        project_id = request.data.get('project_id')
-        if project_id:
-            queryset = queryset.filter(project_id=project_id)
-        
-        # Count before deletion
-        count = queryset.count()
-        
-        if count == 0:
-            return Response({
-                "message": "No items found to delete",
-                "deleted_count": 0,
-                "list_type": list_type
-            })
-        
-        # Perform deletion
-        try:
-            deleted_count, _ = queryset.delete()
-            
-            logger.info(f"🗑️ User {request.user.username} deleted {deleted_count} items from {LIST_TYPES[list_type]['name']}")
-            
-            return Response({
-                "message": f"Successfully deleted all {LIST_TYPES[list_type]['name']} items",
-                "deleted_count": deleted_count,
-                "list_type": list_type,
-                "list_type_name": LIST_TYPES[list_type]['name']
-            }, status=status.HTTP_200_OK)
-            
-        except Exception as e:
-            logger.error(f"❌ Error deleting items: {str(e)}", exc_info=True)
-            return Response({
-                "error": f"Failed to delete items: {str(e)}"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
-    @action(detail=False, methods=['delete'])
-    def bulk_delete(self, request):
-        """
-        Delete multiple items by IDs
-        Soft-coded bulk deletion with validation
-        """
-        item_ids = request.data.get('item_ids', [])
-        
-        if not item_ids or not isinstance(item_ids, list):
-            return Response({
-                "error": "item_ids (array) is required"
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Validate IDs exist and user has permission
-        queryset = EngineeringListItem.objects.filter(id__in=item_ids)
-        count = queryset.count()
-        
-        if count == 0:
-            return Response({
-                "error": "No items found with provided IDs"
-            }, status=status.HTTP_404_NOT_FOUND)
-        
-        if count != len(item_ids):
-            return Response({
-                "warning": f"Only {count} of {len(item_ids)} items found",
-                "found_count": count
-            })
-        
-        try:
-            deleted_count, details = queryset.delete()
-            
-            logger.info(f"🗑️ User {request.user.username} bulk deleted {deleted_count} items")
-            
-            return Response({
-                "message": f"Successfully deleted {deleted_count} items",
-                "deleted_count": deleted_count,
-                "details": details
-            }, status=status.HTTP_200_OK)
-            
-        except Exception as e:
-            logger.error(f"❌ Error bulk deleting items: {str(e)}", exc_info=True)
-            return Response({
-                "error": f"Failed to delete items: {str(e)}"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
     @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser])
     def upload_pid(self, request):
         """
-        Upload P&ID PDF and extract line list items using OCR (Background Processing)
-        Uses Celery task for async processing with progress tracking
-        Returns task_id for status polling
+        Upload P&ID PDF and extract line list items using OCR
+        Intelligently detects line numbers in horizontal/vertical orientations
+        Parses components: size, fluid, sequence, class, insulation, connections
         """
         pid_file = request.FILES.get('pid_file')
         list_type = request.data.get('list_type', 'line_list')
-        line_format_config = request.data.get('line_format_config')
-        use_async = request.data.get('use_async', 'true').lower() == 'true'
         
         if not pid_file:
             return Response({
@@ -633,9 +523,8 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             import tempfile
             import os
             from django.core.files.storage import default_storage
-            from .pid_ocr_extractor_v2 import get_pid_extractor
+            from .pid_ocr_extractor_v2 import PIDLineExtractorV2
             from .models import DesignProject
-            from .tasks import process_pid_upload
             
             # Get or create project
             project, _ = DesignProject.objects.get_or_create(
@@ -658,130 +547,115 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 tmp_path = tmp.name
             
             try:
-                # Parse line format config if provided
-                if line_format_config:
-                    try:
-                        line_format_config = json.loads(line_format_config)
-                    except Exception:
-                        logger.warning("⚠️ Invalid line_format_config JSON; ignoring custom format")
-                        line_format_config = None
+                # Get format preference from request
+                # - include_area: for ADNOC Onshore with area format
+                # - format_type: 'onshore' (default) or 'offshore' for ADNOC Offshore
+                include_area = request.POST.get('include_area', 'false').lower() == 'true'
+                format_type = request.POST.get('format_type', 'onshore').lower()
+                
+                # Extract line numbers using Multi-Engine OCR + Geometric FROM-TO Detection
+                extractor = PIDLineExtractorV2()
+                line_items = extractor.extract_from_pdf(tmp_path, include_area=include_area, format_type=format_type)
+                table_data = extractor.format_as_table_data(line_items)
+                
+                # FROM-TO detection methods (in order of preference):
+                # 1. Spatial Matching (research paper method)
+                # 2. OpenAI Vision (AI-powered visual analysis)
+                # 3. Geometric Line Detection (OpenCV + connectivity graph)
+                
+                logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")
+                logger.info(f"🎯 Using Multi-Engine OCR (Tesseract + EasyOCR + PaddleOCR) + Regex + Geometric Detection")
+                if format_type == 'offshore':
+                    logger.info(f"📍 Format: ADNOC OFFSHORE (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)")
+                elif include_area:
+                    logger.info(f"📍 Format: ADNOC ONSHORE WITH AREA (SIZE\"-AREA-FLUID-SEQ-PIPECLASS)")
                 else:
-                    line_format_config = None
-
-                # For async processing (default), use Celery task if available
-                if use_async:
+                    logger.info(f"📍 Format: GENERAL (SIZE-FLUID-SEQ-PIPECLASS)")
+                
+                # Create or update EngineeringListItem for each detected line
+                created_items = []
+                updated_items = []
+                logger.info(f"📝 Saving {len(table_data)} extracted lines to database (project={project.id if project else None}, list_type={list_type})...")
+                
+                for idx, line_data in enumerate(table_data):
                     try:
-                        # Try to queue background task
-                        task = process_pid_upload.delay(
-                            tmp_path,
-                            line_format_config=line_format_config,
-                            user_id=request.user.id,
-                            list_type=list_type
+                        # Use update_or_create to handle duplicates gracefully
+                        item_data = {
+                            'description': f"{line_data['fluid_description']} Line - {line_data['size']}",
+                            'status': 'pending',
+                            'is_validated': False,
+                            'data': {
+                                'source': 'pid_ocr',
+                                'filename': pid_file.name,
+                                'page_number': line_data.get('page', 1),
+                                'fluid_code': line_data['fluid_code'],
+                                'fluid_description': line_data['fluid_description'],
+                                'size': line_data['size'],
+                                'sequence_no': line_data['sequence_no'],
+                                'pipr_class': line_data['pipr_class'],
+                                'insulation': line_data['insulation'],
+                                'from_equipment': line_data.get('from_equipment', ''),
+                                'to_equipment': line_data.get('to_equipment', ''),
+                                'from_line': line_data.get('from_line', ''),  # NEW: FROM line number
+                                'to_line': line_data.get('to_line', ''),      # NEW: TO line number
+                                'flow_detection_method': line_data.get('flow_detection_method', ''),
+                                'flow_confidence': line_data.get('flow_confidence', ''),
+                                'upload_timestamp': timezone.now().isoformat()
+                            },
+                            'attachments': [{
+                                'type': 'pid_pdf',
+                                'filename': pid_file.name,
+                                'path': saved_path,
+                                'uploaded_at': timezone.now().isoformat()
+                            }]
+                        }
+                        
+                        # Only set created_by on new items
+                        item, created = EngineeringListItem.objects.update_or_create(
+                            list_type=list_type,
+                            project=project,
+                            item_tag=line_data['line_number'],
+                            defaults=item_data
                         )
                         
-                        logger.info(f"📤 [P&ID Upload] Queued background task: {task.id}")
+                        # Set created_by if this is a new item
+                        if created and not item.created_by:
+                            item.created_by = request.user
+                            item.save(update_fields=['created_by'])
                         
-                        return Response({
-                            "message": "P&ID upload queued for processing",
-                            "task_id": task.id,
-                            "filename": pid_file.name,
-                            "status": "queued",
-                            "note": "Use /designiq/lists/upload_pid_status/{task_id}/ to check progress"
-                        }, status=status.HTTP_202_ACCEPTED)
-                    
-                    except Exception as celery_error:
-                        # Celery/Redis not available, fall back to synchronous processing
-                        logger.warning(f"⚠️ Celery not available ({str(celery_error)}), falling back to sync processing")
-                        use_async = False
+                        if created:
+                            created_items.append(item)
+                            if idx == 0:
+                                logger.info(f"   ✅ First item CREATED: {item.item_tag}")
+                        else:
+                            updated_items.append(item)
+                            if idx == 0:
+                                logger.info(f"   ✅ First item UPDATED: {item.item_tag}")
+                        
+                    except Exception as item_err:
+                        logger.error(f"❌ Failed to save item {idx+1}: {line_data.get('line_number', '?')} - Error: {str(item_err)}", exc_info=True)
+                        continue
                 
-                # For synchronous processing (fallback when Redis unavailable or use_async=false)
-                if not use_async:
-                    # Extract line numbers using singleton extractor (fast, reuses models)
-                    extractor = get_pid_extractor()
-                    line_items = extractor.extract_from_pdf(tmp_path, line_format_config=line_format_config)
-                    table_data = extractor.format_as_table_data(line_items)
-                    
-                    logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")
-                    logger.info(f"🎯 Using Multi-Engine OCR (Tesseract + EasyOCR + PaddleOCR) + Strict Validation")
-                    
-                    # Return extracted data immediately
-                    return Response({
-                        "message": "P&ID processed successfully",
-                        "filename": pid_file.name,
-                        "total_items": len(table_data),
-                        "extracted_lines": table_data,
-                        "pdf_path": saved_path,
-                        "note": "Multi-engine OCR (Tesseract + EasyOCR + PaddleOCR) + Strict pattern matching with programmatic validation. Filters out garbage words and validates each component. Data displayed for review - not saved to database."
-                    }, status=status.HTTP_201_CREATED)
+                total_items = len(created_items) + len(updated_items)
+                logger.info(f"✅ Created {len(created_items)} new items, updated {len(updated_items)} existing items from P&ID OCR")
+                
+                return Response({
+                    "message": "P&ID processed successfully using OCR",
+                    "filename": pid_file.name,
+                    "items_created": len(created_items),
+                    "items_updated": len(updated_items),
+                    "total_items": total_items,
+                    "extracted_lines": table_data,
+                    "note": "Multi-engine OCR detection (Tesseract + EasyOCR + PaddleOCR + OpenAI GPT-4)"
+                }, status=status.HTTP_201_CREATED)
                 
             finally:
-                # Clean up temp file (only for sync mode)
-                if not use_async and os.path.exists(tmp_path):
+                # Clean up temp file
+                if os.path.exists(tmp_path):
                     os.unlink(tmp_path)
             
         except Exception as e:
-            logger.error(f"❌ Error processing P&ID: {str(e)}", exc_info=True)
+            logger.error(f"❌ Error uploading/processing P&ID: {str(e)}", exc_info=True)
             return Response({
-                "error": f"Failed to process P&ID: {str(e)}"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
-    @action(detail=False, methods=['get'], url_path='upload_pid_status/(?P<task_id>[^/.]+)')
-    def upload_pid_status(self, request, task_id=None):
-        """
-        Check status of P&ID upload background task
-        GET /api/v1/designiq/lists/upload_pid_status/{task_id}/
-        
-        Returns:
-            - state: PENDING, PROGRESS, SUCCESS, FAILURE
-            - current/total: Progress percentage
-            - status: Human-readable status message
-            - result: Final result if SUCCESS
-        """
-        from celery.result import AsyncResult
-        
-        if not task_id:
-            return Response({
-                "error": "No task_id provided"
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            task = AsyncResult(task_id)
-            
-            if task.state == 'PENDING':
-                response = {
-                    'state': task.state,
-                    'status': 'Task is waiting in queue...',
-                    'current': 0,
-                    'total': 100
-                }
-            elif task.state == 'PROGRESS':
-                response = {
-                    'state': task.state,
-                    'current': task.info.get('current', 0),
-                    'total': task.info.get('total', 100),
-                    'status': task.info.get('status', 'Processing...')
-                }
-            elif task.state == 'SUCCESS':
-                result = task.result
-                response = {
-                    'state': task.state,
-                    'status': 'Completed successfully!',
-                    'current': 100,
-                    'total': 100,
-                    'result': result
-                }
-            else:
-                # FAILURE or other states
-                response = {
-                    'state': task.state,
-                    'status': str(task.info),
-                    'error': str(task.info) if task.failed() else None
-                }
-            
-            return Response(response, status=status.HTTP_200_OK)
-            
-        except Exception as e:
-            logger.error(f"❌ Error checking task status: {str(e)}", exc_info=True)
-            return Response({
-                "error": f"Failed to check task status: {str(e)}"
+                "error": f"Failed to upload P&ID: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
