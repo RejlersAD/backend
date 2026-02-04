@@ -343,10 +343,10 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         """
         Custom permissions:
-        - 'me' action only requires authentication
+        - 'me' and 'change_password' actions only require authentication
         - Other actions require user management permissions
         """
-        if self.action == 'me':
+        if self.action in ['me', 'change_password']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), CanManageUsers()]
     
@@ -555,12 +555,12 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         
         # Clear must_change_password flag
         try:
-            profile = user.profile
+            profile = user.rbac_profile  # Fixed: use rbac_profile instead of profile
             if profile.must_change_password:
                 profile.must_change_password = False
                 profile.save()
-        except:
-            pass
+        except Exception as e:
+            print(f"Warning: Could not clear must_change_password flag: {e}")
         
         # Log the action
         create_audit_log(
