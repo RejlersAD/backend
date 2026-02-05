@@ -1,0 +1,15 @@
+# Heavy ML packages for local development or specific modules
+# NOT INSTALLED ON RAILWAY by default (reduces image from 4.8GB to <1GB)
+# Install only if you need P&ID/PFD OCR processing: pip install -r requirements-ml.txt
+
+# OCR Dependencies (Heavy: ~1.5GB with all dependencies)
+pytesseract==0.3.13
+easyocr==1.7.2
+paddlepaddle==3.3.0
+paddleocr==3.3.3
+opencv-python-headless==4.10.0.84
+
+# MLflow (if needed for ML experiments)
+mlflow==2.10.0
+mongoengine==0.28.2
+scipy>=1.11.0
