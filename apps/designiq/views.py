@@ -11,7 +11,10 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db.models import Q, Count
 from django.utils import timezone
 from django.http import HttpResponse
+from django.conf import settings
 import logging
+import json
+import os
 
 from .models import DesignProject, DesignAnalysis, DesignOptimization, DesignTemplate, EngineeringListItem, LIST_TYPES
 from .s3_utils import s3_storage  # S3 document storage
@@ -24,6 +27,28 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def load_module_config():
+    """Load DesignIQ module configuration from JSON file"""
+    config_path = os.path.join(
+        settings.BASE_DIR,
+        'apps', 'designiq', 'config', 'module_config.json'
+    )
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load module config: {e}")
+        # Return default configuration if file not found
+        return {
+            "design_modules": {"enabled_modules": [], "disabled_modules": []},
+            "list_types": {"enabled": []},
+            "features": {
+                "show_design_type_cards": False,
+                "show_engineering_lists": True
+            }
+        }
 
 
 class DesignProjectViewSet(viewsets.ModelViewSet):
@@ -186,6 +211,17 @@ class DesignProjectViewSet(viewsets.ModelViewSet):
             stats['by_design_type'][choice_value] = queryset.filter(design_type=choice_value).count()
         
         return Response(stats)
+    
+    @action(detail=False, methods=['get'], url_path='module-config')
+    def module_config(self, request):
+        """
+        Get DesignIQ module configuration (soft-coded)
+        GET /api/v1/designiq/projects/module-config/
+        
+        Returns configuration for which modules and features are enabled/disabled
+        """
+        config = load_module_config()
+        return Response(config)
 
 
 class DesignAnalysisViewSet(viewsets.ModelViewSet):
