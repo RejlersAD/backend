@@ -49,6 +49,11 @@ def check_first_login(request):
         is_first_login = getattr(user, 'is_first_login', False)
         must_reset_password = getattr(user, 'must_reset_password', False)
         
+        # Also check RBAC UserProfile if exists
+        if hasattr(user, 'rbac_profile'):
+            must_change_password = getattr(user.rbac_profile, 'must_change_password', False)
+            must_reset_password = must_reset_password or must_change_password
+        
         return Response({
             'is_first_login': is_first_login,
             'must_reset_password': must_reset_password,
@@ -131,6 +136,11 @@ def reset_first_login_password(request):
             user.last_password_change = timezone.now()
             user.temp_password_created_at = None
             user.save()
+            
+            # Also update RBAC UserProfile if exists
+            if hasattr(user, 'rbac_profile'):
+                user.rbac_profile.must_change_password = False
+                user.rbac_profile.save()
         
         logger.info(f"User {user.email} successfully reset password on first login")
         
@@ -332,6 +342,11 @@ def change_password(request):
             user.must_reset_password = False
             user.is_first_login = False
             user.save()
+            
+            # Also update RBAC UserProfile if exists
+            if hasattr(user, 'rbac_profile'):
+                user.rbac_profile.must_change_password = False
+                user.rbac_profile.save()
         
         logger.info(f"User {user.email} successfully changed password")
         

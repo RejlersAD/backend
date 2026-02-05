@@ -14,6 +14,7 @@ from .views import (
 from .dashboard_views import (
     user_dashboard_stats, user_files_list, user_activity_timeline
 )
+from apps.users.views_password import change_password
 
 router = DefaultRouter()
 # RBAC Core
@@ -41,6 +42,8 @@ urlpatterns = [
     path('dashboard/stats/', user_dashboard_stats, name='user-dashboard-stats'),
     path('dashboard/files/', user_files_list, name='user-files-list'),
     path('dashboard/activity/', user_activity_timeline, name='user-activity-timeline'),
+    # Password management
+    path('users/change-password/', change_password, name='rbac-change-password'),
     # Subscription Management (7.3)
     path('subscriptions/', include('apps.rbac.subscription_urls')),
 ]
