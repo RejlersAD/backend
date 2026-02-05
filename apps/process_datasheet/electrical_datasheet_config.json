@@ -1,0 +1,959 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "last_updated": "2026-02-05",
+    "description": "Soft-coded configuration for Electrical Department Datasheets",
+    "department": "Electrical Engineering"
+  },
+  "equipment_types": {
+    "transformer": {
+      "id": "transformer",
+      "name": "Transformer (Power and Distribution)",
+      "code": "XFMR",
+      "description": "Power and Distribution Transformer Technical Data Sheet",
+      "icon": "⚡",
+      "category": "Power Equipment",
+      "standards": ["IEC 60076", "IEEE C57", "ADNOC DEP"],
+      "sections": [
+        {
+          "id": "general",
+          "name": "General Information",
+          "order": 1,
+          "fields": [
+            {
+              "id": "tag_number",
+              "label": "Tag Number",
+              "type": "text",
+              "required": true,
+              "placeholder": "e.g., T-2001",
+              "validation": {
+                "pattern": "^[A-Z]-\\d{4}(-\\d{2})?$",
+                "message": "Format: T-XXXX or T-XXXX-XX"
+              }
+            },
+            {
+              "id": "service_description",
+              "label": "Service Description",
+              "type": "textarea",
+              "required": true,
+              "placeholder": "e.g., Main Power Distribution Transformer"
+            },
+            {
+              "id": "location",
+              "label": "Location/Area",
+              "type": "text",
+              "required": true
+            },
+            {
+              "id": "manufacturer",
+              "label": "Manufacturer",
+              "type": "text",
+              "required": false
+            },
+            {
+              "id": "model_number",
+              "label": "Model Number",
+              "type": "text",
+              "required": false
+            }
+          ]
+        },
+        {
+          "id": "ratings",
+          "name": "Ratings & Specifications",
+          "order": 2,
+          "fields": [
+            {
+              "id": "rated_power",
+              "label": "Rated Power (kVA/MVA)",
+              "type": "number",
+              "required": true,
+              "unit": "kVA",
+              "min": 0
+            },
+            {
+              "id": "frequency",
+              "label": "Frequency (Hz)",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "50", "label": "50 Hz"},
+                {"value": "60", "label": "60 Hz"}
+              ],
+              "default": "50"
+            },
+            {
+              "id": "phases",
+              "label": "Number of Phases",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "1", "label": "Single Phase"},
+                {"value": "3", "label": "Three Phase"}
+              ],
+              "default": "3"
+            },
+            {
+              "id": "primary_voltage",
+              "label": "Primary Voltage (kV)",
+              "type": "number",
+              "required": true,
+              "unit": "kV",
+              "step": 0.1
+            },
+            {
+              "id": "secondary_voltage",
+              "label": "Secondary Voltage (kV)",
+              "type": "number",
+              "required": true,
+              "unit": "kV",
+              "step": 0.1
+            },
+            {
+              "id": "tertiary_voltage",
+              "label": "Tertiary Voltage (kV)",
+              "type": "number",
+              "required": false,
+              "unit": "kV",
+              "step": 0.1
+            },
+            {
+              "id": "connection_type_primary",
+              "label": "Primary Connection",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "delta", "label": "Delta (Δ)"},
+                {"value": "star", "label": "Star (Y)"},
+                {"value": "star_grounded", "label": "Star Grounded (Yn)"}
+              ]
+            },
+            {
+              "id": "connection_type_secondary",
+              "label": "Secondary Connection",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "delta", "label": "Delta (Δ)"},
+                {"value": "star", "label": "Star (Y)"},
+                {"value": "star_grounded", "label": "Star Grounded (Yn)"}
+              ]
+            },
+            {
+              "id": "vector_group",
+              "label": "Vector Group",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "Dyn11", "label": "Dyn11"},
+                {"value": "Dy11", "label": "Dy11"},
+                {"value": "Yyn0", "label": "Yyn0"},
+                {"value": "Yd11", "label": "Yd11"},
+                {"value": "Dd0", "label": "Dd0"}
+              ]
+            }
+          ]
+        },
+        {
+          "id": "impedance",
+          "name": "Impedance & Losses",
+          "order": 3,
+          "fields": [
+            {
+              "id": "impedance_voltage",
+              "label": "Impedance Voltage (%)",
+              "type": "number",
+              "required": true,
+              "unit": "%",
+              "step": 0.01,
+              "min": 0,
+              "max": 20
+            },
+            {
+              "id": "no_load_loss",
+              "label": "No-Load Loss (kW)",
+              "type": "number",
+              "required": false,
+              "unit": "kW",
+              "step": 0.1
+            },
+            {
+              "id": "load_loss",
+              "label": "Load Loss (kW)",
+              "type": "number",
+              "required": false,
+              "unit": "kW",
+              "step": 0.1
+            }
+          ]
+        },
+        {
+          "id": "cooling",
+          "name": "Cooling System",
+          "order": 4,
+          "fields": [
+            {
+              "id": "cooling_type",
+              "label": "Cooling Type",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "ONAN", "label": "ONAN (Oil Natural Air Natural)"},
+                {"value": "ONAF", "label": "ONAF (Oil Natural Air Forced)"},
+                {"value": "OFAF", "label": "OFAF (Oil Forced Air Forced)"},
+                {"value": "OFWF", "label": "OFWF (Oil Forced Water Forced)"},
+                {"value": "AN", "label": "AN (Air Natural - Dry Type)"},
+                {"value": "AF", "label": "AF (Air Forced - Dry Type)"}
+              ]
+            },
+            {
+              "id": "insulation_type",
+              "label": "Insulation Type",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "mineral_oil", "label": "Mineral Oil"},
+                {"value": "silicone_oil", "label": "Silicone Oil"},
+                {"value": "synthetic_ester", "label": "Synthetic Ester"},
+                {"value": "natural_ester", "label": "Natural Ester"},
+                {"value": "dry_type", "label": "Dry Type (Air)"},
+                {"value": "sf6", "label": "SF6 Gas"}
+              ]
+            },
+            {
+              "id": "insulation_class",
+              "label": "Insulation Class",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "A", "label": "Class A (105°C)"},
+                {"value": "E", "label": "Class E (120°C)"},
+                {"value": "B", "label": "Class B (130°C)"},
+                {"value": "F", "label": "Class F (155°C)"},
+                {"value": "H", "label": "Class H (180°C)"}
+              ]
+            }
+          ]
+        },
+        {
+          "id": "tap_changer",
+          "name": "Tap Changer",
+          "order": 5,
+          "fields": [
+            {
+              "id": "tap_changer_type",
+              "label": "Tap Changer Type",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "none", "label": "No Tap Changer"},
+                {"value": "off_load", "label": "Off-Load Tap Changer (OLTC)"},
+                {"value": "on_load", "label": "On-Load Tap Changer (OLTC)"},
+                {"value": "automatic", "label": "Automatic Voltage Regulator (AVR)"}
+              ]
+            },
+            {
+              "id": "tap_range",
+              "label": "Tap Range (%)",
+              "type": "text",
+              "required": false,
+              "placeholder": "e.g., ±5%, ±10%"
+            },
+            {
+              "id": "tap_steps",
+              "label": "Number of Tap Steps",
+              "type": "number",
+              "required": false,
+              "min": 0,
+              "max": 33
+            }
+          ]
+        },
+        {
+          "id": "protection",
+          "name": "Protection & Monitoring",
+          "order": 6,
+          "fields": [
+            {
+              "id": "protection_devices",
+              "label": "Protection Devices",
+              "type": "multi_select",
+              "required": false,
+              "options": [
+                {"value": "buchholz", "label": "Buchholz Relay"},
+                {"value": "oltc_buchholz", "label": "OLTC Buchholz Relay"},
+                {"value": "pressure_relief", "label": "Pressure Relief Device"},
+                {"value": "wti", "label": "Winding Temperature Indicator"},
+                {"value": "oti", "label": "Oil Temperature Indicator"},
+                {"value": "oil_level", "label": "Oil Level Indicator"},
+                {"value": "thermal_overload", "label": "Thermal Overload Protection"},
+                {"value": "differential", "label": "Differential Protection"},
+                {"value": "earth_fault", "label": "Earth Fault Protection"}
+              ]
+            },
+            {
+              "id": "wti_alarm_temp",
+              "label": "WTI Alarm Temperature (°C)",
+              "type": "number",
+              "required": false,
+              "unit": "°C"
+            },
+            {
+              "id": "wti_trip_temp",
+              "label": "WTI Trip Temperature (°C)",
+              "type": "number",
+              "required": false,
+              "unit": "°C"
+            },
+            {
+              "id": "oti_alarm_temp",
+              "label": "OTI Alarm Temperature (°C)",
+              "type": "number",
+              "required": false,
+              "unit": "°C"
+            },
+            {
+              "id": "oti_trip_temp",
+              "label": "OTI Trip Temperature (°C)",
+              "type": "number",
+              "required": false,
+              "unit": "°C"
+            }
+          ]
+        },
+        {
+          "id": "environment",
+          "name": "Environmental Conditions",
+          "order": 7,
+          "fields": [
+            {
+              "id": "ambient_temp_max",
+              "label": "Maximum Ambient Temperature (°C)",
+              "type": "number",
+              "required": true,
+              "unit": "°C",
+              "default": 50
+            },
+            {
+              "id": "ambient_temp_min",
+              "label": "Minimum Ambient Temperature (°C)",
+              "type": "number",
+              "required": true,
+              "unit": "°C",
+              "default": -10
+            },
+            {
+              "id": "altitude",
+              "label": "Altitude (m)",
+              "type": "number",
+              "required": false,
+              "unit": "m",
+              "default": 0
+            },
+            {
+              "id": "installation_type",
+              "label": "Installation Type",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "indoor", "label": "Indoor"},
+                {"value": "outdoor", "label": "Outdoor"},
+                {"value": "substation", "label": "Substation"}
+              ]
+            },
+            {
+              "id": "ip_rating",
+              "label": "IP Rating",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "IP23", "label": "IP23"},
+                {"value": "IP44", "label": "IP44"},
+                {"value": "IP54", "label": "IP54"},
+                {"value": "IP65", "label": "IP65"}
+              ]
+            },
+            {
+              "id": "seismic_zone",
+              "label": "Seismic Zone",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "none", "label": "Not Applicable"},
+                {"value": "zone_1", "label": "Zone 1"},
+                {"value": "zone_2", "label": "Zone 2"},
+                {"value": "zone_3", "label": "Zone 3"},
+                {"value": "zone_4", "label": "Zone 4"}
+              ]
+            }
+          ]
+        },
+        {
+          "id": "standards",
+          "name": "Standards & Testing",
+          "order": 8,
+          "fields": [
+            {
+              "id": "design_standard",
+              "label": "Design Standard",
+              "type": "multi_select",
+              "required": true,
+              "options": [
+                {"value": "IEC_60076", "label": "IEC 60076"},
+                {"value": "IEEE_C57", "label": "IEEE C57"},
+                {"value": "BS_171", "label": "BS 171"},
+                {"value": "ADNOC_DEP", "label": "ADNOC DEP"}
+              ]
+            },
+            {
+              "id": "testing_required",
+              "label": "Testing Required",
+              "type": "multi_select",
+              "required": false,
+              "options": [
+                {"value": "routine", "label": "Routine Tests"},
+                {"value": "type", "label": "Type Tests"},
+                {"value": "special", "label": "Special Tests"},
+                {"value": "impulse", "label": "Impulse Tests"},
+                {"value": "temperature_rise", "label": "Temperature Rise Test"},
+                {"value": "sound_level", "label": "Sound Level Test"},
+                {"value": "partial_discharge", "label": "Partial Discharge Test"}
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "switchgear_11kv": {
+      "id": "switchgear_11kv",
+      "name": "11kV Switchgear",
+      "code": "SWG",
+      "description": "11kV Metal-Clad Switchgear Technical Data Sheet",
+      "icon": "🔌",
+      "category": "Distribution Equipment",
+      "standards": ["IEC 62271-200", "IEEE C37", "ADNOC DEP"],
+      "sections": [
+        {
+          "id": "general",
+          "name": "General Information",
+          "order": 1,
+          "fields": [
+            {
+              "id": "tag_number",
+              "label": "Tag Number",
+              "type": "text",
+              "required": true,
+              "placeholder": "e.g., SWG-11KV-01",
+              "validation": {
+                "pattern": "^SWG-[A-Z0-9]+-\\d{2}$",
+                "message": "Format: SWG-XXXX-XX"
+              }
+            },
+            {
+              "id": "service_description",
+              "label": "Service Description",
+              "type": "textarea",
+              "required": true,
+              "placeholder": "e.g., Main 11kV Incoming Switchgear"
+            },
+            {
+              "id": "location",
+              "label": "Location/Substation",
+              "type": "text",
+              "required": true
+            },
+            {
+              "id": "manufacturer",
+              "label": "Manufacturer",
+              "type": "text",
+              "required": false
+            },
+            {
+              "id": "panel_type",
+              "label": "Panel Type",
+              "type": "text",
+              "required": false,
+              "placeholder": "e.g., Model SM6, UniGear ZS1"
+            }
+          ]
+        },
+        {
+          "id": "ratings",
+          "name": "Electrical Ratings",
+          "order": 2,
+          "fields": [
+            {
+              "id": "rated_voltage",
+              "label": "Rated Voltage (kV)",
+              "type": "number",
+              "required": true,
+              "unit": "kV",
+              "default": 11
+            },
+            {
+              "id": "rated_current",
+              "label": "Rated Normal Current (A)",
+              "type": "number",
+              "required": true,
+              "unit": "A",
+              "step": 1
+            },
+            {
+              "id": "rated_frequency",
+              "label": "Rated Frequency (Hz)",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "50", "label": "50 Hz"},
+                {"value": "60", "label": "60 Hz"}
+              ],
+              "default": "50"
+            },
+            {
+              "id": "rated_short_time_current",
+              "label": "Rated Short Time Current (kA - 1s)",
+              "type": "number",
+              "required": true,
+              "unit": "kA",
+              "step": 0.5
+            },
+            {
+              "id": "rated_peak_current",
+              "label": "Rated Peak Current (kA)",
+              "type": "number",
+              "required": true,
+              "unit": "kA",
+              "step": 0.5
+            },
+            {
+              "id": "rated_breaking_capacity",
+              "label": "Rated Breaking Capacity (kA)",
+              "type": "number",
+              "required": true,
+              "unit": "kA",
+              "step": 0.5
+            }
+          ]
+        },
+        {
+          "id": "configuration",
+          "name": "Switchgear Configuration",
+          "order": 3,
+          "fields": [
+            {
+              "id": "switchgear_type",
+              "label": "Switchgear Type",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "metal_clad", "label": "Metal-Clad"},
+                {"value": "metal_enclosed", "label": "Metal-Enclosed"},
+                {"value": "air_insulated", "label": "Air-Insulated (AIS)"},
+                {"value": "gas_insulated", "label": "Gas-Insulated (GIS)"}
+              ]
+            },
+            {
+              "id": "insulation_medium",
+              "label": "Insulation Medium",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "air", "label": "Air"},
+                {"value": "sf6", "label": "SF6 Gas"},
+                {"value": "vacuum", "label": "Vacuum"}
+              ]
+            },
+            {
+              "id": "number_of_panels",
+              "label": "Number of Panels",
+              "type": "number",
+              "required": true,
+              "min": 1
+            },
+            {
+              "id": "busbar_arrangement",
+              "label": "Busbar Arrangement",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "single_busbar", "label": "Single Busbar"},
+                {"value": "double_busbar", "label": "Double Busbar"},
+                {"value": "main_transfer", "label": "Main & Transfer Busbar"}
+              ]
+            },
+            {
+              "id": "busbar_material",
+              "label": "Busbar Material",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "copper", "label": "Copper"},
+                {"value": "aluminium", "label": "Aluminium"}
+              ]
+            },
+            {
+              "id": "circuit_breaker_type",
+              "label": "Circuit Breaker Type",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "vcb", "label": "Vacuum Circuit Breaker (VCB)"},
+                {"value": "sf6_cb", "label": "SF6 Circuit Breaker"},
+                {"value": "air_cb", "label": "Air Circuit Breaker (ACB)"},
+                {"value": "ocb", "label": "Oil Circuit Breaker (OCB)"}
+              ]
+            },
+            {
+              "id": "operating_mechanism",
+              "label": "Operating Mechanism",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "spring", "label": "Spring Operated"},
+                {"value": "motor", "label": "Motor Operated"},
+                {"value": "manual", "label": "Manual"},
+                {"value": "solenoid", "label": "Solenoid Operated"}
+              ]
+            }
+          ]
+        },
+        {
+          "id": "panel_types",
+          "name": "Panel Types & Quantities",
+          "order": 4,
+          "fields": [
+            {
+              "id": "incoming_panels",
+              "label": "Number of Incoming Panels",
+              "type": "number",
+              "required": false,
+              "min": 0,
+              "default": 0
+            },
+            {
+              "id": "outgoing_feeder_panels",
+              "label": "Number of Outgoing Feeder Panels",
+              "type": "number",
+              "required": false,
+              "min": 0,
+              "default": 0
+            },
+            {
+              "id": "bus_coupler_panels",
+              "label": "Number of Bus Coupler Panels",
+              "type": "number",
+              "required": false,
+              "min": 0,
+              "default": 0
+            },
+            {
+              "id": "metering_panels",
+              "label": "Number of Metering Panels",
+              "type": "number",
+              "required": false,
+              "min": 0,
+              "default": 0
+            },
+            {
+              "id": "vt_panels",
+              "label": "Number of VT Panels",
+              "type": "number",
+              "required": false,
+              "min": 0,
+              "default": 0
+            }
+          ]
+        },
+        {
+          "id": "protection",
+          "name": "Protection & Control",
+          "order": 5,
+          "fields": [
+            {
+              "id": "protection_relays",
+              "label": "Protection Relays",
+              "type": "multi_select",
+              "required": false,
+              "options": [
+                {"value": "overcurrent", "label": "Overcurrent Protection (50/51)"},
+                {"value": "earth_fault", "label": "Earth Fault Protection (50N/51N)"},
+                {"value": "differential", "label": "Differential Protection (87)"},
+                {"value": "directional_oc", "label": "Directional Overcurrent (67)"},
+                {"value": "distance", "label": "Distance Protection (21)"},
+                {"value": "undervoltage", "label": "Undervoltage Protection (27)"},
+                {"value": "overvoltage", "label": "Overvoltage Protection (59)"},
+                {"value": "frequency", "label": "Frequency Protection (81)"},
+                {"value": "synchrocheck", "label": "Synchrocheck (25)"},
+                {"value": "buchholz", "label": "Buchholz Protection (Transformer)"}
+              ]
+            },
+            {
+              "id": "relay_type",
+              "label": "Relay Type",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "numerical", "label": "Numerical/Digital"},
+                {"value": "microprocessor", "label": "Microprocessor Based"},
+                {"value": "electromechanical", "label": "Electromechanical"},
+                {"value": "static", "label": "Static"}
+              ]
+            },
+            {
+              "id": "ct_ratio_primary",
+              "label": "CT Ratio - Primary (A)",
+              "type": "number",
+              "required": false,
+              "unit": "A"
+            },
+            {
+              "id": "ct_ratio_secondary",
+              "label": "CT Ratio - Secondary (A)",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "1", "label": "1 A"},
+                {"value": "5", "label": "5 A"}
+              ],
+              "default": "5"
+            },
+            {
+              "id": "vt_ratio_primary",
+              "label": "VT Ratio - Primary (kV)",
+              "type": "number",
+              "required": false,
+              "unit": "kV",
+              "step": 0.1
+            },
+            {
+              "id": "vt_ratio_secondary",
+              "label": "VT Ratio - Secondary (V)",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "110", "label": "110 V"},
+                {"value": "120", "label": "120 V"}
+              ]
+            }
+          ]
+        },
+        {
+          "id": "metering",
+          "name": "Metering & Monitoring",
+          "order": 6,
+          "fields": [
+            {
+              "id": "metering_equipment",
+              "label": "Metering Equipment",
+              "type": "multi_select",
+              "required": false,
+              "options": [
+                {"value": "multifunction_meter", "label": "Multifunction Meter"},
+                {"value": "ammeter", "label": "Ammeter"},
+                {"value": "voltmeter", "label": "Voltmeter"},
+                {"value": "power_factor_meter", "label": "Power Factor Meter"},
+                {"value": "frequency_meter", "label": "Frequency Meter"},
+                {"value": "energy_meter", "label": "Energy Meter (kWh)"},
+                {"value": "demand_meter", "label": "Demand Meter"}
+              ]
+            },
+            {
+              "id": "communication_protocol",
+              "label": "Communication Protocol",
+              "type": "multi_select",
+              "required": false,
+              "options": [
+                {"value": "modbus", "label": "Modbus RTU/TCP"},
+                {"value": "iec61850", "label": "IEC 61850"},
+                {"value": "dnp3", "label": "DNP3"},
+                {"value": "profibus", "label": "Profibus"}
+              ]
+            },
+            {
+              "id": "scada_integration",
+              "label": "SCADA Integration",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "yes", "label": "Yes"},
+                {"value": "no", "label": "No"},
+                {"value": "future", "label": "Future Provision"}
+              ]
+            }
+          ]
+        },
+        {
+          "id": "environment",
+          "name": "Environmental Conditions",
+          "order": 7,
+          "fields": [
+            {
+              "id": "ambient_temp_max",
+              "label": "Maximum Ambient Temperature (°C)",
+              "type": "number",
+              "required": true,
+              "unit": "°C",
+              "default": 50
+            },
+            {
+              "id": "ambient_temp_min",
+              "label": "Minimum Ambient Temperature (°C)",
+              "type": "number",
+              "required": true,
+              "unit": "°C",
+              "default": -10
+            },
+            {
+              "id": "humidity_max",
+              "label": "Maximum Relative Humidity (%)",
+              "type": "number",
+              "required": false,
+              "unit": "%",
+              "max": 100
+            },
+            {
+              "id": "altitude",
+              "label": "Altitude (m)",
+              "type": "number",
+              "required": false,
+              "unit": "m",
+              "default": 0
+            },
+            {
+              "id": "installation_location",
+              "label": "Installation Location",
+              "type": "select",
+              "required": true,
+              "options": [
+                {"value": "indoor", "label": "Indoor"},
+                {"value": "outdoor", "label": "Outdoor"},
+                {"value": "kiosk", "label": "Kiosk/Container"}
+              ]
+            },
+            {
+              "id": "ip_rating",
+              "label": "IP Rating",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "IP23", "label": "IP23"},
+                {"value": "IP41", "label": "IP41"},
+                {"value": "IP54", "label": "IP54"},
+                {"value": "IP65", "label": "IP65"}
+              ]
+            },
+            {
+              "id": "seismic_requirement",
+              "label": "Seismic Requirement",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "none", "label": "Not Applicable"},
+                {"value": "zone_2", "label": "Zone 2"},
+                {"value": "zone_3", "label": "Zone 3"},
+                {"value": "zone_4", "label": "Zone 4"}
+              ]
+            }
+          ]
+        },
+        {
+          "id": "auxiliary",
+          "name": "Auxiliary Systems",
+          "order": 8,
+          "fields": [
+            {
+              "id": "auxiliary_supply_voltage",
+              "label": "Auxiliary Supply Voltage (V AC/DC)",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "110_dc", "label": "110V DC"},
+                {"value": "220_dc", "label": "220V DC"},
+                {"value": "230_ac", "label": "230V AC"},
+                {"value": "415_ac", "label": "415V AC"}
+              ]
+            },
+            {
+              "id": "space_heaters",
+              "label": "Space Heaters",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "yes", "label": "Yes"},
+                {"value": "no", "label": "No"}
+              ]
+            },
+            {
+              "id": "internal_lighting",
+              "label": "Internal Lighting",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "yes", "label": "Yes"},
+                {"value": "no", "label": "No"}
+              ]
+            },
+            {
+              "id": "interlocking",
+              "label": "Interlocking Features",
+              "type": "multi_select",
+              "required": false,
+              "options": [
+                {"value": "kirk_key", "label": "Kirk Key System"},
+                {"value": "mechanical", "label": "Mechanical Interlocking"},
+                {"value": "electrical", "label": "Electrical Interlocking"},
+                {"value": "trapped_key", "label": "Trapped Key System"}
+              ]
+            }
+          ]
+        },
+        {
+          "id": "standards",
+          "name": "Standards & Testing",
+          "order": 9,
+          "fields": [
+            {
+              "id": "design_standard",
+              "label": "Design Standard",
+              "type": "multi_select",
+              "required": true,
+              "options": [
+                {"value": "IEC_62271_200", "label": "IEC 62271-200"},
+                {"value": "IEEE_C37", "label": "IEEE C37"},
+                {"value": "BS_EN_62271", "label": "BS EN 62271"},
+                {"value": "ADNOC_DEP", "label": "ADNOC DEP"}
+              ]
+            },
+            {
+              "id": "testing_required",
+              "label": "Testing Required",
+              "type": "multi_select",
+              "required": false,
+              "options": [
+                {"value": "routine", "label": "Routine Tests"},
+                {"value": "type", "label": "Type Tests"},
+                {"value": "dielectric", "label": "Dielectric Tests"},
+                {"value": "short_circuit", "label": "Short Circuit Tests"},
+                {"value": "mechanical", "label": "Mechanical Tests"},
+                {"value": "auxiliary", "label": "Auxiliary Circuits Tests"},
+                {"value": "protection", "label": "Protection Tests"}
+              ]
+            },
+            {
+              "id": "arc_flash_category",
+              "label": "Arc Flash Category",
+              "type": "select",
+              "required": false,
+              "options": [
+                {"value": "cat_1", "label": "Category 1"},
+                {"value": "cat_2", "label": "Category 2"},
+                {"value": "cat_3", "label": "Category 3"},
+                {"value": "cat_4", "label": "Category 4"}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
