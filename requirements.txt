@@ -23,6 +23,8 @@ boto3==1.34.69  # AWS S3 for P&ID document storage
 PyPDF2==3.0.1
 pdf2image==1.17.0
 pymupdf==1.24.0
+pytesseract==0.3.10  # OCR for sales documents
+python-dateutil==2.8.2  # Date parsing
 
 # Full OCR Stack for P&ID Processing (Heavy: ~3-4GB with all dependencies)
 pytesseract==0.3.13

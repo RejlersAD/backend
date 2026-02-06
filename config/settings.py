@@ -116,6 +116,7 @@ INSTALLED_APPS = [
     'apps.pfd_converter',
     'apps.crs',
     'apps.finance',  # Finance Invoice Automation
+<<<<<<< Updated upstream
     'apps.sales',  # Sales Management - CRM, Pipeline, AI-Powered Insights
     'apps.designiq',  # DesignIQ - AI-Powered Engineering Design Intelligence
     'apps.procurement',  # Procurement Management - Vendor & PO Tracking
@@ -139,6 +140,10 @@ for app in OPTIONAL_APPS:
 
 # Add remaining apps
 INSTALLED_APPS.extend([
+=======
+    'apps.sales',  # Sales RFP/EOI Automation
+    
+>>>>>>> Stashed changes
     # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
     # Enabling this will cause startup hangs (MLflow server not available)
     # 'apps.mlflow_integration',  # DO NOT UNCOMMENT

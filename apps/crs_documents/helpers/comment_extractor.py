@@ -78,6 +78,8 @@ def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) 
         
     Implementation: Safe, isolated, no side effects
     """
+    import time
+    total_start = time.time()
     comments = []
     
     # Initialize cleaner if available and cleaning is requested
@@ -91,12 +93,15 @@ def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) 
     
     try:
         # Use PyMuPDF (fitz) for better annotation extraction
+        pdf_start = time.time()
         pdf_bytes = pdf_buffer.read()
         pdf_buffer.seek(0)  # Reset for potential re-use
         
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        logger.info(f"[PERF] PDF open took {time.time() - pdf_start:.2f}s")
         logger.info(f"📄 Opened PDF with {len(doc)} pages")
         
+        page_start = time.time()
         for page_num in range(len(doc)):
             page = doc[page_num]
             
@@ -139,18 +144,17 @@ def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) 
                         comment.discipline = _extract_discipline_from_text(content)
                         
                         comments.append(comment)
-                        logger.debug(f"Found annotation: {annot_type} - {content[:50]}...")
                         
                     except Exception as e:
                         logger.warning(f"Error extracting annotation: {e}")
                         continue
             
-            # Also extract text-based comments from page content
-            text = page.get_text()
-            if text:
-                text_comments = _extract_comments_from_text(text, page_num + 1)
-                comments.extend(text_comments)
+            # PERFORMANCE OPTIMIZATION: Skip text extraction (causes timeout on large PDFs)
+            # Text extraction with get_text() is VERY slow and often finds false positives
+            # Annotations are faster and more accurate for CRS comments
+            # If needed, enable selectively with a flag
         
+        logger.info(f"[PERF] Page processing took {time.time() - page_start:.2f}s for {len(doc)} pages")
         doc.close()
         logger.info(f"✅ Extracted {len(comments)} raw comments from PDF")
     
@@ -170,10 +174,13 @@ def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) 
     logger.info(f"Keeping all comments including duplicates: {len(comments)} comments")
     
     # Filter out incomplete comments
+    filter_start = time.time()
     comments = _filter_incomplete_comments(comments)
+    logger.info(f"[PERF] Filtering took {time.time() - filter_start:.2f}s")
     logger.info(f"After filtering incomplete: {len(comments)} comments")
     
     # Apply intelligent cleaning if cleaner is available
+    cleaning_start = time.time()
     if cleaner:
         cleaned_comments = []
         skipped_count = 0
@@ -199,12 +206,14 @@ def extract_reviewer_comments(pdf_buffer: BytesIO, apply_cleaning: bool = True) 
                 # Keep original comment on error
                 cleaned_comments.append(comment)
         
+        logger.info(f"[PERF] Cleaning took {time.time() - cleaning_start:.2f}s")
         logger.info(f"✅ Cleaned {len(cleaned_comments)} comments, skipped {skipped_count} technical elements")
         comments = cleaned_comments
     
     # Filter out comments with "Not Provided" reviewer (no attribution)
     comments = _filter_not_provided_reviewers(comments)
     logger.info(f"After filtering 'Not Provided' reviewers: {len(comments)} comments")
+    logger.info(f"[PERF] Total extraction time: {time.time() - total_start:.2f}s")
     
     return comments
 
@@ -427,11 +436,14 @@ def _filter_incomplete_comments(comments: List[ReviewerComment]) -> List[Reviewe
     - Has reviewer attribution? Likely meaningful
     - Has actual words (not just numbers)? Keep it
     - Not an AutoCAD/technical element? Keep it
+    
+    ENHANCED: Comprehensive AutoCAD pattern filtering
     """
     filtered_comments = []
     
     for comment in comments:
         text = comment.comment_text.strip()
+        text_lower = text.lower()
         reviewer = comment.reviewer_name.strip() if comment.reviewer_name else ""
         
         # Minimum length check (3 chars)
@@ -439,22 +451,56 @@ def _filter_incomplete_comments(comments: List[ReviewerComment]) -> List[Reviewe
             logger.debug(f"Skipped too short (< 3 chars): {text}")
             continue
         
-        # Skip if it's ONLY numbers/symbols (AutoCAD coordinates/dimensions)
-        if re.match(r'^[\d\s\.\-\/\,\:\(\)\[\]]+$', text):
-            logger.debug(f"Skipped numbers/symbols only: {text}")
+        # ============================================
+        # ENHANCED AUTOCAD FILTERS (optimized)
+        # ============================================
+        
+        # Quick keyword check first (fastest)
+        autocad_keywords = ['autocad', 'autodesk', 'acad', 'dwg', 'dxf', 'shx', 'xref', 'viewport', 'mview']
+        if any(kw in text_lower for kw in autocad_keywords):
+            continue  # Skip without logging for performance
+        
+        # Quick special character check
+        if '%%' in text:
             continue
         
-        # Skip if it's ONLY a proper name pattern (First Last format with no other content)
-        # But allow if it has punctuation or additional context
+        # Pattern checks (compiled for performance)
+        # AutoCAD layer naming (e.g., A-ANNO-TEXT, M-DIMS-ELEV)
+        if re.match(r'^[A-Z]+-[A-Z]+-[A-Z0-9]+$', text):
+            continue
+        
+        # AutoCAD text styles
+        if len(text) < 20 and re.match(r'^(STANDARD|ROMANS|ROMAND|SIMPLEX|COMPLEX|ITALIC)\s*$', text, re.IGNORECASE):
+            continue
+        
+        # Scale annotations
+        if re.match(r'^(SCALE|NTS|NOT TO SCALE)\s*[:=]?\s*[\d:/]*$', text, re.IGNORECASE):
+            continue
+        
+        # Coordinate text (X=123.45, Y=-67.89)
+        if len(text) < 30 and re.match(r'^[XYZ]\s*[=:]?\s*[\d\.\-]+$', text, re.IGNORECASE):
+            continue
+        
+        # Drawing/sheet references
+        if re.match(r'^(DWG|SHT|SHEET)\s*[#:]?\s*[\d\-]+$', text, re.IGNORECASE):
+            continue
+        
+        # ============================================
+        # EXISTING FILTERS (optimized)
+        # ============================================
+        
+        # Skip if it's ONLY numbers/symbols (AutoCAD coordinates/dimensions)
+        if re.match(r'^[\d\s\.\-\/\,\:\(\)\[\]]+$', text):
+            continue
+        
+        # Skip if it's ONLY a proper name pattern
         if len(text) > 5 and re.match(r'^[A-Z][a-z]+\s+[A-Z][a-z]+$', text) and reviewer.lower() == text.lower():
-            logger.debug(f"Skipped name only (matches reviewer): {text}")
             continue
         
         # Skip ONLY if it's exactly an annotation label (nothing else)
         annotation_labels = ['text box', 'callout', 'free text', 'note', 'sticky note', 
                             'highlight', 'typewriter', 'comment', 'annotation']
         if text.lower().strip() in annotation_labels:
-            logger.debug(f"Skipped annotation label only: {text}")
             continue
         
         # SMART DECISION: If comment has a reviewer AND contains actual words, keep it
