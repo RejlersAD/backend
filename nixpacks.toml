@@ -23,10 +23,9 @@ cmds = [
 [phases.build]
 cmds = [
     '. /opt/venv/bin/activate && python manage.py collectstatic --noinput || echo "Static files collection skipped"',
-    '# Make startup scripts executable (if they exist)',
-    'chmod +x railway_start.sh 2>/dev/null || echo "railway_start.sh not found or already executable"',
-    'chmod +x start.sh 2>/dev/null || echo "start.sh not found or already executable"'
+    '# Make startup scripts executable (will be used by railway.toml startCommand)',
+    'chmod +x railway_start.sh 2>/dev/null || true',
+    'chmod +x start.sh 2>/dev/null || true'
 ]
 
-[start]
-cmd = 'bash railway_start.sh'
+# Start command is handled by railway.toml to avoid auto-generated chmod issues
