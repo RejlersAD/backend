@@ -123,6 +123,7 @@ INSTALLED_APPS = [
     'apps.procurement',  # Procurement Management - Vendor & PO Tracking
     'apps.notifications',  # Notification System - Multi-Channel Alerts & Email
     'apps.process_datasheet',  # Process Datasheet - AI-Powered Equipment Datasheet Generation
+    'apps.electrical_datasheet',  # Electrical Datasheet - Transformer & Switchgear Technical Data Sheets
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
@@ -604,6 +605,7 @@ else:
 
 # OpenAI Configuration (existing)
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
+OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o')
 
 # ==============================================================================
 # REPORT GENERATION CONFIGURATION (SOFT-CODED)

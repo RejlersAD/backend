@@ -32,8 +32,8 @@ RUN mkdir -p /app/media /app/staticfiles /app/media/invoices
 # Collect static files
 RUN python manage.py collectstatic --noinput || true
 
-# Make scripts executable
-RUN chmod +x railway_start.sh start.sh
+# Make scripts executable (graceful - files are already executable in Git)
+RUN chmod +x railway_start.sh start.sh || true
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

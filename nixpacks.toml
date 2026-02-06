@@ -26,4 +26,5 @@ cmds = [
 ]
 
 [start]
+# Files are executable in git (100755), no chmod needed!
 cmd = 'bash railway_start.sh'
