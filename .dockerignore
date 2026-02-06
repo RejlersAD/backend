@@ -93,6 +93,9 @@ generate_ui_comparison_report.py
 git_push.ps1
 push_to_github.bat
 *.sh
+!railway_start.sh
+!start.sh
+!docker-entrypoint.sh
 *.bat
 *.ps1
 
