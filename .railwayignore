@@ -96,10 +96,13 @@ git_push.ps1
 push_to_github.bat
 *.bat
 *.ps1
-# Keep railway_start.sh and start.sh (required for deployment)
 docker-entrypoint.sh
 railway_health_check.py
 verify_railway_cors.py
+
+# CRITICAL: Explicitly include Railway startup scripts
+!railway_start.sh
+!start.sh
 
 # Backup files
 *_backup.*
