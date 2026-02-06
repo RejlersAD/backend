@@ -91,12 +91,14 @@ pfd_training_examples.json
 pid_knowledge_base.json
 pid_training_examples.json
 
-# Build & Deployment Scripts (not needed in runtime)
+# Build & Deployment Scripts (exclude only development scripts)
 git_push.ps1
 push_to_github.bat
-*.sh
 *.bat
 *.ps1
+!railway_start.sh
+docker-entrypoint.sh
+start.sh
 railway_health_check.py
 verify_railway_cors.py
 
@@ -149,8 +151,3 @@ send_*.py
 troubleshoot_*.py
 validate_*.py
 system_*.py
-
-# Railway/Cloud specific (not needed in final deployment)
-nixpacks.toml
-railway.toml
-Procfile
