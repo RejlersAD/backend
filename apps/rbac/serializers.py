@@ -616,8 +616,6 @@ class UserProfileSerializer(serializers.ModelSerializer):
         
         # Send email verification if enabled (fail gracefully - don't block user creation)
         from django.conf import settings
-        import logging
-        logger = logging.getLogger(__name__)
         
         # Email configuration check
         email_configured = bool(

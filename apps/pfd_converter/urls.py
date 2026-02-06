@@ -31,6 +31,9 @@ urlpatterns = [
     
     path('', include(router.urls)),
     
+    # PFD Projects - New project-based workflow
+    path('', include('apps.pfd.urls.project_urls')),
+    
     # S3 PFD/PID Integration
     path('s3/', include('apps.pfd.urls.s3_urls')),
     
