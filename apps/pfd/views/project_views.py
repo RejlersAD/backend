@@ -303,10 +303,12 @@ class PFDProjectViewSet(viewsets.ModelViewSet):
         - reference_other_documents: (optional)
         """
         try:
-            project_id = request.data.get('project_id')
+            # ✅ FIX: For multipart/form-data, check both request.data AND request.POST
+            project_id = request.data.get('project_id') or request.POST.get('project_id')
             pfd_file = request.FILES.get('pfd_file')
             
             if not project_id:
+                logger.error("No project_id provided in upload request")
                 return Response({
                     'success': False,
                     'error': 'project_id is required'
@@ -320,12 +322,19 @@ class PFDProjectViewSet(viewsets.ModelViewSet):
             
             # Get project
             try:
+                logger.info(f"Looking for project with ID: {project_id} for user: {request.user.username}")
                 project = PFDProject.objects.get(
                     project_id=project_id,
                     created_by=request.user,
                     is_active=True
                 )
+                logger.info(f"✅ Found project: {project.project_name} ({project.project_id})")
             except PFDProject.DoesNotExist:
+                logger.error(f"❌ Project {project_id} not found for user {request.user.username}")
+                # Try to find if project exists for another user
+                all_matching = PFDProject.objects.filter(project_id=project_id)
+                if all_matching.exists():
+                    logger.error(f"   Project exists but belongs to another user: {all_matching.first().created_by.username}")
                 return Response({
                     'success': False,
                     'error': f'Project {project_id} not found'
