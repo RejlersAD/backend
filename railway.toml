@@ -2,7 +2,7 @@
 builder = "nixpacks"
 
 [deploy]
-# Use sh -c to prevent nixpacks from auto-generating chmod commands
-startCommand = "sh -c 'chmod +x railway_start.sh 2>/dev/null; exec bash railway_start.sh'"
+# Files are executable in git repo (100755 permissions)
+# No chmod needed - scripts can run directly
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
