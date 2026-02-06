@@ -113,6 +113,7 @@ INSTALLED_APPS = [
     
     # Local apps - Features (Plugin Architecture)
     'apps.pid_analysis',
+    'apps.pfd',  # PFD Project Management - Reference Documents & Verification
     'apps.pfd_converter',
     'apps.crs',
     'apps.finance',  # Finance Invoice Automation

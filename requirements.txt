@@ -58,6 +58,7 @@ django-storages==1.14.2
 # Report Export
 reportlab==4.0.7
 openpyxl==3.1.2
+xlsxwriter==3.1.9
 
 # Graph-based P&ID Layout
 networkx==3.2.1

@@ -8,16 +8,17 @@ bind = "0.0.0.0:8000"
 backlog = 2048
 
 # Worker processes
-workers = multiprocessing.cpu_count() * 2 + 1
-worker_class = "sync"  # Use sync for CPU-intensive OCR tasks
+workers = 4  # Fixed worker count (more stable than CPU-based)
+worker_class = "gthread"  # Use threaded workers for better connection handling
+threads = 4  # 4 threads per worker
 worker_connections = 1000
-max_requests = 1000
-max_requests_jitter = 50
+max_requests = 0  # Disable worker recycling (prevents mid-request kills)
+max_requests_jitter = 0
 
 # Timeout settings - CRITICAL for P&ID processing
 timeout = 1200  # 20 minutes for P&ID OCR + AI processing
 graceful_timeout = 120  # 2 minutes for graceful shutdown
-keepalive = 5
+keepalive = 75  # Keep connections alive for 75 seconds (fixes ECONNRESET)
 
 # Logging
 accesslog = "-"
