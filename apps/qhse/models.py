@@ -25,7 +25,7 @@ class QHSERunningProject(models.Model):
     
     # Project Management
     project_manager = models.CharField(max_length=255, verbose_name="Project Manager")
-    project_quality_eng = models.CharField(max_length=255, verbose_name="Project Quality Engineer")
+    project_quality_eng = models.CharField(max_length=255, blank=True, default='', verbose_name="Project Quality Engineer")
     
     # Project Timeline
     project_starting_date = models.DateField(blank=True, null=True, verbose_name="Project Starting Date")
