@@ -766,3 +766,78 @@ def predictive_analytics(request):
         }
     })
 
+
+# =============================================================================
+# SOFT-CODED STATS ENDPOINTS (Dashboard Integration)
+# =============================================================================
+from rest_framework.decorators import api_view, permission_classes
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def projects_stats(request):
+    """
+    Project Statistics Endpoint - Soft-coded for dashboard integration
+    Returns aggregate stats for all projects across modules
+    """
+    try:
+        from apps.core.models import Project as CoreProject
+        from apps.qhse.models import QHSERunningProject
+        from apps.pid_analysis.models import PIDProject
+        
+        # Aggregate project counts from different modules
+        core_projects = CoreProject.objects.filter(status='active').count() if hasattr(CoreProject, 'objects') else 0
+        qhse_projects = QHSERunningProject.objects.filter(is_active=True).count()
+        pid_projects = PIDProject.objects.count() if hasattr(PIDProject, 'objects') else 0
+        
+        # Total active projects (deduplicated by project_no if possible)
+        total_projects = qhse_projects  # Primary source
+        
+        return Response({
+            'active_count': total_projects,
+            'qhse_projects': qhse_projects,
+            'pid_projects': pid_projects,
+            'core_projects': core_projects,
+            'total_count': total_projects + pid_projects,
+            'status': 'success',
+            'timestamp': timezone.now().isoformat()
+        })
+    except Exception as e:
+        print(f"[STATS ERROR] projects_stats: {e}")
+        # Return safe fallback data
+        return Response({
+            'active_count': 0,
+            'status': 'error',
+            'message': str(e)
+        }, status=200)  # Return 200 to prevent dashboard errors
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def pid_stats(request):
+    """
+    P&ID Drawing Statistics Endpoint - Soft-coded for dashboard integration
+    Returns aggregate stats for P&ID drawings
+    """
+    try:
+        from apps.pid_analysis.models import PIDDrawing
+        
+        total_drawings = PIDDrawing.objects.count()
+        analyzed_drawings = PIDDrawing.objects.filter(status='completed').count()
+        pending_drawings = PIDDrawing.objects.filter(status='pending').count()
+        
+        return Response({
+            'total_drawings': total_drawings,
+            'analyzed_drawings': analyzed_drawings,
+            'pending_drawings': pending_drawings,
+            'status': 'success',
+            'timestamp': timezone.now().isoformat()
+        })
+    except Exception as e:
+        print(f"[STATS ERROR] pid_stats: {e}")
+        # Return safe fallback data
+        return Response({
+            'total_drawings': 0,
+            'status': 'error',
+            'message': str(e)
+        }, status=200)  # Return 200 to prevent dashboard errors
+

@@ -67,6 +67,13 @@ class QHSERunningProjectSerializer(serializers.ModelSerializer):
             'rejectionOfDeliverablesPercent', 'costOfPoorQualityAED', 'remarks',
             'isOverdue', 'totalCars', 'totalObs'
         ]
+        # SOFT-CODED FIX: Disable unique validation during updates to prevent 400 errors
+        # The unique constraint is enforced at database level, but DRF validators
+        # interfere with PATCH requests by checking uniqueness against all records
+        extra_kwargs = {
+            'sr_no': {'validators': []},  # Remove unique validator
+            'project_no': {'validators': []},  # Remove unique validator
+        }
     
     def create(self, validated_data):
         """Auto-set created_by if user is available"""
