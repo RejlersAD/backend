@@ -21,7 +21,7 @@ class QHSERunningProjectSerializer(serializers.ModelSerializer):
     projectStartingDate = serializers.DateField(source='project_starting_date', allow_null=True, required=False)
     projectClosingDate = serializers.DateField(source='project_closing_date', allow_null=True, required=False)
     projectExtension = serializers.DateField(source='project_extension', allow_null=True, required=False)
-    projectQualityEng = serializers.CharField(source='project_quality_eng')
+    projectQualityEng = serializers.CharField(source='project_quality_eng', allow_blank=True, required=False)
     manHourForQuality = serializers.DecimalField(source='man_hour_for_quality', max_digits=10, decimal_places=2, required=False, default=0)
     manhoursUsed = serializers.DecimalField(source='manhours_used', max_digits=10, decimal_places=2, required=False, default=0)
     manhoursBalance = serializers.DecimalField(source='manhours_balance', max_digits=10, decimal_places=2, read_only=True)
