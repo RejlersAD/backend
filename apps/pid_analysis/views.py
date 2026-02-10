@@ -155,6 +155,20 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         
         print(f"[DEBUG] Serializer data keys: {list(serializer_data.keys())}")
         
+        # SOFT-CODED: Extract reference documents if present
+        reference_documents = {}
+        ref_doc_keys = ['iso_standards', 'pid_standards', 'legends_symbols', 'equipment_datasheet', 
+                        'instrument_datasheet', 'process_description', 'safety_requirements', 'other_documents']
+        
+        for key in ref_doc_keys:
+            ref_key = f'reference_{key}'
+            if ref_key in request.FILES:
+                reference_documents[key] = request.FILES[ref_key]
+                print(f"[DEBUG] Reference document found: {key} - {reference_documents[key].name}")
+        
+        if reference_documents:
+            print(f"[DEBUG] Total reference documents: {len(reference_documents)}")
+        
         # Validate request data
         serializer = PIDDrawingUploadSerializer(data=serializer_data)
         
@@ -182,7 +196,27 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             status='uploaded'
         )
         
-        # Auto-analyze if requested
+        # SOFT-CODED: Save reference documents if provided and pass to analysis
+        saved_reference_docs = {}
+        if reference_documents:
+            print(f"[DEBUG] Saving {len(reference_documents)} reference documents")
+            for doc_type, doc_file in reference_documents.items():
+                try:
+                    ref_doc = ReferenceDocument.objects.create(
+                        title=f"{doc_type.replace('_', ' ').title()} for {drawing.drawing_number}",
+                        description=f"Reference document for P&ID {drawing.drawing_number}",
+                        category='guideline',
+                        file=doc_file,
+                        original_filename=doc_file.name,
+                        file_size=doc_file.size,
+                        uploaded_by=request.user
+                    )
+                    saved_reference_docs[doc_type] = ref_doc
+                    print(f"[DEBUG] Saved reference document: {ref_doc.title} (ID: {ref_doc.id})")
+                except Exception as e:
+                    print(f"[ERROR] Failed to save reference document {doc_type}: {e}")
+        
+        # Auto-analyze if requested (WITH REFERENCE DOCUMENTS)
         if serializer.validated_data.get('auto_analyze', True):
             try:
                 print(f"[DEBUG] Starting auto-analysis for drawing ID: {drawing.id}")
@@ -191,17 +225,17 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                 drawing.analysis_started_at = timezone.now()
                 drawing.save()
                 
-                # Perform analysis
-                print(f"[DEBUG] Initializing PIDAnalysisService")
+                # Perform analysis with reference documents
+                print(f"[DEBUG] Initializing PIDAnalysisService with {len(saved_reference_docs)} reference documents")
                 analysis_service = PIDAnalysisService()
-                print(f"[DEBUG] Calling analyze_pid_drawing with file: {drawing.file.name}")
-                # Pass the file object directly (works with both S3 and local storage)
-                # Also pass drawing number for RAG context retrieval
+                print(f"[DEBUG] Calling analyze_pid_drawing with file  and reference docs: {drawing.file.name}")
+                # Pass the file object directly and reference documents for enhanced analysis
                 analysis_result = analysis_service.analyze_pid_drawing(
                     drawing.file,
-                    drawing_number=drawing.drawing_number
+                    drawing_number=drawing.drawing_number,
+                    reference_documents=saved_reference_docs  # SOFT-CODED: AI-powered cross-verification
                 )
-                print(f"[DEBUG] Analysis completed, result keys: {list(analysis_result.keys())}")
+                print(f"[DEBUG] Analysis completed with reference verification, result keys: {list(analysis_result.keys())}")
                 
                 # Create report
                 report = PIDAnalysisReport.objects.create(

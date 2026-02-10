@@ -1,6 +1,6 @@
 """
 P&ID Analysis Service - Multi-Pass Comprehensive Analysis
-Architecture: OCR + Vision + Cross-Validation + Chain-of-Thought
+Architecture: OCR + Vision + Cross-Validation + Chain-of-Thought + Reference Verification
 """
 import os
 import base64
@@ -12,6 +12,7 @@ from django.conf import settings
 from openai import OpenAI
 import fitz  # PyMuPDF
 from PIL import Image
+from .reference_processor import ReferenceDocumentProcessor
 
 
 class PIDAnalysisService:
@@ -33,6 +34,7 @@ class PIDAnalysisService:
             timeout=180.0,  # 3 minute default timeout for all API calls
             max_retries=2   # Retry failed requests twice
         )
+        self.reference_processor = ReferenceDocumentProcessor()
         self.extracted_text = ""
         self.instrument_tags = set()
         self.equipment_tags = set()
@@ -40,25 +42,37 @@ class PIDAnalysisService:
         self.notes_references = set()
         print('[INFO] Multi-Pass PID Analysis Service initialized with 180s timeout')
 
-    def analyze_pid_drawing(self, pdf_file, drawing_number: Optional[str] = None) -> Dict[str, Any]:
+    def analyze_pid_drawing(self, pdf_file, drawing_number: Optional[str] = None, reference_documents: Dict[str, Any] = None) -> Dict[str, Any]:
         """
-        Multi-Pass P&ID Analysis with OCR, Vision, and Cross-Validation
+        Multi-Pass P&ID Analysis with OCR, Vision, Cross-Validation, and Reference Document Verification
         
         PASS 1: OCR Text Extraction - Extract all text, tags, notes, line numbers
-        PASS 2: Vision Analysis - Comprehensive visual inspection with chain-of-thought
-        PASS 3: Cross-Validation - Verify consistency between text and visual findings
-        PASS 4: Second Review - Re-analyze to catch missed issues
+        PASS 2: Reference Document Processing - Extract equipment specs, legends, standards
+        PASS 3: Vision Analysis - Comprehensive visual inspection with chain-of-thought
+        PASS 4: Cross-Validation - Verify consistency between text, visual, and reference data
+        PASS 5: Second Review - Re-analyze to catch missed issues
         
         Args:
             pdf_file: Django FieldFile or file path
             drawing_number: Optional drawing number for reference
+            reference_documents: Dict of reference document data extracted from uploaded files
+                {
+                    'equipment_datasheets': [...],  # Equipment dimensions, ratings, specs
+                    'instrument_datasheets': [...], # Instrument specs, ranges, fail-safe positions
+                    'legends_symbols': [...],       # Standard symbols and abbreviations
+                    'pid_standards': [...],         # P&ID standards and guidelines
+                    'process_description': [...],   # Process flow and operating conditions
+                    'safety_requirements': [...]    # SIL, HAZOP, PSV requirements
+                }
             
         Returns:
-            Dictionary with comprehensive analysis results
+            Dictionary with comprehensive analysis results including reference compliance
         """
         try:
-            print(f"[INFO] ========== MULTI-PASS ANALYSIS START ==========")
+            print(f"[INFO] ========== MULTI-PASS ANALYSIS WITH REFERENCE VERIFICATION ==========")
             print(f"[INFO] Drawing: {drawing_number or 'Unknown'}")
+            if reference_documents:
+                print(f"[INFO] Reference documents provided: {list(reference_documents.keys())}")
             
             # PASS 1: OCR Text Extraction
             print(f"[INFO] PASS 1: OCR Text Extraction")
@@ -71,16 +85,29 @@ class PIDAnalysisService:
             print(f"[INFO] Extracted {len(self.line_numbers)} line numbers")
             print(f"[INFO] Extracted {len(self.notes_references)} note references")
             
-            # PASS 2: Vision Analysis with Chain-of-Thought
-            print(f"[INFO] PASS 2: Vision Analysis (Chain-of-Thought)")
+            # PASS 2: Reference Document Processing (SOFT-CODED: AI-Powered Intelligence)
+            reference_data = {}
+            if reference_documents:
+                print(f"[INFO] PASS 2: Reference Document Intelligence Extraction")
+                try:
+                    reference_data = self._process_reference_documents(reference_documents)
+                    print(f"[INFO] Reference data extracted: {len(reference_data)} categories")
+                except Exception as e:
+                    print(f"[WARNING] Reference document processing failed (non-critical): {e}")
+                    reference_data = {}
+            else:
+                print(f"[INFO] PASS 2: Skipped (No reference documents provided)")
+            
+            # PASS 3: Vision Analysis with Chain-of-Thought & Reference Cross-Verification
+            print(f"[INFO] PASS 3: Vision Analysis (Chain-of-Thought + Reference Verification)")
             try:
-                vision_result = self._vision_analysis_pass(images_base64)
+                vision_result = self._vision_analysis_with_references(images_base64, reference_data)
             except Exception as e:
-                print(f"[ERROR] PASS 2 failed: {str(e)}")
+                print(f"[ERROR] PASS 3 failed: {str(e)}")
                 vision_result = {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
             
-            # PASS 3: Cross-Validation
-            print(f"[INFO] PASS 3: Cross-Validation & Consistency Checks")
+            # PASS 4: Cross-Validation
+            print(f"[INFO] PASS 4: Cross-Validation & Consistency Checks")
             try:
                 consistency_issues = self._cross_validation_pass(vision_result)
             except Exception as e:
@@ -144,8 +171,10 @@ class PIDAnalysisService:
                     'instrument_tags_found': len(self.instrument_tags),
                     'equipment_tags_found': len(self.equipment_tags),
                     'line_numbers_found': len(self.line_numbers),
-                    'analysis_passes': 4,
-                    'multi_pass_enabled': True
+                    'analysis_passes': 5,
+                    'multi_pass_enabled': True,
+                    'reference_documents_used': bool(reference_documents),
+                    'reference_categories': list(reference_data.keys()) if reference_data else []
                 }
             }
             
@@ -264,17 +293,14 @@ class PIDAnalysisService:
         note_pattern = r'\b((?:NOTE|HOLD|REF)[\s]*[\d]+)\b'
         self.notes_references = set(re.findall(note_pattern, self.extracted_text, re.IGNORECASE))
     
-    def _vision_analysis_pass(self, images_base64: List[str]) -> Dict[str, Any]:
-        """PASS 2: Vision-based analysis with chain-of-thought"""
-    def _vision_analysis_pass(self, images_base64: List[str]) -> Dict[str, Any]:
-        """PASS 2: Vision-based analysis with chain-of-thought"""
+    def _vision_analysis_pass(self, images_base64: List[str], reference_context: str = "") -> Dict[str, Any]:
+        """PASS 3: Enhanced vision-based analysis with chain-of-thought and reference verification"""
         try:
-            messages = [
-                {
-                    "role": "system",
-                    "content": """You are a Senior P&ID Verification Engineer performing HAZOP-level review.
-
-**CRITICAL INSTRUCTION - READ CAREFULLY:**
+            # Build system prompt with reference context
+            system_prompt = "You are a Senior P&ID Verification Engineer performing HAZOP-level review.\n\n"
+            if reference_context:
+                system_prompt += reference_context + "\n\n"
+            system_prompt += """**CRITICAL INSTRUCTION - READ CAREFULLY:**
 🚨 DO NOT STOP AFTER FINDING ONE OR TWO ISSUES 🚨
 
 You MUST perform an EXHAUSTIVE analysis and identify MINIMUM 20-30 findings.
@@ -462,6 +488,11 @@ Before listing issues, you MUST think through:
 - **CREATE SEPARATE ISSUES** for each missing HOLD/NOTE requirement
 - **FORMAT**: "HOLD-X NOT IMPLEMENTED: [specific missing element]" or "NOTE-Y NON-COMPLIANT: [specific violation]"
 """
+            
+            messages = [
+                {
+                    "role": "system",
+                    "content": system_prompt
                 },
                 {
                     "role": "user",
@@ -1086,3 +1117,225 @@ Return ONLY JSON."""
             'pending_count': status_counts['pending'],
             'categories': categories
         }
+    
+    def _process_reference_documents(self, documents: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process reference documents and extract structured data
+        SOFT-CODED: AI-powered intelligence extraction
+        """
+        return self.reference_processor.process_reference_documents(documents)
+    
+    def _vision_analysis_with_references(self, images_base64: List[str], reference_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Enhanced vision analysis with reference document cross-verification
+        SOFT-CODED: Comprehensive compliance checking against uploaded references
+        """
+        # Build reference context for AI
+        reference_context = self._build_reference_context(reference_data)
+        
+        # Use the existing vision analysis but with enhanced prompt
+        return self._vision_analysis_pass(images_base64, reference_context)
+    
+    def _build_reference_context(self, reference_data: Dict[str, Any]) -> str:
+        """
+        Build AI-readable context from reference documents
+        SOFT-CODED: Intelligent summarization of multi-source references
+        """
+        if not reference_data:
+            return ""
+        
+        context_parts = ["\n\n🔍 REFERENCE DOCUMENTS FOR CROSS-VERIFICATION:\n"]
+        
+        # PFD cross-verification (SOFT-CODED: P&IDs are generated from PFDs)
+        if 'pfd_data' in reference_data:
+            pfd = reference_data['pfd_data']
+            context_parts.append("\n⭐ PFD (PROCESS FLOW DIAGRAM) PROVIDED - PRIMARY QUALITY CHECK:")
+            context_parts.append("   🚨 CRITICAL: P&IDs are GENERATED from PFDs - verify complete accuracy!")
+            context_parts.append("\n   MANDATORY PFD-TO-P&ID VERIFICATION:")
+            context_parts.append("   1️⃣ EQUIPMENT CONSISTENCY:")
+            context_parts.append("      - ALL equipment shown on PFD MUST appear on P&ID with SAME tag numbers")
+            context_parts.append("      - Equipment types must match PFD (vessels, pumps, exchangers, etc.)")
+            context_parts.append("      - Design pressures/temperatures must match PFD specifications")
+            context_parts.append("      - Operating conditions on P&ID must match PFD")
+            
+            if 'equipment' in pfd and pfd['equipment']:
+                context_parts.append(f"      - PFD Equipment List ({len(pfd['equipment'])} items):")
+                for eq in pfd['equipment'][:8]:  # Show first 8 equipment
+                    context_parts.append(f"        • {eq.get('tag', 'N/A')}: {eq.get('type', 'Unknown')} "
+                                       f"(Design: {eq.get('design_pressure', 'N/A')} / {eq.get('design_temp', 'N/A')})")
+                context_parts.append("      ⚠️ VERIFY: Each equipment above MUST be shown on P&ID with correct specifications")
+            
+            context_parts.append("\n   2️⃣ PROCESS STREAM CONNECTIVITY:")
+            context_parts.append("      - Stream/line numbers must match between PFD and P&ID")
+            context_parts.append("      - Stream sources and destinations must be consistent")
+            context_parts.append("      - Flow directions must match PFD")
+            context_parts.append("      - Process conditions (P, T, Flow) must match stream data")
+            
+            if 'streams' in pfd and pfd['streams']:
+                context_parts.append(f"      - PFD Stream List ({len(pfd['streams'])} streams):")
+                for stream in pfd['streams'][:6]:  # Show first 6 streams
+                    context_parts.append(f"        • Stream {stream.get('stream_id', 'N/A')}: "
+                                       f"{stream.get('source', 'N/A')} → {stream.get('destination', 'N/A')} "
+                                       f"({stream.get('pressure', 'N/A')}, {stream.get('temperature', 'N/A')})")
+                context_parts.append("      ⚠️ VERIFY: Stream connectivity on P&ID matches PFD process flow")
+            
+            context_parts.append("\n   3️⃣ PROCESS CONDITIONS COMPLIANCE:")
+            context_parts.append("      - Normal Operating Pressure (NOP) must match PFD")
+            context_parts.append("      - Normal Operating Temperature (NOT) must match PFD")
+            context_parts.append("      - Design margins must be maintained")
+            context_parts.append("      - Material balance must be supported by P&ID")
+            
+            if 'process_conditions' in pfd:
+                pc = pfd['process_conditions']
+                if 'operating_pressure_range' in pc:
+                    context_parts.append(f"      - Operating Pressure: {pc['operating_pressure_range']}")
+                if 'operating_temp_range' in pc:
+                    context_parts.append(f"      - Operating Temperature: {pc['operating_temp_range']}")
+            
+            context_parts.append("\n   4️⃣ CONTROL LOOPS IMPLEMENTATION:")
+            context_parts.append("      - ALL control loops shown on PFD must be implemented on P&ID")
+            context_parts.append("      - Control strategy must match PFD philosophy")
+            context_parts.append("      - Setpoints and ranges must be consistent")
+            
+            if 'control_loops' in pfd and pfd['control_loops']:
+                context_parts.append(f"      - PFD Control Loops ({len(pfd['control_loops'])} loops):")
+                for loop in pfd['control_loops'][:5]:
+                    context_parts.append(f"        • {loop.get('parameter', 'N/A')} at {loop.get('location', 'N/A')} "
+                                       f"(Type: {loop.get('type', 'N/A')}, SP: {loop.get('setpoint', 'N/A')})")
+                context_parts.append("      ⚠️ VERIFY: Each control loop implemented correctly on P&ID")
+            
+            context_parts.append("\n   5️⃣ SAFETY SYSTEMS INTEGRITY:")
+            context_parts.append("      - ALL safety devices from PFD must appear on P&ID")
+            context_parts.append("      - PSV locations and set pressures must match PFD")
+            context_parts.append("      - Emergency shutdown systems must be shown")
+            context_parts.append("      - Safety interlocks must be implemented")
+            
+            if 'safety_systems' in pfd and pfd['safety_systems']:
+                context_parts.append(f"      - PFD Safety Systems ({len(pfd['safety_systems'])} devices):")
+                for safety in pfd['safety_systems'][:5]:
+                    context_parts.append(f"        • {safety.get('device', 'N/A')} at {safety.get('location', 'N/A')} "
+                                       f"(Set: {safety.get('set_pressure', 'N/A')})")
+                context_parts.append("      ⚠️ CRITICAL: Verify all safety devices from PFD are present on P&ID")
+            
+            context_parts.append("\n   6️⃣ UTILITY CONNECTIONS:")
+            context_parts.append("      - Utility systems shown on PFD must be on P&ID")
+            context_parts.append("      - Cooling water, steam, air connections must match")
+            context_parts.append("      - Utility supply pressures must be consistent")
+            
+            if 'utilities' in pfd and pfd['utilities']:
+                for utility in pfd['utilities'][:4]:
+                    context_parts.append(f"        • {utility.get('utility', 'N/A')} to {utility.get('connected_equipment', 'N/A')}")
+            
+            context_parts.append("\n   🎯 PFD-P&ID QUALITY CHECK SEVERITY:")
+            context_parts.append("      - Equipment missing from P&ID but shown on PFD: CRITICAL")
+            context_parts.append("      - Process conditions mismatch: CRITICAL")
+            context_parts.append("      - Safety systems missing: CRITICAL")
+            context_parts.append("      - Control loops not implemented: MAJOR")
+            context_parts.append("      - Stream connectivity errors: MAJOR")
+            context_parts.append("      - Utility connections missing: MINOR")
+            context_parts.append("")
+        
+        # Equipment specifications
+        if 'equipment_specs' in reference_data:
+            eq_specs = reference_data['equipment_specs']
+            context_parts.append("\n✓ EQUIPMENT DATASHEETS PROVIDED:")
+            context_parts.append("   VERIFY: Equipment dimensions match datasheet specifications")
+            context_parts.append("   VERIFY: Design pressures and temperatures comply with datasheets")
+            context_parts.append("   VERIFY: PSV set pressures ≤ Equipment design pressure (typically 90-95% of design)")
+            context_parts.append("   VERIFY: Pipe class and Trim class at equipment connections match datasheet requirements")
+            if 'equipment' in eq_specs:
+                for eq in eq_specs['equipment'][:5]:  # Show first 5 items
+                    context_parts.append(f"   - {eq.get('tag', 'Unknown')}: Design P={eq.get('design_pressure', 'N/A')}, PSV={eq.get('psv_setpoint', 'N/A')}")
+        
+        # Instrument specifications
+        if 'instrument_specs' in reference_data:
+            inst_specs = reference_data['instrument_specs']
+            context_parts.append("\n✓ INSTRUMENT DATASHEETS PROVIDED:")
+            context_parts.append("   VERIFY: Instrument tags match datasheet listings")
+            context_parts.append("   VERIFY: Fail-safe positions shown correctly (FC/FO/FL)")
+            context_parts.append("   VERIFY: Control valve fail positions match safety requirements")
+            context_parts.append("   VERIFY: Instrument ranges and alarm/trip setpoints shown on P&ID")
+        
+        # Legends and symbols
+        if 'legends' in reference_data:
+            context_parts.append("\n✓ LEGENDS & SYMBOLS REFERENCE PROVIDED:")
+            context_parts.append("   VERIFY: All symbols used on P&ID are defined in legend")
+            context_parts.append("   VERIFY: Symbol usage consistent with legend definitions")
+            context_parts.append("   VERIFY: Abbreviations match legend")
+        
+        # Standards and guidelines
+        if 'standards' in reference_data:
+            std_data = reference_data['standards']
+            context_parts.append("\n✓ P&ID STANDARDS & GUIDELINES PROVIDED:")
+            context_parts.append("   VERIFY: Minimum spool lengths downstream of Restriction Orifices (RO) - typically 5D-10D")
+            context_parts.append("   VERIFY: Minimum straight pipe after LTCS (Low Temperature Cut-off Switch) - typically 10D")
+            context_parts.append("   VERIFY: Pipe class consistency at all equipment connections")
+            context_parts.append("   VERIFY: Trim class consistency (e.g., IV, VI) for control valves")
+            if 'key_requirements' in std_data:
+                for req in std_data['key_requirements'][:5]:
+                    context_parts.append(f"   - Standard: {req}")
+        
+        # Safety requirements
+        if 'safety_specs' in reference_data:
+            context_parts.append("\n✓ SAFETY REQUIREMENTS (SIL/HAZOP) PROVIDED:")
+            context_parts.append("   VERIFY: SIL-rated instruments shown with correct redundancy")
+            context_parts.append("   VERIFY: HAZOP actions implemented on P&ID")
+            context_parts.append("   VERIFY: Safety instrumented functions (SIF) properly shown")
+        
+        # Process description
+        if 'process_conditions' in reference_data:
+            proc_data = reference_data['process_conditions']
+            context_parts.append("\n✓ PROCESS DESCRIPTION PROVIDED:")
+            context_parts.append("   VERIFY: Operating conditions match process description")
+            context_parts.append("   VERIFY: Process flow logic matches description")
+            if 'operating_conditions' in proc_data:
+                op_cond = proc_data['operating_conditions']
+                if 'pressures' in op_cond:
+                    context_parts.append(f"   - Operating Pressures: {', '.join(op_cond['pressures'][:3])}")
+                if 'temperatures' in op_cond:
+                    context_parts.append(f"   - Operating Temperatures: {', '.join(op_cond['temperatures'][:3])}")
+        
+        # ISO standards
+        if 'iso_requirements' in reference_data:
+            context_parts.append("\n✓ ISO STANDARDS (ISO 15926, ISO 10628) PROVIDED:")
+            context_parts.append("   VERIFY: P&ID format complies with ISO standards")
+            context_parts.append("   VERIFY: Notation and symbology per ISO requirements")
+        
+        # Add specific verification checklist
+        context_parts.append("\n\n🎯 MANDATORY CROSS-VERIFICATION CHECKS (Priority Order):")
+        
+        # Add PFD check as #1 priority if PFD provided
+        if 'pfd_data' in reference_data:
+            context_parts.append("1. ⭐ PFD-to-P&ID ACCURACY (HIGHEST PRIORITY - P&IDs generated from PFDs):")
+            context_parts.append("   - All PFD equipment shown on P&ID with correct tags")
+            context_parts.append("   - Process stream connectivity matches PFD")
+            context_parts.append("   - Operating conditions consistent with PFD")
+            context_parts.append("   - Control loops from PFD implemented on P&ID")
+            context_parts.append("   - Safety systems from PFD present on P&ID")
+            context_parts.append("2. ✓ Equipment dimensions and datasheet compliance")
+            context_parts.append("3. ✓ Instrumentation tags and fail-safe positions")
+            context_parts.append("4. ✓ PSV set pressure vs Equipment Design Pressure (must be < design pressure)")
+            context_parts.append("5. ✓ Pipe class and Trim class consistency at Equipment connections")
+            context_parts.append("6. ✓ Dissimilar material connections require insulating gaskets")
+            context_parts.append("7. ✓ Minimum spool length downstream of RO (Restriction Orifice) - typically 5D minimum")
+            context_parts.append("8. ✓ Minimum straight pipe after LTCS (Low Temp Cut-off Switch) - typically 10D")
+            context_parts.append("9. ✓ Free draining/Slope requirements for horizontal piping (typically 1:100 slope)")
+            context_parts.append("10. ✓ Piping layout and drainage compliance")
+            context_parts.append("11. ✓ Notes, legends, and project standard adherence")
+        else:
+            context_parts.append("1. ✓ Equipment dimensions and datasheet compliance")
+            context_parts.append("2. ✓ Instrumentation tags and fail-safe positions")
+            context_parts.append("3. ✓ PSV set pressure vs Equipment Design Pressure (must be < design pressure)")
+            context_parts.append("4. ✓ Pipe class and Trim class consistency at Equipment connections")
+            context_parts.append("5. ✓ Dissimilar material connections require insulating gaskets")
+            context_parts.append("6. ✓ Minimum spool length downstream of RO (Restriction Orifice) - typically 5D minimum")
+            context_parts.append("7. ✓ Minimum straight pipe after LTCS (Low Temp Cut-off Switch) - typically 10D")
+            context_parts.append("8. ✓ Free draining/Slope requirements for horizontal piping (typically 1:100 slope)")
+            context_parts.append("9. ✓ Piping layout and drainage compliance")
+            context_parts.append("10. ✓ Notes, legends, and project standard adherence")
+        
+        context_parts.append("\n⚠️ FLAG AS CRITICAL if reference document shows requirement NOT met on P&ID!")
+        context_parts.append("🚨 PFD-P&ID mismatches are CRITICAL - P&ID must accurately reflect PFD!")
+        
+        return "\n".join(context_parts)
+

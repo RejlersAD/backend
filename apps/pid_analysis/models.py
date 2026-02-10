@@ -1,6 +1,7 @@
 from django.db import models
 from django.conf import settings
 from django.core.validators import FileExtensionValidator
+import uuid
 
 
 def pid_drawing_upload_path(instance, filename):
@@ -30,6 +31,74 @@ def reference_document_upload_path(instance, filename):
     """
     category = instance.category.lower().replace(' ', '_') if instance.category else 'general'
     return f'reference_docs/{category}/{filename}'
+
+
+class PIDProject(models.Model):
+    """
+    P&ID Project - Contains P&ID drawings organized by project
+    Role-based S3 storage: pid_drawings/{organization}/{project_id}/
+    """
+    project_id = models.CharField(
+        max_length=50,
+        unique=True,
+        editable=False,
+        help_text="Auto-generated unique project ID"
+    )
+    project_name = models.CharField(
+        max_length=255,
+        help_text="User-defined project name"
+    )
+    description = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Optional project description"
+    )
+    
+    # Metadata
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='pid_projects'
+    )
+    organization = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Organization name for RBAC S3 path"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+    
+    class Meta:
+        db_table = 'pid_projects'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['project_id']),
+            models.Index(fields=['created_by', '-created_at']),
+            models.Index(fields=['organization']),
+        ]
+    
+    def save(self, *args, **kwargs):
+        """Generate project_id and set organization if not exists"""
+        if not self.project_id:
+            from django.utils import timezone
+            date_str = timezone.now().strftime('%Y%m%d')
+            unique_id = str(uuid.uuid4())[:8].upper()
+            self.project_id = f"PID-{date_str}-{unique_id}"
+        
+        # Set organization from user profile if available
+        if not self.organization and hasattr(self.created_by, 'organization'):
+            self.organization = self.created_by.organization.name
+        
+        super().save(*args, **kwargs)
+    
+    def get_s3_path(self):
+        """Get S3 path for this project - role-based organization"""
+        org = self.organization or 'default'
+        return f"pid_drawings/{org}/{self.project_id}/"
+    
+    def __str__(self):
+        return f"{self.project_id} - {self.project_name}"
 
 
 class ReferenceDocument(models.Model):
@@ -111,7 +180,7 @@ class ReferenceDocument(models.Model):
 
 
 class PIDDrawing(models.Model):
-    """P&ID Drawing uploaded for analysis (S3-ready)"""
+    """P&ID Drawing uploaded for analysis (S3-ready with project association)"""
     
     STATUS_CHOICES = [
         ('uploaded', 'Uploaded'),
@@ -119,6 +188,16 @@ class PIDDrawing(models.Model):
         ('completed', 'Completed'),
         ('failed', 'Failed'),
     ]
+    
+    # Project association (nullable for backward compatibility)
+    project = models.ForeignKey(
+        PIDProject,
+        on_delete=models.CASCADE,
+        related_name='pid_drawings',
+        null=True,
+        blank=True,
+        help_text='Associated P&ID project'
+    )
     
     # File information (S3-compatible)
     file = models.FileField(

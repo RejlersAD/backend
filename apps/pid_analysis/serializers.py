@@ -1,6 +1,141 @@
 from rest_framework import serializers
-from .models import PIDDrawing, PIDAnalysisReport, PIDIssue, ReferenceDocument
+from .models import PIDProject, PIDDrawing, PIDAnalysisReport, PIDIssue, ReferenceDocument
 
+
+# ========== PID PROJECT SERIALIZERS (RBAC-enabled) ==========
+
+class PIDDrawingListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for P&ID drawings in project lists"""
+    uploaded_by_name = serializers.SerializerMethodField()
+    uploaded_by_email = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = PIDDrawing
+        fields = [
+            'id',
+            'drawing_number',
+            'project_name',
+            'revision',
+            'file_size',
+            'uploaded_by_name',
+            'uploaded_by_email',
+            'uploaded_at',
+        ]
+        read_only_fields = ['id', 'uploaded_at']
+    
+    def get_uploaded_by_name(self, obj):
+        if hasattr(obj.uploaded_by, 'get_full_name'):
+            return obj.uploaded_by.get_full_name()
+        return obj.uploaded_by.email if obj.uploaded_by else 'Unknown'
+    
+    def get_uploaded_by_email(self, obj):
+        return obj.uploaded_by.email if obj.uploaded_by else ''
+
+
+class PIDProjectListSerializer(serializers.ModelSerializer):
+    """Serializer for listing P&ID projects"""
+    created_by_name = serializers.SerializerMethodField()
+    created_by_email = serializers.SerializerMethodField()
+    drawing_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = PIDProject
+        fields = [
+            'id',
+            'project_id',
+            'project_name',
+            'description',
+            'organization',
+            'drawing_count',
+            'created_by',
+            'created_by_name',
+            'created_by_email',
+            'created_at',
+            'updated_at',
+            'is_active',
+        ]
+        read_only_fields = ['id', 'project_id', 'created_at', 'updated_at']
+    
+    def get_created_by_name(self, obj):
+        if hasattr(obj.created_by, 'get_full_name'):
+            return obj.created_by.get_full_name()
+        return obj.created_by.email if obj.created_by else 'Unknown'
+    
+    def get_created_by_email(self, obj):
+        return obj.created_by.email if obj.created_by else ''
+    
+    def get_drawing_count(self, obj):
+        return PIDDrawing.objects.filter(project=obj).count()
+
+
+class PIDProjectDetailSerializer(serializers.ModelSerializer):
+    """Detailed serializer for P&ID project with drawings"""
+    created_by_name = serializers.SerializerMethodField()
+    created_by_email = serializers.SerializerMethodField()
+    drawings = PIDDrawingListSerializer(many=True, read_only=True, source='pid_drawings')
+    drawing_count = serializers.SerializerMethodField()
+    s3_path = serializers.CharField(source='get_s3_path', read_only=True)
+    
+    class Meta:
+        model = PIDProject
+        fields = [
+            'id',
+            'project_id',
+            'project_name',
+            'description',
+            'organization',
+            'drawing_count',
+            'drawings',
+            's3_path',
+            'created_by',
+            'created_by_name',
+            'created_by_email',
+            'created_at',
+            'updated_at',
+            'is_active',
+        ]
+        read_only_fields = ['id', 'project_id', 'created_at', 'updated_at', 's3_path']
+    
+    def get_created_by_name(self, obj):
+        if hasattr(obj.created_by, 'get_full_name'):
+            return obj.created_by.get_full_name()
+        return obj.created_by.email if obj.created_by else 'Unknown'
+    
+    def get_created_by_email(self, obj):
+        return obj.created_by.email if obj.created_by else ''
+    
+    def get_drawing_count(self, obj):
+        return PIDDrawing.objects.filter(project=obj).count()
+
+
+class PIDProjectCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating P&ID projects"""
+    name = serializers.CharField(source='project_name', write_only=True)
+    
+    class Meta:
+        model = PIDProject
+        fields = ['name', 'description']
+    
+    def create(self, validated_data):
+        """Create project with current user and organization"""
+        user = self.context['request'].user
+        
+        # Get organization from user profile - RBAC
+        organization = ''
+        if hasattr(user, 'organization'):
+            organization = user.organization.name
+        elif hasattr(user, 'userprofile') and hasattr(user.userprofile, 'organization'):
+            organization = user.userprofile.organization.name
+        
+        project = PIDProject.objects.create(
+            created_by=user,
+            organization=organization,
+            **validated_data
+        )
+        return project
+
+
+# ========== EXISTING SERIALIZERS ==========
 
 class PIDIssueSerializer(serializers.ModelSerializer):
     """Serializer for P&ID issues"""

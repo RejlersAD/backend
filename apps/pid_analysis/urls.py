@@ -6,6 +6,7 @@ from .views import (
     PIDIssueViewSet,
     ReferenceDocumentViewSet,
 )
+from .project_views import PIDProjectViewSet
 from .history_views import (
     pid_history_overview,
     pid_all_uploads,
@@ -135,6 +136,7 @@ def direct_export(request, pk):
         return Response({'error': str(e)}, status=500)
 
 router = DefaultRouter()
+router.register(r'projects', PIDProjectViewSet, basename='pid-project')
 router.register(r'drawings', PIDDrawingViewSet, basename='pid-drawing')
 router.register(r'reports', PIDAnalysisReportViewSet, basename='pid-report')
 router.register(r'issues', PIDIssueViewSet, basename='pid-issue')

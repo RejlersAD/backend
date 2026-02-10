@@ -280,6 +280,13 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Custom User Model
 AUTH_USER_MODEL = 'users.User'
 
+# Authentication Backends
+# Use custom backend for case-insensitive email authentication
+AUTHENTICATION_BACKENDS = [
+    'apps.users.auth_backend.CaseInsensitiveEmailBackend',  # Custom case-insensitive email auth
+    'django.contrib.auth.backends.ModelBackend',  # Default Django auth (fallback)
+]
+
 # REST Framework Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
