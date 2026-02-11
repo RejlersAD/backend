@@ -19,6 +19,12 @@ LIST_TYPES = {
         'description': 'Piping line specifications and attributes',
         'default_fields': ['line_number', 'service', 'size', 'rating', 'material']
     },
+    'critical_stress': {
+        'name': 'Critical Stress Line List',
+        'icon': 'ExclamationTriangleIcon',
+        'description': 'Stress critical piping line specifications',
+        'default_fields': ['line_number', 'service', 'size', 'rating', 'material']
+    },
     'equipment_list': {
         'name': 'Equipment List',
         'icon': 'CubeIcon',
