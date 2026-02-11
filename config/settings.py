@@ -196,17 +196,63 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 ASGI_APPLICATION = 'config.asgi.application'
 
-# Channel Layers Configuration (for WebSocket support)
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        'CONFIG': {
-            'hosts': [(config('REDIS_HOST', default='redis'), config('REDIS_PORT', default=6379, cast=int))],
-            'capacity': 1500,  # Maximum messages in channel
-            'expiry': 10,  # Message expiry time in seconds
+# ==============================================================================
+# CHANNEL LAYERS CONFIGURATION (WebSocket support)
+# ==============================================================================
+# Redis-backed channel layer for Django Channels (WebSocket real-time features)
+# Railway: Will use REDIS_URL if available, otherwise falls back to host/port
+
+# Parse Redis configuration for Channel Layers
+REDIS_URL_FOR_CHANNELS = config('REDIS_URL', default=None)
+
+if REDIS_URL_FOR_CHANNELS:
+    # Extract host and port from Redis URL for channels_redis
+    # channels_redis expects (host, port) tuple, not full URL
+    import re
+    redis_match = re.match(r'redis://(?:([^:]+):([^@]+)@)?([^:]+):(\d+)', REDIS_URL_FOR_CHANNELS)
+    if redis_match:
+        redis_host = redis_match.group(3)
+        redis_port = int(redis_match.group(4))
+        CHANNEL_LAYERS = {
+            'default': {
+                'BACKEND': 'channels_redis.core.RedisChannelLayer',
+                'CONFIG': {
+                    'hosts': [(redis_host, redis_port)],
+                    'capacity': 1500,
+                    'expiry': 10,
+                },
+            },
+        }
+        print(f"[CHANNELS] ✅ Channel layer configured (URL-based): {redis_host}:{redis_port}")
+    else:
+        print(f"[CHANNELS] ⚠️  Could not parse REDIS_URL, using default config")
+        CHANNEL_LAYERS = {
+            'default': {
+                'BACKEND': 'channels_redis.core.RedisChannelLayer',
+                'CONFIG': {
+                    'hosts': [('redis', 6379)],
+                    'capacity': 1500,
+                    'expiry': 10,
+                },
+            },
+        }
+else:
+    # Fallback to host/port configuration
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                'hosts': [(config('REDIS_HOST', default='redis'), config('REDIS_PORT', default=6379, cast=int))],
+                'capacity': 1500,
+                'expiry': 10,
+            },
         },
-    },
-}
+    }
+    print(f"[CHANNELS] ✅ Channel layer configured (host-based): {config('REDIS_HOST', default='redis')}:{config('REDIS_PORT', default=6379)}")
+
+# ==============================================================================
+# End of Channel Layers Configuration
+# ==============================================================================
 
 # Database
 # ⚠️ CRITICAL: DATABASE_URL is REQUIRED for Railway deployment
@@ -484,13 +530,97 @@ for origin in CSRF_TRUSTED_ORIGINS:
 # End of CORS/CSRF Configuration
 # ==============================================================================
 
-# Celery Configuration
-CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://redis:6379/0')
-CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://redis:6379/0')
+# ==============================================================================
+# CACHE CONFIGURATION (Redis)
+# ==============================================================================
+# Cache backend for session storage, task progress tracking, and performance optimization
+# Railway: Set REDIS_URL environment variable (e.g., redis://default:password@host:port)
+# Docker: Uses redis:6379 by default
+
+REDIS_URL = config('REDIS_URL', default=None)
+
+if REDIS_URL:
+    # Railway or external Redis (URL-based configuration)
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': REDIS_URL,
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+                'SOCKET_CONNECT_TIMEOUT': 5,  # seconds
+                'SOCKET_TIMEOUT': 5,  # seconds
+                'RETRY_ON_TIMEOUT': True,
+                'MAX_CONNECTIONS': 50,
+                'CONNECTION_POOL_KWARGS': {
+                    'max_connections': 50,
+                    'retry_on_timeout': True,
+                },
+            },
+            'KEY_PREFIX': 'radai',
+            'TIMEOUT': 300,  # 5 minutes default
+        }
+    }
+    print(f"[CACHE] ✅ Redis cache configured (URL-based)")
+    print(f"[CACHE] URL: {REDIS_URL.split('@')[0]}@***")  # Hide credentials
+else:
+    # Fallback: Try host/port configuration (Docker Compose)
+    REDIS_HOST = config('REDIS_HOST', default='redis')
+    REDIS_PORT = config('REDIS_PORT', default=6379, cast=int)
+    REDIS_PASSWORD = config('REDIS_PASSWORD', default=None)
+    
+    redis_location = f"redis://{':' + REDIS_PASSWORD + '@' if REDIS_PASSWORD else ''}{REDIS_HOST}:{REDIS_PORT}/1"
+    
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': redis_location,
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+                'SOCKET_CONNECT_TIMEOUT': 5,
+                'SOCKET_TIMEOUT': 5,
+                'RETRY_ON_TIMEOUT': True,
+                'MAX_CONNECTIONS': 50,
+            },
+            'KEY_PREFIX': 'radai',
+            'TIMEOUT': 300,
+        }
+    }
+    print(f"[CACHE] ✅ Redis cache configured (host-based)")
+    print(f"[CACHE] Host: {REDIS_HOST}:{REDIS_PORT}")
+
+# ==============================================================================
+# End of Cache Configuration
+# ==============================================================================
+
+# ==============================================================================
+# CELERY CONFIGURATION (Task Queue)
+# ==============================================================================
+# Celery broker and result backend - uses same Redis configuration as cache
+# Railway: Set REDIS_URL or CELERY_BROKER_URL environment variable
+# Docker: Uses redis:6379 by default
+
+if REDIS_URL:
+    # Use the same Redis URL for Celery (different database number for separation)
+    CELERY_BROKER_URL = config('CELERY_BROKER_URL', default=REDIS_URL.replace('/1', '/0'))
+    CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default=REDIS_URL.replace('/1', '/0'))
+    print(f"[CELERY] ✅ Broker configured (URL-based)")
+else:
+    # Fallback to host/port configuration
+    CELERY_BROKER_URL = config('CELERY_BROKER_URL', default=f'redis://{REDIS_HOST}:{REDIS_PORT}/0')
+    CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default=f'redis://{REDIS_HOST}:{REDIS_PORT}/0')
+    print(f"[CELERY] ✅ Broker configured (host-based): {REDIS_HOST}:{REDIS_PORT}")
+
 CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
+
+print(f"[CELERY] Broker: {CELERY_BROKER_URL.split('@')[0] if '@' in CELERY_BROKER_URL else CELERY_BROKER_URL}")
+print(f"[CELERY] Result Backend: {CELERY_RESULT_BACKEND.split('@')[0] if '@' in CELERY_RESULT_BACKEND else CELERY_RESULT_BACKEND}")
+
+# ==============================================================================
+# End of Celery Configuration
+# ==============================================================================
 
 # Process Datasheet - Dynamic Retry Configuration
 DATASHEET_MAX_RETRIES = config('DATASHEET_MAX_RETRIES', default=5, cast=int)
