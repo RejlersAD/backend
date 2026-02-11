@@ -118,6 +118,10 @@ class Notification(models.Model):
             models.Index(fields=['priority', '-created_at']),
             models.Index(fields=['status', '-created_at']),
             models.Index(fields=['category', '-created_at']),
+            # Optimized index for unread_count query - critical for performance
+            models.Index(fields=['recipient', 'is_read', 'status', 'expires_at'], name='notif_unread_opt'),
+            # Optimized index for marking as read
+            models.Index(fields=['recipient', 'is_read'], name='notif_read_lookup'),
         ]
     
     def __str__(self):
