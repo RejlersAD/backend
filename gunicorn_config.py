@@ -8,9 +8,9 @@ bind = "0.0.0.0:8000"
 backlog = 2048
 
 # Worker processes
-workers = 4  # Fixed worker count (more stable than CPU-based)
+workers = 8  # 8 workers for high concurrency (handles P&ID + other requests)
 worker_class = "gthread"  # Use threaded workers for better connection handling
-threads = 4  # 4 threads per worker
+threads = 4  # 4 threads per worker (8 workers × 4 threads = 32 concurrent connections)
 worker_connections = 1000
 max_requests = 0  # Disable worker recycling (prevents mid-request kills)
 max_requests_jitter = 0
