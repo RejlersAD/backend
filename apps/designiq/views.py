@@ -535,9 +535,17 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser])
     def upload_pid(self, request):
         """
-        Upload P&ID PDF and extract line list items using OCR
-        Intelligently detects line numbers in horizontal/vertical orientations
-        Parses components: size, fluid, sequence, class, insulation, connections
+        Upload P&ID PDF and queue async OCR processing (OPTIMIZED - NO TIMEOUT)
+        
+        This endpoint immediately returns after uploading the file and queuing a Celery task.
+        The actual OCR processing happens asynchronously in the background.
+        
+        Frontend should poll /upload_pid_status/{task_id}/ for progress and results.
+        
+        Response includes:
+        - task_id: Use this to check processing status
+        - message: Instructions for checking status
+        - estimated_time: Rough estimate based on file size
         """
         pid_file = request.FILES.get('pid_file')
         list_type = request.data.get('list_type', 'line_list')
@@ -558,11 +566,10 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            import tempfile
-            import os
             from django.core.files.storage import default_storage
-            from .pid_ocr_extractor_v2 import PIDLineExtractorV2
             from .models import DesignProject
+            from .tasks import process_pid_upload_async
+            from io import BytesIO
             
             # Get or create project
             project, _ = DesignProject.objects.get_or_create(
@@ -574,8 +581,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 }
             )
             
-            # 🆔 GENERATE UNIQUE 4-DIGIT DOCUMENT ID
-            # Find the highest existing document ID from all line items
+            # Generate unique document ID
             last_doc_id = 0
             existing_items = EngineeringListItem.objects.filter(
                 data__has_key='document_id'
@@ -583,24 +589,21 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             
             if existing_items and existing_items.data.get('document_id'):
                 try:
-                    # Extract the 4-digit number from format "0001-filename.pdf"
                     doc_id_str = existing_items.data['document_id'].split('-')[0]
                     last_doc_id = int(doc_id_str)
                 except (ValueError, IndexError):
                     pass
             
-            # Generate new 4-digit ID (increment)
             new_doc_id = last_doc_id + 1
             document_id = f"{new_doc_id:04d}-{pid_file.name}"
             
-            logger.info(f"🆔 Generated Document ID: {document_id}")
+            logger.info(f"🆔 Generated Document ID: {document_id} (size: {pid_file.size / 1024 / 1024:.2f} MB)")
             
-            # Read file content once to avoid file pointer issues
+            # Read file content once
             pid_file.seek(0)
             file_content = pid_file.read()
             
-            # 📤 UPLOAD TO S3 (if configured)
-            from io import BytesIO
+            # Upload to S3 (if configured)
             s3_file = BytesIO(file_content)
             s3_result = s3_storage.upload_document(
                 file_obj=s3_file,
@@ -610,13 +613,11 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             
             if s3_result['success']:
                 logger.info(f"☁️ Uploaded to S3: {s3_result['s3_key']}")
-                saved_path = s3_result['s3_key']  # Use S3 key as path
+                saved_path = s3_result['s3_key']
                 storage_type = 's3'
                 s3_url = s3_result['s3_url']
             else:
-                logger.warning(f"⚠️ S3 upload failed: {s3_result['error']}, falling back to local storage")
-                # Fallback to local storage - recreate file object with content
-                from django.core.files.uploadedfile import InMemoryUploadedFile
+                logger.warning(f"⚠️ S3 upload failed, using local storage")
                 local_file = BytesIO(file_content)
                 local_file.seek(0)
                 file_path = f"designiq/pid_uploads/{timezone.now().strftime('%Y/%m/%d')}/{document_id}"
@@ -624,136 +625,120 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 storage_type = 'local'
                 s3_url = None
             
-            # Save to temp file for OCR processing using the content we already read
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
-                tmp.write(file_content)
-                tmp_path = tmp.name
+            # Get processing options
+            include_area = request.POST.get('include_area', 'false').lower() == 'true'
+            format_type = request.POST.get('format_type', 'onshore').lower()
             
-            try:
-                # Get format preference from request
-                # - include_area: for ADNOC Onshore with area format
-                # - format_type: 'onshore' (default) or 'offshore' for ADNOC Offshore
-                include_area = request.POST.get('include_area', 'false').lower() == 'true'
-                format_type = request.POST.get('format_type', 'onshore').lower()
-                
-                # Extract line numbers using Multi-Engine OCR + Geometric FROM-TO Detection
-                extractor = PIDLineExtractorV2()
-                line_items = extractor.extract_from_pdf(tmp_path, include_area=include_area, format_type=format_type)
-                table_data = extractor.format_as_table_data(line_items)
-                
-                # FROM-TO detection methods (in order of preference):
-                # 1. Spatial Matching (research paper method)
-                # 2. OpenAI Vision (AI-powered visual analysis)
-                # 3. Geometric Line Detection (OpenCV + connectivity graph)
-                
-                logger.info(f"📊 Extracted {len(line_items)} line numbers from {pid_file.name}")
-                logger.info(f"🎯 Using Multi-Engine OCR (Tesseract + EasyOCR + PaddleOCR) + Regex + Geometric Detection")
-                if format_type == 'offshore':
-                    logger.info(f"📍 Format: ADNOC OFFSHORE (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)")
-                elif include_area:
-                    logger.info(f"📍 Format: ADNOC ONSHORE WITH AREA (SIZE\"-AREA-FLUID-SEQ-PIPECLASS)")
-                else:
-                    logger.info(f"📍 Format: GENERAL (SIZE-FLUID-SEQ-PIPECLASS)")
-                
-                # Create or update EngineeringListItem for each detected line
-                created_items = []
-                updated_items = []
-                logger.info(f"📝 Saving {len(table_data)} extracted lines to database (project={project.id if project else None}, list_type={list_type})...")
-                
-                for idx, line_data in enumerate(table_data):
-                    try:
-                        # Use update_or_create to handle duplicates gracefully
-                        item_data = {
-                            'description': f"{line_data['fluid_description']} Line - {line_data['size']}",
-                            'status': 'pending',
-                            'is_validated': False,
-                            'data': {
-                                'source': 'pid_ocr',
-                                'filename': pid_file.name,
-                                'document_id': document_id,  # 🆔 UNIQUE DOCUMENT ID
-                                'document_path': saved_path,  # 📄 S3 KEY or LOCAL PATH
-                                'storage_type': storage_type,  # 's3' or 'local'
-                                's3_url': s3_url,  # Direct S3 URL (if applicable)
-                                'upload_timestamp': timezone.now().isoformat(),
-                                'format_type': format_type,
-                                'include_area': include_area,
-                                'page_number': line_data.get('page', 1),
-                                'fluid_code': line_data['fluid_code'],
-                                'fluid_description': line_data['fluid_description'],
-                                'size': line_data['size'],
-                                'area': line_data.get('area', ''),  # AREA field
-                                'sequence_no': line_data['sequence_no'],
-                                'pipr_class': line_data['pipr_class'],
-                                'insulation': line_data['insulation'],
-                                'from_equipment': line_data.get('from_equipment', ''),
-                                'to_equipment': line_data.get('to_equipment', ''),
-                                'from_line': line_data.get('from_line', ''),  # NEW: FROM line number
-                                'to_line': line_data.get('to_line', ''),      # NEW: TO line number
-                                'flow_detection_method': line_data.get('flow_detection_method', ''),
-                                'flow_confidence': line_data.get('flow_confidence', '')
-                            },
-                            'attachments': [{
-                                'type': 'pid_pdf',
-                                'filename': pid_file.name,
-                                'document_id': document_id,
-                                'path': saved_path,
-                                'storage_type': storage_type,
-                                's3_url': s3_url,
-                                'uploaded_at': timezone.now().isoformat()
-                            }]
-                        }
-                        
-                        # Only set created_by on new items
-                        item, created = EngineeringListItem.objects.update_or_create(
-                            list_type=list_type,
-                            project=project,
-                            item_tag=line_data['line_number'],
-                            defaults=item_data
-                        )
-                        
-                        # Set created_by if this is a new item
-                        if created and not item.created_by:
-                            item.created_by = request.user
-                            item.save(update_fields=['created_by'])
-                        
-                        if created:
-                            created_items.append(item)
-                            if idx == 0:
-                                logger.info(f"   ✅ First item CREATED: {item.item_tag}")
-                        else:
-                            updated_items.append(item)
-                            if idx == 0:
-                                logger.info(f"   ✅ First item UPDATED: {item.item_tag}")
-                        
-                    except Exception as item_err:
-                        logger.error(f"❌ Failed to save item {idx+1}: {line_data.get('line_number', '?')} - Error: {str(item_err)}", exc_info=True)
-                        continue
-                
-                total_items = len(created_items) + len(updated_items)
-                logger.info(f"✅ Created {len(created_items)} new items, updated {len(updated_items)} existing items from P&ID OCR")
-                
-                return Response({
-                    "message": "P&ID processed successfully using OCR",
-                    "filename": pid_file.name,
-                    "document_id": document_id,  # 🆔 RETURN DOCUMENT ID
-                    "document_path": saved_path,  # 📄 RETURN FILE PATH
-                    "items_created": len(created_items),
-                    "items_updated": len(updated_items),
-                    "total_items": total_items,
-                    "extracted_lines": table_data,
-                    "note": "Multi-engine OCR detection (Tesseract + EasyOCR + PaddleOCR + OpenAI GPT-4)"
-                }, status=status.HTTP_201_CREATED)
-                
-            finally:
-                # Clean up temp file
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
+            # Queue Celery task for async processing
+            task = process_pid_upload_async.delay(
+                file_path=saved_path,
+                filename=pid_file.name,
+                list_type=list_type,
+                user_id=request.user.id,
+                project_id=project.id if project else None,
+                document_id=document_id,
+                storage_type=storage_type,
+                s3_url=s3_url,
+                include_area=include_area,
+                format_type=format_type
+            )
+            
+            # Estimate processing time based on file size (rough: 30-60 seconds per MB)
+            file_size_mb = pid_file.size / 1024 / 1024
+            estimated_seconds = int(file_size_mb * 45)  # 45 seconds per MB average
+            
+            logger.info(f"✅ Queued task {task.id} for {pid_file.name} (estimated {estimated_seconds}s)")
+            
+            return Response({
+                "success": True,
+                "task_id": task.id,
+                "message": "PDF uploaded successfully. Processing in background...",
+                "document_id": document_id,
+                "filename": pid_file.name,
+                "file_size_mb": round(file_size_mb, 2),
+                "estimated_time_seconds": estimated_seconds,
+                "status_endpoint": f"/api/v1/designiq/lists/upload_pid_status/{task.id}/",
+                "instructions": "Poll the status_endpoint to check progress and get results when complete"
+            }, status=status.HTTP_202_ACCEPTED)  # 202 = Accepted for processing
             
         except Exception as e:
-            logger.error(f"❌ Error uploading/processing P&ID: {str(e)}", exc_info=True)
+            logger.error(f"❌ Error uploading P&ID: {str(e)}", exc_info=True)
             return Response({
                 "error": f"Failed to upload P&ID: {str(e)}"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)    
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['get'], url_path='upload_pid_status/(?P<task_id>[^/.]+)')
+    def upload_pid_status(self, request, task_id=None):
+        """
+        Check status of async P&ID upload processing
+        
+        GET /api/v1/designiq/lists/upload_pid_status/{task_id}/
+        
+        Returns:
+        - state: PENDING, PROCESSING, SUCCESS, or FAILURE
+        - progress: 0-100% (if PROCESSING)
+        - status: Human-readable status message
+        - result: Processing results (if SUCCESS)
+        - error: Error message (if FAILURE)
+        """
+        from celery.result import AsyncResult
+        from django.core.cache import cache
+        
+        if not task_id:
+            return Response({
+                "error": "Task ID is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            # Check cache first for fast response
+            cache_key = f'pid_upload_progress_{task_id}'
+            cached_data = cache.get(cache_key)
+            
+            if cached_data:
+                return Response(cached_data)
+            
+            # Fall back to Celery task result
+            task = AsyncResult(task_id)
+            
+            response_data = {
+                'task_id': task_id,
+                'state': task.state,
+            }
+            
+            if task.state == 'PENDING':
+                response_data.update({
+                    'status': 'Task is queued, waiting to start...',
+                    'percent': 0
+                })
+            elif task.state == 'PROGRESS':
+                response_data.update(task.info)
+            elif task.state == 'SUCCESS':
+                response_data.update({
+                    'status': 'Processing complete!',
+                    'percent': 100,
+                    'result': task.result
+                })
+            elif task.state == 'FAILURE':
+                response_data.update({
+                    'status': 'Processing failed',
+                    'percent': 0,
+                    'error': str(task.info) if task.info else 'Unknown error'
+                })
+            else:
+                response_data.update({
+                    'status': f'Task state: {task.state}',
+                    'percent': 0
+                })
+            
+            return Response(response_data)
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking task status: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to check task status: {str(e)}",
+                "task_id": task_id
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
     @action(detail=False, methods=['get'], url_path='documents')
     def list_documents(self, request):
         """
