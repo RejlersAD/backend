@@ -319,6 +319,72 @@ class PumpCalculationDataCreateSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'  # Include timestamps for tracking
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']  # These are set automatically by the database
+        
+        # Make all new template fields optional to maintain backward compatibility
+        extra_kwargs = {
+            # Project Information
+            'company_name': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'site': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'unit': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'manufacturer': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'model': {'required': False, 'allow_null': True, 'allow_blank': True},
+            
+            # Liquid Characteristics
+            'liquid_type': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'vapor_pressure_max': {'required': False, 'allow_null': True},
+            'vapor_pressure_min': {'required': False, 'allow_null': True},
+            'density_max': {'required': False, 'allow_null': True},
+            'density_min': {'required': False, 'allow_null': True},
+            'viscosity_max': {'required': False, 'allow_null': True},
+            'viscosity_min': {'required': False, 'allow_null': True},
+            'temperature_max': {'required': False, 'allow_null': True},
+            'temperature_min': {'required': False, 'allow_null': True},
+            
+            # Operating Conditions
+            'flow_rate_max': {'required': False, 'allow_null': True},
+            'flow_rate_normal': {'required': False, 'allow_null': True},
+            'flow_rate_min': {'required': False, 'allow_null': True},
+            'suction_pressure_max': {'required': False, 'allow_null': True},
+            'suction_pressure_normal': {'required': False, 'allow_null': True},
+            'suction_pressure_min': {'required': False, 'allow_null': True},
+            'discharge_pressure_max': {'required': False, 'allow_null': True},
+            'discharge_pressure_normal': {'required': False, 'allow_null': True},
+            'discharge_pressure_min': {'required': False, 'allow_null': True},
+            'differential_pressure_max': {'required': False, 'allow_null': True},
+            'differential_pressure_normal': {'required': False, 'allow_null': True},
+            'differential_pressure_min': {'required': False, 'allow_null': True},
+            'differential_head_max': {'required': False, 'allow_null': True},
+            'differential_head_normal': {'required': False, 'allow_null': True},
+            'differential_head_min': {'required': False, 'allow_null': True},
+            
+            # NPSH
+            'npsh_available_max': {'required': False, 'allow_null': True},
+            'npsh_available_min': {'required': False, 'allow_null': True},
+            'npsh_required': {'required': False, 'allow_null': True},
+            
+            # Pump Performance
+            'pump_efficiency_max': {'required': False, 'allow_null': True},
+            'pump_efficiency_normal': {'required': False, 'allow_null': True},
+            'pump_efficiency_min': {'required': False, 'allow_null': True},
+            'bhp_max': {'required': False, 'allow_null': True},
+            'bhp_normal': {'required': False, 'allow_null': True},
+            'bhp_min': {'required': False, 'allow_null': True},
+            'absorbed_power_max': {'required': False, 'allow_null': True},
+            'absorbed_power_normal': {'required': False, 'allow_null': True},
+            'absorbed_power_min': {'required': False, 'allow_null': True},
+            
+            # Motor/Driver Data
+            'driver_type': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'motor_voltage': {'required': False, 'allow_null': True},
+            'motor_speed': {'required': False, 'allow_null': True},
+            
+            # Construction Materials
+            'casing': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'impeller': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'shaft': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'bearings': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'mechanical_seal': {'required': False, 'allow_null': True, 'allow_blank': True},
+        }
     
     def create(self, validated_data):
         # Set prepared_by from request user
