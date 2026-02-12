@@ -1,0 +1,335 @@
+"""
+Smart Pump Data Sheet Generator - Template-Based Approach
+Uses actual Pump Data Sheet.xlsx template and intelligently maps form data
+to preserve professional formatting and structure.
+"""
+
+import openpyxl
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from io import BytesIO
+import boto3
+from django.conf import settings
+from decimal import Decimal
+import logging
+import os
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+
+class PumpDataSheetGenerator:
+    """
+    Template based pump data sheet generator
+    Loads actual Pump Data Sheet.xlsx template and maps form data intelligently
+    """
+
+    def __init__(self):
+        self.template_path = os.path.join(
+            settings.BASE_DIR, 
+            'temp_pump_analysis', 
+            'pump_data_sheet_output.xlsx'
+        )
+        
+        # Smart field mapping to Excel template cells
+        # Based on actual Pump Data Sheet template structure
+        self.FIELD_MAPPING = self._initialize_template_mapping()
+
+    def _initialize_template_mapping(self):
+        """
+        Intelligent mapping of form fields to template cells
+        Soft-coded for easy maintenance and updates
+        """
+        return {
+            # Cover Sheet Fields
+            'cover': {
+                'sheet_name': 'Cover',
+                'fields': {
+                    'document_no': 'C7',  # Document number
+                    'tag_no': 'C8',  # Tag number / Description
+                    'revision': 'G7',  # Revision number
+                    'date': 'G8',  # Date
+                    'document_class': 'A9',  # Document class
+                }
+            },
+            
+            # Sheet 1 - Main Data Sheet
+            'main_sheet': {
+                'sheet_name': 'Sheet 1',
+                'fields': {
+                    # Project Information (rows 11-15)
+                    'company_name': 'I12',
+                    'site': 'I13',
+                    'unit': 'AD12',
+                    'service': 'AD13',
+                    'no_required': 'I14',
+                    'type_of_pump': 'AD14',
+                    'manufacturer': 'I15',
+                    'model': 'AD15',
+                    
+                    # Liquid Characteristics (rows 18-30)
+                    'liquid_type': 'N19',  # Or service description
+                    'vapor_pressure': {'max': 'N20', 'min': 'Q20'},
+                    'density': {'max': 'N21', 'min': 'Q21'},
+                    'viscosity': {'max': 'N22', 'min': 'Q22'},
+                    'temperature': {'max': 'N23', 'min': 'Q23'},
+                    
+                    # Flow Rate (row 31)
+                    'flow_rate': {'max': 'N31', 'min': 'Q31', 'normal': 'W31'},
+                    
+                    # Pressure Data (rows 32-40)
+                    'suction_pressure': {'max': 'N32', 'min': 'Q32', 'normal': 'W32'},
+                    'discharge_pressure': {'max': 'N33', 'min': 'Q33', 'normal': 'W33'},
+                    'differential_pressure': {'max': 'N34', 'min': 'Q34', 'normal': 'W34'},
+                    'differential_head': {'max': 'N35', 'min': 'Q35', 'normal': 'W35'},
+                    
+                    # NPSH (rows 36-37)
+                    'npsh_available': {'max': 'N36', 'min': 'Q36'},
+                    'npsh_required': 'N37',
+                    
+                    # Pump Efficiency & Power (rows 38-40)
+                    'pump_efficiency': {'max': 'N38', 'min': 'Q38', 'normal': 'W38'},
+                    'bhp': {'max': 'N39', 'min': 'Q39', 'normal': 'W39'},
+                    'absorbed_power': {'max': 'N40', 'min': 'Q40', 'normal': 'W40'},
+                    
+                    # Driver/Motor Data (rows 44-51)
+                    'driver_type': 'N44',
+                    'motor_rating': 'N47',
+                    'motor_voltage': 'N48',
+                    'motor_speed': 'N49',
+                    'motor_efficiency': 'N50',
+                    'motor_classification': 'N51',
+                    
+                    # Construction Materials  (rows 56-64)
+                    'casing': 'N56',
+                    'impeller': 'N57',
+                    'shaft': 'N58',
+                    'bearings': 'N59',
+                    'mechanical_seal': 'N60',
+                    
+                    # Notes and Remarks (rows 68+)
+                    'general_notes': 'C68',
+                }
+            }
+        }
+
+    def generate_datasheet(self, pump_data):
+        """
+        Generate pump data sheet from template with intelligent field mapping
+        
+        Args:
+            pump_data: PumpCalculationData instance
+            
+        Returns:
+            BytesIO: Excel file buffer
+        """
+        try:
+            logger.info(f"🔄 Generating pump datasheet for ID: {pump_data.id}")
+            
+            # Load the template
+            workbook = self._load_template()
+            
+            # Apply data mapping
+            self._map_cover_sheet(workbook, pump_data)
+            self._map_main_sheet(workbook, pump_data)
+            
+            # Save to buffer
+            output_buffer = BytesIO()
+            workbook.save(output_buffer)
+            output_buffer.seek(0)
+            
+            logger.info("✅ Datasheet generated successfully")
+            return output_buffer
+            
+        except Exception as e:
+            logger.error(f"❌ Error generating datasheet: {str(e)}")
+            raise
+
+    def _load_template(self):
+        """Load the Pump Data Sheet template"""
+        if not os.path.exists(self.template_path):
+            logger.warning(f"Template not found at {self.template_path}, creating basic workbook")
+            return openpyxl.Workbook()
+        
+        logger.info(f"📂 Loading template from: {self.template_path}")
+        return openpyxl.load_workbook(self.template_path)
+
+    def _map_cover_sheet(self, workbook, pump_data):
+        """Map data to Cover sheet"""
+        mapping = self.FIELD_MAPPING['cover']
+        
+        if mapping['sheet_name'] not in workbook.sheetnames:
+            logger.warning(f"Cover sheet not found in template")
+            return
+        
+        ws = workbook[mapping['sheet_name']]
+        
+        # Map fields using soft-coded configuration
+        field_values = {
+            'document_no': getattr(pump_data, 'document_no', 'N/A'),
+            'tag_no': getattr(pump_data, 'tag_no', 'N/A'),
+            'revision': getattr(pump_data, 'revision', '0'),
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'document_class': getattr(pump_data, 'document_class', 'Confidential'),
+        }
+        
+        for field_name, cell_address in mapping['fields'].items():
+            if field_name in field_values:
+                try:
+                    self._set_cell_value(ws, cell_address, field_values[field_name])
+                except Exception as e:
+                    logger.warning(f"Could not set {field_name} in {cell_address}: {e}")
+
+    def _map_main_sheet(self, workbook, pump_data):
+        """Map data to main data sheet (Sheet 1)"""
+        mapping = self.FIELD_MAPPING['main_sheet']
+        
+        if mapping['sheet_name'] not in workbook.sheetnames:
+            logger.warning(f"Main sheet '{mapping['sheet_name']}' not found")
+            return
+        
+        ws = workbook[mapping['sheet_name']]
+        
+        # Project Information
+        self._set_cell_value(ws, 'I12', getattr(pump_data, 'company_name', 'Rejlers'))
+        self._set_cell_value(ws, 'I13', getattr(pump_data, 'site', 'TBD'))
+        self._set_cell_value(ws, 'AD12', getattr(pump_data, 'unit', 'N/A'))
+        self._set_cell_value(ws, 'AD13', getattr(pump_data, 'service', 'N/A'))
+        self._set_cell_value(ws, 'I14', '1')  # Number required (default 1)
+        self._set_cell_value(ws, 'AD14', 'Centrifugal')  # Type
+        self._set_cell_value(ws, 'I15', getattr(pump_data, 'manufacturer', 'TBD'))
+        self._set_cell_value(ws, 'AD15', getattr(pump_data, 'model', 'TBD'))
+        
+        # Liquid Characteristics
+        self._set_cell_value(ws, 'N19', getattr(pump_data, 'service', 'Process Fluid'))
+        
+        # Vapor Pressure
+        vapor_pressure = self._format_number(getattr(pump_data, 'vapor_pressure', None))
+        self._set_cell_value(ws, 'N20', vapor_pressure)
+        self._set_cell_value(ws, 'Q20', vapor_pressure)
+        
+        # Density
+        density = self._format_number(getattr(pump_data, 'density', None))
+        self._set_cell_value(ws, 'N21', density)
+        self._set_cell_value(ws, 'Q21', density)
+        
+        # Viscosity
+        viscosity = self._format_number(getattr(pump_data, 'fluid_viscosity_at_temp', None))
+        self._set_cell_value(ws, 'N22', viscosity)
+        self._set_cell_value(ws, 'Q22', viscosity)
+        
+        # Temperature
+        temperature = self._format_number(getattr(pump_data, 'temperature', None))
+        self._set_cell_value(ws, 'N23', temperature)
+        self._set_cell_value(ws, 'Q23', temperature)
+        
+        # Flow Rate (using flow_type to determine max/normal/min)
+        flow_type = getattr(pump_data, 'flow_type', 'Normal')
+        # For now, put same value in all three
+        self._set_cell_value(ws, 'N31', 'Max')
+        self._set_cell_value(ws, 'Q31', 'Min')
+        self._set_cell_value(ws, 'W31', 'Normal')
+        
+        # Pressure Data
+        discharge_pressure = self._format_number(getattr(pump_data, 'total_discharge_pressure', None))
+        suction_pressure = self._format_number(getattr(pump_data, 'total_suction_pressure', None))
+        differential_pressure = self._format_number(getattr(pump_data, 'differential_pressure', None))
+        differential_head = self._format_number(getattr(pump_data, 'differential_head', None))
+        
+        # Suction Pressure
+        self._set_cell_value(ws, 'N32', suction_pressure)
+        self._set_cell_value(ws, 'Q32', suction_pressure)
+        self._set_cell_value(ws, 'W32', suction_pressure)
+        
+        # Discharge Pressure
+        self._set_cell_value(ws, 'N33', discharge_pressure)
+        self._set_cell_value(ws, 'Q33', discharge_pressure)
+        self._set_cell_value(ws, 'W33', discharge_pressure)
+        
+        # Differential Pressure
+        self._set_cell_value(ws, 'N34', differential_pressure)
+        self._set_cell_value(ws, 'Q34', differential_pressure)
+        self._set_cell_value(ws, 'W34', differential_pressure)
+        
+        # Differential Head
+        self._set_cell_value(ws, 'N35', differential_head)
+        self._set_cell_value(ws, 'Q35', differential_head)
+        self._set_cell_value(ws, 'W35', differential_head)
+        
+        # NPSH
+        npsha = self._format_number(getattr(pump_data, 'npsha', None))
+        self._set_cell_value(ws, 'N36', npsha)
+        self._set_cell_value(ws, 'Q36', npsha)
+        self._set_cell_value(ws, 'N37', 'TBD')  # NPSH Required (not in form)
+        
+        # Pump Efficiency
+        pump_eff = self._format_number(getattr(pump_data, 'pump_efficiency', None))
+        self._set_cell_value(ws, 'N38', pump_eff)
+        self._set_cell_value(ws, 'Q38', pump_eff)
+        self._set_cell_value(ws, 'W38', pump_eff)
+        
+        # BHP (Break Horse Power)
+        bhp = self._format_number(getattr(pump_data, 'break_horse_power', None))
+        self._set_cell_value(ws, 'N39', bhp)
+        self._set_cell_value(ws, 'Q39', bhp)
+        self._set_cell_value(ws, 'W39', bhp)
+        
+        # Absorbed Power
+        power = self._format_number(getattr(pump_data, 'power_consumption', None))
+        self._set_cell_value(ws, 'N40', power)
+        self._set_cell_value(ws, 'Q40', power)
+        self._set_cell_value(ws, 'W40', power)
+        
+        # Driver/Motor Data
+        self._set_cell_value(ws, 'N44', getattr(pump_data, 'type_of_motor', 'AC Induction'))
+        self._set_cell_value(ws, 'N47', self._format_number(getattr(pump_data, 'motor_rating', None)))
+        self._set_cell_value(ws, 'N48', 'TBD')  # Voltage not in form
+        self._set_cell_value(ws, 'N49', 'TBD')  # Speed not in form
+        self._set_cell_value(ws, 'N50', self._format_number(getattr(pump_data, 'motor_efficiency', None)))
+        self._set_cell_value(ws, 'N51', getattr(pump_data, 'motor_classification', 'N/A'))
+        
+        # General Notes
+        notes_data = {
+            'Agreement No': getattr(pump_data, 'agreement_no', 'N/A'),
+            'Project No': getattr(pump_data, 'project_no', 'N/A'),
+            'Document No': getattr(pump_data, 'document_no', 'N/A'),
+        }
+        notes_text = ' | '.join([f"{k}: {v}" for k, v in notes_data.items()])
+        self._set_cell_value(ws, 'C68', notes_text)
+
+    def _set_cell_value(self, worksheet, cell_address, value):
+        """Safely set cell value preserving formatting"""
+        try:
+            cell = worksheet[cell_address]
+            
+            if value is not None:
+                cell.value = value
+            else:
+                cell.value = ''
+                
+        except Exception as e:
+            logger.warning(f"Could not set value in {cell_address}: {e}")
+
+    def _format_number(self, value):
+        """Format numeric values consistently"""
+        if value is None:
+            return 'N/A'
+        
+        if isinstance(value, (Decimal, float)):
+            return f"{float(value):.2f}"
+        
+        if isinstance(value, int):
+            return str(value)
+        
+        return str(value)
+
+    def generate_filename(self, pump_data):
+        """Generate intelligent filename for the datasheet"""
+        doc_no = getattr(pump_data, 'document_no', 'PUMP')
+        tag_no = getattr(pump_data, 'tag_no', 'DATA')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # Clean filename (remove special characters)
+        doc_no = ''.join(c for c in doc_no if c.isalnum() or c in '-_')
+        tag_no = ''.join(c for c in tag_no if c.isalnum() or c in '-_')
+        
+        return f"Pump_Data_Sheet_{doc_no}_{tag_no}_{timestamp}.xlsx"
