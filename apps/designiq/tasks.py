@@ -84,9 +84,11 @@ def process_pid_upload_async(
         if storage_type == 's3':
             from .s3_utils import s3_storage
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
-                success = s3_storage.download_document(file_path, tmp.name)
-                if not success:
+                content = s3_storage.get_document(file_path)
+                if not content:
                     raise Exception(f"Failed to download PDF from S3: {file_path}")
+                tmp.write(content)
+                tmp.flush()
                 local_file_path = tmp.name
         else:
             local_file_path = file_path
