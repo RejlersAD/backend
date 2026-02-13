@@ -434,6 +434,16 @@ else:
     if CORS_ORIGINS_ENV:
         # If env var is set, use it (comma-separated list)
         CORS_ALLOWED_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_ENV.split(',')]
+        # ALWAYS add production domains even if env var is set
+        production_domains = [
+            'https://radai.ae',
+            'https://www.radai.ae',
+            'http://radai.ae',
+            'http://www.radai.ae',
+        ]
+        for domain in production_domains:
+            if domain not in CORS_ALLOWED_ORIGINS:
+                CORS_ALLOWED_ORIGINS.append(domain)
     else:
         # Use default list
         CORS_ALLOWED_ORIGINS = [
