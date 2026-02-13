@@ -82,7 +82,7 @@ def process_pid_upload_async(
         
         # Handle S3 or local file
         if storage_type == 's3':
-            from apps.designiq.s3_storage import s3_storage
+            from .s3_utils import s3_storage
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
                 success = s3_storage.download_document(file_path, tmp.name)
                 if not success:
