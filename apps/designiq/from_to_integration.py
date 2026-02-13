@@ -299,10 +299,20 @@ Return the JSON now:"""
             logger.info(f"  ⏭️ Falling back to empty FROM-TO results (will use geometric fallback)")
             return {}
         
-        # Parse the response
-        content = response.choices[0].message.content
+        # Parse the response - check for refusal first
+        message = response.choices[0].message
+        
+        # Check if there's a refusal
+        if hasattr(message, 'refusal') and message.refusal:
+            logger.error(f"  ❌ OpenAI Vision refused: {message.refusal}")
+            logger.info(f"  ⏭️ Falling back to empty FROM-TO results (will use geometric fallback)")
+            return {}
+        
+        content = message.content
         if not content:
             logger.error(f"  ❌ OpenAI Vision returned None content")
+            logger.error(f"     Response finish_reason: {response.choices[0].finish_reason}")
+            logger.error(f"     Full message: {message}")
             logger.info(f"  ⏭️ Falling back to empty FROM-TO results (will use geometric fallback)")
             return {}
         
