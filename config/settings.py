@@ -135,13 +135,13 @@ OPTIONAL_APPS = [
 for app in OPTIONAL_APPS:
     if app_exists(app):
         INSTALLED_APPS.append(app)
-        print(f"[✓] Loaded optional app: {app}")
+        print(f"[OK] Loaded optional app: {app}")
     else:
-        print(f"[⚠] Skipped missing app: {app}")
+        print(f"[WARNING] Skipped missing app: {app}")
 
 # Add remaining apps
 INSTALLED_APPS.extend([
-    # ⚠️ CRITICAL: MLflow MUST STAY DISABLED for Railway
+    # WARNING CRITICAL: MLflow MUST STAY DISABLED for Railway
     # Enabling this will cause startup hangs (MLflow server not available)
     # 'apps.mlflow_integration',  # DO NOT UNCOMMENT
     
@@ -225,16 +225,16 @@ if REDIS_URL_FOR_CHANNELS:
                 },
             },
         }
-        print(f"[CHANNELS] ✅ Channel layer configured (URL-based): {redis_host}:{redis_port}")
+        print(f"[CHANNELS] OK Channel layer configured (URL-based): {redis_host}:{redis_port}")
     else:
         # Could not parse URL - use in-memory fallback
-        print(f"[CHANNELS] ⚠️  Could not parse REDIS_URL")
+        print(f"[CHANNELS] WARNING  Could not parse REDIS_URL")
         CHANNEL_LAYERS = {
             'default': {
                 'BACKEND': 'channels.layers.InMemoryChannelLayer',
             },
         }
-        print(f"[CHANNELS] ⚠️ Using in-memory channels (single-server only)")
+        print(f"[CHANNELS] WARNING Using in-memory channels (single-server only)")
 else:
     # Check if REDIS_HOST is configured
     REDIS_HOST_FOR_CHANNELS = config('REDIS_HOST', default=None)
@@ -250,7 +250,7 @@ else:
                 },
             },
         }
-        print(f"[CHANNELS] ✅ Channel layer configured (host-based): {REDIS_HOST_FOR_CHANNELS}:{config('REDIS_PORT', default=6379)}")
+        print(f"[CHANNELS] OK Channel layer configured (host-based): {REDIS_HOST_FOR_CHANNELS}:{config('REDIS_PORT', default=6379)}")
     else:
         # No Redis available - use in-memory channel layer
         CHANNEL_LAYERS = {
@@ -258,7 +258,7 @@ else:
                 'BACKEND': 'channels.layers.InMemoryChannelLayer',
             },
         }
-        print(f"[CHANNELS] ⚠️ Using in-memory channels (Redis not configured)")
+        print(f"[CHANNELS] WARNING Using in-memory channels (Redis not configured)")
         print(f"[CHANNELS] Note: WebSockets limited to single server. Set REDIS_URL for multi-server support.")
 
 # ==============================================================================
@@ -266,7 +266,7 @@ else:
 # ==============================================================================
 
 # Database
-# ⚠️ CRITICAL: DATABASE_URL is REQUIRED for Railway deployment
+# WARNING CRITICAL: DATABASE_URL is REQUIRED for Railway deployment
 # Railway Env Var: DATABASE_URL=postgresql://postgres:PASSWORD@HOST:PORT/railway
 # Use DATABASE_URL if available (Railway), otherwise use individual DB settings
 try:
@@ -418,7 +418,7 @@ PRODUCTION_FRONTEND = config('FRONTEND_URL', default='https://airflow-frontend.v
 PRODUCTION_BACKEND = config('BACKEND_URL', default='https://aiflowbackend-production.up.railway.app')
 FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:5173')  # For email links
 
-# ⚠️ CRITICAL: DO NOT CHANGE - CORS_ALLOW_ALL_ORIGINS MUST BE FALSE
+# WARNING CRITICAL: DO NOT CHANGE - CORS_ALLOW_ALL_ORIGINS MUST BE FALSE
 # Setting this to True will break JWT authentication with credentials
 # Railway Env Var: CORS_ALLOW_ALL_ORIGINS=False (or omit to use default)
 CORS_ALLOW_ALL_ORIGINS = safe_cast_bool(config('CORS_ALLOW_ALL_ORIGINS', default='False'), False)
@@ -427,7 +427,7 @@ if CORS_ALLOW_ALL_ORIGINS:
     # If allowing all origins, disable credentials for security
     CORS_ALLOW_CREDENTIALS = False
     CORS_ALLOWED_ORIGINS = []  # Not used when allow all is True
-    print("[CORS] ⚠️  WARNING: CORS_ALLOW_ALL_ORIGINS is True - ALL origins allowed!")
+    print("[CORS] WARNING  WARNING: CORS_ALLOW_ALL_ORIGINS is True - ALL origins allowed!")
 else:
     # Use specific origins for better security
     CORS_ORIGINS_ENV = config('CORS_ALLOWED_ORIGINS', default='')
@@ -573,7 +573,7 @@ if REDIS_URL:
             'TIMEOUT': 300,  # 5 minutes default
         }
     }
-    print(f"[CACHE] ✅ Redis cache configured (URL-based)")
+    print(f"[CACHE] OK Redis cache configured (URL-based)")
     print(f"[CACHE] URL: {REDIS_URL.split('@')[0]}@***")  # Hide credentials
 elif REDIS_HOST and REDIS_HOST != 'None':
     # Docker Compose: host/port configuration
@@ -597,7 +597,7 @@ elif REDIS_HOST and REDIS_HOST != 'None':
             'TIMEOUT': 300,
         }
     }
-    print(f"[CACHE] ✅ Redis cache configured (host-based)")
+    print(f"[CACHE] OK Redis cache configured (host-based)")
     print(f"[CACHE] Host: {REDIS_HOST}:{REDIS_PORT}")
 else:
     # Fallback: In-memory cache (Railway without Redis plugin)
@@ -611,7 +611,7 @@ else:
             }
         }
     }
-    print(f"[CACHE] ⚠️ Using in-memory cache (Redis not configured)")
+    print(f"[CACHE] WARNING Using in-memory cache (Redis not configured)")
     print(f"[CACHE] Note: Cache will be lost on restart. Set REDIS_URL for persistent cache.")
 
 # ==============================================================================
@@ -630,20 +630,20 @@ if REDIS_URL:
     # Use the same Redis URL for Celery (different database number for separation)
     CELERY_BROKER_URL = config('CELERY_BROKER_URL', default=REDIS_URL.replace('/1', '/0'))
     CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default=REDIS_URL.replace('/1', '/0'))
-    print(f"[CELERY] ✅ Broker configured (URL-based)")
+    print(f"[CELERY] OK Broker configured (URL-based)")
 elif REDIS_HOST and REDIS_HOST != 'None':
     # Fallback to host/port configuration
     REDIS_PORT = config('REDIS_PORT', default=6379, cast=int)
     CELERY_BROKER_URL = config('CELERY_BROKER_URL', default=f'redis://{REDIS_HOST}:{REDIS_PORT}/0')
     CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default=f'redis://{REDIS_HOST}:{REDIS_PORT}/0')
-    print(f"[CELERY] ✅ Broker configured (host-based): {REDIS_HOST}:{REDIS_PORT}")
+    print(f"[CELERY] OK Broker configured (host-based): {REDIS_HOST}:{REDIS_PORT}")
 else:
     # No Redis available - disable Celery (tasks will run synchronously)
     CELERY_TASK_ALWAYS_EAGER = True
     CELERY_TASK_EAGER_PROPAGATES = True
     CELERY_BROKER_URL = None
     CELERY_RESULT_BACKEND = 'django-db'  # Use database for minimal task tracking
-    print(f"[CELERY] ⚠️ Running in EAGER mode (Redis not configured)")
+    print(f"[CELERY] WARNING Running in EAGER mode (Redis not configured)")
     print(f"[CELERY] Note: Tasks run synchronously. Set REDIS_URL for async tasks.")
 
 CELERY_ACCEPT_CONTENT = ['application/json']
@@ -651,8 +651,15 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 
-print(f"[CELERY] Broker: {CELERY_BROKER_URL.split('@')[0] if '@' in CELERY_BROKER_URL else CELERY_BROKER_URL}")
-print(f"[CELERY] Result Backend: {CELERY_RESULT_BACKEND.split('@')[0] if '@' in CELERY_RESULT_BACKEND else CELERY_RESULT_BACKEND}")
+# Safe printing of broker URLs (handle None case)
+if CELERY_BROKER_URL:
+    print(f"[CELERY] Broker: {CELERY_BROKER_URL.split('@')[0] if '@' in CELERY_BROKER_URL else CELERY_BROKER_URL}")
+else:
+    print(f"[CELERY] Broker: None (EAGER mode)")
+if CELERY_RESULT_BACKEND:
+    print(f"[CELERY] Result Backend: {CELERY_RESULT_BACKEND.split('@')[0] if '@' in CELERY_RESULT_BACKEND else CELERY_RESULT_BACKEND}")
+else:
+    print(f"[CELERY] Result Backend: None")
 
 # ==============================================================================
 # End of Celery Configuration
@@ -682,7 +689,7 @@ S3_READY = safe_cast_bool(config('S3_READY', default='False'), False)
 
 # Smart S3 validation: Require explicit S3_READY flag to prevent credential errors
 if USE_S3_CONFIG and not S3_READY:
-    print("⚠️  [S3] USE_S3=True but S3_READY=False. Using local storage for safety.")
+    print("WARNING  [S3] USE_S3=True but S3_READY=False. Using local storage for safety.")
     print("    Set S3_READY=True on Railway after updating AWS credentials.")
     USE_S3 = False
 elif USE_S3_CONFIG and S3_READY:
@@ -693,13 +700,13 @@ elif USE_S3_CONFIG and S3_READY:
     
     # Validate that all required S3 configuration is present
     if not aws_access_key or not aws_secret_key or not aws_bucket_name:
-        print("⚠️  [S3] Credentials incomplete despite S3_READY=True. Falling back to local storage.")
-        print(f"    - AWS_ACCESS_KEY_ID: {'✓ Set' if aws_access_key else '✗ Missing'}")
-        print(f"    - AWS_SECRET_ACCESS_KEY: {'✓ Set' if aws_secret_key else '✗ Missing'}")
-        print(f"    - AWS_STORAGE_BUCKET_NAME: {'✓ Set' if aws_bucket_name else '✗ Missing'}")
+        print("WARNING  [S3] Credentials incomplete despite S3_READY=True. Falling back to local storage.")
+        print(f"    - AWS_ACCESS_KEY_ID: {'OK Set' if aws_access_key else '✗ Missing'}")
+        print(f"    - AWS_SECRET_ACCESS_KEY: {'OK Set' if aws_secret_key else '✗ Missing'}")
+        print(f"    - AWS_STORAGE_BUCKET_NAME: {'OK Set' if aws_bucket_name else '✗ Missing'}")
         USE_S3 = False  # Disable S3 if credentials are incomplete
     else:
-        print(f"✅ [S3] Enabled with bucket: {aws_bucket_name}")
+        print(f"OK [S3] Enabled with bucket: {aws_bucket_name}")
         USE_S3 = True
 else:
     USE_S3 = False
@@ -712,10 +719,10 @@ if USE_S3:
     # 3. AWS credentials file (~/.aws/credentials)
     
     # DO NOT SET THESE IN CODE - Use environment variables or IAM roles
-    # AWS_ACCESS_KEY_ID = 'NEVER_HARDCODE_THIS'  ❌ WRONG
-    # AWS_SECRET_ACCESS_KEY = 'NEVER_HARDCODE_THIS'  ❌ WRONG
+    # AWS_ACCESS_KEY_ID = 'NEVER_HARDCODE_THIS'  ERROR WRONG
+    # AWS_SECRET_ACCESS_KEY = 'NEVER_HARDCODE_THIS'  ERROR WRONG
     
-    # ⚠️ CRITICAL: S3 bucket must exist before deployment
+    # WARNING CRITICAL: S3 bucket must exist before deployment
     # Railway Env Var: AWS_STORAGE_BUCKET_NAME=user-management-rejlers (production bucket)
     # Only configure S3 if bucket name is set (prevents startup errors)
     AWS_STORAGE_BUCKET_NAME = config('AWS_STORAGE_BUCKET_NAME', default='')
@@ -757,7 +764,7 @@ if USE_S3:
         STATIC_URL = '/static/'
     else:
         # S3 enabled but bucket not configured - use local storage
-        print("⚠️  USE_S3=True but AWS_STORAGE_BUCKET_NAME not set. Using local storage.")
+        print("WARNING  USE_S3=True but AWS_STORAGE_BUCKET_NAME not set. Using local storage.")
         MEDIA_ROOT = BASE_DIR / 'media'
         MEDIA_URL = '/media/'
         STATIC_ROOT = BASE_DIR / 'staticfiles'
