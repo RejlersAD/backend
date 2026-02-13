@@ -75,12 +75,10 @@ class PIDLineExtractorV2:
         # Initialize PaddleOCR
         try:
             from paddleocr import PaddleOCR
-            # Enable angle classification for vertical text detection
+            # Note: Removed use_space_char and show_log - not supported in PaddleOCR 3.3+
             self.paddleocr_reader = PaddleOCR(
                 use_angle_cls=True,  # Enable 180-degree angle classification
-                lang='en',
-                use_space_char=True,  # Preserve spaces
-                show_log=False  # Reduce log spam
+                lang='en'
             )
             logger.info("✅ PaddleOCR initialized (with vertical text support)")
         except Exception as e:
