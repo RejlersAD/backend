@@ -75,12 +75,15 @@ class PIDLineExtractorV2:
         # Initialize PaddleOCR
         try:
             from paddleocr import PaddleOCR
-            # Note: Removed use_space_char and show_log - not supported in PaddleOCR 3.3+
+            import os
+            # PaddleOCR 3.3+ uses new model-based API
+            # Disable model connectivity check to speed up initialization
+            os.environ['DISABLE_MODEL_SOURCE_CHECK'] = 'True'
             self.paddleocr_reader = PaddleOCR(
-                use_angle_cls=True,  # Enable 180-degree angle classification
-                lang='en'
+                lang='en',
+                ocr_version='PP-OCRv4'  # Use v4 (faster, smaller models than v5)
             )
-            logger.info("✅ PaddleOCR initialized (with vertical text support)")
+            logger.info("✅ PaddleOCR initialized (PP-OCRv4)")
         except Exception as e:
             logger.warning(f"⚠️ PaddleOCR not available: {e}")
         
