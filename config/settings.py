@@ -642,7 +642,7 @@ else:
     CELERY_TASK_ALWAYS_EAGER = True
     CELERY_TASK_EAGER_PROPAGATES = True
     CELERY_BROKER_URL = None
-    CELERY_RESULT_BACKEND = 'django-db'  # Use database for minimal task tracking
+    CELERY_RESULT_BACKEND = None  # No backend needed for EAGER mode
     print(f"[CELERY] WARNING Running in EAGER mode (Redis not configured)")
     print(f"[CELERY] Note: Tasks run synchronously. Set REDIS_URL for async tasks.")
 
