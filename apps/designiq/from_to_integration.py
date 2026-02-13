@@ -300,7 +300,13 @@ Return the JSON now:"""
             return {}
         
         # Parse the response
-        content = response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
+        if not content:
+            logger.error(f"  ❌ OpenAI Vision returned None content")
+            logger.info(f"  ⏭️ Falling back to empty FROM-TO results (will use geometric fallback)")
+            return {}
+        
+        content = content.strip()
         logger.info(f"  📥 OpenAI Response: {len(content)} chars")
         
         # Extract JSON from response (handle markdown code blocks)
