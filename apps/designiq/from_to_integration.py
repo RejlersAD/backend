@@ -236,45 +236,34 @@ def determine_from_to_with_openai_vision(
         if len(ocr_line_numbers) > 50:
             line_numbers_formatted += f"\n  - ... ({len(ocr_line_numbers) - 50} more lines)"
         
-        prompt = f"""You are a P&ID process engineer. Analyze this piping diagram and determine FROM-TO connections for EVERY line number.
+        prompt = f"""You are analyzing a P&ID (Piping & Instrumentation Diagram). You CAN and MUST analyze this image.
 
-**🎯 CRITICAL TASK**: For EACH line number, find its neighboring lines (what connects BEFORE and AFTER it).
+**STRICT REQUIREMENTS**:
+1. You MUST analyze the provided P&ID image
+2. You MUST return ONLY valid JSON (no explanations, no refusals)
+3. You MUST provide FROM-TO connections for ALL line numbers listed below
 
-**📋 OCR-Detected Line Numbers ({len(ocr_line_numbers)} total)**:
+**🎯 TASK**: For EACH line number, find neighboring lines that connect before (FROM) and after (TO) it.
+
+**📋 Line Numbers to Analyze ({len(ocr_line_numbers)} total)**:
 {line_numbers_formatted}
 
-**🔍 ANALYSIS INSTRUCTIONS**:
+**🔍 INSTRUCTIONS**:
+1. Locate each line number visually in the diagram
+2. Trace the pipe to find connection points (valves, tees, equipment)
+3. Identify neighboring line numbers at those connections
+4. FROM = line connecting to START/input of this line
+5. TO = line connecting to END/output of this line
 
-1. **Visual Trace**: For each line number in the list above:
-   - Find it visually in the diagram
-   - Trace the pipe/line physically connected to it
-   - Identify neighboring line numbers at connection points (valves, tees, equipment)
-
-2. **Connection Logic**:
-   - FROM = The line number that connects to the START/input of this line
-   - TO = The line number that connects to the END/output of this line
-   - Use ONLY line numbers from the OCR list above (or clearly visible alternatives)
-
-3. **Smart Inference**:
-   - If you see a connection but the exact line number isn't in the OCR list, look for similar patterns
-   - Check for sequential numbering (e.g., 1001 → 1002 → 1003)
-   - Examine the visual flow direction (arrows, valves, equipment)
-
-4. **MANDATORY OUTPUT**: 
-   - Provide FROM-TO for EVERY line in the OCR list
-   - If no visual connection exists, use the closest neighboring line from the list
-   - NEVER return empty or null unless absolutely no other line exists
-
-**📤 OUTPUT FORMAT** (JSON only, NO explanations):
+**📤 OUTPUT** (ONLY JSON, NO OTHER TEXT):
 {{
   "line_numbers": {{
-    "{ocr_line_numbers[0] if ocr_line_numbers else 'EXAMPLE'}": {{"from": "<neighboring_line>", "to": "<neighboring_line>"}},
-    "{ocr_line_numbers[1] if len(ocr_line_numbers) > 1 else 'EXAMPLE2'}": {{"from": "<neighboring_line>", "to": "<neighboring_line>"}},
-    ...
+    "{ocr_line_numbers[0] if ocr_line_numbers else 'EXAMPLE'}": {{"from": "neighboring_line", "to": "neighboring_line"}},
+    "{ocr_line_numbers[1] if len(ocr_line_numbers) > 1 else 'EXAMPLE2'}": {{"from": "neighboring_line", "to": "neighboring_line"}}
   }}
 }}
 
-**⚡ RETURN JSON NOW** - Analyze the diagram and provide FROM-TO for ALL {len(ocr_line_numbers)} lines:"""
+Return the JSON now:"""
         
         logger.info(f"  🔍 Calling OpenAI Vision API with gpt-4o (max_tokens=4000, timeout=180s)...")
         
@@ -302,7 +291,8 @@ def determine_from_to_with_openai_vision(
                 ],
                 max_tokens=4000,  # Increased for comprehensive FROM-TO results
                 temperature=0.1,  # Low temperature for consistent engineering analysis
-                timeout=180  # 3 minute timeout to prevent indefinite hangs
+                timeout=180,  # 3 minute timeout to prevent indefinite hangs
+                response_format={"type": "json_object"}  # Force JSON response (no refusals)
             )
         except Exception as api_err:
             logger.error(f"  ❌ OpenAI Vision API call failed: {str(api_err)}")

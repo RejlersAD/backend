@@ -49,7 +49,8 @@ class PIDLineExtractor:
         
         try:
             from paddleocr import PaddleOCR
-            self.paddleocr_reader = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+            # Note: show_log parameter removed - not supported in newer PaddleOCR versions
+            self.paddleocr_reader = PaddleOCR(use_angle_cls=True, lang='en')
             logger.info("✅ PaddleOCR initialized")
         except Exception as e:
             logger.warning(f"⚠️ PaddleOCR not available: {e}")
