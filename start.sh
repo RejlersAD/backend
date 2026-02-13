@@ -15,14 +15,9 @@ python manage.py migrate --noinput
 # Collect static files
 # python manage.py collectstatic --noinput --clear  # TEMP DISABLED
 
-echo "✅ Pre-flight complete - Starting Gunicorn..."
+echo "✅ Pre-flight complete - Starting Gunicorn with 8 workers..."
 
-# Start Gunicorn using gunicorn_config.py for timeout handling
+# Start Gunicorn using gunicorn_config.py (8 workers, 20min timeout)
 exec gunicorn config.wsgi:application \
-    --bind "0.0.0.0:${PORT}" \
     --config gunicorn_config.py \
-    --worker-tmp-dir /dev/shm \
-    --preload \
-    --access-logfile - \
-    --error-logfile - \
-    --capture-output
+    --bind "0.0.0.0:${PORT}"
