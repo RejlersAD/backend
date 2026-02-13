@@ -200,7 +200,9 @@ ASGI_APPLICATION = 'config.asgi.application'
 # CHANNEL LAYERS CONFIGURATION (WebSocket support)
 # ==============================================================================
 # Redis-backed channel layer for Django Channels (WebSocket real-time features)
-# Railway: Will use REDIS_URL if available, otherwise falls back to host/port
+# Railway: Will use REDIS_URL if available, otherwise falls back to in-memory
+# Docker: Uses redis:6379
+# Fallback: In-memory channel layer (single-server only, no WebSocket persistence)
 
 # Parse Redis configuration for Channel Layers
 REDIS_URL_FOR_CHANNELS = config('REDIS_URL', default=None)
@@ -225,30 +227,39 @@ if REDIS_URL_FOR_CHANNELS:
         }
         print(f"[CHANNELS] ✅ Channel layer configured (URL-based): {redis_host}:{redis_port}")
     else:
-        print(f"[CHANNELS] ⚠️  Could not parse REDIS_URL, using default config")
+        # Could not parse URL - use in-memory fallback
+        print(f"[CHANNELS] ⚠️  Could not parse REDIS_URL")
+        CHANNEL_LAYERS = {
+            'default': {
+                'BACKEND': 'channels.layers.InMemoryChannelLayer',
+            },
+        }
+        print(f"[CHANNELS] ⚠️ Using in-memory channels (single-server only)")
+else:
+    # Check if REDIS_HOST is configured
+    REDIS_HOST_FOR_CHANNELS = config('REDIS_HOST', default=None)
+    if REDIS_HOST_FOR_CHANNELS and REDIS_HOST_FOR_CHANNELS != 'None':
+        # Docker Compose: host/port configuration
         CHANNEL_LAYERS = {
             'default': {
                 'BACKEND': 'channels_redis.core.RedisChannelLayer',
                 'CONFIG': {
-                    'hosts': [('redis', 6379)],
+                    'hosts': [(REDIS_HOST_FOR_CHANNELS, config('REDIS_PORT', default=6379, cast=int))],
                     'capacity': 1500,
                     'expiry': 10,
                 },
             },
         }
-else:
-    # Fallback to host/port configuration
-    CHANNEL_LAYERS = {
-        'default': {
-            'BACKEND': 'channels_redis.core.RedisChannelLayer',
-            'CONFIG': {
-                'hosts': [(config('REDIS_HOST', default='redis'), config('REDIS_PORT', default=6379, cast=int))],
-                'capacity': 1500,
-                'expiry': 10,
+        print(f"[CHANNELS] ✅ Channel layer configured (host-based): {REDIS_HOST_FOR_CHANNELS}:{config('REDIS_PORT', default=6379)}")
+    else:
+        # No Redis available - use in-memory channel layer
+        CHANNEL_LAYERS = {
+            'default': {
+                'BACKEND': 'channels.layers.InMemoryChannelLayer',
             },
-        },
-    }
-    print(f"[CHANNELS] ✅ Channel layer configured (host-based): {config('REDIS_HOST', default='redis')}:{config('REDIS_PORT', default=6379)}")
+        }
+        print(f"[CHANNELS] ⚠️ Using in-memory channels (Redis not configured)")
+        print(f"[CHANNELS] Note: WebSockets limited to single server. Set REDIS_URL for multi-server support.")
 
 # ==============================================================================
 # End of Channel Layers Configuration
@@ -536,8 +547,10 @@ for origin in CSRF_TRUSTED_ORIGINS:
 # Cache backend for session storage, task progress tracking, and performance optimization
 # Railway: Set REDIS_URL environment variable (e.g., redis://default:password@host:port)
 # Docker: Uses redis:6379 by default
+# Fallback: Uses in-memory cache if Redis not available (Railway without Redis plugin)
 
 REDIS_URL = config('REDIS_URL', default=None)
+REDIS_HOST = config('REDIS_HOST', default=None)
 
 if REDIS_URL:
     # Railway or external Redis (URL-based configuration)
@@ -562,9 +575,8 @@ if REDIS_URL:
     }
     print(f"[CACHE] ✅ Redis cache configured (URL-based)")
     print(f"[CACHE] URL: {REDIS_URL.split('@')[0]}@***")  # Hide credentials
-else:
-    # Fallback: Try host/port configuration (Docker Compose)
-    REDIS_HOST = config('REDIS_HOST', default='redis')
+elif REDIS_HOST and REDIS_HOST != 'None':
+    # Docker Compose: host/port configuration
     REDIS_PORT = config('REDIS_PORT', default=6379, cast=int)
     REDIS_PASSWORD = config('REDIS_PASSWORD', default=None)
     
@@ -587,6 +599,20 @@ else:
     }
     print(f"[CACHE] ✅ Redis cache configured (host-based)")
     print(f"[CACHE] Host: {REDIS_HOST}:{REDIS_PORT}")
+else:
+    # Fallback: In-memory cache (Railway without Redis plugin)
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'radai-cache',
+            'TIMEOUT': 300,
+            'OPTIONS': {
+                'MAX_ENTRIES': 1000,
+            }
+        }
+    }
+    print(f"[CACHE] ⚠️ Using in-memory cache (Redis not configured)")
+    print(f"[CACHE] Note: Cache will be lost on restart. Set REDIS_URL for persistent cache.")
 
 # ==============================================================================
 # End of Cache Configuration
@@ -598,17 +624,27 @@ else:
 # Celery broker and result backend - uses same Redis configuration as cache
 # Railway: Set REDIS_URL or CELERY_BROKER_URL environment variable
 # Docker: Uses redis:6379 by default
+# Fallback: Celery disabled if Redis not available
 
 if REDIS_URL:
     # Use the same Redis URL for Celery (different database number for separation)
     CELERY_BROKER_URL = config('CELERY_BROKER_URL', default=REDIS_URL.replace('/1', '/0'))
     CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default=REDIS_URL.replace('/1', '/0'))
     print(f"[CELERY] ✅ Broker configured (URL-based)")
-else:
+elif REDIS_HOST and REDIS_HOST != 'None':
     # Fallback to host/port configuration
+    REDIS_PORT = config('REDIS_PORT', default=6379, cast=int)
     CELERY_BROKER_URL = config('CELERY_BROKER_URL', default=f'redis://{REDIS_HOST}:{REDIS_PORT}/0')
     CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default=f'redis://{REDIS_HOST}:{REDIS_PORT}/0')
     print(f"[CELERY] ✅ Broker configured (host-based): {REDIS_HOST}:{REDIS_PORT}")
+else:
+    # No Redis available - disable Celery (tasks will run synchronously)
+    CELERY_TASK_ALWAYS_EAGER = True
+    CELERY_TASK_EAGER_PROPAGATES = True
+    CELERY_BROKER_URL = None
+    CELERY_RESULT_BACKEND = 'django-db'  # Use database for minimal task tracking
+    print(f"[CELERY] ⚠️ Running in EAGER mode (Redis not configured)")
+    print(f"[CELERY] Note: Tasks run synchronously. Set REDIS_URL for async tasks.")
 
 CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'
