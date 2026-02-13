@@ -629,7 +629,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             include_area = request.POST.get('include_area', 'false').lower() == 'true'
             format_type = request.POST.get('format_type', 'onshore').lower()
             
-            # Queue Celery task for async processing
+            # Queue Celery task for async processing (or execute immediately if EAGER mode)
             task = process_pid_upload_async.delay(
                 file_path=saved_path,
                 filename=pid_file.name,
@@ -643,23 +643,58 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 format_type=format_type
             )
             
-            # Estimate processing time based on file size (rough: 30-60 seconds per MB)
-            file_size_mb = pid_file.size / 1024 / 1024
-            estimated_seconds = int(file_size_mb * 45)  # 45 seconds per MB average
+            # Check if running in EAGER mode (synchronous execution)
+            from django.conf import settings
+            is_eager = getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
             
-            logger.info(f"✅ Queued task {task.id} for {pid_file.name} (estimated {estimated_seconds}s)")
-            
-            return Response({
-                "success": True,
-                "task_id": task.id,
-                "message": "PDF uploaded successfully. Processing in background...",
-                "document_id": document_id,
-                "filename": pid_file.name,
-                "file_size_mb": round(file_size_mb, 2),
-                "estimated_time_seconds": estimated_seconds,
-                "status_endpoint": f"/api/v1/designiq/lists/upload_pid_status/{task.id}/",
-                "instructions": "Poll the status_endpoint to check progress and get results when complete"
-            }, status=status.HTTP_202_ACCEPTED)  # 202 = Accepted for processing
+            if is_eager:
+                # EAGER mode: Task completed immediately, return result now
+                logger.info(f"⚡ EAGER mode: Task {task.id} completed synchronously")
+                
+                # Get result from task
+                if task.successful():
+                    result = task.result
+                    logger.info(f"✅ Returning {result.get('total_items', 0)} items directly to frontend")
+                    
+                    return Response({
+                        "success": True,
+                        "message": result.get('message', 'P&ID processed successfully'),
+                        "document_id": document_id,
+                        "filename": pid_file.name,
+                        "extracted_lines": result.get('extracted_lines', []),
+                        "items_created": result.get('items_created', 0),
+                        "items_updated": result.get('items_updated', 0),
+                        "total_items": result.get('total_items', 0),
+                        "format_type": result.get('format_type', format_type),
+                        "include_area": result.get('include_area', include_area),
+                        "s3_url": s3_url
+                    }, status=status.HTTP_200_OK)
+                else:
+                    # Task failed in EAGER mode
+                    error = str(task.result) if task.result else "Task failed"
+                    logger.error(f"❌ EAGER mode task failed: {error}")
+                    return Response({
+                        "success": False,
+                        "error": f"Processing failed: {error}"
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            else:
+                # Async mode: Return task ID for polling
+                file_size_mb = pid_file.size / 1024 / 1024
+                estimated_seconds = int(file_size_mb * 45)  # 45 seconds per MB average
+                
+                logger.info(f"🔄 Async mode: Queued task {task.id} (estimated {estimated_seconds}s)")
+                
+                return Response({
+                    "success": True,
+                    "task_id": task.id,
+                    "message": "PDF uploaded successfully. Processing in background...",
+                    "document_id": document_id,
+                    "filename": pid_file.name,
+                    "file_size_mb": round(file_size_mb, 2),
+                    "estimated_time_seconds": estimated_seconds,
+                    "status_endpoint": f"/api/v1/designiq/lists/upload_pid_status/{task.id}/",
+                    "instructions": "Poll the status_endpoint to check progress and get results when complete"
+                }, status=status.HTTP_202_ACCEPTED)
             
         except Exception as e:
             logger.error(f"❌ Error uploading P&ID: {str(e)}", exc_info=True)
