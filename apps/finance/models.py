@@ -240,3 +240,22 @@ class ApprovalRoute(models.Model):
     
     def __str__(self):
         return f"{self.get_invoice_type_display()} - {len(self.approval_chain)} levels"
+
+
+# =================================================================
+# SALARY SLIP AUTOMATION SYSTEM MODELS
+# Import all salary-related models from salary_models.py
+# =================================================================
+from .salary_models import (
+    SalaryStatus,
+    ApprovalStatus,
+    EmailStatus,
+    EmployeeSalaryInfo,
+    SalaryComponent,
+    EmployeeSalaryComponent,
+    PayrollRun,
+    SalarySlip,
+    SalarySlipApproval,
+    SalarySlipEmail,
+    SalarySlipAuditLog,
+)

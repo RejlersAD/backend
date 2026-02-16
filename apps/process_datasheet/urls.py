@@ -9,7 +9,8 @@ from .views import (
     ProcessDatasheetViewSet,
     DatasheetTemplateViewSet,
     DatasheetValidationRuleViewSet,
-    DatasheetExtractionJobViewSet
+    DatasheetExtractionJobViewSet,
+    PumpCalculationDataViewSet
 )
 
 router = DefaultRouter()
@@ -18,6 +19,7 @@ router.register(r'datasheets', ProcessDatasheetViewSet, basename='datasheet')
 router.register(r'templates', DatasheetTemplateViewSet, basename='datasheet-template')
 router.register(r'validation-rules', DatasheetValidationRuleViewSet, basename='validation-rule')
 router.register(r'extraction-jobs', DatasheetExtractionJobViewSet, basename='extraction-job')
+router.register(r'pump-calculations', PumpCalculationDataViewSet, basename='pump-calculation')
 
 urlpatterns = [
     path('', include(router.urls)),

@@ -10,6 +10,7 @@ gunicorn==21.2.0
 whitenoise==6.6.0
 celery==5.3.4
 redis==5.0.1
+django-redis==5.4.0  # Redis cache backend for Django
 channels==4.0.0  # Django Channels for WebSocket support
 channels-redis==4.1.0  # Redis channel layer for WebSocket
 daphne==4.0.0  # ASGI server for Django Channels
@@ -20,6 +21,8 @@ openai==1.54.3
 httpx==0.27.2
 requests>=2.31.0  # For AWS S3 template downloads
 boto3==1.34.69  # AWS S3 for P&ID document storage
+openpyxl==3.1.2  # Excel file generation and manipulation
+reportlab==4.0.7  # PDF generation and manipulation
 PyPDF2==3.0.1
 pdf2image==1.17.0
 pymupdf==1.24.0

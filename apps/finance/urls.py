@@ -12,11 +12,33 @@ from .views import (
     submit_approval_decision
 )
 
+# Import salary slip views
+from .salary_views import (
+    EmployeeSalaryInfoViewSet,
+    SalaryComponentViewSet,
+    EmployeeSalaryComponentViewSet,
+    PayrollRunViewSet,
+    SalarySlipViewSet,
+    SalarySlipApprovalViewSet,
+    SalarySlipEmailViewSet,
+    SalarySlipAuditLogViewSet,
+)
+
 app_name = 'finance'
 
 router = DefaultRouter()
 router.register(r'invoices', InvoiceViewSet, basename='invoice')
 router.register(r'approval-routes', ApprovalRouteViewSet, basename='approval-route')
+
+# Salary slip routes
+router.register(r'employee-salary-info', EmployeeSalaryInfoViewSet, basename='employee-salary-info')
+router.register(r'salary-components', SalaryComponentViewSet, basename='salary-component')
+router.register(r'employee-salary-components', EmployeeSalaryComponentViewSet, basename='employee-salary-component')
+router.register(r'payroll-runs', PayrollRunViewSet, basename='payroll-run')
+router.register(r'salary-slips', SalarySlipViewSet, basename='salary-slip')
+router.register(r'salary-approvals', SalarySlipApprovalViewSet, basename='salary-approval')
+router.register(r'salary-emails', SalarySlipEmailViewSet, basename='salary-email')
+router.register(r'salary-audit-logs', SalarySlipAuditLogViewSet, basename='salary-audit-log')
 
 urlpatterns = [
     # Router URLs

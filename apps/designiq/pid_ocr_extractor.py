@@ -39,20 +39,53 @@ class PIDLineExtractor:
         self._init_ocr_engines()
     
     def _init_ocr_engines(self):
-        """Initialize EasyOCR and PaddleOCR engines"""
-        try:
+        """Initialize EasyOCR and PaddleOCR engines with smart timeouts"""
+        import threading
+        
+        def init_with_timeout(init_func, timeout_seconds, engine_name):
+            """Initialize engine with timeout - returns True if successful"""
+            result = {'success': False, 'error': None}
+            
+            def target():
+                try:
+                    init_func()
+                    result['success'] = True
+                except Exception as e:
+                    result['error'] = e
+            
+            logger.info(f"🔄 Initializing {engine_name} ({timeout_seconds}s timeout)...")
+            thread = threading.Thread(target=target, daemon=True)
+            thread.start()
+            thread.join(timeout=timeout_seconds)
+            
+            if thread.is_alive():
+                logger.warning(f"⏱️ {engine_name} initialization timeout after {timeout_seconds}s - skipping")
+                return False
+            elif result['success']:
+                logger.info(f"✅ {engine_name} initialized")
+                return True
+            else:
+                logger.warning(f"⚠️ {engine_name} not available: {result['error']}")
+                return False
+        
+        # Initialize EasyOCR with 60-second timeout
+        def init_easyocr():
             import easyocr
             self.easyocr_reader = easyocr.Reader(['en'], gpu=False)
-            logger.info("✅ EasyOCR initialized")
-        except Exception as e:
-            logger.warning(f"⚠️ EasyOCR not available: {e}")
         
-        try:
+        init_with_timeout(init_easyocr, 60, "EasyOCR")
+        
+        # Initialize PaddleOCR with 90-second timeout
+        def init_paddleocr():
             from paddleocr import PaddleOCR
-            self.paddleocr_reader = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
-            logger.info("✅ PaddleOCR initialized")
-        except Exception as e:
-            logger.warning(f"⚠️ PaddleOCR not available: {e}")
+            import os
+            os.environ['DISABLE_MODEL_SOURCE_CHECK'] = 'True'
+            self.paddleocr_reader = PaddleOCR(
+                lang='en',
+                ocr_version='PP-OCRv4'
+            )
+        
+        init_with_timeout(init_paddleocr, 90, "PaddleOCR")
     
     # Regex pattern for line numbers - more flexible
     LINE_NUMBER_PATTERN = re.compile(
