@@ -656,6 +656,14 @@ else:
     print(f"[CELERY] WARNING Running in EAGER mode (Redis not configured)")
     print(f"[CELERY] Note: Tasks run synchronously. Set REDIS_URL for async tasks.")
 
+# Check if EAGER mode is explicitly requested via environment variable
+CELERY_TASK_ALWAYS_EAGER = config('CELERY_TASK_ALWAYS_EAGER', default=False, cast=bool)
+CELERY_TASK_EAGER_PROPAGATES = config('CELERY_TASK_EAGER_PROPAGATES', default=CELERY_TASK_ALWAYS_EAGER, cast=bool)
+
+if CELERY_TASK_ALWAYS_EAGER:
+    print(f"[CELERY] ⚡ EAGER mode enabled via environment variable")
+    print(f"[CELERY] ⚡ Tasks will execute synchronously (immediate results)")
+
 CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'

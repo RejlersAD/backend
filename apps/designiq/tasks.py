@@ -91,7 +91,10 @@ def process_pid_upload_async(
                 tmp.flush()
                 local_file_path = tmp.name
         else:
-            local_file_path = file_path
+            # Build full path: file_path is relative to MEDIA_ROOT
+            from django.conf import settings
+            import os
+            local_file_path = os.path.join(settings.MEDIA_ROOT, file_path)
         
         update_progress(25, 100, 'Running Multi-Engine OCR...')
         
