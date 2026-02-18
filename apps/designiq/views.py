@@ -537,6 +537,9 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
         """
         Upload P&ID PDF and queue async OCR processing (OPTIMIZED - NO TIMEOUT)
         
+        ENRICHMENT LAYER: Optionally accepts HMB/PMS/NACE documents for smart enrichment
+        Base extraction runs first, enrichment layer adds columns if docs provided
+        
         This endpoint immediately returns after uploading the file and queuing a Celery task.
         The actual OCR processing happens asynchronously in the background.
         
@@ -549,6 +552,11 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
         """
         pid_file = request.FILES.get('pid_file')
         list_type = request.data.get('list_type', 'line_list')
+        
+        # ENRICHMENT LAYER: Optional documents (do NOT block processing)
+        hmb_file = request.FILES.get('hmb_file')
+        pms_file = request.FILES.get('pms_file')
+        nace_file = request.FILES.get('nace_file')
         
         if not pid_file:
             return Response({
@@ -629,6 +637,33 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             include_area = request.POST.get('include_area', 'false').lower() == 'true'
             format_type = request.POST.get('format_type', 'onshore').lower()
             
+            # ENRICHMENT LAYER: Process optional documents
+            enrichment_files = {}
+            if hmb_file:
+                logger.info(f"📊 HMB document attached: {hmb_file.name}")
+                hmb_content = hmb_file.read()
+                enrichment_files['hmb'] = {
+                    'filename': hmb_file.name,
+                    'content': hmb_content,
+                    'size': len(hmb_content)
+                }
+            if pms_file:
+                logger.info(f"🔧 PMS document attached: {pms_file.name}")
+                pms_content = pms_file.read()
+                enrichment_files['pms'] = {
+                    'filename': pms_file.name,
+                    'content': pms_content,
+                    'size': len(pms_content)
+                }
+            if nace_file:
+                logger.info(f"⚗️ NACE document attached: {nace_file.name}")
+                nace_content = nace_file.read()
+                enrichment_files['nace'] = {
+                    'filename': nace_file.name,
+                    'content': nace_content,
+                    'size': len(nace_content)
+                }
+            
             # Queue Celery task for async processing (or execute immediately if EAGER mode)
             task = process_pid_upload_async.delay(
                 file_path=saved_path,
@@ -640,7 +675,8 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 storage_type=storage_type,
                 s3_url=s3_url,
                 include_area=include_area,
-                format_type=format_type
+                format_type=format_type,
+                enrichment_files=enrichment_files if enrichment_files else None
             )
             
             # Check if running in EAGER mode (synchronous execution)
@@ -662,6 +698,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                         "document_id": document_id,
                         "filename": pid_file.name,
                         "extracted_lines": result.get('extracted_lines', []),
+                        "enriched_data": result.get('enriched_data', []),  # ENRICHMENT LAYER
                         "items_created": result.get('items_created', 0),
                         "items_updated": result.get('items_updated', 0),
                         "total_items": result.get('total_items', 0),
@@ -700,6 +737,192 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             logger.error(f"❌ Error uploading P&ID: {str(e)}", exc_info=True)
             return Response({
                 "error": f"Failed to upload P&ID: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser])
+    def upload_enriched_pid(self, request):
+        """
+        🧠 4-Document Smart Enrichment Upload
+        
+        Upload P&ID + HMB + PMS + NACE for 34-column line list extraction
+        
+        Required:
+        - pid_file: P&ID PDF (mandatory)
+        - hmb_file: HMB/PFD PDF (mandatory)
+        - pms_file: PMS PDF (mandatory) 
+        - nace_file: Material Selection/NACE PDF (mandatory)
+        
+        Returns: Enriched line data with up to 34 columns
+        """
+        # Get all 4 documents
+        pid_file = request.FILES.get('pid_file')
+        hmb_file = request.FILES.get('hmb_file')
+        pms_file = request.FILES.get('pms_file')
+        nace_file = request.FILES.get('nace_file')
+        
+        list_type = request.data.get('list_type', 'line_list')
+        
+        # Validate all 4 documents are present
+        if not pid_file:
+            return Response({
+                "error": "P&ID file is mandatory"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not hmb_file:
+            return Response({
+                "error": "HMB file is mandatory"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not pms_file:
+            return Response({
+                "error": "PMS file is mandatory"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not nace_file:
+            return Response({
+                "error": "NACE file is mandatory"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            from django.core.files.storage import default_storage
+            from .models import DesignProject
+            from .tasks_enriched import process_enriched_pid_upload
+            from io import BytesIO
+            
+            # Get or create project
+            project, _ = DesignProject.objects.get_or_create(
+                project_name="P&ID Enriched Upload Project",
+                defaults={
+                    'created_by': request.user,
+                    'design_type': 'pid',
+                    'status': 'active'
+                }
+            )
+            
+            # Generate document ID
+            last_doc_id = 0
+            existing_items = EngineeringListItem.objects.filter(
+                data__has_key='document_id'
+            ).order_by('-created_at').first()
+            
+            if existing_items and existing_items.data.get('document_id'):
+                try:
+                    doc_id_str = existing_items.data['document_id'].split('-')[0]
+                    last_doc_id = int(doc_id_str)
+                except (ValueError, IndexError):
+                    pass
+            
+            new_doc_id = last_doc_id + 1
+            document_id = f"{new_doc_id:04d}-{pid_file.name}"
+            
+            logger.info(f"🧠 Starting 4-document enrichment: {document_id}")
+            
+            # Upload all 4 documents to storage
+            storage_type = 'local'
+            
+            # Save P&ID
+            pid_file.seek(0)
+            pid_path = default_storage.save(
+                f"designiq/enriched_uploads/{timezone.now().strftime('%Y/%m/%d')}/{document_id}",
+                pid_file
+            )
+            
+            # Save HMB
+            hmb_file.seek(0)
+            hmb_path = default_storage.save(
+                f"designiq/enriched_uploads/{timezone.now().strftime('%Y/%m/%d')}/HMB-{document_id}",
+                hmb_file
+            )
+            
+            # Save PMS
+            pms_file.seek(0)
+            pms_path = default_storage.save(
+                f"designiq/enriched_uploads/{timezone.now().strftime('%Y/%m/%d')}/PMS-{document_id}",
+                pms_file
+            )
+            
+            # Save NACE
+            nace_file.seek(0)
+            nace_path = default_storage.save(
+                f"designiq/enriched_uploads/{timezone.now().strftime('%Y/%m/%d')}/NACE-{document_id}",
+                nace_file
+            )
+            
+            # Get format options
+            include_area = request.POST.get('include_area', 'false').lower() == 'true'
+            format_type = request.POST.get('format_type', 'onshore').lower()
+            
+            # Convert relative paths to absolute paths for task processing
+            pid_absolute_path = default_storage.path(pid_path)
+            hmb_absolute_path = default_storage.path(hmb_path)
+            pms_absolute_path = default_storage.path(pms_path)
+            nace_absolute_path = default_storage.path(nace_path)
+            
+            # Queue enrichment task
+            task = process_enriched_pid_upload.delay(
+                pid_file_path=pid_absolute_path,
+                pid_filename=pid_file.name,
+                hmb_file_path=hmb_absolute_path,
+                pms_file_path=pms_absolute_path,
+                nace_file_path=nace_absolute_path,
+                list_type=list_type,
+                user_id=request.user.id,
+                project_id=project.id,
+                document_id=document_id,
+                storage_type=storage_type,
+                include_area=include_area,
+                format_type=format_type
+            )
+            
+            # Check if EAGER mode
+            from django.conf import settings
+            is_eager = getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
+            
+            if is_eager:
+                logger.info(f"⚡ EAGER mode: Task {task.id} completed synchronously")
+                
+                if task.successful():
+                    result = task.result
+                    logger.info(f"✅ Enrichment complete: {result.get('total_items', 0)} items with 34 columns")
+                    
+                    return Response({
+                        "success": True,
+                        "message": result.get('message', '4-document enrichment complete'),
+                        "document_id": document_id,
+                        "enriched_lines": result.get('extracted_lines', []),
+                        "items_created": result.get('items_created', 0),
+                        "items_updated": result.get('items_updated', 0),
+                        "total_items": result.get('total_items', 0),
+                        "has_hmb_enrichment": result.get('has_hmb_enrichment', False),
+                        "has_pms_enrichment": result.get('has_pms_enrichment', False),
+                        "has_nace_enrichment": result.get('has_nace_enrichment', False),
+                        "format_type": result.get('format_type', format_type),
+                        "include_area": result.get('include_area', include_area)
+                    }, status=status.HTTP_200_OK)
+                else:
+                    error = str(task.result) if task.result else "Unknown error"
+                    return Response({
+                        "error": f"Enrichment failed: {error}"
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            else:
+                # Async mode
+                logger.info(f"🔄 Async mode: Queued enrichment task {task.id}")
+                
+                return Response({
+                    "success": True,
+                    "task_id": task.id,
+                    "message": "All 4 documents uploaded successfully. Processing enrichment...",
+                    "document_id": document_id,
+                    "estimated_time_minutes": 5,
+                    "status_endpoint": f"/api/v1/designiq/lists/enriched_upload_status/{task.id}/",
+                    "instructions": "Poll the status_endpoint to check progress"
+                }, status=status.HTTP_202_ACCEPTED)
+        
+        except Exception as e:
+            logger.error(f"❌ Error in enriched upload: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to process enriched upload: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['get'], url_path='upload_pid_status/(?P<task_id>[^/.]+)')
@@ -771,6 +994,103 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             logger.error(f"❌ Error checking task status: {str(e)}", exc_info=True)
             return Response({
                 "error": f"Failed to check task status: {str(e)}",
+                "task_id": task_id
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['get'], url_path='enriched_upload_status/(?P<task_id>[^/.]+)')
+    def enriched_upload_status(self, request, task_id=None):
+        """
+        Check status of 4-document enriched upload processing
+        
+        GET /api/v1/designiq/lists/enriched_upload_status/{task_id}/
+        
+        Returns:
+        - state: PENDING, PROCESSING, SUCCESS, or FAILURE
+        - progress: 0-100% (if PROCESSING)
+        - current_phase: P&ID, HMB, PMS, or NACE
+        - status: Human-readable status message
+        - result: Processing results with enrichment flags (if SUCCESS)
+        - error: Error message (if FAILURE)
+        """
+        from celery.result import AsyncResult
+        from django.core.cache import cache
+        
+        if not task_id:
+            return Response({
+                "error": "Task ID is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            # Check cache first for fast response
+            cache_key = f'enriched_upload_progress_{task_id}'
+            cached_data = cache.get(cache_key)
+            
+            if cached_data:
+                return Response(cached_data)
+            
+            # Fall back to Celery task result
+            task = AsyncResult(task_id)
+            
+            response_data = {
+                'task_id': task_id,
+                'state': task.state,
+            }
+            
+            if task.state == 'PENDING':
+                response_data.update({
+                    'status': '⏳ Enrichment queued, waiting to start...',
+                    'percent': 0,
+                    'current_phase': 'queued'
+                })
+            elif task.state == 'PROGRESS':
+                info = task.info or {}
+                response_data.update({
+                    'status': info.get('status', 'Processing...'),
+                    'percent': info.get('percent', 0),
+                    'current_phase': info.get('current_phase', 'unknown'),
+                    'items_processed': info.get('items_processed', 0),
+                    'has_hmb_enrichment': info.get('has_hmb_enrichment', False),
+                    'has_pms_enrichment': info.get('has_pms_enrichment', False),
+                    'has_nace_enrichment': info.get('has_nace_enrichment', False)
+                })
+            elif task.state == 'SUCCESS':
+                result = task.result or {}
+                response_data.update({
+                    'status': '✅ 4-document enrichment complete!',
+                    'percent': 100,
+                    'current_phase': 'complete',
+                    'result': {
+                        'success': result.get('success', True),
+                        'total_items': result.get('total_items', 0),
+                        'items_created': result.get('items_created', 0),
+                        'items_updated': result.get('items_updated', 0),
+                        'has_hmb_enrichment': result.get('has_hmb_enrichment', False),
+                        'has_pms_enrichment': result.get('has_pms_enrichment', False),
+                        'has_nace_enrichment': result.get('has_nace_enrichment', False),
+                        'enriched_lines': result.get('extracted_lines', []),
+                        'message': result.get('message', '')
+                    }
+                })
+            elif task.state == 'FAILURE':
+                response_data.update({
+                    'status': '❌ Enrichment failed',
+                    'percent': 0,
+                    'current_phase': 'error',
+                    'error': str(task.info) if task.info else 'Unknown error'
+                })
+            else:
+                response_data.update({
+                    'status': f'Task state: {task.state}',
+                    'percent': 0,
+                    'current_phase': 'unknown'
+                })
+            
+            return Response(response_data)
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking enriched task status: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to check enriched task status: {str(e)}",
                 "task_id": task_id
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     

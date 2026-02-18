@@ -266,51 +266,27 @@ else:
 # ==============================================================================
 
 # Database
-# WARNING CRITICAL: DATABASE_URL is REQUIRED for Railway deployment
-# Railway Env Var: DATABASE_URL=postgresql://postgres:PASSWORD@HOST:PORT/railway
-# Use DATABASE_URL if available (Railway), otherwise use individual DB settings
-try:
-    DATABASE_URL = config('DATABASE_URL', default='')
-    if DATABASE_URL:
-        db_config = dj_database_url.parse(DATABASE_URL)
-        # Add timeout options to prevent hanging
-        db_config['CONN_MAX_AGE'] = 60
-        db_config['OPTIONS'] = {
-            'connect_timeout': 10,  # Reduced from 30 to 10 seconds
-            'options': '-c statement_timeout=30000'
-        }
-        DATABASES = {'default': db_config}
-        print(f"[DJANGO] Using DATABASE_URL configuration")
-        print(f"[DJANGO] DB Host: {db_config.get('HOST', 'unknown')}")
-    else:
-        DATABASES = {
-            'default': {
-                'ENGINE': 'django.db.backends.postgresql',
-                'NAME': config('DB_NAME', default='radai_db'),
-                'USER': config('DB_USER', default='postgres'),
-                'PASSWORD': config('DB_PASSWORD', default='postgres'),
-                'HOST': config('DB_HOST', default='db'),
-                'PORT': config('DB_PORT', default='5432'),
-                'CONN_MAX_AGE': 60,
-                'OPTIONS': {
-                    'connect_timeout': 10,
-                    'options': '-c statement_timeout=30000'
-                }
-            }
-        }
-        print(f"[DJANGO] Using individual DB configuration")
-        print(f"[DJANGO] DB_HOST: {config('DB_HOST', default='db')}")
-except Exception as e:
-    print(f"[ERROR] Database configuration failed: {e}")
-    # Set a minimal database config to prevent crashes
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        }
-    }
-    print(f"[WARNING] Falling back to SQLite due to database configuration error")
-    print(f"[WARNING] Falling back to SQLite due to database configuration error")
+# RAILWAY POSTGRESQL - REQUIRED
+# DATABASE_URL must be set in environment variables
+DATABASE_URL = config('DATABASE_URL')
+db_config = dj_database_url.parse(DATABASE_URL)
+
+# Extended timeout configuration for Railway database
+db_config['CONN_MAX_AGE'] = 600  # Keep connection alive for 10 minutes
+db_config['OPTIONS'] = {
+    'connect_timeout': 60,  # 60 seconds for initial connection
+    'options': '-c statement_timeout=120000',  # 120 seconds for queries
+    'keepalives': 1,
+    'keepalives_idle': 60,
+    'keepalives_interval': 10,
+    'keepalives_count': 10
+}
+
+DATABASES = {'default': db_config}
+
+print(f"[DJANGO] 🚂 Railway PostgreSQL ONLY")
+print(f"[DJANGO] 📡 DB: {db_config.get('HOST')}:{db_config.get('PORT')}")
+print(f"[DJANGO] ⏱️ Timeouts: connect=60s, query=120s, keepalive=60s")
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -458,8 +434,10 @@ else:
             # Development
             'http://localhost:3000',
             'http://localhost:5173',
+            'http://localhost:5175',
             'http://127.0.0.1:3000',
             'http://127.0.0.1:5173',
+            'http://127.0.0.1:5175',
         ]
     
     # Allow credentials (for JWT tokens in Authorization header)

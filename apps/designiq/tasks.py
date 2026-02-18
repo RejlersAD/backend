@@ -9,8 +9,53 @@ from django.core.cache import cache
 import logging
 import tempfile
 import os
+import PyPDF2
+from io import BytesIO
 
 logger = logging.getLogger(__name__)
+
+
+def extract_text_from_file(file_data):
+    """Extract text from PDF, Excel, or Word file for enrichment"""
+    try:
+        content = file_data['content']
+        filename = file_data['filename'].lower()
+        
+        # PDF
+        if filename.endswith('.pdf'):
+            pdf_file = BytesIO(content)
+            reader = PyPDF2.PdfReader(pdf_file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+            return text
+        
+        # Excel
+        elif filename.endswith(('.xlsx', '.xls')):
+            import openpyxl
+            excel_file = BytesIO(content)
+            workbook = openpyxl.load_workbook(excel_file)
+            text = ""
+            for sheet in workbook:
+                for row in sheet.iter_rows(values_only=True):
+                    text += " ".join(str(cell) for cell in row if cell) + "\n"
+            return text
+        
+        # Word
+        elif filename.endswith('.docx'):
+            from docx import Document
+            doc_file = BytesIO(content)
+            doc = Document(doc_file)
+            text = "\n".join([para.text for para in doc.paragraphs])
+            return text
+        
+        else:
+            logger.warning(f"Unsupported file type: {filename}")
+            return ""
+            
+    except Exception as e:
+        logger.error(f"Error extracting text from {file_data['filename']}: {e}")
+        return ""
 
 
 @shared_task(bind=True, time_limit=1200, soft_time_limit=1140)  # 20 minutes max
@@ -25,16 +70,20 @@ def process_pid_upload_async(
     storage_type='local',
     s3_url=None,
     include_area=False,
-    format_type='onshore'
+    format_type='onshore',
+    enrichment_files=None  # ENRICHMENT LAYER: Optional HMB/PMS/NACE
 ):
     """
     Background task to process P&ID PDF upload with OCR (ASYNC)
     
+    ENRICHMENT LAYER: If enrichment_files provided, runs enrichment after base extraction
+    
     This task handles the entire P&ID processing pipeline asynchronously:
-    1. OCR extraction (Multi-Engine: Tesseract + EasyOCR + PaddleOCR)
-    2. FROM-TO detection (Geometric + OpenAI Vision)
-    3. Line item parsing and database storage
-    4. Progress tracking via Celery state
+    1. OCR extraction (Multi-Engine: Tesseract + EasyOCR + PaddleOCR) - UNCHANGED
+    2. FROM-TO detection (Geometric + OpenAI Vision) - UNCHANGED
+    3. Line item parsing and database storage - UNCHANGED
+    4. ENRICHMENT (NEW): If HMB/PMS/NACE provided, add columns via AI
+    5. Progress tracking via Celery state
     
     Args:
         file_path: Path to uploaded PDF (local or S3 key)
@@ -47,9 +96,10 @@ def process_pid_upload_async(
         s3_url: S3 URL if stored in S3
         include_area: Include area field in line number format
         format_type: 'onshore', 'offshore', or 'general'
+        enrichment_files: Optional dict with HMB/PMS/NACE file data
         
     Returns:
-        dict: Processing results with extracted lines and statistics
+        dict: Processing results with extracted lines and enriched data
     """
     from .pid_ocr_extractor_v2 import PIDLineExtractorV2
     from .models import DesignProject, EngineeringListItem
@@ -73,6 +123,19 @@ def process_pid_upload_async(
         logger.info(f"[Task {task_id}] {progress_data['percent']}% - {status_message}")
     
     try:
+        # SYSTEMATIC PROCESSING: Log the workflow
+        has_enrichment = enrichment_files and len(enrichment_files) == 3
+        if has_enrichment:
+            logger.info("=" * 80)
+            logger.info("🚀 SYSTEMATIC 4-DOCUMENT PROCESSING:")
+            logger.info("   STEP 1: Extract 8 base columns from P&ID (LOCKED OLD LOGIC)")
+            logger.info("   STEP 2: Extract text from HMB/PMS/NACE documents")
+            logger.info("   STEP 3: Run AI enrichment to add 26 columns")
+            logger.info("   STEP 4: Return 34-column enriched table (8 base + 26 enriched)")
+            logger.info("=" * 80)
+        else:
+            logger.info(f"📄 Standard P&ID processing: 8 base columns only")
+        
         update_progress(5, 100, 'Initializing OCR engines...')
         
         user = User.objects.get(id=user_id)
@@ -174,7 +237,100 @@ def process_pid_upload_async(
                 logger.error(f"[Task {task_id}] Failed to save item {idx+1}: {str(item_err)}")
                 continue
         
-        update_progress(95, 100, 'Finalizing results...')
+        update_progress(95, 100, 'Base extraction complete!')
+        
+        # ✅ STEP 1 COMPLETE: Base 8 columns extracted from P&ID using OLD LOCKED LOGIC
+        logger.info("=" * 80)
+        logger.info(f"✅ STEP 1 COMPLETE: Extracted {len(table_data)} lines with 8 base columns from P&ID")
+        logger.info(f"   Base columns: Line Number, Size, Fluid Code, Area, Sequence, PIPR Class, Insulation, From-To")
+        logger.info("=" * 80)
+        
+        # ENRICHMENT LAYER: Requires ALL 3 documents (HMB + PMS + NACE) for enrichment
+        enriched_data = []
+        if enrichment_files:
+            has_hmb = 'hmb' in enrichment_files
+            has_pms = 'pms' in enrichment_files
+            has_nace = 'nace' in enrichment_files
+            
+            if has_hmb and has_pms and has_nace:
+                try:
+                    logger.info(f"🚀 STEP 2: Base 8 columns extracted from P&ID ✅")
+                    logger.info(f"🚀 STEP 3: Starting enrichment with all 3 documents...")
+                    update_progress(96, 100, 'Running AI enrichment (HMB+PMS+NACE)...')
+                    
+                    # Check file sizes before processing
+                    hmb_size = len(enrichment_files['hmb']['content']) / (1024 * 1024)
+                    pms_size = len(enrichment_files['pms']['content']) / (1024 * 1024)
+                    nace_size = len(enrichment_files['nace']['content']) / (1024 * 1024)
+                    total_size = hmb_size + pms_size + nace_size
+                    
+                    logger.info(f"📊 Enrichment files: HMB={hmb_size:.1f}MB, PMS={pms_size:.1f}MB, NACE={nace_size:.1f}MB (Total: {total_size:.1f}MB)")
+                    
+                    # Safety check: Skip if files too large (prevent crash)
+                    if total_size > 50:
+                        logger.warning(f"⚠️ Enrichment files too large ({total_size:.1f}MB > 50MB limit) - Skipping enrichment to prevent crash")
+                        logger.info(f"→ Returning base 8 columns only")
+                        enriched_data = []
+                    else:
+                        from designiq.services.enrichment_service import get_enrichment_service
+                        
+                        enrichment_service = get_enrichment_service()
+                        
+                        # Extract text from enrichment documents
+                        logger.info(f"📊 Extracting text from HMB...")
+                        hmb_text = extract_text_from_file(enrichment_files['hmb'])
+                        logger.info(f"   └─ Extracted {len(hmb_text)} chars")
+                        
+                        logger.info(f"🔧 Extracting text from PMS...")
+                        pms_text = extract_text_from_file(enrichment_files['pms'])
+                        logger.info(f"   └─ Extracted {len(pms_text)} chars")
+                        
+                        logger.info(f"⚗️ Extracting text from NACE...")
+                        nace_text = extract_text_from_file(enrichment_files['nace'])
+                        logger.info(f"   └─ Extracted {len(nace_text)} chars")
+                        
+                        # Extract text from P&ID for metadata (pid_no, pid_rev, date)
+                        logger.info(f"📄 Extracting text from P&ID for metadata...")
+                        pid_text = ""
+                        try:
+                            # P&ID is already loaded at local_file_path
+                            import fitz  # PyMuPDF
+                            pid_doc = fitz.open(local_file_path)
+                            # Extract text from first page (title block usually on first page)
+                            pid_text = pid_doc[0].get_text()
+                            pid_doc.close()
+                            logger.info(f"   └─ Extracted {len(pid_text)} chars from P&ID")
+                        except Exception as pid_err:
+                            logger.warning(f"   └─ Failed to extract P&ID text: {pid_err}")
+                        
+                        logger.info(f"🤖 Running AI enrichment on {len(table_data)} lines...")
+                        # Run enrichment (preserves base 8 columns, adds 26 new columns)
+                        enriched_data = enrichment_service.enrich_lines(
+                            base_lines=table_data,
+                            hmb_text=hmb_text,
+                            pms_text=pms_text,
+                            nace_text=nace_text,
+                            pid_text=pid_text
+                        )
+                        
+                        if enriched_data:
+                            logger.info(f"✅ STEP 4: Enrichment complete! {len(enriched_data)} lines with {len(enriched_data[0].keys())} total columns")
+                            update_progress(98, 100, 'Enrichment complete!')
+                        else:
+                            logger.warning(f"⚠️ Enrichment returned empty - using base 8 columns")
+                    
+                except Exception as e:
+                    logger.error(f"⚠️ Enrichment failed (returning base 8 columns): {e}", exc_info=True)
+                    enriched_data = []  # Fallback to base extraction only
+            else:
+                missing = []
+                if not has_hmb: missing.append("HMB")
+                if not has_pms: missing.append("PMS")
+                if not has_nace: missing.append("NACE")
+                logger.info(f"⚠️ Enrichment skipped - Missing: {', '.join(missing)}")
+                logger.info(f"→ Returning base 8 columns only (need all 3 docs for full enrichment)")
+        else:
+            logger.info("→ No enrichment docs provided - Returning base 8 columns from P&ID")
         
         if storage_type == 's3':
             try:
@@ -190,14 +346,19 @@ def process_pid_upload_async(
             'document_id': document_id,
             'document_path': file_path,
             'storage_type': storage_type,
-            's3_url': s3_url,
+'s3_url': s3_url,
             'items_created': len(created_items),
             'items_updated': len(updated_items),
             'total_items': total_items,
-            'extracted_lines': table_data,
+            'extracted_lines': table_data,  # Base extraction (8 columns - ALWAYS)
+            'enriched_data': enriched_data if enriched_data else [],  # Enriched data (20+ columns - if all 3 docs)
             'format_type': format_type,
             'include_area': include_area,
-            'message': 'P&ID processed successfully'
+            'message': (
+                f'✅ P&ID processed with full enrichment: {len(enriched_data[0].keys())} columns' 
+                if enriched_data 
+                else '✅ P&ID processed: Base 8 columns (provide HMB+PMS+NACE for full enrichment)'
+            )
         }
         
         cache.set(cache_key, {
