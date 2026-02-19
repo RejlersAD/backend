@@ -210,8 +210,8 @@ def process_pid_upload_async(
                 logger.info(f"   ✅ NACE text: {len(nace_text) if nace_text else 0} chars")
                 
                 # Call enrichment service
-                from designiq.services.enrichment_service import LineEnrichmentService
-                enrichment_service = LineEnrichmentService()
+                from designiq.services.enrichment_service import EnrichmentService
+                enrichment_service = EnrichmentService()
                 
                 logger.info(f"   🧠 Calling OpenAI to enrich {len(table_data)} lines...")
                 enriched_lines = enrichment_service.enrich_lines(
