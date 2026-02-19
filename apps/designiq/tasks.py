@@ -276,46 +276,9 @@ def process_pid_upload_async(
         logger.info(f"   Base columns: Line Number, Size, Fluid Code, Area, Sequence, PIPR Class, Insulation, From-To")
         logger.info("=" * 80)
         
-        # 🔥 QUICK FIX: Add default enrichment columns to EVERY line immediately
-        logger.info("🔥 ADDING DEFAULT ENRICHMENT COLUMNS TO ALL LINES")
-        default_enrichment = {
-            'flow_medium': 'default',
-            'two_phase': 'default',
-            'surge_flow': 'default',
-            'flow_max': 'default',
-            'density': 'default',
-            'normal_pressure': 'default',
-            'normal_temp': 'default',
-            'design_pressure': 'default',
-            'minimax_design_temp': 'default',
-            'design_code': 'default',
-            'category_m_fluid': 'default',
-            'schedule_wall_thk': 'default',
-            'stress_relief': 'default',
-            'pwht': 'default',
-            'rt': 'default',
-            'mt_pt': 'default',
-            'hardness': 'default',
-            'visual': 'default',
-            'nace_mr_0175': 'default',
-            'piping_rated_pressure': 'default',
-            'test_pressure': 'default',
-            'test_medium': 'default',
-            'pid_no': 'default',
-            'pid_rev': 'default',
-            'date': 'default',
-            'criticality_code': 'default'
-        }
-        
-        for line in table_data:
-            line.update(default_enrichment)
-        
-        logger.info(f"✅ Added 26 default enrichment columns to {len(table_data)} lines")
-        logger.info(f"   Total columns per line now: {len(table_data[0].keys())}")
-        
-        # Set enriched_data to table_data (which now has defaults)
+        # Initialize enriched_data as base table_data (8 columns only)
         enriched_data = table_data
-        logger.info(f"✅ Enriched data = table_data with {len(enriched_data)} lines and {len(enriched_data[0].keys()) if enriched_data else 0} columns per line")
+        logger.info(f"✅ Base extraction ready: {len(enriched_data)} lines with {len(enriched_data[0].keys()) if enriched_data else 0} columns per line")
         
         if storage_type == 's3':
             try:

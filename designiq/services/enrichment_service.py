@@ -94,18 +94,15 @@ class EnrichmentService:
         logger.debug(f"📄 PMS preview: {pms_text[:200]}...")
         logger.debug(f"📄 NACE preview: {nace_text[:200]}...")
         
-        logger.info(f"🚀 Starting enrichment for {len(base_lines)} lines (All 3 docs provided)")
-        
-        # 🧪 TEMPORARY TEST MODE: Hardcoded values to test frontend/backend connection
-        logger.warning("="*80)
-        logger.warning("🧪 TEST MODE: Using hardcoded default values for all enrichment columns")
-        logger.warning("="*80)
+        logger.info(f"🚀 Starting AI-powered enrichment for {len(base_lines)} lines (All 3 docs provided)")
+        logger.info("🤖 Using OpenAI GPT-4 to intelligently extract 26 enrichment columns from documents")
         
         try:
             enriched_lines = []
             
             for idx, line in enumerate(base_lines):
-                logger.info(f"Processing line {idx+1}/{len(base_lines)}: {line.get('original_detection', 'N/A')}")
+                line_id = line.get('original_detection', f'Line-{idx+1}')
+                logger.info(f"🔄 Processing line {idx+1}/{len(base_lines)}: {line_id}")
                 
                 # Start with base columns (PRESERVED FROM OLD LOGIC)
                 enriched_line = {
@@ -120,52 +117,24 @@ class EnrichmentService:
                     'to': line.get('to', '')
                 }
                 
-                # 🧪 HARDCODED TEST DATA - All enrichment columns with visible test values
-                enrichment_data = {
-                    'flow_medium': 'TEST: Water',
-                    'two_phase': 'TEST: No',
-                    'surge_flow': 'TEST: 150 GPM',
-                    'flow_max': 'TEST: 200 GPM',
-                    'density': 'TEST: 62.4 lb/ft3',
-                    'normal_pressure': 'TEST: 100 psig',
-                    'normal_temp': 'TEST: 70°F',
-                    'design_pressure': 'TEST: 150 psig',
-                    'minimax_design_temp': 'TEST: -20/300°F',
-                    'design_code': 'TEST: ASME B31.3',
-                    'category_m_fluid': 'TEST: Normal',
-                    'schedule_wall_thk': 'TEST: Sch 40',
-                    'stress_relief': 'TEST: No',
-                    'pwht': 'TEST: No',
-                    'rt': 'TEST: 10%',
-                    'mt_pt': 'TEST: Yes',
-                    'hardness': 'TEST: HB 200 Max',
-                    'visual': 'TEST: 100%',
-                    'nace_mr_0175': 'TEST: Not Required',
-                    'piping_rated_pressure': 'TEST: 300#',
-                    'test_pressure': 'TEST: 225 psig',
-                    'test_medium': 'TEST: Water',
-                    'pid_no': 'TEST: PID-001',
-                    'pid_rev': 'TEST: Rev A',
-                    'date': 'TEST: 2026-02-19',
-                    'criticality_code': 'TEST: C'
-                }
+                # 🤖 AI ENRICHMENT: Extract intelligent values from all 4 documents
+                logger.info(f"   🧠 Calling OpenAI to extract enrichment data for {line_id}...")
+                enrichment_data = self._extract_enrichment_data(
+                    line=line,
+                    hmb_text=hmb_text,
+                    pms_text=pms_text,
+                    nace_text=nace_text,
+                    pid_text=pid_text
+                )
                 
-                logger.info(f"✅ Line {idx+1} enriched with {len(enrichment_data)} TEST columns")
+                # LOCK: Ensure all 26 enrichment columns exist (even if empty)
+                empty_enrichment = self._get_empty_enrichment_columns()
+                for key in empty_enrichment:
+                    if key not in enrichment_data:
+                        enrichment_data[key] = ""
                 
-                # # COMMENTED: Original AI enrichment logic (will uncomment after testing)
-                # enrichment_data = self._extract_enrichment_data(
-                #     line=line,
-                #     hmb_text=hmb_text,
-                #     pms_text=pms_text,
-                #     nace_text=nace_text,
-                #     pid_text=pid_text
-                # )
-                # 
-                # # LOCK: Ensure all 26 enrichment columns exist (even if empty)
-                # empty_enrichment = self._get_empty_enrichment_columns()
-                # for key in empty_enrichment:
-                #     if key not in enrichment_data:
-                #         enrichment_data[key] = ""
+                filled_count = len([v for v in enrichment_data.values() if v and v.strip()])
+                logger.info(f"   ✅ Line {idx+1} enriched: {filled_count}/26 columns filled by AI")
                 
                 # Merge enrichment into base (8 + 26 = 34 columns GUARANTEED)
                 enriched_line.update(enrichment_data)
