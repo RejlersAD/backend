@@ -248,7 +248,7 @@ def process_pid_upload_async(
                     update_progress(progress, 100, f'Saving item {idx+1}/{len(table_data)}...')
                 
                 item_data = {
-                    'description': f"{line_data['fluid_description']} Line - {line_data['size']}",
+                    'description': f"{line_data.get('flow_medium', 'Line')} - {line_data['size']}",
                     'status': 'pending',
                     'is_validated': False,
                     'data': {
@@ -273,7 +273,7 @@ def process_pid_upload_async(
                         'to_line': line_data.get('to_line', ''),
                         'flow_detection_method': line_data.get('flow_detection_method', ''),
                         'flow_confidence': line_data.get('flow_confidence', ''),
-                        # 26 Enrichment columns (empty or filled by AI)
+                        # 26 Gen AI Enrichment columns
                         'flow_medium': line_data.get('flow_medium', ''),
                         'two_phase': line_data.get('two_phase', ''),
                         'surge_flow': line_data.get('surge_flow', ''),

@@ -104,17 +104,21 @@ class EnrichmentService:
                 line_id = line.get('original_detection', f'Line-{idx+1}')
                 logger.info(f"🔄 Processing line {idx+1}/{len(base_lines)}: {line_id}")
                 
-                # Start with base columns (PRESERVED FROM OLD LOGIC)
+                # Start with base columns (PRESERVED FROM P&ID OLD LOCKED LOGIC - 9 columns)
                 enriched_line = {
-                    'original_detection': line.get('original_detection', ''),
-                    'fluid_code': line.get('fluid_code', ''),
+                    'line_number': line.get('line_number', ''),
                     'size': line.get('size', ''),
+                    'fluid_code': line.get('fluid_code', ''),
                     'area': line.get('area', ''),
                     'sequence_no': line.get('sequence_no', ''),
                     'pipr_class': line.get('pipr_class', ''),
                     'insulation': line.get('insulation', ''),
-                    'from': line.get('from', ''),
-                    'to': line.get('to', '')
+                    'from_line': line.get('from_line', ''),
+                    'to_line': line.get('to_line', ''),
+                    'flow_detection_method': line.get('flow_detection_method', ''),
+                    'flow_confidence': line.get('flow_confidence', ''),
+                    'page': line.get('page', 1),
+                    'confidence': line.get('confidence', 'medium')
                 }
                 
                 # 🤖 AI ENRICHMENT: Extract intelligent values from all 4 documents
@@ -144,7 +148,7 @@ class EnrichmentService:
                 logger.info(f"📦 Enriched line {idx+1} data sample: {list(enriched_line.keys())[:5]}... (Total: {len(enriched_line)} keys)")
             
             logger.info("="*80)
-            logger.info(f"✅ Enrichment complete: {len(enriched_lines)} lines with {len(enriched_lines[0].keys())} columns (8 base + 26 enriched = 34 total)")
+            logger.info(f"✅ Enrichment complete: {len(enriched_lines)} lines with {len(enriched_lines[0].keys())} columns (9 base + 26 enriched = 35 total)")
             logger.info(f"🔍 First line sample enrichment columns:")
             if enriched_lines:
                 sample = enriched_lines[0]
@@ -153,8 +157,8 @@ class EnrichmentService:
                 logger.info(f"   - design_code: {sample.get('design_code', 'MISSING')}")
             logger.info("="*80)
             
-            # FINAL VALIDATION: Ensure every line has exactly 34 columns
-            expected_total = 34
+            # FINAL VALIDATION: Ensure every line has exactly 35 columns
+            expected_total = 35
             for idx, line in enumerate(enriched_lines):
                 if len(line.keys()) != expected_total:
                     logger.warning(f"⚠️ Line {idx} has {len(line.keys())} columns, expected {expected_total}. Fixing...")
@@ -541,14 +545,16 @@ EXAMPLES OF GOOD VALUES:
     def _get_empty_enrichment_columns(self) -> Dict:
         """
         Returns empty enrichment columns when AI fails
-        LOCKED STRUCTURE: 26 additional columns (8 base + 26 = 34 total)
+        LOCKED STRUCTURE: 26 Gen AI columns (9 base from P&ID + 26 Gen AI = 35 total)
         
-        CORRECT COLUMNS as per user requirements:
+        Base columns from P&ID: Line Number, Size, Fluid Code, Area, Sequence No, PIPR Class, Insulation, From, To
+        
+        Gen AI columns (26):
         1. Flow Medium, 2. Two Phase, 3. Surge Flow, 4. Flow Max, 5. Density,
         6. Normal Pressure, 7. Normal Temp, 8. Design Pressure, 9. Minimax Design Temp,
         10. Design Code, 11. Category-M Fluid, 12. Schedule / Wall THK, 13. Stress Relief,
         14. PWHT, 15. RT, 16. MT/PT, 17. Hardness, 18. Visual, 19. NACE-MR-0175,
-        20. Piping Rated Pressure at Ambient Condition, 21. Test Pressure, 22. Test Medium,
+        20. Piping Rated Pressure, 21. Test Pressure, 22. Test Medium,
         23. P&ID No., 24. P&ID Rev, 25. Date, 26. Criticality Code
         """
         return {
