@@ -223,10 +223,19 @@ class PressureInstrumentAnalyzer:
                         - Connected to vessels and equipment
                         - In instrument loops and control schemes
                         - In legend tables and instrument lists
+                        - In line schedules and process data tables
+                        - In border notes and general notes sections
                         - Even if partially visible or unclear
                         
+                        EXTRACT MAXIMUM DATA from the drawing:
+                        - Check line schedules for operating conditions (pressure, temperature, piping class)
+                        - Look for process data tables with fluid properties (density, viscosity)
+                        - Read equipment data sheets if visible in the drawing
+                        - Extract design conditions from notes or specifications
+                        - Identify special service requirements (H2S, NACE, corrosive, etc.)
+                        
                         If you see ANY circular symbol with letters/numbers that could be a pressure instrument, 
-                        INCLUDE IT in your analysis. When in doubt, include it."""
+                        INCLUDE IT in your analysis with ALL VISIBLE DATA. When in doubt, include it."""
                     },
                     {
                         "role": "user",
@@ -245,8 +254,8 @@ class PressureInstrumentAnalyzer:
                         ]
                     }
                 ],
-                max_tokens=4096,
-                temperature=0.2
+                max_tokens=10000,
+                temperature=0.1
             )
             
             # Parse AI response
@@ -455,64 +464,86 @@ Start with [ and end with ]
         try:
             logger.info("[PressureInstrument] Attempting simplified detection strategy...")
             
-            simplified_prompt = f"""Look at this P&ID diagram image.
+            simplified_prompt = f"""🎯 EMERGENCY FALLBACK DETECTION MODE
 
-SIMPLE TASK: Find ALL circular instrument bubbles/symbols that represent PRESSURE instruments.
+Analyze this P&ID diagram and extract EVERY pressure instrument with ALL AVAILABLE data.
 
-Pressure instruments have tags starting with letter 'P' and include:
-- PT (Pressure Transmitter)
-- PI (Pressure Indicator)  
-- PS (Pressure Switch)
-- PC (Pressure Controller)
-- PG (Pressure Gauge)
-- PDT (Differential Pressure Transmitter)
-- PSV (Pressure Safety Valve)
-- PRV (Pressure Relief Valve)
+📋 Drawing: {drawing_info.get('drawing_number', 'N/A')} - {drawing_info.get('drawing_title', 'N/A')}
 
-For EACH pressure instrument circle/bubble you see:
-1. Read the tag number (like PT-101, PI-202, etc.)
-2. See what line or equipment it's connected to
-3. Note the service description if visible
+🔍 TARGET INSTRUMENTS (starting with 'P'):
+PT, PI, PS, PC, PG, PDT, PDI, PSV, PRV, PIT, PIA, PSH, PSL, PIC, PCV, etc.
 
-Return a JSON array. Example:
+📊 EXTRACTION STRATEGY - For EACH pressure instrument found:
+
+**STEP 1 - INSTRUMENT IDENTIFICATION:**
+- Tag Number: Read the instrument tag (PT-101, PI-202, PSV-3601-01, etc.)
+- Line Number: Check what process line it's connected to (look for line tags like 1"-P-4001)
+- Equipment Number: See if connected to equipment (C-101, V-202, P-301, etc.)
+- Service: Read nearby text describing the service or function
+
+**STEP 2 - PROCESS CONDITIONS (Look for tables, notes, line lists):**
+- Operating Pressure: Check for pressure values near the line/equipment (bar, psi, kPa)
+- Operating Temperature: Look for temperature annotations (°C, °F, K)
+- Design Pressure: Usually in line schedule or equipment data sheets
+- Design Temperature: Check equipment data or line specifications
+
+**STEP 3 - FLUID PROPERTIES (From line schedules or process notes):**
+- Fluid State: Gas, Liquid, Vapor, Two-Phase (look at line shading/patterns)
+- Fluid Phase: Single Phase, Multi-Phase
+- Piping Class: Line class specification (150#, 300#, 600#, ANSI rating)
+- Density: ρ = kg/m³ or lb/ft³ (check process data tables)
+- Viscosity: μ = cP or cSt (check fluid property tables)
+
+**STEP 4 - SPECIAL REQUIREMENTS:**
+- Special Conditions: H2S Service, Corrosive, High Temperature, Cryogenic, etc.
+- NACE Requirement: MR0175, MR0103, or "Not Required"
+- Gauge Adaptor: Diaphragm Seal, Siphon, Remote Seal, Direct Mount
+- Source Service: Where fluid originates (Feed Gas, Diesel Oil, Cooling Water, etc.)
+
+🎯 DATA EXTRACTION RULES:
+- ✅ EXTRACT visible data from: Line tags, equipment tags, tables, notes, legends, schedules
+- ✅ INFER reasonable values when partially visible
+- ✅ CHECK borders/margins for process data tables or legends
+- ❌ ONLY use "N/A" when data is truly not available in the drawing
+- ❌ DON'T assume – if pressure is "45 bar", don't guess min/max, use "N/A"
+
+📦 JSON OUTPUT FORMAT:
 [
   {{
     "tag_number": "PT-101",
     "pid_no": "{drawing_info.get('drawing_number', 'N/A')}",
-    "line_no": "N/A",
-    "piping_class": "N/A",
-    "equipment_no": "N/A",
-    "service": "Pressure Measurement",
-    "fluid_state": "N/A",
-    "fluid_phase": "N/A",
-    "operating_pressure_min": "N/A",
-    "operating_pressure_norm": "N/A",
-    "operating_pressure_max": "N/A",
-    "operating_temp_min": "N/A",
-    "operating_temp_norm": "N/A",
-    "operating_temp_max": "N/A",
+    "line_no": "1\"-P-4001",
+    "piping_class": "150#",
+    "equipment_no": "C-101",
+    "service": "Compressor Discharge Pressure",
+    "fluid_state": "Gas",
+    "fluid_phase": "Single Phase",
+    "operating_pressure_min": "40",
+    "operating_pressure_norm": "45",
+    "operating_pressure_max": "50",
+    "operating_temp_min": "30",
+    "operating_temp_norm": "40",
+    "operating_temp_max": "45",
     "operating_differential_pressure": "N/A",
-    "design_pressure_min": "N/A",
-    "design_pressure_norm": "N/A",
-    "design_pressure_max": "N/A",
-    "source_service": "N/A",
-    "special_conditions": "N/A",
-    "density_min": "N/A",
-    "density_norm": "N/A",
-    "density_max": "N/A",
-    "viscosity_min": "N/A",
-    "viscosity_norm": "N/A",
-    "viscosity_max": "N/A",
-    "gauge_adaptor": "N/A",
-    "nace_requirement": "N/A",
-    "notes": "Extracted via simplified detection"
+    "design_pressure_min": "60",
+    "design_pressure_norm": "65",
+    "design_pressure_max": "70",
+    "source_service": "Natural Gas",
+    "special_conditions": "H2S Service",
+    "density_min": "15.0",
+    "density_norm": "18.5",
+    "density_max": "22.0",
+    "viscosity_min": "0.01",
+    "viscosity_norm": "0.015",
+    "viscosity_max": "0.02",
+    "gauge_adaptor": "Diaphragm Seal",
+    "nace_requirement": "MR0175",
+    "notes": "Critical alarm - monitor continuously"
   }}
 ]
 
-IMPORTANT: 
-- Return ONLY the JSON array
-- Include ALL pressure instrument tags you see
-- If you truly see NO pressure instruments, return []
+⚠️ CRITICAL: Extract ALL instruments you find with MAXIMUM data available from the drawing.
+Return ONLY the JSON array - no explanations, no markdown blocks.
 """
 
             response = self.openai_client.chat.completions.create(
@@ -520,7 +551,7 @@ IMPORTANT:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a P&ID instrument detector. Your ONLY job is to find pressure instrument tags (symbols starting with P) and return them as JSON."
+                        "content": "You are an expert P&ID analyzer specializing in process instrumentation. Extract ALL pressure instruments with MAXIMUM available data from drawings including: tags, line numbers, equipment connections, operating conditions, design parameters, fluid properties, and special requirements. Return comprehensive JSON data."
                     },
                     {
                         "role": "user",
@@ -536,8 +567,8 @@ IMPORTANT:
                         ]
                     }
                 ],
-                max_tokens=4096,
-                temperature=0.3
+                max_tokens=8000,
+                temperature=0.2
             )
             
             retry_response = response.choices[0].message.content
