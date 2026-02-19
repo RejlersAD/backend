@@ -21,8 +21,8 @@ class Command(BaseCommand):
             defaults={
                 'code': 'REJ_UAE',
                 'description': 'Default organization for Rejlers Oil & Gas AI Platform',
-                's3_bucket_name': 'rejlers-aiflow-storage',
-                's3_region': 'eu-west-1',
+                's3_bucket_name': 'user-management-rejlers',
+                's3_region': 'us-east-1',
                 'is_active': True,
                 'primary_contact_name': 'Admin',
                 'primary_contact_email': 'admin@rejlers.ae',

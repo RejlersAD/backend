@@ -1,15 +1,43 @@
-# Heavy ML packages for local development or specific modules
-# NOT INSTALLED ON RAILWAY by default (reduces image from 4.8GB to <1GB)
-# Install only if you need P&ID/PFD OCR processing: pip install -r requirements-ml.txt
+# ========================================================================
+# OPTIONAL MACHINE LEARNING & OCR DEPENDENCIES
+# ========================================================================
+# These packages are OPTIONAL and only needed if you're using ML/OCR features.
+# Uncommenting these will add ~1.5-3GB to the Docker image and increase build time by 5-10 minutes.
+# 
+# To enable ML features:
+# 1. Uncomment the packages you need below
+# 2. Rebuild the container: docker-compose build --no-cache backend_local
+# ========================================================================
 
-# OCR Dependencies (Heavy: ~1.5GB with all dependencies)
-pytesseract==0.3.13
-easyocr==1.7.2
-paddlepaddle==3.3.0
-paddleocr==3.3.3
-opencv-python-headless==4.10.0.84
+# ========================================================================
+# Deep Learning Frameworks
+# ========================================================================
+# torch>=2.0.0
+# torchvision>=0.15.0
+# tensorflow>=2.12.0
 
-# MLflow (if needed for ML experiments)
-mlflow==2.10.0
-mongoengine==0.28.2
-scipy>=1.11.0
+# ========================================================================
+# OCR (Optical Character Recognition)
+# ========================================================================
+# easyocr>=1.7.0              # Easy-to-use OCR supporting 80+ languages
+# paddleocr>=2.7.0            # PaddlePaddle-based OCR engine
+# pytesseract>=0.3.10         # Python wrapper for Tesseract OCR
+
+# ========================================================================
+# Computer Vision & Image Processing
+# ========================================================================
+# opencv-python>=4.8.0        # Computer vision library
+# Pillow>=10.0.0              # Image processing (usually already installed)
+
+# ========================================================================
+# NLP (Natural Language Processing)
+# ========================================================================
+# transformers>=4.30.0        # Hugging Face transformers
+# sentence-transformers>=2.2.0 # Sentence embeddings
+
+# ========================================================================
+# Scientific Computing (Heavy)
+# ========================================================================
+# scipy>=1.11.0               # Scientific computing
+# scikit-learn>=1.3.0         # Machine learning utilities
+

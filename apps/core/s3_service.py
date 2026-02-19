@@ -1,6 +1,7 @@
 """
 AWS S3 Service
 Comprehensive S3 operations for media and static files management
+Now with unified folder structure support
 """
 import boto3
 import os
@@ -11,6 +12,14 @@ from django.conf import settings
 from botocore.exceptions import ClientError
 import logging
 
+# Import unified folder configuration
+try:
+    from .unified_folder_config import UnifiedFolderConfig, get_folder, get_document_folder
+    UNIFIED_CONFIG_AVAILABLE = True
+except ImportError:
+    UNIFIED_CONFIG_AVAILABLE = False
+    print("⚠️ Unified folder config not available, using legacy folder structure")
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,10 +27,11 @@ class S3Service:
     """
     Centralized S3 service for all file operations
     Handles uploads, downloads, deletions, and presigned URLs
+    Now supports both legacy and unified folder structures
     """
     
-    # Folder structure mapping
-    FOLDERS = {
+    # Legacy folder structure mapping (maintained for backward compatibility)
+    LEGACY_FOLDERS = {
         'pid_drawings': 'media/pid_drawings/',
         'pid_reports': 'media/pid_reports/',
         'crs_documents': 'media/crs_documents/',
@@ -37,6 +47,9 @@ class S3Service:
         'backups_reports': 'backups/reports/',
         'logs': 'logs/',
     }
+    
+    # Keep FOLDERS for backward compatibility
+    FOLDERS = LEGACY_FOLDERS
     
     def __init__(self):
         """Initialize S3 client with credentials from environment"""
@@ -59,9 +72,63 @@ class S3Service:
         
         logger.info(f"[S3Service] Initialized with bucket: {self.bucket_name}, region: {self.region}")
     
-    def _get_folder(self, folder_type: str) -> str:
-        """Get the S3 folder path for a given type"""
-        return self.FOLDERS.get(folder_type, 'media/')
+    def _get_folder(self, folder_type: str, **kwargs) -> str:
+        """
+        Get the S3 folder path for a given type
+        Supports both legacy and unified folder structures
+        
+        Args:
+            folder_type: Type of folder
+            **kwargs: Additional parameters for unified path formatting
+            
+        Returns:
+            str: S3 folder path
+        """
+        # Try unified configuration first (if available and enabled)
+        unified_enabled = os.environ.get('RADAI_USE_UNIFIED_FOLDERS', 'false').lower() == 'true'
+        
+        if UNIFIED_CONFIG_AVAILABLE and unified_enabled:
+            try:
+                return get_folder(folder_type, **kwargs)
+            except Exception as e:
+                logger.warning(f"[S3Service] Unified folder lookup failed for '{folder_type}': {e}")
+                # Fall back to legacy
+        
+        # Use legacy folder structure
+        return self.LEGACY_FOLDERS.get(folder_type, 'media/')
+    
+    def get_document_folder(self, document_type: str, user_id: int = None) -> str:
+        """
+        Get appropriate folder for document type
+        Uses unified configuration when available
+        
+        Args:
+            document_type: Type of document
+            user_id: User ID for user-specific documents
+            
+        Returns:
+            str: Document folder path
+        """
+        unified_enabled = os.environ.get('RADAI_USE_UNIFIED_FOLDERS', 'false').lower() == 'true'
+        
+        if UNIFIED_CONFIG_AVAILABLE and unified_enabled:
+            try:
+                return get_document_folder(document_type, user_id)
+            except Exception as e:
+                logger.warning(f"[S3Service] Unified document folder lookup failed: {e}")
+        
+        # Fallback mapping for document types to legacy folders
+        doc_type_mapping = {
+            'pid_drawing': 'pid_drawings',
+            'pfd_document': 'pfd_files', 
+            'engineering_document': 'pid_reports',
+            'user_upload': 'exports',
+            'system_report': 'logs',
+            'crs_document': 'crs_documents',
+        }
+        
+        folder_type = doc_type_mapping.get(document_type, 'temp')
+        return self._get_folder(folder_type)
     
     def _generate_unique_filename(self, original_filename: str) -> str:
         """Generate a unique filename with timestamp and UUID"""

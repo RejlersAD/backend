@@ -986,8 +986,16 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             print(f"[DEBUG /rbac/users/me/] User authenticated: {request.user.is_authenticated}")
             print(f"[DEBUG /rbac/users/me/] User email: {getattr(request.user, 'email', 'N/A')}")
             
-            # Try to get existing profile
-            profile = UserProfile.objects.filter(
+            # Try to get existing profile with optimized query
+            # Use select_related and prefetch_related to avoid N+1 queries
+            profile = UserProfile.objects.select_related(
+                'user', 
+                'organization'
+            ).prefetch_related(
+                'roles',
+                'roles__permissions',  # Prefetch permissions through roles
+                'userrole_set__role'
+            ).filter(
                 user=request.user,
                 is_deleted=False
             ).first()

@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 # AWS S3 Configuration
 AWS_ACCESS_KEY = config('AWS_ACCESS_KEY_ID', default='')
 AWS_SECRET_KEY = config('AWS_SECRET_ACCESS_KEY', default='')
-AWS_REGION = config('AWS_REGION', default='me-central-1')
-S3_BUCKET = config('AWS_S3_BUCKET_NAME', default='rejlers-engineering-data')
+AWS_REGION = config('AWS_REGION', default='us-east-1')
+S3_BUCKET = config('AWS_S3_BUCKET_NAME', default='user-management-rejlers')
 
 # Initialize clients
 s3_client = boto3.client(

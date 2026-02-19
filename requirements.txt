@@ -1,3 +1,11 @@
+# ==========================================
+# AIFLOW - SINGLE SOURCE OF TRUTH
+# ONE requirements.txt for all environments
+# ==========================================
+
+# ==========================================
+# 1. DJANGO CORE (Required)
+# ==========================================
 Django==5.0.0
 djangorestframework==3.14.0
 django-cors-headers==4.3.1
@@ -8,120 +16,97 @@ python-dotenv==1.0.0
 dj-database-url==2.1.0
 gunicorn==21.2.0
 whitenoise==6.6.0
+
+# ==========================================
+# 2. ASYNC & WEBSOCKETS (Required)
+# ==========================================
 celery==5.3.4
 redis==5.0.1
-django-redis==5.4.0  # Redis cache backend for Django
-channels==4.0.0  # Django Channels for WebSocket support
-channels-redis==4.1.0  # Redis channel layer for WebSocket
-daphne==4.0.0  # ASGI server for Django Channels
+django-redis==5.4.0
+channels==4.0.0
+channels-redis==4.1.0
+daphne==4.0.0
+
+# ==========================================
+# 3. AUTHENTICATION & API (Required)
+# ==========================================
 djangorestframework-simplejwt==5.3.1
 drf-spectacular==0.27.0
-pillow==10.1.0
+
+# ==========================================
+# 4. AI APIs (Required)
+# ==========================================
 openai==1.54.3
+anthropic>=0.18.0
 httpx==0.27.2
-requests>=2.31.0  # For AWS S3 template downloads
-boto3==1.34.69  # AWS S3 for P&ID document storage
-openpyxl==3.1.2  # Excel file generation and manipulation
-reportlab==4.0.7  # PDF generation and manipulation
+requests>=2.31.0
+
+# ==========================================
+# 5. FILE PROCESSING (Required)
+# ==========================================
+pillow==10.1.0
 PyPDF2==3.0.1
 pdf2image==1.17.0
 pymupdf==1.24.0
-python-dateutil==2.8.2  # Date parsing
+reportlab==4.0.7
+openpyxl==3.1.2
+xlsxwriter==3.1.9
+python-docx==1.1.0
+python-dateutil==2.8.2
 
-# Full OCR Stack for P&ID Processing (Heavy: ~3-4GB with all dependencies)
-pytesseract==0.3.13  # OCR for P&ID and sales documents
+# ==========================================
+# 6. AWS S3 STORAGE (Required)
+# ==========================================
+boto3==1.34.69
+django-storages==1.14.2
+
+# Lightweight alternatives for Sales/Finance modules (no heavy ML needed)
+# Sales module uses rule-based AI - statistical calculations only
+
+# ==========================================
+# 7. GOOGLE SHEETS API (Required)
+# ==========================================
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.1.1
+google-auth-oauthlib>=1.1.0
+
+# ==========================================
+# 8. DATA PROCESSING & ML (Required)
+# ==========================================
+numpy>=1.24.0,<2.0
+pandas>=2.1.0
+scikit-learn>=1.3.0
+networkx==3.2.1
+
+# ==========================================
+# 9. OCR STACK (Optional - Heavy: ~3-4GB)
+# Comment out if not using P&ID/PFD OCR
+# ==========================================
+pytesseract==0.3.13
 easyocr==1.7.2
 paddlepaddle==3.3.0
 paddleocr==3.3.3
 opencv-python-headless==4.10.0.84
 
-# Lightweight alternatives for Sales/Finance modules (no heavy ML needed)
-# Sales module uses rule-based AI - statistical calculations only
-
-# Google Sheets API
-google-api-python-client>=2.100.0
-google-auth-httplib2>=0.1.1
-google-auth-oauthlib>=1.1.0
-
-# MongoDB - NoSQL database for reports and unstructured data
-# MongoDB removed - using PostgreSQL only
-
-# MLflow - REMOVED (Not used in application)
-# mlflow==2.10.0
-# scikit-learn==1.3.2  # Required by MLflow
-# pandas>=2.1.0  # Required by MLflow
-# scipy>=1.11.0  # Required for ML algorithms
-# mongoengine==0.28.2
-
-# AWS S3 Storage
-# boto3==1.34.21  # REMOVED: Duplicate - using boto3==1.34.69 from line 22
-django-storages==1.14.2
-
-# Report Export
-reportlab==4.0.7
-openpyxl==3.1.2
-xlsxwriter==3.1.9
-
-# Graph-based P&ID Layout
-networkx==3.2.1
-
-# RAG and Document Processing
-python-docx==1.1.0
-scikit-learn>=1.3.0
+# ==========================================
+# 10. UTILITIES (Required)
+# ==========================================
+tqdm>=4.66.0
 
 # ==========================================
-# ADVANCED AI/ML MODELS
-# ⚠️ HEAVY ML MODELS DISABLED FOR PERFORMANCE
+# NOTES:
 # ==========================================
-# YOLOv8, GNN, and RL models have been disabled in ai_models_config.py
-# These dependencies are commented out to reduce installation size and time
-# To re-enable: Uncomment the required packages and set enabled=True in config
-
-# YOLOv8 Object Detection (DISABLED)
-# ultralytics>=8.1.0  # YOLOv8 for symbol detection
-# opencv-python>=4.9.0  # Image processing (now using opencv-python-headless from OCR section)
-# opencv-contrib-python>=4.9.0  # Additional OpenCV features
+# • This is the SINGLE source of truth for dependencies
+# • Use same file for local development, Docker, and Railway
+# • To speed up local dev: Comment out OCR section (saves 3-4GB)
+# • Production (Railway/Docker): Install everything
+# • Heavy ML models (PyTorch, YOLOv8, etc.) removed - using cloud APIs
+# ==========================================
 
 # ==========================================
-# CLOUD-BASED AI MODELS (API-ONLY - NO LOCAL INSTALLATION)
+# TESTING (Optional)
 # ==========================================
-# All heavy ML models now use cloud APIs for better performance
-
-# Claude AI (Anthropic) - ACTIVE
-anthropic>=0.18.0  # Claude API client for engineering reasoning
-
-# Stable Diffusion XL - CLOUD-BASED (via API, not local)
-# diffusers>=0.27.0  # Hugging Face Diffusers (DISABLED - using cloud API)
-# transformers>=4.38.0  # Transformers (DISABLED - not needed)
-# accelerate>=0.27.0  # Fast training (DISABLED - not needed)
-# safetensors>=0.4.2  # Model weights (DISABLED - not needed)
-
-# PyTorch & Deep Learning (DISABLED - ALL LOCAL ML REMOVED)
-# torch>=2.2.0  # PyTorch core (DISABLED - 2GB+ with CUDA dependencies)
-# torchvision>=0.17.0  # Computer vision (DISABLED - not needed)
-# torchaudio>=2.2.0  # Audio processing (DISABLED - not needed)
-
-# Graph Neural Networks (DISABLED)
-# torch-geometric>=2.5.0  # PyG for GNN
-# NOTE: torch-scatter, torch-sparse, torch-cluster - NOT NEEDED
-
-# Reinforcement Learning (DISABLED)
-# gymnasium>=0.29.0  # OpenAI Gym successor
-# stable-baselines3>=2.2.0  # RL algorithms (PPO, etc.)
-# tensorboard>=2.15.0  # Training visualization
-
-# Florence-2 & Advanced Vision (Optional - enable when ready)
-# timm>=0.9.12  # PyTorch Image Models
-# einops>=0.7.0  # Tensor operations
-
-# Additional Utilities (Lightweight - keep for basic operations)
-numpy>=1.24.0,<2.0  # Array operations (compatible with pandas and pyarrow)
-tqdm>=4.66.0  # Progress bars
-
-# Heavy visualization libraries (DISABLED - not needed in backend)
-# scipy>=1.12.0  # Scientific computing (DISABLED)
-# matplotlib>=3.8.0  # Plotting (DISABLED)
-# seaborn>=0.13.0  # Statistical visualization (DISABLED)
-
-# Roboflow (Dataset Management - NOT NEEDED)
-# roboflow>=1.1.0  # Uncomment for dataset annotation
+# Uncomment if running pytest:
+# pytest==7.4.3
+# pytest-django==4.7.0
+# pytest-cov==4.1.0

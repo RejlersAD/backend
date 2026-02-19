@@ -1,6 +1,6 @@
 """
 Core App URL Configuration
-Includes S3 storage API endpoints
+Includes S3 storage API endpoints and dashboard APIs
 """
 from django.urls import path
 from .s3_views import (
@@ -14,10 +14,16 @@ from .s3_views import (
     S3FileCopyView,
     S3FolderListView,
 )
+from . import views
 
 app_name = 'core'
 
 urlpatterns = [
+    # Dashboard API endpoints
+    path('dashboard/stats/', views.dashboard_stats, name='dashboard-stats'),
+    path('dashboard/projects/', views.project_overview, name='project-overview'),
+    path('dashboard/health/', views.system_health_check, name='system-health'),
+    
     # S3 Storage Endpoints
     path('s3/health/', S3HealthCheckView.as_view(), name='s3-health'),
     path('s3/folders/', S3FolderListView.as_view(), name='s3-folders'),

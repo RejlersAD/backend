@@ -84,6 +84,12 @@ try:
     if '*' not in ALLOWED_HOSTS and not any(host.endswith('.railway.app') for host in ALLOWED_HOSTS):
         ALLOWED_HOSTS.append('.railway.app')
     
+    # Add Docker service names for local development
+    docker_hosts = ['backend_local:8000', 'backend:8000', 'localhost:8000', '127.0.0.1:8000']
+    for docker_host in docker_hosts:
+        if docker_host not in ALLOWED_HOSTS:
+            ALLOWED_HOSTS.append(docker_host)
+    
     print(f"[DJANGO] ALLOWED_HOSTS: {ALLOWED_HOSTS}")
 except Exception as e:
     print(f"[ERROR] ALLOWED_HOSTS configuration failed: {e}")
@@ -265,52 +271,153 @@ else:
 # End of Channel Layers Configuration
 # ==============================================================================
 
-# Database
-# WARNING CRITICAL: DATABASE_URL is REQUIRED for Railway deployment
-# Railway Env Var: DATABASE_URL=postgresql://postgres:PASSWORD@HOST:PORT/railway
-# Use DATABASE_URL if available (Railway), otherwise use individual DB settings
-try:
-    DATABASE_URL = config('DATABASE_URL', default='')
-    if DATABASE_URL:
-        db_config = dj_database_url.parse(DATABASE_URL)
-        # Add timeout options to prevent hanging
-        db_config['CONN_MAX_AGE'] = 60
-        db_config['OPTIONS'] = {
-            'connect_timeout': 10,  # Reduced from 30 to 10 seconds
-            'options': '-c statement_timeout=30000'
-        }
-        DATABASES = {'default': db_config}
-        print(f"[DJANGO] Using DATABASE_URL configuration")
-        print(f"[DJANGO] DB Host: {db_config.get('HOST', 'unknown')}")
-    else:
-        DATABASES = {
-            'default': {
+# ==============================================================================
+# DATABASE CONFIGURATION - PostgreSQL ONLY
+# ==============================================================================
+# HARD REQUIREMENT: PostgreSQL is the ONLY supported database
+# 
+# PRIORITY LOGIC (First match wins):
+#   1. DATABASE_URL exists → Use full PostgreSQL connection string (Railway/Render)
+#   2. DB_HOST exists → Use individual PostgreSQL credentials
+#   3. Neither exists → Application will NOT start (fail fast)
+#
+# CONFIGURATION:
+#   - Local Dev: .env.local with Railway PostgreSQL credentials
+#   - Production: Railway dashboard environment variables (same DB)
+#   - Container: docker-compose.yml passes env vars (no hardcoded defaults)
+#
+# WHY POSTGRESQL ONLY:
+#   ✅ Schema parity between dev and production (no migration surprises)
+#   ✅ Test with real data structure (275 users, realistic scenarios)
+#   ✅ PostgreSQL-specific features work everywhere (JSON fields, arrays, etc.)
+#   ✅ One codebase, one database engine, predictable behavior
+#   ✅ No SQLite fallback = fail fast on misconfiguration
+# ==============================================================================
+
+DATABASE_URL = config('DATABASE_URL', default='')
+DB_HOST = config('DB_HOST', default='')
+
+# Smart Database Connection: Test Railway, fallback to Local
+def test_database_connectivity(host, port, timeout=3):
+    """Quick connectivity test without full database connection"""
+    import socket
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except:
+        return False
+
+if DATABASE_URL:
+    # Priority 1: Railway-style connection string
+    db_config = dj_database_url.parse(DATABASE_URL)
+    
+    # Smart Connection: Test Railway accessibility
+    railway_host = db_config.get('HOST', '')
+    railway_port = db_config.get('PORT', 5432)
+    
+    # Check if this is Railway database and test connectivity
+    if 'railway' in railway_host or 'rlwy' in railway_host:
+        is_accessible = test_database_connectivity(railway_host, railway_port, timeout=5)
+        
+        if not is_accessible:
+            # Railway not accessible - fallback to local
+            print(f"⚠️  [DATABASE] Railway database not accessible: {railway_host}:{railway_port}")
+            print(f"🔄 [DATABASE] Auto-switching to local development database...")
+            
+            # Use local database as fallback (from DB_HOST environment variable)
+            local_host = DB_HOST or 'postgres_local'  # Default to postgres_local for Docker
+            local_port = config('DB_PORT', default='5432')
+            local_name = config('DB_NAME', default='aiflow_dev')
+            local_user = config('DB_USER', default='aiflow_user')
+            local_password = config('DB_PASSWORD', default='aiflow_local_pass_123')
+            
+            db_config = {
                 'ENGINE': 'django.db.backends.postgresql',
-                'NAME': config('DB_NAME', default='radai_db'),
-                'USER': config('DB_USER', default='postgres'),
-                'PASSWORD': config('DB_PASSWORD', default='postgres'),
-                'HOST': config('DB_HOST', default='db'),
-                'PORT': config('DB_PORT', default='5432'),
+                'NAME': local_name,
+                'USER': local_user,
+                'PASSWORD': local_password,
+                'HOST': local_host,
+                'PORT': int(local_port),
                 'CONN_MAX_AGE': 60,
                 'OPTIONS': {
                     'connect_timeout': 10,
                     'options': '-c statement_timeout=30000'
                 }
             }
+            DATABASES = {'default': db_config}
+            print(f"✅ [DATABASE] Using LOCAL fallback database")
+            print(f"   • Host: {local_host}")
+            print(f"   • Database: {local_name}")
+        else:
+            # Railway is accessible
+            db_config['CONN_MAX_AGE'] = 60
+            db_config['OPTIONS'] = {
+                'connect_timeout': 10,
+                'options': '-c statement_timeout=30000'
+            }
+            DATABASES = {'default': db_config}
+            print(f"✅ [DATABASE] Using DATABASE_URL (Railway PostgreSQL)")
+            print(f"   • Host: {db_config.get('HOST', 'unknown')}")
+            print(f"   • Database: {db_config.get('NAME', 'unknown')}")
+    else:
+        # Not Railway database, use as configured
+        db_config['CONN_MAX_AGE'] = 60
+        db_config['OPTIONS'] = {
+            'connect_timeout': 10,
+            'options': '-c statement_timeout=30000'
         }
-        print(f"[DJANGO] Using individual DB configuration")
-        print(f"[DJANGO] DB_HOST: {config('DB_HOST', default='db')}")
-except Exception as e:
-    print(f"[ERROR] Database configuration failed: {e}")
-    # Set a minimal database config to prevent crashes
+        DATABASES = {'default': db_config}
+        print(f"✅ [DATABASE] Using DATABASE_URL (Railway PostgreSQL)")
+        print(f"   • Host: {db_config.get('HOST', 'unknown')}")
+        print(f"   • Database: {db_config.get('NAME', 'unknown')}")
+elif DB_HOST:
+    # Priority 2: Individual PostgreSQL credentials
     DATABASES = {
         'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': config('DB_NAME', default='radai_db'),
+            'USER': config('DB_USER', default='postgres'),
+            'PASSWORD': config('DB_PASSWORD', default='postgres'),
+            'HOST': DB_HOST,
+            'PORT': config('DB_PORT', default='5432'),
+            'CONN_MAX_AGE': 60,
+            'OPTIONS': {
+                'connect_timeout': 10,
+                'options': '-c statement_timeout=30000'
+            }
         }
     }
-    print(f"[WARNING] Falling back to SQLite due to database configuration error")
-    print(f"[WARNING] Falling back to SQLite due to database configuration error")
+    print(f"✅ [DATABASE] Using PostgreSQL (individual credentials)")
+    print(f"   • Host: {DB_HOST}")
+    print(f"   • Database: {config('DB_NAME', default='radai_db')}")
+else:
+    # NO FALLBACK - Fail fast if PostgreSQL is not configured
+    print(f"\n{'='*70}")
+    print(f"❌ CRITICAL ERROR: PostgreSQL not configured!")
+    print(f"{'='*70}")
+    print(f"This application requires PostgreSQL. SQLite is NOT supported.")
+    print(f"\nPlease configure PostgreSQL using one of these methods:")
+    print(f"  1. Set DATABASE_URL environment variable (recommended for Railway)")
+    print(f"  2. Set DB_HOST, DB_NAME, DB_USER, DB_PASSWORD environment variables")
+    print(f"\nExample .env.local configuration:")
+    print(f"  DATABASE_URL=postgresql://user:password@host:port/database")
+    print(f"  OR")
+    print(f"  DB_HOST=localhost")
+    print(f"  DB_PORT=5432")
+    print(f"  DB_NAME=radai_db")
+    print(f"  DB_USER=postgres")
+    print(f"  DB_PASSWORD=yourpassword")
+    print(f"{'='*70}\n")
+    
+    # Raise exception to prevent application from starting
+    raise RuntimeError(
+        "PostgreSQL database not configured. "
+        "Set DATABASE_URL or DB_HOST environment variable. "
+        "SQLite is not supported."
+    )
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -772,6 +879,34 @@ if USE_S3:
         # Static files (CSS/JS) - use local storage
         STATIC_ROOT = BASE_DIR / 'staticfiles'
         STATIC_URL = '/static/'
+        
+        # ==================================================================
+        # RADAI S3 FOLDER STRUCTURE CONFIGURATION
+        # ==================================================================
+        
+        # Enable unified folder structure (soft migration approach)
+        RADAI_USE_UNIFIED_FOLDERS = config('RADAI_USE_UNIFIED_FOLDERS', default=False, cast=bool)
+        
+        # Optional folder prefix for multi-environment setups
+        RADAI_FOLDER_PREFIX = config('RADAI_FOLDER_PREFIX', default='')
+        
+        # Migration mode - enables special handling during S3 bucket consolidation
+        RADAI_MIGRATION_MODE = config('RADAI_MIGRATION_MODE', default=False, cast=bool)
+        
+        # Source buckets for migration (if needed)
+        RADAI_MIGRATION_SOURCE_BUCKETS = config('RADAI_MIGRATION_SOURCE_BUCKETS', default='')
+        
+        # Debug S3 operations (development only)
+        RADAI_S3_DEBUG = config('RADAI_S3_DEBUG', default=False, cast=bool) and DEBUG
+        
+        if RADAI_USE_UNIFIED_FOLDERS:
+            print("[S3] ✨ Using RADAI unified folder structure")
+        else:
+            print("[S3] 📁 Using legacy folder structure (backward compatibility)")
+            
+        if RADAI_FOLDER_PREFIX:
+            print(f"[S3] 🏷️  Folder prefix: {RADAI_FOLDER_PREFIX}")
+            
     else:
         # S3 enabled but bucket not configured - use local storage
         print("WARNING  USE_S3=True but AWS_STORAGE_BUCKET_NAME not set. Using local storage.")

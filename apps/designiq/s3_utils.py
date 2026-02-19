@@ -17,7 +17,8 @@ class S3DocumentStorage:
     
     def __init__(self):
         """Initialize S3 client with credentials from environment"""
-        self.bucket_name = config('AWS_STORAGE_BUCKET_NAME', default='radai-pid-documents')
+        # Standardized bucket with backward compatibility
+        self.bucket_name = config('AWS_STORAGE_BUCKET_NAME', default='user-management-rejlers')
         self.region = config('AWS_S3_REGION_NAME', default='us-east-1')
         
         # Initialize S3 client

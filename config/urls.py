@@ -6,6 +6,7 @@ from django.apps import apps
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from apps.core.cors_test_views import CorsTestView, cors_health_check, railway_health_check
 from apps.core.health_check import comprehensive_health_check, database_connectivity_check
+from apps.core.views import dashboard_stats as dashboard_stats_view
 from django.http import HttpResponse, JsonResponse
 from django.db import connection
 from django.core.exceptions import ImproperlyConfigured
@@ -137,6 +138,8 @@ urlpatterns = [
     
     # API endpoints - Core
     path('api/v1/', include('apps.api.urls')),
+    path('api/v1/core/', include('apps.core.urls')),  # Core app endpoints including dashboard
+    path('api/v1/dashboard/metrics/', dashboard_stats_view, name='dashboard-metrics'),  # Direct dashboard endpoint
     path('api/v1/rbac/', include('apps.rbac.urls')),
     path('api/v1/users/', include('apps.users.urls')),  # User management endpoints
     path('api/v1/enquiry/', include('apps.core.urls_enquiry')),  # Public enquiry endpoint

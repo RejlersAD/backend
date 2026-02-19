@@ -25,8 +25,8 @@ class S3PFDService:
     
     def __init__(self):
         # Use the configured bucket name directly
-        self.bucket_name = config('AWS_STORAGE_BUCKET_NAME', default='rejlers-engineering-data')
-        self.region = config('AWS_S3_REGION_NAME', default='me-central-1')
+        self.bucket_name = config('AWS_STORAGE_BUCKET_NAME', default='user-management-rejlers')
+        self.region = config('AWS_S3_REGION_NAME', default='us-east-1')
         self.access_key = config('AWS_ACCESS_KEY_ID', default='')
         self.secret_key = config('AWS_SECRET_ACCESS_KEY', default='')
         
