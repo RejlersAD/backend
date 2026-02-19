@@ -15,6 +15,7 @@ from django.conf import settings
 import logging
 import json
 import base64
+import traceback
 from openai import OpenAI
 from PIL import Image
 import io
@@ -148,59 +149,120 @@ class PressureInstrumentAnalyzer:
             list: Extracted pressure instrument data
         """
         if not self.openai_client:
-            logger.error("[PressureInstrument] OpenAI client not initialized")
+            logger.error("[PressureInstrument] ❌ OpenAI client not initialized - API key missing!")
+            logger.error("[PressureInstrument] Please set OPENAI_API_KEY in your .env file")
             return []
         
         try:
+            logger.info(f"[PressureInstrument] 📥 Received data type: {type(pid_image_data)}, size: {len(pid_image_data) if isinstance(pid_image_data, bytes) else 'unknown'}")
+            
             # Convert image to base64
             if isinstance(pid_image_data, bytes):
                 # Check if PDF
                 if pid_image_data[:4] == b'%PDF':
-                    logger.info("[PressureInstrument] Converting PDF to image...")
-                    # Convert PDF first page to image
-                    images = convert_from_bytes(pid_image_data, first_page=1, last_page=1, dpi=300)
-                    img = images[0]
+                    logger.info("[PressureInstrument] 📄 Detected PDF format - converting to image...")
+                    try:
+                        # Convert PDF first page to image
+                        images = convert_from_bytes(pid_image_data, first_page=1, last_page=1, dpi=200)
+                        img = images[0]
+                        logger.info(f"[PressureInstrument] ✅ PDF converted successfully: {img.width}x{img.height}")
+                    except Exception as pdf_error:
+                        logger.error(f"[PressureInstrument] ❌ PDF conversion failed: {pdf_error}")
+                        # Try alternative approach - just use raw bytes
+                        logger.info("[PressureInstrument] Attempting to use raw PDF bytes...")
+                        image_bytes = pid_image_data
+                        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+                        logger.warning(f"[PressureInstrument] ⚠️ Using raw PDF (may not work with OpenAI Vision): {len(base64_image)} chars")
+                        # Skip to prompt creation
+                        prompt = self._create_analysis_prompt(drawing_info)
+                        logger.info("[PressureInstrument] Sending P&ID to OpenAI Vision API for analysis...")
+                        return self._call_openai_vision_api(base64_image, prompt, drawing_info)
                     
-                    # Resize if too large (max 2048x2048 for OpenAI)
-                    max_size = 2048
+                    # Resize if too large (max 2000x2000 for better performance)
+                    max_size = 2000
                     if img.width > max_size or img.height > max_size:
-                        logger.info(f"[PressureInstrument] Resizing image from {img.width}x{img.height}")
-                        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                        logger.info(f"[PressureInstrument] 🔄 Resizing image from {img.width}x{img.height}")
+                        ratio = min(max_size / img.width, max_size / img.height)
+                        new_size = (int(img.width * ratio), int(img.height * ratio))
+                        img = img.resize(new_size, Image.Resampling.LANCZOS)
+                        logger.info(f"[PressureInstrument] ✅ Resized to: {img.width}x{img.height}")
+                    
+                    # Convert to RGB if needed (remove alpha channel)
+                    if img.mode in ('RGBA', 'LA', 'P'):
+                        logger.info(f"[PressureInstrument] Converting from {img.mode} to RGB")
+                        rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                        if img.mode == 'P':
+                            img = img.convert('RGBA')
+                        rgb_img.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                        img = rgb_img
                     
                     buffered = io.BytesIO()
-                    img.save(buffered, format="PNG", optimize=True)
+                    img.save(buffered, format="JPEG", quality=85, optimize=True)
                     image_bytes = buffered.getvalue()
-                    logger.info(f"[PressureInstrument] PDF converted to PNG: {len(image_bytes)} bytes")
+                    logger.info(f"[PressureInstrument] ✅ PDF converted to JPEG: {len(image_bytes)} bytes")
                 else:
                     # Already an image, just validate and potentially resize
                     try:
                         img = Image.open(io.BytesIO(pid_image_data))
-                        logger.info(f"[PressureInstrument] Image loaded: {img.format} {img.width}x{img.height}")
+                        logger.info(f"[PressureInstrument] 🖼️ Image loaded: {img.format} {img.width}x{img.height} mode={img.mode}")
                         
                         # Resize if too large
-                        max_size = 2048
+                        max_size = 2000
                         if img.width > max_size or img.height > max_size:
-                            logger.info(f"[PressureInstrument] Resizing image from {img.width}x{img.height}")
-                            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                            logger.info(f"[PressureInstrument] 🔄 Resizing image from {img.width}x{img.height}")
+                            ratio = min(max_size / img.width, max_size / img.height)
+                            new_size = (int(img.width * ratio), int(img.height * ratio))
+                            img = img.resize(new_size, Image.Resampling.LANCZOS)
+                            logger.info(f"[PressureInstrument] ✅ Resized to: {img.width}x{img.height}")
                         
-                        # Convert to PNG for consistency
+                        # Convert to RGB if needed
+                        if img.mode in ('RGBA', 'LA', 'P'):
+                            logger.info(f"[PressureInstrument] Converting from {img.mode} to RGB")
+                            rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                            if img.mode == 'P':
+                                img = img.convert('RGBA')
+                            rgb_img.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                            img = rgb_img
+                        
+                        # Convert to JPEG for better compression
                         buffered = io.BytesIO()
-                        img.save(buffered, format="PNG", optimize=True)
+                        img.save(buffered, format="JPEG", quality=85, optimize=True)
                         image_bytes = buffered.getvalue()
+                        logger.info(f"[PressureInstrument] ✅ Converted to JPEG: {len(image_bytes)} bytes")
                     except Exception as e:
-                        logger.warning(f"[PressureInstrument] Could not process as image: {e}, using raw bytes")
+                        logger.warning(f"[PressureInstrument] ⚠️ Could not process as image: {e}, using raw bytes")
                         image_bytes = pid_image_data
             else:
                 image_bytes = pid_image_data
             
-            logger.info(f"[PressureInstrument] Final image size: {len(image_bytes)} bytes")
+            logger.info(f"[PressureInstrument] 📊 Final image size: {len(image_bytes)} bytes ({len(image_bytes)/1024:.1f} KB)")
             base64_image = base64.b64encode(image_bytes).decode('utf-8')
-            logger.info(f"[PressureInstrument] Base64 encoded: {len(base64_image)} characters")
+            logger.info(f"[PressureInstrument] 🔐 Base64 encoded: {len(base64_image)} characters ({len(base64_image)/1024:.1f} KB)")
+            
+            # Validate base64 size (OpenAI has 20MB limit)
+            if len(base64_image) > 20 * 1024 * 1024:
+                logger.error(f"[PressureInstrument] ❌ Base64 image too large: {len(base64_image)/1024/1024:.1f} MB (max 20MB)")
+                return []
             
             # Create comprehensive AI prompt
             prompt = self._create_analysis_prompt(drawing_info)
             
-            logger.info("[PressureInstrument] Sending P&ID to OpenAI Vision API for analysis...")
+            logger.info("[PressureInstrument] 🚀 Sending P&ID to OpenAI Vision API for analysis...")
+            return self._call_openai_vision_api(base64_image, prompt, drawing_info)
+            
+        except Exception as e:
+            logger.error(f"[PressureInstrument] AI analysis error: {str(e)}")
+            logger.error(f"[PressureInstrument] Traceback: {traceback.format_exc()}")
+            return []
+
+    def _call_openai_vision_api(self, base64_image, prompt, drawing_info):
+        """
+        Call OpenAI Vision API with proper error handling.
+        Separated for reusability and cleaner code.
+        """
+        try:
+            logger.info("[PressureInstrument] 📞 Calling OpenAI Vision API...")
+            logger.info(f"[PressureInstrument] Model: gpt-4o, Max Tokens: 10000, Temperature: 0.1")
             
             # Call OpenAI Vision API with updated model
             # Using gpt-4o which has vision capabilities and is the latest model
@@ -247,7 +309,7 @@ class PressureInstrumentAnalyzer:
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/png;base64,{base64_image}",
+                                    "url": f"data:image/jpeg;base64,{base64_image}",
                                     "detail": "high"
                                 }
                             }
@@ -261,8 +323,7 @@ class PressureInstrumentAnalyzer:
             # Parse AI response
             ai_response = response.choices[0].message.content
             logger.info(f"[PressureInstrument] ✅ AI Response received: {len(ai_response)} characters")
-            logger.info(f"[PressureInstrument] 📄 Full AI Response:\n{ai_response}")
-            logger.info(f"[PressureInstrument] 📄 Response first 500 chars: {ai_response[:500]}")
+            logger.info(f"[PressureInstrument] 📄 Response first 1000 chars: {ai_response[:1000]}")
             
             # Extract structured data from AI response
             instruments = self._parse_ai_response(ai_response)
@@ -275,14 +336,16 @@ class PressureInstrumentAnalyzer:
                 logger.info(f"[PressureInstrument] 📊 Simplified detection found {len(instruments)} instruments")
             
             if not instruments:
-                logger.warning(f"[PressureInstrument] No instruments extracted from AI response")
+                logger.warning(f"[PressureInstrument] ❌ No instruments extracted from AI response")
                 logger.warning(f"[PressureInstrument] Response preview: {ai_response[:500]}")
             
-            logger.info(f"[PressureInstrument] Extracted {len(instruments)} pressure instruments")
+            logger.info(f"[PressureInstrument] ✅ Extracted {len(instruments)} pressure instruments")
             return instruments
             
         except Exception as e:
-            logger.error(f"[PressureInstrument] AI analysis error: {str(e)}")
+            logger.error(f"[PressureInstrument] ❌ OpenAI API call error: {str(e)}")
+            import traceback
+            logger.error(f"[PressureInstrument] Traceback: {traceback.format_exc()}")
             return []
 
     def _create_analysis_prompt(self, drawing_info):
@@ -560,7 +623,7 @@ Return ONLY the JSON array - no explanations, no markdown blocks.
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/png;base64,{base64_image}",
+                                    "url": f"data:image/jpeg;base64,{base64_image}",
                                     "detail": "high"
                                 }
                             }
