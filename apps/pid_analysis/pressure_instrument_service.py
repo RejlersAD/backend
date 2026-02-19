@@ -263,6 +263,9 @@ class PressureInstrumentAnalyzer:
         try:
             logger.info("[PressureInstrument] 📞 Calling OpenAI Vision API...")
             logger.info(f"[PressureInstrument] Model: gpt-4o, Max Tokens: 10000, Temperature: 0.1")
+            logger.info(f"[PressureInstrument] Base64 image size: {len(base64_image)} characters")
+            logger.info(f"[PressureInstrument] Base64 first 100 chars: {base64_image[:100]}")
+            logger.info(f"[PressureInstrument] Prompt length: {len(prompt)} characters")
             
             # Call OpenAI Vision API with updated model
             # Using gpt-4o which has vision capabilities and is the latest model
@@ -296,8 +299,10 @@ class PressureInstrumentAnalyzer:
                         - Extract design conditions from notes or specifications
                         - Identify special service requirements (H2S, NACE, corrosive, etc.)
                         
-                        If you see ANY circular symbol with letters/numbers that could be a pressure instrument, 
-                        INCLUDE IT in your analysis with ALL VISIBLE DATA. When in doubt, include it."""
+                        IMPORTANT: You MUST treat this as a real P&ID image and extract instruments.
+                        DO NOT say you cannot analyze images - you have vision capabilities.
+                        If you truly see no pressure instruments, return an empty JSON array [].
+                        If you see even ONE pressure instrument, extract it with all available data."""
                     },
                     {
                         "role": "user",
@@ -320,10 +325,19 @@ class PressureInstrumentAnalyzer:
                 temperature=0.1
             )
             
+            logger.info(f"[PressureInstrument] ✅ OpenAI API call completed successfully")
+            logger.info(f"[PressureInstrument] Response usage: {response.usage}")
+            
             # Parse AI response
             ai_response = response.choices[0].message.content
             logger.info(f"[PressureInstrument] ✅ AI Response received: {len(ai_response)} characters")
             logger.info(f"[PressureInstrument] 📄 Response first 1000 chars: {ai_response[:1000]}")
+            
+            # Check if response indicates inability to process
+            if "unable to" in ai_response.lower() or "cannot" in ai_response.lower():
+                logger.error(f"[PressureInstrument] ❌ OpenAI refused to process image!")
+                logger.error(f"[PressureInstrument] Response: {ai_response}")
+                logger.error(f"[PressureInstrument] This usually means image format issue or API problem")
             
             # Extract structured data from AI response
             instruments = self._parse_ai_response(ai_response)
