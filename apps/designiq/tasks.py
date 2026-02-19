@@ -169,36 +169,8 @@ def process_pid_upload_async(
         table_data = extractor.format_as_table_data(line_items)
         logger.info(f"[Task {task_id}] Extracted {len(table_data)} lines from {filename}")
         
-        # 🔥 IMMEDIATELY ADD DEFAULT VALUES TO ALL EXTRACTED LINES
-        for line in table_data:
-            line['flow_medium'] = 'default'
-            line['two_phase'] = 'default'
-            line['surge_flow'] = 'default'
-            line['flow_max'] = 'default'
-            line['density'] = 'default'
-            line['normal_pressure'] = 'default'
-            line['normal_temp'] = 'default'
-            line['design_pressure'] = 'default'
-            line['minimax_design_temp'] = 'default'
-            line['design_code'] = 'default'
-            line['category_m_fluid'] = 'default'
-            line['schedule_wall_thk'] = 'default'
-            line['stress_relief'] = 'default'
-            line['pwht'] = 'default'
-            line['rt'] = 'default'
-            line['mt_pt'] = 'default'
-            line['hardness'] = 'default'
-            line['visual'] = 'default'
-            line['nace_mr_0175'] = 'default'
-            line['piping_rated_pressure'] = 'default'
-            line['test_pressure'] = 'default'
-            line['test_medium'] = 'default'
-            line['pid_no'] = 'default'
-            line['pid_rev'] = 'default'
-            line['date'] = 'default'
-            line['criticality_code'] = 'default'
-        
-        logger.info(f"✅ ADDED 26 'default' VALUES TO ALL {len(table_data)} LINES")
+        # ✅ Base extraction complete (8 columns from P&ID OCR)
+        # AI enrichment will add 26 additional columns with real values from documents
         
         update_progress(75, 100, f'Saving {len(table_data)} items to database...')
         
