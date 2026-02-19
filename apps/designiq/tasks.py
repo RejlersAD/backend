@@ -188,7 +188,7 @@ def process_pid_upload_async(
         for line in table_data:
             for col in enrichment_columns:
                 if col not in line:
-                    line[col] = ''  # Empty - will be filled by AI if enrichment files provided
+                    line[col] = 'Pending'  # Placeholder - will be filled by AI if enrichment files provided
         
         logger.info(f"✅ Added 26 enrichment column placeholders to {len(table_data)} lines")
         
