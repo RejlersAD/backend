@@ -269,8 +269,6 @@ def process_pid_upload_async(
                         'sequence_no': line_data['sequence_no'],
                         'pipr_class': line_data['pipr_class'],
                         'insulation': line_data['insulation'],
-                        'from_equipment': line_data.get('from_equipment', ''),
-                        'to_equipment': line_data.get('to_equipment', ''),
                         'from_line': line_data.get('from_line', ''),
                         'to_line': line_data.get('to_line', ''),
                         'flow_detection_method': line_data.get('flow_detection_method', ''),
