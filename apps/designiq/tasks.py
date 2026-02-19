@@ -263,7 +263,6 @@ def process_pid_upload_async(
                         'include_area': include_area,
                         'page_number': line_data.get('page', 1),
                         'fluid_code': line_data['fluid_code'],
-                        'fluid_description': line_data['fluid_description'],
                         'size': line_data['size'],
                         'area': line_data.get('area', ''),
                         'sequence_no': line_data['sequence_no'],
