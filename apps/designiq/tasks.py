@@ -169,37 +169,6 @@ def process_pid_upload_async(
         table_data = extractor.format_as_table_data(line_items)
         logger.info(f"[Task {task_id}] Extracted {len(table_data)} lines from {filename}")
         
-        # 🔥 IMMEDIATELY ADD DEFAULT VALUES TO ALL EXTRACTED LINES
-        for line in table_data:
-            line['flow_medium'] = 'default'
-            line['two_phase'] = 'default'
-            line['surge_flow'] = 'default'
-            line['flow_max'] = 'default'
-            line['density'] = 'default'
-            line['normal_pressure'] = 'default'
-            line['normal_temp'] = 'default'
-            line['design_pressure'] = 'default'
-            line['minimax_design_temp'] = 'default'
-            line['design_code'] = 'default'
-            line['category_m_fluid'] = 'default'
-            line['schedule_wall_thk'] = 'default'
-            line['stress_relief'] = 'default'
-            line['pwht'] = 'default'
-            line['rt'] = 'default'
-            line['mt_pt'] = 'default'
-            line['hardness'] = 'default'
-            line['visual'] = 'default'
-            line['nace_mr_0175'] = 'default'
-            line['piping_rated_pressure'] = 'default'
-            line['test_pressure'] = 'default'
-            line['test_medium'] = 'default'
-            line['pid_no'] = 'default'
-            line['pid_rev'] = 'default'
-            line['date'] = 'default'
-            line['criticality_code'] = 'default'
-        
-        logger.info(f"✅ ADDED 26 'default' VALUES TO ALL {len(table_data)} LINES")
-        
         update_progress(75, 100, f'Saving {len(table_data)} items to database...')
         
         created_items = []
@@ -212,7 +181,7 @@ def process_pid_upload_async(
                     update_progress(progress, 100, f'Saving item {idx+1}/{len(table_data)}...')
                 
                 item_data = {
-                    'description': f"{line_data.get('flow_medium', 'Line')} - {line_data['size']}",
+                    'description': f"{line_data['fluid_description']} Line - {line_data['size']}",
                     'status': 'pending',
                     'is_validated': False,
                     'data': {
@@ -227,42 +196,18 @@ def process_pid_upload_async(
                         'include_area': include_area,
                         'page_number': line_data.get('page', 1),
                         'fluid_code': line_data['fluid_code'],
+                        'fluid_description': line_data['fluid_description'],
                         'size': line_data['size'],
                         'area': line_data.get('area', ''),
                         'sequence_no': line_data['sequence_no'],
                         'pipr_class': line_data['pipr_class'],
                         'insulation': line_data['insulation'],
+                        'from_equipment': line_data.get('from_equipment', ''),
+                        'to_equipment': line_data.get('to_equipment', ''),
                         'from_line': line_data.get('from_line', ''),
                         'to_line': line_data.get('to_line', ''),
                         'flow_detection_method': line_data.get('flow_detection_method', ''),
-                        'flow_confidence': line_data.get('flow_confidence', ''),
-                        # 26 Gen AI Enrichment columns
-                        'flow_medium': line_data.get('flow_medium', 'default'),
-                        'two_phase': line_data.get('two_phase', 'default'),
-                        'surge_flow': line_data.get('surge_flow', 'default'),
-                        'flow_max': line_data.get('flow_max', 'default'),
-                        'density': line_data.get('density', 'default'),
-                        'normal_pressure': line_data.get('normal_pressure', 'default'),
-                        'normal_temp': line_data.get('normal_temp', 'default'),
-                        'design_pressure': line_data.get('design_pressure', 'default'),
-                        'minimax_design_temp': line_data.get('minimax_design_temp', 'default'),
-                        'design_code': line_data.get('design_code', 'default'),
-                        'category_m_fluid': line_data.get('category_m_fluid', 'default'),
-                        'schedule_wall_thk': line_data.get('schedule_wall_thk', 'default'),
-                        'stress_relief': line_data.get('stress_relief', 'default'),
-                        'pwht': line_data.get('pwht', 'default'),
-                        'rt': line_data.get('rt', 'default'),
-                        'mt_pt': line_data.get('mt_pt', 'default'),
-                        'hardness': line_data.get('hardness', 'default'),
-                        'visual': line_data.get('visual', 'default'),
-                        'nace_mr_0175': line_data.get('nace_mr_0175', 'default'),
-                        'piping_rated_pressure': line_data.get('piping_rated_pressure', 'default'),
-                        'test_pressure': line_data.get('test_pressure', 'default'),
-                        'test_medium': line_data.get('test_medium', 'default'),
-                        'pid_no': line_data.get('pid_no', 'default'),
-                        'pid_rev': line_data.get('pid_rev', 'default'),
-                        'date': line_data.get('date', 'default'),
-                        'criticality_code': line_data.get('criticality_code', 'default')
+                        'flow_confidence': line_data.get('flow_confidence', '')
                     },
                     'attachments': [{
                         'type': 'pid_pdf',
@@ -300,46 +245,92 @@ def process_pid_upload_async(
         logger.info(f"   Base columns: Line Number, Size, Fluid Code, Area, Sequence, PIPR Class, Insulation, From-To")
         logger.info("=" * 80)
         
-        # 🔥 QUICK FIX: Add default enrichment columns to EVERY line immediately
-        logger.info("🔥 ADDING DEFAULT ENRICHMENT COLUMNS TO ALL LINES")
-        default_enrichment = {
-            'flow_medium': 'default',
-            'two_phase': 'default',
-            'surge_flow': 'default',
-            'flow_max': 'default',
-            'density': 'default',
-            'normal_pressure': 'default',
-            'normal_temp': 'default',
-            'design_pressure': 'default',
-            'minimax_design_temp': 'default',
-            'design_code': 'default',
-            'category_m_fluid': 'default',
-            'schedule_wall_thk': 'default',
-            'stress_relief': 'default',
-            'pwht': 'default',
-            'rt': 'default',
-            'mt_pt': 'default',
-            'hardness': 'default',
-            'visual': 'default',
-            'nace_mr_0175': 'default',
-            'piping_rated_pressure': 'default',
-            'test_pressure': 'default',
-            'test_medium': 'default',
-            'pid_no': 'default',
-            'pid_rev': 'default',
-            'date': 'default',
-            'criticality_code': 'default'
-        }
-        
-        for line in table_data:
-            line.update(default_enrichment)
-        
-        logger.info(f"✅ Added 26 default enrichment columns to {len(table_data)} lines")
-        logger.info(f"   Total columns per line now: {len(table_data[0].keys())}")
-        
-        # Set enriched_data to table_data (which now has defaults)
-        enriched_data = table_data
-        logger.info(f"✅ Enriched data = table_data with {len(enriched_data)} lines and {len(enriched_data[0].keys()) if enriched_data else 0} columns per line")
+        # ENRICHMENT LAYER: Requires ALL 3 documents (HMB + PMS + NACE) for enrichment
+        enriched_data = []
+        if enrichment_files:
+            has_hmb = 'hmb' in enrichment_files
+            has_pms = 'pms' in enrichment_files
+            has_nace = 'nace' in enrichment_files
+            
+            if has_hmb and has_pms and has_nace:
+                try:
+                    logger.info(f"🚀 STEP 2: Base 8 columns extracted from P&ID ✅")
+                    logger.info(f"🚀 STEP 3: Starting enrichment with all 3 documents...")
+                    update_progress(96, 100, 'Running AI enrichment (HMB+PMS+NACE)...')
+                    
+                    # Check file sizes before processing
+                    hmb_size = len(enrichment_files['hmb']['content']) / (1024 * 1024)
+                    pms_size = len(enrichment_files['pms']['content']) / (1024 * 1024)
+                    nace_size = len(enrichment_files['nace']['content']) / (1024 * 1024)
+                    total_size = hmb_size + pms_size + nace_size
+                    
+                    logger.info(f"📊 Enrichment files: HMB={hmb_size:.1f}MB, PMS={pms_size:.1f}MB, NACE={nace_size:.1f}MB (Total: {total_size:.1f}MB)")
+                    
+                    # Safety check: Skip if files too large (prevent crash)
+                    if total_size > 50:
+                        logger.warning(f"⚠️ Enrichment files too large ({total_size:.1f}MB > 50MB limit) - Skipping enrichment to prevent crash")
+                        logger.info(f"→ Returning base 8 columns only")
+                        enriched_data = []
+                    else:
+                        from designiq.services.enrichment_service import get_enrichment_service
+                        
+                        enrichment_service = get_enrichment_service()
+                        
+                        # Extract text from enrichment documents
+                        logger.info(f"📊 Extracting text from HMB...")
+                        hmb_text = extract_text_from_file(enrichment_files['hmb'])
+                        logger.info(f"   └─ Extracted {len(hmb_text)} chars")
+                        
+                        logger.info(f"🔧 Extracting text from PMS...")
+                        pms_text = extract_text_from_file(enrichment_files['pms'])
+                        logger.info(f"   └─ Extracted {len(pms_text)} chars")
+                        
+                        logger.info(f"⚗️ Extracting text from NACE...")
+                        nace_text = extract_text_from_file(enrichment_files['nace'])
+                        logger.info(f"   └─ Extracted {len(nace_text)} chars")
+                        
+                        # Extract text from P&ID for metadata (pid_no, pid_rev, date)
+                        logger.info(f"📄 Extracting text from P&ID for metadata...")
+                        pid_text = ""
+                        try:
+                            # P&ID is already loaded at local_file_path
+                            import fitz  # PyMuPDF
+                            pid_doc = fitz.open(local_file_path)
+                            # Extract text from first page (title block usually on first page)
+                            pid_text = pid_doc[0].get_text()
+                            pid_doc.close()
+                            logger.info(f"   └─ Extracted {len(pid_text)} chars from P&ID")
+                        except Exception as pid_err:
+                            logger.warning(f"   └─ Failed to extract P&ID text: {pid_err}")
+                        
+                        logger.info(f"🤖 Running AI enrichment on {len(table_data)} lines...")
+                        # Run enrichment (preserves base 8 columns, adds 26 new columns)
+                        enriched_data = enrichment_service.enrich_lines(
+                            base_lines=table_data,
+                            hmb_text=hmb_text,
+                            pms_text=pms_text,
+                            nace_text=nace_text,
+                            pid_text=pid_text
+                        )
+                        
+                        if enriched_data:
+                            logger.info(f"✅ STEP 4: Enrichment complete! {len(enriched_data)} lines with {len(enriched_data[0].keys())} total columns")
+                            update_progress(98, 100, 'Enrichment complete!')
+                        else:
+                            logger.warning(f"⚠️ Enrichment returned empty - using base 8 columns")
+                    
+                except Exception as e:
+                    logger.error(f"⚠️ Enrichment failed (returning base 8 columns): {e}", exc_info=True)
+                    enriched_data = []  # Fallback to base extraction only
+            else:
+                missing = []
+                if not has_hmb: missing.append("HMB")
+                if not has_pms: missing.append("PMS")
+                if not has_nace: missing.append("NACE")
+                logger.info(f"⚠️ Enrichment skipped - Missing: {', '.join(missing)}")
+                logger.info(f"→ Returning base 8 columns only (need all 3 docs for full enrichment)")
+        else:
+            logger.info("→ No enrichment docs provided - Returning base 8 columns from P&ID")
         
         if storage_type == 's3':
             try:
@@ -349,23 +340,13 @@ def process_pid_upload_async(
         
         total_items = len(created_items) + len(updated_items)
         
-        # DEBUG: Log what we're returning
-        logger.info("="*80)
-        logger.info("🔍 PREPARING TASK RESULT")
-        logger.info(f"   - Base extraction (extracted_lines): {len(table_data)} items")
-        logger.info(f"   - Enriched data: {len(enriched_data) if enriched_data else 0} items")
-        if enriched_data:
-            logger.info(f"   - Enriched data columns: {len(enriched_data[0].keys())} keys")
-            logger.info(f"   - Sample enriched keys: {list(enriched_data[0].keys())[:10]}")
-        logger.info("="*80)
-        
         result = {
             'success': True,
             'filename': filename,
             'document_id': document_id,
             'document_path': file_path,
             'storage_type': storage_type,
-            's3_url': s3_url,
+'s3_url': s3_url,
             'items_created': len(created_items),
             'items_updated': len(updated_items),
             'total_items': total_items,
@@ -379,11 +360,6 @@ def process_pid_upload_async(
                 else '✅ P&ID processed: Base 8 columns (provide HMB+PMS+NACE for full enrichment)'
             )
         }
-        
-        logger.info("="*80)
-        logger.info("🚀 TASK RESULT PREPARED - RETURNING TO VIEW")
-        logger.info(f"   - enriched_data in result: {len(result.get('enriched_data', []))} items")
-        logger.info("="*80)
         
         cache.set(cache_key, {
             'state': 'SUCCESS',
