@@ -169,8 +169,55 @@ def process_pid_upload_async(
         table_data = extractor.format_as_table_data(line_items)
         logger.info(f"[Task {task_id}] Extracted {len(table_data)} lines from {filename}")
         
-        # ✅ Base extraction complete (8 columns from P&ID OCR)
-        # AI enrichment will add 26 additional columns with real values from documents
+        # ✅ STEP 1 COMPLETE: Base extraction (9 columns from LOCKED logic)
+        logger.info("=" * 80)
+        logger.info(f"✅ STEP 1 COMPLETE: Base extraction with {len(table_data)} lines")
+        logger.info(f"   Base columns: {list(table_data[0].keys()) if table_data else []}")
+        logger.info("=" * 80)
+        
+        # 🚀 STEP 2: INTELLIGENT ENRICHMENT (26 additional columns from commit 8f82346)
+        # This adds enrichment WITHOUT modifying the locked base extraction logic
+        enriched_data = table_data  # Start with base data
+        
+        if hmb_file or pms_file or nace_file:
+            try:
+                logger.info("=" * 80)
+                logger.info("🚀 STEP 2: Running intelligent enrichment (commit 8f82346 logic)")
+                logger.info("=" * 80)
+                
+                # Import enrichment service (from commit 8f82346)
+                from designiq.services.enrichment_service import EnrichmentService
+                enrichment_service = EnrichmentService()
+                
+                # Extract text from enrichment documents
+                hmb_text = extract_text_from_file(hmb_file) if hmb_file else None
+                pms_text = extract_text_from_file(pms_file) if pms_file else None
+                nace_text = extract_text_from_file(nace_file) if nace_file else None
+                
+                logger.info(f"   📄 HMB text: {len(hmb_text) if hmb_text else 0} chars")
+                logger.info(f"   📄 PMS text: {len(pms_text) if pms_text else 0} chars")
+                logger.info(f"   📄 NACE text: {len(nace_text) if nace_text else 0} chars")
+                
+                # Enrich with 26 additional columns
+                enriched_data = enrichment_service.enrich_lines(
+                    base_lines=table_data,  # LOCKED base 9 columns
+                    hmb_text=hmb_text,
+                    pms_text=pms_text,
+                    nace_text=nace_text
+                )
+                
+                logger.info("=" * 80)
+                logger.info(f"✅ STEP 2 COMPLETE: Enrichment added {len(enriched_data[0].keys()) - len(table_data[0].keys())} columns")
+                logger.info(f"   Total columns: {len(enriched_data[0].keys())} (9 base + 26 enriched)")
+                logger.info("=" * 80)
+                
+            except Exception as enrich_err:
+                logger.error(f"❌ Enrichment failed: {enrich_err}")
+                logger.info("→ Continuing with base 9 columns only")
+                enriched_data = table_data
+        
+        # Use enriched data for database saving
+        table_data = enriched_data
         
         update_progress(75, 100, f'Saving {len(table_data)} items to database...')
         
@@ -183,35 +230,52 @@ def process_pid_upload_async(
                     progress = 75 + int((idx / len(table_data)) * 20)
                     update_progress(progress, 100, f'Saving item {idx+1}/{len(table_data)}...')
                 
+                # Build data dict with base columns + enrichment columns dynamically
+                data_dict = {
+                    'source': 'pid_ocr_async',
+                    'filename': filename,
+                    'document_id': document_id,
+                    'document_path': file_path,
+                    'storage_type': storage_type,
+                    's3_url': s3_url,
+                    'upload_timestamp': timezone.now().isoformat(),
+                    'format_type': format_type,
+                    'include_area': include_area,
+                    'page_number': line_data.get('page', 1),
+                    # Base 9 columns (LOCKED - from base extraction)
+                    'fluid_code': line_data['fluid_code'],
+                    'fluid_description': line_data['fluid_description'],
+                    'size': line_data['size'],
+                    'area': line_data.get('area', ''),
+                    'sequence_no': line_data['sequence_no'],
+                    'pipr_class': line_data['pipr_class'],
+                    'insulation': line_data['insulation'],
+                    'from_equipment': line_data.get('from_equipment', ''),
+                    'to_equipment': line_data.get('to_equipment', ''),
+                    'from_line': line_data.get('from_line', ''),
+                    'to_line': line_data.get('to_line', ''),
+                    'flow_detection_method': line_data.get('flow_detection_method', ''),
+                    'flow_confidence': line_data.get('flow_confidence', '')
+                }
+                
+                # Add enrichment columns dynamically if present (26 additional columns)
+                enrichment_keys = [
+                    'flow_medium', 'two_phase', 'surge_flow', 'flow_max', 'density',
+                    'normal_pressure', 'normal_temp', 'design_pressure', 'minimax_design_temp',
+                    'design_code', 'category_m_fluid', 'schedule_wall_thk', 'stress_relief',
+                    'pwht', 'rt', 'mt_pt', 'hardness', 'visual', 'nace_mr_0175',
+                    'piping_rated_pressure_ambient', 'test_pressure', 'test_medium',
+                    'pid_no', 'pid_rev', 'date', 'criticality_code'
+                ]
+                for key in enrichment_keys:
+                    if key in line_data:
+                        data_dict[key] = line_data[key]
+                
                 item_data = {
                     'description': f"{line_data['fluid_description']} Line - {line_data['size']}",
                     'status': 'pending',
                     'is_validated': False,
-                    'data': {
-                        'source': 'pid_ocr_async',
-                        'filename': filename,
-                        'document_id': document_id,
-                        'document_path': file_path,
-                        'storage_type': storage_type,
-                        's3_url': s3_url,
-                        'upload_timestamp': timezone.now().isoformat(),
-                        'format_type': format_type,
-                        'include_area': include_area,
-                        'page_number': line_data.get('page', 1),
-                        'fluid_code': line_data['fluid_code'],
-                        'fluid_description': line_data['fluid_description'],
-                        'size': line_data['size'],
-                        'area': line_data.get('area', ''),
-                        'sequence_no': line_data['sequence_no'],
-                        'pipr_class': line_data['pipr_class'],
-                        'insulation': line_data['insulation'],
-                        'from_equipment': line_data.get('from_equipment', ''),
-                        'to_equipment': line_data.get('to_equipment', ''),
-                        'from_line': line_data.get('from_line', ''),
-                        'to_line': line_data.get('to_line', ''),
-                        'flow_detection_method': line_data.get('flow_detection_method', ''),
-                        'flow_confidence': line_data.get('flow_confidence', '')
-                    },
+                    'data': data_dict,
                     'attachments': [{
                         'type': 'pid_pdf',
                         'filename': filename,
