@@ -94,51 +94,78 @@ class EnrichmentService:
         logger.debug(f"📄 PMS preview: {pms_text[:200]}...")
         logger.debug(f"📄 NACE preview: {nace_text[:200]}...")
         
-        logger.info(f"🚀 Starting AI-powered enrichment for {len(base_lines)} lines (All 3 docs provided)")
-        logger.info("🤖 Using OpenAI GPT-4 to intelligently extract 26 enrichment columns from documents")
+        logger.info(f"🚀 Starting enrichment for {len(base_lines)} lines (All 3 docs provided)")
+        
+        # 🧪 TEMPORARY TEST MODE: Hardcoded values to test frontend/backend connection
+        logger.warning("="*80)
+        logger.warning("🧪 TEST MODE: Using hardcoded default values for all enrichment columns")
+        logger.warning("="*80)
         
         try:
             enriched_lines = []
             
             for idx, line in enumerate(base_lines):
-                line_id = line.get('original_detection', f'Line-{idx+1}')
-                logger.info(f"🔄 Processing line {idx+1}/{len(base_lines)}: {line_id}")
+                logger.info(f"Processing line {idx+1}/{len(base_lines)}: {line.get('original_detection', 'N/A')}")
                 
-                # Start with base columns (PRESERVED FROM P&ID OLD LOCKED LOGIC - 9 columns)
+                # Start with base columns (PRESERVED FROM OLD LOGIC)
                 enriched_line = {
-                    'line_number': line.get('line_number', ''),
-                    'size': line.get('size', ''),
+                    'original_detection': line.get('original_detection', ''),
                     'fluid_code': line.get('fluid_code', ''),
+                    'size': line.get('size', ''),
                     'area': line.get('area', ''),
                     'sequence_no': line.get('sequence_no', ''),
                     'pipr_class': line.get('pipr_class', ''),
                     'insulation': line.get('insulation', ''),
-                    'from_line': line.get('from_line', ''),
-                    'to_line': line.get('to_line', ''),
-                    'flow_detection_method': line.get('flow_detection_method', ''),
-                    'flow_confidence': line.get('flow_confidence', ''),
-                    'page': line.get('page', 1),
-                    'confidence': line.get('confidence', 'medium')
+                    'from': line.get('from', ''),
+                    'to': line.get('to', '')
                 }
                 
-                # 🤖 AI ENRICHMENT: Extract intelligent values from all 4 documents
-                logger.info(f"   🧠 Calling OpenAI to extract enrichment data for {line_id}...")
-                enrichment_data = self._extract_enrichment_data(
-                    line=line,
-                    hmb_text=hmb_text,
-                    pms_text=pms_text,
-                    nace_text=nace_text,
-                    pid_text=pid_text
-                )
+                # 🧪 HARDCODED TEST DATA - All enrichment columns with visible test values
+                enrichment_data = {
+                    'flow_medium': 'TEST: Water',
+                    'two_phase': 'TEST: No',
+                    'surge_flow': 'TEST: 150 GPM',
+                    'flow_max': 'TEST: 200 GPM',
+                    'density': 'TEST: 62.4 lb/ft3',
+                    'normal_pressure': 'TEST: 100 psig',
+                    'normal_temp': 'TEST: 70°F',
+                    'design_pressure': 'TEST: 150 psig',
+                    'minimax_design_temp': 'TEST: -20/300°F',
+                    'design_code': 'TEST: ASME B31.3',
+                    'category_m_fluid': 'TEST: Normal',
+                    'schedule_wall_thk': 'TEST: Sch 40',
+                    'stress_relief': 'TEST: No',
+                    'pwht': 'TEST: No',
+                    'rt': 'TEST: 10%',
+                    'mt_pt': 'TEST: Yes',
+                    'hardness': 'TEST: HB 200 Max',
+                    'visual': 'TEST: 100%',
+                    'nace_mr_0175': 'TEST: Not Required',
+                    'piping_rated_pressure': 'TEST: 300#',
+                    'test_pressure': 'TEST: 225 psig',
+                    'test_medium': 'TEST: Water',
+                    'pid_no': 'TEST: PID-001',
+                    'pid_rev': 'TEST: Rev A',
+                    'date': 'TEST: 2026-02-19',
+                    'criticality_code': 'TEST: C'
+                }
                 
-                # LOCK: Ensure all 26 enrichment columns exist (even if empty)
-                empty_enrichment = self._get_empty_enrichment_columns()
-                for key in empty_enrichment:
-                    if key not in enrichment_data:
-                        enrichment_data[key] = ""
+                logger.info(f"✅ Line {idx+1} enriched with {len(enrichment_data)} TEST columns")
                 
-                filled_count = len([v for v in enrichment_data.values() if v and v.strip()])
-                logger.info(f"   ✅ Line {idx+1} enriched: {filled_count}/26 columns filled by AI")
+                # # COMMENTED: Original AI enrichment logic (will uncomment after testing)
+                # enrichment_data = self._extract_enrichment_data(
+                #     line=line,
+                #     hmb_text=hmb_text,
+                #     pms_text=pms_text,
+                #     nace_text=nace_text,
+                #     pid_text=pid_text
+                # )
+                # 
+                # # LOCK: Ensure all 26 enrichment columns exist (even if empty)
+                # empty_enrichment = self._get_empty_enrichment_columns()
+                # for key in empty_enrichment:
+                #     if key not in enrichment_data:
+                #         enrichment_data[key] = ""
                 
                 # Merge enrichment into base (8 + 26 = 34 columns GUARANTEED)
                 enriched_line.update(enrichment_data)
@@ -148,7 +175,7 @@ class EnrichmentService:
                 logger.info(f"📦 Enriched line {idx+1} data sample: {list(enriched_line.keys())[:5]}... (Total: {len(enriched_line)} keys)")
             
             logger.info("="*80)
-            logger.info(f"✅ Enrichment complete: {len(enriched_lines)} lines with {len(enriched_lines[0].keys())} columns (9 base + 26 enriched = 35 total)")
+            logger.info(f"✅ Enrichment complete: {len(enriched_lines)} lines with {len(enriched_lines[0].keys())} columns (8 base + 26 enriched = 34 total)")
             logger.info(f"🔍 First line sample enrichment columns:")
             if enriched_lines:
                 sample = enriched_lines[0]
@@ -157,8 +184,8 @@ class EnrichmentService:
                 logger.info(f"   - design_code: {sample.get('design_code', 'MISSING')}")
             logger.info("="*80)
             
-            # FINAL VALIDATION: Ensure every line has exactly 35 columns
-            expected_total = 35
+            # FINAL VALIDATION: Ensure every line has exactly 34 columns
+            expected_total = 34
             for idx, line in enumerate(enriched_lines):
                 if len(line.keys()) != expected_total:
                     logger.warning(f"⚠️ Line {idx} has {len(line.keys())} columns, expected {expected_total}. Fixing...")
@@ -545,16 +572,14 @@ EXAMPLES OF GOOD VALUES:
     def _get_empty_enrichment_columns(self) -> Dict:
         """
         Returns empty enrichment columns when AI fails
-        LOCKED STRUCTURE: 26 Gen AI columns (9 base from P&ID + 26 Gen AI = 35 total)
+        LOCKED STRUCTURE: 26 additional columns (8 base + 26 = 34 total)
         
-        Base columns from P&ID: Line Number, Size, Fluid Code, Area, Sequence No, PIPR Class, Insulation, From, To
-        
-        Gen AI columns (26):
+        CORRECT COLUMNS as per user requirements:
         1. Flow Medium, 2. Two Phase, 3. Surge Flow, 4. Flow Max, 5. Density,
         6. Normal Pressure, 7. Normal Temp, 8. Design Pressure, 9. Minimax Design Temp,
         10. Design Code, 11. Category-M Fluid, 12. Schedule / Wall THK, 13. Stress Relief,
         14. PWHT, 15. RT, 16. MT/PT, 17. Hardness, 18. Visual, 19. NACE-MR-0175,
-        20. Piping Rated Pressure, 21. Test Pressure, 22. Test Medium,
+        20. Piping Rated Pressure at Ambient Condition, 21. Test Pressure, 22. Test Medium,
         23. P&ID No., 24. P&ID Rev, 25. Date, 26. Criticality Code
         """
         return {
