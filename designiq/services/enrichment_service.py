@@ -46,18 +46,18 @@ class EnrichmentService:
         Enriches base extraction with additional columns from documents
         
         MANDATORY STRATEGY:
-        - Base 8 columns ALWAYS filled from P&ID (old logic)
+        - Base 17 columns ALWAYS filled from P&ID (locked logic from 9b4d837)
         - Enrichment columns require ALL 3 documents (HMB + PMS + NACE)
         - If any document missing, returns base extraction only
         
         Args:
-            base_lines: Lines from base P&ID extraction (UNCHANGED)
+            base_lines: Lines from base P&ID extraction (UNCHANGED - 17 columns)
             hmb_text: Extracted text from HMB/PFD document
             pms_text: Extracted text from PMS document  
             nace_text: Extracted text from NACE document
             
         Returns:
-            Enriched lines with additional columns merged in (if all 3 docs provided)
+            Enriched lines with 43 total columns (17 base + 26 enriched)
         """
         if not base_lines:
             logger.warning("No base lines to enrich")
@@ -96,17 +96,8 @@ class EnrichmentService:
             
             for line in base_lines:
                 # Start with base columns (PRESERVED FROM OLD LOGIC)
-                enriched_line = {
-                    'original_detection': line.get('original_detection', ''),
-                    'fluid_code': line.get('fluid_code', ''),
-                    'size': line.get('size', ''),
-                    'area': line.get('area', ''),
-                    'sequence_no': line.get('sequence_no', ''),
-                    'pipr_class': line.get('pipr_class', ''),
-                    'insulation': line.get('insulation', ''),
-                    'from': line.get('from', ''),
-                    'to': line.get('to', '')
-                }
+                # Copy ALL base columns from the locked extraction (17 columns)
+                enriched_line = dict(line)  # Preserve ALL base fields including from_line, to_line, from_equipment, to_equipment
                 
                 # Add enrichment columns via AI (GUARANTEED 26 columns)
                 enrichment_data = self._extract_enrichment_data(
@@ -127,10 +118,10 @@ class EnrichmentService:
                 enriched_line.update(enrichment_data)
                 enriched_lines.append(enriched_line)
             
-            logger.info(f"✅ Enrichment complete: {len(enriched_lines)} lines with {len(enriched_lines[0].keys())} columns (8 base + 26 enriched = 34 total)")
+            logger.info(f"✅ Enrichment complete: {len(enriched_lines)} lines with {len(enriched_lines[0].keys())} columns (17 base + 26 enriched = 43 total)")
             
-            # FINAL VALIDATION: Ensure every line has exactly 34 columns
-            expected_total = 34
+            # FINAL VALIDATION: Ensure every line has exactly 43 columns (17 base from locked logic + 26 enriched)
+            expected_total = 43
             for idx, line in enumerate(enriched_lines):
                 if len(line.keys()) != expected_total:
                     logger.warning(f"⚠️ Line {idx} has {len(line.keys())} columns, expected {expected_total}. Fixing...")
@@ -140,7 +131,7 @@ class EnrichmentService:
                         if key not in line:
                             line[key] = ""
             
-            logger.info(f"🔒 LOCKED: All {len(enriched_lines)} lines guaranteed to have {expected_total} columns")
+            logger.info(f"🔒 LOCKED: All {len(enriched_lines)} lines guaranteed to have {expected_total} columns (17 base + 26 enriched)")
             return enriched_lines
             
         except Exception as e:
