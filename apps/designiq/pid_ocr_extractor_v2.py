@@ -305,7 +305,7 @@ class PIDLineExtractorV2:
         - Faster processing
         - Consistent results
         """
-        format_label = 'OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA')
+        format_label = 'OFFSHORE' if format_type == 'offshore' else ('GENERAL (WITH AREA)' if format_type == 'general' else ('WITH AREA' if include_area else 'WITHOUT AREA'))
         logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({format_label})")
         
         # First, normalize the text - replace all dash-like characters with standard hyphen
@@ -354,7 +354,7 @@ class PIDLineExtractorV2:
                 # Pattern 5: Case insensitive
                 r'(?:^|\s)(\d{2,3})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Za-z0-9]{5,6})\s*-\s*(\d{4,5})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
             ]
-        elif include_area:
+        elif include_area or format_type == 'general':
             # WITH AREA PATTERNS: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
             patterns = [
                 # Pattern 1: With quote after size (most common with area)
@@ -442,7 +442,7 @@ class PIDLineExtractorV2:
                     continue
                 
                 # 2. AREA: For offshore and include_area formats, must be 2-3 digits
-                if format_type == 'offshore' or include_area:
+                if format_type == 'offshore' or include_area or format_type == 'general':
                     if not area or not area.isdigit() or len(area) not in [2, 3]:
                         rejected.append(f"Invalid area: {area}")
                         continue
@@ -450,13 +450,13 @@ class PIDLineExtractorV2:
                     area = ''  # Ensure area is empty for without-area format
                 
                 # 3. FLUID: Must be 1-3 uppercase letters (allow 3 for area format like SWR)
-                max_fluid_len = 3 if (include_area or format_type == 'offshore') else 2
+                max_fluid_len = 3 if (include_area or format_type == 'offshore' or format_type == 'general') else 2
                 if not fluid or not fluid.isalpha() or len(fluid) > max_fluid_len:
                     rejected.append(f"Invalid fluid: {fluid}")
                     continue
                 
                 # 4. SEQUENCE: Must be 4-5 digits for offshore/area formats, 4 for standard
-                if format_type == 'offshore' or include_area:
+                if format_type == 'offshore' or include_area or format_type == 'general':
                     seq_lengths = [4, 5]
                 else:
                     seq_lengths = [4]
@@ -465,7 +465,7 @@ class PIDLineExtractorV2:
                     continue
                 
                 # 5. PIPE CLASS: Same validation for offshore and area formats (5-6 chars)
-                if format_type == 'offshore' or include_area:
+                if format_type == 'offshore' or include_area or format_type == 'general':
                     # Offshore/Area format: 5-6 alphanumeric characters (e.g., A2AU16, BC2GA0, AC2NL1)
                     if not pipr_class or len(pipr_class) not in [5, 6]:
                         rejected.append(f"Invalid pipe class: {pipr_class}")
@@ -495,7 +495,7 @@ class PIDLineExtractorV2:
                         line_number = f"{area}-{fluid}-{size}-{pipr_class}-{seq}-{insulation}"
                     else:
                         line_number = f"{area}-{fluid}-{size}-{pipr_class}-{seq}"
-                elif include_area:
+                elif include_area or format_type == 'general':
                     # With area format: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
                     if insulation:
                         line_number = f"{size}\"-{area}-{fluid}-{seq}-{pipr_class}-{insulation}"
@@ -521,7 +521,7 @@ class PIDLineExtractorV2:
                     'sequence_no': seq,
                     'pipr_class': pipr_class,
                     'insulation': insulation,
-                    'area': area if (format_type == 'offshore' or include_area) else '',
+                    'area': area if (format_type == 'offshore' or include_area or format_type == 'general') else '',
                     'page': page_num,
                     'from_equipment': '',
                     'to_equipment': '',
