@@ -194,10 +194,18 @@ def process_pid_upload_async(
                 from designiq.services.enrichment_service import EnrichmentService
                 enrichment_service = EnrichmentService()
                 
-                # Extract text from enrichment documents
+                # Extract text from enrichment documents and clean null bytes
                 hmb_text = extract_text_from_file(hmb_file) if hmb_file else None
                 pms_text = extract_text_from_file(pms_file) if pms_file else None
                 nace_text = extract_text_from_file(nace_file) if nace_file else None
+                
+                # Clean null bytes from extracted text (prevents "source code string cannot contain null bytes" error)
+                if hmb_text:
+                    hmb_text = hmb_text.replace('\x00', '')
+                if pms_text:
+                    pms_text = pms_text.replace('\x00', '')
+                if nace_text:
+                    nace_text = nace_text.replace('\x00', '')
                 
                 logger.info(f"   📄 HMB text: {len(hmb_text) if hmb_text else 0} chars")
                 logger.info(f"   📄 PMS text: {len(pms_text) if pms_text else 0} chars")
@@ -218,7 +226,10 @@ def process_pid_upload_async(
                 
             except Exception as enrich_err:
                 logger.error(f"❌ Enrichment failed: {enrich_err}")
-                logger.info("→ Continuing with base 9 columns only")
+                logger.error(f"Error type: {type(enrich_err).__name__}")
+                import traceback
+                logger.error(f"Traceback:\n{traceback.format_exc()}")
+                logger.info("→ Continuing with base 17 columns only")
                 enriched_data = table_data
         
         # Use enriched data for database saving
