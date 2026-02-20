@@ -2939,23 +2939,20 @@ Analyze and return JSON:"""
             line_number = item.get('line_number', '')
             
             table_data.append({
-                'original_detection': line_number,  # Full line as detected (FIRST COLUMN)
                 'line_number': line_number,
                 'fluid_code': fluid_code,
-                'fluid_description': fluid_code_names.get(fluid_code, 'Unknown'),
                 'size': item.get('size', ''),
+                'area': item.get('area', ''),  # AREA field for general/offshore formats
                 'sequence_no': item.get('sequence_no', ''),
                 'pipr_class': item.get('pipr_class', ''),
                 'insulation': insulation,
-                'insulation_description': insulation_names.get(insulation, 'Unknown'),
-                'from_equipment': item.get('from_equipment', ''),
-                'to_equipment': item.get('to_equipment', ''),
-                'from_line': item.get('from_line', ''),  # NEW: Symbol-based FROM detection
-                'to_line': item.get('to_line', ''),      # NEW: Symbol-based TO detection
+                'from_line': item.get('from_line', ''),  # FROM line detection
+                'to_line': item.get('to_line', ''),      # TO line detection
                 'flow_detection_method': item.get('flow_detection_method', ''),
                 'flow_confidence': item.get('flow_confidence', ''),
                 'page': item.get('page', 1),
-                'confidence': item.get('confidence', 'medium')
+                'confidence': item.get('confidence', 'medium'),
+                'original_detection': line_number  # Keep for reference
             })
         
         return table_data
