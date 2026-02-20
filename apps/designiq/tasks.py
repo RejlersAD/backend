@@ -179,6 +179,11 @@ def process_pid_upload_async(
         # This adds enrichment WITHOUT modifying the locked base extraction logic
         enriched_data = table_data  # Start with base data
         
+        # Extract enrichment files from the enrichment_files dict
+        hmb_file = enrichment_files.get('hmb') if enrichment_files else None
+        pms_file = enrichment_files.get('pms') if enrichment_files else None
+        nace_file = enrichment_files.get('nace') if enrichment_files else None
+        
         if hmb_file or pms_file or nace_file:
             try:
                 logger.info("=" * 80)
