@@ -29,41 +29,61 @@ class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
         if email and password:
             # Authenticate using email
             try:
+                logger.info(f"[JWT] Authenticating user: {email}")
                 user = authenticate(
                     request=self.context.get('request'),
                     username=email,  # Django's authenticate expects 'username' parameter
                     password=password
                 )
+                
+                if not user:
+                    logger.warning(f"[JWT] Authentication failed - invalid credentials for: {email}")
+                    raise serializers.ValidationError(
+                        'No active account found with the given credentials',
+                        code='authorization'
+                    )
+                
+                if not user.is_active:
+                    logger.warning(f"[JWT] Authentication failed - account disabled for: {email}")
+                    raise serializers.ValidationError(
+                        'User account is disabled',
+                        code='authorization'
+                    )
+                
+                logger.info(f"[JWT] Authentication successful for: {email}")
+                
+            except serializers.ValidationError:
+                # Re-raise validation errors
+                raise
             except Exception as e:
-                logger.exception(f"Authentication error for {email}: {e}")
+                logger.exception(f"[JWT] Unexpected authentication error for {email}: {e}")
                 raise serializers.ValidationError(
-                    'Authentication failed. Please try again.',
-                    code='authorization'
-                )
-            
-            if not user:
-                raise serializers.ValidationError(
-                    'No active account found with the given credentials',
-                    code='authorization'
-                )
-            
-            if not user.is_active:
-                raise serializers.ValidationError(
-                    'User account is disabled',
+                    'Authentication failed due to a system error. Please try again.',
                     code='authorization'
                 )
         else:
+            logger.warning(f"[JWT] Missing email or password in request")
             raise serializers.ValidationError(
                 'Must include "email" and "password"',
                 code='authorization'
             )
         
         # Generate tokens using the parent class method
-        refresh = self.get_token(user)
-        
-        data = {
-            'refresh': str(refresh),
-            'access': str(refresh.access_token),
-        }
-        
-        return data
+        try:
+            logger.info(f"[JWT] Generating tokens for: {email}")
+            refresh = self.get_token(user)
+            
+            data = {
+                'refresh': str(refresh),
+                'access': str(refresh.access_token),
+            }
+            
+            logger.info(f"[JWT] Token generation successful for: {email}")
+            return data
+            
+        except Exception as e:
+            logger.exception(f"[JWT] Token generation failed for {email}: {e}")
+            raise serializers.ValidationError(
+                'Failed to generate authentication tokens. Please try again.',
+                code='authorization'
+            )

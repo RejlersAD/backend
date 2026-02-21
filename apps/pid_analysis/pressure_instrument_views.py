@@ -16,9 +16,38 @@ import logging
 import traceback
 from datetime import datetime
 
-from .pressure_instrument_service import PressureInstrumentAnalyzer
-
+# Import ALL analyzers - use V3 by default, fallback to V2, then original
 logger = logging.getLogger(__name__)
+
+# Try to import V3 (Advanced with deep pressure extraction and AI recommendations)
+USE_V3_ANALYZER = False
+USE_V2_ANALYZER = False
+USE_ORIGINAL_ANALYZER = False
+
+try:
+    from .pressure_instrument_service_v3 import AdvancedPressureInstrumentAnalyzer
+    USE_V3_ANALYZER = True
+    logger.info("[PressureInstrument] ✅ V3 Advanced Analyzer Available (Deep Extraction + AI Recommendations)")
+except ImportError as e:
+    logger.info(f"[PressureInstrument] V3 not available: {e}")
+
+# Try V2 if V3 not available
+if not USE_V3_ANALYZER:
+    try:
+        from .pressure_instrument_service_v2 import EnhancedPressureInstrumentAnalyzer
+        USE_V2_ANALYZER = True
+        logger.info("[PressureInstrument] ✅ V2 Enhanced Analyzer Available (Multi-Engine OCR)")
+    except ImportError as e:
+        logger.info(f"[PressureInstrument] V2 not available: {e}")
+
+# Fallback to original
+if not USE_V3_ANALYZER and not USE_V2_ANALYZER:
+    try:
+        from .pressure_instrument_service import PressureInstrumentAnalyzer
+        USE_ORIGINAL_ANALYZER = True
+        logger.warning("[PressureInstrument] ⚠️ Using original Vision-only analyzer (fallback)")
+    except ImportError as e:
+        logger.error(f"[PressureInstrument] ❌ No analyzer available: {e}")
 
 # Soft-coded configuration
 PRESSURE_INSTRUMENT_CONFIG = {
@@ -27,8 +56,41 @@ PRESSURE_INSTRUMENT_CONFIG = {
     'require_authentication': False,  # Set to True for production
     'enable_detailed_logging': True,
     'default_project_name': 'Default Project',
-    'default_revision': 'A'
+    'default_revision': 'A',
+    'analyzer_version': 'v3',  # 'v3' (recommended), 'v2', 'original'
+    'use_enhanced_ocr': True,  # Enable/disable enhanced OCR
+    'use_ai_recommendations': True  # Enable AI recommendations for missing data
 }
+
+def get_analyzer():
+    """
+    Factory function to get the appropriate analyzer.
+    Priority: V3 > V2 > Original
+    
+    V3: Advanced with deep pressure extraction + AI-powered recommendations
+    V2: Enhanced with multi-engine OCR
+    Original: Vision-only analyzer
+    """
+    config_version = PRESSURE_INSTRUMENT_CONFIG.get('analyzer_version', 'v3')
+    
+    # If V3 requested and available
+    if config_version == 'v3' and USE_V3_ANALYZER:
+        logger.info("[PressureInstrument] 🚀 Using V3 Advanced Analyzer (Deep + AI)")
+        return AdvancedPressureInstrumentAnalyzer()
+    
+    # If V2 requested or V3 not available
+    if (config_version in ['v2', 'v3']) and USE_V2_ANALYZER:
+        logger.info("[PressureInstrument] 📊 Using V2 Enhanced Analyzer (Multi-OCR)")
+        return EnhancedPressureInstrumentAnalyzer()
+    
+    # Fallback to original
+    if USE_ORIGINAL_ANALYZER:
+        logger.info("[PressureInstrument] 👁️ Using Original Analyzer (Vision-only)")
+        from .pressure_instrument_service import PressureInstrumentAnalyzer
+        return PressureInstrumentAnalyzer()
+    
+    # No analyzer available
+    raise ImportError("No pressure instrument analyzer available")
 
 def safe_execute(func):
     """Decorator for comprehensive error handling"""
@@ -114,11 +176,28 @@ def analyze_pid_for_pressure_instruments(request):
         logger.info(f"[PressureInstrumentAPI] Processing P&ID: {pid_file.name} ({pid_file.size} bytes)")
         logger.info(f"[PressureInstrumentAPI] Drawing: {drawing_info['drawing_number']}")
         
-        # Initialize analyzer
-        analyzer = PressureInstrumentAnalyzer()
+        # Initialize analyzer (enhanced or original)
+        analyzer = get_analyzer()
         
-        # Generate datasheet
-        excel_file, instruments, message = analyzer.generate_datasheet_from_pid(
+        # For enhanced analyzer, use the new method
+        if hasattr(analyzer, 'analyze_pid_with_enhanced_ocr'):
+            logger.info("[PressureInstrumentAPI] Using Enhanced OCR Analysis")
+            # Get file bytes
+            pid_bytes = pid_file.read()
+            
+            # Analyze with enhanced OCR
+            instruments = analyzer.analyze_pid_with_enhanced_ocr(pid_bytes, drawing_info)
+            
+            # Generate Excel from instruments
+            if instruments:
+                excel_file = analyzer.populate_excel_datasheet(instruments, drawing_info) if hasattr(analyzer, 'populate_excel_datasheet') else None
+                message = f"Successfully extracted {len(instruments)} instruments"
+            else:
+                excel_file = None
+                message = "No pressure instruments detected in P&ID"
+        else:
+            # Original analyzer
+            excel_file, instruments, message = analyzer.generate_datasheet_from_pid(
             pid_file,
             drawing_info
         )
@@ -194,29 +273,49 @@ def download_pressure_instrument_excel(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        logger.info(f"[PressureInstrumentAPI] Generating Excel for {len(instruments)} instruments")
+        logger.info(f"[PressureInstrumentAPI] 📊 Generating Excel for {len(instruments)} instruments")
+        logger.info(f"[PressureInstrumentAPI] Drawing: {drawing_info.get('drawing_number', 'N/A')}")
         
-        # Initialize analyzer
-        analyzer = PressureInstrumentAnalyzer()
+        # Initialize analyzer (V3 > V2 > Original)
+        analyzer = get_analyzer()
+        logger.info(f"[PressureInstrumentAPI] Using analyzer: {analyzer.__class__.__name__}")
         
-        # Generate Excel
-        excel_file = analyzer.populate_excel_datasheet(instruments, drawing_info)
+        # Generate Excel (returns BytesIO object)
+        excel_buffer = analyzer.populate_excel_datasheet(instruments, drawing_info)
+        
+        if excel_buffer is None:
+            raise ValueError("Excel generation returned None - check analyzer logs")
+        
+        # Validate BytesIO object
+        if not hasattr(excel_buffer, 'getvalue'):
+            raise TypeError(f"Expected BytesIO object, got {type(excel_buffer).__name__}")
         
         # Return Excel file with standardized filename
         response = HttpResponse(
-            excel_file.getvalue(),
+            excel_buffer.getvalue(),
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
-        filename = 'Pressure Instrument Data Sheet.xlsx'
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
         
-        logger.info(f"[PressureInstrumentAPI] Excel generated: {filename}")
+        # Generate filename with timestamp
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        drawing_num = drawing_info.get('drawing_number', 'AUTO').replace('/', '-')
+        filename = f'Pressure_Instruments_{drawing_num}_{timestamp}.xlsx'
+        
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['Access-Control-Expose-Headers'] = 'Content-Disposition'
+        
+        logger.info(f"[PressureInstrumentAPI] ✅ Excel generated: {filename} ({len(excel_buffer.getvalue())} bytes)")
         return response
         
     except Exception as e:
-        logger.error(f"[PressureInstrumentAPI] Excel generation error: {str(e)}", exc_info=True)
+        logger.error(f"[PressureInstrumentAPI] ❌ Excel generation error: {str(e)}", exc_info=True)
         return Response(
-            {'error': f'Excel generation failed: {str(e)}'},
+            {
+                'error': 'Excel generation failed',
+                'details': str(e),
+                'analyzer': analyzer.__class__.__name__ if 'analyzer' in locals() else 'Unknown'
+            },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -232,7 +331,7 @@ def get_instrument_types(request):
     - instrument_types: Dictionary of instrument type configurations
     """
     try:
-        analyzer = PressureInstrumentAnalyzer()
+        analyzer = get_analyzer()
         
         response_data = {
             'instrument_types': analyzer.INSTRUMENT_TYPES,
