@@ -305,6 +305,20 @@ class PIDLineExtractorV2:
         - Faster processing
         - Consistent results
         """
+        # 🔧 GENERAL FORMAT FIX: Auto-detect area by trying both patterns
+        if format_type == 'general':
+            # Try WITH AREA first (more specific pattern), then WITHOUT AREA
+            logger.info(f"  🔍 Using REGEX pattern matching on OCR text (GENERAL - auto-detect area)")
+            results_with_area = self.parse_with_regex(extracted_text, page_num, include_area=True, format_type='onshore')
+            results_without_area = self.parse_with_regex(extracted_text, page_num, include_area=False, format_type='onshore')
+            # Return whichever found more lines (prioritize with-area if equal)
+            if len(results_with_area) >= len(results_without_area):
+                logger.info(f"  ✅ GENERAL format detected WITH AREA: {len(results_with_area)} lines")
+                return results_with_area
+            else:
+                logger.info(f"  ✅ GENERAL format detected WITHOUT AREA: {len(results_without_area)} lines")
+                return results_without_area
+        
         format_label = 'OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA')
         logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({format_label})")
         
