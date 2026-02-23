@@ -665,6 +665,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 }
             
             # Queue Celery task for async processing (or execute immediately if EAGER mode)
+            # PRODUCTION FIX: Catch ALL connection errors and fallback to direct execution
             try:
                 task = process_pid_upload_async.delay(
                     file_path=saved_path,
@@ -679,40 +680,55 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     format_type=format_type,
                     enrichment_files=enrichment_files if enrichment_files else None
                 )
-            except (ConnectionRefusedError, ConnectionError, OSError) as conn_err:
-                # Redis connection failed - fallback to direct synchronous execution
-                logger.warning(f"⚠️ Connection error calling task: {conn_err}")
-                logger.info(f"🔄 Falling back to direct synchronous execution")
+            except Exception as task_err:
+                # ANY error calling task (Redis, Celery, Connection, etc.) - fallback to direct execution
+                logger.warning(f"⚠️ Task dispatch failed: {type(task_err).__name__}: {task_err}")
+                logger.info(f"🔄 Falling back to DIRECT synchronous execution (no broker required)")
                 
-                # Import and call the task function directly
+                # Import and call the task function directly (bypasses Celery/Redis entirely)
                 from apps.designiq.tasks import process_pid_upload_async
-                result = process_pid_upload_async(
-                    file_path=saved_path,
-                    filename=pid_file.name,
-                    list_type=list_type,
-                    user_id=request.user.id,
-                    project_id=project.id if project else None,
-                    document_id=document_id,
-                    storage_type=storage_type,
-                    s3_url=s3_url,
-                    include_area=include_area,
-                    format_type=format_type,
-                    enrichment_files=enrichment_files
-                )
                 
-                logger.info(f"✅ Direct execution complete: {result.get('total_items', 0)} items")
-                
-                return Response({
-                    "success": True,
-                    "message": result.get('message', 'P&ID processed successfully'),
-                    "document_id": document_id,
-                    "filename": pid_file.name,
-                    "extracted_lines": result.get('extracted_lines', []),
-                    "items_created": result.get('items_created', 0),
-                    "items_updated": result.get('items_updated', 0),
-                    "total_items": result.get('total_items', 0),
-                    "execution_mode": "direct_sync"
-                }, status=200)
+                try:
+                    result = process_pid_upload_async(
+                        file_path=saved_path,
+                        filename=pid_file.name,
+                        list_type=list_type,
+                        user_id=request.user.id,
+                        project_id=project.id if project else None,
+                        document_id=document_id,
+                        storage_type=storage_type,
+                        s3_url=s3_url,
+                        include_area=include_area,
+                        format_type=format_type,
+                        enrichment_files=enrichment_files
+                    )
+                    
+                    logger.info(f"✅ Direct execution complete: {result.get('total_items', 0)} items")
+                    
+                    return Response({
+                        "success": True,
+                        "message": result.get('message', 'P&ID processed successfully'),
+                        "document_id": document_id,
+                        "filename": pid_file.name,
+                        "extracted_lines": result.get('extracted_lines', []),
+                        "items_created": result.get('items_created', 0),
+                        "items_updated": result.get('items_updated', 0),
+                        "total_items": result.get('total_items', 0),
+                        "execution_mode": "direct_sync_fallback"
+                    }, status=200)
+                    
+                except Exception as exec_err:
+                    # Even direct execution failed - return detailed error
+                    logger.error(f"❌ Direct execution ALSO failed: {exec_err}")
+                    logger.exception("Full traceback:")
+                    
+                    return Response({
+                        "success": False,
+                        "error": f"Processing failed: {str(exec_err)}",
+                        "error_type": type(exec_err).__name__,
+                        "document_id": document_id,
+                        "filename": pid_file.name
+                    }, status=500)
             
             # Check if running in EAGER mode (synchronous execution)
             from django.conf import settings
