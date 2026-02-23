@@ -1,6 +1,7 @@
 """
 Core App URL Configuration
 Includes S3 storage API endpoints
+Note: Dashboard endpoints moved to apps.api.urls
 """
 from django.urls import path
 from .s3_views import (

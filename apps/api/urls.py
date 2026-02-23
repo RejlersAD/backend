@@ -14,7 +14,7 @@ from .export_wrapper import pid_export_wrapper
 from .email_views import verify_email, resend_verification_email, check_verification_status
 
 
-# Custom JWT view for email-based login with error handling
+# Custom JWT view for email-based login with comprehensive error handling
 class EmailTokenObtainPairView(TokenObtainPairView):
     serializer_class = EmailTokenObtainPairSerializer
     
@@ -24,17 +24,39 @@ class EmailTokenObtainPairView(TokenObtainPairView):
             response = super().post(request, *args, **kwargs)
             print(f"[LOGIN] Login successful for: {request.data.get('email')}")
             return response
-        except (ValidationError, AuthenticationFailed):
-            # Let DRF handle proper 400/401 responses
+        except (ValidationError, AuthenticationFailed) as e:
+            # Let DRF handle proper 400/401 responses for auth failures
+            print(f"[LOGIN] Authentication failed for {request.data.get('email')}: {str(e)}")
             raise
         except Exception as e:
+            # Catch any unexpected errors and log them comprehensively
             import traceback
-            print(f"[LOGIN ERROR] Exception: {str(e)}")
-            print(f"[LOGIN ERROR] Type: {type(e).__name__}")
-            print(f"[LOGIN ERROR] Traceback:")
-            traceback.print_exc()
+            import sys
+            
+            error_details = {
+                'exception': str(e),
+                'type': type(e).__name__,
+                'email': request.data.get('email', 'N/A'),
+            }
+            
+            print(f"[LOGIN ERROR] Unexpected exception during login:")
+            print(f"[LOGIN ERROR]   Email: {error_details['email']}")
+            print(f"[LOGIN ERROR]   Exception Type: {error_details['type']}")
+            print(f"[LOGIN ERROR]   Exception Message: {error_details['exception']}")
+            print(f"[LOGIN ERROR]   Traceback:")
+            traceback.print_exc(file=sys.stdout)
+            
+            # Log to Django logger as well
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"Login error for {error_details['email']}: {error_details}", exc_info=True)
+            
+            # Return a user-friendly error message
             return Response(
-                {'error': str(e), 'type': type(e).__name__},
+                {
+                    'detail': 'An unexpected error occurred during login. Please try again.',
+                    'error_type': error_details['type'],
+                    'debug_info': error_details['exception'] if __import__('django.conf').settings.DEBUG else None
+                },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 

@@ -26,8 +26,8 @@ class ElectricalDatasheetS3Service:
     
     def __init__(self):
         self.s3_enabled = getattr(settings, 'USE_S3', False) and getattr(settings, 'S3_READY', False)
-        self.bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'rejlers-engineering-data')
-        self.region = getattr(settings, 'AWS_S3_REGION_NAME', 'me-central-1')
+        self.bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'user-management-rejlers')
+        self.region = getattr(settings, 'AWS_S3_REGION_NAME', 'us-east-1')
         
         if self.s3_enabled:
             self.s3_client = boto3.client(

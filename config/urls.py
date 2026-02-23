@@ -137,6 +137,7 @@ urlpatterns = [
     
     # API endpoints - Core
     path('api/v1/', include('apps.api.urls')),
+    path('api/v1/core/', include('apps.core.urls')),  # Core app endpoints including dashboard
     path('api/v1/rbac/', include('apps.rbac.urls')),
     path('api/v1/users/', include('apps.users.urls')),  # User management endpoints
     path('api/v1/enquiry/', include('apps.core.urls_enquiry')),  # Public enquiry endpoint

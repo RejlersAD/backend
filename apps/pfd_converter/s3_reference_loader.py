@@ -98,8 +98,8 @@ class S3ReferenceLoader:
     """
     
     def __init__(self, bucket_name: str = None, region: str = None):
-        self.bucket_name = bucket_name or os.getenv('AWS_STORAGE_BUCKET_NAME', 'rejlers-engineering-data')
-        self.region = region or os.getenv('AWS_S3_REGION_NAME', 'me-central-1')
+        self.bucket_name = bucket_name or os.getenv('AWS_STORAGE_BUCKET_NAME', 'user-management-rejlers')
+        self.region = region or os.getenv('AWS_S3_REGION_NAME', 'us-east-1')
         
         # Initialize S3 client
         self.s3_client = boto3.client(

@@ -1013,6 +1013,7 @@ class PumpCalculationData(models.Model):
     )
     bearings = models.CharField(
         max_length=200,
+        null=True,
         blank=True,
         verbose_name='Bearings Type',
         help_text='Bearing type and material specification'

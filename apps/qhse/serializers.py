@@ -12,7 +12,8 @@ class QHSERunningProjectSerializer(serializers.ModelSerializer):
     Maintains exact field names expected by existing frontend
     """
     # Map database fields to frontend expected field names
-    srNo = serializers.IntegerField(source='sr_no')
+    # SOFT-CODED: sr_no is optional for creation (auto-generated), required for updates
+    srNo = serializers.IntegerField(source='sr_no', required=False)
     projectNo = serializers.CharField(source='project_no')
     projectTitle = serializers.CharField(source='project_title')
     projectTitleKey = serializers.CharField(source='project_title_key', allow_blank=True, allow_null=True, required=False)
@@ -76,15 +77,26 @@ class QHSERunningProjectSerializer(serializers.ModelSerializer):
         }
     
     def create(self, validated_data):
-        """Auto-set created_by if user is available"""
+        """
+        SOFT-CODED FIX: Auto-generate sr_no if not provided or if value is 0/invalid
+        This prevents duplicate key errors when frontend sends default value 0
+        """
         request = self.context.get('request')
         if request and hasattr(request, 'user'):
             validated_data['created_by'] = request.user
             validated_data['updated_by'] = request.user
         
+        # Auto-generate sr_no if not provided or if it's 0 (frontend default)
+        if 'sr_no' not in validated_data or validated_data.get('sr_no', 0) <= 0:
+            from django.db.models import Max
+            max_sr_no = QHSERunningProject.objects.aggregate(Max('sr_no'))['sr_no__max']
+            validated_data['sr_no'] = (max_sr_no or 0) + 1
+            print(f"[QHSE Serializer] Auto-generated sr_no: {validated_data['sr_no']}")
+        
         print(f"[QHSE Serializer] Creating project with data: {list(validated_data.keys())}")
+        print(f"[QHSE Serializer] sr_no={validated_data.get('sr_no')}, project_no={validated_data.get('project_no')}")
         instance = super().create(validated_data)
-        print(f"[QHSE Serializer] Successfully created project ID: {instance.id}")
+        print(f"[QHSE Serializer] Successfully created project ID: {instance.id}, sr_no: {instance.sr_no}")
         return instance
     
     def update(self, instance, validated_data):

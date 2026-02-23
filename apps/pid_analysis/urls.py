@@ -15,6 +15,11 @@ from .history_views import (
     download_pid_report,
     delete_pid_drawing
 )
+from .pressure_instrument_views import (
+    analyze_pid_for_pressure_instruments,
+    download_pressure_instrument_excel,
+    get_instrument_types
+)
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework import permissions
 from rest_framework.response import Response
@@ -143,6 +148,11 @@ router.register(r'issues', PIDIssueViewSet, basename='pid-issue')
 router.register(r'reference-documents', ReferenceDocumentViewSet, basename='reference-document')
 
 urlpatterns = [
+    # Pressure Instrument Analysis endpoints
+    path('pressure-instruments/analyze/', analyze_pid_for_pressure_instruments, name='pressure-instrument-analyze'),
+    path('pressure-instruments/download-excel/', download_pressure_instrument_excel, name='pressure-instrument-download'),
+    path('pressure-instruments/types/', get_instrument_types, name='pressure-instrument-types'),
+    
     # History endpoints
     path('history/', pid_history_overview, name='pid-history-overview'),
     path('history/uploads/', pid_all_uploads, name='pid-history-uploads'),

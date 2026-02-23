@@ -368,41 +368,47 @@ class UserProfileSerializer(serializers.ModelSerializer):
     
     def get_profile_photo(self, obj):
         """Get absolute URL for profile photo with environment-aware hostname handling"""
-        if obj.profile_photo:
-            from django.conf import settings
-            request = self.context.get('request')
-            
-            if request:
-                # Build absolute URI
-                absolute_uri = request.build_absolute_uri(obj.profile_photo.url)
-                
-                # Fix Vite proxy issue - frontend port in URL should be backend port
-                if ':5173' in absolute_uri:
-                    absolute_uri = absolute_uri.replace('http://localhost:5173', 'http://localhost:8000')
-                    absolute_uri = absolute_uri.replace('https://localhost:5173', 'http://localhost:8000')
-                
-                # Fix internal Docker hostname for local development
-                if 'backend:8000' in absolute_uri or 'backend_local:8000' in absolute_uri:
-                    absolute_uri = absolute_uri.replace('http://backend:8000', 'http://localhost:8000')
-                    absolute_uri = absolute_uri.replace('http://backend_local:8000', 'http://localhost:8000')
-                
-                # Handle Railway internal URLs for production
-                # Replace Railway internal domains with the actual request host
-                if '.railway.internal' in absolute_uri or 'backend-production' in absolute_uri:
-                    # Get the host from the request (this will be the Railway public URL)
-                    host = request.get_host()
-                    scheme = 'https' if request.is_secure() else 'http'
-                    # Replace the internal URL with the public host
-                    import re
-                    absolute_uri = re.sub(r'https?://[^/]+', f'{scheme}://{host}', absolute_uri)
-                
-                return absolute_uri
-            
-            # Fallback: construct URL manually
-            from django.conf import settings
-            base_url = getattr(settings, 'BACKEND_URL', 'http://localhost:8000')
-            return f"{base_url}{obj.profile_photo.url}"
+        # Temporarily disable S3 profile photos until CORS is configured
+        # S3 bucket 'rejlers-engineering-data' in me-central-1 needs CORS setup
+        # Return None to use initials fallback in frontend
         return None
+        
+        # ORIGINAL CODE (disabled until CORS configured):
+        # if obj.profile_photo:
+        #     from django.conf import settings
+        #     request = self.context.get('request')
+        #     
+        #     if request:
+        #         # Build absolute URI
+        #         absolute_uri = request.build_absolute_uri(obj.profile_photo.url)
+        #         
+        #         # Fix Vite proxy issue - frontend port in URL should be backend port
+        #         if ':5173' in absolute_uri:
+        #             absolute_uri = absolute_uri.replace('http://localhost:5173', 'http://localhost:8000')
+        #             absolute_uri = absolute_uri.replace('https://localhost:5173', 'http://localhost:8000')
+        #         
+        #         # Fix internal Docker hostname for local development
+        #         if 'backend:8000' in absolute_uri or 'backend_local:8000' in absolute_uri:
+        #             absolute_uri = absolute_uri.replace('http://backend:8000', 'http://localhost:8000')
+        #             absolute_uri = absolute_uri.replace('http://backend_local:8000', 'http://localhost:8000')
+        #         
+        #         # Handle Railway internal URLs for production
+        #         # Replace Railway internal domains with the actual request host
+        #         if '.railway.internal' in absolute_uri or 'backend-production' in absolute_uri:
+        #             # Get the host from the request (this will be the Railway public URL)
+        #             host = request.get_host()
+        #             scheme = 'https' if request.is_secure() else 'http'
+        #             # Replace the internal URL with the public host
+        #             import re
+        #             absolute_uri = re.sub(r'https?://[^/]+', f'{scheme}://{host}', absolute_uri)
+        #         
+        #         return absolute_uri
+        #     
+        #     # Fallback: construct URL manually
+        #     from django.conf import settings
+        #     base_url = getattr(settings, 'BACKEND_URL', 'http://localhost:8000')
+        #     return f"{base_url}{obj.profile_photo.url}"
+        # return None
     
     def create(self, validated_data):
         role_ids = validated_data.pop('role_ids', [])
