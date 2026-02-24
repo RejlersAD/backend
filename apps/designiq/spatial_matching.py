@@ -5,7 +5,14 @@ Based on research paper: "Automated counting of piping and instrumentation diagr
 Key Technique: Spatially match extracted text descriptions with visual line representations
 """
 
-import cv2
+# Conditional import for cv2 (graceful fallback if not installed)
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    cv2 = None
+    CV2_AVAILABLE = False
+
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 import logging
@@ -20,6 +27,9 @@ class SpatialLineDetector:
     """
     
     def __init__(self):
+        if not CV2_AVAILABLE:
+            raise ImportError("OpenCV (cv2) is required for SpatialLineDetector but not installed. "
+                            "Set ENABLE_ML_FEATURES=true to enable ML/OCR features.")
         self.min_line_length = 50
         self.max_line_gap = 10
         

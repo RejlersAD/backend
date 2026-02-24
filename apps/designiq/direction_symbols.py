@@ -3,7 +3,14 @@ Direction Symbol Detection Module
 Detects triangles and arrows on P&ID diagrams using computer vision.
 """
 
-import cv2
+# Conditional import for cv2 (graceful fallback if not installed)
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    cv2 = None
+    CV2_AVAILABLE = False
+
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
@@ -44,6 +51,10 @@ def detect_direction_symbols(
     Returns:
         List of detected DirectionSymbol objects
     """
+    if not CV2_AVAILABLE:
+        logger.warning("⚠️ OpenCV not available, cannot detect direction symbols")
+        return []
+    
     # Get config parameters with defaults
     min_area = config.get('min_symbol_area', 50)
     max_area = config.get('max_symbol_area', 5000)

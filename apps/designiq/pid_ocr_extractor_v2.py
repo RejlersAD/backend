@@ -6,7 +6,6 @@ Uses Tesseract, EasyOCR, PaddleOCR + OpenAI for accurate line detection
 import re
 import fitz  # PyMuPDF
 from PIL import Image
-import pytesseract
 import io
 import logging
 import json
@@ -15,6 +14,14 @@ import numpy as np
 from openai import OpenAI
 from django.conf import settings
 import base64
+
+# Conditional import for pytesseract (graceful fallback if not installed)
+try:
+    import pytesseract
+    PYTESSERACT_AVAILABLE = True
+except ImportError:
+    pytesseract = None
+    PYTESSERACT_AVAILABLE = False
 
 # Import Geometric FROM-TO detector
 try:
@@ -33,6 +40,8 @@ class PIDLineExtractorV2:
     Multi-Engine P&ID line number extractor with AI intelligence
     Step 1: Extract ALL text using Tesseract, EasyOCR, PaddleOCR
     Step 2: Use OpenAI to intelligently categorize into table format
+    
+    Gracefully handles missing ML/OCR dependencies - will use available engines only
     """
     
     def __init__(self):
@@ -40,7 +49,25 @@ class PIDLineExtractorV2:
         self.paddleocr_reader = None
         self.openai_client = None
         self.geometric_detector = None
+        self.pytesseract_available = PYTESSERACT_AVAILABLE
         self._init_engines()
+        self._init_geometric_detector()
+        
+        # Log configuration summary
+        engines_available = []
+        if self.pytesseract_available:
+            engines_available.append("Tesseract")
+        if self.easyocr_reader:
+            engines_available.append("EasyOCR")
+        if self.paddleocr_reader:
+            engines_available.append("PaddleOCR")
+        if self.openai_client:
+            engines_available.append("OpenAI")
+        
+        if engines_available:
+            logger.info(f"✅ P&ID Extractor V2 ready with: {', '.join(engines_available)}")
+        else:
+            logger.warning("⚠️ P&ID Extractor V2 initialized with NO OCR engines - extraction quality will be limited")
         self._init_geometric_detector()
     
     def _init_geometric_detector(self):
@@ -94,21 +121,29 @@ class PIDLineExtractorV2:
         
         # Initialize EasyOCR with 60-second timeout
         def init_easyocr():
-            import easyocr
-            self.easyocr_reader = easyocr.Reader(['en'], gpu=False)
+            try:
+                import easyocr
+                self.easyocr_reader = easyocr.Reader(['en'], gpu=False)
+            except ImportError as e:
+                logger.warning(f"⚠️ EasyOCR not installed: {e}")
+                raise
         
         init_with_timeout(init_easyocr, 60, "EasyOCR")
         
         # Initialize PaddleOCR with 90-second timeout
         def init_paddleocr():
-            from paddleocr import PaddleOCR
-            import os
-            # Disable model connectivity check to speed up initialization
-            os.environ['DISABLE_MODEL_SOURCE_CHECK'] = 'True'
-            self.paddleocr_reader = PaddleOCR(
-                lang='en',
-                ocr_version='PP-OCRv4'  # Use v4 (faster, smaller models)
-            )
+            try:
+                from paddleocr import PaddleOCR
+                import os
+                # Disable model connectivity check to speed up initialization
+                os.environ['DISABLE_MODEL_SOURCE_CHECK'] = 'True'
+                self.paddleocr_reader = PaddleOCR(
+                    lang='en',
+                    ocr_version='PP-OCRv4'  # Use v4 (faster, smaller models)
+                )
+            except ImportError as e:
+                logger.warning(f"⚠️ PaddleOCR not installed: {e}")
+                raise
         
         init_with_timeout(init_paddleocr, 90, "PaddleOCR")
         
@@ -131,32 +166,35 @@ class PIDLineExtractorV2:
         results = {}
         
         # 1. Tesseract OCR - Multiple PSM modes to detect vertical text
-        try:
-            # PSM 6: Assume uniform block of text (horizontal)
-            tesseract_text = pytesseract.image_to_string(img, config='--psm 6')
-            
-            # PSM 5: Single vertical block of text
+        if PYTESSERACT_AVAILABLE and pytesseract:
             try:
-                tesseract_vertical = pytesseract.image_to_string(img, config='--psm 5')
-                if tesseract_vertical and len(tesseract_vertical.strip()) > 10:
-                    tesseract_text += ' ' + tesseract_vertical
-                    logger.info(f"  📐 Tesseract vertical text: +{len(tesseract_vertical)} characters")
-            except:
-                pass
-            
-            # PSM 11: Sparse text. Find as much text as possible in no particular order
-            try:
-                tesseract_sparse = pytesseract.image_to_string(img, config='--psm 11')
-                if tesseract_sparse and len(tesseract_sparse.strip()) > 10:
-                    tesseract_text += ' ' + tesseract_sparse
-                    logger.info(f"  🔍 Tesseract sparse text: +{len(tesseract_sparse)} characters")
-            except:
-                pass
-            
-            results['tesseract'] = tesseract_text
-            logger.info(f"  ✅ Tesseract extracted {len(tesseract_text)} characters (combined)")
-        except Exception as e:
-            logger.warning(f"  ⚠️ Tesseract failed: {e}")
+                # PSM 6: Assume uniform block of text (horizontal)
+                tesseract_text = pytesseract.image_to_string(img, config='--psm 6')
+                
+                # PSM 5: Single vertical block of text
+                try:
+                    tesseract_vertical = pytesseract.image_to_string(img, config='--psm 5')
+                    if tesseract_vertical and len(tesseract_vertical.strip()) > 10:
+                        tesseract_text += ' ' + tesseract_vertical
+                        logger.info(f"  📐 Tesseract vertical text: +{len(tesseract_vertical)} characters")
+                except:
+                    pass
+                
+                # PSM 11: Sparse text. Find as much text as possible in no particular order
+                try:
+                    tesseract_sparse = pytesseract.image_to_string(img, config='--psm 11')
+                    if tesseract_sparse and len(tesseract_sparse.strip()) > 10:
+                        tesseract_text += ' ' + tesseract_sparse
+                        logger.info(f"  🔍 Tesseract sparse text: +{len(tesseract_sparse)} characters")
+                except:
+                    pass
+                
+                results['tesseract'] = tesseract_text
+                logger.info(f"  ✅ Tesseract extracted {len(tesseract_text)} characters (combined)")
+            except Exception as e:
+                logger.warning(f"  ⚠️ Tesseract failed: {e}")
+        else:
+            logger.warning(f"  ⚠️ Pytesseract not available, skipping Tesseract OCR")
         
         # 2. EasyOCR - Enable rotation detection for vertical text
         if self.easyocr_reader:

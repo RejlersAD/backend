@@ -14,7 +14,14 @@ Author: RAD AI System
 Date: 2026-01-29
 """
 
-import cv2
+# Conditional import for cv2 (graceful fallback if not installed)
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    cv2 = None
+    CV2_AVAILABLE = False
+
 import numpy as np
 from typing import List, Dict, Tuple, Optional, Set
 from dataclasses import dataclass, field
@@ -158,6 +165,10 @@ class GeometricFromToDetector:
             max_line_gap: Maximum gap between line segments (pixels)
             association_threshold: Max distance to associate line number with line (normalized)
         """
+        if not CV2_AVAILABLE:
+            raise ImportError("OpenCV (cv2) is required for GeometricFromToDetector but not installed. "
+                            "Set ENABLE_ML_FEATURES=true to enable ML/OCR features.")
+        
         self.line_detection_threshold = line_detection_threshold
         self.min_line_length = min_line_length
         self.max_line_gap = max_line_gap
