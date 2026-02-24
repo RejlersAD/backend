@@ -429,10 +429,43 @@ def get_visibility_description(module_code: str) -> str:
 # AUDIT & LOGGING
 # ============================================================================
 
-def log_data_access(user, module_code: str, record_count: int, filters_applied: str = None):
-    """Log data access for audit trail"""
+def get_user_agent_from_request(request=None):
+    """
+    Safely extract user agent from request
+    Soft-coded with multiple fallback options
+    
+    Args:
+        request: Django request object (optional)
+        
+    Returns:
+        str: User agent string or empty string as safe default
+    """
+    if not request:
+        return ''
+    
+    # Try multiple headers (soft-coded list of possible headers)
+    headers_to_check = [
+        'HTTP_USER_AGENT',
+        'User-Agent',
+        'user-agent',
+    ]
+    
+    for header in headers_to_check:
+        user_agent = request.META.get(header, '')
+        if user_agent:
+            return user_agent[:500]  # Truncate to reasonable length
+    
+    return ''  # Safe default - empty string instead of None
+
+
+def log_data_access(user, module_code: str, record_count: int, filters_applied: str = None, request=None):
+    """Log data access for audit trail with soft-coded metadata extraction"""
     try:
         from apps.rbac.models import AuditLog
+        
+        # Soft-coded: Extract metadata safely with fallbacks
+        user_agent = get_user_agent_from_request(request)
+        ip_address = request.META.get('REMOTE_ADDR', '') if request else ''
         
         AuditLog.objects.create(
             user=user,
@@ -445,8 +478,8 @@ def log_data_access(user, module_code: str, record_count: int, filters_applied: 
                 'filters': filters_applied,
                 'auto_configured': get_visibility_config(module_code).get('auto_discovered', False)
             },
-            ip_address=None,
-            user_agent=None,
+            ip_address=ip_address or '',  # Empty string instead of None
+            user_agent=user_agent or '',  # Empty string instead of None
             success=True
         )
     except Exception as e:
