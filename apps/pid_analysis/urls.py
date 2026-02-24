@@ -20,6 +20,13 @@ from .pressure_instrument_views import (
     download_pressure_instrument_excel,
     get_instrument_types
 )
+from .equipment_analysis_views import (
+    analyze_pid_equipment,
+    analyze_pid_equipment_batch,
+    download_equipment_excel,
+    get_equipment_analysis_results,
+    get_equipment_analysis_status
+)
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework import permissions
 from rest_framework.response import Response
@@ -152,6 +159,13 @@ urlpatterns = [
     path('pressure-instruments/analyze/', analyze_pid_for_pressure_instruments, name='pressure-instrument-analyze'),
     path('pressure-instruments/download-excel/', download_pressure_instrument_excel, name='pressure-instrument-download'),
     path('pressure-instruments/types/', get_instrument_types, name='pressure-instrument-types'),
+    
+    # Equipment Analysis endpoints
+    path('equipment/analyze/', analyze_pid_equipment, name='equipment-analyze'),
+    path('equipment/analyze-batch/', analyze_pid_equipment_batch, name='equipment-analyze-batch'),
+    path('equipment/download-excel/<str:upload_id>/', download_equipment_excel, name='equipment-download-excel'),
+    path('equipment/results/<str:upload_id>/', get_equipment_analysis_results, name='equipment-results'),
+    path('equipment/status/<str:upload_id>/', get_equipment_analysis_status, name='equipment-status'),
     
     # History endpoints
     path('history/', pid_history_overview, name='pid-history-overview'),
