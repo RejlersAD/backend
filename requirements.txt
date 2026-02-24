@@ -71,22 +71,27 @@ google-auth-httplib2>=0.1.1
 google-auth-oauthlib>=1.1.0
 
 # ==========================================
-# 8. DATA PROCESSING & ML (Required)
+# 8. DATA PROCESSING (Lightweight - Required)
 # ==========================================
 numpy>=1.24.0,<2.0
 pandas>=2.1.0
-scikit-learn>=1.3.0
 networkx==3.2.1
 
 # ==========================================
-# 9. OCR STACK (Optional - Heavy: ~3-4GB)
-# Comment out if not using P&ID/PFD OCR
+# 9. ML & OCR FEATURES (OPTIONAL - MOVED TO requirements-ml.txt)
 # ==========================================
-pytesseract==0.3.13
-easyocr==1.7.2
-paddlepaddle==3.3.0
-paddleocr==3.3.3
-opencv-python-headless==4.10.0.84
+# Heavy ML/OCR packages moved to requirements-ml.txt to reduce image size
+# Base image: ~1-2GB | With ML: ~8-10GB
+# 
+# To enable ML/OCR features:
+# 1. Set ENABLE_ML_FEATURES=true in docker-compose.yml or .env
+# 2. Rebuild: docker-compose build --no-cache backend_local
+# 
+# Packages moved:
+# - pytesseract, easyocr, paddleocr (~2GB)
+# - paddlepaddle, torch (~4GB)
+# - opencv, scikit-learn (~1GB)
+# ==========================================
 
 # ==========================================
 # 10. UTILITIES (Required)
