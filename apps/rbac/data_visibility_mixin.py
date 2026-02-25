@@ -137,7 +137,8 @@ class DataVisibilityMixin:
                     user=self.request.user,
                     module_code=self.visibility_module_code or 'unknown',
                     record_count=count,
-                    filters_applied=filter_desc
+                    filters_applied=filter_desc,
+                    request=self.request  # Pass request for user_agent extraction
                 )
             except Exception:
                 # Don't fail requests due to logging errors
