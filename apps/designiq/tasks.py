@@ -340,6 +340,58 @@ def process_pid_upload_async(
         
         total_items = len(created_items) + len(updated_items)
         
+        # 📥 SAVE EXCEL OUTPUT FOR HISTORICAL DOWNLOAD (Enhancement - No core logic change)
+        excel_file_path = None
+        try:
+            import pandas as pd
+            from django.core.files.base import ContentFile
+            from .models import ProcessedPIDOutput
+            
+            # Generate Excel file from enriched data
+            df = pd.DataFrame(enriched_data)
+            excel_buffer = BytesIO()
+            df.to_excel(excel_buffer, index=False, engine='openpyxl')
+            excel_buffer.seek(0)
+            
+            # Extract P&ID number and revision from document_id or first line
+            pid_number = document_id.split('-')[0] if '-' in document_id else filename.replace('.pdf', '')
+            pid_revision = enriched_data[0].get('pid_rev', '') if enriched_data and 'pid_rev' in enriched_data[0] else ''
+            
+            # Generate Excel filename
+            excel_filename = f"LineList_{pid_number}_Rev{pid_revision}_{timezone.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            
+            # Save ProcessedPIDOutput record
+            output_record = ProcessedPIDOutput.objects.create(
+                project=project,
+                pid_number=pid_number,
+                pid_revision=pid_revision,
+                list_type=list_type,
+                document_id=document_id,
+                processed_by=user,
+                excel_filename=excel_filename,
+                file_size=len(excel_buffer.getvalue()),
+                total_lines=len(enriched_data),
+                total_columns=len(enriched_data[0].keys()) if enriched_data else 0,
+                processing_time_seconds=0,  # Can add timing if needed
+                format_type=format_type,
+                include_area=include_area,
+                enrichment_enabled=bool(enrichment_files and len(enrichment_files) > 0)
+            )
+            
+            # Save Excel file to FileField
+            output_record.excel_file.save(
+                excel_filename,
+                ContentFile(excel_buffer.getvalue()),
+                save=True
+            )
+            
+            excel_file_path = output_record.excel_file.name
+            logger.info(f"📥 Saved historical output: {excel_filename} (ID: {output_record.id})")
+            
+        except Exception as excel_err:
+            logger.warning(f"⚠️ Could not save Excel output for history: {excel_err}")
+            # Don't fail the entire process if Excel save fails
+        
         # DEBUG: Log what we're returning
         logger.info("="*80)
         logger.info("🔍 PREPARING TASK RESULT")
@@ -348,6 +400,8 @@ def process_pid_upload_async(
         if enriched_data:
             logger.info(f"   - Enriched data columns: {len(enriched_data[0].keys())} keys")
             logger.info(f"   - Sample enriched keys: {list(enriched_data[0].keys())[:10]}")
+        if excel_file_path:
+            logger.info(f"   - Excel output saved: {excel_file_path}")
         logger.info("="*80)
         
         result = {

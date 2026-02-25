@@ -321,3 +321,55 @@ class EngineeringListItem(TimeStampedModel):
         self.updated_by = user
         self.save()
 
+
+class ProcessedPIDOutput(TimeStampedModel):
+    """
+    Store historical P&ID processing outputs with generated Excel files
+    Allows users to download previously processed results without reprocessing
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        DesignProject,
+        on_delete=models.CASCADE,
+        related_name='processed_outputs',
+        null=True,
+        blank=True
+    )
+    
+    # P&ID Identification
+    pid_number = models.CharField(max_length=200, db_index=True)
+    pid_revision = models.CharField(max_length=50, blank=True)
+    list_type = models.CharField(max_length=50, db_index=True, default='line_list')
+    
+    # Processing metadata
+    document_id = models.CharField(max_length=500, unique=True, db_index=True)
+    processing_date = models.DateTimeField(auto_now_add=True)
+    processed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    
+    # File storage
+    excel_file = models.FileField(upload_to='designiq/processed_outputs/%Y/%m/', null=True, blank=True)
+    excel_filename = models.CharField(max_length=500)
+    file_size = models.BigIntegerField(default=0)  # in bytes
+    
+    # Processing statistics
+    total_lines = models.IntegerField(default=0)
+    total_columns = models.IntegerField(default=0)
+    processing_time_seconds = models.FloatField(default=0)
+    
+    # Additional metadata
+    format_type = models.CharField(max_length=50, default='general')  # onshore, offshore, general
+    include_area = models.BooleanField(default=False)
+    enrichment_enabled = models.BooleanField(default=False)
+    
+    class Meta:
+        db_table = 'designiq_processed_pid_outputs'
+        ordering = ['-processing_date']
+        indexes = [
+            models.Index(fields=['pid_number', '-processing_date']),
+            models.Index(fields=['list_type', '-processing_date']),
+            models.Index(fields=['document_id']),
+        ]
+    
+    def __str__(self):
+        return f"PID: {self.pid_number} - Rev {self.pid_revision} ({self.processing_date.strftime('%Y-%m-%d')})"
+

@@ -1420,3 +1420,137 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             return Response({
                 "error": f"Failed to export Excel: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'], url_path='previous_outputs')
+    def previous_outputs(self, request):
+        """
+        List all previously processed P&ID outputs for download
+        
+        GET /api/v1/designiq/lists/previous_outputs/
+        
+        Query Parameters:
+        - list_type: Filter by list type (default: line_list)
+        - limit: Number of results (default: 50)
+        
+        Returns list of historical P&ID processing outputs with download info
+        """
+        try:
+            from .models import ProcessedPIDOutput
+            
+            list_type = request.query_params.get('list_type', 'line_list')
+            limit = int(request.query_params.get('limit', 50))
+            
+            # Check if table exists by attempting a simple query
+            try:
+                outputs = ProcessedPIDOutput.objects.filter(
+                    list_type=list_type
+                ).order_by('-processing_date')[:limit]
+                
+                results = []
+                for output in outputs:
+                    try:
+                        results.append({
+                            'id': str(output.id),
+                            'pid_number': output.pid_number or '',
+                            'pid_revision': output.pid_revision or '',
+                            'processing_date': output.processing_date.strftime('%Y-%m-%d %H:%M') if output.processing_date else '',
+                            'processed_by': output.processed_by.email if output.processed_by else 'Unknown',
+                            'total_lines': output.total_lines or 0,
+                            'total_columns': output.total_columns or 0,
+                            'excel_filename': output.excel_filename or '',
+                            'file_size_mb': round(output.file_size / (1024 * 1024), 2) if output.file_size else 0,
+                            'enrichment_enabled': output.enrichment_enabled or False,
+                            'format_type': output.format_type or 'general',
+                            'has_file': bool(output.excel_file) if hasattr(output, 'excel_file') else False
+                        })
+                    except Exception as e:
+                        logger.warning(f"Error processing output {output.id}: {e}")
+                        continue
+                
+                logger.info(f"📂 Retrieved {len(results)} previous outputs for {list_type}")
+                
+                return Response({
+                    'success': True,
+                    'count': len(results),
+                    'outputs': results
+                })
+            except Exception as db_error:
+                logger.warning(f"Database query error in previous_outputs: {db_error}")
+                # Return empty list if table doesn't exist or query fails
+                return Response({
+                    'success': True,
+                    'count': 0,
+                    'outputs': [],
+                    'message': 'No previous outputs available'
+                })
+        except Exception as e:
+            logger.error(f"Error in previous_outputs endpoint: {e}")
+            return Response({
+                'success': False,
+                'error': 'Failed to fetch previous outputs',
+                'outputs': []
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        except Exception as e:
+            logger.error(f"Error fetching previous outputs: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to fetch previous outputs: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['get'], url_path='download_output/(?P<output_id>[^/.]+)')
+    def download_output(self, request, output_id=None):
+        """
+        Download a previously generated Excel file
+        
+        GET /api/v1/designiq/lists/download_output/{output_id}/
+        
+        Returns the Excel file for download without reprocessing
+        """
+        from .models import ProcessedPIDOutput
+        from django.http import FileResponse
+        import os
+        
+        if not output_id:
+            return Response({
+                "error": "Output ID is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            output = ProcessedPIDOutput.objects.get(id=output_id)
+            
+            if not output.excel_file:
+                return Response({
+                    "error": "Excel file not found for this output"
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Check if file exists
+            if not output.excel_file.storage.exists(output.excel_file.name):
+                return Response({
+                    "error": "Excel file no longer exists on server"
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Open file and create response
+            file_handle = output.excel_file.open('rb')
+            response = FileResponse(
+                file_handle,
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="{output.excel_filename}"'
+            response['X-PID-Number'] = output.pid_number
+            response['X-PID-Revision'] = output.pid_revision
+            response['X-Processing-Date'] = output.processing_date.strftime('%Y-%m-%d')
+            
+            logger.info(f"📥 Downloaded: {output.excel_filename} (ID: {output_id})")
+            
+            return response
+            
+        except ProcessedPIDOutput.DoesNotExist:
+            return Response({
+                "error": "Output not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"Error downloading output: {str(e)}", exc_info=True)
+            return Response({
+                "error": f"Failed to download output: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
