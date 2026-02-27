@@ -1,4 +1,4 @@
-"""
+﻿"""
 Smart Enrichment Layer - Enhances base P&ID extraction with HMB/PMS/NACE data
 
 ARCHITECTURE:
@@ -144,7 +144,7 @@ class EnrichmentService:
             logger.info("="*80)
             
             # FINAL VALIDATION: Ensure every line has exactly 34 columns
-            expected_total = 34
+            expected_total = 35  # 8 base + 26 enrichment + 1 stress
             for idx, line in enumerate(enriched_lines):
                 if len(line.keys()) != expected_total:
                     logger.warning(f"⚠️ Line {idx} has {len(line.keys())} columns, expected {expected_total}. Fixing...")
@@ -720,3 +720,4 @@ def get_enrichment_service() -> EnrichmentService:
     if _enrichment_service is None:
         _enrichment_service = EnrichmentService()
     return _enrichment_service
+

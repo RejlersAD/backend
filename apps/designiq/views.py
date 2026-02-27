@@ -557,6 +557,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
         hmb_file = request.FILES.get('hmb_file')
         pms_file = request.FILES.get('pms_file')
         nace_file = request.FILES.get('nace_file')
+        stress_criticality_file = request.FILES.get('stress_criticality_file')  # NEW: 5th document for stress criticality
         
         if not pid_file:
             return Response({
@@ -662,6 +663,14 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     'filename': nace_file.name,
                     'content': nace_content,
                     'size': len(nace_content)
+                }
+            if stress_criticality_file:
+                logger.info(f"⚡ Stress Criticality document attached: {stress_criticality_file.name}")
+                stress_content = stress_criticality_file.read()
+                enrichment_files['stress_criticality'] = {
+                    'filename': stress_criticality_file.name,
+                    'content': stress_content,
+                    'size': len(stress_content)
                 }
             
             # Queue Celery task for async processing (or execute immediately if EAGER mode)
@@ -1351,7 +1360,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             headers = [
                 'Line Number', 'Size', 'Fluid Code', 'Fluid Description',
                 'Sequence No', 'Pipe Class', 'Insulation', 'Area',
-                'FROM', 'TO', 'Status', 'Validated'
+                'FROM', 'TO', 'Criticality Stress', 'Status', 'Validated'
             ]
             
             ws.append(headers)
@@ -1376,6 +1385,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     item.data.get('area', ''),
                     item.data.get('from_line', ''),
                     item.data.get('to_line', ''),
+                    item.data.get('criticality_stress', 'N/A'),
                     item.status,
                     'Yes' if item.is_validated else 'No'
                 ])
