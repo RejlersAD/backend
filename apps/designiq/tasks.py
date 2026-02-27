@@ -6,6 +6,7 @@ Background tasks for long-running operations like P&ID OCR processing
 from celery import shared_task
 from django.utils import timezone
 from django.core.cache import cache
+from django.conf import settings
 import logging
 import tempfile
 import os
@@ -56,6 +57,91 @@ def extract_text_from_file(file_data):
     except Exception as e:
         logger.error(f"Error extracting text from {file_data['filename']}: {e}")
         return ""
+
+
+def extract_section_7(document_text):
+    """
+    Extract Section 7 from stress criticality document
+    Looks for patterns like 'Section 7', '7.', 'SECTION 7', etc.
+    """
+    import re
+    
+    # Try different patterns for Section 7
+    patterns = [
+        r'(?i)section\s*7[:\.\s]+(.*?)(?=section\s*8|section\s*\d+|\Z)',
+        r'(?i)7\.\s*(.*?)(?=8\.|(?:^\d+\.|\Z))',
+        r'(?i)SECTION\s*7[:\.\s]+(.*?)(?=SECTION\s*8|SECTION\s*\d+|\Z)',
+        r'(?i)7\s*[-–—]\s*(.*?)(?=8\s*[-–—]|\Z)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, document_text, re.DOTALL | re.MULTILINE)
+        if match:
+            section_text = match.group(1).strip()
+            if len(section_text) > 50:  # Ensure we got meaningful content
+                logger.info(f"   ✅ Found Section 7 using pattern: {pattern[:30]}...")
+                return section_text
+    
+    # If no section found, return first 2000 chars as fallback
+    logger.warning("   ⚠️ Could not find Section 7, using first 2000 chars")
+    return document_text[:2000]
+
+
+def build_stress_criticality_prompt(lines_context, section_7_text):
+    """
+    Build intelligent prompt for OpenAI to determine stress criticality codes
+    Uses temperature data + Section 7 criteria
+    """
+    prompt = f"""You are an expert piping stress engineer applying stress criticality selection criteria from Section 7 of the project specification.
+
+SECTION 7 - STRESS CRITICALITY SELECTION CRITERIA:
+{section_7_text[:2500]}
+
+YOUR TASK:
+Analyze each pipeline line below and assign the correct stress criticality code based on Section 7 criteria.
+
+CRITICAL ANALYSIS INSTRUCTIONS:
+1. READ Section 7 above CAREFULLY - it defines the exact stress criticality codes and selection criteria
+2. The criteria typically uses TEMPERATURE ranges as the primary factor (e.g., "Code 1: >400°C", "Code 2: 200-400°C", "Code 3: <200°C")
+3. Also consider: fluid type, pressure class, material specification, and any other factors mentioned in Section 7
+4. Extract temperature from "Normal Temp" or "Min/Max Design Temp" columns
+5. Parse temperature values correctly (e.g., "150°C", "150 C", "150", "-20/200") and use the highest value for selection
+6. Output the EXACT code format as specified in Section 7 (numeric like "1", "2", "3" or alphanumeric like "SC1", "SC2", "C1", etc.)
+
+PIPELINE LINES TO ANALYZE:
+"""
+    
+    for line in lines_context:
+        prompt += f"\n- Line {line['line_number']}:"
+        prompt += f"\n  * Normal Temp: {line.get('normal_temp', 'N/A')}"
+        prompt += f"\n  * Min/Max Design Temp: {line.get('minimax_temp', 'N/A')}"
+        prompt += f"\n  * Fluid: {line['fluid_code']}"
+        prompt += f"\n  * Pipe Class: {line['pipr_class']}"
+        prompt += f"\n  * Design Pressure: {line.get('design_pressure', 'N/A')}"
+    
+    prompt += """
+
+OUTPUT FORMAT (JSON array with exact codes from Section 7):
+[
+  {"criticality_stress": "1"},
+  {"criticality_stress": "2"},
+  {"criticality_stress": "1"},
+  ...
+]
+
+RULES:
+✅ Apply Section 7 criteria EXACTLY as written in the document
+✅ Use temperature as the PRIMARY selection factor (parse numeric values correctly)
+✅ If both Normal Temp and Design Temp are available, use the higher value for conservative selection
+✅ If temperature is completely missing (N/A), analyze based on other factors (fluid, pressure, class)
+✅ Match the exact code format used in Section 7 (e.g., "1", "2", "3" or "SC1", "SC2", etc.)
+✅ Return codes in the SAME ORDER as the lines above
+❌ Do NOT add explanations, only return the JSON array
+❌ Do NOT invent codes - use only what's defined in Section 7
+
+Analyze each line intelligently and return the JSON array with stress criticality codes in order."""
+    
+    return prompt
 
 
 @shared_task(bind=True, time_limit=1200, soft_time_limit=1140)  # 20 minutes max
@@ -183,6 +269,7 @@ def process_pid_upload_async(
         hmb_file = enrichment_files.get('hmb') if enrichment_files else None
         pms_file = enrichment_files.get('pms') if enrichment_files else None
         nace_file = enrichment_files.get('nace') if enrichment_files else None
+        stress_criticality_file = enrichment_files.get('stress_criticality') if enrichment_files else None
         
         if hmb_file or pms_file or nace_file:
             try:
@@ -232,8 +319,155 @@ def process_pid_upload_async(
                 logger.info("→ Continuing with base 17 columns only")
                 enriched_data = table_data
         
+        # 🚀 STEP 3: STRESS CRITICALITY PROCESSING (AI-powered using temperature + Section 7)
+        # This adds intelligent stress criticality data using OpenAI to analyze:
+        # 1. Temperature column from enriched table data
+        # 2. Section 7 from the stress criticality document
+        if stress_criticality_file:
+            try:
+                logger.info("=" * 80)
+                logger.info("⚡ STEP 3: AI-Powered Stress Criticality Selection")
+                logger.info("   Strategy: Apply Section 7 criteria using Temperature column")
+                logger.info("   Output: Criticality codes (1, 2, 3, etc.) per Section 7 logic")
+                logger.info("=" * 80)
+                
+                # Extract text from stress criticality document
+                stress_text = extract_text_from_file(stress_criticality_file)
+                
+                # Clean null bytes
+                if stress_text:
+                    stress_text = stress_text.replace('\x00', '')
+                    logger.info(f"   📄 Stress Criticality document: {len(stress_text)} chars")
+                    
+                    # 🔍 EXTRACT SECTION 7 from the document
+                    logger.info("   🔍 Extracting Section 7 from stress criticality document...")
+                    section_7_text = extract_section_7(stress_text)
+                    logger.info(f"   ✅ Section 7 extracted: {len(section_7_text)} chars")
+                    
+                    # 🤖 USE OPENAI TO INTELLIGENTLY FILL STRESS CRITICALITY
+                    # Process in batches to optimize API calls
+                    from openai import OpenAI
+                    openai_key = getattr(settings, 'OPENAI_API_KEY', None)
+                    
+                    if openai_key and section_7_text:
+                        client = OpenAI(api_key=openai_key)
+                        logger.info("   🤖 Using OpenAI GPT-4o to analyze stress criticality...")
+                        
+                        # Process lines in batches of 10 for efficiency
+                        batch_size = 10
+                        for i in range(0, len(enriched_data), batch_size):
+                            batch = enriched_data[i:i+batch_size]
+                            
+                            # Build context for AI with temperature data
+                            lines_context = []
+                            for idx, line_item in enumerate(batch):
+                                line_number = line_item.get('line_number', 'Unknown')
+                                # Get temperature from enriched columns (normal_temp or minimax_design_temp)
+                                normal_temp = line_item.get('normal_temp', '')
+                                minimax_temp = line_item.get('minimax_design_temp', '')
+                                # Use whichever temperature is available
+                                temperature = normal_temp or minimax_temp or 'N/A'
+                                fluid_code = line_item.get('fluid_code', 'Unknown')
+                                pipr_class = line_item.get('pipr_class', 'Unknown')
+                                design_pressure = line_item.get('design_pressure', 'N/A')
+                                
+                                lines_context.append({
+                                    'index': i + idx,
+                                    'line_number': line_number,
+                                    'temperature': temperature,
+                                    'normal_temp': normal_temp or 'N/A',
+                                    'minimax_temp': minimax_temp or 'N/A',
+                                    'fluid_code': fluid_code,
+                                    'pipr_class': pipr_class,
+                                    'design_pressure': design_pressure
+                                })
+                            
+                            # Call OpenAI with section 7 + temperature data
+                            prompt = build_stress_criticality_prompt(lines_context, section_7_text)
+                            
+                            try:
+                                response = client.chat.completions.create(
+                                    model="gpt-4o",
+                                    messages=[
+                                        {"role": "system", "content": "You are an expert piping engineer analyzing stress criticality for pipeline systems."},
+                                        {"role": "user", "content": prompt}
+                                    ],
+                                    temperature=0.2,
+                                    max_tokens=2000
+                                )
+                                
+                                result_text = response.choices[0].message.content.strip()
+                                logger.info(f"   ✅ OpenAI analyzed batch {i//batch_size + 1}/{(len(enriched_data) + batch_size - 1)//batch_size}")
+                                
+                                # Parse OpenAI response (expects JSON array)
+                                import json
+                                try:
+                                    stress_results = json.loads(result_text)
+                                    
+                                    # Apply stress criticality to batch
+                                    for idx, stress_data in enumerate(stress_results):
+                                        if idx < len(batch):
+                                            batch[idx]['criticality_stress'] = stress_data.get('criticality_stress', 'N/A')
+                                            
+                                except json.JSONDecodeError:
+                                    # Fallback: parse line by line
+                                    logger.warning(f"   ⚠️ Could not parse JSON, using fallback...")
+                                    for line_item in batch:
+                                        line_item['criticality_stress'] = 'N/A'
+                                        
+                            except Exception as api_err:
+                                logger.error(f"   ❌ OpenAI API error for batch: {api_err}")
+                                # Fallback to N/A
+                                for line_item in batch:
+                                    line_item['criticality_stress'] = 'N/A'
+                        
+                        logger.info("=" * 80)
+                        logger.info("✅ STEP 3 COMPLETE: AI-Powered Stress Criticality Added")
+                        logger.info(f"   Total lines: {len(enriched_data)}")
+                        logger.info(f"   Total columns: {len(enriched_data[0].keys()) if enriched_data else 0}")
+                        if enriched_data:
+                            logger.info(f"   Column names: {list(enriched_data[0].keys())}")
+                            logger.info(f"   Sample criticality_stress values: {[item.get('criticality_stress') for item in enriched_data[:3]]}")
+                        logger.info("=" * 80)
+                        
+                    else:
+                        logger.warning("⚠️ OpenAI not configured or Section 7 not found - filling with N/A")
+                        for line_item in enriched_data:
+                            line_item['criticality_stress'] = 'N/A'
+                else:
+                    logger.warning("⚠️ Stress criticality document is empty")
+                    for line_item in enriched_data:
+                        line_item['criticality_stress'] = 'N/A'
+                    
+            except Exception as stress_err:
+                logger.error(f"❌ Stress criticality processing failed: {stress_err}")
+                logger.error(f"Error type: {type(stress_err).__name__}")
+                import traceback
+                logger.error(f"Traceback:\n{traceback.format_exc()}")
+                logger.info("→ Continuing without stress criticality data")
+                for line_item in enriched_data:
+                    line_item['criticality_stress'] = 'N/A'
+        else:
+            # No stress criticality file uploaded, add empty column
+            logger.info("=" * 80)
+            logger.info("⚠️ No stress criticality file provided - adding N/A column")
+            logger.info("=" * 80)
+            for line_item in enriched_data:
+                line_item['criticality_stress'] = 'N/A'
+            logger.info(f"✅ Added criticality_stress='N/A' to {len(enriched_data)} lines")
+            logger.info(f"   Total columns now: {len(enriched_data[0].keys()) if enriched_data else 0}")
+        
         # Use enriched data for database saving
         table_data = enriched_data
+        
+        logger.info("=" * 80)
+        logger.info("📊 FINAL DATA SUMMARY BEFORE DATABASE SAVE:")
+        logger.info(f"   Total lines: {len(table_data)}")
+        logger.info(f"   Total columns: {len(table_data[0].keys()) if table_data else 0}")
+        if table_data:
+            logger.info(f"   All column names: {list(table_data[0].keys())}")
+            logger.info(f"   Has criticality_stress? {'criticality_stress' in table_data[0]}")
+        logger.info("=" * 80)
         
         update_progress(75, 100, f'Saving {len(table_data)} items to database...')
         
@@ -274,18 +508,19 @@ def process_pid_upload_async(
                     'flow_confidence': line_data.get('flow_confidence', '')
                 }
                 
-                # Add enrichment columns dynamically if present (26 additional columns)
+                # Add enrichment columns dynamically if present (27 additional columns including stress)
+                # CRITICAL: Always initialize ALL columns to ensure 35 total (8 base + 27 enrichment)
                 enrichment_keys = [
                     'flow_medium', 'two_phase', 'surge_flow', 'flow_max', 'density',
                     'normal_pressure', 'normal_temp', 'design_pressure', 'minimax_design_temp',
                     'design_code', 'category_m_fluid', 'schedule_wall_thk', 'stress_relief',
                     'pwht', 'rt', 'mt_pt', 'hardness', 'visual', 'nace_mr_0175',
                     'piping_rated_pressure_ambient', 'test_pressure', 'test_medium',
-                    'pid_no', 'pid_rev', 'date', 'criticality_code'
+                    'pid_no', 'pid_rev', 'date', 'criticality_code', 'criticality_stress'
                 ]
+                # Initialize ALL enrichment columns (even if empty) to guarantee 35-column structure
                 for key in enrichment_keys:
-                    if key in line_data:
-                        data_dict[key] = line_data[key]
+                    data_dict[key] = line_data.get(key, '')
                 
                 item_data = {
                     'description': f"{line_data['fluid_description']} Line - {line_data['size']}",
@@ -428,6 +663,10 @@ def process_pid_upload_async(
         logger.info("="*80)
         logger.info("🚀 TASK RESULT PREPARED - RETURNING TO VIEW")
         logger.info(f"   - enriched_data in result: {len(result.get('enriched_data', []))} items")
+        logger.info(f"   - enriched_data columns: {len(result.get('enriched_data', [{}])[0].keys()) if result.get('enriched_data') else 0}")
+        if result.get('enriched_data'):
+            logger.info(f"   - Has criticality_stress in first item? {'criticality_stress' in result['enriched_data'][0]}")
+            logger.info(f"   - Sample criticality_stress value: {result['enriched_data'][0].get('criticality_stress', 'MISSING')}")
         logger.info("="*80)
         
         cache.set(cache_key, {
