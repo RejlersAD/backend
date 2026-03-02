@@ -3007,7 +3007,8 @@ Analyze and return JSON:"""
                 'flow_detection_method': item.get('flow_detection_method', ''),
                 'flow_confidence': item.get('flow_confidence', ''),
                 'page': item.get('page', 1),
-                'confidence': item.get('confidence', 'medium')
+                'confidence': item.get('confidence', 'medium'),
+                'criticality_stress': item.get('criticality_stress', 'N/A')  # NEW: Stress Criticality column
             })
         
         return table_data

@@ -1563,4 +1563,111 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             return Response({
                 "error": f"Failed to download output: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['post'], url_path='base_extraction')
+    def base_extraction(self, request):
+        """
+        🎯 BASE EXTRACTION ENDPOINT - P&ID Only (No Enrichment, No FROM-TO)
+        
+        POST /api/v1/designiq/lists/base_extraction/
+        
+        Accepts: P&ID file only
+        Returns: 8 base columns extracted synchronously (FAST - no OpenAI)
+        
+        Columns: Original Detection, Fluid Code, Size, Sequence No, 
+                 PIPR Class, Insulation, From, To
+        
+        Does NOT include:
+        - Enrichment logic (HMB/PMS/NACE/Stress)
+        - FROM-TO detection (OpenAI/Spatial/Geometric)
+        
+        Designed for: /engineering/process/line-list page (FAST preview only)
+        """
+        from apps.designiq.pid_ocr_extractor_v2 import PIDLineExtractorV2
+        from io import BytesIO
+        
+        logger.info("="*80)
+        logger.info("🎯 BASE EXTRACTION REQUEST - P&ID Only (FAST MODE)")
+        logger.info("="*80)
+        
+        try:
+            # Validate P&ID file
+            pid_file = request.FILES.get('pid_file')
+            if not pid_file:
+                return Response({
+                    'error': 'P&ID file is required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Validate file type
+            if not pid_file.name.lower().endswith('.pdf'):
+                return Response({
+                    'error': 'Only PDF files are supported'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get processing options
+            include_area = request.POST.get('include_area', 'false').lower() == 'true'
+            format_type = request.POST.get('format_type', 'onshore').lower()
+            
+            logger.info(f"📄 File: {pid_file.name} ({pid_file.size / 1024 / 1024:.2f} MB)")
+            logger.info(f"📍 Format: {format_type}, Include Area: {include_area}")
+            
+            # Save file temporarily
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                for chunk in pid_file.chunks():
+                    tmp_file.write(chunk)
+                tmp_path = tmp_file.name
+            
+            logger.info(f"💾 Saved to temporary file: {tmp_path}")
+            
+            # FAST MODE: Only OCR + Regex (Skip FROM-TO detection)
+            logger.info("🔍 Starting FAST base extraction (OCR + Regex only)...")
+            extractor = PIDLineExtractorV2()
+            
+            # Call the lightweight extraction method
+            extracted_lines = extractor.extract_from_pdf(
+                pdf_path=tmp_path,
+                include_area=include_area,
+                format_type=format_type
+            )
+            
+            # Clean up temp file
+            import os
+            os.unlink(tmp_path)
+            
+            logger.info(f"✅ Extracted {len(extracted_lines)} lines from P&ID (FAST MODE)")
+            
+            # Transform to 8-column format (From/To will be empty in FAST mode)
+            base_data = []
+            for line in extracted_lines:
+                base_item = {
+                    'original_detection': line.get('original_detection', line.get('line_number', '')),
+                    'fluid_code': line.get('fluid_code', ''),
+                    'size': line.get('size', ''),
+                    'sequence_no': line.get('sequence_no', ''),
+                    'pipr_class': line.get('pipr_class', ''),
+                    'insulation': line.get('insulation', ''),
+                    'from': line.get('from_line', line.get('from_equipment', '')),
+                    'to': line.get('to_line', line.get('to_equipment', ''))
+                }
+                base_data.append(base_item)
+            
+            logger.info("="*80)
+            logger.info(f"🎉 BASE EXTRACTION COMPLETE: {len(base_data)} lines (FAST MODE)")
+            logger.info("="*80)
+            
+            return Response({
+                'success': True,
+                'total_lines': len(base_data),
+                'data': base_data,
+                'columns': 8,
+                'message': f'Successfully extracted {len(base_data)} lines from P&ID'
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"❌ Base extraction failed: {e}", exc_info=True)
+            return Response({
+                'error': str(e),
+                'message': 'Base extraction failed'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
