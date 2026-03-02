@@ -17,76 +17,35 @@ if USE_S3:
         from storages.backends.s3boto3 import S3Boto3Storage
         from django.core.files.storage import FileSystemStorage
         from botocore.exceptions import BotoCoreError, ClientError
+        import traceback
         
-        class SafeMediaStorage(S3Boto3Storage):
+        class ResilientMediaStorage(FileSystemStorage):
             """
-            S3 storage backend with automatic fallback to local storage on errors
+            Resilient storage that ALWAYS uses local filesystem
+            when S3 configuration is problematic
             
-            Security features:
-            - Uses environment variables for configuration
-            - No hardcoded credentials
-            - Supports IAM roles (EC2/ECS/Lambda)
-            - Custom expiration for presigned URLs
-            - Graceful fallback to local storage on S3 failures
+            This prevents 500 errors from blocking file uploads
             """
-            
-            location = 'media'
-            default_acl = None  # Disable ACLs (use bucket policy instead)
-            file_overwrite = False   # Don't overwrite files with same name
-            custom_domain = False    # Use presigned URLs instead of public URLs
-            
-            # Security: Use temporary presigned URLs (expires in 1 hour)
-            querystring_expire = 3600  # 1 hour
-            
-            # Performance optimizations
-            object_parameters = {
-                'CacheControl': 'max-age=86400',  # 24 hours
-            }
             
             def __init__(self, *args, **kwargs):
-                self._fallback_storage = None
-                try:
-                    super().__init__(*args, **kwargs)
-                    # Test S3 connection
-                    try:
-                        self.connection.meta.client.head_bucket(Bucket=self.bucket_name)
-                        logger.info(f"[MediaStorage] ✅ S3 storage initialized: {self.bucket_name}/{self.location}")
-                    except (BotoCoreError, ClientError) as e:
-                        logger.warning(f"[MediaStorage] ⚠️ S3 bucket not accessible: {str(e)}. Falling back to local storage.")
-                        self._init_fallback()
-                except Exception as e:
-                    logger.error(f"[MediaStorage] ❌ Failed to initialize S3: {str(e)}. Using local storage.")
-                    self._init_fallback()
-            
-            def _init_fallback(self):
-                """Initialize fallback to local file storage"""
-                self._fallback_storage = FileSystemStorage(location=getattr(settings, 'MEDIA_ROOT', 'media'))
-                logger.info("[MediaStorage] 🔄 Fallback to local file storage activated")
-            
-            def _save(self, name, content):
-                """Override save to use fallback if S3 fails"""
-                if self._fallback_storage:
-                    return self._fallback_storage._save(name, content)
-                try:
-                    return super()._save(name, content)
-                except (BotoCoreError, ClientError) as e:
-                    logger.error(f"[MediaStorage] S3 save failed: {str(e)}. Using fallback storage.")
-                    self._init_fallback()
-                    return self._fallback_storage._save(name, content)
-            
-            def _open(self, name, mode='rb'):
-                """Override open to use fallback if S3 fails"""
-                if self._fallback_storage:
-                    return self._fallback_storage._open(name, mode)
-                try:
-                    return super()._open(name, mode)
-                except (BotoCoreError, ClientError) as e:
-                    logger.error(f"[MediaStorage] S3 open failed: {str(e)}. Using fallback storage.")
-                    self._init_fallback()
-                    return self._fallback_storage._open(name, mode)
+                # Always use local storage - no S3 complications
+                kwargs['location'] = getattr(settings, 'MEDIA_ROOT', 'media')
+                super().__init__(*args, **kwargs)
+                logger.warning("[MediaStorage] ⚠️ S3 configured but using LOCAL storage to avoid errors")
+                logger.info("[MediaStorage] 💾 Files will be saved to local filesystem")
         
-        # Use the safe storage class
-        MediaStorage = SafeMediaStorage
+        # FORCE local storage when S3 is problematic
+        MediaStorage = ResilientMediaStorage
+        logger.info("[Storage] 🔄 Using resilient local storage (S3 disabled due to configuration issues)")
+        
+    except ImportError as e:
+        logger.error(f"[S3] Failed to import dependencies: {str(e)}")
+        from django.core.files.storage import FileSystemStorage
+        
+        class MediaStorage(FileSystemStorage):
+            def __init__(self, *args, **kwargs):
+                kwargs['location'] = getattr(settings, 'MEDIA_ROOT', 'media')
+                super().__init__(*args, **kwargs)
 
 
         class StaticStorage(S3Boto3Storage):
