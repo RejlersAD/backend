@@ -3,12 +3,14 @@ SDV Streams Extraction View
 Handles P&ID + HMB upload and generates filled datasheets
 """
 import logging
+import json
+import base64
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from django.core.files.base import ContentFile
-from django.http import FileResponse
+from django.http import FileResponse, JsonResponse
 import tempfile
 import os
 
@@ -102,7 +104,7 @@ def extract_sdv_streams(request):
             # Import extraction and mapping services
             from apps.designiq.pid_ocr_extractor_v2 import PIDLineExtractorV2
             from apps.process_datasheet.sdv_ai_mapper import SDVDatasheetAIMapper
-            from apps.process_datasheet.sdv_excel_generator import SDVExcelGenerator
+            from apps.process_datasheet.sdv_excel_generator_dynamic import SDVExcelGeneratorDynamic
             from apps.process_datasheet.mock_extractors import (
                 MockPIDExtractor, 
                 MockHMBExtractor,
@@ -147,21 +149,30 @@ def extract_sdv_streams(request):
             )
             logger.info(f"[SDV Streams] ✅ Mapped {len(mapped_data.get('valves', []))} valves")
             
-            # STEP 5: Generate Excel datasheet
-            logger.info("[SDV Streams] STEP 5: Generating Excel datasheet...")
-            generator = SDVExcelGenerator()
+            # STEP 5: Generate Excel datasheet (dynamically created from scratch - NO TEMPLATE)
+            logger.info("[SDV Streams] STEP 5: Generating Excel datasheet dynamically...")
+            generator = SDVExcelGeneratorDynamic()
             excel_file = generator.generate_datasheet(mapped_data)
             logger.info("[SDV Streams] ✅ Excel datasheet generated")
             
-            # Return Excel file as download
-            response = FileResponse(
-                excel_file,
-                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                as_attachment=True,
-                filename=f'SDV_Datasheet_{pid_data.get("valves", [{}])[0].get("tag", "Unknown")}.xlsx'
-            )
+            # Convert Excel to base64 for embedding in response
+            excel_file.seek(0)
+            excel_base64 = base64.b64encode(excel_file.read()).decode('utf-8')
+            excel_file.seek(0)
             
-            logger.info("[SDV Streams] ✅ SUCCESS - Returning filled datasheet")
+            # Generate HTML preview table
+            valve_data = mapped_data.get('valves', [{}])[0]
+            html_preview = generate_html_preview(valve_data)
+            
+            # Return JSON with HTML preview and Excel data
+            response_data = {
+                'success': True,
+                'html_preview': html_preview,
+                'excel_file': excel_base64,
+                'filename': f'SDV_Datasheet_{valve_data.get("tag_no", "Unknown")}.xlsx'
+            }
+            response = JsonResponse(response_data, safe=False)
+            response['Content-Type'] = 'application/json'
             return response
             
         finally:
@@ -179,3 +190,247 @@ def extract_sdv_streams(request):
             {'error': f'SDV streams extraction failed: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+def generate_html_preview(valve_data: dict) -> str:
+    """Generate HTML table preview matching the image structure"""
+    
+    html = """
+    <style>
+        .sdv-table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            margin: 20px 0;
+        }}
+        .sdv-table th, .sdv-table td {{
+            border: 1px solid #000;
+            padding: 8px;
+            text-align: left;
+        }}
+        .sdv-header {{
+            background-color: #f0f0f0;
+            font-weight: bold;
+            text-align: center;
+            font-size: 16px;
+        }}
+        .section-label {{
+            background-color: #e8e8e8;
+            font-weight: bold;
+            text-align: center;
+            vertical-align: middle;
+        }}
+        .row-num {{
+            text-align: center;
+            font-weight: bold;
+            width: 30px;
+        }}
+        .field-label {{
+            font-weight: bold;
+            width: 150px;
+        }}
+        .sub-field {{
+            font-weight: bold;
+            width: 80px;
+        }}
+    </style>
+    
+    <table class="sdv-table">
+        <!-- Header -->
+        <tr>
+            <th colspan="2" class="field-label">COMPANY Doc No.:</th>
+            <th colspan="10"></th>
+            <th class="field-label">Rev. No.:</th>
+            <th>{rev_no}</th>
+        </tr>
+        <tr>
+            <th colspan="12" rowspan="2" class="sdv-header">PROCESS DATA SHEET<br/>SHUTDOWN VALVE</th>
+            <th class="field-label">Date:</th>
+            <th>{date}</th>
+        </tr>
+        <tr>
+            <th colspan="2">Page No: 2 Of 2</th>
+        </tr>
+        <tr>
+            <th colspan="2" class="field-label">Document Class:</th>
+            <th colspan="12"></th>
+        </tr>
+        
+        <!-- General Data Section -->
+        <tr>
+            <td rowspan="6" class="section-label">General<br/>Data</td>
+            <td class="row-num">1</td>
+            <td class="field-label">Tag No.</td>
+            <td colspan="11">{tag_no}</td>
+        </tr>
+        <tr>
+            <td class="row-num">2</td>
+            <td class="field-label">Service</td>
+            <td colspan="11">{service}</td>
+        </tr>
+        <tr>
+            <td class="row-num">3</td>
+            <td class="field-label">P&ID No.</td>
+            <td colspan="11">{pid_no}</td>
+        </tr>
+        <tr>
+            <td class="row-num">4</td>
+            <td class="field-label">Line No.</td>
+            <td colspan="4">{line_no}</td>
+            <td class="sub-field">Piping class</td>
+            <td colspan="5">{piping_class}</td>
+        </tr>
+        <tr>
+            <td class="row-num">5</td>
+            <td class="field-label">Sour Service</td>
+            <td colspan="4">{sour_service}</td>
+            <td class="sub-field">Special Service</td>
+            <td colspan="5">{special_service}</td>
+        </tr>
+        <tr>
+            <td class="row-num">6</td>
+            <td class="field-label">Ambient Temp</td>
+            <td class="sub-field">Min</td>
+            <td>{ambient_temp_min}</td>
+            <td class="sub-field">Max.</td>
+            <td>{ambient_temp_max}</td>
+            <td class="sub-field">Unit</td>
+            <td colspan="5">{ambient_temp_unit}</td>
+        </tr>
+        
+        <!-- Operating Conditions Section -->
+        <tr>
+            <td rowspan="5" class="section-label">Operating<br/>Conditions</td>
+            <td class="row-num">7</td>
+            <td class="field-label">Fluid</td>
+            <td colspan="2">{fluid}</td>
+            <td class="sub-field">Phase</td>
+            <td>{phase}</td>
+            <td class="sub-field">State</td>
+            <td colspan="6">{state}</td>
+        </tr>
+        <tr>
+            <td class="row-num">8</td>
+            <td class="field-label">Press.</td>
+            <td class="sub-field">Normal</td>
+            <td>{pressure_normal}</td>
+            <td class="sub-field">Design</td>
+            <td>{pressure_design}</td>
+            <td class="sub-field">Unit</td>
+            <td colspan="6">{pressure_unit}</td>
+        </tr>
+        <tr>
+            <td class="row-num">9</td>
+            <td class="field-label">Temperature</td>
+            <td class="sub-field">Min</td>
+            <td>{temp_min}</td>
+            <td class="sub-field">Max.</td>
+            <td>{temp_max}</td>
+            <td class="sub-field">Unit</td>
+            <td colspan="6">{temp_unit}</td>
+        </tr>
+        <tr>
+            <td class="row-num">10</td>
+            <td class="field-label">Design Temp.</td>
+            <td class="sub-field">Min</td>
+            <td>{design_temp_min}</td>
+            <td class="sub-field">Max.</td>
+            <td>{design_temp_max}</td>
+            <td class="sub-field">Unit</td>
+            <td colspan="6">{design_temp_unit}</td>
+        </tr>
+        <tr>
+            <td class="row-num">11</td>
+            <td class="field-label">Shut Off Pressure</td>
+            <td colspan="11">{shut_off_pressure}</td>
+        </tr>
+        
+        <!-- Valve Details Section -->
+        <tr>
+            <td rowspan="2" class="section-label">Valve<br/>Details</td>
+            <td class="row-num">12</td>
+            <td class="field-label">Bore Detail</td>
+            <td colspan="11">{bore_detail}</td>
+        </tr>
+        <tr>
+            <td class="row-num">13</td>
+            <td class="field-label">Mech. Handwheel</td>
+            <td colspan="11">{mech_handwheel}</td>
+        </tr>
+        
+        <!-- Actuator Details Section -->
+        <tr>
+            <td rowspan="4" class="section-label">Actuator<br/>Details</td>
+            <td class="row-num">14</td>
+            <td class="field-label">Air Fail position</td>
+            <td colspan="11">{fail_position}</td>
+        </tr>
+        <tr>
+            <td class="row-num">15</td>
+            <td class="field-label">Valve Close Time</td>
+            <td colspan="4">{valve_close_time}</td>
+            <td class="sub-field">Valve Open Time</td>
+            <td colspan="6">{valve_open_time}</td>
+        </tr>
+        <tr>
+            <td class="row-num">16</td>
+            <td class="field-label">Design Pressure</td>
+            <td colspan="11">{design_pressure}</td>
+        </tr>
+        <tr>
+            <td class="row-num">17</td>
+            <td class="field-label">Seat Leakage Class</td>
+            <td colspan="11">{seat_leakage_class}</td>
+        </tr>
+        
+        <!-- Accessories Section -->
+        <tr>
+            <td class="section-label">Accessories</td>
+            <td class="row-num">18</td>
+            <td class="field-label">NACE Requirement</td>
+            <td colspan="11">{nace_requirement}</td>
+        </tr>
+        
+        <!-- Notes -->
+        <tr>
+            <td colspan="14" class="field-label">Notes:</td>
+        </tr>
+    </table>
+    """.format(
+        rev_no=valve_data.get('rev_no', 'A'),
+        date=valve_data.get('date', 'N/A'),
+        tag_no=valve_data.get('tag_no', ''),
+        service=valve_data.get('service', ''),
+        pid_no=valve_data.get('pid_no', ''),
+        line_no=valve_data.get('line_no', ''),
+        piping_class=valve_data.get('piping_class', ''),
+        sour_service=valve_data.get('sour_service', ''),
+        special_service=valve_data.get('special_service', ''),
+        ambient_temp_min=valve_data.get('ambient_temp_min', ''),
+        ambient_temp_max=valve_data.get('ambient_temp_max', ''),
+        ambient_temp_unit=valve_data.get('ambient_temp_unit', '°C'),
+        fluid=valve_data.get('fluid', ''),
+        phase=valve_data.get('phase', ''),
+        state=valve_data.get('state', ''),
+        pressure_normal=valve_data.get('operating_pressure_normal', ''),
+        pressure_design=valve_data.get('operating_pressure_design', ''),
+        pressure_unit=valve_data.get('pressure_unit', 'barg'),
+        temp_min=valve_data.get('operating_temp_min', ''),
+        temp_max=valve_data.get('operating_temp_max', ''),
+        temp_unit=valve_data.get('operating_temp_unit', '°C'),
+        design_temp_min=valve_data.get('design_temp_min', ''),
+        design_temp_max=valve_data.get('design_temp_max', ''),
+        design_temp_unit=valve_data.get('design_temp_unit', '°C'),
+        shut_off_pressure=valve_data.get('shut_off_pressure', ''),
+        bore_detail=valve_data.get('bore_detail', ''),
+        mech_handwheel=valve_data.get('mech_handwheel', ''),
+        fail_position=valve_data.get('fail_position', ''),
+        valve_close_time=valve_data.get('valve_close_time', ''),
+        valve_open_time=valve_data.get('valve_open_time', ''),
+        design_pressure=valve_data.get('design_pressure', ''),
+        seat_leakage_class=valve_data.get('seat_leakage_class', ''),
+        nace_requirement=valve_data.get('nace_requirement', '')
+    )
+    
+    return html
