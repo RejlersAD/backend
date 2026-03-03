@@ -130,24 +130,69 @@ Your task is to intelligently map and fill SDV datasheet fields by matching data
 
 **FIELD MAPPING:**
 From P&ID:
-- tag_no, service, pid_no, line_no, piping_class, sour_service, special_service, ambient_temp
+- tag_no, service, pid_no, line_no, piping_class
+- sour_service, special_service
+- fail_position, valve_close_time, valve_open_time
+- bore_detail, mech_handwheel, seat_leakage_class, nace_requirement
 
 From HMB:
-- fluid, phase, state, operating_pressure (normal & design), operating_temp (min & max), design_temp, shut_off_pressure
+- fluid, phase, state
+- operating_pressure_normal, operating_pressure_design, pressure_unit
+- operating_temp_min, operating_temp_max, operating_temp_unit
+- design_temp_min, design_temp_max, design_temp_unit
+- shut_off_pressure
+- ambient_temp_min, ambient_temp_max, ambient_temp_unit
 
 **MATCHING STRATEGY:**
 1. Extract line_no from P&ID valve context
 2. Find matching stream in HMB by line_no or stream_id
 3. Combine valve data from P&ID with process data from HMB
-4. Flag if no match found
+4. Include ambient conditions from HMB process_conditions
+5. Flag if no match found
 
 Return ONLY valid JSON in this structure:
 {
   "valves": [
     {
-      "tag_no": "SDV-001",
-      "service": "Main Gas Shutdown",
-      "pid_no": "P-100-001",
+      "tag_no": "SDV-100-001",
+      "service": "Natural Gas Main Line Shutdown",
+      "pid_no": "P-100-001-Rev-A",
+      "line_no": "6\\"-GA-100-1501-A2B",
+      "piping_class": "ASME B16.5 150#",
+      "sour_service": "No",
+      "special_service": "None",
+      "ambient_temp_min": "10",
+      "ambient_temp_max": "50",
+      "ambient_temp_unit": "°C",
+      "fluid": "Natural Gas",
+      "phase": "Gas",
+      "state": "Supercritical",
+      "operating_pressure_normal": "75",
+      "operating_pressure_design": "90",
+      "pressure_unit": "barg",
+      "operating_temp_min": "-10",
+      "operating_temp_max": "65",
+      "operating_temp_unit": "°C",
+      "design_temp_min": "-20",
+      "design_temp_max": "85",
+      "design_temp_unit": "°C",
+      "shut_off_pressure": "105 barg",
+      "bore_detail": "6\\" Full Bore",
+      "mech_handwheel": "Yes",
+      "fail_position": "Fail Close (FC)",
+      "valve_close_time": "5 seconds",
+      "valve_open_time": "8 seconds",
+      "design_pressure": "90 barg",
+      "seat_leakage_class": "Class VI",
+      "nace_requirement": "MR0175",
+      "confidence": "high",
+      "match_method": "line_number"
+    }
+  ],
+  "overall_confidence": "high",
+  "unmatched_valves": [],
+  "unmatched_streams": []
+}"""
       "line_no": "6\\"-GA-100-1501-A2B",
       "piping_class": "ASME B16.5 150#",
       "fluid": "Natural Gas",

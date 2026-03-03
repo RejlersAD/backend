@@ -23,6 +23,7 @@ router.register(r'extraction-jobs', DatasheetExtractionJobViewSet, basename='ext
 router.register(r'pump-calculations', PumpCalculationDataViewSet, basename='pump-calculation')
 
 urlpatterns = [
-    path('', include(router.urls)),
+    # Specific paths MUST come before router.urls to avoid conflicts
     path('datasheets/extract-sdv-streams/', extract_sdv_streams, name='extract-sdv-streams'),
+    path('', include(router.urls)),
 ]

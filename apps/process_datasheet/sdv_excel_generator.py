@@ -5,6 +5,7 @@ Fills the bundled template with AI-mapped data
 import logging
 from pathlib import Path
 from typing import Dict, List
+from datetime import datetime
 import openpyxl
 from io import BytesIO
 from django.core.files.base import ContentFile
@@ -19,57 +20,79 @@ class SDVExcelGenerator:
     Uses the bundled Excel template and openpyxl
     """
     
-    # Excel cell mappings (based on template inspection)
+    # Excel cell mappings (based on actual template structure from image)
     CELL_MAPPINGS = {
-        # Document Info
+        # Document Info (Header)
         'document_no': 'C2',
-        'rev_no': 'N2',
+        'rev_no': 'N2', 
         'date': 'N3',
         
-        # General Data (Column E for values)
-        'tag_no': 'E5',
-        'service': 'E6',
-        'pid_no': 'E7',
-        'line_no': 'E8',
+        # Row 1: Tag No.
+        'tag_no': 'D5',
+        
+        # Row 2: Service
+        'service': 'D6',
+        
+        # Row 3: P&ID No.
+        'pid_no': 'D7',
+        
+        # Row 4: Line No. | Piping class
+        'line_no': 'D8',
         'piping_class': 'I8',
-        'sour_service': 'E9',
+        
+        # Row 5: Sour Service | Special Service
+        'sour_service': 'D9',
         'special_service': 'I9',
         
-        # Ambient Temperature
+        # Row 6: Ambient Temp | Min | Max. | Unit
         'ambient_temp_min': 'E10',
         'ambient_temp_max': 'G10',
-        'ambient_temp_unit': 'H10',
+        'ambient_temp_unit': 'I10',
         
-        # Fluid Info
-        'fluid': 'E11',
-        'phase': 'G11',
+        # Row 7: Fluid | Phase | State
+        'fluid': 'D11',
+        'phase': 'F11',
         'state': 'H11',
         
-        # Operating Conditions - Pressure
+        # Row 8: Press. | Normal | Design | Unit
         'operating_pressure_normal': 'E12',
         'operating_pressure_design': 'G12',
         'pressure_unit': 'I12',
         
-        # Operating Conditions - Temperature
-        'operating_temp_min': 'E14',
-        'operating_temp_max': 'G14',
-        'operating_temp_unit': 'I14',
+        # Row 9: Temperature | Min | Max. | Unit
+        'operating_temp_min': 'E13',
+        'operating_temp_max': 'G13',
+        'operating_temp_unit': 'I13',
         
-        # Design Temperature
-        'design_temp_min': 'E15',
-        'design_temp_max': 'G15',
-        'design_temp_unit': 'I15',
+        # Row 10: Design Temp. | Min | Max. | Unit
+        'design_temp_min': 'E14',
+        'design_temp_max': 'G14',
+        'design_temp_unit': 'I14',
         
-        # Valve Details
-        'shut_off_pressure': 'E16',
-        'bore_detail': 'E17',
-        'mech_handwheel': 'E18',
-        'fail_position': 'E19',
-        'valve_close_time': 'E20',
-        'valve_open_time': 'H21',
-        'design_pressure': 'E22',
-        'seat_leakage_class': 'E23',
-        'nace_requirement': 'E24',
+        # Row 11: Shut Off Pressure
+        'shut_off_pressure': 'D15',
+        
+        # Row 12: Bore Detail
+        'bore_detail': 'D16',
+        
+        # Row 13: Mech. Handwheel
+        'mech_handwheel': 'D17',
+        
+        # Row 14: Air Fail position
+        'fail_position': 'D18',
+        
+        # Row 15: Valve Close Time | Valve Open Time
+        'valve_close_time': 'D19',
+        'valve_open_time': 'H19',
+        
+        # Row 16: Design Pressure
+        'design_pressure': 'D20',
+        
+        # Row 17: Seat Leakage Class
+        'seat_leakage_class': 'D21',
+        
+        # Row 18: NACE Requirement
+        'nace_requirement': 'D22',
     }
     
     def __init__(self):
@@ -148,45 +171,19 @@ class SDVExcelGenerator:
         # Add default document info
         ws['C2'] = valve_data.get('document_no', 'RJ-AB-SDV-DS-001')
         ws['N2'] = valve_data.get('rev_no', 'A')
-        ws['N3'] = valve_data.get('date', 'N/A')
+        ws['N3'] = valve_data.get('date', datetime.now().strftime('%d-%b-%Y'))
         filled_count += 3
         
-        # Map valve data to cells
-        field_mapping = {
-            'tag_no': 'E5',
-            'service': 'E6',
-            'pid_no': 'E7',
-            'line_no': 'E8',
-            'piping_class': 'I8',
-            'sour_service': 'E9',
-            'special_service': 'I9',
-            'ambient_temp_min': 'E10',
-            'ambient_temp_max': 'G10',
-            'ambient_temp_unit': 'H10',
-            'fluid': 'E11',
-            'phase': 'G11',
-            'state': 'H11',
-            'operating_pressure_normal': 'E12',
-            'operating_pressure_design': 'G12',
-            'pressure_unit': 'I12',
-            'operating_temp_min': 'E14',
-            'operating_temp_max': 'G14',
-            'operating_temp_unit': 'I14',
-            'design_temp_min': 'E15',
-            'design_temp_max': 'G15',
-            'design_temp_unit': 'I15',
-            'shut_off_pressure': 'E16',
-            'fail_position': 'E19',
-            'valve_close_time': 'E20',
-            'valve_open_time': 'H21',
-        }
-        
-        for field, cell in field_mapping.items():
+        # Map all fields using CELL_MAPPINGS
+        for field, cell in self.CELL_MAPPINGS.items():
+            # Skip document header fields already handled
+            if field in ['document_no', 'rev_no', 'date']:
+                continue
+                
             value = valve_data.get(field)
             if value is not None and value != '':
-                ws[cell] = value
+                ws[cell] = str(value)
                 filled_count += 1
-                logger.debug(f"[SDVExcelGenerator] {cell} = {value}")
         
         return filled_count
     

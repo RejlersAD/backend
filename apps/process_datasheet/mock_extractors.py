@@ -34,25 +34,43 @@ class MockPIDExtractor:
                     'tag': 'SDV-100-001',
                     'type': 'SDV',
                     'location': 'Main Gas Line Inlet',
+                    'service': 'Natural Gas Main Line Shutdown',
                     'line_no': '6"-GA-100-1501-A2B',
-                    'fail_position': 'FC',
-                    'closure_time': '5 seconds'
+                    'fail_position': 'Fail Close (FC)',
+                    'closure_time': '5 seconds',
+                    'opening_time': '8 seconds',
+                    'bore_detail': '6" Full Bore',
+                    'mech_handwheel': 'Yes',
+                    'seat_leakage_class': 'Class VI',
+                    'nace_requirement': 'MR0175'
                 },
                 {
                     'tag': 'SDV-100-002',
                     'type': 'SDV',
                     'location': 'Gas Line Branch A',
+                    'service': 'Natural Gas Branch Shutdown',
                     'line_no': '4"-GA-100-1502-A2B',
-                    'fail_position': 'FC',
-                    'closure_time': '3 seconds'
+                    'fail_position': 'Fail Close (FC)',
+                    'closure_time': '3 seconds',
+                    'opening_time': '5 seconds',
+                    'bore_detail': '4" Full Bore',
+                    'mech_handwheel': 'Yes',
+                    'seat_leakage_class': 'Class VI',
+                    'nace_requirement': 'MR0175'
                 },
                 {
                     'tag': 'XV-100-003',
                     'type': 'XV',
                     'location': 'Isolation Valve',
+                    'service': 'Main Line Isolation',
                     'line_no': '6"-GA-100-1501-A2B',
-                    'fail_position': 'FO',
-                    'closure_time': '10 seconds'
+                    'fail_position': 'Fail Open (FO)',
+                    'closure_time': '10 seconds',
+                    'opening_time': '12 seconds',
+                    'bore_detail': '6" Reduced Bore',
+                    'mech_handwheel': 'No',
+                    'seat_leakage_class': 'Class IV',
+                    'nace_requirement': 'Not Required'
                 }
             ],
             'lines': [
@@ -121,7 +139,13 @@ class MockHMBExtractor:
                     'pressure': {
                         'normal': 75,
                         'design': 90,
+                        'shutoff': 105,  # Added shut off pressure
                         'unit': 'barg'
+                    },
+                    'design_temperature': {  # Added design temperature
+                        'min': -20,
+                        'max': 85,
+                        'unit': '°C'
                     },
                     'flow_rate': 50000,
                     'flow_unit': 'kg/hr',
@@ -148,7 +172,13 @@ class MockHMBExtractor:
                     'pressure': {
                         'normal': 70,
                         'design': 85,
+                        'shutoff': 100,  # Added shut off pressure
                         'unit': 'barg'
+                    },
+                    'design_temperature': {  # Added design temperature
+                        'min': -15,
+                        'max': 80,
+                        'unit': '°C'
                     },
                     'flow_rate': 25000,
                     'flow_unit': 'kg/hr',
