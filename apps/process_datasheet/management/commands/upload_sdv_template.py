@@ -1,6 +1,8 @@
 """
-Management command to upload SDV datasheet templates
+Management command to upload SDV datasheet templates to bundled directory
 Usage: python manage.py upload_sdv_template path/to/template.xlsx [--name custom_name.xlsx]
+
+Note: This copies the template into the codebase. Remember to commit to git!
 """
 from django.core.management.base import BaseCommand
 from django.core.files import File
@@ -8,7 +10,7 @@ import os
 
 
 class Command(BaseCommand):
-    help = 'Upload SDV datasheet template to storage (S3 or local)'
+    help = 'Upload SDV datasheet template to bundled templates directory'
     
     def add_arguments(self, parser):
         parser.add_argument(
@@ -50,11 +52,8 @@ class Command(BaseCommand):
         
         try:
             with open(template_path, 'rb') as f:
-                # Create Django File object
-                file_obj = File(f)
-                
-                # Save template
-                saved_path = SDVTemplateManager.save_template(file_obj, template_name)
+                # Save template to bundled directory
+                saved_path = SDVTemplateManager.save_template(f, template_name)
                 
                 self.stdout.write(
                     self.style.SUCCESS(
@@ -63,11 +62,9 @@ class Command(BaseCommand):
                 )
                 self.stdout.write(f'📁 Saved to: {saved_path}')
                 
-                # Show template URL if S3
-                from django.conf import settings
-                if settings.USE_S3:
-                    template_url = SDVTemplateManager.get_template_url(template_name)
-                    self.stdout.write(f'🔗 S3 URL: {template_url}')
+                # Get template info
+                info = SDVTemplateManager.get_template_info(template_name)
+                self.stdout.write(f'📊 Size: {info["size_mb"]} MB')
                 
                 # List all templates
                 templates = SDVTemplateManager.list_templates()
@@ -78,6 +75,16 @@ class Command(BaseCommand):
                 )
                 for tmpl in templates:
                     self.stdout.write(f'  - {tmpl}')
+                
+                # Remind to commit
+                self.stdout.write(
+                    self.style.WARNING(
+                        f'\n📝 Remember to commit this to git:\n'
+                        f'  git add {saved_path}\n'
+                        f'  git commit -m "Update SDV template"\n'
+                        f'  git push'
+                    )
+                )
                 
         except Exception as e:
             self.stdout.write(
