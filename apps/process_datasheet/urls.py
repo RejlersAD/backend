@@ -12,6 +12,7 @@ from .views import (
     DatasheetExtractionJobViewSet,
     PumpCalculationDataViewSet
 )
+from .sdv_streams_view import extract_sdv_streams
 
 router = DefaultRouter()
 router.register(r'equipment-types', EquipmentTypeViewSet, basename='equipment-type')
@@ -23,4 +24,5 @@ router.register(r'pump-calculations', PumpCalculationDataViewSet, basename='pump
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('datasheets/extract-sdv-streams/', extract_sdv_streams, name='extract-sdv-streams'),
 ]
