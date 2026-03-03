@@ -128,20 +128,24 @@ Your task is to intelligently map and fill SDV datasheet fields by matching data
 - Preserve units exactly as extracted
 - Map phase descriptions consistently (Gas/Liquid/Two-Phase)
 
-**FIELD MAPPING:**
-From P&ID:
+**CRITICAL FIELD MAPPING RULES:**
+
+SECTION 1 - General Data (FROM P&ID ONLY):
 - tag_no, service, pid_no, line_no, piping_class
 - sour_service, special_service
-- fail_position, valve_close_time, valve_open_time
-- bore_detail, mech_handwheel, seat_leakage_class, nace_requirement
+- ambient_temp_min, ambient_temp_max, ambient_temp_unit
 
-From HMB:
+SECTION 2 - Operating Conditions (FROM HMB ONLY):
 - fluid, phase, state
 - operating_pressure_normal, operating_pressure_design, pressure_unit
 - operating_temp_min, operating_temp_max, operating_temp_unit
 - design_temp_min, design_temp_max, design_temp_unit
 - shut_off_pressure
-- ambient_temp_min, ambient_temp_max, ambient_temp_unit
+
+SECTIONS 3-5 (Valve Details, Actuator Details, Accessories):
+- LEAVE ALL FIELDS AS null
+- DO NOT fill: bore_detail, mech_handwheel, fail_position, valve_close_time, valve_open_time, design_pressure, seat_leakage_class, nace_requirement
+- These sections will be filled manually by engineers
 
 **MATCHING STRATEGY:**
 1. Extract line_no from P&ID valve context
@@ -177,35 +181,14 @@ Return ONLY valid JSON in this structure:
       "design_temp_max": "85",
       "design_temp_unit": "°C",
       "shut_off_pressure": "105 barg",
-      "bore_detail": "6\\" Full Bore",
-      "mech_handwheel": "Yes",
-      "fail_position": "Fail Close (FC)",
-      "valve_close_time": "5 seconds",
-      "valve_open_time": "8 seconds",
-      "design_pressure": "90 barg",
-      "seat_leakage_class": "Class VI",
-      "nace_requirement": "MR0175",
-      "confidence": "high",
-      "match_method": "line_number"
-    }
-  ],
-  "overall_confidence": "high",
-  "unmatched_valves": [],
-  "unmatched_streams": []
-}"""
-      "line_no": "6\\"-GA-100-1501-A2B",
-      "piping_class": "ASME B16.5 150#",
-      "fluid": "Natural Gas",
-      "phase": "Gas",
-      "state": "Supercritical",
-      "operating_pressure_normal": "75",
-      "operating_pressure_design": "90",
-      "pressure_unit": "barg",
-      "operating_temp_min": "-10",
-      "operating_temp_max": "65",
-      "temp_unit": "°C",
-      "design_temp_min": "-20",
-      "design_temp_max": "85",
+      "bore_detail": null,
+      "mech_handwheel": null,
+      "fail_position": null,
+      "valve_close_time": null,
+      "valve_open_time": null,
+      "design_pressure": null,
+      "seat_leakage_class": null,
+      "nace_requirement": null,
       "confidence": "high",
       "match_method": "line_number"
     }
