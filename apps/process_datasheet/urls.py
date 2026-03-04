@@ -14,6 +14,7 @@ from .views import (
 )
 from .sdv_streams_view import extract_sdv_streams, check_sdv_job_status
 from .mov_equipment_view import extract_mov_equipment, check_mov_job_status
+from .smart_datasheet_view import smart_datasheet_upload, smart_datasheet_status, smart_datasheet_preview
 
 router = DefaultRouter()
 router.register(r'equipment-types', EquipmentTypeViewSet, basename='equipment-type')
@@ -25,6 +26,10 @@ router.register(r'pump-calculations', PumpCalculationDataViewSet, basename='pump
 
 urlpatterns = [
     # Specific paths MUST come before router.urls to avoid conflicts
+    # Smart Datasheet endpoints (unified tool for all 4 types)
+    path('datasheets/smart-upload/', smart_datasheet_upload, name='smart-datasheet-upload'),
+    path('datasheets/smart-preview/', smart_datasheet_preview, name='smart-datasheet-preview'),
+    path('smart-job-status/<str:job_id>/', smart_datasheet_status, name='smart-datasheet-status'),
     # SDV Streams endpoints
     path('datasheets/extract-sdv-streams/', extract_sdv_streams, name='extract-sdv-streams'),
     path('sdv-job-status/<str:job_id>/', check_sdv_job_status, name='check-sdv-job-status'),
