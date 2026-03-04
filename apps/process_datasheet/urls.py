@@ -13,6 +13,7 @@ from .views import (
     PumpCalculationDataViewSet
 )
 from .sdv_streams_view import extract_sdv_streams, check_sdv_job_status
+from .mov_equipment_view import extract_mov_equipment, check_mov_job_status
 
 router = DefaultRouter()
 router.register(r'equipment-types', EquipmentTypeViewSet, basename='equipment-type')
@@ -24,7 +25,11 @@ router.register(r'pump-calculations', PumpCalculationDataViewSet, basename='pump
 
 urlpatterns = [
     # Specific paths MUST come before router.urls to avoid conflicts
+    # SDV Streams endpoints
     path('datasheets/extract-sdv-streams/', extract_sdv_streams, name='extract-sdv-streams'),
     path('sdv-job-status/<str:job_id>/', check_sdv_job_status, name='check-sdv-job-status'),
+    # MOV Equipment endpoints
+    path('datasheets/extract-mov-equipment/', extract_mov_equipment, name='extract-mov-equipment'),
+    path('mov-job-status/<str:job_id>/', check_mov_job_status, name='check-mov-job-status'),
     path('', include(router.urls)),
 ]
