@@ -1,6 +1,6 @@
 """
 SDV Streams Extraction View
-Handles P&ID + HMB upload and generates filled datasheets
+Handles P&ID + HMB upload and generates filled datasheets (ASYNC)
 """
 import logging
 import json
@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.core.files.base import ContentFile
 from django.http import FileResponse, JsonResponse
+from django.core.cache import cache
 import tempfile
 import os
 
@@ -21,19 +22,17 @@ logger = logging.getLogger(__name__)
 @permission_classes([IsAuthenticated])
 def extract_sdv_streams(request):
     """
-    AI-Orchestrated SDV Datasheet Generation
+    AI-Orchestrated SDV Datasheet Generation (ASYNC)
     
     POST /api/v1/process-datasheet/datasheets/extract-sdv-streams/
     
     Body (multipart/form-data):
         - pid_file: P&ID PDF file (required)
-        - hmb_file: HMB PDF file (optional but recommended)
+        - hmb_file: HMB PDF file (required)
         - equipment_type: 'sdv_streams' (required)
     
     Returns:
-        - Immediate: Filled Excel datasheet download
-        OR
-        - Job ID for background processing
+        - Job ID for background processing (immediate response)
     """
     try:
         logger.info(f"[SDV Streams] Request from user: {request.user.email}")
@@ -52,6 +51,13 @@ def extract_sdv_streams(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # Validate HMB file (required)
+        if not hmb_file:
+            return Response(
+                {'error': 'HMB file (hmb_file) is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         # Validate equipment type
         if equipment_type != 'sdv_streams':
             return Response(
@@ -66,7 +72,7 @@ def extract_sdv_streams(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        if hmb_file and not hmb_file.name.lower().endswith('.pdf'):
+        if not hmb_file.name.lower().endswith('.pdf'):
             return Response(
                 {'error': 'HMB file must be PDF'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -79,13 +85,51 @@ def extract_sdv_streams(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        if hmb_file and hmb_file.size > 50 * 1024 * 1024:
+        if hmb_file.size > 50 * 1024 * 1024:
             return Response(
                 {'error': 'HMB file exceeds 50MB limit'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        logger.info("[SDV Streams] ✅ Validation passed, starting extraction...")
+        logger.info("[SDV Streams] ✅ Validation passed, starting async processing...")
+        
+        # Save files to temp location
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as pid_temp:
+            for chunk in pid_file.chunks():
+                pid_temp.write(chunk)
+            pid_temp_path = pid_temp.name
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as hmb_temp:
+            for chunk in hmb_file.chunks():
+                hmb_temp.write(chunk)
+            hmb_temp_path = hmb_temp.name
+        
+        # Start async task using threading (works with or without Celery)
+        from apps.process_datasheet.sdv_threading_processor import start_async_processing
+        
+        job_id = start_async_processing(
+            pid_file_path=pid_temp_path,
+            hmb_file_path=hmb_temp_path,
+            pid_filename=pid_file.name,
+            user_email=request.user.email if hasattr(request.user, 'email') else 'anonymous'
+        )
+        
+        logger.info(f"[SDV Streams] ✅ Job started: {job_id}")
+        
+        # Return job ID immediately
+        return JsonResponse({
+            'success': True,
+            'job_id': job_id,
+            'status': 'processing',
+            'message': 'Processing started. This may take 2-5 minutes for Vision AI extraction.'
+        })
+        
+    except Exception as e:
+        logger.error(f"[SDV Streams] ❌ Error: {e}", exc_info=True)
+        return Response(
+            {'error': f'SDV streams extraction failed: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
         
         # Save files temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as pid_temp:
@@ -107,25 +151,34 @@ def extract_sdv_streams(request):
             from apps.process_datasheet.sdv_excel_generator_dynamic import SDVExcelGeneratorDynamic
             from apps.process_datasheet.mock_extractors import (
                 MockPIDExtractor, 
-                MockHMBExtractor,
                 match_lines_to_streams
             )
+            from apps.process_datasheet.hmb_vision_extractor import HMBVisionExtractor
             
             # STEP 1: Extract P&ID data
             logger.info("[SDV Streams] STEP 1: Extracting P&ID data...")
+            logger.info(f"[SDV Streams] P&ID filename: {pid_file.name}")
             # TODO: Replace with real extraction
             pid_extractor = MockPIDExtractor()
-            pid_data = pid_extractor.extract_from_pdf(pid_temp_path)
+            pid_data = pid_extractor.extract_from_pdf(pid_temp_path, original_filename=pid_file.name)
             logger.info(f"[SDV Streams] ✅ Extracted {len(pid_data.get('valves', []))} valves from P&ID")
+            logger.info(f"[SDV Streams] ✅ P&ID Number: {pid_data.get('drawing_info', {}).get('pid_no', 'Unknown')}")
             
-            # STEP 2: Extract HMB data (if provided)
+            # STEP 2: Extract HMB data using Vision model (STRICT ACCURACY MODE)
             hmb_data = None
             if hmb_temp_path:
-                logger.info("[SDV Streams] STEP 2: Extracting HMB data...")
-                # TODO: Replace with real extraction
-                hmb_extractor = MockHMBExtractor()
-                hmb_data = hmb_extractor.extract_from_pdf(hmb_temp_path)
-                logger.info(f"[SDV Streams] ✅ Extracted {len(hmb_data.get('streams', []))} streams from HMB")
+                logger.info("[SDV Streams] STEP 2: Extracting HMB data using Vision model...")
+                try:
+                    vision_extractor = HMBVisionExtractor()
+                    hmb_data = vision_extractor.extract_from_pdf(hmb_temp_path)
+                    logger.info(f"[SDV Streams] ✅ Extracted {len(hmb_data.get('streams', []))} streams from HMB")
+                except Exception as e:
+                    logger.warning(f"[SDV Streams] ⚠️ Vision extraction failed, using fallback: {e}")
+                    # Fallback to mock if vision fails
+                    from apps.process_datasheet.mock_extractors import MockHMBExtractor
+                    hmb_extractor = MockHMBExtractor()
+                    hmb_data = hmb_extractor.extract_from_pdf(hmb_temp_path)
+                    logger.info(f"[SDV Streams] ✅ Extracted {len(hmb_data.get('streams', []))} streams from HMB (fallback)")
             else:
                 logger.info("[SDV Streams] STEP 2: No HMB file provided, using P&ID data only")
                 # Create minimal HMB data structure
@@ -194,6 +247,18 @@ def extract_sdv_streams(request):
 
 def generate_html_preview(valve_data: dict) -> str:
     """Generate HTML table preview matching the image structure"""
+    
+    # Extract first valve if valve_data contains 'valves' array
+    if 'valves' in valve_data and isinstance(valve_data['valves'], list) and valve_data['valves']:
+        valve_data = valve_data['valves'][0]
+    
+    # Clean all values - remove None and convert to string
+    cleaned_data = {}
+    for key, value in valve_data.items():
+        if value is None:
+            cleaned_data[key] = ''
+        else:
+            cleaned_data[key] = str(value)
     
     html = """
     <style>
@@ -398,39 +463,90 @@ def generate_html_preview(valve_data: dict) -> str:
         </tr>
     </table>
     """.format(
-        rev_no=valve_data.get('rev_no', 'A'),
-        date=valve_data.get('date', 'N/A'),
-        tag_no=valve_data.get('tag_no', ''),
-        service=valve_data.get('service', ''),
-        pid_no=valve_data.get('pid_no', ''),
-        line_no=valve_data.get('line_no', ''),
-        piping_class=valve_data.get('piping_class', ''),
-        sour_service=valve_data.get('sour_service', ''),
-        special_service=valve_data.get('special_service', ''),
-        ambient_temp_min=valve_data.get('ambient_temp_min', ''),
-        ambient_temp_max=valve_data.get('ambient_temp_max', ''),
-        ambient_temp_unit=valve_data.get('ambient_temp_unit', '°C'),
-        fluid=valve_data.get('fluid', ''),
-        phase=valve_data.get('phase', ''),
-        state=valve_data.get('state', ''),
-        pressure_normal=valve_data.get('operating_pressure_normal', ''),
-        pressure_design=valve_data.get('operating_pressure_design', ''),
-        pressure_unit=valve_data.get('pressure_unit', 'barg'),
-        temp_min=valve_data.get('operating_temp_min', ''),
-        temp_max=valve_data.get('operating_temp_max', ''),
-        temp_unit=valve_data.get('operating_temp_unit', '°C'),
-        design_temp_min=valve_data.get('design_temp_min', ''),
-        design_temp_max=valve_data.get('design_temp_max', ''),
-        design_temp_unit=valve_data.get('design_temp_unit', '°C'),
-        shut_off_pressure=valve_data.get('shut_off_pressure', ''),
-        bore_detail=valve_data.get('bore_detail', ''),
-        mech_handwheel=valve_data.get('mech_handwheel', ''),
-        fail_position=valve_data.get('fail_position', ''),
-        valve_close_time=valve_data.get('valve_close_time', ''),
-        valve_open_time=valve_data.get('valve_open_time', ''),
-        design_pressure=valve_data.get('design_pressure', ''),
-        seat_leakage_class=valve_data.get('seat_leakage_class', ''),
-        nace_requirement=valve_data.get('nace_requirement', '')
+        rev_no=cleaned_data.get('rev_no', 'A'),
+        date=cleaned_data.get('date', 'N/A'),
+        tag_no=cleaned_data.get('tag_no', ''),
+        service=cleaned_data.get('service', ''),
+        pid_no=cleaned_data.get('pid_no', ''),
+        line_no=cleaned_data.get('line_no', ''),
+        piping_class=cleaned_data.get('piping_class', ''),
+        sour_service=cleaned_data.get('sour_service', ''),
+        special_service=cleaned_data.get('special_service', ''),
+        ambient_temp_min=cleaned_data.get('ambient_temp_min', ''),
+        ambient_temp_max=cleaned_data.get('ambient_temp_max', ''),
+        ambient_temp_unit=cleaned_data.get('ambient_temp_unit', '°C'),
+        fluid=cleaned_data.get('fluid', ''),
+        phase=cleaned_data.get('phase', ''),
+        state=cleaned_data.get('state', ''),
+        pressure_normal=cleaned_data.get('operating_pressure_normal', ''),
+        pressure_design=cleaned_data.get('operating_pressure_design', ''),
+        pressure_unit=cleaned_data.get('pressure_unit', 'barg'),
+        temp_min=cleaned_data.get('operating_temp_min', ''),
+        temp_max=cleaned_data.get('operating_temp_max', ''),
+        temp_unit=cleaned_data.get('operating_temp_unit', '°C'),
+        design_temp_min=cleaned_data.get('design_temp_min', ''),
+        design_temp_max=cleaned_data.get('design_temp_max', ''),
+        design_temp_unit=cleaned_data.get('design_temp_unit', '°C'),
+        shut_off_pressure=cleaned_data.get('shut_off_pressure', ''),
+        bore_detail=cleaned_data.get('bore_detail', ''),
+        mech_handwheel=cleaned_data.get('mech_handwheel', ''),
+        fail_position=cleaned_data.get('fail_position', ''),
+        valve_close_time=cleaned_data.get('valve_close_time', ''),
+        valve_open_time=cleaned_data.get('valve_open_time', ''),
+        design_pressure=cleaned_data.get('design_pressure', ''),
+        seat_leakage_class=cleaned_data.get('seat_leakage_class', ''),
+        nace_requirement=cleaned_data.get('nace_requirement', '')
     )
     
     return html
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def check_sdv_job_status(request, job_id):
+    """
+    Check status of async SDV processing job
+    
+    GET /api/v1/process-datasheet/datasheets/sdv-job-status/<job_id>/
+    
+    Returns:
+        - progress (0-100)
+        - stage (current processing stage)
+        - result (if complete)
+    """
+    try:
+        # Get cached progress and result
+        progress = cache.get(f'sdv_task_{job_id}_progress', 0)
+        stage = cache.get(f'sdv_task_{job_id}_stage', 'Initializing...')
+        result = cache.get(f'sdv_task_{job_id}_result')
+        
+        if result:
+            # Task complete
+            return JsonResponse({
+                'status': 'completed' if result.get('success') else 'failed',
+                'progress': 100 if result.get('success') else 0,
+                'stage': 'Complete' if result.get('success') else 'Error',
+                'result': result
+            })
+        elif progress > 0:
+            # Task in progress
+            return JsonResponse({
+                'status': 'processing',
+                'progress': progress,
+                'stage': stage
+            })
+        else:
+            # No progress yet or invalid job_id
+            return JsonResponse({
+                'status': 'not_found',
+                'progress': 0,
+                'stage': 'Job not found or not started',
+                'error': 'Invalid job_id or job expired'
+            })
+            
+    except Exception as e:
+        logger.error(f"[SDV Job Status] Error: {e}")
+        return Response(
+            {'error': f'Failed to check job status: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

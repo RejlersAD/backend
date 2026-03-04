@@ -3,12 +3,20 @@ AI-Orchestrated SDV Datasheet Intelligence Layer
 Smart mapping between extracted P&ID and HMB data
 """
 import logging
+import sys
 from typing import Dict, List, Optional
 from openai import OpenAI
 from django.conf import settings
 import json
 
 logger = logging.getLogger(__name__)
+
+
+def log_and_print(message):
+    """Log to both logger and stderr (which Docker captures)"""
+    logger.info(message)
+    sys.stderr.write(f"{message}\n")
+    sys.stderr.flush()
 
 
 class SDVDatasheetAIMapper:
@@ -28,7 +36,7 @@ class SDVDatasheetAIMapper:
             api_key=settings.OPENAI_API_KEY,
             timeout=60.0
         )
-        logger.info("[SDVDatasheetAIMapper] Initialized with OpenAI GPT-4")
+        log_and_print("[SDVDatasheetAIMapper] Initialized with OpenAI GPT-4")
     
     def map_pid_hmb_to_datasheet(
         self,
@@ -59,7 +67,7 @@ class SDVDatasheetAIMapper:
         Returns:
             Dict with filled datasheet fields ready for Excel
         """
-        logger.info("[SDVDatasheetAIMapper] Starting intelligent mapping...")
+        log_and_print("[SDVDatasheetAIMapper] 🤖 Starting intelligent mapping...")
         
         try:
             # Build the system prompt
@@ -68,9 +76,15 @@ class SDVDatasheetAIMapper:
             # Build the user prompt with structured data
             user_prompt = self._build_user_prompt(pid_data, hmb_data, line_context)
             
-            logger.info(f"[SDVDatasheetAIMapper] Sending to OpenAI GPT-4...")
-            logger.info(f"[SDVDatasheetAIMapper] P&ID valves: {len(pid_data.get('valves', []))}")
-            logger.info(f"[SDVDatasheetAIMapper] HMB streams: {len(hmb_data.get('streams', []))}")
+            log_and_print(f"[SDVDatasheetAIMapper] Sending to OpenAI GPT-4...")
+            log_and_print(f"[SDVDatasheetAIMapper] P&ID valves: {len(pid_data.get('valves', []))}")
+            log_and_print(f"[SDVDatasheetAIMapper] HMB streams: {len(hmb_data.get('streams', []))}")
+            
+            # Log sample valve and stream for debugging
+            if pid_data.get('valves'):
+                log_and_print(f"[SDVDatasheetAIMapper] Sample P&ID valve: {json.dumps(pid_data['valves'][0], indent=2)[:300]}")
+            if hmb_data.get('streams'):
+                log_and_print(f"[SDVDatasheetAIMapper] Sample HMB stream: {json.dumps(hmb_data['streams'][0], indent=2)[:300]}")
             
             # Call OpenAI
             response = self.client.chat.completions.create(
@@ -79,7 +93,7 @@ class SDVDatasheetAIMapper:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.1,  # Low temperature for deterministic output
+                temperature=0.2,  # Slightly creative for intelligent matching while maintaining accuracy
                 response_format={"type": "json_object"}
             )
             
@@ -87,8 +101,15 @@ class SDVDatasheetAIMapper:
             result_text = response.choices[0].message.content
             mapped_data = json.loads(result_text)
             
-            logger.info(f"[SDVDatasheetAIMapper] ✅ AI mapping complete")
-            logger.info(f"[SDVDatasheetAIMapper] Mapped valves: {len(mapped_data.get('valves', []))}")
+            log_and_print(f"[SDVDatasheetAIMapper] ✅ AI mapping complete")
+            log_and_print(f"[SDVDatasheetAIMapper] Mapped valves: {len(mapped_data.get('valves', []))}")
+            
+            # Log sample mapped valve - DETAILED OUTPUT
+            if mapped_data.get('valves'):
+                sample_valve = mapped_data['valves'][0]
+                log_and_print(f"[SDVDatasheetAIMapper] Sample mapped valve: {json.dumps(sample_valve, indent=2)[:500]}")
+                log_and_print(f"[SDVDatasheetAIMapper] SECTION 1 CHECK: pid_no={sample_valve.get('pid_no')}, line_no={sample_valve.get('line_no')}, service={sample_valve.get('service')}")
+                log_and_print(f"[SDVDatasheetAIMapper] SECTION 2 CHECK: fluid={sample_valve.get('fluid')}, pressure={sample_valve.get('operating_pressure_normal')}, temp={sample_valve.get('operating_temp_min')}")
             
             return mapped_data
             
@@ -102,57 +123,73 @@ class SDVDatasheetAIMapper:
             }
     
     def _build_system_prompt(self) -> str:
-        """Build the system prompt for AI"""
-        return """You are a process engineering assistant specializing in Safety Shutdown Valve (SDV) datasheets.
+        """Build the system prompt for AI - INTELLIGENT EXTRACTION MODE"""
+        return """You are an expert engineering data extraction assistant for Safety Device Valve (SDV) Datasheets.
 
-You receive structured extracted data from:
-1. P&ID document (valve tags, line numbers, service descriptions)
-2. HMB document (process conditions, temperatures, pressures, fluid properties)
+🎯 INTELLIGENT EXTRACTION RULES - ACCURACY WITH CONTEXT:
 
-Your task is to intelligently map and fill SDV datasheet fields by matching data between both documents.
+1. Extract values from the provided structured data (P&ID and HMB)
+2. Use intelligent matching to populate as many fields as possible
+3. When exact data is available, use it precisely
+4. When data needs interpretation (like matching line numbers to streams), use engineering judgment
+5. Preserve units exactly as written
+6. If a critical field is missing from the data, return null (but try your best to find it first)
+7. Return ONLY valid JSON
 
-**MAPPING RULES:**
-1. Match by Line Number primarily (highest priority)
-2. If Line No missing, use Tag or Stream mapping
-3. Prefer HMB values for pressure and temperature (more accurate process data)
-4. Prefer P&ID for service description and valve classification
-5. Match valve tags to streams using line numbers as connector
-6. If multiple streams match one line, use the one with closest conditions
-7. Do NOT hallucinate missing data - use null for unknown fields
-8. Flag uncertain mappings with confidence: "low", "medium", "high"
+**DATA SOURCE MAPPING:**
 
-**OUTPUT REQUIREMENTS:**
-- Return valid JSON only
-- Each valve must have complete available data
-- Include confidence level for each mapping
-- Preserve units exactly as extracted
-- Map phase descriptions consistently (Gas/Liquid/Two-Phase)
+📋 SECTION 1 - GENERAL DATA (FROM P&ID DOCUMENT):
+Read the P&ID document to extract:
+- tag_no (valve tag number) - REQUIRED - read from P&ID
+- service (valve service description) - read from P&ID or valve label
+- **pid_no: MUST use EXACTLY the value from pid_data['drawing_info']['pid_no']**
+- line_no (line number associated with valve) - read from P&ID
+- piping_class (pipe specification) - read from P&ID line data
+- sour_service (Yes/No) - read from P&ID or line specifications
+- special_service (Any special requirements) - read from P&ID notes
+- ambient_temp_min, ambient_temp_max (from P&ID or HMB general conditions)
 
-**CRITICAL FIELD MAPPING RULES:**
+📋 SECTION 2 - OPERATING CONDITIONS (FROM HMB DOCUMENT):
+Read the HMB (Heat and Material Balance) document to extract:
+- fluid (fluid/chemical name) - read from HMB stream table
+- phase (Gas/Liquid/Two-Phase/Mixed) - read from HMB
+- state (Normal/Supercritical/etc) - read from HMB
+- operating_pressure_normal (normal operating pressure) - read from HMB
+- operating_pressure_design (design pressure) - read from HMB
+- pressure_unit (barg/bara/psig) - read from HMB
+- operating_temp_min (minimum operating temp) - read from HMB
+- operating_temp_max (maximum operating temp) - read from HMB
+- operating_temp_unit (°C/°F/K) - read from HMB
+- design_temp_min (minimum design temp) - read from HMB
+- design_temp_max (maximum design temp) - read from HMB
+- design_temp_unit (°C/°F/K) - read from HMB
+- shut_off_pressure (shut-off pressure with unit) - read from HMB
 
-SECTION 1 - General Data (FROM P&ID ONLY):
-- tag_no, service, pid_no, line_no, piping_class
-- sour_service, special_service
-- ambient_temp_min, ambient_temp_max, ambient_temp_unit
+🚫 SECTIONS 3-5 - LEAVE AS NULL (Manual Engineering Input Required):
+- Section 3 (Valve Details): bore_detail, mech_handwheel, fail_position, valve_close_time, valve_open_time
+- Section 4 (Actuator Details): design_pressure, seat_leakage_class
+- Section 5 (Accessories): nace_requirement
+- DO NOT fill these fields - return null for all Section 3-5 fields
 
-SECTION 2 - Operating Conditions (FROM HMB ONLY):
-- fluid, phase, state
-- operating_pressure_normal, operating_pressure_design, pressure_unit
-- operating_temp_min, operating_temp_max, operating_temp_unit
-- design_temp_min, design_temp_max, design_temp_unit
-- shut_off_pressure
+**INTELLIGENT MATCHING STRATEGY:**
+1. For each valve in P&ID data:
+   a. Extract Section 1 fields by reading P&ID document data
+   b. Find line_no associated with valve from P&ID
+   c. Match line_no to HMB streams (exact match preferred, fuzzy match if needed)
+   d. Extract Section 2 fields by reading HMB document data for matched stream
+   e. If no stream match, use general HMB process conditions
+2. Fill Section 1 (General Data) from P&ID
+3. Fill Section 2 (Operating Conditions) from HMB
+4. Leave Sections 3-5 as null
+5. **ALWAYS use pid_data['drawing_info']['pid_no'] for pid_no field**
+6. Use intelligent interpretation when matching streams to lines
+6. Do NOT cross-reference or derive from other streams
 
-SECTIONS 3-5 (Valve Details, Actuator Details, Accessories):
-- LEAVE ALL FIELDS AS null
-- DO NOT fill: bore_detail, mech_handwheel, fail_position, valve_close_time, valve_open_time, design_pressure, seat_leakage_class, nace_requirement
-- These sections will be filled manually by engineers
-
-**MATCHING STRATEGY:**
-1. Extract line_no from P&ID valve context
-2. Find matching stream in HMB by line_no or stream_id
-3. Combine valve data from P&ID with process data from HMB
-4. Include ambient conditions from HMB process_conditions
-5. Flag if no match found
+**CONFIDENCE SCORING:**
+- high: Exact line_no match found between P&ID and HMB
+- medium: Partial match (similar line numbers)
+- low: No match found
+- none: Data missing from source
 
 Return ONLY valid JSON in this structure:
 {
