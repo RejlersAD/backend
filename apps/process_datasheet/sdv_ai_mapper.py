@@ -77,14 +77,17 @@ class SDVDatasheetAIMapper:
             user_prompt = self._build_user_prompt(pid_data, hmb_data, line_context)
             
             log_and_print(f"[SDVDatasheetAIMapper] Sending to OpenAI GPT-4...")
-            log_and_print(f"[SDVDatasheetAIMapper] P&ID valves: {len(pid_data.get('valves', []))}")
-            log_and_print(f"[SDVDatasheetAIMapper] HMB streams: {len(hmb_data.get('streams', []))}")
+            log_and_print(f"[SDVDatasheetAIMapper] 📊 INPUT DATA:")
+            log_and_print(f"[SDVDatasheetAIMapper]   - P&ID valves: {len(pid_data.get('valves', []))}")
+            log_and_print(f"[SDVDatasheetAIMapper]   - HMB streams: {len(hmb_data.get('streams', []))}")
             
             # Log sample valve and stream for debugging
             if pid_data.get('valves'):
-                log_and_print(f"[SDVDatasheetAIMapper] Sample P&ID valve: {json.dumps(pid_data['valves'][0], indent=2)[:300]}")
+                log_and_print(f"[SDVDatasheetAIMapper] 📄 Sample P&ID valve:")
+                log_and_print(f"    {json.dumps(pid_data['valves'][0], indent=2)}")
             if hmb_data.get('streams'):
-                log_and_print(f"[SDVDatasheetAIMapper] Sample HMB stream: {json.dumps(hmb_data['streams'][0], indent=2)[:300]}")
+                log_and_print(f"[SDVDatasheetAIMapper] 🌡️ Sample HMB stream:")
+                log_and_print(f"    {json.dumps(hmb_data['streams'][0], indent=2)}")
             
             # Call OpenAI
             response = self.client.chat.completions.create(
@@ -104,12 +107,23 @@ class SDVDatasheetAIMapper:
             log_and_print(f"[SDVDatasheetAIMapper] ✅ AI mapping complete")
             log_and_print(f"[SDVDatasheetAIMapper] Mapped valves: {len(mapped_data.get('valves', []))}")
             
-            # Log sample mapped valve - DETAILED OUTPUT
+            # Log sample mapped valve - DETAILED OUTPUT WITH SECTION CHECK
             if mapped_data.get('valves'):
                 sample_valve = mapped_data['valves'][0]
-                log_and_print(f"[SDVDatasheetAIMapper] Sample mapped valve: {json.dumps(sample_valve, indent=2)[:500]}")
-                log_and_print(f"[SDVDatasheetAIMapper] SECTION 1 CHECK: pid_no={sample_valve.get('pid_no')}, line_no={sample_valve.get('line_no')}, service={sample_valve.get('service')}")
-                log_and_print(f"[SDVDatasheetAIMapper] SECTION 2 CHECK: fluid={sample_valve.get('fluid')}, pressure={sample_valve.get('operating_pressure_normal')}, temp={sample_valve.get('operating_temp_min')}")
+                log_and_print(f"[SDVDatasheetAIMapper] 📋 Sample mapped valve (first valve):")
+                log_and_print(f"    Tag: {sample_valve.get('tag_no')}")
+                log_and_print(f"    ✅ SECTION 1 (from P&ID):")
+                log_and_print(f"       - PID No: {sample_valve.get('pid_no')}")
+                log_and_print(f"       - Line No: {sample_valve.get('line_no')}")
+                log_and_print(f"       - Service: {sample_valve.get('service')}")
+                log_and_print(f"       - Piping Class: {sample_valve.get('piping_class')}")
+                log_and_print(f"    🌡️ SECTION 2 (from HMB):")
+                log_and_print(f"       - Fluid: {sample_valve.get('fluid')}")
+                log_and_print(f"       - Phase: {sample_valve.get('phase')}")
+                log_and_print(f"       - Operating Pressure: {sample_valve.get('operating_pressure_normal')} {sample_valve.get('pressure_unit')}")
+                log_and_print(f"       - Operating Temp Min/Max: {sample_valve.get('operating_temp_min')}/{sample_valve.get('operating_temp_max')} {sample_valve.get('operating_temp_unit')}")
+                log_and_print(f"       - Design Temp Min/Max: {sample_valve.get('design_temp_min')}/{sample_valve.get('design_temp_max')} {sample_valve.get('design_temp_unit')}")
+                log_and_print(f"       - Shut Off Pressure: {sample_valve.get('shut_off_pressure')}")
             
             return mapped_data
             
@@ -150,20 +164,20 @@ Read the P&ID document to extract:
 - ambient_temp_min, ambient_temp_max (from P&ID or HMB general conditions)
 
 📋 SECTION 2 - OPERATING CONDITIONS (FROM HMB DOCUMENT):
-Read the HMB (Heat and Material Balance) document to extract:
-- fluid (fluid/chemical name) - read from HMB stream table
-- phase (Gas/Liquid/Two-Phase/Mixed) - read from HMB
-- state (Normal/Supercritical/etc) - read from HMB
-- operating_pressure_normal (normal operating pressure) - read from HMB
-- operating_pressure_design (design pressure) - read from HMB
-- pressure_unit (barg/bara/psig) - read from HMB
-- operating_temp_min (minimum operating temp) - read from HMB
-- operating_temp_max (maximum operating temp) - read from HMB
-- operating_temp_unit (°C/°F/K) - read from HMB
-- design_temp_min (minimum design temp) - read from HMB
-- design_temp_max (maximum design temp) - read from HMB
-- design_temp_unit (°C/°F/K) - read from HMB
-- shut_off_pressure (shut-off pressure with unit) - read from HMB
+Extract these fields directly from the flattened HMB stream data:
+- fluid: stream['fluid']
+- phase: stream['phase']
+- state: stream['state']
+- operating_pressure_normal: stream['operating_pressure_normal']
+- operating_pressure_design: stream['operating_pressure_design']
+- pressure_unit: stream['pressure_unit']
+- operating_temp_min: stream['operating_temp_min']
+- operating_temp_max: stream['operating_temp_max']
+- operating_temp_unit: stream['operating_temp_unit']
+- design_temp_min: stream['design_temp_min']
+- design_temp_max: stream['design_temp_max']
+- design_temp_unit: stream['design_temp_unit']
+- shut_off_pressure: Format as stream['shut_off_pressure'] + " " + stream['pressure_unit']
 
 🚫 SECTIONS 3-5 - LEAVE AS NULL (Manual Engineering Input Required):
 - Section 3 (Valve Details): bore_detail, mech_handwheel, fail_position, valve_close_time, valve_open_time
@@ -235,6 +249,42 @@ Return ONLY valid JSON in this structure:
   "unmatched_streams": []
 }"""
     
+    def _flatten_hmb_streams(self, hmb_data: Dict) -> Dict:
+        """
+        Flatten nested HMB stream structure for AI
+        Converts nested fields like stream['pressure']['normal'] to flat fields
+        """
+        flattened_hmb = {
+            'streams': [],
+            'process_conditions': hmb_data.get('process_conditions', {})
+        }
+        
+        for stream in hmb_data.get('streams', []):
+            flat_stream = {
+                'stream_id': stream.get('stream_id'),
+                'stream_name': stream.get('stream_name'),
+                'line_no': stream.get('line_no'),
+                'fluid': stream.get('fluid'),
+                'phase': stream.get('phase'),
+                'state': stream.get('state'),
+                # Flatten temperature nested object
+                'operating_temp_min': stream.get('temperature', {}).get('min'),
+                'operating_temp_max': stream.get('temperature', {}).get('max'),
+                'operating_temp_unit': stream.get('temperature', {}).get('unit'),
+                # Flatten design_temperature nested object
+                'design_temp_min': stream.get('design_temperature', {}).get('min'),
+                'design_temp_max': stream.get('design_temperature', {}).get('max'),
+                'design_temp_unit': stream.get('design_temperature', {}).get('unit'),
+                # Flatten pressure nested object
+                'operating_pressure_normal': stream.get('pressure', {}).get('normal'),
+                'operating_pressure_design': stream.get('pressure', {}).get('design'),
+                'shut_off_pressure': stream.get('pressure', {}).get('shutoff'),
+                'pressure_unit': stream.get('pressure', {}).get('unit')
+            }
+            flattened_hmb['streams'].append(flat_stream)
+        
+        return flattened_hmb
+    
     def _build_user_prompt(
         self,
         pid_data: Dict,
@@ -243,6 +293,9 @@ Return ONLY valid JSON in this structure:
     ) -> str:
         """Build user prompt with structured data"""
         
+        # Flatten HMB data for easier AI extraction
+        flattened_hmb = self._flatten_hmb_streams(hmb_data)
+        
         prompt = f"""**EXTRACTED DATA FROM DOCUMENTS:**
 
 **1. P&ID DATA:**
@@ -250,9 +303,9 @@ Return ONLY valid JSON in this structure:
 {json.dumps(pid_data, indent=2)}
 ```
 
-**2. HMB DATA:**
+**2. HMB DATA (FLATTENED FOR EASY EXTRACTION):**
 ```json
-{json.dumps(hmb_data, indent=2)}
+{json.dumps(flattened_hmb, indent=2)}
 ```
 """
         

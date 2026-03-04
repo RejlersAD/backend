@@ -77,7 +77,7 @@ def process_sdv_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         cache.set(f'sdv_task_{job_id}_progress', 75, timeout=3600)
         cache.set(f'sdv_task_{job_id}_stage', 'AI intelligent mapping...', timeout=3600)
         
-        # STEP 4: AI Mapping
+        # STEP 4: AI Mapping (AI-only, no fallback for data quality)
         log_and_print(f"🤖 [SDV {job_id[:8]}] STEP 4: AI intelligent mapping...")
         mapper = SDVDatasheetAIMapper()
         mapped_data = mapper.map_pid_hmb_to_datasheet(pid_data, hmb_data, line_context)
@@ -114,12 +114,20 @@ def process_sdv_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         
     except Exception as e:
         logger.error(f"[SDV Thread {job_id}] ❌ Error: {e}", exc_info=True)
+        
+        # Provide more user-friendly error messages
+        error_message = str(e)
+        if 'insufficient_quota' in error_message or '429' in error_message or 'exceeded your current quota' in error_message:
+            error_message = "OpenAI API quota exceeded. Please add credits at https://platform.openai.com/account/billing to continue processing."
+        elif 'rate_limit' in error_message.lower():
+            error_message = "OpenAI API rate limit reached. Please wait a moment and try again."
+        
         error_result = {
             'success': False,
-            'error': str(e)
+            'error': error_message
         }
         cache.set(f'sdv_task_{job_id}_result', error_result, timeout=3600)
-        cache.set(f'sdv_task_{job_id}_stage', f'Error: {str(e)}', timeout=3600)
+        cache.set(f'sdv_task_{job_id}_stage', f'Error: {error_message}', timeout=3600)
     
     finally:
         # Cleanup temp files
