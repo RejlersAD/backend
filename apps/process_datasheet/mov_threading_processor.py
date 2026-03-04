@@ -45,17 +45,29 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         from apps.process_datasheet.mov_ai_mapper import MOVDatasheetAIMapper
         from apps.process_datasheet.mov_excel_generator_dynamic import MOVExcelGeneratorDynamic
         
-        # STEP 1: Extract P&ID data (find MOV valves)
-        log_and_print(f"📄 [MOV {job_id[:8]}] STEP 1: Extracting P&ID...")
-        pid_extractor = MockPIDExtractor()
-        pid_data = pid_extractor.extract_from_pdf(pid_file_path, original_filename=pid_filename)
-        
-        # Filter for MOV valves only
-        all_valves = pid_data.get('valves', [])
-        mov_valves = [v for v in all_valves if v.get('type', '').upper() == 'MOV' or 'MOV' in v.get('tag_no', '').upper()]
-        pid_data['valves'] = mov_valves
-        
-        log_and_print(f"✅ [MOV {job_id[:8]}] P&ID extracted: {len(mov_valves)} MOV valves found")
+        # STEP 1: Extract P&ID data with REAL extraction (Vision AI + OCR)
+        log_and_print(f"📄 [MOV {job_id[:8]}] STEP 1: Extracting P&ID with Vision AI...")
+        try:
+            from apps.process_datasheet.real_pid_extractor import RealPIDExtractor
+            real_extractor = RealPIDExtractor()
+            pid_data = real_extractor.extract_valves_from_pdf(pid_file_path, original_filename=pid_filename, valve_type='MOV')
+            
+            # Check if real extraction produced results
+            if not pid_data.get('valves') or len(pid_data.get('valves', [])) == 0:
+                raise ValueError("Real extraction returned 0 valves")
+            
+            log_and_print(f"✅ [MOV {job_id[:8]}] REAL extraction: {len(pid_data.get('valves', []))} MOV valves")
+        except Exception as e:
+            logger.warning(f"[MOV Thread {job_id}] Real extraction failed, using mock fallback: {e}")
+            log_and_print(f"⚠️ [MOV {job_id[:8]}] Using mock data fallback...")
+            pid_extractor = MockPIDExtractor()
+            pid_data = pid_extractor.extract_from_pdf(pid_file_path, original_filename=pid_filename)
+            
+            # Filter for MOV valves from mock data
+            all_valves = pid_data.get('valves', [])
+            mov_valves = [v for v in all_valves if v.get('type', '').upper() == 'MOV' or 'MOV' in v.get('tag_no', '').upper()]
+            pid_data['valves'] = mov_valves
+            log_and_print(f"✅ [MOV {job_id[:8]}] Mock extraction: {len(mov_valves)} MOV valves")
         
         cache.set(f'mov_task_{job_id}_progress', 30, timeout=3600)
         cache.set(f'mov_task_{job_id}_stage', 'Extracting HMB data with Vision AI (this may take 2-5 minutes)...', timeout=3600)
@@ -83,11 +95,48 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         cache.set(f'mov_task_{job_id}_progress', 75, timeout=3600)
         cache.set(f'mov_task_{job_id}_stage', 'AI intelligent mapping...', timeout=3600)
         
-        # STEP 4: AI Mapping (AI-only, no fallback for data quality)
+        # STEP 4: AI Mapping with fallback to basic mapping
         log_and_print(f"🤖 [MOV {job_id[:8]}] STEP 4: AI intelligent mapping...")
-        mapper = MOVDatasheetAIMapper()
-        mapped_data = mapper.map_pid_hmb_to_datasheet(pid_data, hmb_data, line_context)
-        log_and_print(f"✅ [MOV {job_id[:8]}] AI mapping complete: {len(mapped_data.get('valves', []))} valves mapped")
+        try:
+            mapper = MOVDatasheetAIMapper()
+            mapped_data = mapper.map_pid_hmb_to_datasheet(pid_data, hmb_data, line_context)
+            
+            # Check if AI mapping actually produced results
+            if not mapped_data.get('valves') or len(mapped_data.get('valves', [])) == 0:
+                raise ValueError(f"AI mapping returned 0 valves. Error: {mapped_data.get('error', 'Unknown')}")
+                
+            log_and_print(f"✅ [MOV {job_id[:8]}] AI mapping complete: {len(mapped_data.get('valves', []))} valves mapped")
+        except Exception as e:
+            logger.warning(f"[MOV Thread {job_id}] AI mapping failed, using basic mapping: {e}")
+            log_and_print(f"⚠️ [MOV {job_id[:8]}] AI failed, using basic mapping from P&ID data...")
+            
+            # Fallback: Create basic mapped data from P&ID valves
+            mapped_valves = []
+            for valve in pid_data.get('valves', []):
+                mapped_valve = {
+                    'tag_no': valve.get('tag_no', valve.get('tag', 'UNKNOWN')),
+                    'tag': valve.get('tag', valve.get('tag_no', 'UNKNOWN')),
+                    'pid_no': pid_data.get('drawing_info', {}).get('pid_no', 'UNKNOWN'),
+                    'line_no': valve.get('line_no', ''),
+                    'service': valve.get('service', valve.get('description', '')),
+                    'piping_class': valve.get('piping_class', ''),
+                    'fluid': 'See HMB',
+                    'phase': 'TBD',
+                    'operating_pressure_normal': valve.get('pressure', ''),
+                    'operating_temp_min': valve.get('temp_min', ''),
+                    'operating_temp_max': valve.get('temp_max', ''),
+                    'design_pressure': valve.get('design_pressure', ''),
+                    'design_temp_min': valve.get('design_temp_min', ''),
+                    'design_temp_max': valve.get('design_temp_max', ''),
+                }
+                mapped_valves.append(mapped_valve)
+            
+            mapped_data = {
+                'valves': mapped_valves,
+                'drawing_info': pid_data.get('drawing_info', {}),
+                'mapping_method': 'basic_fallback'
+            }
+            log_and_print(f"✅ [MOV {job_id[:8]}] Basic mapping complete: {len(mapped_valves)} valves mapped")
         
         cache.set(f'mov_task_{job_id}_progress', 90, timeout=3600)
         cache.set(f'mov_task_{job_id}_stage', 'Generating Excel datasheet...', timeout=3600)
@@ -117,6 +166,7 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         cache.set(f'mov_task_{job_id}_stage', 'Complete!', timeout=3600)
         
         log_and_print(f"✅✅✅ [MOV {job_id[:8]}] COMPLETE! Datasheet ready.")
+        return result
         
     except Exception as e:
         logger.error(f"[MOV Thread {job_id}] ❌ Error: {e}", exc_info=True)
@@ -134,6 +184,7 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         }
         cache.set(f'mov_task_{job_id}_result', error_result, timeout=3600)
         cache.set(f'mov_task_{job_id}_stage', f'Error: {error_message}', timeout=3600)
+        return error_result
     
     finally:
         # Cleanup temp files
