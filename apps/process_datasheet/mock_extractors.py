@@ -15,27 +15,36 @@ class MockPIDExtractor:
     TODO: Replace with real OCR/AI extraction from designiq.pid_ocr_extractor_v2
     """
     
-    def extract_from_pdf(self, pdf_file) -> Dict:
+    def extract_from_pdf(self, pdf_file, original_filename=None) -> Dict:
         """
         Extract valve and line data from P&ID
         
         Args:
-            pdf_file: Uploaded PDF file
+            pdf_file: Uploaded PDF file path
+            original_filename: Original filename of uploaded PDF
         
         Returns:
             Dict with structured P&ID data
         """
         logger.info("[MockPIDExtractor] Extracting from P&ID...")
         
+        # Extract P&ID number from filename or PDF metadata
+        pid_no = self._extract_pid_number(pdf_file, original_filename)
+        logger.info(f"[MockPIDExtractor] Extracted P&ID No: {pid_no}")
+        
         # Simulated extraction (replace with real extraction)
         pid_data = {
             'valves': [
                 {
+                    'tag_no': 'SDV-100-001',
                     'tag': 'SDV-100-001',
                     'type': 'SDV',
                     'location': 'Main Gas Line Inlet',
                     'service': 'Natural Gas Main Line Shutdown',
                     'line_no': '6"-GA-100-1501-A2B',
+                    'piping_class': 'ASME B16.5 150#',
+                    'sour_service': 'No',
+                    'special_service': 'None',
                     'fail_position': 'Fail Close (FC)',
                     'closure_time': '5 seconds',
                     'opening_time': '8 seconds',
@@ -45,11 +54,15 @@ class MockPIDExtractor:
                     'nace_requirement': 'MR0175'
                 },
                 {
+                    'tag_no': 'SDV-100-002',
                     'tag': 'SDV-100-002',
                     'type': 'SDV',
                     'location': 'Gas Line Branch A',
                     'service': 'Natural Gas Branch Shutdown',
                     'line_no': '4"-GA-100-1502-A2B',
+                    'piping_class': 'ASME B16.5 150#',
+                    'sour_service': 'No',
+                    'special_service': 'None',
                     'fail_position': 'Fail Close (FC)',
                     'closure_time': '3 seconds',
                     'opening_time': '5 seconds',
@@ -59,11 +72,15 @@ class MockPIDExtractor:
                     'nace_requirement': 'MR0175'
                 },
                 {
+                    'tag_no': 'XV-100-003',
                     'tag': 'XV-100-003',
                     'type': 'XV',
                     'location': 'Isolation Valve',
                     'service': 'Main Line Isolation',
                     'line_no': '6"-GA-100-1501-A2B',
+                    'piping_class': 'ASME B16.5 150#',
+                    'sour_service': 'No',
+                    'special_service': 'None',
                     'fail_position': 'Fail Open (FO)',
                     'closure_time': '10 seconds',
                     'opening_time': '12 seconds',
@@ -90,7 +107,7 @@ class MockPIDExtractor:
                 }
             ],
             'drawing_info': {
-                'pid_no': 'P-100-001-Rev-A',
+                'pid_no': pid_no,
                 'date': datetime.now().strftime('%d-%b-%Y'),
                 'project': 'Gas Processing Unit',
                 'area': 'Gas Compression'
@@ -99,6 +116,23 @@ class MockPIDExtractor:
         
         logger.info(f"[MockPIDExtractor] ✅ Extracted {len(pid_data['valves'])} valves, {len(pid_data['lines'])} lines")
         return pid_data
+    
+    def _extract_pid_number(self, pdf_path, original_filename=None):
+        """
+        Extract P&ID number STRICTLY from filename only
+        RULE: P&ID No = Uploaded file name (without extension)
+        
+        NO document text extraction - filename is source of truth
+        """
+        if original_filename:
+            # Remove extension and return as-is
+            pid_no = original_filename.rsplit('.', 1)[0]
+            logger.info(f"[MockPIDExtractor] P&ID No from filename: {pid_no}")
+            return pid_no
+        
+        # Fallback only if no filename provided
+        logger.warning("[MockPIDExtractor] No filename provided for P&ID number")
+        return 'UNKNOWN-PID'
 
 
 class MockHMBExtractor:
