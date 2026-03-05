@@ -313,6 +313,19 @@ class PumpCalculationDataCreateSerializer(serializers.ModelSerializer):
             # NPSH Availability
             'suction_pressure_npsh', 'vapor_pressure', 'npsha', 'safety_margin_npsha',
             'npsha_with_safety_margin',
+            # Pump Calculation Results (NEW - Section 7)
+            'discharge_pressure', 'suction_pressure_result', 'differential_pressure',
+            'differential_head', 'npsha_result',
+            # Max Suction Pressure Max Density (NEW - Section 8)
+            'suction_vessel_max_op_pressure', 'suction_el_m', 'tl_to_hhll_m', 'max_suction_pressure',
+            # Minimum Flow Line Control Valve (NEW - Section 9)
+            'pump_minimum_flow', 'fluid_density_mcf', 'pump_discharge_pressure_min_flow',
+            'destination_pressure', 'el_destination_pump_cl', 'mcf_line_friction_losses',
+            'flow_meter_losses', 'misc_pressure_drop_mcf', 'mcf_cv_pressure_drop',
+            # Max Discharge Pressure at Max Density (NEW - Section 10)
+            'api_610_tolerance_used', 'api_tolerance_factor', 'shut_off_pressure_factor',
+            'shut_off_differential_pressure', 'maximum_discharge_pressure_option_1',
+            'maximum_discharge_pressure_option_2',
             # Additional data sections
             'general_data', 'control_valve_delta_p', 'suction_pressure_calculations', 'power_consumption_per_pump',
             'npsh_availability', 'general_notes',
@@ -377,6 +390,38 @@ class PumpCalculationDataCreateSerializer(serializers.ModelSerializer):
             'driver_type': {'required': False, 'allow_null': True, 'allow_blank': True},
             'motor_voltage': {'required': False, 'allow_null': True},
             'motor_speed': {'required': False, 'allow_null': True},
+            
+            # Pump Calculation Results (Section 7)
+            'discharge_pressure': {'required': False, 'allow_null': True},
+            'suction_pressure_result': {'required': False, 'allow_null': True},
+            'differential_pressure': {'required': False, 'allow_null': True},
+            'differential_head': {'required': False, 'allow_null': True},
+            'npsha_result': {'required': False, 'allow_null': True},
+            
+            # Max Suction Pressure (Section 8)
+            'suction_vessel_max_op_pressure': {'required': False, 'allow_null': True},
+            'suction_el_m': {'required': False, 'allow_null': True},
+            'tl_to_hhll_m': {'required': False, 'allow_null': True},
+            'max_suction_pressure': {'required': False, 'allow_null': True},
+            
+            # Minimum Flow Conditions (Section 9)
+            'pump_minimum_flow': {'required': False, 'allow_null': True},
+            'fluid_density_mcf': {'required': False, 'allow_null': True},
+            'pump_discharge_pressure_min_flow': {'required': False, 'allow_null': True},
+            'destination_pressure': {'required': False, 'allow_null': True},
+            'el_destination_pump_cl': {'required': False, 'allow_null': True},
+            'mcf_line_friction_losses': {'required': False, 'allow_null': True},
+            'flow_meter_losses': {'required': False, 'allow_null': True},
+            'misc_pressure_drop_mcf': {'required': False, 'allow_null': True},
+            'mcf_cv_pressure_drop': {'required': False, 'allow_null': True},
+            
+            # Max Discharge Pressure (Section 10)
+            'api_610_tolerance_used': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'api_tolerance_factor': {'required': False, 'allow_null': True},
+            'shut_off_pressure_factor': {'required': False, 'allow_null': True},
+            'shut_off_differential_pressure': {'required': False, 'allow_null': True},
+            'maximum_discharge_pressure_option_1': {'required': False, 'allow_null': True},
+            'maximum_discharge_pressure_option_2': {'required': False, 'allow_null': True},
             
             # Construction Materials
             'casing': {'required': False, 'allow_null': True, 'allow_blank': True},

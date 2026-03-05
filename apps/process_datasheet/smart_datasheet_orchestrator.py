@@ -244,35 +244,50 @@ class SmartDatasheetOrchestrator:
     
     def _process_pressure_instrument(self, files_dict):
         """Route to Pressure Instrument processor"""
+        from .pressure_threading_processor import process_pressure_instrument_in_thread
+        
         # Get P&ID file info from dict
         pid_info = files_dict.get('pid')
         
         if not pid_info:
             return {'success': False, 'error': 'Pressure Instrument requires P&ID file'}
         
-        # This would integrate with existing pressure instrument logic
-        return {
-            'success': True,
-            'message': 'Pressure Instrument processing (integration pending)',
-            'excel_file': None,
-            'filename': 'pressure_instrument.xlsx'
-        }
+        # Files are already saved as temp files, just use the paths
+        pid_path = pid_info['path']
+        pid_filename = pid_info['name']
+        
+        # Process with proper parameters: (pid_path, pid_filename, user_email, job_id)
+        result = process_pressure_instrument_in_thread(
+            pid_path,
+            pid_filename,
+            'smart_user@system',  # user_email
+            str(uuid.uuid4())  # job_id
+        )
+        return result
     
     def _process_pump(self, files_dict):
-        """Route to Pump/PFD processor"""
-        # Get pump data file from dict
-        other_file = files_dict.get('other')
+        """Route to Pump Hydraulic processor"""
+        from .pump_threading_processor import process_pump_hydraulic_in_thread
         
-        if not other_file:
-            return {'success': False, 'error': 'Pump Hydraulic requires pump data file'}
+        # For pump hydraulic, we expect form_data instead of files
+        form_data = files_dict.get('form_data', {})
         
-        # This would integrate with existing pump hydraulic logic
-        return {
-            'success': True,
-            'message': 'Pump Hydraulic processing (integration pending)',
-            'excel_file': None,
-            'filename': 'pump_hydraulic.xlsx'
-        }
+        if not form_data:
+            return {'success': False, 'error': 'Pump Hydraulic requires form data with pump parameters'}
+        
+        # Validate required fields
+        required_fields = ['tag_no', 'service']
+        missing = [field for field in required_fields if not form_data.get(field)]
+        if missing:
+            return {'success': False, 'error': f'Missing required fields: {", ".join(missing)}'}
+        
+        # Process with proper parameters: (form_data, user_email, job_id)
+        result = process_pump_hydraulic_in_thread(
+            form_data,
+            'smart_user@system',  # user_email
+            str(uuid.uuid4())  # job_id
+        )
+        return result
 
 
 def process_smart_datasheet_async(files_dict, user_preferences, job_id):

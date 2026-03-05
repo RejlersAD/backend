@@ -125,6 +125,11 @@ class PumpDataSheetGenerator:
         try:
             logger.info(f"🔄 Generating pump datasheet for ID: {pump_data.id}")
             
+            # Check if template exists, otherwise create structured datasheet
+            if not os.path.exists(self.template_path):
+                logger.warning("Template not found, generating structured datasheet")
+                return self._generate_structured_datasheet(pump_data)
+            
             # Load the template
             workbook = self._load_template()
             
@@ -143,6 +148,312 @@ class PumpDataSheetGenerator:
         except Exception as e:
             logger.error(f"❌ Error generating datasheet: {str(e)}")
             raise
+
+    def _generate_structured_datasheet(self, pump_data):
+        """Generate a structured Excel datasheet when template is not available"""
+        logger.info("📊 Creating structured datasheet from pump data")
+        
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Pump Hydraulic Datasheet"
+        
+        # Header styling
+        header_font = Font(bold=True, size=12, color="FFFFFF")
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        section_font = Font(bold=True, size=11)
+        section_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+        
+        row = 1
+        
+        # Title
+        ws.merge_cells(f'A{row}:D{row}')
+        title_cell = ws[f'A{row}']
+        title_cell.value = "PUMP HYDRAULIC CALCULATION DATA SHEET"
+        title_cell.font = Font(bold=True, size=14)
+        title_cell.alignment = Alignment(horizontal='center')
+        row += 2
+        
+        # Project Information Section
+        ws.merge_cells(f'A{row}:D{row}')
+        section_cell = ws[f'A{row}']
+        section_cell.value = "PROJECT INFORMATION"
+        section_cell.font = section_font
+        section_cell.fill = section_fill
+        row += 1
+        
+        project_fields = [
+            ('Agreement No', getattr(pump_data, 'agreement_no', 'N/A')),
+            ('Project No', getattr(pump_data, 'project_no', 'N/A')),
+            ('Document No', getattr(pump_data, 'document_no', 'N/A')),
+            ('Revision', getattr(pump_data, 'revision', 'A')),
+            ('Document Class', getattr(pump_data, 'document_class', 'N/A')),
+            ('Tag No', getattr(pump_data, 'tag_no', 'N/A')),
+            ('Service', getattr(pump_data, 'service', 'N/A')),
+        ]
+        
+        for label, value in project_fields:
+            ws[f'A{row}'] = label
+            ws[f'A{row}'].font = Font(bold=True)
+            ws[f'B{row}'] = value
+            row += 1
+        
+        row += 1
+        
+        # Discharge Pressure Calculations
+        ws.merge_cells(f'A{row}:D{row}')
+        section_cell = ws[f'A{row}']
+        section_cell.value = "DISCHARGE PRESSURE CALCULATIONS"
+        section_cell.font = section_font
+        section_cell.fill = section_fill
+        row += 1
+        
+        discharge_fields = [
+            ('Destination Description', getattr(pump_data, 'destination_description', 'N/A')),
+            ('Flow Type', getattr(pump_data, 'flow_type', 'N/A')),
+            ('Destination Pressure (bar)', self._format_number(getattr(pump_data, 'destination_pressure', None))),
+            ('Destination Elevation (m)', self._format_number(getattr(pump_data, 'destination_elevation', None))),
+            ('Line Friction Loss (bar)', self._format_number(getattr(pump_data, 'line_friction_loss', None))),
+            ('Flow Meter Del P (bar)', self._format_number(getattr(pump_data, 'flow_meter_del_p', None))),
+            ('Other Losses (bar)', self._format_number(getattr(pump_data, 'other_losses', None))),
+            ('Control Valve (bar)', self._format_number(getattr(pump_data, 'control_valve', None))),
+            ('Misc Item (bar)', self._format_number(getattr(pump_data, 'misc_item', None))),
+            ('Contingency (bar)', self._format_number(getattr(pump_data, 'contingency', None))),
+            ('TOTAL DISCHARGE PRESSURE (bar)', self._format_number(getattr(pump_data, 'total_discharge_pressure', None))),
+        ]
+        
+        for label, value in discharge_fields:
+            ws[f'A{row}'] = label
+            ws[f'A{row}'].font = Font(bold=True) if 'TOTAL' in label else Font()
+            ws[f'B{row}'] = value
+            if 'TOTAL' in label:
+                ws[f'B{row}'].font = Font(bold=True)
+                ws[f'B{row}'].fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+            row += 1
+        
+        row += 1
+        
+        # Control Valve Delta P Check
+        ws.merge_cells(f'A{row}:D{row}')
+        section_cell = ws[f'A{row}']
+        section_cell.value = "CONTROL VALVE DELTA P CHECK"
+        section_cell.font = section_font
+        section_cell.fill = section_fill
+        row += 1
+        
+        cv_fields = [
+            ('Density (kg/m³)', self._format_number(getattr(pump_data, 'density', None))),
+            ('CV Max', self._format_number(getattr(pump_data, 'cv_max', None))),
+            ('CV Min', self._format_number(getattr(pump_data, 'cv_min', None))),
+            ('CV Ratio', self._format_number(getattr(pump_data, 'cv_ratio', None))),
+            ('Total Frictional Losses (bar)', self._format_number(getattr(pump_data, 'total_frictional_losses', None))),
+            ('Dynamic Losses 30%', self._format_number(getattr(pump_data, 'dynamic_losses_30_percent', None))),
+            ('CV Pressure Drop (bar)', self._format_number(getattr(pump_data, 'cv_pressure_drop', None))),
+            ('CV Rangeability', self._format_number(getattr(pump_data, 'cv_rangeability', None))),
+            ('CV Ratio Within Range?', getattr(pump_data, 'cv_ratio_within_range', 'N/A')),
+            ('CV Pr.drop@Normal Flow > 30% Fric?', getattr(pump_data, 'cv_pressure_drop_check', 'N/A')),
+        ]
+        
+        for label, value in cv_fields:
+            ws[f'A{row}'] = label
+            ws[f'A{row}'].font = Font(bold=True)
+            ws[f'B{row}'] = value
+            row += 1
+        
+        row += 1
+        
+        # Suction Pressure Calculations
+        ws.merge_cells(f'A{row}:D{row}')
+        section_cell = ws[f'A{row}']
+        section_cell.value = "SUCTION PRESSURE CALCULATIONS"
+        section_cell.font = section_font
+        section_cell.fill = section_fill
+        row += 1
+        
+        suction_fields = [
+            ('Source Op. Pressure (bar)', self._format_number(getattr(pump_data, 'source_op_pressure', None))),
+            ('Suction EL from Pump C/L (m)', self._format_number(getattr(pump_data, 'suction_el_m', None))),
+            ('Inline Inst. Losses (bar)', self._format_number(getattr(pump_data, 'inline_inst_losses', None))),
+            ('Line Fric. Losses (bar)', self._format_number(getattr(pump_data, 'line_fric_losses', None))),
+            ('Control Valve Suction (bar)', self._format_number(getattr(pump_data, 'control_valve_suction', None))),
+            ('Misc Items Suction (bar)', self._format_number(getattr(pump_data, 'misc_items_suction', None))),
+            ('Total Suction Losses (bar)', self._format_number(getattr(pump_data, 'total_suction_losses', None))),
+            ('TOTAL SUCTION PRESSURE (bar)', self._format_number(getattr(pump_data, 'total_suction_pressure', None))),
+        ]
+        
+        for label, value in suction_fields:
+            ws[f'A{row}'] = label
+            ws[f'A{row}'].font = Font(bold=True) if 'TOTAL' in label else Font(bold=True)
+            ws[f'B{row}'] = value
+            if 'TOTAL SUCTION' in label:
+                ws[f'B{row}'].font = Font(bold=True)
+                ws[f'B{row}'].fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+            row += 1
+        
+        row += 1
+        
+        # Power Consumption Per Pump
+        ws.merge_cells(f'A{row}:D{row}')
+        section_cell = ws[f'A{row}']
+        section_cell.value = "POWER CONSUMPTION PER PUMP"
+        section_cell.font = section_font
+        section_cell.fill = section_fill
+        row += 1
+        
+        power_fields = [
+            ('Hydraulic Power (kW)', self._format_number(getattr(pump_data, 'hydraulic_power', None))),
+            ('Pump Efficiency (%)', self._format_number(getattr(pump_data, 'pump_efficiency', None))),
+            ('Break Horse Power (HP)', self._format_number(getattr(pump_data, 'break_horse_power', None))),
+            ('Motor Rating (kW)', self._format_number(getattr(pump_data, 'motor_rating', None))),
+            ('Motor Efficiency (%)', self._format_number(getattr(pump_data, 'motor_efficiency', None))),
+            ('Power Consumption (kW)', self._format_number(getattr(pump_data, 'power_consumption', None))),
+            ('Type of Motor', getattr(pump_data, 'type_of_motor', 'N/A')),
+            ('Motor Classification', getattr(pump_data, 'motor_classification', 'N/A')),
+        ]
+        
+        for label, value in power_fields:
+            ws[f'A{row}'] = label
+            ws[f'A{row}'].font = Font(bold=True)
+            ws[f'B{row}'] = value
+            row += 1
+        
+        row += 1
+        
+        # NPSH Availability
+        ws.merge_cells(f'A{row}:D{row}')
+        section_cell = ws[f'A{row}']
+        section_cell.value = "NPSH AVAILABILITY"
+        section_cell.font = section_font
+        section_cell.fill = section_fill
+        row += 1
+        
+        npsh_fields = [
+            ('Suction Pressure (bar)', self._format_number(getattr(pump_data, 'suction_pressure_npsh', None))),
+            ('Vapor Pressure (bar)', self._format_number(getattr(pump_data, 'vapor_pressure', None))),
+            ('NPSHA (m)', self._format_number(getattr(pump_data, 'npsha', None))),
+            ('Safety Margin NPSHA (%)', self._format_number(getattr(pump_data, 'safety_margin_npsha', None))),
+            ('NPSHA with Safety Margin (m)', self._format_number(getattr(pump_data, 'npsha_with_safety_margin', None))),
+        ]
+        
+        for label, value in npsh_fields:
+            ws[f'A{row}'] = label
+            ws[f'A{row}'].font = Font(bold=True)
+            ws[f'B{row}'] = value
+            row += 1
+        
+        row += 1
+        
+        # Pump Calculation Results
+        ws.merge_cells(f'A{row}:D{row}')
+        section_cell = ws[f'A{row}']
+        section_cell.value = "PUMP CALCULATION RESULTS"
+        section_cell.font = section_font
+        section_cell.fill = section_fill
+        row += 1
+        
+        result_fields = [
+            ('Discharge Pressure (bar)', self._format_number(getattr(pump_data, 'discharge_pressure', None))),
+            ('Suction Pressure (bar)', self._format_number(getattr(pump_data, 'suction_pressure_result', None))),
+            ('Differential Pressure (bar)', self._format_number(getattr(pump_data, 'differential_pressure', None))),
+            ('Differential Head (m)', self._format_number(getattr(pump_data, 'differential_head', None))),
+            ('NPSHA (m)', self._format_number(getattr(pump_data, 'npsha_result', None))),
+        ]
+        
+        for label, value in result_fields:
+            ws[f'A{row}'] = label
+            ws[f'A{row}'].font = Font(bold=True)
+            ws[f'B{row}'] = value
+            ws[f'B{row}'].font = Font(bold=True, color="0000FF")
+            row += 1
+        
+        row += 1
+        
+        # Maximum Suction Pressure
+        ws.merge_cells(f'A{row}:D{row}')
+        section_cell = ws[f'A{row}']
+        section_cell.value = "MAXIMUM SUCTION PRESSURE"
+        section_cell.font = section_font
+        section_cell.fill = section_fill
+        row += 1
+        
+        max_suction_fields = [
+            ('Suction Vessel Max Op. Pressure (bar)', self._format_number(getattr(pump_data, 'suction_vessel_max_op_pressure', None))),
+            ('Suction EL from Pump C/L Max (m)', self._format_number(getattr(pump_data, 'suction_el_m', None))),
+            ('TL to HHLL (m)', self._format_number(getattr(pump_data, 'tl_to_hhll_m', None))),
+            ('Max Suction Pressure (bar)', self._format_number(getattr(pump_data, 'max_suction_pressure', None))),
+        ]
+        
+        for label, value in max_suction_fields:
+            ws[f'A{row}'] = label
+            ws[f'A{row}'].font = Font(bold=True)
+            ws[f'B{row}'] = value
+            row += 1
+        
+        row += 1
+        
+        # Minimum Flow Conditions
+        ws.merge_cells(f'A{row}:D{row}')
+        section_cell = ws[f'A{row}']
+        section_cell.value = "MINIMUM FLOW CONDITIONS"
+        section_cell.font = section_font
+        section_cell.fill = section_fill
+        row += 1
+        
+        min_flow_fields = [
+            ('Pump Minimum Flow (m³/h)', self._format_number(getattr(pump_data, 'pump_minimum_flow', None))),
+            ('Fluid Density MCF (kg/m³)', self._format_number(getattr(pump_data, 'fluid_density_mcf', None))),
+            ('Pump Discharge Pressure Min Flow (bar)', self._format_number(getattr(pump_data, 'pump_discharge_pressure_min_flow', None))),
+            ('Destination Pressure MCF (bar)', self._format_number(getattr(pump_data, 'destination_pressure', None))),
+            ('EL Destination Pump C/L (m)', self._format_number(getattr(pump_data, 'el_destination_pump_cl', None))),
+            ('MCF Line Friction Losses (bar)', self._format_number(getattr(pump_data, 'mcf_line_friction_losses', None))),
+            ('Flow Meter Losses (bar)', self._format_number(getattr(pump_data, 'flow_meter_losses', None))),
+            ('Misc Pressure Drop MCF (bar)', self._format_number(getattr(pump_data, 'misc_pressure_drop_mcf', None))),
+            ('MCF CV Pressure Drop (bar)', self._format_number(getattr(pump_data, 'mcf_cv_pressure_drop', None))),
+        ]
+        
+        for label, value in min_flow_fields:
+            ws[f'A{row}'] = label
+            ws[f'A{row}'].font = Font(bold=True)
+            ws[f'B{row}'] = value
+            row += 1
+        
+        row += 1
+        
+        # Maximum Discharge Pressure
+        ws.merge_cells(f'A{row}:D{row}')
+        section_cell = ws[f'A{row}']
+        section_cell.value = "MAXIMUM DISCHARGE PRESSURE"
+        section_cell.font = section_font
+        section_cell.fill = section_fill
+        row += 1
+        
+        max_discharge_fields = [
+            ('API610 Tolerance Used', getattr(pump_data, 'api_610_tolerance_used', 'N/A')),
+            ('API Tolerance Factor', self._format_number(getattr(pump_data, 'api_tolerance_factor', None))),
+            ('Shut Off Pressure Factor', self._format_number(getattr(pump_data, 'shut_off_pressure_factor', None))),
+            ('Shut Off Differential Pressure (bar)', self._format_number(getattr(pump_data, 'shut_off_differential_pressure', None))),
+            ('Maximum Discharge Pressure Option 1 (bar)', self._format_number(getattr(pump_data, 'maximum_discharge_pressure_option_1', None))),
+            ('Maximum Discharge Pressure Option 2 (bar)', self._format_number(getattr(pump_data, 'maximum_discharge_pressure_option_2', None))),
+        ]
+        
+        for label, value in max_discharge_fields:
+            ws[f'A{row}'] = label
+            ws[f'A{row}'].font = Font(bold=True)
+            ws[f'B{row}'] = value
+            row += 1
+        
+        # Auto-size columns
+        ws.column_dimensions['A'].width = 50
+        ws.column_dimensions['B'].width = 25
+        ws.column_dimensions['C'].width = 15
+        ws.column_dimensions['D'].width = 15
+        
+        # Save to buffer
+        output_buffer = BytesIO()
+        wb.save(output_buffer)
+        output_buffer.seek(0)
+        
+        logger.info("✅ Structured datasheet generated successfully")
+        return output_buffer
 
     def _load_template(self):
         """Load the Pump Data Sheet template"""
