@@ -149,6 +149,7 @@ urlpatterns = [
     path('api/v1/finance/', include('apps.finance.urls')),  # Finance Invoice Automation
     path('api/v1/designiq/', include('apps.designiq.urls')),  # DesignIQ - AI Design Intelligence
     path('api/v1/process-datasheet/', include('apps.process_datasheet.urls')),  # Process Datasheet
+    # SOFT-CODED: Electrical Datasheet - RE-ENABLED
     path('api/v1/electrical-datasheet/', include('apps.electrical_datasheet.urls')),  # Electrical Datasheet
     path('api/v1/projects/', include('apps.core.project_urls')),
 ]

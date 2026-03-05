@@ -122,6 +122,7 @@ INSTALLED_APPS = [
     'apps.procurement',  # Procurement Management - Vendor & PO Tracking
     'apps.notifications',  # Notification System - Multi-Channel Alerts & Email
     'apps.process_datasheet',  # Process Datasheet - AI-Powered Equipment Datasheet Generation
+    # SOFT-CODED: Electrical Datasheet - RE-ENABLED
     'apps.electrical_datasheet',  # Electrical Datasheet - Transformer & Switchgear Technical Data Sheets
 ]
 
@@ -265,10 +266,36 @@ else:
 # End of Channel Layers Configuration
 # ==============================================================================
 
-# Database
-# RAILWAY POSTGRESQL - REQUIRED
-# DATABASE_URL must be set in environment variables
-DATABASE_URL = config('DATABASE_URL')
+# ============================================
+# SMART DATABASE CONFIGURATION - SOFT CODED
+# ============================================
+# Environment-aware database configuration with fallbacks
+# Supports: production, staging (preprod), and development
+
+# Get environment type
+ENVIRONMENT = config('ENVIRONMENT', default='production')
+
+# Environment-specific database configurations
+PREPROD_DATABASE_URL = "postgresql://postgres:OPMUckaUZIxVfSsWxgRKuVFbBsVKxPyk@nozomi.proxy.rlwy.net:43647/railway"
+
+# Smart database URL detection
+if ENVIRONMENT == 'staging':
+    # Preprod environment - use preprod database
+    DATABASE_URL = config('DATABASE_URL', default=PREPROD_DATABASE_URL)
+    print(f"[DJANGO] 🚀 PREPROD Environment - Using Railway Preprod Database")
+elif ENVIRONMENT == 'production':
+    # Production environment - DATABASE_URL is required
+    DATABASE_URL = config('DATABASE_URL')
+    print(f"[DJANGO] 🏭 PRODUCTION Environment - Using Railway Production Database")
+else:
+    # Development or other environments
+    DATABASE_URL = config('DATABASE_URL', default=PREPROD_DATABASE_URL)
+    print(f"[DJANGO] 🔧 {ENVIRONMENT.upper()} Environment - Using fallback database")
+
+print(f"[DJANGO] 🌍 Environment: {ENVIRONMENT}")
+print(f"[DJANGO] 🗄️ Database configured successfully")
+
+# Parse database configuration
 db_config = dj_database_url.parse(DATABASE_URL)
 
 # Extended timeout configuration for Railway database
