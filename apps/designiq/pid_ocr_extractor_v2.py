@@ -359,6 +359,8 @@ class PIDLineExtractorV2:
         
         format_label = 'OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA')
         logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({format_label})")
+        if format_type == 'offshore':
+            logger.info(f"  📋 Offshore format: AREA-FLUIDCODE-SIZE-PIPECLASS-SEQUENCE-INSULATION (e.g., 604-HO-8-BC2CA0-1071-H)")
         
         # First, normalize the text - replace all dash-like characters with standard hyphen
         # OCR often sees: = ~ — – ― ─ | / as separators
@@ -388,22 +390,26 @@ class PIDLineExtractorV2:
         # Examples: 604-HO-8-BC2GA0-1071-H, 41-SWR-16-A2AU16-64313-V
         
         if format_type == 'offshore':
-            # ADNOC OFFSHORE PATTERNS: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
-            # Same methodology as onshore with area - flexible patterns, same validation
+            # OFFSHORE PATTERNS: AREA-FLUIDCODE-LINESIZE-PIPECLASS-SEQUENCE-INSULATION
+            # Example: 604-HO-8-BC2CA0-1071-H
+            # Format: AREA(2-3 digits) - FLUID(1-3 letters) - SIZE(1-2 digits) - CLASS(5-6 alphanumeric) - SEQ(4-5 digits) - INSULATION(1-2 letters, optional)
             patterns = [
-                # Pattern 1: Standard with word boundaries (most reliable)
+                # Pattern 1: Exact compact format (highest priority for clean data)
+                r'\b(\d{2,3})-([A-Z]{1,3})-(\d{1,2})-([A-Z0-9]{5,6})-(\d{4,5})(?:-([A-Z]{1,2}))?\b',
+                
+                # Pattern 2: With optional spaces around hyphens
+                r'\b(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{1,2})\s*-\s*([A-Z0-9]{5,6})\s*-\s*(\d{4,5})(?:\s*-\s*([A-Z]{1,2}))?\b',
+                
+                # Pattern 3: With optional quote after size (OCR artifact)
                 r'\b(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Z0-9]{5,6})\s*-\s*(\d{4,5})(?:\s*-\s*([A-Z]{1,2}))?\b',
                 
-                # Pattern 2: With flexible spacing
+                # Pattern 4: With flexible spacing and multiple hyphens
                 r'\b(\d{2,3})\s*-+\s*([A-Z]{1,3})\s*-+\s*(\d{1,2})"?\s*-+\s*([A-Z0-9]{5,6})\s*-+\s*(\d{4,5})(?:\s*-+\s*([A-Z]{1,2}))?\b',
                 
-                # Pattern 3: Compact format (no spaces)
-                r'\b(\d{2,3})-([A-Z]{1,3})-(\d{1,2})"?-([A-Z0-9]{5,6})-(\d{4,5})(?:-([A-Z]{1,2}))?\b',
+                # Pattern 5: With word boundaries and lookahead
+                r'(?:^|\s)(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Z0-9]{5,6})\s*-\s*(\d{4,5})(?:\s*-\s*([A-Z]{1,2}))?(?=\s|$|-)',
                 
-                # Pattern 4: With spaces and lookahead
-                r'(?:^|\s)(\d{2,3})\s*-+\s*([A-Z]{1,3})\s+-+\s*(\d{1,2})"?\s+-+\s*([A-Z0-9]{5,6})\s+-+\s*(\d{4,5})(?:\s*-+\s*([A-Z]{1,2}))?(?=\s|$|-)',
-                
-                # Pattern 5: Case insensitive
+                # Pattern 6: Case insensitive for OCR errors
                 r'(?:^|\s)(\d{2,3})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Za-z0-9]{5,6})\s*-\s*(\d{4,5})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
             ]
         elif include_area:
