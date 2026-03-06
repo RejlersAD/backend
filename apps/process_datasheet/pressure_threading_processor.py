@@ -94,9 +94,13 @@ def process_pressure_threading(pid_file_path, job_id):
         
         log_and_print(f"📄 [Pressure {job_id[:8]}] STEP 1: Extracting pressure instruments from P&ID...")
         
-        # Extract filename from path for P&ID No field
+        # Extract filename from path for P&ID No field (without extension)
         import os
         pid_filename = os.path.basename(pid_file_path)
+        # Remove file extension to get clean drawing number
+        pid_filename = os.path.splitext(pid_filename)[0]
+        
+        log_and_print(f"📋 [Pressure {job_id[:8]}] Using P&ID filename: {pid_filename}")
         
         try:
             # Use the same PressureInstrumentAnalyzer from the existing page
