@@ -68,10 +68,14 @@ def generate_pressure_html_preview(instruments):
     
     return html
 
-def process_pressure_threading(pid_file_path, job_id):
+def process_pressure_threading(pid_file_path, job_id, original_filename=None):
     """
     Process Pressure Instrument datasheet synchronously
     Called from orchestrator which already runs in a thread
+    Args:
+        pid_file_path: Path to the uploaded P&ID file
+        job_id: Unique job identifier
+        original_filename: Original uploaded filename (optional, for P&ID No extraction)
     """
     try:
         log_and_print(f"🎯 [Pressure {job_id[:8]}] Starting pressure instrument extraction...")
@@ -94,44 +98,6 @@ def process_pressure_threading(pid_file_path, job_id):
         
         log_and_print(f"📄 [Pressure {job_id[:8]}] STEP 1: Extracting pressure instruments from P&ID...")
         
-        # Extract P&ID drawing number smartly from filename
-        import os
-        import re
-        
-        # Get base filename without path and extension
-        full_filename = os.path.basename(pid_file_path)
-        filename_no_ext = os.path.splitext(full_filename)[0]
-        
-        # Smart extraction: Look for P&ID number patterns
-        # Common patterns: P-12345-001, DWG-123-A, 16093-001, etc.
-        # Priority 1: Letter-Number-Number pattern (e.g., P-16093-001)
-        pattern1 = re.search(r'([A-Z]-\d+-\d+)', filename_no_ext, re.IGNORECASE)
-        # Priority 2: Number-Number pattern (e.g., 16093-001)
-        pattern2 = re.search(r'(\d{4,6}-\d+)', filename_no_ext)
-        # Priority 3: Any alphanumeric with hyphens (e.g., DWG-123-A)
-        pattern3 = re.search(r'([A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+)', filename_no_ext, re.IGNORECASE)
-        # Priority 4: Simple number sequence (e.g., 16093001)
-        pattern4 = re.search(r'(\d{6,})', filename_no_ext)
-        
-        # Use the first matching pattern
-        if pattern1:
-            pid_filename = pattern1.group(1)
-        elif pattern2:
-            pid_filename = pattern2.group(1)
-        elif pattern3:
-            pid_filename = pattern3.group(1)
-        elif pattern4:
-            pid_filename = pattern4.group(1)
-        else:
-            # Fallback: use filename without extension, clean up timestamps/UUIDs
-            # Remove common prefixes like timestamps (1234567890_) or UUIDs
-            pid_filename = re.sub(r'^[\d_]+', '', filename_no_ext)
-            # If still empty or too short, use the whole filename
-            if not pid_filename or len(pid_filename) < 3:
-                pid_filename = filename_no_ext
-        
-        log_and_print(f"📋 [Pressure {job_id[:8]}] Extracted P&ID No: {pid_filename} (from: {full_filename})")
-        
         try:
             # Use the same PressureInstrumentAnalyzer from the existing page
             from apps.pid_analysis.pressure_instrument_service import PressureInstrumentAnalyzer
@@ -142,19 +108,27 @@ def process_pressure_threading(pid_file_path, job_id):
             
             analyzer = PressureInstrumentAnalyzer()
             
-            # Extract pressure instruments using AI Vision API
+            # Let AI extract drawing info from the P&ID itself
             drawing_info = {
-                'drawing_number': pid_filename,
+                'drawing_number': 'AUTO',  # AI will extract from drawing
                 'drawing_title': 'P&ID Analysis',
                 'revision': '0'
             }
             
+            log_and_print(f"📋 [Pressure {job_id[:8]}] AI will extract drawing number from P&ID image...")
+            
             # Use the correct method name: analyze_pid_with_ai
             pressure_instruments = analyzer.analyze_pid_with_ai(pid_image_data, drawing_info)
             
-            # Update all instruments to use the uploaded filename as P&ID No
-            for instrument in pressure_instruments:
-                instrument['pid_no'] = pid_filename
+            # AI extracts the drawing number from the P&ID - use it for all instruments
+            # The first instrument should have the correct pid_no extracted by AI
+            if pressure_instruments and len(pressure_instruments) > 0:
+                extracted_pid_no = pressure_instruments[0].get('pid_no', 'N/A')
+                log_and_print(f"✅ [Pressure {job_id[:8]}] AI extracted P&ID No: {extracted_pid_no}")
+                # Ensure all instruments have the same P&ID number
+                for instrument in pressure_instruments:
+                    if not instrument.get('pid_no') or instrument.get('pid_no') == 'N/A':
+                        instrument['pid_no'] = extracted_pid_no
             
             log_and_print(f"✅ [Pressure {job_id[:8]}] Found {len(pressure_instruments)} pressure instruments")
             

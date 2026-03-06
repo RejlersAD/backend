@@ -252,11 +252,12 @@ class SmartDatasheetOrchestrator:
         if not pid_info:
             return {'success': False, 'error': 'Pressure Instrument requires P&ID file'}
         
-        # Files are already saved as temp files, just use the path
+        # Files are already saved as temp files, use path and original filename
         pid_path = pid_info['path']
+        pid_filename = pid_info.get('name', 'Unknown')
         
         # Process synchronously (orchestrator already runs in a thread)
-        result = process_pressure_threading(pid_path, str(uuid.uuid4()))
+        result = process_pressure_threading(pid_path, str(uuid.uuid4()), pid_filename)
         return result
     
     def _process_pump(self, files_dict):
