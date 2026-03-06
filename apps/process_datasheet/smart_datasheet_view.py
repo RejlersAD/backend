@@ -50,9 +50,8 @@ def smart_datasheet_upload(request):
         pid_file = request.FILES.get('pid_file')
         hmb_file = request.FILES.get('hmb_file')
         other_file = request.FILES.get('other_file')
-        pump_form_data = request.POST.get('pump_form_data')  # JSON string for pump hydraulic
         
-        # Validate files/data based on datasheet type
+        # Validate files based on datasheet type
         if selected_type in ['mov_equipment', 'sdv_streams']:
             if not pid_file:
                 return JsonResponse({
@@ -73,13 +72,13 @@ def smart_datasheet_upload(request):
                 }, status=400)
                 
         elif selected_type == 'pump_hydraulic':
-            if not pump_form_data:
+            if not other_file:
                 return JsonResponse({
                     'success': False,
-                    'error': 'Pump parameters are required for Pump Hydraulic calculation.'
+                    'error': 'Pump data file is required for Pump Hydraulic calculation.'
                 }, status=400)
         
-        logger.info(f"[Smart Datasheet] Files received - P&ID: {bool(pid_file)}, HMB: {bool(hmb_file)}, Other: {bool(other_file)}, Pump Form: {bool(pump_form_data)}")
+        logger.info(f"[Smart Datasheet] Files received - P&ID: {bool(pid_file)}, HMB: {bool(hmb_file)}, Other: {bool(other_file)}")
         
         # Get user preferences
         user_preferences = {
@@ -141,11 +140,6 @@ def smart_datasheet_upload(request):
                     'path': temp_info['path'],
                     'name': temp_info['name']
                 }
-            
-            # For pump hydraulic, add form data
-            if selected_type == 'pump_hydraulic' and pump_form_data:
-                import json
-                files_info['form_data'] = json.loads(pump_form_data)
             
             process_smart_datasheet_async(files_info, user_preferences, job_id)
         
