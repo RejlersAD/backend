@@ -93,6 +93,11 @@ def process_pressure_threading(pid_file_path, job_id):
         cache.set(f'pressure_task_{job_id}_stage', 'Extracting pressure instruments from P&ID...', timeout=3600)
         
         log_and_print(f"📄 [Pressure {job_id[:8]}] STEP 1: Extracting pressure instruments from P&ID...")
+        
+        # Extract filename from path for P&ID No field
+        import os
+        pid_filename = os.path.basename(pid_file_path)
+        
         try:
             # Use the same PressureInstrumentAnalyzer from the existing page
             from apps.pid_analysis.pressure_instrument_service import PressureInstrumentAnalyzer
@@ -105,13 +110,17 @@ def process_pressure_threading(pid_file_path, job_id):
             
             # Extract pressure instruments using AI Vision API
             drawing_info = {
-                'drawing_number': 'Smart Datasheet Upload',
+                'drawing_number': pid_filename,
                 'drawing_title': 'P&ID Analysis',
                 'revision': '0'
             }
             
             # Use the correct method name: analyze_pid_with_ai
             pressure_instruments = analyzer.analyze_pid_with_ai(pid_image_data, drawing_info)
+            
+            # Update all instruments to use the uploaded filename as P&ID No
+            for instrument in pressure_instruments:
+                instrument['pid_no'] = pid_filename
             
             log_and_print(f"✅ [Pressure {job_id[:8]}] Found {len(pressure_instruments)} pressure instruments")
             
