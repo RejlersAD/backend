@@ -244,19 +244,20 @@ class SmartDatasheetOrchestrator:
     
     def _process_pressure_instrument(self, files_dict):
         """Route to Pressure Instrument processor"""
+        from .pressure_threading_processor import process_pressure_threading
+        
         # Get P&ID file info from dict
         pid_info = files_dict.get('pid')
         
         if not pid_info:
             return {'success': False, 'error': 'Pressure Instrument requires P&ID file'}
         
-        # This would integrate with existing pressure instrument logic
-        return {
-            'success': True,
-            'message': 'Pressure Instrument processing (integration pending)',
-            'excel_file': None,
-            'filename': 'pressure_instrument.xlsx'
-        }
+        # Files are already saved as temp files, just use the path
+        pid_path = pid_info['path']
+        
+        # Process synchronously (orchestrator already runs in a thread)
+        result = process_pressure_threading(pid_path, str(uuid.uuid4()))
+        return result
     
     def _process_pump(self, files_dict):
         """Route to Pump/PFD processor"""
