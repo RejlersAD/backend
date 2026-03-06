@@ -94,13 +94,43 @@ def process_pressure_threading(pid_file_path, job_id):
         
         log_and_print(f"📄 [Pressure {job_id[:8]}] STEP 1: Extracting pressure instruments from P&ID...")
         
-        # Extract filename from path for P&ID No field (without extension)
+        # Extract P&ID drawing number smartly from filename
         import os
-        pid_filename = os.path.basename(pid_file_path)
-        # Remove file extension to get clean drawing number
-        pid_filename = os.path.splitext(pid_filename)[0]
+        import re
         
-        log_and_print(f"📋 [Pressure {job_id[:8]}] Using P&ID filename: {pid_filename}")
+        # Get base filename without path and extension
+        full_filename = os.path.basename(pid_file_path)
+        filename_no_ext = os.path.splitext(full_filename)[0]
+        
+        # Smart extraction: Look for P&ID number patterns
+        # Common patterns: P-12345-001, DWG-123-A, 16093-001, etc.
+        # Priority 1: Letter-Number-Number pattern (e.g., P-16093-001)
+        pattern1 = re.search(r'([A-Z]-\d+-\d+)', filename_no_ext, re.IGNORECASE)
+        # Priority 2: Number-Number pattern (e.g., 16093-001)
+        pattern2 = re.search(r'(\d{4,6}-\d+)', filename_no_ext)
+        # Priority 3: Any alphanumeric with hyphens (e.g., DWG-123-A)
+        pattern3 = re.search(r'([A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+)', filename_no_ext, re.IGNORECASE)
+        # Priority 4: Simple number sequence (e.g., 16093001)
+        pattern4 = re.search(r'(\d{6,})', filename_no_ext)
+        
+        # Use the first matching pattern
+        if pattern1:
+            pid_filename = pattern1.group(1)
+        elif pattern2:
+            pid_filename = pattern2.group(1)
+        elif pattern3:
+            pid_filename = pattern3.group(1)
+        elif pattern4:
+            pid_filename = pattern4.group(1)
+        else:
+            # Fallback: use filename without extension, clean up timestamps/UUIDs
+            # Remove common prefixes like timestamps (1234567890_) or UUIDs
+            pid_filename = re.sub(r'^[\d_]+', '', filename_no_ext)
+            # If still empty or too short, use the whole filename
+            if not pid_filename or len(pid_filename) < 3:
+                pid_filename = filename_no_ext
+        
+        log_and_print(f"📋 [Pressure {job_id[:8]}] Extracted P&ID No: {pid_filename} (from: {full_filename})")
         
         try:
             # Use the same PressureInstrumentAnalyzer from the existing page
