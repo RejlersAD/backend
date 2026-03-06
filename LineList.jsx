@@ -15,6 +15,7 @@
 import React, { useState, useRef } from 'react';
 import { DocumentTextIcon, CloudArrowUpIcon, CheckCircleIcon } from '@heroicons/react/24/outline';
 import { apiClientLongTimeout } from '../../../services/api.service';
+import * as XLSX from 'xlsx';
 
 const LineList = () => {
   // State management
@@ -83,34 +84,46 @@ const LineList = () => {
   const handleExport = () => {
     if (!extractedData?.data) return;
 
-    // Create CSV content
+    // Define headers (8 columns only)
     const headers = ['Original Detection', 'Fluid Code', 'Size', 'Sequence No', 'PIPR Class', 'Insulation', 'From', 'To'];
-    const rows = extractedData.data.map(item => [
-      item.original_detection || '',
-      item.fluid_code || '',
-      item.size || '',
-      item.sequence_no || '',
-      item.pipr_class || '',
-      item.insulation || '',
-      item.from || '',
-      item.to || ''
-    ]);
 
-    const csvContent = [
-      headers.join(','),
-      ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
-    ].join('\n');
+    // Build worksheet data with explicit field mapping
+    const wsData = [
+      headers,
+      ...extractedData.data.map(item => [
+        item.original_detection || '',
+        item.fluid_code || '',
+        item.size || '',
+        item.sequence_no || '',
+        item.pipr_class || '',
+        item.insulation || '',
+        item.from || '',
+        item.to || ''
+      ])
+    ];
 
-    // Download CSV
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `line-list-${new Date().toISOString().split('T')[0]}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    // Create worksheet
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+    // Auto-size columns
+    const colWidths = headers.map((header, colIndex) => {
+      let maxWidth = header.length;
+      for (let rowIndex = 1; rowIndex < wsData.length; rowIndex++) {
+        const cellValue = wsData[rowIndex][colIndex];
+        if (cellValue) {
+          maxWidth = Math.max(maxWidth, String(cellValue).length);
+        }
+      }
+      return { wch: Math.min(Math.max(maxWidth + 2, 12), 50) };
+    });
+    ws['!cols'] = colWidths;
+
+    // Create workbook and append worksheet
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Line List');
+
+    // Download as Excel file
+    XLSX.writeFile(wb, `line-list-${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
   return (
@@ -227,7 +240,7 @@ const LineList = () => {
               onClick={handleExport}
               className="px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition-all shadow-lg hover:shadow-xl"
             >
-              Export to CSV
+              Download Excel
             </button>
           )}
         </div>
