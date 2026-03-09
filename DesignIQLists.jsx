@@ -384,16 +384,16 @@ const DesignIQLists = () => {
       
       // CRITICAL MAPPING: Format type determines regex pattern and area handling
       // onshore → format_type='onshore', include_area=false
-      //   Pattern: SIZE-FLUID-SEQUENCE-PIPECLASS
+      //   Pattern: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
       //   Example: 2-D-5777-033842-X
       //
-      // general → format_type='general', include_area=true
-      //   Pattern: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS
+      // general → format_type='general', include_area=true  
+      //   Pattern: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
       //   Example: 1"-41-SWS-64544-A2AU16-V
       //
       // offshore → format_type='offshore', include_area=true
-      //   Pattern: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE
-      //   Example: 604-HO-8-BC2GA0-1070-H
+      //   Pattern: AREA-FLUIDCODE-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
+      //   Example: 604-HO-8-BC2CA0-1071-H
       const includeArea = (selectedFormat === 'offshore' || selectedFormat === 'general');
       formData.append('include_area', includeArea ? 'true' : 'false');
       formData.append('format_type', selectedFormat);
@@ -878,7 +878,7 @@ const DesignIQLists = () => {
                   }`}
                 >
                   <div className="text-sm font-bold">Offshore</div>
-                  <div className="text-xs mt-1">Area first (604-HO-8-BC2GA0)</div>
+                  <div className="text-xs mt-1">604-HO-8-BC2CA0-1071-H</div>
                 </button>
               </div>
               {!selectedFormat && (
@@ -1422,30 +1422,32 @@ const DesignIQLists = () => {
                   onClick={() => {
                     const data = extractedData.lines;
                     
-                    // ALL 35 COLUMNS Excel Export (From and To separate)
+                    // Excel Export with EXACT same column order as preview table
                     const headers = [
                       'Line Number', 'Size', 'Fluid Code', 'Area', 'Sequence No', 'PIPR Class', 'Insulation', 'From', 'To',
                       'Flow Medium', 'Two Phase', 'Surge Flow', 'Flow Max', 'Density', 
                       'Normal Pressure', 'Normal Temp', 'Design Pressure', 'Minimax Design Temp',
                       'Design Code', 'Category-M Fluid', 'Schedule / Wall THK', 'Stress Relief', 'PWHT',
                       'RT', 'MT/PT', 'Hardness', 'Visual', 'NACE-MR-0175', 'Piping Rated Pressure',
-                      'Test Pressure', 'Test Medium', 'P&ID No.', 'P&ID Rev', 'Date', 'Criticality Code'
+                      'Test Pressure', 'Test Medium', 'P&ID No.', 'P&ID Rev', 'Date', 'Criticality Code', 'Criticality Stress'
                     ];
                     
                     const wsData = [headers];
                     
-                    // Add all 35 columns for each row
+                    // Map each row with EXACT field order matching preview table
                     data.forEach(row => {
                       wsData.push([
-                        row.original_detection || row.line_number || '',
-                        row.size || '',
-                        row.fluid_code || '',
-                        row.area || '',
-                        row.sequence_no || '',
-                        row.pipr_class || '',
-                        row.insulation || '',
-                        row.from_line || row.from || '',
-                        row.to_line || row.to || '',
+                        // 9 BASE COLUMNS (matching preview table order exactly)
+                        row.original_detection || row.line_number || '',  // Line Number
+                        row.size || '',                                    // Size
+                        row.fluid_code || '',                              // Fluid Code
+                        row.area || '',                                    // Area
+                        row.sequence_no || '',                             // Sequence No
+                        row.pipr_class || '',                              // PIPR Class
+                        row.insulation || '',                              // Insulation
+                        row.from_line || row.from || '',                   // From
+                        row.to_line || row.to || '',                       // To
+                        // 27 ENRICHED COLUMNS
                         row.flow_medium || '',
                         row.two_phase || '',
                         row.surge_flow || '',
@@ -1471,27 +1473,33 @@ const DesignIQLists = () => {
                         row.pid_no || '',
                         row.pid_rev || '',
                         row.date || '',
-                        row.criticality_code || ''
+                        row.criticality_code || '',
+                        row.criticality_stress || ''
                       ]);
                     });
                     
                     const wb = XLSX.utils.book_new();
                     const ws = XLSX.utils.aoa_to_sheet(wsData);
                     
-                    // Set column widths for all 35 columns
-                    ws['!cols'] = [
-                      { wch: 20 }, { wch: 8 }, { wch: 12 }, { wch: 10 }, { wch: 15 }, { wch: 15 }, { wch: 12 }, { wch: 20 }, { wch: 20 },
-                      { wch: 15 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 10 },
-                      { wch: 15 }, { wch: 12 }, { wch: 15 }, { wch: 18 },
-                      { wch: 15 }, { wch: 16 }, { wch: 18 }, { wch: 12 }, { wch: 10 },
-                      { wch: 8 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 15 }, { wch: 20 },
-                      { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 12 }, { wch: 12 }, { wch: 15 }
-                    ];
+                    // Auto-calculate column widths based on content
+                    const colWidths = headers.map((header, colIndex) => {
+                      let maxWidth = header.length;
+                      // Check all data rows for this column
+                      for (let rowIndex = 1; rowIndex < wsData.length; rowIndex++) {
+                        const cellValue = wsData[rowIndex][colIndex];
+                        if (cellValue) {
+                          maxWidth = Math.max(maxWidth, String(cellValue).length);
+                        }
+                      }
+                      // Add padding and cap maximum width
+                      return { wch: Math.min(Math.max(maxWidth + 2, 12), 50) };
+                    });
+                    ws['!cols'] = colWidths;
                     
-                    XLSX.utils.book_append_sheet(wb, ws, 'P&ID 35 Columns');
+                    XLSX.utils.book_append_sheet(wb, ws, 'Line List');
                     
                     const timestamp = new Date().toISOString().split('T')[0];
-                    XLSX.writeFile(wb, `PID_35Columns_${data.length}lines_${timestamp}.xlsx`);
+                    XLSX.writeFile(wb, `LineList_${data.length}lines_${timestamp}.xlsx`);
                   }}
                   className="flex items-center px-6 py-3 bg-gradient-to-r from-green-600 to-emerald-600 text-white rounded-xl hover:shadow-lg transition-all font-semibold"
                 >
