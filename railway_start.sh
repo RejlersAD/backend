@@ -33,6 +33,14 @@ python manage.py collectstatic --noinput --clear 2>&1 || {
     echo "⚠️  Static files collection failed, continuing..."
 }
 
+# Fix preprod migration conflicts (soft-coded - only runs in Railway)
+echo "Checking for migration conflicts..."
+python fix_preprod_migrations.py 2>&1 || {
+    echo "❌ FATAL: Migration conflict resolution failed"
+    echo "Check the logs above for details"
+    exit 1
+}
+
 # Run migrations
 echo "Running database migrations..."
 python manage.py migrate --noinput 2>&1 || {
