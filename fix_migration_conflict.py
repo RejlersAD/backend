@@ -66,6 +66,19 @@ def check_table_exists(table_name):
         """, [table_name])
         return cursor.fetchone()[0]
 
+def check_column_exists(table_name, column_name):
+    """Check if a column exists in a specific table"""
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.columns 
+                WHERE table_schema = 'public' 
+                AND table_name = %s 
+                AND column_name = %s
+            )
+        """, [table_name, column_name])
+        return cursor.fetchone()[0]
+
 def get_unapplied_migrations():
     """Get list of unapplied migrations"""
     executor = MigrationExecutor(connection)
@@ -90,6 +103,19 @@ def get_table_name_from_operation(operation):
         model_name = operation.name.lower()
         # Django prefixes tables with app_label
         return model_name
+    return None
+
+def get_field_info_from_operation(operation, app_label):
+    """Extract field information from AddField operation"""
+    if isinstance(operation, migrations.AddField):
+        model_name = operation.model_name.lower()
+        field_name = operation.name
+        table_name = f"{app_label}_{model_name}"
+        return {
+            'table_name': table_name,
+            'column_name': field_name,
+            'model_name': model_name
+        }
     return None
 
 def main():
@@ -125,16 +151,40 @@ def main():
         
         # Check if any CreateModel operations create tables that already exist
         tables_exist = []
+        columns_exist = []
+        
         for op in operations:
+            # Check for table conflicts (CreateModel)
             if isinstance(op, migrations.CreateModel):
                 table_name = f"{app_label}_{op.name.lower()}"
                 exists = check_table_exists(table_name)
                 print_info(f"  Table '{table_name}': {'EXISTS' if exists else 'NOT FOUND'}")
                 if exists:
                     tables_exist.append(table_name)
+            
+            # Check for column conflicts (AddField)
+            elif isinstance(op, migrations.AddField):
+                field_info = get_field_info_from_operation(op, app_label)
+                if field_info:
+                    table_name = field_info['table_name']
+                    column_name = field_info['column_name']
+                    
+                    # Only check if table exists first
+                    if check_table_exists(table_name):
+                        col_exists = check_column_exists(table_name, column_name)
+                        print_info(f"  Column '{table_name}.{column_name}': {'EXISTS' if col_exists else 'NOT FOUND'}")
+                        if col_exists:
+                            columns_exist.append(f"{table_name}.{column_name}")
+                    else:
+                        print_info(f"  Column '{table_name}.{column_name}': TABLE MISSING (will create)")
         
-        if tables_exist:
-            print_warning(f"  Decision: FAKE (tables already exist: {', '.join(tables_exist)})")
+        if tables_exist or columns_exist:
+            conflicts = []
+            if tables_exist:
+                conflicts.append(f"tables: {', '.join(tables_exist)}")
+            if columns_exist:
+                conflicts.append(f"columns: {', '.join(columns_exist)}")
+            print_warning(f"  Decision: FAKE ({' | '.join(conflicts)} already exist)")
             migrations_to_fake.append((app_label, migration_name))
         else:
             print_info(f"  Decision: RUN NORMALLY")
