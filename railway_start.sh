@@ -33,6 +33,12 @@ python manage.py collectstatic --noinput --clear 2>&1 || {
     echo "⚠️  Static files collection failed, continuing..."
 }
 
+# Fix problematic migration (fake if column already exists)
+echo "Checking for existing migrations..."
+python manage.py migrate pid_analysis 0002 --fake 2>&1 || {
+    echo "⚠️  Migration 0002 fake failed (might not exist yet), continuing..."
+}
+
 # Run migrations
 echo "Running database migrations..."
 python manage.py migrate --noinput 2>&1 || {

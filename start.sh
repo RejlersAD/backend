@@ -9,6 +9,10 @@ export PYTHONUNBUFFERED=1
 
 echo "🚀 Starting on port: $PORT"
 
+# Fix problematic migration (fake if column already exists)
+echo "Checking for existing migrations..."
+python manage.py migrate pid_analysis 0002 --fake 2>/dev/null || echo "⚠️  Migration already applied or doesn't exist"
+
 # Run migrations
 python manage.py migrate --noinput 
 
