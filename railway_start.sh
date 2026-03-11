@@ -38,7 +38,18 @@ echo "=========================================="
 echo "🔍 Checking for migration conflicts..."
 echo "=========================================="
 
-# Strategy 1: Use automated conflict resolver if available
+# Strategy 1: Fix migration order inconsistencies (0005/0006 issue)
+if [ -f "fix_migration_order.py" ]; then
+    echo "✅ Running migration order fixer..."
+    python fix_migration_order.py 2>&1 && {
+        echo "✅ Migration order fixed successfully"
+    } || {
+        echo "⚠️  Migration order fixer completed with warnings"
+        echo "    Attempting remaining fixes..."
+    }
+fi
+
+# Strategy 2: Use automated conflict resolver for table conflicts
 if [ -f "fix_migration_conflict.py" ]; then
     echo "✅ Running automated migration conflict resolver..."
     python fix_migration_conflict.py 2>&1 && {
