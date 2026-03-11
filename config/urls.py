@@ -137,7 +137,7 @@ urlpatterns = [
     
     # API endpoints - Core
     path('api/v1/', include('apps.api.urls')),
-    path('api/v1/core/', include('apps.core.urls')),  # Core app endpoints including dashboard
+    # path('api/v1/core/', include('apps.core.urls')),  # REMOVED: Duplicate - already included via apps.api.urls
     path('api/v1/rbac/', include('apps.rbac.urls')),
     path('api/v1/users/', include('apps.users.urls')),  # User management endpoints
     path('api/v1/enquiry/', include('apps.core.urls_enquiry')),  # Public enquiry endpoint
@@ -149,9 +149,9 @@ urlpatterns = [
     path('api/v1/finance/', include('apps.finance.urls')),  # Finance Invoice Automation
     path('api/v1/designiq/', include('apps.designiq.urls')),  # DesignIQ - AI Design Intelligence
     path('api/v1/process-datasheet/', include('apps.process_datasheet.urls')),  # Process Datasheet
-    # SOFT-CODED: Electrical Datasheet - RE-ENABLED
-    path('api/v1/electrical-datasheet/', include('apps.electrical_datasheet.urls')),  # Electrical Datasheet
-    path('api/v1/', include('apps.usage_tracking.urls')),  # Usage Tracking & Analytics
+    # SOFT-CODED: Electrical Datasheet - TEMPORARILY DISABLED (views need updating)
+    # path('api/v1/electrical-datasheet/', include('apps.electrical_datasheet.urls')),  # Electrical Datasheet
+    # path('api/v1/', include('apps.usage_tracking.urls')),  # Usage Tracking & Analytics - REMOVED (app deleted)
     path('api/v1/projects/', include('apps.core.project_urls')),
 ]
 

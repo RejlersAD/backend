@@ -1,6 +1,7 @@
 """
 Django settings for AIFlow project.
 Smart configuration using environment variables for security and flexibility.
+Aligned with centralized environment configuration (9-3-26 commit).
 """
 
 import os
@@ -10,6 +11,30 @@ import dj_database_url
 
 # Build paths inside the project
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# ============================================
+# SOFT-CODED CENTRALIZED CONFIGURATION
+# ============================================
+# Import centralized environment configuration for alignment
+try:
+    from config.environment_config import (
+        config as env_config,
+        get_environment,
+        get_cors_origins,
+        get_csrf_origins,
+        get_database_url as get_centralized_db_url,
+    )
+    CENTRALIZED_CONFIG_AVAILABLE = True
+    print(f"[CONFIG] ✅ Centralized configuration loaded")
+except ImportError as e:
+    print(f"[CONFIG] ⚠️  Centralized configuration not available: {e}")
+    CENTRALIZED_CONFIG_AVAILABLE = False
+    env_config = None
+    get_environment = lambda: 'local'
+    get_cors_origins = lambda: []
+    get_csrf_origins = lambda: []
+    get_centralized_db_url = lambda: None
+# ============================================
 
 # Helper function to safely cast config values, handling empty strings
 def safe_cast_int(value, default):
@@ -65,26 +90,33 @@ DEBUG = safe_cast_bool(config('DEBUG', default='False'), False)
 # This password should be changed by users on first login
 DEFAULT_USER_PASSWORD = config('DEFAULT_USER_PASSWORD', default='Rejlers@123')
 
-# Railway-friendly ALLOWED_HOSTS configuration
+# Railway-friendly ALLOWED_HOSTS configuration (SOFT-CODED)
 try:
-    ALLOWED_HOSTS_ENV = config('ALLOWED_HOSTS', default='*')  # Allow all by default for Railway
-    if ALLOWED_HOSTS_ENV == '*':
-        ALLOWED_HOSTS = ['*']
+    # SOFT-CODED: Try to use centralized configuration first
+    if CENTRALIZED_CONFIG_AVAILABLE:
+        backend_config = env_config.get_backend_config()
+        ALLOWED_HOSTS = backend_config.get('allowed_hosts', ['*'])
+        print(f"[DJANGO] ✅ Using ALLOWED_HOSTS from centralized config: {ALLOWED_HOSTS}")
     else:
-        ALLOWED_HOSTS = [s.strip() for s in ALLOWED_HOSTS_ENV.split(',')]
+        # Fallback to environment variable
+        ALLOWED_HOSTS_ENV = config('ALLOWED_HOSTS', default='*')  # Allow all by default for Railway
+        if ALLOWED_HOSTS_ENV == '*':
+            ALLOWED_HOSTS = ['*']
+        else:
+            ALLOWED_HOSTS = [s.strip() for s in ALLOWED_HOSTS_ENV.split(',')]
 
-    # Add Railway domain automatically
-    RAILWAY_STATIC_URL = config('RAILWAY_STATIC_URL', default='')
-    if RAILWAY_STATIC_URL:
-        railway_domain = RAILWAY_STATIC_URL.replace('https://', '').replace('http://', '')
-        if railway_domain and railway_domain not in ALLOWED_HOSTS and '*' not in ALLOWED_HOSTS:
-            ALLOWED_HOSTS.append(railway_domain)
+        # Add Railway domain automatically
+        RAILWAY_STATIC_URL = config('RAILWAY_STATIC_URL', default='')
+        if RAILWAY_STATIC_URL:
+            railway_domain = RAILWAY_STATIC_URL.replace('https://', '').replace('http://', '')
+            if railway_domain and railway_domain not in ALLOWED_HOSTS and '*' not in ALLOWED_HOSTS:
+                ALLOWED_HOSTS.append(railway_domain)
 
-    # Add .railway.app domains if not using wildcard
-    if '*' not in ALLOWED_HOSTS and not any(host.endswith('.railway.app') for host in ALLOWED_HOSTS):
-        ALLOWED_HOSTS.append('.railway.app')
-    
-    print(f"[DJANGO] ALLOWED_HOSTS: {ALLOWED_HOSTS}")
+        # Add .railway.app domains if not using wildcard
+        if '*' not in ALLOWED_HOSTS and not any(host.endswith('.railway.app') for host in ALLOWED_HOSTS):
+            ALLOWED_HOSTS.append('.railway.app')
+        
+        print(f"[DJANGO] ALLOWED_HOSTS: {ALLOWED_HOSTS}")
 except Exception as e:
     print(f"[ERROR] ALLOWED_HOSTS configuration failed: {e}")
     # Fallback to allow all hosts to prevent 500 error
@@ -124,7 +156,7 @@ INSTALLED_APPS = [
     'apps.process_datasheet',  # Process Datasheet - AI-Powered Equipment Datasheet Generation
     # SOFT-CODED: Electrical Datasheet - RE-ENABLED
     'apps.electrical_datasheet',  # Electrical Datasheet - Transformer & Switchgear Technical Data Sheets
-    'apps.usage_tracking',  # Usage Tracking & Metering - Smart User Activity Analytics
+    # 'apps.usage_tracking',  # Usage Tracking & Metering - REMOVED (app deleted during cleanup)
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
@@ -164,7 +196,7 @@ MIDDLEWARE = [
     'apps.users.middleware.PasswordExpiryMiddleware',  # Password expiry checking
     'apps.rbac.middleware.RBACMiddleware',
     'apps.activity.tracker.ActivityMiddleware',  # Activity tracking middleware
-    'apps.usage_tracking.middleware.UsageTrackingMiddleware',  # Usage metering middleware
+    # 'apps.usage_tracking.middleware.UsageTrackingMiddleware',  # Usage metering - REMOVED (app deleted)
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -277,8 +309,9 @@ else:
 # Get environment type
 ENVIRONMENT = config('ENVIRONMENT', default='production')
 
-# Environment-specific database configurations
+# Environment-specific database configurations (SOFT-CODED fallbacks)
 PREPROD_DATABASE_URL = "postgresql://postgres:OPMUckaUZIxVfSsWxgRKuVFbBsVKxPyk@nozomi.proxy.rlwy.net:43647/railway"
+PRODUCTION_DATABASE_URL = "postgresql://postgres:cJLHOrfvZxZXHKaMCWdLdRedgHgmIneU@shinkansen.proxy.rlwy.net:38534/railway"
 
 # Smart database URL detection
 if ENVIRONMENT == 'staging':
@@ -286,8 +319,8 @@ if ENVIRONMENT == 'staging':
     DATABASE_URL = config('DATABASE_URL', default=PREPROD_DATABASE_URL)
     print(f"[DJANGO] 🚀 PREPROD Environment - Using Railway Preprod Database")
 elif ENVIRONMENT == 'production':
-    # Production environment - DATABASE_URL is required
-    DATABASE_URL = config('DATABASE_URL')
+    # Production environment - use production database with fallback
+    DATABASE_URL = config('DATABASE_URL', default=PRODUCTION_DATABASE_URL)
     print(f"[DJANGO] 🏭 PRODUCTION Environment - Using Railway Production Database")
 else:
     # Development or other environments
@@ -313,9 +346,9 @@ db_config['OPTIONS'] = {
 
 DATABASES = {'default': db_config}
 
-print(f"[DJANGO] 🚂 Railway PostgreSQL ONLY")
-print(f"[DJANGO] 📡 DB: {db_config.get('HOST')}:{db_config.get('PORT')}")
-print(f"[DJANGO] ⏱️ Timeouts: connect=60s, query=120s, keepalive=60s")
+print(f"[DJANGO] Railway PostgreSQL ONLY")
+print(f"[DJANGO] DB: {db_config.get('HOST')}:{db_config.get('PORT')}")
+print(f"[DJANGO] Timeouts: connect=60s, query=120s, keepalive=60s")
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -415,8 +448,10 @@ SIMPLE_JWT = {
 # ==============================================================================
 
 # ==============================================================================
-# CORS CONFIGURATION - RAILWAY PRODUCTION READY
+# CORS CONFIGURATION - RAILWAY PRODUCTION READY (SOFT-CODED)
 # ==============================================================================
+# This configuration now uses centralized environment configuration
+# from config/environments.json for proper alignment across all services
 
 # PRODUCTION URLS
 PRODUCTION_FRONTEND = config('FRONTEND_URL', default='https://airflow-frontend.vercel.app')
@@ -434,43 +469,62 @@ if CORS_ALLOW_ALL_ORIGINS:
     CORS_ALLOWED_ORIGINS = []  # Not used when allow all is True
     print("[CORS] WARNING  WARNING: CORS_ALLOW_ALL_ORIGINS is True - ALL origins allowed!")
 else:
-    # Use specific origins for better security
-    CORS_ORIGINS_ENV = config('CORS_ALLOWED_ORIGINS', default='')
-    if CORS_ORIGINS_ENV:
-        # If env var is set, use it (comma-separated list)
-        CORS_ALLOWED_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_ENV.split(',')]
-        # ALWAYS add production domains even if env var is set
-        production_domains = [
-            'https://radai.ae',
-            'https://www.radai.ae',
-            'http://radai.ae',
-            'http://www.radai.ae',
-        ]
-        for domain in production_domains:
-            if domain not in CORS_ALLOWED_ORIGINS:
-                CORS_ALLOWED_ORIGINS.append(domain)
+    # SOFT-CODED: Use centralized configuration if available
+    if CENTRALIZED_CONFIG_AVAILABLE:
+        print("[CORS] ✅ Using centralized environment configuration")
+        CORS_ALLOWED_ORIGINS = get_cors_origins()
+        print(f"[CORS] Current environment: {get_environment()}")
     else:
-        # Use default list
-        CORS_ALLOWED_ORIGINS = [
-            # Production - Custom Domain
-            'https://radai.ae',
-            'https://www.radai.ae',
-            'http://radai.ae',  # Include HTTP for redirects
-            'http://www.radai.ae',
-            # Production - Vercel
-            PRODUCTION_FRONTEND,
-            PRODUCTION_BACKEND,
-            # Development
-            'http://localhost:3000',
-            'http://localhost:5173',
-            'http://localhost:5175',
-            'http://127.0.0.1:3000',
-            'http://127.0.0.1:5173',
-            'http://127.0.0.1:5175',
-        ]
+        # Fallback to environment variable or defaults
+        CORS_ORIGINS_ENV = config('CORS_ALLOWED_ORIGINS', default='')
+        if CORS_ORIGINS_ENV:
+            # If env var is set, use it (comma-separated list)
+            CORS_ALLOWED_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_ENV.split(',')]
+        else:
+            # Use default list
+            CORS_ALLOWED_ORIGINS = [
+                # Production - Custom Domain
+                'https://radai.ae',
+                'https://www.radai.ae',
+                'http://radai.ae',  # Include HTTP for redirects
+                'http://www.radai.ae',
+                # Production - Vercel
+                PRODUCTION_FRONTEND,
+                PRODUCTION_BACKEND,
+                # Development
+                'http://localhost:3000',
+                'http://localhost:5173',
+                'http://localhost:5175',
+                'http://127.0.0.1:3000',
+                'http://127.0.0.1:5173',
+                'http://127.0.0.1:5175',
+            ]
     
-    # Allow credentials (for JWT tokens in Authorization header)
-    CORS_ALLOW_CREDENTIALS = safe_cast_bool(config('CORS_ALLOW_CREDENTIALS', default='True'), True)
+    # CRITICAL: Always add production domains regardless of config source
+    # This ensures Railway production always accepts requests from www.radai.ae
+    production_domains = [
+        'https://radai.ae',
+        'https://www.radai.ae',
+        'http://radai.ae',
+        'http://www.radai.ae',
+        'https://aiflowbackend-production.up.railway.app',
+    ]
+    for domain in production_domains:
+        if domain not in CORS_ALLOWED_ORIGINS:
+            CORS_ALLOWED_ORIGINS.append(domain)
+    
+    # Always add backend URL to allowed origins (for Railway health checks)
+    BACKEND_URL_CORS = config('BACKEND_URL', default='')
+    if BACKEND_URL_CORS and BACKEND_URL_CORS not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(BACKEND_URL_CORS)
+    
+    # Always add frontend URL to allowed origins
+    FRONTEND_URL_CORS = config('FRONTEND_URL', default='')
+    if FRONTEND_URL_CORS and FRONTEND_URL_CORS not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(FRONTEND_URL_CORS)
+    
+    # Allow credentials (REQUIRED for JWT tokens in Authorization header)
+    CORS_ALLOW_CREDENTIALS = True
 
 # Allow all standard methods
 CORS_ALLOW_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
@@ -525,24 +579,39 @@ print(f"[CORS] Backend URL: {PRODUCTION_BACKEND}")
 print("="*70 + "\n")
 
 # ==============================================================================
-# CSRF CONFIGURATION
+# CSRF CONFIGURATION (SOFT-CODED)
 # ==============================================================================
 
-# Build CSRF trusted origins from CORS origins
-CSRF_TRUSTED_ORIGINS = [
+# SOFT-CODED: Use centralized configuration if available
+if CENTRALIZED_CONFIG_AVAILABLE:
+    print("[CSRF] ✅ Using centralized environment configuration")
+    CSRF_TRUSTED_ORIGINS = get_csrf_origins()
+else:
+    # Fallback: Build CSRF trusted origins from CORS origins
+    CSRF_TRUSTED_ORIGINS = [
+        'https://radai.ae',
+        'https://www.radai.ae',
+        PRODUCTION_FRONTEND,
+        PRODUCTION_BACKEND,
+        'http://localhost:3000',
+        'http://localhost:5173',
+    ]
+
+    # Add any additional origins from environment
+    if not CORS_ALLOW_ALL_ORIGINS and CORS_ALLOWED_ORIGINS:
+        for origin in CORS_ALLOWED_ORIGINS:
+            if origin not in CSRF_TRUSTED_ORIGINS and origin.startswith('https'):
+                CSRF_TRUSTED_ORIGINS.append(origin)
+
+# CRITICAL: Always add production domains to CSRF regardless of config source
+production_csrf_domains = [
     'https://radai.ae',
     'https://www.radai.ae',
-    PRODUCTION_FRONTEND,
-    PRODUCTION_BACKEND,
-    'http://localhost:3000',
-    'http://localhost:5173',
+    'https://aiflowbackend-production.up.railway.app',
 ]
-
-# Add any additional origins from environment
-if not CORS_ALLOW_ALL_ORIGINS and CORS_ALLOWED_ORIGINS:
-    for origin in CORS_ALLOWED_ORIGINS:
-        if origin not in CSRF_TRUSTED_ORIGINS and origin.startswith('https'):
-            CSRF_TRUSTED_ORIGINS.append(origin)
+for domain in production_csrf_domains:
+    if domain not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(domain)
 
 # CSRF settings - Important for API endpoints
 CSRF_COOKIE_SECURE = not DEBUG

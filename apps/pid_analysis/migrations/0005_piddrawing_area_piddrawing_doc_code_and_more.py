@@ -3,46 +3,78 @@
 from django.db import migrations, models
 
 
+def check_and_add_columns(apps, schema_editor):
+    """
+    SOFT-CODED IDEMPOTENT COLUMN ADDITIONS
+    Only add columns if they don't already exist
+    """
+    from django.db import connection
+    
+    table_name = 'pid_analysis_piddrawing'
+    
+    # Define columns to add with their SQL definitions
+    columns_to_add = {
+        'area': "VARCHAR(2) NULL",
+        'doc_code': "VARCHAR(2) NULL",
+        'p_area': "VARCHAR(2) NULL",
+        'rev': "VARCHAR(1) NULL",
+        'serial_number': "VARCHAR(4) NULL",
+        'sheet_number': "VARCHAR(1) DEFAULT '1'",
+        'total_sheets': "VARCHAR(1) DEFAULT '1'",
+    }
+    
+    with connection.cursor() as cursor:
+        for column_name, column_definition in columns_to_add.items():
+            # Check if column exists
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.columns 
+                    WHERE table_schema = 'public' 
+                    AND table_name = %s 
+                    AND column_name = %s
+                )
+            """, [table_name, column_name])
+            
+            column_exists = cursor.fetchone()[0]
+            
+            if not column_exists:
+                # Add column using raw SQL
+                cursor.execute(f"""
+                    ALTER TABLE {table_name} 
+                    ADD COLUMN {column_name} {column_definition}
+                """)
+                print(f"✅ Added column '{column_name}' to '{table_name}'")
+            else:
+                print(f"ℹ️  Column '{column_name}' already exists in '{table_name}' - skipping")
+
+
+def reverse_columns(apps, schema_editor):
+    """Remove columns if migration is reversed"""
+    from django.db import connection
+    
+    table_name = 'pid_analysis_piddrawing'
+    columns_to_remove = ['area', 'doc_code', 'p_area', 'rev', 'serial_number', 'sheet_number', 'total_sheets']
+    
+    with connection.cursor() as cursor:
+        for column_name in columns_to_remove:
+            cursor.execute(f"""
+                ALTER TABLE {table_name} 
+                DROP COLUMN IF EXISTS {column_name}
+            """)
+
+
 class Migration(migrations.Migration):
+    # Mark as non-initial to enable smart checking
+    initial = False
 
     dependencies = [
         ('pid_analysis', '0004_pidissue_location_on_drawing'),
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='piddrawing',
-            name='area',
-            field=models.CharField(blank=True, help_text='Area code (2 digits)', max_length=2),
-        ),
-        migrations.AddField(
-            model_name='piddrawing',
-            name='doc_code',
-            field=models.CharField(blank=True, help_text='Document code (2 digits)', max_length=2),
-        ),
-        migrations.AddField(
-            model_name='piddrawing',
-            name='p_area',
-            field=models.CharField(blank=True, help_text='P/Area code (2 digits)', max_length=2),
-        ),
-        migrations.AddField(
-            model_name='piddrawing',
-            name='rev',
-            field=models.CharField(blank=True, help_text='Revision (1 digit)', max_length=1),
-        ),
-        migrations.AddField(
-            model_name='piddrawing',
-            name='serial_number',
-            field=models.CharField(blank=True, help_text='Serial number (4 digits)', max_length=4),
-        ),
-        migrations.AddField(
-            model_name='piddrawing',
-            name='sheet_number',
-            field=models.CharField(blank=True, default='1', help_text='Sheet number', max_length=1),
-        ),
-        migrations.AddField(
-            model_name='piddrawing',
-            name='total_sheets',
-            field=models.CharField(blank=True, default='1', help_text='Total sheets', max_length=1),
+        # Use RunPython for idempotent column additions
+        migrations.RunPython(
+            check_and_add_columns,
+            reverse_columns
         ),
     ]
