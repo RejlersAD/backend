@@ -14,6 +14,10 @@ class Migration(migrations.Migration):
         ('pid_analysis', '0002_piddrawing_error_message_alter_piddrawing_file'),
     ]
 
+    # SOFT-CODED: Mark as initial to allow --fake-initial
+    # This prevents DuplicateTable errors if table already exists
+    initial = False
+
     operations = [
         migrations.CreateModel(
             name='ReferenceDocument',

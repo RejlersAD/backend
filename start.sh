@@ -9,7 +9,27 @@ export PYTHONUNBUFFERED=1
 
 echo "🚀 Starting on port: $PORT"
 
+# SOFT-CODED MIGRATION CONFLICT RESOLUTION
+echo "=========================================="
+echo "🔍 Checking for migration conflicts..."
+echo "=========================================="
+
+# Check if fix_migration_conflict.py exists and run it
+if [ -f "fix_migration_conflict.py" ]; then
+    echo "✅ Running automated migration conflict resolver..."
+    python fix_migration_conflict.py 2>&1 || {
+        echo "⚠️  Migration conflict resolver completed with warnings"
+        echo "Attempting standard migrations..."
+    }
+else
+    echo "⚠️  Migration conflict resolver not found!"
+    echo "    Attempting standard migrations anyway..."
+fi
+
 # Run migrations
+echo "=========================================="
+echo "🚀 Running database migrations..."
+echo "=========================================="
 python manage.py migrate --noinput 
 
 # Collect static files

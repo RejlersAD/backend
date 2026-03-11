@@ -13,8 +13,8 @@ nixPkgs = [
 cmds = [
     'python -m venv /opt/venv',
     '. /opt/venv/bin/activate && pip install --upgrade pip',
-    '# Use Railway-optimized requirements (excludes 4GB of ML packages)',
-    '. /opt/venv/bin/activate && pip install -r requirements-railway.txt',
+    '# Use standard requirements file',
+    '. /opt/venv/bin/activate && pip install -r requirements.txt',
     '# Verify tesseract installation',
     'which tesseract || echo "❌ Tesseract not found"',
     'tesseract --version || echo "❌ Tesseract version check failed"'

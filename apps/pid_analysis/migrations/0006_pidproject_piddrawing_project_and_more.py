@@ -5,7 +5,101 @@ from django.db import migrations, models
 import django.db.models.deletion
 
 
+def check_and_create_pidproject_table(apps, schema_editor):
+    """
+    SOFT-CODED IDEMPOTENT TABLE CREATION
+    Only create PIDProject table and related objects if they don't exist
+    """
+    from django.db import connection
+    
+    table_name = 'pid_projects'
+    
+    with connection.cursor() as cursor:
+        # Check if table exists
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = %s
+            )
+        """, [table_name])
+        
+        table_exists = cursor.fetchone()[0]
+        
+        if not table_exists:
+            print(f"✅ Creating table '{table_name}'...")
+            # Create the PIDProject table
+            cursor.execute("""
+                CREATE TABLE pid_projects (
+                    id BIGSERIAL PRIMARY KEY,
+                    project_id VARCHAR(50) UNIQUE NOT NULL,
+                    project_name VARCHAR(255) NOT NULL,
+                    description TEXT NULL,
+                    organization VARCHAR(255),
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_by_id BIGINT NOT NULL REFERENCES auth_user(id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Create indexes
+            cursor.execute("""
+                CREATE INDEX pid_project_project_209c56_idx ON pid_projects (project_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX pid_project_created_09046f_idx ON pid_projects (created_by_id, created_at DESC)
+            """)
+            cursor.execute("""
+                CREATE INDEX pid_project_organiz_a8e179_idx ON pid_projects (organization)
+            """)
+            
+            print(f"✅ Created table '{table_name}' with indexes")
+        else:
+            print(f"ℹ️  Table '{table_name}' already exists - skipping")
+        
+        # Check and add project ForeignKey to pid_analysis_piddrawing
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.columns 
+                WHERE table_schema = 'public' 
+                AND table_name = 'pid_analysis_piddrawing' 
+                AND column_name = 'project_id'
+            )
+        """)
+        
+        column_exists = cursor.fetchone()[0]
+        
+        if not column_exists:
+            print("✅ Adding 'project_id' column to pid_analysis_piddrawing...")
+            cursor.execute("""
+                ALTER TABLE pid_analysis_piddrawing 
+                ADD COLUMN project_id BIGINT NULL 
+                REFERENCES pid_projects(id) ON DELETE CASCADE
+            """)
+            print("✅ Added 'project_id' foreign key column")
+        else:
+            print("ℹ️  Column 'project_id' already exists in pid_analysis_piddrawing - skipping")
+
+
+def reverse_pidproject_table(apps, schema_editor):
+    """Remove PIDProject table and related objects if migration is reversed"""
+    from django.db import connection
+    
+    with connection.cursor() as cursor:
+        # Drop foreign key column first
+        cursor.execute("""
+            ALTER TABLE pid_analysis_piddrawing 
+            DROP COLUMN IF EXISTS project_id CASCADE
+        """)
+        
+        # Drop the table (CASCADE will drop indexes)
+        cursor.execute("DROP TABLE IF EXISTS pid_projects CASCADE")
+
+
 class Migration(migrations.Migration):
+    # Mark as non-initial to enable smart checking
+    initial = False
 
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
@@ -13,39 +107,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.CreateModel(
-            name='PIDProject',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('project_id', models.CharField(editable=False, help_text='Auto-generated unique project ID', max_length=50, unique=True)),
-                ('project_name', models.CharField(help_text='User-defined project name', max_length=255)),
-                ('description', models.TextField(blank=True, help_text='Optional project description', null=True)),
-                ('organization', models.CharField(blank=True, help_text='Organization name for RBAC S3 path', max_length=255)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('is_active', models.BooleanField(default=True)),
-                ('created_by', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='pid_projects', to=settings.AUTH_USER_MODEL)),
-            ],
-            options={
-                'db_table': 'pid_projects',
-                'ordering': ['-created_at'],
-            },
-        ),
-        migrations.AddField(
-            model_name='piddrawing',
-            name='project',
-            field=models.ForeignKey(blank=True, help_text='Associated P&ID project', null=True, on_delete=django.db.models.deletion.CASCADE, related_name='pid_drawings', to='pid_analysis.pidproject'),
-        ),
-        migrations.AddIndex(
-            model_name='pidproject',
-            index=models.Index(fields=['project_id'], name='pid_project_project_209c56_idx'),
-        ),
-        migrations.AddIndex(
-            model_name='pidproject',
-            index=models.Index(fields=['created_by', '-created_at'], name='pid_project_created_09046f_idx'),
-        ),
-        migrations.AddIndex(
-            model_name='pidproject',
-            index=models.Index(fields=['organization'], name='pid_project_organiz_a8e179_idx'),
+        # Use RunPython for idempotent table creation
+        migrations.RunPython(
+            check_and_create_pidproject_table,
+            reverse_pidproject_table
         ),
     ]

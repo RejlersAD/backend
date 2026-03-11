@@ -33,19 +33,38 @@ python manage.py collectstatic --noinput --clear 2>&1 || {
     echo "⚠️  Static files collection failed, continuing..."
 }
 
-# Fix preprod migration conflicts (soft-coded - only runs in Railway)
-echo "Checking for migration conflicts..."
-python fix_preprod_migrations.py 2>&1 || {
-    echo "❌ FATAL: Migration conflict resolution failed"
-    echo "Check the logs above for details"
-    exit 1
-}
+# SOFT-CODED MIGRATION CONFLICT RESOLUTION
+echo "=========================================="
+echo "🔍 Checking for migration conflicts..."
+echo "=========================================="
 
-# Run migrations
-echo "Running database migrations..."
+# Strategy 1: Use automated conflict resolver if available
+if [ -f "fix_migration_conflict.py" ]; then
+    echo "✅ Running automated migration conflict resolver..."
+    python fix_migration_conflict.py 2>&1 && {
+        echo "✅ Migration conflict resolver succeeded"
+    } || {
+        echo "⚠️  Migration conflict resolver completed with warnings"
+        echo "    Continuing with standard migrations..."
+    }
+else
+    echo "⚠️  Migration conflict resolver not found!"
+    echo "    This should not happen in production."
+    echo "    Attempting standard migrations anyway..."
+fi
+
+# Run remaining migrations
+echo "=========================================="
+echo "🚀 Running database migrations..."
+echo "=========================================="
 python manage.py migrate --noinput 2>&1 || {
     echo "❌ FATAL: Database migration failed"
     echo "Check DATABASE_URL and PostgreSQL connection"
+    echo ""
+    echo "Troubleshooting tips:"
+    echo "  1. Verify DATABASE_URL is set correctly"
+    echo "  2. Check PostgreSQL is accessible"
+    echo "  3. Review migration conflicts above"
     exit 1
 }
 

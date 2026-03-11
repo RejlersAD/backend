@@ -18,7 +18,7 @@ try:
     UNIFIED_CONFIG_AVAILABLE = True
 except ImportError:
     UNIFIED_CONFIG_AVAILABLE = False
-    print("⚠️ Unified folder config not available, using legacy folder structure")
+    print("[WARNING] Unified folder config not available, using legacy folder structure")
 
 logger = logging.getLogger(__name__)
 
