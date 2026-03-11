@@ -97,12 +97,18 @@ def get_migration_operations(app_label, migration_name):
     except (ImportError, AttributeError):
         return []
 
-def get_table_name_from_operation(operation):
-    """Extract table name from CreateModel operation"""
+def get_table_name_from_operation(operation, app_label):
+    """Extract table name from CreateModel operation, respecting custom db_table"""
     if isinstance(operation, migrations.CreateModel):
+        # Check if operation has custom db_table in options
+        if hasattr(operation, 'options') and operation.options:
+            custom_table = operation.options.get('db_table')
+            if custom_table:
+                return custom_table
+        
+        # Default: Django prefixes tables with app_label
         model_name = operation.name.lower()
-        # Django prefixes tables with app_label
-        return model_name
+        return f"{app_label}_{model_name}"
     return None
 
 def get_field_info_from_operation(operation, app_label):
@@ -156,7 +162,8 @@ def main():
         for op in operations:
             # Check for table conflicts (CreateModel)
             if isinstance(op, migrations.CreateModel):
-                table_name = f"{app_label}_{op.name.lower()}"
+                # Use helper function to get correct table name (handles custom db_table)
+                table_name = get_table_name_from_operation(op, app_label)
                 exists = check_table_exists(table_name)
                 print_info(f"  Table '{table_name}': {'EXISTS' if exists else 'NOT FOUND'}")
                 if exists:
