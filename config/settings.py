@@ -156,7 +156,7 @@ INSTALLED_APPS = [
     'apps.process_datasheet',  # Process Datasheet - AI-Powered Equipment Datasheet Generation
     # SOFT-CODED: Electrical Datasheet - RE-ENABLED
     'apps.electrical_datasheet',  # Electrical Datasheet - Transformer & Switchgear Technical Data Sheets
-    'apps.usage_tracking',  # Usage Tracking & Metering - Smart User Activity Analytics
+    # 'apps.usage_tracking',  # Usage Tracking & Metering - REMOVED (app deleted during cleanup)
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
@@ -196,7 +196,7 @@ MIDDLEWARE = [
     'apps.users.middleware.PasswordExpiryMiddleware',  # Password expiry checking
     'apps.rbac.middleware.RBACMiddleware',
     'apps.activity.tracker.ActivityMiddleware',  # Activity tracking middleware
-    'apps.usage_tracking.middleware.UsageTrackingMiddleware',  # Usage metering middleware
+    # 'apps.usage_tracking.middleware.UsageTrackingMiddleware',  # Usage metering - REMOVED (app deleted)
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
