@@ -478,16 +478,6 @@ else:
         if CORS_ORIGINS_ENV:
             # If env var is set, use it (comma-separated list)
             CORS_ALLOWED_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_ENV.split(',')]
-            # ALWAYS add production domains even if env var is set
-            production_domains = [
-                'https://radai.ae',
-                'https://www.radai.ae',
-                'http://radai.ae',
-                'http://www.radai.ae',
-            ]
-            for domain in production_domains:
-                if domain not in CORS_ALLOWED_ORIGINS:
-                    CORS_ALLOWED_ORIGINS.append(domain)
         else:
             # Use default list
             CORS_ALLOWED_ORIGINS = [
@@ -508,8 +498,30 @@ else:
                 'http://127.0.0.1:5175',
             ]
     
-    # Allow credentials (for JWT tokens in Authorization header)
-    CORS_ALLOW_CREDENTIALS = safe_cast_bool(config('CORS_ALLOW_CREDENTIALS', default='True'), True)
+    # CRITICAL: Always add production domains regardless of config source
+    # This ensures Railway production always accepts requests from www.radai.ae
+    production_domains = [
+        'https://radai.ae',
+        'https://www.radai.ae',
+        'http://radai.ae',
+        'http://www.radai.ae',
+    ]
+    for domain in production_domains:
+        if domain not in CORS_ALLOWED_ORIGINS:
+            CORS_ALLOWED_ORIGINS.append(domain)
+    
+    # Always add backend URL to allowed origins (for Railway health checks)
+    BACKEND_URL_CORS = config('BACKEND_URL', default='')
+    if BACKEND_URL_CORS and BACKEND_URL_CORS not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(BACKEND_URL_CORS)
+    
+    # Always add frontend URL to allowed origins
+    FRONTEND_URL_CORS = config('FRONTEND_URL', default='')
+    if FRONTEND_URL_CORS and FRONTEND_URL_CORS not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(FRONTEND_URL_CORS)
+    
+    # Allow credentials (REQUIRED for JWT tokens in Authorization header)
+    CORS_ALLOW_CREDENTIALS = True
 
 # Allow all standard methods
 CORS_ALLOW_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
@@ -587,6 +599,15 @@ else:
         for origin in CORS_ALLOWED_ORIGINS:
             if origin not in CSRF_TRUSTED_ORIGINS and origin.startswith('https'):
                 CSRF_TRUSTED_ORIGINS.append(origin)
+
+# CRITICAL: Always add production domains to CSRF regardless of config source
+production_csrf_domains = [
+    'https://radai.ae',
+    'https://www.radai.ae',
+]
+for domain in production_csrf_domains:
+    if domain not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(domain)
 
 # CSRF settings - Important for API endpoints
 CSRF_COOKIE_SECURE = not DEBUG
