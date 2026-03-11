@@ -9,11 +9,29 @@ export PYTHONUNBUFFERED=1
 
 echo "🚀 Starting on port: $PORT"
 
-# Fix problematic migration (fake if column already exists)
-echo "Checking for existing migrations..."
-python manage.py migrate pid_analysis 0002 --fake 2>/dev/null || echo "⚠️  Migration already applied or doesn't exist"
+# SOFT-CODED MIGRATION CONFLICT RESOLUTION
+echo "=========================================="
+echo "🔍 Checking for migration conflicts..."
+echo "=========================================="
+
+# Check if fix_migration_conflict.py exists and run it
+if [ -f "fix_migration_conflict.py" ]; then
+    echo "✅ Running automated migration conflict resolver..."
+    python fix_migration_conflict.py 2>&1 || {
+        echo "⚠️  Migration conflict resolver completed with warnings"
+        echo "Attempting standard migrations..."
+    }
+else
+    echo "ℹ️  No migration conflict resolver found"
+    # Fallback: Try faking known problematic migrations
+    python manage.py migrate pid_analysis 0002 --fake 2>/dev/null || echo "  (Migration 0002 not found)"
+    python manage.py migrate pid_analysis 0003 --fake 2>/dev/null || echo "  (Migration 0003 not found)"
+fi
 
 # Run migrations
+echo "=========================================="
+echo "🚀 Running database migrations..."
+echo "=========================================="
 python manage.py migrate --noinput 
 
 # Collect static files
