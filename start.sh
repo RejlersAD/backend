@@ -22,11 +22,8 @@ if [ -f "fix_migration_conflict.py" ]; then
         echo "Attempting standard migrations..."
     }
 else
-    echo "ℹ️  No migration conflict resolver found"
-    # Fallback: Try faking known problematic migrations
-    python manage.py migrate pid_analysis 0002 --fake 2>/dev/null || echo "  (Migration 0002 not found)"
-    python manage.py migrate pid_analysis 0003 --fake 2>/dev/null || echo "  (Migration 0003 not found)"
-    python manage.py migrate pid_analysis 0004 --fake 2>/dev/null || echo "  (Migration 0004 not found)"
+    echo "⚠️  Migration conflict resolver not found!"
+    echo "    Attempting standard migrations anyway..."
 fi
 
 # Run migrations
