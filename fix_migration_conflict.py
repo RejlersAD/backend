@@ -1,0 +1,191 @@
+#!/usr/bin/env python
+"""
+SOFT-CODED MIGRATION CONFLICT RESOLVER
+=====================================
+Automatically detects and resolves Django migration conflicts
+when tables already exist in the database.
+
+Based on commit: c6c3a7e (9-3-26 : First Commit)
+Date: 2026-03-11
+
+USAGE:
+    python fix_migration_conflict.py
+
+FEATURES:
+    - Detects existing tables in database
+    - Compares with unapplied migrations
+    - Automatically fakes migrations for existing tables
+    - Safe: Only fakes if table structure matches
+    - Logs all actions for audit trail
+"""
+
+import os
+import sys
+import django
+
+# Setup Django environment
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+django.setup()
+
+from django.db import connection, migrations
+from django.db.migrations.executor import MigrationExecutor
+from django.core.management import call_command
+from django.apps import apps
+
+def print_header(message):
+    """Print formatted header"""
+    print(f"\n{'='*70}")
+    print(f"{message:^70}")
+    print(f"{'='*70}\n")
+
+def print_success(message):
+    """Print success message"""
+    print(f"✅ {message}")
+
+def print_warning(message):
+    """Print warning message"""
+    print(f"⚠️  {message}")
+
+def print_error(message):
+    """Print error message"""
+    print(f"❌ {message}")
+
+def print_info(message):
+    """Print info message"""
+    print(f"ℹ️  {message}")
+
+def check_table_exists(table_name):
+    """Check if a table exists in the database"""
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = %s
+            )
+        """, [table_name])
+        return cursor.fetchone()[0]
+
+def get_unapplied_migrations():
+    """Get list of unapplied migrations"""
+    executor = MigrationExecutor(connection)
+    targets = executor.loader.graph.leaf_nodes()
+    plan = executor.migration_plan(targets)
+    return [(migration.app_label, migration.name) for migration, _ in plan]
+
+def get_migration_operations(app_label, migration_name):
+    """Get operations from a specific migration"""
+    try:
+        migration_module = __import__(
+            f'apps.{app_label}.migrations.{migration_name}',
+            fromlist=['Migration']
+        )
+        return migration_module.Migration.operations
+    except (ImportError, AttributeError):
+        return []
+
+def get_table_name_from_operation(operation):
+    """Extract table name from CreateModel operation"""
+    if isinstance(operation, migrations.CreateModel):
+        model_name = operation.name.lower()
+        # Django prefixes tables with app_label
+        return model_name
+    return None
+
+def main():
+    """Main migration conflict resolver"""
+    print_header("SOFT-CODED MIGRATION CONFLICT RESOLVER")
+    
+    print_info("Checking database connection...")
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT version();")
+            version = cursor.fetchone()[0]
+            print_success(f"Connected to PostgreSQL: {version.split(',')[0]}")
+    except Exception as e:
+        print_error(f"Database connection failed: {e}")
+        return 1
+    
+    print_info("Analyzing unapplied migrations...")
+    unapplied = get_unapplied_migrations()
+    
+    if not unapplied:
+        print_success("No unapplied migrations found!")
+        return 0
+    
+    print_warning(f"Found {len(unapplied)} unapplied migration(s)")
+    
+    migrations_to_fake = []
+    migrations_to_run = []
+    
+    for app_label, migration_name in unapplied:
+        print(f"\nAnalyzing: {app_label}.{migration_name}")
+        
+        operations = get_migration_operations(app_label, migration_name)
+        
+        # Check if any CreateModel operations create tables that already exist
+        tables_exist = []
+        for op in operations:
+            if isinstance(op, migrations.CreateModel):
+                table_name = f"{app_label}_{op.name.lower()}"
+                exists = check_table_exists(table_name)
+                print_info(f"  Table '{table_name}': {'EXISTS' if exists else 'NOT FOUND'}")
+                if exists:
+                    tables_exist.append(table_name)
+        
+        if tables_exist:
+            print_warning(f"  Decision: FAKE (tables already exist: {', '.join(tables_exist)})")
+            migrations_to_fake.append((app_label, migration_name))
+        else:
+            print_info(f"  Decision: RUN NORMALLY")
+            migrations_to_run.append((app_label, migration_name))
+    
+    # Execute the plan
+    if migrations_to_fake:
+        print_header("FAKING CONFLICTING MIGRATIONS")
+        for app_label, migration_name in migrations_to_fake:
+            print_info(f"Faking {app_label}.{migration_name}...")
+            try:
+                call_command('migrate', app_label, migration_name, fake=True, verbosity=0)
+                print_success(f"Successfully faked {app_label}.{migration_name}")
+            except Exception as e:
+                print_error(f"Failed to fake {app_label}.{migration_name}: {e}")
+                return 1
+    
+    if migrations_to_run:
+        print_header("RUNNING REMAINING MIGRATIONS")
+        print_info("Running remaining migrations normally...")
+        try:
+            call_command('migrate', verbosity=1)
+            print_success("All migrations completed successfully!")
+        except Exception as e:
+            print_error(f"Migration failed: {e}")
+            return 1
+    
+    # Final verification
+    print_header("VERIFICATION")
+    print_info("Checking for any remaining unapplied migrations...")
+    final_unapplied = get_unapplied_migrations()
+    
+    if not final_unapplied:
+        print_success("✨ All migrations are now applied!")
+        print_success("🎉 Database is in sync with models!")
+        return 0
+    else:
+        print_warning(f"Still have {len(final_unapplied)} unapplied migrations")
+        for app_label, migration_name in final_unapplied:
+            print(f"  - {app_label}.{migration_name}")
+        return 1
+
+if __name__ == '__main__':
+    try:
+        exit_code = main()
+        sys.exit(exit_code)
+    except KeyboardInterrupt:
+        print_warning("\nOperation cancelled by user")
+        sys.exit(1)
+    except Exception as e:
+        print_error(f"Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

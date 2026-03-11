@@ -307,8 +307,9 @@ else:
 # Get environment type
 ENVIRONMENT = config('ENVIRONMENT', default='production')
 
-# Environment-specific database configurations
+# Environment-specific database configurations (SOFT-CODED fallbacks)
 PREPROD_DATABASE_URL = "postgresql://postgres:OPMUckaUZIxVfSsWxgRKuVFbBsVKxPyk@nozomi.proxy.rlwy.net:43647/railway"
+PRODUCTION_DATABASE_URL = "postgresql://postgres:cJLHOrfvZxZXHKaMCWdLdRedgHgmIneU@shinkansen.proxy.rlwy.net:38534/railway"
 
 # Smart database URL detection
 if ENVIRONMENT == 'staging':
@@ -316,8 +317,8 @@ if ENVIRONMENT == 'staging':
     DATABASE_URL = config('DATABASE_URL', default=PREPROD_DATABASE_URL)
     print(f"[DJANGO] 🚀 PREPROD Environment - Using Railway Preprod Database")
 elif ENVIRONMENT == 'production':
-    # Production environment - DATABASE_URL is required
-    DATABASE_URL = config('DATABASE_URL')
+    # Production environment - use production database with fallback
+    DATABASE_URL = config('DATABASE_URL', default=PRODUCTION_DATABASE_URL)
     print(f"[DJANGO] 🏭 PRODUCTION Environment - Using Railway Production Database")
 else:
     # Development or other environments
