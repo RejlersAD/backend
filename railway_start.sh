@@ -38,13 +38,13 @@ echo "=========================================="
 echo "🔍 Checking for migration conflicts..."
 echo "=========================================="
 
-# Strategy 1: Fix migration order inconsistencies (0005/0006 issue)
-if [ -f "fix_migration_order.py" ]; then
-    echo "✅ Running migration order fixer..."
-    python fix_migration_order.py 2>&1 && {
-        echo "✅ Migration order fixed successfully"
+# Strategy 1: Fix migration order inconsistencies (0005/0006 issue) via direct DB insertion
+if [ -f "fix_migration_record.py" ]; then
+    echo "✅ Running migration record fixer (direct DB insertion)..."
+    python fix_migration_record.py 2>&1 && {
+        echo "✅ Migration record fixed successfully"
     } || {
-        echo "⚠️  Migration order fixer completed with warnings"
+        echo "⚠️  Migration record fixer completed with warnings"
         echo "    Attempting remaining fixes..."
     }
 fi
