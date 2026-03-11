@@ -505,6 +505,7 @@ else:
         'https://www.radai.ae',
         'http://radai.ae',
         'http://www.radai.ae',
+        'https://aiflowbackend-production.up.railway.app',
     ]
     for domain in production_domains:
         if domain not in CORS_ALLOWED_ORIGINS:
@@ -604,6 +605,7 @@ else:
 production_csrf_domains = [
     'https://radai.ae',
     'https://www.radai.ae',
+    'https://aiflowbackend-production.up.railway.app',
 ]
 for domain in production_csrf_domains:
     if domain not in CSRF_TRUSTED_ORIGINS:
