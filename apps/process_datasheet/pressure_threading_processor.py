@@ -72,11 +72,10 @@ def process_pressure_threading(pid_file_path, job_id, original_filename=None):
     """
     Process Pressure Instrument datasheet synchronously
     Called from orchestrator which already runs in a thread
-    
     Args:
         pid_file_path: Path to the uploaded P&ID file
         job_id: Unique job identifier
-        original_filename: Original uploaded filename (optional, for P&ID No display)
+        original_filename: Original uploaded filename (optional, for P&ID No extraction)
     """
     try:
         log_and_print(f"🎯 [Pressure {job_id[:8]}] Starting pressure instrument extraction...")
@@ -99,16 +98,6 @@ def process_pressure_threading(pid_file_path, job_id, original_filename=None):
         
         log_and_print(f"📄 [Pressure {job_id[:8]}] STEP 1: Extracting pressure instruments from P&ID...")
         
-        # Extract filename for P&ID No display
-        import os
-        if original_filename:
-            pid_filename = original_filename
-            log_and_print(f"📋 [Pressure {job_id[:8]}] Using original filename: {pid_filename}")
-        else:
-            # Fallback: extract from path
-            pid_filename = os.path.basename(pid_file_path)
-            log_and_print(f"⚠️ [Pressure {job_id[:8]}] No original filename provided, using: {pid_filename}")
-        
         try:
             # Use the same PressureInstrumentAnalyzer from the existing page
             from apps.pid_analysis.pressure_instrument_service import PressureInstrumentAnalyzer
@@ -119,19 +108,27 @@ def process_pressure_threading(pid_file_path, job_id, original_filename=None):
             
             analyzer = PressureInstrumentAnalyzer()
             
-            # Extract pressure instruments using AI Vision API
+            # Let AI extract drawing info from the P&ID itself
             drawing_info = {
-                'drawing_number': pid_filename,  # Use uploaded filename
+                'drawing_number': 'AUTO',  # AI will extract from drawing
                 'drawing_title': 'P&ID Analysis',
                 'revision': '0'
             }
             
+            log_and_print(f"📋 [Pressure {job_id[:8]}] AI will extract drawing number from P&ID image...")
+            
             # Use the correct method name: analyze_pid_with_ai
             pressure_instruments = analyzer.analyze_pid_with_ai(pid_image_data, drawing_info)
             
-            # Ensure all instruments use the uploaded filename for P&ID No
-            for instrument in pressure_instruments:
-                instrument['pid_no'] = pid_filename
+            # AI extracts the drawing number from the P&ID - use it for all instruments
+            # The first instrument should have the correct pid_no extracted by AI
+            if pressure_instruments and len(pressure_instruments) > 0:
+                extracted_pid_no = pressure_instruments[0].get('pid_no', 'N/A')
+                log_and_print(f"✅ [Pressure {job_id[:8]}] AI extracted P&ID No: {extracted_pid_no}")
+                # Ensure all instruments have the same P&ID number
+                for instrument in pressure_instruments:
+                    if not instrument.get('pid_no') or instrument.get('pid_no') == 'N/A':
+                        instrument['pid_no'] = extracted_pid_no
             
             log_and_print(f"✅ [Pressure {job_id[:8]}] Found {len(pressure_instruments)} pressure instruments")
             

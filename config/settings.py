@@ -156,6 +156,7 @@ INSTALLED_APPS = [
     'apps.process_datasheet',  # Process Datasheet - AI-Powered Equipment Datasheet Generation
     # SOFT-CODED: Electrical Datasheet - RE-ENABLED
     'apps.electrical_datasheet',  # Electrical Datasheet - Transformer & Switchgear Technical Data Sheets
+    # 'apps.usage_tracking',  # Usage Tracking & Metering - REMOVED (app deleted during cleanup)
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
@@ -195,6 +196,7 @@ MIDDLEWARE = [
     'apps.users.middleware.PasswordExpiryMiddleware',  # Password expiry checking
     'apps.rbac.middleware.RBACMiddleware',
     'apps.activity.tracker.ActivityMiddleware',  # Activity tracking middleware
+    # 'apps.usage_tracking.middleware.UsageTrackingMiddleware',  # Usage metering - REMOVED (app deleted)
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -952,3 +954,23 @@ ALEKSI_EMAIL = config('FINANCE_ALEKSI_EMAIL', default='test.user7@rejlers.ae')
 SHERWIN_EMAIL = config('FINANCE_SHERWIN_EMAIL', default='test.user8@rejlers.ae')
 NIJUM_EMAIL = config('FINANCE_NIJUM_EMAIL', default='test.user9@rejlers.ae')
 HR_ADMIN_EMAIL = config('FINANCE_HR_ADMIN_EMAIL', default='test.user10@rejlers.ae')
+
+# ========================================================================
+# Usage Tracking Configuration
+# ========================================================================
+# Enable/disable usage tracking globally
+ENABLE_USAGE_TRACKING = safe_cast_bool(config('ENABLE_USAGE_TRACKING', default='True'), True)
+
+# Data retention (days)
+USAGE_LOG_RETENTION_DAYS = safe_cast_int(config('USAGE_LOG_RETENTION_DAYS', default='90'), 90)
+
+# Cache TTL for summary data (seconds)
+USAGE_CACHE_TTL = safe_cast_int(config('USAGE_CACHE_TTL', default='300'), 300)
+
+print("\n" + "=" * 60)
+print("USAGE TRACKING CONFIGURATION")
+print("=" * 60)
+print(f"Enabled: {ENABLE_USAGE_TRACKING}")
+print(f"Log Retention: {USAGE_LOG_RETENTION_DAYS} days")
+print(f"Cache TTL: {USAGE_CACHE_TTL} seconds")
+print("=" * 60 + "\n")
