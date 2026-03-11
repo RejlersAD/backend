@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('process_datasheet', '0005_merge_migrations'),
+        ('process_datasheet', '0004_discharge_pressure_calculations'),
     ]
 
     operations = [
