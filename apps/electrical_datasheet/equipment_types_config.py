@@ -107,6 +107,32 @@ EQUIPMENT_TYPES_CONFIG = [
             'ANSI/IEEE C57.12.01 - Dry-type transformers',
             'ADNOC-AGES-TR-001 - Transformer Specifications'
         ],
+        'supported_documents': [
+            {
+                'type': 'mv_trafo_calculation',
+                'label': 'MV Trafo Calculation',
+                'description': 'Medium Voltage Transformer Calculation Document',
+                'required': False
+            },
+            {
+                'type': 'criteria',
+                'label': 'Criteria',
+                'description': 'Transformer Selection Criteria Document',
+                'required': False
+            },
+            {
+                'type': 'formula',
+                'label': 'Formula',
+                'description': 'Transformer Design Formula Document',
+                'required': False
+            },
+            {
+                'type': 'lv_trafo_calculation',
+                'label': 'LV Trafo Calculation',
+                'description': 'Low Voltage Transformer Calculation Document',
+                'required': False
+            }
+        ],
         'sections': [
             {
                 'name': 'General Information',
