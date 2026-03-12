@@ -28,6 +28,29 @@ from .serializers import (
 
 logger = logging.getLogger(__name__)
 
+# Global singleton for PIDLineExtractorV2 to avoid reinitialization
+_pid_extractor_instance = None
+_pid_extractor_lock = None
+
+def get_pid_extractor():
+    """Get or create the global PIDLineExtractorV2 instance"""
+    global _pid_extractor_instance, _pid_extractor_lock
+    
+    if _pid_extractor_lock is None:
+        import threading
+        _pid_extractor_lock = threading.Lock()
+    
+    if _pid_extractor_instance is None:
+        with _pid_extractor_lock:
+            # Double-check pattern
+            if _pid_extractor_instance is None:
+                logger.info("🚀 Initializing PIDLineExtractorV2 (one-time initialization)...")
+                from apps.designiq.pid_ocr_extractor_v2 import PIDLineExtractorV2
+                _pid_extractor_instance = PIDLineExtractorV2()
+                logger.info("✅ PIDLineExtractorV2 ready for all requests")
+    
+    return _pid_extractor_instance
+
 
 def load_module_config():
     """Load DesignIQ module configuration from JSON file"""
@@ -1567,27 +1590,23 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='base_extraction')
     def base_extraction(self, request):
         """
-        🎯 BASE EXTRACTION ENDPOINT - P&ID Only (No Enrichment, No FROM-TO)
+        🎯 BASE EXTRACTION ENDPOINT - P&ID Only (No Enrichment)
         
         POST /api/v1/designiq/lists/base_extraction/
         
         Accepts: P&ID file only
-        Returns: 8 base columns extracted synchronously (FAST - no OpenAI)
+        Returns: 8 base columns extracted synchronously
         
         Columns: Original Detection, Fluid Code, Size, Sequence No, 
                  PIPR Class, Insulation, From, To
         
-        Does NOT include:
-        - Enrichment logic (HMB/PMS/NACE/Stress)
-        - FROM-TO detection (OpenAI/Spatial/Geometric)
-        
-        Designed for: /engineering/process/line-list page (FAST preview only)
+        Does NOT include enrichment logic (HMB/PMS/NACE/Stress)
+        Designed for: /engineering/process/line-list page
         """
-        from apps.designiq.pid_ocr_extractor_v2 import PIDLineExtractorV2
         from io import BytesIO
         
         logger.info("="*80)
-        logger.info("🎯 BASE EXTRACTION REQUEST - P&ID Only (FAST MODE)")
+        logger.info("🎯 BASE EXTRACTION REQUEST - P&ID Only")
         logger.info("="*80)
         
         try:
@@ -1620,13 +1639,11 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             
             logger.info(f"💾 Saved to temporary file: {tmp_path}")
             
-            # FAST MODE: Only OCR + Regex (Skip FROM-TO detection)
-            logger.info("🔍 Starting FAST base extraction (OCR + Regex only)...")
-            extractor = PIDLineExtractorV2()
-            
-            # Call the lightweight extraction method
+            # Extract base columns using global singleton (FAST MODE - No reinitialization)
+            logger.info("🔍 Starting base extraction (FAST MODE)...")
+            extractor = get_pid_extractor()
             extracted_lines = extractor.extract_from_pdf(
-                pdf_path=tmp_path,
+                tmp_path,
                 include_area=include_area,
                 format_type=format_type
             )
@@ -1635,9 +1652,9 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             import os
             os.unlink(tmp_path)
             
-            logger.info(f"✅ Extracted {len(extracted_lines)} lines from P&ID (FAST MODE)")
+            logger.info(f"✅ Extracted {len(extracted_lines)} lines from P&ID")
             
-            # Transform to 8-column format (From/To will be empty in FAST mode)
+            # Transform to 8-column format
             base_data = []
             for line in extracted_lines:
                 base_item = {
@@ -1653,7 +1670,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 base_data.append(base_item)
             
             logger.info("="*80)
-            logger.info(f"🎉 BASE EXTRACTION COMPLETE: {len(base_data)} lines (FAST MODE)")
+            logger.info(f"🎉 BASE EXTRACTION COMPLETE: {len(base_data)} lines")
             logger.info("="*80)
             
             return Response({

@@ -23,7 +23,7 @@ services:
     container_name: aiflow_backend
     command: bash start.sh
     volumes:
-      # - .:/app  # Disabled for production - causes worker hangs
+      - .:/app  # Enable for development - code changes reflect immediately
       - media_files:/app/media
       - static_files:/app/staticfiles
     ports:

@@ -108,27 +108,25 @@ def process_pressure_threading(pid_file_path, job_id, original_filename=None):
             
             analyzer = PressureInstrumentAnalyzer()
             
+            # ✅ FIXED: Use uploaded filename as drawing_number (P&ID No)
+            if original_filename:
+                pid_no_from_filename = original_filename.rsplit('.', 1)[0]  # Remove extension
+                log_and_print(f"✅ [Pressure {job_id[:8]}] Using filename as P&ID No: {pid_no_from_filename}")
+            else:
+                pid_no_from_filename = 'AUTO'
+                log_and_print(f"⚠️ [Pressure {job_id[:8]}] No filename provided, using AUTO")
+            
             # Let AI extract drawing info from the P&ID itself
             drawing_info = {
-                'drawing_number': 'AUTO',  # AI will extract from drawing
+                'drawing_number': pid_no_from_filename,  # Use filename instead of 'AUTO'
                 'drawing_title': 'P&ID Analysis',
                 'revision': '0'
             }
             
-            log_and_print(f"📋 [Pressure {job_id[:8]}] AI will extract drawing number from P&ID image...")
+            log_and_print(f"📋 [Pressure {job_id[:8]}] Drawing info set with P&ID No: {pid_no_from_filename}")
             
             # Use the correct method name: analyze_pid_with_ai
             pressure_instruments = analyzer.analyze_pid_with_ai(pid_image_data, drawing_info)
-            
-            # AI extracts the drawing number from the P&ID - use it for all instruments
-            # The first instrument should have the correct pid_no extracted by AI
-            if pressure_instruments and len(pressure_instruments) > 0:
-                extracted_pid_no = pressure_instruments[0].get('pid_no', 'N/A')
-                log_and_print(f"✅ [Pressure {job_id[:8]}] AI extracted P&ID No: {extracted_pid_no}")
-                # Ensure all instruments have the same P&ID number
-                for instrument in pressure_instruments:
-                    if not instrument.get('pid_no') or instrument.get('pid_no') == 'N/A':
-                        instrument['pid_no'] = extracted_pid_no
             
             log_and_print(f"✅ [Pressure {job_id[:8]}] Found {len(pressure_instruments)} pressure instruments")
             

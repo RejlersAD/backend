@@ -142,19 +142,24 @@ def analyze_pid_for_pressure_instruments(request):
         
         pid_file = request.FILES['file']
         
+        # ✅ FIXED: Extract P&ID No from filename (same as MOV/SDV logic)
+        pid_filename = pid_file.name
+        pid_no_from_filename = pid_filename.rsplit('.', 1)[0]  # Remove extension
+        
         # Extract drawing information
         drawing_info = {
-            'drawing_number': request.data.get('drawing_number', ''),
+            'drawing_number': request.data.get('drawing_number', pid_no_from_filename),  # Use filename if not provided
             'drawing_title': request.data.get('drawing_title', 'Pressure Instrument Analysis'),
             'revision': request.data.get('revision', 'A'),
             'project_name': request.data.get('project_name', 'Default Project'),
             'area': request.data.get('area', ''),
-            'date': datetime.now().strftime('%Y-%m-%d')
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'pid_no': pid_no_from_filename  # ✅ Kept for backwards compatibility
         }
         
-        # Auto-generate drawing number if not provided
+        # Auto-generate drawing number if not provided or set to AUTO
         if not drawing_info['drawing_number'] or drawing_info['drawing_number'] == 'AUTO':
-            drawing_info['drawing_number'] = f"PI-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            drawing_info['drawing_number'] = pid_no_from_filename  # Use filename instead of generated ID
         
         # Validate file type
         allowed_extensions = ['pdf', 'png', 'jpg', 'jpeg', 'dwg']
