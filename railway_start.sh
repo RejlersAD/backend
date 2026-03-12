@@ -38,13 +38,13 @@ echo "=========================================="
 echo "🔍 Checking for migration conflicts..."
 echo "=========================================="
 
-# Strategy 1: Fix migration order inconsistencies (0005/0006 issue) via direct DB insertion
+# Strategy 1: Dynamically detect and fix any InconsistentMigrationHistory across all apps
 if [ -f "fix_migration_record.py" ]; then
-    echo "✅ Running migration record fixer (direct DB insertion)..."
+    echo "✅ Running dynamic migration history consistency fixer..."
     python fix_migration_record.py 2>&1 && {
-        echo "✅ Migration record fixed successfully"
+        echo "✅ Migration history consistency check passed"
     } || {
-        echo "⚠️  Migration record fixer completed with warnings"
+        echo "⚠️  Migration history fixer completed with warnings"
         echo "    Attempting remaining fixes..."
     }
 fi
