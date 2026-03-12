@@ -29,41 +29,41 @@ class ReferenceDocumentProcessor:
         Process uploaded reference documents and extract structured data
         
         Args:
-            documents: Dict of {doc_type: ReferenceDocument model instance}
+            documents: Dict of {doc_type: Django FieldFile object or file path}
         
         Returns:
             Structured data extracted from all reference documents
         """
         extracted_data = {}
         
-        for doc_type, doc_model in documents.items():
+        for doc_type, doc_file in documents.items():
             try:
                 print(f"[INFO] Processing reference document: {doc_type}")
                 
                 # SOFT-CODED: PFD cross-verification (P&ID generated from PFD)
                 if doc_type in ['pfd_document', 'pfd']:
-                    extracted_data['pfd_data'] = self._extract_pfd_data(doc_model)
+                    extracted_data['pfd_data'] = self._extract_pfd_data(doc_file)
                 
                 elif doc_type in ['equipment_datasheet', 'equipment_datasheets']:
-                    extracted_data['equipment_specs'] = self._extract_equipment_specs(doc_model)
+                    extracted_data['equipment_specs'] = self._extract_equipment_specs(doc_file)
                 
                 elif doc_type in ['instrument_datasheet', 'instrument_datasheets']:
-                    extracted_data['instrument_specs'] = self._extract_instrument_specs(doc_model)
+                    extracted_data['instrument_specs'] = self._extract_instrument_specs(doc_file)
                 
                 elif doc_type in ['legends_symbols']:
-                    extracted_data['legends'] = self._extract_legends(doc_model)
+                    extracted_data['legends'] = self._extract_legends(doc_file)
                 
                 elif doc_type in ['pid_standards']:
-                    extracted_data['standards'] = self._extract_standards(doc_model)
+                    extracted_data['standards'] = self._extract_standards(doc_file)
                 
                 elif doc_type in ['safety_requirements']:
-                    extracted_data['safety_specs'] = self._extract_safety_requirements(doc_model)
+                    extracted_data['safety_specs'] = self._extract_safety_requirements(doc_file)
                 
                 elif doc_type in ['process_description']:
-                    extracted_data['process_conditions'] = self._extract_process_conditions(doc_model)
+                    extracted_data['process_conditions'] = self._extract_process_conditions(doc_file)
                 
                 elif doc_type in ['iso_standards']:
-                    extracted_data['iso_requirements'] = self._extract_iso_standards(doc_model)
+                    extracted_data['iso_requirements'] = self._extract_iso_standards(doc_file)
                 
             except Exception as e:
                 print(f"[ERROR] Failed to process {doc_type}: {e}")
@@ -71,14 +71,18 @@ class ReferenceDocumentProcessor:
         
         return extracted_data
     
-    def _extract_equipment_specs(self, doc_model) -> Dict[str, Any]:
-        """Extract equipment specifications using AI"""
+    def _extract_equipment_specs(self, doc_file) -> Dict[str, Any]:
+        """Extract equipment specifications using AI
+        
+        Args:
+            doc_file: Django FieldFile object or file path string
+        """
         if not self.client:
             return {}
         
         try:
             # Convert PDF to images
-            images = self._pdf_to_images(doc_model.file.path)
+            images = self._pdf_to_images(doc_file)
             if not images:
                 return {}
             
@@ -143,13 +147,17 @@ class ReferenceDocumentProcessor:
             print(f"[ERROR] Equipment spec extraction failed: {e}")
             return {}
     
-    def _extract_instrument_specs(self, doc_model) -> Dict[str, Any]:
-        """Extract instrument specifications"""
+    def _extract_instrument_specs(self, doc_file) -> Dict[str, Any]:
+        """Extract instrument specifications
+        
+        Args:
+            doc_file: Django FieldFile object or file path string
+        """
         if not self.client:
             return {}
         
         try:
-            images = self._pdf_to_images(doc_model.file.path)
+            images = self._pdf_to_images(doc_file)
             if not images:
                 return {}
             
@@ -204,11 +212,17 @@ OUTPUT JSON:
             print(f"[ERROR] Instrument spec extraction failed: {e}")
             return {}
     
-    def _extract_legends(self, doc_model) -> Dict[str, Any]:
-        """Extract legend symbols and definitions"""
+    def _extract_legends(self, doc_file) -> Dict[str, Any]:
+        """Extract legend symbols and definitions
+        
+        Args:
+            doc_file: Django FieldFile object or file path string
+        """
         # Basic text extraction
         try:
-            doc = fitz.open(doc_model.file.path)
+            # Handle both Django FieldFile and string paths
+            pdf_path = doc_file.path if hasattr(doc_file, 'path') else str(doc_file)
+            doc = fitz.open(pdf_path)
             text = ""
             for page in doc:
                 text += page.get_text()
@@ -222,10 +236,15 @@ OUTPUT JSON:
             print(f"[ERROR] Legend extraction failed: {e}")
             return {}
     
-    def _extract_standards(self, doc_model) -> Dict[str, Any]:
-        """Extract P&ID standards and requirements"""
+    def _extract_standards(self, doc_file) -> Dict[str, Any]:
+        """Extract P&ID standards and requirements
+        
+        Args:
+            doc_file: Django FieldFile object or file path string
+        """
         try:
-            doc = fitz.open(doc_model.file.path)
+            pdf_path = doc_file.path if hasattr(doc_file, 'path') else str(doc_file)
+            doc = fitz.open(pdf_path)
             text = ""
             for page in doc:
                 text += page.get_text()
@@ -239,10 +258,15 @@ OUTPUT JSON:
             print(f"[ERROR] Standards extraction failed: {e}")
             return {}
     
-    def _extract_safety_requirements(self, doc_model) -> Dict[str, Any]:
-        """Extract safety requirements (SIL, HAZOP)"""
+    def _extract_safety_requirements(self, doc_file) -> Dict[str, Any]:
+        """Extract safety requirements (SIL, HAZOP)
+        
+        Args:
+            doc_file: Django FieldFile object or file path string
+        """
         try:
-            doc = fitz.open(doc_model.file.path)
+            pdf_path = doc_file.path if hasattr(doc_file, 'path') else str(doc_file)
+            doc = fitz.open(pdf_path)
             text = ""
             for page in doc:
                 text += page.get_text()
@@ -257,10 +281,15 @@ OUTPUT JSON:
             print(f"[ERROR] Safety requirements extraction failed: {e}")
             return {}
     
-    def _extract_process_conditions(self, doc_model) -> Dict[str, Any]:
-        """Extract process description and operating conditions"""
+    def _extract_process_conditions(self, doc_file) -> Dict[str, Any]:
+        """Extract process description and operating conditions
+        
+        Args:
+            doc_file: Django FieldFile object or file path string
+        """
         try:
-            doc = fitz.open(doc_model.file.path)
+            pdf_path = doc_file.path if hasattr(doc_file, 'path') else str(doc_file)
+            doc = fitz.open(pdf_path)
             text = ""
             for page in doc:
                 text += page.get_text()
@@ -274,10 +303,15 @@ OUTPUT JSON:
             print(f"[ERROR] Process description extraction failed: {e}")
             return {}
     
-    def _extract_iso_standards(self, doc_model) -> Dict[str, Any]:
-        """Extract ISO standards requirements"""
+    def _extract_iso_standards(self, doc_file) -> Dict[str, Any]:
+        """Extract ISO standards requirements
+        
+        Args:
+            doc_file: Django FieldFile object or file path string
+        """
         try:
-            doc = fitz.open(doc_model.file.path)
+            pdf_path = doc_file.path if hasattr(doc_file, 'path') else str(doc_file)
+            doc = fitz.open(pdf_path)
             text = ""
             for page in doc:
                 text += page.get_text()
@@ -291,9 +325,23 @@ OUTPUT JSON:
             print(f"[ERROR] ISO standards extraction failed: {e}")
             return {}
     
-    def _pdf_to_images(self, pdf_path: str) -> List[str]:
-        """Convert PDF first page to base64 image"""
+    def _pdf_to_images(self, pdf_file) -> List[str]:
+        """Convert PDF first page to base64 image
+        
+        Args:
+            pdf_file: Django FieldFile object or file path string
+        """
         try:
+            # Handle both Django FieldFile and string paths
+            if isinstance(pdf_file, str):
+                pdf_path = pdf_file
+            elif hasattr(pdf_file, 'path'):
+                # Django FieldFile
+                pdf_path = pdf_file.path
+            else:
+                # Try to get path attribute
+                pdf_path = str(pdf_file)
+            
             doc = fitz.open(pdf_path)
             page = doc[0]  # First page only
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom
@@ -370,17 +418,20 @@ OUTPUT JSON:
             conditions['temperatures'] = [f"{t[0]} {t[1]}" for t in temp_matches[:5]]
         
         return conditions    
-    def _extract_pfd_data(self, doc_model) -> Dict[str, Any]:
+    def _extract_pfd_data(self, doc_file) -> Dict[str, Any]:
         """
         Extract PFD (Process Flow Diagram) data for P&ID cross-verification
         SOFT-CODED: P&IDs are generated from PFDs - extract process flow for quality check
+        
+        Args:
+            doc_file: Django FieldFile object or file path string
         """
         if not self.client:
             return {}
         
         try:
             # Convert PDF to images
-            images = self._pdf_to_images(doc_model.file.path)
+            images = self._pdf_to_images(doc_file)
             if not images:
                 return {}
             

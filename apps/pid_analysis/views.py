@@ -148,8 +148,15 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         else:
             print(f"[DEBUG] ✗ No file found in request.FILES")
         
-        # Prepare data for serializer - combine data and FILES
-        serializer_data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        # Prepare data for serializer - DON'T use .copy() on request.data as it may deepcopy file objects
+        # Instead, create a new dict with only the non-file fields
+        serializer_data = {}
+        for key, value in request.data.items():
+            # Skip file fields - we'll add them from request.FILES
+            if not key.startswith('reference_') and key != 'file':
+                serializer_data[key] = value
+        
+        # Add the main file from request.FILES (not from request.data)
         if file_in_files:
             serializer_data['file'] = file_in_files
         
@@ -157,7 +164,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         
         # SOFT-CODED: Extract reference documents if present
         reference_documents = {}
-        ref_doc_keys = ['iso_standards', 'pid_standards', 'legends_symbols', 'equipment_datasheet', 
+        ref_doc_keys = ['pfd_document', 'iso_standards', 'pid_standards', 'legends_symbols', 'equipment_datasheet', 
                         'instrument_datasheet', 'process_description', 'safety_requirements', 'other_documents']
         
         for key in ref_doc_keys:
@@ -198,6 +205,7 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         
         # SOFT-CODED: Save reference documents if provided and pass to analysis
         saved_reference_docs = {}
+        saved_reference_files = {}  # Store file objects/paths separately
         if reference_documents:
             print(f"[DEBUG] Saving {len(reference_documents)} reference documents")
             for doc_type, doc_file in reference_documents.items():
@@ -212,7 +220,9 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                         uploaded_by=request.user
                     )
                     saved_reference_docs[doc_type] = ref_doc
-                    print(f"[DEBUG] Saved reference document: {ref_doc.title} (ID: {ref_doc.id})")
+                    # Store the file PATH STRING for processing (pickle-safe)
+                    saved_reference_files[doc_type] = ref_doc.file.path  # String path is pickle-safe
+                    print(f"[DEBUG] Saved reference document: {ref_doc.title} (ID: {ref_doc.id}, Path: {ref_doc.file.path})")
                 except Exception as e:
                     print(f"[ERROR] Failed to save reference document {doc_type}: {e}")
         
@@ -228,12 +238,12 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                 # Perform analysis with reference documents
                 print(f"[DEBUG] Initializing PIDAnalysisService with {len(saved_reference_docs)} reference documents")
                 analysis_service = PIDAnalysisService()
-                print(f"[DEBUG] Calling analyze_pid_drawing with file  and reference docs: {drawing.file.name}")
-                # Pass the file object directly and reference documents for enhanced analysis
+                print(f"[DEBUG] Calling analyze_pid_drawing with file path: {drawing.file.path}")
+                # Pass the file PATH STRING (not FieldFile) and reference file paths for pickle-safe processing
                 analysis_result = analysis_service.analyze_pid_drawing(
-                    drawing.file,
+                    drawing.file.path,  # STRING path, not FieldFile
                     drawing_number=drawing.drawing_number,
-                    reference_documents=saved_reference_docs  # SOFT-CODED: AI-powered cross-verification
+                    reference_documents=saved_reference_files  # Dict of STRING paths
                 )
                 print(f"[DEBUG] Analysis completed with reference verification, result keys: {list(analysis_result.keys())}")
                 
