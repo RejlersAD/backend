@@ -248,7 +248,16 @@ class PressureInstrumentAnalyzer:
             prompt = self._create_analysis_prompt(drawing_info)
             
             logger.info("[PressureInstrument] 🚀 Sending P&ID to OpenAI Vision API for analysis...")
-            return self._call_openai_vision_api(base64_image, prompt, drawing_info)
+            instruments = self._call_openai_vision_api(base64_image, prompt, drawing_info)
+            
+            # ✅ FIXED: Override pid_no with filename if provided (same as MOV/SDV logic)
+            if drawing_info.get('pid_no'):
+                pid_no_from_filename = drawing_info['pid_no']
+                logger.info(f"[PressureInstrument] ✅ Overriding all instruments' P&ID No with filename: {pid_no_from_filename}")
+                for instrument in instruments:
+                    instrument['pid_no'] = pid_no_from_filename
+            
+            return instruments
             
         except Exception as e:
             logger.error(f"[PressureInstrument] AI analysis error: {str(e)}")

@@ -74,6 +74,24 @@ class ElectricalEquipmentTypeViewSet(viewsets.ModelViewSet):
             {"error": "Configuration not found for this equipment type"},
             status=status.HTTP_404_NOT_FOUND
         )
+    
+    @action(detail=True, methods=['get'], url_path='supported-documents')
+    def supported_documents(self, request, pk=None):
+        """Get supported document types for a specific equipment type (e.g., transformer)"""
+        config_data = load_electrical_config()
+        equipment_config = config_data.get('equipment_types', {}).get(pk)
+        
+        if equipment_config:
+            supported_docs = equipment_config.get('supported_documents', [])
+            return Response({
+                'equipment_type': pk,
+                'equipment_name': equipment_config.get('name'),
+                'supported_documents': supported_docs
+            })
+        return Response(
+            {"error": "Configuration not found for this equipment type"},
+            status=status.HTTP_404_NOT_FOUND
+        )
 
     @action(detail=False, methods=['post'])
     def sync_from_config(self, request):
@@ -1157,6 +1175,33 @@ class SmartSLDUploadViewSet(viewsets.ViewSet):
     - Old: GPT-4o Vision = ~$75 per 1000 pages
     - New: Hybrid approach = ~$0.50 per 1000 pages  
     - Savings: 99% cost reduction!
+    
+    TRANSFORMER DOCUMENT UPLOAD:
+    For Transformer (Power and Distribution) equipment:
+    - Instead of SLD files, upload specific calculation/criteria documents
+    - Supported document types:
+      1. MV Trafo Calculation (mv_trafo_calculation)
+      2. Criteria (criteria)
+      3. Formula (formula)
+      4. LV Trafo Calculation (lv_trafo_calculation)
+    - Set equipment_type='transformer' in request data
+    - Each file should have doc_type_<filename>=<document_type> in request data
+    
+    Frontend Usage:
+    ```javascript
+    // For transformers, send equipment_type parameter
+    const formData = new FormData();
+    formData.append('equipment_type', 'transformer');
+    formData.append('files', file1);
+    formData.append('files', file2);
+    formData.append('doc_type_' + file1.name, 'mv_trafo_calculation');
+    formData.append('doc_type_' + file2.name, 'lv_trafo_calculation');
+    
+    // Regular SLD processing (non-transformer equipment)
+    const formData = new FormData();
+    formData.append('files', sldFile);
+    formData.append('datasheet_transformer', 'true');
+    ```
     """
     permission_classes = [IsAuthenticated]
     
@@ -1166,6 +1211,93 @@ class SmartSLDUploadViewSet(viewsets.ViewSet):
         from .cost_recommendation_system import CostRecommendationSystem
         self.orchestrator = None
         self.cost_system = CostRecommendationSystem
+    
+    def _process_transformer_documents(self, request, uploaded_files, project_info):
+        """
+        Process equipment-specific documents (Transformer, EDG, Switchgear)
+        instead of SLD files for specific equipment types.
+        """
+        try:
+            import uuid
+            from .s3_service import ElectricalDatasheetS3Service
+            
+            equipment_type = request.data.get('equipment_type', 'transformer')
+            job_id = str(uuid.uuid4())
+            
+            equipment_labels = {
+                'edg': 'Emergency Diesel Generator',
+                'switchgear_11kv': '11kV Switchgear',
+                'transformer': 'Transformer'
+            }
+            
+            logger.info(f"[EquipmentDocs] Processing {len(uploaded_files)} {equipment_labels.get(equipment_type, equipment_type)} documents, job_id: {job_id}")
+            
+            s3_service = ElectricalDatasheetS3Service()
+            uploaded_docs = []
+            
+            # Process each uploaded file and categorize by document type
+            for file in uploaded_files:
+                doc_type = request.data.get(f'doc_type_{file.name}', 'general')
+                
+                # Valid document types by equipment
+                valid_types = {
+                    'edg': ['edg_load_list', 'dg_calculation'],
+                    'switchgear_11kv': ['switchgear_sld', 'switchgear_schedule'],
+                    'transformer': ['mv_trafo_calculation', 'criteria', 'formula', 'lv_trafo_calculation']
+                }
+                
+                if equipment_type in valid_types and doc_type not in valid_types[equipment_type]:
+                    doc_type = 'general'
+                
+                # Upload to S3/local storage
+                try:
+                    upload_result = s3_service.upload_datasheet(
+                        file_obj=file,
+                        filename=file.name,
+                        equipment_type=equipment_type,
+                        metadata={
+                            'document_type': doc_type,
+                            'project_info': project_info,
+                            'job_id': job_id,
+                            'uploaded_by': request.user.username
+                        }
+                    )
+                    
+                    uploaded_docs.append({
+                        'filename': file.name,
+                        'doc_type': doc_type,
+                        's3_key': upload_result.get('s3_key') or upload_result.get('local_path'),
+                        'size': file.size,
+                        'content_type': file.content_type
+                    })
+                    
+                except Exception as e:
+                    logger.error(f"[EquipmentDocs] Error uploading {file.name}: {e}")
+                    return Response(
+                        {'error': f'Failed to upload {file.name}: {str(e)}'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+            
+            # Return success response with uploaded document details
+            response_data = {
+                'success': True,
+                'job_id': job_id,
+                'equipment_type': equipment_type,
+                'documents_uploaded': len(uploaded_docs),
+                'documents': uploaded_docs,
+                'project_info': project_info,
+                'message': f'Successfully uploaded {len(uploaded_docs)} {equipment_labels.get(equipment_type, equipment_type)} documents'
+            }
+            
+            logger.info(f"[EquipmentDocs] ✅ Success: {len(uploaded_docs)} documents uploaded for job {job_id}")
+            return Response(response_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"[EquipmentDocs] ❌ Error: {e}", exc_info=True)
+            return Response(
+                {'error': f'Processing failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     @action(detail=False, methods=['post'], url_path='process')
     def process_sld(self, request):
@@ -1221,6 +1353,12 @@ class SmartSLDUploadViewSet(viewsets.ViewSet):
                 'diesel_generator': request.data.get('datasheet_diesel_generator', 'false').lower() == 'true',
                 'switchgear_11kv': request.data.get('datasheet_switchgear_11kv', 'false').lower() == 'true'
             }
+            
+            # Check if this is a equipment-specific document upload (not SLD)
+            equipment_type = request.data.get('equipment_type', '')
+            if equipment_type in ['edg', 'switchgear_11kv', 'transformer']:
+                return self._process_transformer_documents(request, uploaded_files, project_info)
+
             
             # Extract analysis options
             analysis_options = {

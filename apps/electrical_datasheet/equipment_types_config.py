@@ -107,6 +107,32 @@ EQUIPMENT_TYPES_CONFIG = [
             'ANSI/IEEE C57.12.01 - Dry-type transformers',
             'ADNOC-AGES-TR-001 - Transformer Specifications'
         ],
+        'supported_documents': [
+            {
+                'type': 'mv_trafo_calculation',
+                'label': 'MV Trafo Calculation',
+                'description': 'Medium Voltage Transformer Calculation Document',
+                'required': False
+            },
+            {
+                'type': 'criteria',
+                'label': 'Criteria',
+                'description': 'Transformer Selection Criteria Document',
+                'required': False
+            },
+            {
+                'type': 'formula',
+                'label': 'Formula',
+                'description': 'Transformer Design Formula Document',
+                'required': False
+            },
+            {
+                'type': 'lv_trafo_calculation',
+                'label': 'LV Trafo Calculation',
+                'description': 'Low Voltage Transformer Calculation Document',
+                'required': False
+            }
+        ],
         'sections': [
             {
                 'name': 'General Information',
@@ -150,6 +176,20 @@ EQUIPMENT_TYPES_CONFIG = [
             'IEEE C37 - Power switchgear',
             'ANSI C37.20 - Metal-enclosed switchgear',
             'ADNOC-AGES-SW-001 - Switchgear Requirements'
+        ],
+        'supported_documents': [
+            {
+                'type': 'switchgear_sld',
+                'label': 'Switchgear SLD',
+                'description': '11kV Switchgear Single Line Diagram',
+                'required': False
+            },
+            {
+                'type': 'switchgear_schedule',
+                'label': 'Switchgear Schedule',
+                'description': '11kV Switchgear Equipment Schedule',
+                'required': False
+            }
         ],
         'sections': [
             {
@@ -414,17 +454,31 @@ EQUIPMENT_TYPES_CONFIG = [
         }
     },
     {
-        'id': 'generator',
-        'name': 'Generator',
+        'id': 'edg',
+        'name': 'Emergency Diesel Generator',
         'code': 'EG',
-        'description': 'Electrical generators - diesel, gas, standby',
-        'icon': '⚡',
+        'description': 'Emergency diesel generators - standby power systems',
+        'icon': '⚙️',
         'category': 'Power Generation',
         'standards': [
             'IEC 60034 - Rotating electrical machines',
             'ISO 8528 - Reciprocating internal combustion engine generator sets',
             'NFPA 110 - Emergency and standby power systems',
             'ADNOC-AGES-GE-001 - Generator Requirements'
+        ],
+        'supported_documents': [
+            {
+                'type': 'edg_load_list',
+                'label': 'EDG Load List',
+                'description': 'Emergency Diesel Generator Load List Document',
+                'required': False
+            },
+            {
+                'type': 'dg_calculation',
+                'label': 'DG Calculation',
+                'description': 'Diesel Generator Sizing Calculation Document',
+                'required': False
+            }
         ],
         'sections': [
             {
