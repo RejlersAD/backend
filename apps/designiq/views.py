@@ -15,6 +15,8 @@ from django.conf import settings
 import logging
 import json
 import os
+import threading
+import uuid
 
 from .models import DesignProject, DesignAnalysis, DesignOptimization, DesignTemplate, EngineeringListItem, LIST_TYPES
 from .s3_utils import s3_storage  # S3 document storage
@@ -27,6 +29,80 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Thread-based extraction fallback (used when Celery broker is unavailable)
+# Progress is written to /tmp/base_extraction_{task_id}.json so every
+# Gunicorn worker on the same container can read it during polling.
+# ---------------------------------------------------------------------------
+def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, format_type):
+    """Spawn a daemon thread that runs P&ID OCR and writes progress to /tmp/."""
+    progress_file = f'/tmp/base_extraction_{task_id}.json'
+
+    def _write(state, percent, status_msg, result=None, error=None):
+        payload = {'task_id': task_id, 'state': state, 'percent': percent, 'status': status_msg}
+        if result is not None:
+            payload['result'] = result
+        if error is not None:
+            payload['error'] = error
+        try:
+            with open(progress_file, 'w') as fh:
+                json.dump(payload, fh)
+        except Exception as we:
+            logger.warning(f'[base_extract_thread] progress write failed: {we}')
+
+    def _run():
+        try:
+            logger.info(f'[base_extract_thread] START task_id={task_id} file={filename}')
+            from apps.designiq.pid_ocr_extractor_v2 import PIDLineExtractorV2
+            _write('PROGRESS', 5, 'Initializing OCR engine…')
+            extractor = PIDLineExtractorV2()
+            _write('PROGRESS', 15, f'Running extraction on {filename}…')
+            extracted_lines = extractor.extract_from_pdf(
+                file_path,
+                include_area=include_area,
+                format_type=format_type,
+            )
+            _write('PROGRESS', 85, f'OCR complete: {len(extracted_lines)} lines found. Formatting…')
+            base_data = [
+                {
+                    'original_detection': line.get('original_detection', line.get('line_number', '')),
+                    'fluid_code':         line.get('fluid_code', ''),
+                    'size':               line.get('size', ''),
+                    'sequence_no':        line.get('sequence_no', ''),
+                    'pipr_class':         line.get('pipr_class', ''),
+                    'insulation':         line.get('insulation', ''),
+                    'from':               line.get('from_line', line.get('from_equipment', '')),
+                    'to':                 line.get('to_line',   line.get('to_equipment', '')),
+                }
+                for line in extracted_lines
+            ]
+            if os.path.exists(file_path):
+                try:
+                    os.unlink(file_path)
+                except Exception as de:
+                    logger.warning(f'[base_extract_thread] temp file delete failed: {de}')
+            result = {
+                'success': True,
+                'total_lines': len(base_data),
+                'data': base_data,
+                'columns': 8,
+                'message': f'Successfully extracted {len(base_data)} lines from {filename}',
+            }
+            _write('SUCCESS', 100, 'Extraction complete!', result=result)
+            logger.info(f'[base_extract_thread] DONE task_id={task_id} lines={len(base_data)}')
+        except Exception as exc:
+            logger.error(f'[base_extract_thread] FAILED task_id={task_id}: {exc}', exc_info=True)
+            if os.path.exists(file_path):
+                try:
+                    os.unlink(file_path)
+                except Exception:
+                    pass
+            _write('FAILURE', 0, 'Extraction failed', error=str(exc))
+
+    t = threading.Thread(target=_run, name=f'base_extract_{task_id}', daemon=True)
+    t.start()
 
 # Global singleton for PIDLineExtractorV2 to avoid reinitialization
 _pid_extractor_instance = None
@@ -1640,21 +1716,47 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             logger.info(f"💾 Saved to temp file: {tmp_path}")
 
             # ------------------------------------------------------------------
-            # 3. Submit Celery task
+            # 3. Submit Celery task (with graceful fallback to thread if broker
+            #    is unreachable — e.g. REDIS_URL set but Redis service is down)
             # ------------------------------------------------------------------
-            task = base_extract_lines_async.delay(
-                file_path=tmp_path,
-                filename=pid_file.name,
-                include_area=include_area,
-                format_type=format_type,
-            )
+            _use_thread_fallback = False
+            _task_id_str = None
+
+            try:
+                task = base_extract_lines_async.delay(
+                    file_path=tmp_path,
+                    filename=pid_file.name,
+                    include_area=include_area,
+                    format_type=format_type,
+                )
+                _task_id_str = task.id
+            except Exception as broker_err:
+                _err_low = str(broker_err).lower()
+                _is_conn_err = any(x in _err_low for x in (
+                    'connection refused', 'errno 111', 'no broker',
+                    'connection error', 'nodename nor servname',
+                    'name or service not known', 'transport error',
+                ))
+                if _is_conn_err:
+                    logger.warning(
+                        f'⚠️ Celery broker unavailable ({broker_err}). '
+                        'Falling back to thread-based extraction.'
+                    )
+                    _use_thread_fallback = True
+                    _task_id_str = str(uuid.uuid4())
+                    _run_base_extraction_in_thread(
+                        _task_id_str, tmp_path, pid_file.name,
+                        include_area, format_type,
+                    )
+                else:
+                    raise  # re-raise unexpected Celery errors
 
             # ------------------------------------------------------------------
             # 4. EAGER mode (local dev): task ran synchronously — return result
             # ------------------------------------------------------------------
             is_eager = getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
-            if is_eager:
-                logger.info(f"⚡ EAGER mode: task {task.id} completed synchronously")
+            if is_eager and not _use_thread_fallback:
+                logger.info(f"⚡ EAGER mode: task {_task_id_str} completed synchronously")
                 if task.successful():
                     result = task.result
                     return Response(result, status=status.HTTP_200_OK)
@@ -1667,17 +1769,18 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             # ------------------------------------------------------------------
             file_size_mb = pid_file.size / 1024 / 1024
             estimated_seconds = max(60, int(file_size_mb * 45))  # soft estimate
+            _mode = 'thread-fallback' if _use_thread_fallback else 'celery'
 
-            logger.info(f"🔄 Async mode: queued task {task.id} (~{estimated_seconds}s estimated)")
+            logger.info(f"🔄 Async mode ({_mode}): queued task {_task_id_str} (~{estimated_seconds}s estimated)")
 
             return Response({
                 'success': True,
-                'task_id': task.id,
+                'task_id': _task_id_str,
                 'message': 'P&ID uploaded. Processing in background — please poll the status endpoint.',
                 'filename': pid_file.name,
                 'file_size_mb': round(file_size_mb, 2),
                 'estimated_time_seconds': estimated_seconds,
-                'status_endpoint': f'/api/v1/designiq/lists/base_extraction_status/{task.id}/',
+                'status_endpoint': f'/api/v1/designiq/lists/base_extraction_status/{_task_id_str}/',
             }, status=status.HTTP_202_ACCEPTED)
 
         except Exception as e:
@@ -1708,28 +1811,60 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             return Response({'error': 'task_id is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            # ------------------------------------------------------------------
+            # A. Thread-based fallback: check /tmp/ progress file first.
+            #    This is written by _run_base_extraction_in_thread() when the
+            #    Celery broker is unavailable. All Gunicorn workers share /tmp/.
+            # ------------------------------------------------------------------
+            progress_file = f'/tmp/base_extraction_{task_id}.json'
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'r') as fh:
+                        return Response(json.load(fh))
+                except Exception as read_err:
+                    logger.warning(f'Could not read thread progress file: {read_err}')
+
+            # ------------------------------------------------------------------
+            # B. Celery path: check Redis cache then AsyncResult
+            # ------------------------------------------------------------------
             cache_key = f'base_extraction_progress_{task_id}'
-            cached = cache.get(cache_key)
+            try:
+                cached = cache.get(cache_key)
+            except Exception:
+                cached = None  # Cache backend unreachable — skip gracefully
             if cached:
                 return Response(cached)
 
-            # Fall back to Celery broker
-            task = AsyncResult(task_id)
-            response_data = {'task_id': task_id, 'state': task.state}
+            # C. Fall back to Celery AsyncResult (works when Redis/broker is live)
+            try:
+                task = AsyncResult(task_id)
+                response_data = {'task_id': task_id, 'state': task.state}
 
-            if task.state == 'PENDING':
-                response_data.update({'status': 'Queued, waiting to start…', 'percent': 0})
-            elif task.state == 'PROGRESS':
-                response_data.update(task.info or {})
-            elif task.state == 'SUCCESS':
-                response_data.update({'status': 'Extraction complete!', 'percent': 100, 'result': task.result})
-            elif task.state == 'FAILURE':
-                response_data.update({'status': 'Extraction failed', 'percent': 0,
-                                       'error': str(task.info) if task.info else 'Unknown error'})
-            else:
-                response_data.update({'status': f'State: {task.state}', 'percent': 0})
+                if task.state == 'PENDING':
+                    response_data.update({'status': 'Queued, waiting to start…', 'percent': 0})
+                elif task.state == 'PROGRESS':
+                    response_data.update(task.info or {})
+                elif task.state == 'SUCCESS':
+                    response_data.update({'status': 'Extraction complete!', 'percent': 100, 'result': task.result})
+                elif task.state == 'FAILURE':
+                    response_data.update({'status': 'Extraction failed', 'percent': 0,
+                                           'error': str(task.info) if task.info else 'Unknown error'})
+                else:
+                    response_data.update({'status': f'State: {task.state}', 'percent': 0})
 
-            return Response(response_data)
+                return Response(response_data)
+            except Exception as celery_poll_err:
+                # Broker unreachable — task not found in any store
+                _err_low = str(celery_poll_err).lower()
+                if any(x in _err_low for x in ('connection refused', 'errno 111', 'transport error')):
+                    logger.warning(f'Celery broker unreachable during status poll: {celery_poll_err}')
+                    return Response({
+                        'task_id': task_id,
+                        'state': 'PENDING',
+                        'percent': 0,
+                        'status': 'Task queued — broker temporarily unreachable, will retry…',
+                    })
+                raise
 
         except Exception as e:
             logger.error(f"❌ base_extraction_status error: {e}", exc_info=True)

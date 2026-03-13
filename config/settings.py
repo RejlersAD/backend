@@ -732,9 +732,20 @@ else:
     print(f"[CELERY] WARNING Running in EAGER mode (Redis not configured)")
     print(f"[CELERY] Note: Tasks run synchronously. Set REDIS_URL for async tasks.")
 
-# Check if EAGER mode is explicitly requested via environment variable
-CELERY_TASK_ALWAYS_EAGER = config('CELERY_TASK_ALWAYS_EAGER', default=False, cast=bool)
-CELERY_TASK_EAGER_PROPAGATES = config('CELERY_TASK_EAGER_PROPAGATES', default=CELERY_TASK_ALWAYS_EAGER, cast=bool)
+# Check if EAGER mode is explicitly requested via environment variable.
+# IMPORTANT: preserve True set by the no-Redis branch above; only override if explicitly
+# provided in the environment so we never clobber the safe synchronous fallback.
+_eager_already_set = globals().get('CELERY_TASK_ALWAYS_EAGER', False)
+CELERY_TASK_ALWAYS_EAGER = config(
+    'CELERY_TASK_ALWAYS_EAGER',
+    default=_eager_already_set,
+    cast=bool,
+)
+CELERY_TASK_EAGER_PROPAGATES = config(
+    'CELERY_TASK_EAGER_PROPAGATES',
+    default=CELERY_TASK_ALWAYS_EAGER,
+    cast=bool,
+)
 
 if CELERY_TASK_ALWAYS_EAGER:
     print(f"[CELERY] ⚡ EAGER mode enabled via environment variable")
