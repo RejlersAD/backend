@@ -751,6 +751,15 @@ if CELERY_TASK_ALWAYS_EAGER:
     print(f"[CELERY] ⚡ EAGER mode enabled via environment variable")
     print(f"[CELERY] ⚡ Tasks will execute synchronously (immediate results)")
 
+# SOFT-CODED: opt-in flag for the base_extraction endpoint to prefer Celery
+# over thread-based extraction.  False by default (safe for all environments).
+# Set CELERY_BASE_EXTRACTION_PREFER_CELERY=true in Railway env vars only when
+# a live Redis broker is confirmed to be available.
+CELERY_BASE_EXTRACTION_PREFER_CELERY = config(
+    'CELERY_BASE_EXTRACTION_PREFER_CELERY', default=False, cast=bool
+)
+print(f"[CELERY] base_extraction prefer_celery: {CELERY_BASE_EXTRACTION_PREFER_CELERY}")
+
 CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'

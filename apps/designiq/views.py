@@ -1717,101 +1717,106 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             logger.info(f"💾 Saved to temp file: {tmp_path}")
 
             # ------------------------------------------------------------------
-            # 3. Submit Celery task (with graceful, hard-timeout fallback to
-            #    thread when the broker is unreachable or slow).
+            # 3. Dispatch — two modes, chosen by EAGER flag:
             #
-            # SOFT-CODED: CELERY_BROKER_CONNECTION_TIMEOUT (default 5 s) from
-            # settings.py / env var controls how long we wait for Celery before
-            # switching to the thread-based fallback.  Transport-level timeouts
-            # are also set via CELERY_BROKER_TRANSPORT_OPTIONS in settings.py.
+            #  A. EAGER (CELERY_TASK_ALWAYS_EAGER=True, local dev):
+            #     Celery runs the task inline — no broker needed.
+            #     Returns HTTP 200 immediately with extraction results.
+            #
+            #  B. Production (default):
+            #     ALWAYS use thread-based extraction.  The thread writes
+            #     progress to /tmp/base_extraction_{task_id}.json so that
+            #     any Gunicorn worker on the same container can serve the
+            #     polling endpoint.  The POST handler returns HTTP 202
+            #     in < 1 second regardless of Redis/Celery availability.
+            #
+            #  SOFT-CODED opt-in: set env var
+            #     CELERY_BASE_EXTRACTION_PREFER_CELERY=true
+            #  to use Celery when a live broker is configured.  The
+            #  CELERY_BROKER_CONNECTION_TIMEOUT setting controls how long
+            #  we wait before falling back to thread (max 8 s, non-blocking).
             # ------------------------------------------------------------------
-            _use_thread_fallback = False
-            _task_id_str = None
+            is_eager = getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
 
-            # Soft-coded: read broker connect timeout from Django settings
-            _broker_timeout = getattr(
-                settings, 'CELERY_BROKER_CONNECTION_TIMEOUT', 5
-            ) + 3  # add 3 s buffer on top of socket timeout
-
-            try:
-                # Run .delay() in a worker thread so we can enforce a hard
-                # wall-clock timeout — the transport-level options cover most
-                # cases but this is the last line of defence.
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _tpe:
-                    _future = _tpe.submit(
-                        base_extract_lines_async.delay,
-                        file_path=tmp_path,
-                        filename=pid_file.name,
-                        include_area=include_area,
-                        format_type=format_type,
-                    )
-                    task = _future.result(timeout=_broker_timeout)
-                _task_id_str = task.id
-                logger.info(f'✅ Celery task submitted: {_task_id_str}')
-
-            except concurrent.futures.TimeoutError:
-                logger.warning(
-                    f'⚠️ Celery .delay() timed out after {_broker_timeout}s. '
-                    'Falling back to thread-based extraction.'
+            # --- path A: EAGER --------------------------------------------------
+            if is_eager:
+                logger.info('⚡ EAGER mode — running task synchronously')
+                task = base_extract_lines_async.delay(
+                    file_path=tmp_path,
+                    filename=pid_file.name,
+                    include_area=include_area,
+                    format_type=format_type,
                 )
-                _use_thread_fallback = True
+                if task.successful():
+                    return Response(task.result, status=status.HTTP_200_OK)
+                error = str(task.result) if task.result else 'Task failed in EAGER mode'
+                return Response({'error': error}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            # --- path B: async (production) ------------------------------------
+            # SOFT-CODED: prefer Celery only when explicitly opted in AND broker
+            # URL is configured.  Otherwise always use the thread path which
+            # is guaranteed non-blocking.
+            _prefer_celery = getattr(settings, 'CELERY_BASE_EXTRACTION_PREFER_CELERY', False)
+            _broker_url    = getattr(settings, 'CELERY_BROKER_URL', None)
+            _task_id_str   = None
+            _mode          = 'thread'
+
+            if _prefer_celery and _broker_url:
+                # Non-blocking Celery dispatch: create TPE without context manager
+                # so we can call shutdown(wait=False) and never block the worker.
+                _broker_timeout = getattr(
+                    settings, 'CELERY_BROKER_CONNECTION_TIMEOUT', 5
+                ) + 3
+                _tpe    = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                _future = _tpe.submit(
+                    base_extract_lines_async.delay,
+                    file_path=tmp_path,
+                    filename=pid_file.name,
+                    include_area=include_area,
+                    format_type=format_type,
+                )
+                # CRITICAL: shutdown(wait=False) — never block even if Redis hangs
+                _tpe.shutdown(wait=False)
+                try:
+                    task         = _future.result(timeout=_broker_timeout)
+                    _task_id_str = task.id
+                    _mode        = 'celery'
+                    logger.info(f'✅ Celery task submitted: {_task_id_str}')
+                except Exception as _celery_err:
+                    logger.warning(
+                        f'⚠️ Celery dispatch failed ({_celery_err.__class__.__name__}: '
+                        f'{_celery_err}). Falling back to thread.'
+                    )
+
+            # Thread fallback (or always-thread when _prefer_celery is False)
+            if _task_id_str is None:
                 _task_id_str = str(uuid.uuid4())
+                _mode        = 'thread'
                 _run_base_extraction_in_thread(
                     _task_id_str, tmp_path, pid_file.name,
                     include_area, format_type,
                 )
 
-            except Exception as broker_err:
-                _err_low = str(broker_err).lower()
-                _is_conn_err = any(x in _err_low for x in (
-                    'connection refused', 'errno 111', 'no broker',
-                    'connection error', 'nodename nor servname',
-                    'name or service not known', 'transport error',
-                ))
-                if _is_conn_err:
-                    logger.warning(
-                        f'⚠️ Celery broker unavailable ({broker_err}). '
-                        'Falling back to thread-based extraction.'
-                    )
-                    _use_thread_fallback = True
-                    _task_id_str = str(uuid.uuid4())
-                    _run_base_extraction_in_thread(
-                        _task_id_str, tmp_path, pid_file.name,
-                        include_area, format_type,
-                    )
-                else:
-                    raise  # re-raise unexpected Celery errors
+            # ------------------------------------------------------------------
+            # 4. Return 202 immediately — frontend polls for progress/results
+            # ------------------------------------------------------------------
+            file_size_mb      = pid_file.size / 1024 / 1024
+            estimated_seconds = max(60, int(file_size_mb * 45))  # soft heuristic
 
-            # ------------------------------------------------------------------
-            # 4. EAGER mode (local dev): task ran synchronously — return result
-            # ------------------------------------------------------------------
-            is_eager = getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
-            if is_eager and not _use_thread_fallback:
-                logger.info(f"⚡ EAGER mode: task {_task_id_str} completed synchronously")
-                if task.successful():
-                    result = task.result
-                    return Response(result, status=status.HTTP_200_OK)
-                else:
-                    error = str(task.result) if task.result else 'Task failed in EAGER mode'
-                    return Response({'error': error}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-            # ------------------------------------------------------------------
-            # 5. Async mode (production): return task_id for polling
-            # ------------------------------------------------------------------
-            file_size_mb = pid_file.size / 1024 / 1024
-            estimated_seconds = max(60, int(file_size_mb * 45))  # soft estimate
-            _mode = 'thread-fallback' if _use_thread_fallback else 'celery'
-
-            logger.info(f"🔄 Async mode ({_mode}): queued task {_task_id_str} (~{estimated_seconds}s estimated)")
+            logger.info(
+                f'🔄 Async mode ({_mode}): task {_task_id_str} '
+                f'(~{estimated_seconds}s estimated)'
+            )
 
             return Response({
-                'success': True,
-                'task_id': _task_id_str,
-                'message': 'P&ID uploaded. Processing in background — please poll the status endpoint.',
-                'filename': pid_file.name,
-                'file_size_mb': round(file_size_mb, 2),
+                'success':           True,
+                'task_id':           _task_id_str,
+                'message':           'P&ID uploaded — processing in background. Poll the status endpoint.',
+                'filename':          pid_file.name,
+                'file_size_mb':      round(file_size_mb, 2),
                 'estimated_time_seconds': estimated_seconds,
-                'status_endpoint': f'/api/v1/designiq/lists/base_extraction_status/{_task_id_str}/',
+                'dispatch_mode':     _mode,
+                'status_endpoint':   f'/api/v1/designiq/lists/base_extraction_status/{_task_id_str}/',
             }, status=status.HTTP_202_ACCEPTED)
 
         except Exception as e:
