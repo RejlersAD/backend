@@ -42,10 +42,11 @@ class SDVDatasheetAIMapper:
         self,
         pid_data: Dict,
         hmb_data: Dict,
-        line_context: Optional[Dict] = None
+        line_context: Optional[Dict] = None,
+        line_list_data: Optional[Dict] = None
     ) -> Dict:
         """
-        Intelligently map P&ID and HMB data to SDV datasheet fields
+        Intelligently map P&ID, HMB, and Line List data to SDV datasheet fields
         
         Args:
             pid_data: Structured data extracted from P&ID
@@ -63,6 +64,7 @@ class SDVDatasheetAIMapper:
                 {
                     'SDV-001': {'line_no': '6"-GA-100', 'stream_id': 'S-100'}
                 }
+            line_list_data: Structured data extracted from Line List (optional)
         
         Returns:
             Dict with filled datasheet fields ready for Excel
@@ -70,16 +72,18 @@ class SDVDatasheetAIMapper:
         log_and_print("[SDVDatasheetAIMapper] 🤖 Starting intelligent mapping...")
         
         try:
-            # Build the system prompt
+            # Build the system prompt with Line List support
             system_prompt = self._build_system_prompt()
             
-            # Build the user prompt with structured data
-            user_prompt = self._build_user_prompt(pid_data, hmb_data, line_context)
+            # Build the user prompt with structured data including Line List
+            user_prompt = self._build_user_prompt(pid_data, hmb_data, line_context, line_list_data)
             
             log_and_print(f"[SDVDatasheetAIMapper] Sending to OpenAI GPT-4...")
             log_and_print(f"[SDVDatasheetAIMapper] 📊 INPUT DATA:")
             log_and_print(f"[SDVDatasheetAIMapper]   - P&ID valves: {len(pid_data.get('valves', []))}")
             log_and_print(f"[SDVDatasheetAIMapper]   - HMB streams: {len(hmb_data.get('streams', []))}")
+            if line_list_data:
+                log_and_print(f"[SDVDatasheetAIMapper]   - Line List entries: {len(line_list_data.get('lines', []))}")
             
             # Log sample valve and stream for debugging
             if pid_data.get('valves'):
@@ -137,17 +141,48 @@ class SDVDatasheetAIMapper:
             }
     
     def _build_system_prompt(self) -> str:
-        """Build the system prompt for AI - INTELLIGENT EXTRACTION MODE"""
+        """Build the system prompt for AI - INTELLIGENT EXTRACTION WITH LINE LIST"""
         return """You are an expert engineering data extraction assistant for Safety Device Valve (SDV) Datasheets.
 
-🎯 INTELLIGENT EXTRACTION RULES - ACCURACY WITH CONTEXT:
+🎯 SDV DATASHEET EXTRACTION RULES WITH LINE LIST:
 
-1. Extract values from the provided structured data (P&ID and HMB)
+**DATA SOURCE MAPPING (Same as MOV):**
+
+📋 SECTION 1 - GENERAL DATA:
+Sources: P&ID (primary) + Line List + Legend
+- tag_no: From P&ID (e.g., "SDV-100-001")
+- service: From Legend P&ID (abbreviations) or P&ID description
+- pid_no: From P&ID drawing info
+- line_no: From P&ID (match valve to line)
+- piping_class: From **P&ID** (line specification on P&ID drawing)
+
+📋 SECTION 2 - OPERATING CONDITIONS:
+Sources: H&MB (primary) + Line List (fallback)
+- fluid: From **Line List** and **H&MB** (both sources)
+- state: From Line List and H&MB (Liquid/Gas/Two-Phase)
+- phase: From Line List and H&MB (Single/Multi-phase)
+- operating_pressure_normal: From **H&MB** or **Line List** (normal values)
+- operating_temp_normal: From **H&MB** or **Line List** (normal values)
+- design_pressure: From **Line List** (in general - overall design specs)
+- design_temp: From **Line List** (in general - overall design specs)
+- sour_service: From H2S content in H&MB (if H2S > 0 ppm → "Yes", else "No") - can be tricky to find
+- shut_off_pressure: Depends on SDV location - max possible pressure of upstream equipment
+
+📋 SECTION 3 - VALVE DETAILS:
+Sources: P&ID + Instrumentation Department + Vendor
+- fail_position: From **P&ID** (FO = Fail Open, FC = Fail Closed, FL = Fail Last)
+- valve_close_time: Generally from **Vendor inputs** (leave null if not provided)
+- valve_open_time: Generally from **Vendor inputs** (leave null if not provided)
+- diff_pressure_delta_p: Usually from hydraulic calculation software (leave null if not provided)
+
+**INTELLIGENT EXTRACTION RULES:**
+1. Extract values from structured data (P&ID, H&MB, Line List)
 2. Use intelligent matching to populate as many fields as possible
-3. When exact data is available, use it precisely
-4. When data needs interpretation (like matching line numbers to streams), use engineering judgment
-5. Preserve units exactly as written
-6. If a critical field is missing from the data, return null (but try your best to find it first)
+3. Line List provides: piping_class, design_pressure, design_temp
+4. H&MB provides: fluid, operating conditions, H2S content
+5. P&ID provides: tag, line_no, fail_position
+6. Preserve units exactly as written
+7. Leave vendor fields null unless provided
 7. Return ONLY valid JSON
 
 **DATA SOURCE MAPPING:**
@@ -289,9 +324,10 @@ Return ONLY valid JSON in this structure:
         self,
         pid_data: Dict,
         hmb_data: Dict,
-        line_context: Optional[Dict]
+        line_context: Optional[Dict],
+        line_list_data: Optional[Dict] = None
     ) -> str:
-        """Build user prompt with structured data"""
+        """Build user prompt with structured data including Line List"""
         
         # Flatten HMB data for easier AI extraction
         flattened_hmb = self._flatten_hmb_streams(hmb_data)
@@ -309,9 +345,24 @@ Return ONLY valid JSON in this structure:
 ```
 """
         
+        if line_list_data:
+            prompt += f"""
+**3. LINE LIST DATA (DESIGN SPECIFICATIONS):**
+```json
+{json.dumps(line_list_data, indent=2)}
+```
+
+**Line List contains:**
+- Line numbers (match with P&ID)
+- Piping class/specification
+- Design pressure and temperature (general design values)
+- Normal operating pressure and temperature (fallback if H&MB incomplete)
+- Fluid identification
+"""
+        
         if line_context:
             prompt += f"""
-**3. PRE-MAPPED LINE CONTEXT:**
+**4. PRE-MAPPED LINE CONTEXT:**
 ```json
 {json.dumps(line_context, indent=2)}
 ```
@@ -320,8 +371,12 @@ Return ONLY valid JSON in this structure:
         prompt += """
 
 **YOUR TASK:**
-Intelligently map the P&ID valve data with HMB process conditions.
-Match valves to streams using line numbers.
+Intelligently map the P&ID valve data with HMB process conditions and Line List design data.
+- Use P&ID for: TAG NO, LINE NO, PIPING CLASS, FAIL POSITION
+- Use H&MB for: FLUID, OPERATING CONDITIONS, H2S (sour service)
+- Use Line List for: DESIGN PRESSURE, DESIGN TEMP (cross-reference with line numbers)
+- Match valves to streams using line numbers
+
 Return complete datasheet data for each valve in the specified JSON format.
 
 Focus on accuracy - flag uncertain matches with low confidence.

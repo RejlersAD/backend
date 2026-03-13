@@ -49,6 +49,7 @@ def smart_datasheet_upload(request):
         # Get uploaded files based on selected type
         pid_file = request.FILES.get('pid_file')
         hmb_file = request.FILES.get('hmb_file')
+        linelist_file = request.FILES.get('linelist_file')
         other_file = request.FILES.get('other_file')
         
         # Validate files based on datasheet type
@@ -78,7 +79,7 @@ def smart_datasheet_upload(request):
                     'error': 'Pump data file is required for Pump Hydraulic calculation.'
                 }, status=400)
         
-        logger.info(f"[Smart Datasheet] Files received - P&ID: {bool(pid_file)}, HMB: {bool(hmb_file)}, Other: {bool(other_file)}")
+        logger.info(f"[Smart Datasheet] Files received - P&ID: {bool(pid_file)}, HMB: {bool(hmb_file)}, Line List: {bool(linelist_file)}, Other: {bool(other_file)}")
         
         # Get user preferences
         user_preferences = {
@@ -119,6 +120,16 @@ def smart_datasheet_upload(request):
                 'path': temp_file.name,
                 'name': hmb_file.name,
                 'type': 'hmb'
+            })
+        
+        if linelist_file:
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+            temp_file.write(linelist_file.read())
+            temp_file.close()
+            temp_files.append({
+                'path': temp_file.name,
+                'name': linelist_file.name,
+                'type': 'linelist'
             })
             
         if other_file:

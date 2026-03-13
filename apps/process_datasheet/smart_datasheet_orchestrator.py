@@ -197,6 +197,7 @@ class SmartDatasheetOrchestrator:
         # Get P&ID and HMB file info from dict
         pid_info = files_dict.get('pid')
         hmb_info = files_dict.get('hmb')
+        linelist_info = files_dict.get('linelist')
         
         if not pid_info or not hmb_info:
             return {'success': False, 'error': 'MOV requires both P&ID and HMB files'}
@@ -204,15 +205,17 @@ class SmartDatasheetOrchestrator:
         # Files are already saved as temp files, just use the paths
         pid_path = pid_info['path']
         hmb_path = hmb_info['path']
+        linelist_path = linelist_info['path'] if linelist_info else None
         pid_filename = pid_info['name']
         
-        # Process with proper parameters: (pid_path, hmb_path, pid_filename, user_email, job_id)
+        # Process with proper parameters: (pid_path, hmb_path, pid_filename, user_email, job_id, linelist_path)
         result = process_mov_in_thread(
             pid_path,
             hmb_path,
             pid_filename,
             'smart_user@system',  # user_email  
-            str(uuid.uuid4())  # job_id
+            str(uuid.uuid4()),  # job_id
+            linelist_path  # linelist_file_path
         )
         return result
     
@@ -223,6 +226,7 @@ class SmartDatasheetOrchestrator:
         # Get P&ID and HMB file info from dict
         pid_info = files_dict.get('pid')
         hmb_info = files_dict.get('hmb')
+        linelist_info = files_dict.get('linelist')
         
         if not pid_info or not hmb_info:
             return {'success': False, 'error': 'SDV requires both P&ID and HMB files'}
@@ -230,15 +234,17 @@ class SmartDatasheetOrchestrator:
         # Files are already saved as temp files, just use the paths
         pid_path = pid_info['path']
         hmb_path = hmb_info['path']
+        linelist_path = linelist_info['path'] if linelist_info else None
         pid_filename = pid_info['name']
         
-        # Process with proper parameters: (pid_path, hmb_path, pid_filename, user_email, job_id)
+        # Process with proper parameters: (pid_path, hmb_path, pid_filename, user_email, job_id, linelist_path)
         result = process_sdv_in_thread(
             pid_path, 
             hmb_path, 
             pid_filename,
             'smart_user@system',  # user_email
-            str(uuid.uuid4())  # job_id
+            str(uuid.uuid4()),  # job_id
+            linelist_path  # linelist_file_path
         )
         return result
     

@@ -42,15 +42,17 @@ class MOVDatasheetAIMapper:
         self,
         pid_data: Dict,
         hmb_data: Dict,
-        line_context: Optional[Dict] = None
+        line_context: Optional[Dict] = None,
+        line_list_data: Optional[Dict] = None
     ) -> Dict:
         """
-        Intelligently map P&ID and HMB data to MOV datasheet fields
+        Intelligently map P&ID, HMB, and Line List data to MOV datasheet fields
         
         Args:
             pid_data: Structured data extracted from P&ID
             hmb_data: Structured data extracted from HMB
             line_context: Pre-mapped line associations (optional)
+            line_list_data: Structured data extracted from Line List (optional)
         
         Returns:
             Dict with filled datasheet fields ready for Excel
@@ -58,16 +60,18 @@ class MOVDatasheetAIMapper:
         log_and_print("[MOVDatasheetAIMapper] 🤖 Starting intelligent mapping...")
         
         try:
-            # Build the system prompt
+            # Build the system prompt with Line List support
             system_prompt = self._build_system_prompt()
             
-            # Build the user prompt with structured data
-            user_prompt = self._build_user_prompt(pid_data, hmb_data, line_context)
+            # Build the user prompt with structured data including Line List
+            user_prompt = self._build_user_prompt(pid_data, hmb_data, line_context, line_list_data)
             
             log_and_print(f"[MOVDatasheetAIMapper] Sending to OpenAI GPT-4...")
             log_and_print(f"[MOVDatasheetAIMapper] 📊 INPUT DATA:")
             log_and_print(f"[MOVDatasheetAIMapper]   - P&ID valves: {len(pid_data.get('valves', []))}")
             log_and_print(f"[MOVDatasheetAIMapper]   - HMB streams: {len(hmb_data.get('streams', []))}")
+            if line_list_data:
+                log_and_print(f"[MOVDatasheetAIMapper]   - Line List entries: {len(line_list_data.get('lines', []))}")
             
             # Log sample valve and stream for debugging
             if pid_data.get('valves'):
@@ -119,65 +123,107 @@ class MOVDatasheetAIMapper:
             raise  # Re-raise to show clear error to user
     
     def _build_system_prompt(self) -> str:
-        """Build the system prompt for AI - MOV SPECIFIC EXTRACTION"""
+        """Build the system prompt for AI - MOV SPECIFIC EXTRACTION WITH LINE LIST"""
         return """You are an expert engineering data extraction assistant for Motor Operated Valve (MOV) Datasheets.
 
 🎯 MOV DATASHEET EXTRACTION RULES:
 
 **STRUCTURE:**
-- Section 1: General Data (FROM P&ID)
-- Section 2: Operating Conditions (FROM HMB)
-- Section 3: Valve Details (LEAVE BLANK)
-- Section 4: Actuator Details (LEAVE BLANK)
+- Section 1: General Data (FROM P&ID + Line List + Legend)
+- Section 2: Operating Conditions (FROM HMB + Line List)
+- Section 3: Valve Details (FROM P&ID + Vendor/Instrumentation)
+- Section 4: Actuator Details (LEAVE BLANK for now)
 
 **DATA SOURCE MAPPING:**
 
-📋 SECTION 1 - GENERAL DATA (FROM P&ID):
-Extract from P&ID document:
-- tag_no: Valve tag number (e.g., "MOV-100-001")
-- service: Valve service description
+📋 SECTION 1 - GENERAL DATA:
+Sources: P&ID (primary) + Line List + Legend
+- tag_no: From P&ID (e.g., "MOV-100-001")
+- service: From Legend P&ID (abbreviations) or P&ID description
 - **pid_no: EXACTLY from pid_data['drawing_info']['pid_no']**
-- line_no: Line number associated with valve
-- piping_class: Pipe specification
-- fluid: From HMB stream matching line_no
-- state: From HMB stream (Liquid/Gas/Two-Phase)
-- phase: From HMB stream (Single/Multi-phase)
+- line_no: From P&ID (match valve to line)
+- piping_class: From **P&ID** (line specification on P&ID drawing)
+- fluid: From **Line List** and **H&MB** (both sources)
+- state: From Line List and H&MB (Liquid/Gas/Two-Phase)
+- phase: From Line List and H&MB (Single/Multi-phase)
 
-📋 SECTION 2 - OPERATING CONDITIONS (FROM HMB):
-Extract from flattened HMB stream data:
-- operating_pressure_min: stream['operating_pressure_min']
-- operating_pressure_normal: stream['operating_pressure_normal']
-- operating_pressure_max: stream['operating_pressure_max']
-- pressure_unit: stream['pressure_unit']
-- operating_temp_min: stream['operating_temp_min']
-- operating_temp_normal: stream['operating_temp_normal']
-- operating_temp_max: stream['operating_temp_max']
-- operating_temp_unit: stream['operating_temp_unit']
-- design_pressure_min: stream['design_pressure_min']
-- design_pressure_max: stream['design_pressure_max']
-- design_temp_min: stream['design_temp_min']
-- design_temp_max: stream['design_temp_max']
-- design_temp_unit: stream['design_temp_unit']
-- sour_service: "Yes"/"No" from P&ID or HMB
-- special_conditions: Any special requirements
-- shut_off_pressure: Format as value + unit
+📋 SECTION 2 - OPERATING CONDITIONS:
+Sources: H&MB (primary) + Line List (fallback)
+- operating_pressure_min: From H&MB or calculated
+- operating_pressure_normal: From **H&MB** or **Line List** "Normal Operating Pressure"
+- operating_pressure_max: From H&MB or calculated
+- pressure_unit: From H&MB
+- operating_temp_min: From H&MB or calculated
+- operating_temp_normal: From **H&MB** or **Line List** "Normal Operating Temperature"
+- operating_temp_max: From H&MB or calculated
+- operating_temp_unit: From H&MB
+- design_pressure: From **Line List** (primary) or H&MB
+- design_temp: From **Line List** (primary) or H&MB
+- sour_service: From H2S content in H&MB (if H2S > 0 ppm → "Yes", else "No")
+- shut_off_pressure: Upstream equipment max pressure (from P&ID equipment specs)
 
-🚫 SECTIONS 3 & 4 - LEAVE AS NULL:
-- diff_pressure_delta_p: null
-- seat_leakage_class: null
-- nace_compliant: null
-- fail_position: null
-- valve_close_time: null
-- valve_open_time: null
+📋 SECTION 3 - VALVE DETAILS:
+Sources: P&ID + Instrumentation Department + Vendor (if available)
+- diff_pressure_delta_p: From hydraulic calculations (usually software-generated, leave null if not provided)
+- fail_position: From **P&ID** (FO = Fail Open, FC = Fail Closed, FL = Fail Last)
+- valve_close_time: From **Vendor inputs** (leave null if not provided)
+- valve_open_time: From **Vendor inputs** (leave null if not provided)
+- seat_leakage_class: From Vendor or standards (leave null if not provided)
+- nace_compliant: From H2S content or specs (leave null if unknown)
+
+🚫 SECTION 4 - ACTUATOR DETAILS (LEAVE AS NULL):
+- actuator_type: null
+- actuator_power: null
+- actuator_voltage: null
+
+**INTELLIGENT EXTRACTION STRATEGY:**
+
+1. **TAG NO & P&ID NO**: Always from P&ID
+2. **SERVICE**: Check Legend P&ID for abbreviations first, fallback to P&ID description
+3. **LINE NO & PIPING CLASS**: 
+   - Line number from P&ID
+   - Piping class from P&ID (line specification on drawing)
+4. **FLUID/STATE/PHASE**: Both Line List and H&MB (cross-reference both sources)
+5. **OPERATING PRESSURE & TEMP**:
+   - Normal values: H&MB primary, Line List fallback
+   - Min/Max: Usually from calculations (not directly in documents)
+6. **DESIGN PRESSURE & TEMP**: Line List (in general - overall design specs)
+7. **SOUR SERVICE**: 
+   - Check H&MB for H2S content
+   - If H2S > 0 ppm or H2S mentioned → "Yes"
+   - Otherwise → "No"
+   - Note: Can be tricky to find in H&MB depending on format
+8. **SHUT OFF PRESSURE**: 
+   - Depends on MOV location
+   - Use max possible pressure of upstream equipment
+   - Look for upstream equipment in P&ID
+9. **DIFF PRESSURE**: Usually from hydraulic calculation software, leave null if not provided
+10. **FAIL POSITION**: Extract from P&ID symbols (FO=Fail Open, FC=Fail Closed, FL=Fail Last)
+11. **VALVE CLOSE/OPEN TIME**: Generally from Vendor inputs, leave null if not provided
+
+**LINE LIST DATA FORMAT:**
+Line List typically contains:
+- Line Number (matches valve line_no)
+- Fluid Code & Description
+- Piping Class/Spec
+- Design Pressure
+- Design Temperature
+- Normal Operating Pressure
+- Normal Operating Temperature
+- Insulation requirements
 
 **MATCHING STRATEGY:**
 1. For each MOV valve in P&ID:
-   - Extract Section 1 fields from P&ID
-   - Find line_no
-   - Match line_no to HMB streams
-   - Extract Section 2 from matched HMB stream
-   - Leave Sections 3 & 4 as null
+   - Extract TAG NO and P&ID NO from P&ID
+   - Find associated LINE NO from P&ID
+   - Match LINE NO to Line List → get piping_class, design_pressure, design_temp
+   - Match LINE NO to H&MB streams → get fluid, operating conditions, H2S content
+   - Check Legend for SERVICE abbreviation
+   - Extract FAIL POSITION from P&ID (FO/FC/FL)
+   - Calculate SHUT OFF PRESSURE from upstream equipment
+   - Leave vendor-specific fields (valve times) as null unless provided
 
+**EXAMPLE OUTPUT:**
 Return ONLY valid JSON:
 {
   "valves": [
@@ -190,32 +236,21 @@ Return ONLY valid JSON:
       "fluid": "Natural Gas",
       "state": "Gas",
       "phase": "Single Phase",
-      "operating_pressure_min": "65",
-      "operating_pressure_normal": "75",
-      "operating_pressure_max": "85",
-      "pressure_unit": "barg",
-      "operating_temp_min": "-10",
-      "operating_temp_normal": "25",
-      "operating_temp_max": "65",
-      "operating_temp_unit": "°C",
-      "design_pressure_min": "0",
-      "design_pressure_max": "90",
-      "design_temp_min": "-20",
-      "design_temp_max": "85",
-      "design_temp_unit": "°C",
+      "operating_pressure_normal": "75 barg",
+      "operating_temp_normal": "25°C",
+      "design_pressure": "90 barg",
+      "design_temp": "85°C",
       "sour_service": "No",
-      "special_conditions": "None",
       "shut_off_pressure": "95 barg",
+      "fail_position": "FC",
       "diff_pressure_delta_p": null,
-      "seat_leakage_class": null,
-      "nace_compliant": null,
-      "fail_position": null,
       "valve_close_time": null,
       "valve_open_time": null,
       "confidence": "high"
     }
   ],
-  "overall_confidence": "high"
+  "overall_confidence": "high",
+  "data_sources_used": ["P&ID", "H&MB", "Line List", "Legend"]
 }"""
     
     def _flatten_hmb_streams(self, hmb_data: Dict) -> Dict:
@@ -262,9 +297,10 @@ Return ONLY valid JSON:
         self,
         pid_data: Dict,
         hmb_data: Dict,
-        line_context: Optional[Dict]
+        line_context: Optional[Dict],
+        line_list_data: Optional[Dict] = None
     ) -> str:
-        """Build user prompt with structured data"""
+        """Build user prompt with structured data including Line List"""
         
         # Flatten HMB data
         flattened_hmb = self._flatten_hmb_streams(hmb_data)
@@ -276,15 +312,32 @@ Return ONLY valid JSON:
 {json.dumps(pid_data, indent=2)}
 ```
 
-**2. HMB DATA (FLATTENED):**
+**2. H&MB DATA (FLATTENED):**
 ```json
 {json.dumps(flattened_hmb, indent=2)}
 ```
 """
         
+        if line_list_data:
+            prompt += f"""
+**3. LINE LIST DATA:**
+```json
+{json.dumps(line_list_data, indent=2)}
+```
+
+**LINE LIST USAGE INSTRUCTIONS:**
+- Match LINE NO from P&ID valve to Line List entries
+- Extract PIPING CLASS from Line List (primary source)
+- Extract DESIGN PRESSURE from Line List
+- Extract DESIGN TEMPERATURE from Line List
+- Extract NORMAL OPERATING PRESSURE from Line List (if available)
+- Extract NORMAL OPERATING TEMPERATURE from Line List (if available)
+- Line List provides general design values for entire piping line
+"""
+        
         if line_context:
             prompt += f"""
-**3. PRE-MAPPED LINE CONTEXT:**
+**4. PRE-MAPPED LINE CONTEXT:**
 ```json
 {json.dumps(line_context, indent=2)}
 ```
@@ -293,9 +346,15 @@ Return ONLY valid JSON:
         prompt += """
 
 **YOUR TASK:**
-Map P&ID MOV valve data with HMB process conditions.
-Populate ONLY Section 1 (General Data) and Section 2 (Operating Conditions).
-Leave Sections 3 & 4 as null.
+Map MOV valve data intelligently from multiple sources:
+1. P&ID → TAG NO, P&ID NO, LINE NO, FAIL POSITION (FO/FC/FL)
+2. Line List → PIPING CLASS, DESIGN PRESSURE, DESIGN TEMP
+3. H&MB → FLUID, STATE, PHASE, OPERATING CONDITIONS, H2S (for Sour Service)
+4. Legend → SERVICE abbreviations
+5. Calculate SHUT OFF PRESSURE from upstream equipment max pressure
+
+Populate all available fields based on document sources.
+Leave vendor-specific fields (valve times, diff pressure) as null unless provided.
 Return complete datasheet data in the specified JSON format.
 """
         

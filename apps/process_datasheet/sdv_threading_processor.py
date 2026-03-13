@@ -20,7 +20,7 @@ def log_and_print(message):
     sys.stderr.flush()
 
 
-def process_sdv_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email, job_id):
+def process_sdv_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email, job_id, linelist_file_path=None):
     """
     Process SDV datasheet in background thread
     Stores result in Django cache
@@ -31,6 +31,7 @@ def process_sdv_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         pid_filename: Original P&ID filename
         user_email: User email
         job_id: Unique job identifier
+        linelist_file_path: Optional path to Line List PDF
     """
     log_and_print(f"ðŸš€ [SDV Thread {job_id[:8]}] Starting processing...")
     
@@ -97,6 +98,22 @@ def process_sdv_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
             hmb_extractor = MockHMBExtractor()
             hmb_data = hmb_extractor.extract_from_pdf(hmb_file_path)
             log_and_print(f" [SDV {job_id[:8]}] Mock HMB: {len(hmb_data.get('streams', []))} streams")
+        
+        # STEP 2.5: Extract Line List data if provided (optional)
+        line_list_data = None
+        if linelist_file_path:
+            cache.set(f'sdv_task_{job_id}_stage', 'Extracting Line List data...', timeout=3600)
+            log_and_print(f"📋 [SDV {job_id[:8]}] STEP 2.5: Extracting Line List...")
+            try:
+                # Use same Vision extractor for Line List
+                vision_extractor = HMBVisionExtractor()
+                line_list_data = vision_extractor.extract_from_pdf(linelist_file_path)
+                log_and_print(f"✅ [SDV {job_id[:8]}] Line List extracted")
+            except Exception as e:
+                logger.warning(f"[SDV Thread {job_id}] Line List extraction failed: {e}")
+                log_and_print(f"⚠️ [SDV {job_id[:8]}] Line List extraction failed, continuing without it...")
+                line_list_data = None
+        
         cache.set(f'sdv_task_{job_id}_stage', 'Matching P&ID and HMB data...', timeout=3600)
         
         # STEP 3: Match lines
@@ -111,7 +128,7 @@ def process_sdv_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         log_and_print(f"ðŸ¤– [SDV {job_id[:8]}] STEP 4: AI intelligent mapping...")
         try:
             mapper = SDVDatasheetAIMapper()
-            mapped_data = mapper.map_pid_hmb_to_datasheet(pid_data, hmb_data, line_context)
+            mapped_data = mapper.map_pid_hmb_to_datasheet(pid_data, hmb_data, line_context, line_list_data)
             
             # Check if AI mapping actually produced results
             if not mapped_data.get('valves') or len(mapped_data.get('valves', [])) == 0:
