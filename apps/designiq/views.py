@@ -1590,101 +1590,149 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='base_extraction')
     def base_extraction(self, request):
         """
-        🎯 BASE EXTRACTION ENDPOINT - P&ID Only (No Enrichment)
-        
+        🎯 BASE EXTRACTION ENDPOINT - P&ID Only (Async, production-safe)
+
         POST /api/v1/designiq/lists/base_extraction/
-        
-        Accepts: P&ID file only
-        Returns: 8 base columns extracted synchronously
-        
-        Columns: Original Detection, Fluid Code, Size, Sequence No, 
+
+        Accepts: P&ID file only (PDF)
+        Returns (HTTP 202): { task_id, status_endpoint } — poll for progress/results
+        Returns (HTTP 200): { success, data, ... } — only when Celery is in EAGER mode (local dev)
+
+        Columns: Original Detection, Fluid Code, Size, Sequence No,
                  PIPR Class, Insulation, From, To
-        
-        Does NOT include enrichment logic (HMB/PMS/NACE/Stress)
-        Designed for: /engineering/process/line-list page
+
+        Why async? Railway's reverse proxy times out HTTP requests after ~60 s.
+        OCR extraction takes several minutes, so we offload it to a Celery worker
+        and let the frontend poll /base_extraction_status/{task_id}/ for results.
         """
-        from io import BytesIO
-        
-        logger.info("="*80)
-        logger.info("🎯 BASE EXTRACTION REQUEST - P&ID Only")
-        logger.info("="*80)
-        
+        from apps.designiq.tasks import base_extract_lines_async
+
+        logger.info("=" * 80)
+        logger.info("🎯 BASE EXTRACTION REQUEST (async) – P&ID Only")
+        logger.info("=" * 80)
+
         try:
-            # Validate P&ID file
+            # ------------------------------------------------------------------
+            # 1. Validate input
+            # ------------------------------------------------------------------
             pid_file = request.FILES.get('pid_file')
             if not pid_file:
-                return Response({
-                    'error': 'P&ID file is required'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Validate file type
+                return Response({'error': 'P&ID file is required'}, status=status.HTTP_400_BAD_REQUEST)
+
             if not pid_file.name.lower().endswith('.pdf'):
-                return Response({
-                    'error': 'Only PDF files are supported'
-                }, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Get processing options
+                return Response({'error': 'Only PDF files are supported'}, status=status.HTTP_400_BAD_REQUEST)
+
             include_area = request.POST.get('include_area', 'false').lower() == 'true'
             format_type = request.POST.get('format_type', 'onshore').lower()
-            
+
             logger.info(f"📄 File: {pid_file.name} ({pid_file.size / 1024 / 1024:.2f} MB)")
             logger.info(f"📍 Format: {format_type}, Include Area: {include_area}")
-            
-            # Save file temporarily
+
+            # ------------------------------------------------------------------
+            # 2. Save to a temporary file (Celery worker needs a path on disk)
+            # ------------------------------------------------------------------
             import tempfile
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                 for chunk in pid_file.chunks():
                     tmp_file.write(chunk)
                 tmp_path = tmp_file.name
-            
-            logger.info(f"💾 Saved to temporary file: {tmp_path}")
-            
-            # Extract base columns using global singleton (FAST MODE - No reinitialization)
-            logger.info("🔍 Starting base extraction (FAST MODE)...")
-            extractor = get_pid_extractor()
-            extracted_lines = extractor.extract_from_pdf(
-                tmp_path,
+
+            logger.info(f"💾 Saved to temp file: {tmp_path}")
+
+            # ------------------------------------------------------------------
+            # 3. Submit Celery task
+            # ------------------------------------------------------------------
+            task = base_extract_lines_async.delay(
+                file_path=tmp_path,
+                filename=pid_file.name,
                 include_area=include_area,
-                format_type=format_type
+                format_type=format_type,
             )
-            
-            # Clean up temp file
-            import os
-            os.unlink(tmp_path)
-            
-            logger.info(f"✅ Extracted {len(extracted_lines)} lines from P&ID")
-            
-            # Transform to 8-column format
-            base_data = []
-            for line in extracted_lines:
-                base_item = {
-                    'original_detection': line.get('original_detection', line.get('line_number', '')),
-                    'fluid_code': line.get('fluid_code', ''),
-                    'size': line.get('size', ''),
-                    'sequence_no': line.get('sequence_no', ''),
-                    'pipr_class': line.get('pipr_class', ''),
-                    'insulation': line.get('insulation', ''),
-                    'from': line.get('from_line', line.get('from_equipment', '')),
-                    'to': line.get('to_line', line.get('to_equipment', ''))
-                }
-                base_data.append(base_item)
-            
-            logger.info("="*80)
-            logger.info(f"🎉 BASE EXTRACTION COMPLETE: {len(base_data)} lines")
-            logger.info("="*80)
-            
+
+            # ------------------------------------------------------------------
+            # 4. EAGER mode (local dev): task ran synchronously — return result
+            # ------------------------------------------------------------------
+            is_eager = getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
+            if is_eager:
+                logger.info(f"⚡ EAGER mode: task {task.id} completed synchronously")
+                if task.successful():
+                    result = task.result
+                    return Response(result, status=status.HTTP_200_OK)
+                else:
+                    error = str(task.result) if task.result else 'Task failed in EAGER mode'
+                    return Response({'error': error}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            # ------------------------------------------------------------------
+            # 5. Async mode (production): return task_id for polling
+            # ------------------------------------------------------------------
+            file_size_mb = pid_file.size / 1024 / 1024
+            estimated_seconds = max(60, int(file_size_mb * 45))  # soft estimate
+
+            logger.info(f"🔄 Async mode: queued task {task.id} (~{estimated_seconds}s estimated)")
+
             return Response({
                 'success': True,
-                'total_lines': len(base_data),
-                'data': base_data,
-                'columns': 8,
-                'message': f'Successfully extracted {len(base_data)} lines from P&ID'
-            }, status=status.HTTP_200_OK)
-            
+                'task_id': task.id,
+                'message': 'P&ID uploaded. Processing in background — please poll the status endpoint.',
+                'filename': pid_file.name,
+                'file_size_mb': round(file_size_mb, 2),
+                'estimated_time_seconds': estimated_seconds,
+                'status_endpoint': f'/api/v1/designiq/lists/base_extraction_status/{task.id}/',
+            }, status=status.HTTP_202_ACCEPTED)
+
         except Exception as e:
-            logger.error(f"❌ Base extraction failed: {e}", exc_info=True)
+            logger.error(f"❌ base_extraction failed: {e}", exc_info=True)
             return Response({
                 'error': str(e),
-                'message': 'Base extraction failed'
+                'message': 'Base extraction failed',
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'], url_path='base_extraction_status/(?P<task_id>[^/.]+)')
+    def base_extraction_status(self, request, task_id=None):
+        """
+        📊 Poll the status of an async base extraction job
+
+        GET /api/v1/designiq/lists/base_extraction_status/{task_id}/
+
+        Returns:
+        - state: PENDING | PROGRESS | SUCCESS | FAILURE
+        - percent: 0-100
+        - status: human-readable message
+        - result: extraction data (only when state == SUCCESS)
+        - error: error message (only when state == FAILURE)
+        """
+        from celery.result import AsyncResult
+        from django.core.cache import cache
+
+        if not task_id:
+            return Response({'error': 'task_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            cache_key = f'base_extraction_progress_{task_id}'
+            cached = cache.get(cache_key)
+            if cached:
+                return Response(cached)
+
+            # Fall back to Celery broker
+            task = AsyncResult(task_id)
+            response_data = {'task_id': task_id, 'state': task.state}
+
+            if task.state == 'PENDING':
+                response_data.update({'status': 'Queued, waiting to start…', 'percent': 0})
+            elif task.state == 'PROGRESS':
+                response_data.update(task.info or {})
+            elif task.state == 'SUCCESS':
+                response_data.update({'status': 'Extraction complete!', 'percent': 100, 'result': task.result})
+            elif task.state == 'FAILURE':
+                response_data.update({'status': 'Extraction failed', 'percent': 0,
+                                       'error': str(task.info) if task.info else 'Unknown error'})
+            else:
+                response_data.update({'status': f'State: {task.state}', 'percent': 0})
+
+            return Response(response_data)
+
+        except Exception as e:
+            logger.error(f"❌ base_extraction_status error: {e}", exc_info=True)
+            return Response({'error': str(e), 'task_id': task_id}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 

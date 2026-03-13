@@ -693,3 +693,119 @@ def process_pid_upload_async(
         }, timeout=3600)
         
         raise
+
+
+@shared_task(bind=True, time_limit=1200, soft_time_limit=1140)  # 20 minutes max
+def base_extract_lines_async(self, file_path, filename, include_area=False, format_type='onshore'):
+    """
+    🎯 Async Celery task for Line List base extraction (P&ID only)
+
+    Fixes production timeout: Railway's reverse proxy cuts long HTTP requests.
+    This task runs OCR in the background and stores results in cache for polling.
+
+    Args:
+        file_path: Absolute path to the temporary PDF file
+        filename: Original uploaded filename (for logging)
+        include_area: Include area code in line number format
+        format_type: 'onshore', 'offshore', or 'general'
+
+    Returns:
+        dict with success, total_lines, data, columns, message
+    """
+    from .pid_ocr_extractor_v2 import PIDLineExtractorV2
+
+    task_id = self.request.id
+    cache_key = f'base_extraction_progress_{task_id}'
+
+    def update_progress(percent, status_message):
+        """Write progress to cache so the status endpoint can return it."""
+        progress_data = {
+            'task_id': task_id,
+            'state': 'PROGRESS',
+            'status': status_message,
+            'percent': percent,
+        }
+        self.update_state(state='PROGRESS', meta=progress_data)
+        cache.set(cache_key, progress_data, timeout=3600)
+        logger.info(f"[base_extract {task_id}] {percent}% – {status_message}")
+
+    try:
+        logger.info("=" * 70)
+        logger.info(f"🎯 BASE EXTRACTION TASK STARTED  task_id={task_id}")
+        logger.info(f"   file: {filename}  format: {format_type}  area: {include_area}")
+        logger.info("=" * 70)
+
+        update_progress(5, 'Initializing OCR engine…')
+
+        extractor = PIDLineExtractorV2()
+
+        update_progress(15, f'Loaded OCR engine. Running extraction on {filename}…')
+
+        extracted_lines = extractor.extract_from_pdf(
+            file_path,
+            include_area=include_area,
+            format_type=format_type,
+        )
+
+        update_progress(85, f'OCR complete: {len(extracted_lines)} lines found. Formatting…')
+
+        # Transform to 8-column format (mirrors the sync base_extraction logic)
+        base_data = []
+        for line in extracted_lines:
+            base_data.append({
+                'original_detection': line.get('original_detection', line.get('line_number', '')),
+                'fluid_code': line.get('fluid_code', ''),
+                'size': line.get('size', ''),
+                'sequence_no': line.get('sequence_no', ''),
+                'pipr_class': line.get('pipr_class', ''),
+                'insulation': line.get('insulation', ''),
+                'from': line.get('from_line', line.get('from_equipment', '')),
+                'to': line.get('to_line', line.get('to_equipment', '')),
+            })
+
+        # Clean up temporary file
+        if os.path.exists(file_path):
+            try:
+                os.unlink(file_path)
+            except Exception as cleanup_err:
+                logger.warning(f"Could not delete temp file {file_path}: {cleanup_err}")
+
+        result = {
+            'success': True,
+            'total_lines': len(base_data),
+            'data': base_data,
+            'columns': 8,
+            'message': f'Successfully extracted {len(base_data)} lines from {filename}',
+        }
+
+        cache.set(cache_key, {
+            'task_id': task_id,
+            'state': 'SUCCESS',
+            'status': 'Extraction complete!',
+            'percent': 100,
+            'result': result,
+        }, timeout=3600)
+
+        logger.info(f"✅ BASE EXTRACTION COMPLETE: {len(base_data)} lines  task_id={task_id}")
+        return result
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"❌ base_extract_lines_async failed: {error_msg}", exc_info=True)
+
+        # Clean up temp file on failure
+        if os.path.exists(file_path):
+            try:
+                os.unlink(file_path)
+            except Exception:
+                pass
+
+        cache.set(cache_key, {
+            'task_id': task_id,
+            'state': 'FAILURE',
+            'status': 'Extraction failed',
+            'percent': 0,
+            'error': error_msg,
+        }, timeout=3600)
+
+        raise
