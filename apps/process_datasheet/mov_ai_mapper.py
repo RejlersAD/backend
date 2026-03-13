@@ -71,7 +71,15 @@ class MOVDatasheetAIMapper:
             log_and_print(f"[MOVDatasheetAIMapper]   - P&ID valves: {len(pid_data.get('valves', []))}")
             log_and_print(f"[MOVDatasheetAIMapper]   - HMB streams: {len(hmb_data.get('streams', []))}")
             if line_list_data:
-                log_and_print(f"[MOVDatasheetAIMapper]   - Line List entries: {len(line_list_data.get('lines', []))}")
+                # Log Line List data structure for debugging
+                log_and_print(f"[MOVDatasheetAIMapper]   - Line List provided: YES")
+                log_and_print(f"[MOVDatasheetAIMapper]   - Line List keys: {list(line_list_data.keys())}")
+                line_entries = line_list_data.get('lines', []) or line_list_data.get('streams', []) or line_list_data.get('data', [])
+                log_and_print(f"[MOVDatasheetAIMapper]   - Line List entries: {len(line_entries)}")
+                if line_entries and len(line_entries) > 0:
+                    log_and_print(f"[MOVDatasheetAIMapper]   - Sample Line List entry: {json.dumps(line_entries[0], indent=2)}")
+            else:
+                log_and_print(f"[MOVDatasheetAIMapper]   - Line List: NOT PROVIDED")
             
             # Log sample valve and stream for debugging
             if pid_data.get('valves'):
@@ -83,7 +91,7 @@ class MOVDatasheetAIMapper:
             
             # Call OpenAI
             response = self.client.chat.completions.create(
-                model="gpt-4-turbo-preview",
+                model="gpt-4o",  # Use GPT-4o for better extraction
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -126,6 +134,13 @@ class MOVDatasheetAIMapper:
         """Build the system prompt for AI - MOV SPECIFIC EXTRACTION WITH LINE LIST"""
         return """You are an expert engineering data extraction assistant for Motor Operated Valve (MOV) Datasheets.
 
+🎯 CRITICAL INSTRUCTIONS:
+1. EXTRACT ALL AVAILABLE DATA - Do NOT use "N/A" unless data is truly unavailable
+2. CROSS-REFERENCE between P&ID, HMB, and Line List to populate maximum fields
+3. Use intelligent matching (line numbers, stream IDs, valve tags) to link data
+4. If a field value exists in ANY document source, extract it
+5. Only use null/N/A for vendor-specific fields (valve times, diff pressure)
+
 🎯 MOV DATASHEET EXTRACTION RULES:
 
 **STRUCTURE:**
@@ -148,19 +163,19 @@ Sources: P&ID (primary) + Line List + Legend
 - phase: From Line List and H&MB (Single/Multi-phase)
 
 📋 SECTION 2 - OPERATING CONDITIONS:
-Sources: H&MB (primary) + Line List (fallback)
-- operating_pressure_min: From H&MB or calculated
-- operating_pressure_normal: From **H&MB** or **Line List** "Normal Operating Pressure"
-- operating_pressure_max: From H&MB or calculated
-- pressure_unit: From H&MB
-- operating_temp_min: From H&MB or calculated
-- operating_temp_normal: From **H&MB** or **Line List** "Normal Operating Temperature"
-- operating_temp_max: From H&MB or calculated
-- operating_temp_unit: From H&MB
-- design_pressure: From **Line List** (primary) or H&MB
-- design_temp: From **Line List** (primary) or H&MB
-- sour_service: From H2S content in H&MB (if H2S > 0 ppm → "Yes", else "No")
-- shut_off_pressure: Upstream equipment max pressure (from P&ID equipment specs)
+Sources: H&MB (primary) + Line List (fallback) - MUST EXTRACT ALL AVAILABLE VALUES
+- operating_pressure_normal: **REQUIRED** - From H&MB streams or Line List "Operating Pressure" or "Normal Pressure"
+- operating_pressure_min: From H&MB min value OR calculate as normal - 10% if only normal available
+- operating_pressure_max: From H&MB max value OR calculate as normal + 10% if only normal available
+- pressure_unit: From H&MB or Line List (barg, psig, kPa, MPa) - DO NOT leave as N/A
+- operating_temp_normal: **REQUIRED** - From H&MB streams or Line List "Operating Temperature" or "Normal Temperature"
+- operating_temp_min: From H&MB min value OR calculate as normal - 10°C/20°F if only normal available
+- operating_temp_max: From H&MB max value OR calculate as normal + 10°C/20°F if only normal available
+- operating_temp_unit: From H&MB or Line List (°C, °F, K) - DO NOT leave as N/A
+- design_pressure: **REQUIRED** - From Line List "Design Pressure" (primary) or H&MB or calculate as operating_max × 1.1
+- design_temp: **REQUIRED** - From Line List "Design Temperature" (primary) or H&MB or calculate as operating_max + 20°C
+- sour_service: Check H&MB for H2S content (if H2S > 0 ppm or mentioned → "Yes", else "No") - Default to "No" if unclear
+- shut_off_pressure: Look for upstream equipment pressure in P&ID, or use design_pressure × 1.05 as estimate
 
 📋 SECTION 3 - VALVE DETAILS:
 Sources: P&ID + Instrumentation Department + Vendor (if available)
@@ -184,19 +199,27 @@ Sources: P&ID + Instrumentation Department + Vendor (if available)
    - Line number from P&ID
    - Piping class from P&ID (line specification on drawing)
 4. **FLUID/STATE/PHASE**: Both Line List and H&MB (cross-reference both sources)
-5. **OPERATING PRESSURE & TEMP**:
-   - Normal values: H&MB primary, Line List fallback
-   - Min/Max: Usually from calculations (not directly in documents)
-6. **DESIGN PRESSURE & TEMP**: Line List (in general - overall design specs)
+5. **OPERATING PRESSURE & TEMP** - CRITICAL:
+   - Normal values: Search H&MB streams first, then Line List
+   - Look for fields like: "Operating Pressure", "Normal Pressure", "Design Operating", "Process Pressure"
+   - Look for fields like: "Operating Temperature", "Normal Temperature", "Process Temperature"
+   - Min/Max: Extract from H&MB if available, otherwise calculate from normal (±10% for pressure, ±10-20 units for temp)
+   - Units: ALWAYS extract units (barg, psig, °C, °F) - never leave as N/A
+   - If H&MB has stream data, match by line number or stream ID to get correct values for the valve's line
+6. **DESIGN PRESSURE & TEMP** - CRITICAL:
+   - Primary source: Line List (search for "Design Pressure", "Design Temp", "Maximum Allowable")
+   - Fallback: H&MB or calculate as operating_max × 1.1 for pressure, operating_max + 20 for temperature
+   - Design values are typically higher than operating values for safety margin
 7. **SOUR SERVICE**: 
    - Check H&MB for H2S content
    - If H2S > 0 ppm or H2S mentioned → "Yes"
-   - Otherwise → "No"
+   - Otherwise → "No" (default to "No" if data unclear)
    - Note: Can be tricky to find in H&MB depending on format
 8. **SHUT OFF PRESSURE**: 
    - Depends on MOV location
    - Use max possible pressure of upstream equipment
    - Look for upstream equipment in P&ID
+   - Fallback: Use design_pressure × 1.05 as reasonable estimate
 9. **DIFF PRESSURE**: Usually from hydraulic calculation software, leave null if not provided
 10. **FAIL POSITION**: Extract from P&ID symbols (FO=Fail Open, FC=Fail Closed, FL=Fail Last)
 11. **VALVE CLOSE/OPEN TIME**: Generally from Vendor inputs, leave null if not provided

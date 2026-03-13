@@ -83,7 +83,15 @@ class SDVDatasheetAIMapper:
             log_and_print(f"[SDVDatasheetAIMapper]   - P&ID valves: {len(pid_data.get('valves', []))}")
             log_and_print(f"[SDVDatasheetAIMapper]   - HMB streams: {len(hmb_data.get('streams', []))}")
             if line_list_data:
-                log_and_print(f"[SDVDatasheetAIMapper]   - Line List entries: {len(line_list_data.get('lines', []))}")
+                # Log Line List data structure for debugging
+                log_and_print(f"[SDVDatasheetAIMapper]   - Line List provided: YES")
+                log_and_print(f"[SDVDatasheetAIMapper]   - Line List keys: {list(line_list_data.keys())}")
+                line_entries = line_list_data.get('lines', []) or line_list_data.get('streams', []) or line_list_data.get('data', [])
+                log_and_print(f"[SDVDatasheetAIMapper]   - Line List entries: {len(line_entries)}")
+                if line_entries and len(line_entries) > 0:
+                    log_and_print(f"[SDVDatasheetAIMapper]   - Sample Line List entry: {json.dumps(line_entries[0], indent=2)}")
+            else:
+                log_and_print(f"[SDVDatasheetAIMapper]   - Line List: NOT PROVIDED")
             
             # Log sample valve and stream for debugging
             if pid_data.get('valves'):
@@ -95,7 +103,7 @@ class SDVDatasheetAIMapper:
             
             # Call OpenAI
             response = self.client.chat.completions.create(
-                model="gpt-4-turbo-preview",
+                model="gpt-4o",  # Use GPT-4o for better extraction
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -144,6 +152,13 @@ class SDVDatasheetAIMapper:
         """Build the system prompt for AI - INTELLIGENT EXTRACTION WITH LINE LIST"""
         return """You are an expert engineering data extraction assistant for Safety Device Valve (SDV) Datasheets.
 
+🎯 CRITICAL INSTRUCTIONS:
+1. EXTRACT ALL AVAILABLE DATA - Do NOT use "N/A" unless data is truly unavailable
+2. CROSS-REFERENCE between P&ID, HMB, and Line List to populate maximum fields
+3. Use intelligent matching (line numbers, stream IDs, valve tags) to link data
+4. If a field value exists in ANY document source, extract it
+5. Only use null/N/A for vendor-specific fields (valve times, diff pressure)
+
 🎯 SDV DATASHEET EXTRACTION RULES WITH LINE LIST:
 
 **DATA SOURCE MAPPING (Same as MOV):**
@@ -157,16 +172,16 @@ Sources: P&ID (primary) + Line List + Legend
 - piping_class: From **P&ID** (line specification on P&ID drawing)
 
 📋 SECTION 2 - OPERATING CONDITIONS:
-Sources: H&MB (primary) + Line List (fallback)
-- fluid: From **Line List** and **H&MB** (both sources)
-- state: From Line List and H&MB (Liquid/Gas/Two-Phase)
-- phase: From Line List and H&MB (Single/Multi-phase)
-- operating_pressure_normal: From **H&MB** or **Line List** (normal values)
-- operating_temp_normal: From **H&MB** or **Line List** (normal values)
-- design_pressure: From **Line List** (in general - overall design specs)
-- design_temp: From **Line List** (in general - overall design specs)
-- sour_service: From H2S content in H&MB (if H2S > 0 ppm → "Yes", else "No") - can be tricky to find
-- shut_off_pressure: Depends on SDV location - max possible pressure of upstream equipment
+Sources: H&MB (primary) + Line List (fallback) - MUST EXTRACT ALL AVAILABLE VALUES
+- fluid: From **Line List** and **H&MB** (both sources) - cross-reference for accuracy
+- state: From Line List and H&MB (Liquid/Gas/Two-Phase) - DO NOT leave as N/A
+- phase: From Line List and H&MB (Single/Multi-phase) - DO NOT leave as N/A
+- operating_pressure_normal: **REQUIRED** - From H&MB streams or Line List "Operating Pressure"
+- operating_temp_normal: **REQUIRED** - From H&MB streams or Line List "Operating Temperature"
+- design_pressure: **REQUIRED** - From Line List "Design Pressure" (primary) or calculate as operating × 1.1
+- design_temp: **REQUIRED** - From Line List "Design Temperature" (primary) or calculate as operating + 20°C
+- sour_service: Check H&MB for H2S content (if H2S > 0 ppm → "Yes", else "No") - Default to "No" if unclear
+- shut_off_pressure: Depends on SDV location - max possible pressure of upstream equipment or design_pressure × 1.05
 
 📋 SECTION 3 - VALVE DETAILS:
 Sources: P&ID + Instrumentation Department + Vendor
