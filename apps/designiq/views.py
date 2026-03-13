@@ -17,6 +17,7 @@ import json
 import os
 import threading
 import uuid
+import concurrent.futures
 
 from .models import DesignProject, DesignAnalysis, DesignOptimization, DesignTemplate, EngineeringListItem, LIST_TYPES
 from .s3_utils import s3_storage  # S3 document storage
@@ -1716,20 +1717,50 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             logger.info(f"💾 Saved to temp file: {tmp_path}")
 
             # ------------------------------------------------------------------
-            # 3. Submit Celery task (with graceful fallback to thread if broker
-            #    is unreachable — e.g. REDIS_URL set but Redis service is down)
+            # 3. Submit Celery task (with graceful, hard-timeout fallback to
+            #    thread when the broker is unreachable or slow).
+            #
+            # SOFT-CODED: CELERY_BROKER_CONNECTION_TIMEOUT (default 5 s) from
+            # settings.py / env var controls how long we wait for Celery before
+            # switching to the thread-based fallback.  Transport-level timeouts
+            # are also set via CELERY_BROKER_TRANSPORT_OPTIONS in settings.py.
             # ------------------------------------------------------------------
             _use_thread_fallback = False
             _task_id_str = None
 
+            # Soft-coded: read broker connect timeout from Django settings
+            _broker_timeout = getattr(
+                settings, 'CELERY_BROKER_CONNECTION_TIMEOUT', 5
+            ) + 3  # add 3 s buffer on top of socket timeout
+
             try:
-                task = base_extract_lines_async.delay(
-                    file_path=tmp_path,
-                    filename=pid_file.name,
-                    include_area=include_area,
-                    format_type=format_type,
-                )
+                # Run .delay() in a worker thread so we can enforce a hard
+                # wall-clock timeout — the transport-level options cover most
+                # cases but this is the last line of defence.
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _tpe:
+                    _future = _tpe.submit(
+                        base_extract_lines_async.delay,
+                        file_path=tmp_path,
+                        filename=pid_file.name,
+                        include_area=include_area,
+                        format_type=format_type,
+                    )
+                    task = _future.result(timeout=_broker_timeout)
                 _task_id_str = task.id
+                logger.info(f'✅ Celery task submitted: {_task_id_str}')
+
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    f'⚠️ Celery .delay() timed out after {_broker_timeout}s. '
+                    'Falling back to thread-based extraction.'
+                )
+                _use_thread_fallback = True
+                _task_id_str = str(uuid.uuid4())
+                _run_base_extraction_in_thread(
+                    _task_id_str, tmp_path, pid_file.name,
+                    include_area, format_type,
+                )
+
             except Exception as broker_err:
                 _err_low = str(broker_err).lower()
                 _is_conn_err = any(x in _err_low for x in (

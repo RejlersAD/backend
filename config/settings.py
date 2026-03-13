@@ -756,6 +756,25 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 
+# SOFT-CODED: Broker transport options — ensures .delay() fails fast when
+# the Redis broker is unreachable (slow timeout vs immediate ERRNO 111).
+# Values come from environment variables with safe defaults.
+# CELERY_BROKER_CONNECTION_TIMEOUT: how long (seconds) to wait for broker TCP connect
+CELERY_BROKER_CONNECTION_TIMEOUT = config('CELERY_BROKER_CONNECTION_TIMEOUT', default=5, cast=float)
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    # Redis socket timeouts — fail fast if broker is unreachable
+    'socket_connect_timeout': CELERY_BROKER_CONNECTION_TIMEOUT,
+    'socket_timeout':         CELERY_BROKER_CONNECTION_TIMEOUT * 2,  # read/write ops
+    # Retry once only so .delay() raises quickly instead of blocking
+    'max_retries':     1,
+    'interval_start':  0,
+    'interval_step':   0.2,
+    'interval_max':    0.5,
+    # Long visibility timeout so heavy OCR tasks are not re-queued mid-flight
+    'visibility_timeout': 43200,  # 12 hours
+}
+print(f"[CELERY] Broker connect timeout: {CELERY_BROKER_CONNECTION_TIMEOUT}s")
+
 # Safe printing of broker URLs (handle None case)
 if CELERY_BROKER_URL:
     print(f"[CELERY] Broker: {CELERY_BROKER_URL.split('@')[0] if '@' in CELERY_BROKER_URL else CELERY_BROKER_URL}")
