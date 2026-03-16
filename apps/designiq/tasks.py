@@ -749,7 +749,10 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
 
         update_progress(85, f'OCR complete: {len(extracted_lines)} lines found. Formatting…')
 
-        # Transform to 8-column format (mirrors the sync base_extraction logic)
+        # Build 8-column output structure with EXPLICIT field mapping
+        # Column order: Original Detection, Fluid Code, Size, Sequence No, PIPR Class, Insulation, From, To
+        # Note: For offshore format (AREA-FluidCode-LineSize-PipeClass-SequenceNo-Insulation),
+        #       area is parsed internally but NOT exported as a separate column
         base_data = []
         for line in extracted_lines:
             base_data.append({
@@ -762,6 +765,8 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
                 'from': line.get('from_line', line.get('from_equipment', '')),
                 'to': line.get('to_line', line.get('to_equipment', '')),
             })
+        
+        logger.info(f'[base_extract {task_id}] Formatted {len(base_data)} rows with 8 explicit columns (area excluded from export)')
 
         # Clean up temporary file
         if os.path.exists(file_path):

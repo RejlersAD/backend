@@ -66,8 +66,12 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                 format_type=format_type,
             )
             _write('PROGRESS', 85, f'OCR complete: {len(extracted_lines)} lines found. Formatting…')
-            base_data = [
-                {
+            # Build 8-column output structure with EXPLICIT field mapping
+            # Column order: Original Detection, Fluid Code, Size, Sequence No, PIPR Class, Insulation, From, To
+            # Note: For offshore format, area is parsed internally but NOT exported as a separate column
+            base_data = []
+            for line in extracted_lines:
+                base_data.append({
                     'original_detection': line.get('original_detection', line.get('line_number', '')),
                     'fluid_code':         line.get('fluid_code', ''),
                     'size':               line.get('size', ''),
@@ -76,9 +80,8 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                     'insulation':         line.get('insulation', ''),
                     'from':               line.get('from_line', line.get('from_equipment', '')),
                     'to':                 line.get('to_line',   line.get('to_equipment', '')),
-                }
-                for line in extracted_lines
-            ]
+                })
+            logger.info(f'[base_extract_thread] Formatted {len(base_data)} rows with 8 columns (area excluded from export)')
             if os.path.exists(file_path):
                 try:
                     os.unlink(file_path)

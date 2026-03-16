@@ -360,7 +360,8 @@ class PIDLineExtractorV2:
         format_label = 'OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA')
         logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({format_label})")
         if format_type == 'offshore':
-            logger.info(f"  📋 Offshore format: AREA-FLUIDCODE-SIZE-PIPECLASS-SEQUENCE-INSULATION (e.g., 604-HO-8-BC2CA0-1071-H)")
+            logger.info(f"  📋 Offshore format: AREA-FLUIDCODE-SIZE-PIPECLASS-SEQUENCE-INSULATION")
+            logger.info(f"  📋 ADNOC examples: 604-RO-4-AN1NLO-0011-P, 604-HO-8-BC2CA0-1071-H, 604-AG-3-ASSNLO-0007")
         
         # First, normalize the text - replace all dash-like characters with standard hyphen
         # OCR often sees: = ~ — – ― ─ | / as separators
@@ -391,26 +392,31 @@ class PIDLineExtractorV2:
         
         if format_type == 'offshore':
             # OFFSHORE PATTERNS: AREA-FLUIDCODE-LINESIZE-PIPECLASS-SEQUENCE-INSULATION
-            # Example: 604-HO-8-BC2CA0-1071-H
-            # Format: AREA(2-3 digits) - FLUID(1-3 letters) - SIZE(1-2 digits) - CLASS(5-6 alphanumeric) - SEQ(4-5 digits) - INSULATION(1-2 letters, optional)
+            # Standard Example: 604-HO-8-BC2CA0-1071-H
+            # ADNOC Examples: 604-RO-4-AN1NLO-0011-P, 604-HO-8-BC2CA0-1071-H, 604-AG-3-ASSNLO-0007
+            # Supports both 5-segment (no insulation) and 6-segment (with insulation) formats
             patterns = [
-                # Pattern 1: Exact compact format (highest priority for clean data)
-                r'\b(\d{2,3})-([A-Z]{1,3})-(\d{1,2})-([A-Z0-9]{5,6})-(\d{4,5})(?:-([A-Z]{1,2}))?\b',
+                # Pattern 1: ADNOC primary format - flexible and permissive
+                # Matches: 604-HO-8-BC2CA0-1071-H (6 segments), 604-AG-3-ASSNLO-0007 (5 segments)
+                r'\b(\d{3})-([A-Z]{2})-(\d+)-([A-Z0-9]+)-(\d{3,5})(?:-([A-Z]{1,2}))?\b',
                 
-                # Pattern 2: With optional spaces around hyphens
-                r'\b(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{1,2})\s*-\s*([A-Z0-9]{5,6})\s*-\s*(\d{4,5})(?:\s*-\s*([A-Z]{1,2}))?\b',
+                # Pattern 2: ADNOC with flexible area (2-3 digits) and fluid (1-3 letters)
+                r'\b(\d{2,3})-([A-Z]{1,3})-(\d{1,2})-([A-Z0-9]{4,8})-(\d{3,5})(?:-([A-Z]{1,2}))?\b',
                 
-                # Pattern 3: With optional quote after size (OCR artifact)
-                r'\b(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Z0-9]{5,6})\s*-\s*(\d{4,5})(?:\s*-\s*([A-Z]{1,2}))?\b',
+                # Pattern 3: With optional spaces around hyphens
+                r'\b(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{1,2})\s*-\s*([A-Z0-9]{4,8})\s*-\s*(\d{3,5})(?:\s*-\s*([A-Z]{1,2}))?\b',
                 
-                # Pattern 4: With flexible spacing and multiple hyphens
-                r'\b(\d{2,3})\s*-+\s*([A-Z]{1,3})\s*-+\s*(\d{1,2})"?\s*-+\s*([A-Z0-9]{5,6})\s*-+\s*(\d{4,5})(?:\s*-+\s*([A-Z]{1,2}))?\b',
+                # Pattern 4: With optional quote after size (OCR artifact)
+                r'\b(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Z0-9]{4,8})\s*-\s*(\d{3,5})(?:\s*-\s*([A-Z]{1,2}))?\b',
                 
-                # Pattern 5: With word boundaries and lookahead
-                r'(?:^|\s)(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Z0-9]{5,6})\s*-\s*(\d{4,5})(?:\s*-\s*([A-Z]{1,2}))?(?=\s|$|-)',
+                # Pattern 5: With flexible spacing and multiple hyphens
+                r'\b(\d{2,3})\s*-+\s*([A-Z]{1,3})\s*-+\s*(\d{1,2})"?\s*-+\s*([A-Z0-9]{4,8})\s*-+\s*(\d{3,5})(?:\s*-+\s*([A-Z]{1,2}))?\b',
                 
-                # Pattern 6: Case insensitive for OCR errors
-                r'(?:^|\s)(\d{2,3})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Za-z0-9]{5,6})\s*-\s*(\d{4,5})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+                # Pattern 6: With word boundaries and lookahead
+                r'(?:^|\s)(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Z0-9]{4,8})\s*-\s*(\d{3,5})(?:\s*-\s*([A-Z]{1,2}))?(?=\s|$|-)',
+                
+                # Pattern 7: Case insensitive for OCR errors (most flexible)
+                r'(?:^|\s)(\d{2,3})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{1,2})"?\s*-\s*([A-Za-z0-9]{4,8})\s*-\s*(\d{3,5})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
             ]
         elif include_area:
             # WITH AREA PATTERNS: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
@@ -493,9 +499,9 @@ class PIDLineExtractorV2:
                 if insulation:
                     insulation = re.sub(r'[^A-Z]', '', insulation)
                 
-                # STRICT VALIDATION
-                # 1. SIZE: Must be 1-2 digits
-                if not size or not size.isdigit() or len(size) > 2:
+                # SMART VALIDATION (flexible for ADNOC offshore formats)
+                # 1. SIZE: Must be 1+ digits (ADNOC can have any size)
+                if not size or not size.isdigit():
                     rejected.append(f"Invalid size: {size}")
                     continue
                 
@@ -507,26 +513,27 @@ class PIDLineExtractorV2:
                 else:
                     area = ''  # Ensure area is empty for without-area format
                 
-                # 3. FLUID: Must be 1-3 uppercase letters (allow 3 for area format like SWR)
+                # 3. FLUID: Must be 1-3 uppercase letters
                 max_fluid_len = 3 if (include_area or format_type == 'offshore') else 2
                 if not fluid or not fluid.isalpha() or len(fluid) > max_fluid_len:
                     rejected.append(f"Invalid fluid: {fluid}")
                     continue
                 
-                # 4. SEQUENCE: Must be 4-5 digits for offshore/area formats, 4 for standard
+                # 4. SEQUENCE: Must be 3-5 digits for offshore/area formats (ADNOC uses 3-4 digits like 0007, 0011), 4 for standard
                 if format_type == 'offshore' or include_area:
-                    seq_lengths = [4, 5]
+                    if not seq or not seq.isdigit() or len(seq) < 3 or len(seq) > 5:
+                        rejected.append(f"Invalid sequence: {seq}")
+                        continue
                 else:
-                    seq_lengths = [4]
-                if not seq or not seq.isdigit() or len(seq) not in seq_lengths:
-                    rejected.append(f"Invalid sequence: {seq}")
-                    continue
+                    if not seq or not seq.isdigit() or len(seq) != 4:
+                        rejected.append(f"Invalid sequence: {seq}")
+                        continue
                 
-                # 5. PIPE CLASS: Same validation for offshore and area formats (5-6 chars)
+                # 5. PIPE CLASS: Flexible validation for offshore/area formats (ADNOC uses variable length like AN1NLO, ASSNLO, BC2CA0)
                 if format_type == 'offshore' or include_area:
-                    # Offshore/Area format: 5-6 alphanumeric characters (e.g., A2AU16, BC2GA0, AC2NL1)
-                    if not pipr_class or len(pipr_class) not in [5, 6]:
-                        rejected.append(f"Invalid pipe class: {pipr_class}")
+                    # Offshore/Area format: 4+ alphanumeric characters, max 10 for safety
+                    if not pipr_class or len(pipr_class) < 4 or len(pipr_class) > 10:
+                        rejected.append(f"Invalid pipe class length: {pipr_class}")
                         continue
                     if not pipr_class.isalnum():
                         rejected.append(f"Invalid pipe class (not alphanumeric): {pipr_class}")
@@ -546,9 +553,11 @@ class PIDLineExtractorV2:
                     rejected.append(f"Invalid insulation: {insulation}")
                     continue
                 
-                # Build line number string
+                # Build line number string (dynamic based on segments - supports 5 or 6 segments)
                 if format_type == 'offshore':
                     # Offshore format: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
+                    # 5 segments: 604-AG-3-ASSNLO-0007
+                    # 6 segments: 604-HO-8-BC2CA0-1071-H
                     if insulation:
                         line_number = f"{area}-{fluid}-{size}-{pipr_class}-{seq}-{insulation}"
                     else:
@@ -591,9 +600,13 @@ class PIDLineExtractorV2:
         
         # Log summary with debugging info
         if rejected and len(rejected) <= 20:
-            logger.info(f"  ⚠️ Rejected {len(rejected)} potential matches: {rejected[:10]}")
+            logger.info(f"  ⚠️ Rejected {len(rejected)} potential matches:")
+            for r in rejected[:10]:
+                logger.info(f"     - {r}")
         elif rejected:
-            logger.info(f"  ⚠️ Rejected {len(rejected)} potential matches (showing first 10): {rejected[:10]}")
+            logger.info(f"  ⚠️ Rejected {len(rejected)} potential matches (showing first 10):")
+            for r in rejected[:10]:
+                logger.info(f"     - {r}")
         
         logger.info(f"  🎯 REGEX found {len(found_lines)} unique line numbers from {len(patterns)} patterns")
         return found_lines
