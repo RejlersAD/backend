@@ -19,6 +19,11 @@ def _get_user_profile_model():
     from apps.rbac.models import UserProfile  # noqa
     return UserProfile
 
+def _get_activity_models():
+    """Lazy-import activity models to avoid circular imports."""
+    from apps.activity.models import SystemActivity, UserSession  # noqa
+    return SystemActivity, UserSession
+
 
 # ---------------------------------------------------------------------------
 # Soft-coded range config - add new ranges here without touching views
@@ -250,3 +255,153 @@ class AllUsersView(APIView):
         # Sort: active users with usage first, then inactive / never-used at bottom
         results.sort(key=lambda x: (-x['total_requests'], x['full_name'].lower()))
         return Response(results)
+
+
+class DatabaseEventsView(APIView):
+    """
+    GET /api/v1/usage/db-events/
+    Pulls recent SystemActivity records (all DB/user events) from the activity app.
+    Soft-coded filter map: add new activity_type / category filters without touching logic.
+
+    Query params:
+      ?range=1d|7d|30d|90d   (default 7d)
+      ?category=authentication|api|data_management|…  (optional)
+      ?severity=info|low|normal|high|critical          (optional)
+      ?limit=50 (default, max 200)
+    """
+    permission_classes = [IsAuthenticated]
+
+    # Soft-coded: filter category → human label
+    CATEGORY_LABELS = {
+        'authentication':   'Authentication',
+        'authorization':    'Authorization',
+        'data_management':  'Data Management',
+        'system_operation': 'System Operation',
+        'security':         'Security',
+        'api':              'API',
+        'ml_ai':            'ML / AI',
+        'communication':    'Communication',
+        'maintenance':      'Maintenance',
+    }
+
+    # Soft-coded: severity → colour hint for the frontend
+    SEVERITY_COLOR = {
+        'info':     '#64748b',
+        'low':      '#22c55e',
+        'normal':   '#3b82f6',
+        'high':     '#f59e0b',
+        'critical': '#ef4444',
+    }
+
+    def get(self, request):
+        SystemActivity, _ = _get_activity_models()
+        start, _ = _parse_range(request)
+
+        qs = SystemActivity.objects.filter(timestamp__gte=start).select_related('user')
+
+        # Optional filters (soft-coded: just add more query-param keys here)
+        category = request.query_params.get('category')
+        severity = request.query_params.get('severity')
+        if category and category in self.CATEGORY_LABELS:
+            qs = qs.filter(category=category)
+        if severity and severity in self.SEVERITY_COLOR:
+            qs = qs.filter(severity=severity)
+
+        limit = min(int(request.query_params.get('limit', 50)), 200)
+        qs = qs.order_by('-timestamp')[:limit]
+
+        events = []
+        for ev in qs:
+            events.append({
+                'id':           ev.id,
+                'activity_type':ev.activity_type,
+                'category':     ev.category,
+                'category_label': self.CATEGORY_LABELS.get(ev.category, ev.category),
+                'severity':     ev.severity,
+                'severity_color': self.SEVERITY_COLOR.get(ev.severity, '#64748b'),
+                'description':  ev.description,
+                'user_email':   ev.user_email or '',
+                'user_full_name': ev.user_full_name or '',
+                'ip_address':   str(ev.ip_address) if ev.ip_address else '',
+                'success':      ev.success,
+                'duration_ms':  ev.duration_ms,
+                'details':      ev.details,
+                'timestamp':    ev.timestamp.isoformat(),
+            })
+
+        # Also return category summary counts for the period
+        category_counts = (
+            SystemActivity.objects
+            .filter(timestamp__gte=start)
+            .values('category')
+            .annotate(count=Count('id'))
+            .order_by('-count')
+        )
+
+        return Response({
+            'events':           events,
+            'total_in_period':  SystemActivity.objects.filter(timestamp__gte=start).count(),
+            'category_summary': [
+                {
+                    'category': r['category'],
+                    'label':    self.CATEGORY_LABELS.get(r['category'], r['category']),
+                    'count':    r['count'],
+                }
+                for r in category_counts
+            ],
+        })
+
+
+class UserSessionsView(APIView):
+    """
+    GET /api/v1/usage/sessions/
+    Live + recent UserSession records from the activity app.
+    Shows browser, OS, device, current page, and session duration.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        _, UserSession = _get_activity_models()
+
+        # Active sessions: not expired, last activity within 30 min
+        cutoff = timezone.now() - timedelta(minutes=30)
+        active_qs = (
+            UserSession.objects
+            .filter(is_active=True, last_activity__gte=cutoff)
+            .select_related('user')
+            .order_by('-last_activity')
+        )
+
+        # Recent sessions (last 7 days, including expired)
+        week_ago = timezone.now() - timedelta(days=7)
+        recent_qs = (
+            UserSession.objects
+            .filter(created_at__gte=week_ago)
+            .select_related('user')
+            .order_by('-last_activity')[:100]
+        )
+
+        def _serialize_session(s):
+            duration_s = int((s.last_activity - s.created_at).total_seconds())
+            hours, rem = divmod(duration_s, 3600)
+            mins = rem // 60
+            return {
+                'id':            str(s.id),
+                'user_email':    s.user.email if s.user else '',
+                'user_name':     s.user.get_full_name() if s.user else '',
+                'ip_address':    str(s.ip_address) if s.ip_address else '',
+                'device_type':   s.device_type or 'Unknown',
+                'browser':       s.browser or 'Unknown',
+                'os':            s.os or 'Unknown',
+                'current_page':  s.current_page or '',
+                'is_active':     s.is_active,
+                'last_activity': s.last_activity.isoformat(),
+                'created_at':    s.created_at.isoformat(),
+                'duration_label': f"{hours}h {mins}m" if hours else f"{mins}m",
+            }
+
+        return Response({
+            'active_sessions':  [_serialize_session(s) for s in active_qs],
+            'recent_sessions':  [_serialize_session(s) for s in recent_qs],
+            'active_count':     active_qs.count(),
+        })
