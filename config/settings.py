@@ -303,32 +303,49 @@ else:
 # ============================================
 # SMART DATABASE CONFIGURATION - SOFT CODED
 # ============================================
-# Environment-aware database configuration with fallbacks
-# Supports: production, staging (preprod), and development
+# Environment-aware database configuration
+# Supports: production, staging, development, testing
+# SOFT-CODED: add new environments by editing _ENV_DB_MAP only
 
-# Get environment type
+# Get environment type — override via ENVIRONMENT env var or .env file
 ENVIRONMENT = config('ENVIRONMENT', default='production')
 
-# Environment-specific database configurations (SOFT-CODED fallbacks)
-PREPROD_DATABASE_URL = "postgresql://postgres:OPMUckaUZIxVfSsWxgRKuVFbBsVKxPyk@nozomi.proxy.rlwy.net:43647/railway"
+# ── Named database URL constants ─────────────────────────────────────────────
+# TEST_DATABASE_URL  : Used for local development AND all non-production runs
+# PRODUCTION_DATABASE_URL : Live production — never used locally
+TEST_DATABASE_URL = "postgresql://postgres:OPMUckaUZIxVfSsWxgRKuVFbBsVKxPyk@nozomi.proxy.rlwy.net:43647/railway"
 PRODUCTION_DATABASE_URL = "postgresql://postgres:cJLHOrfvZxZXHKaMCWdLdRedgHgmIneU@shinkansen.proxy.rlwy.net:38534/railway"
+PREPROD_DATABASE_URL = TEST_DATABASE_URL  # backward-compat alias
 
-# Smart database URL detection
-if ENVIRONMENT == 'staging':
-    # Preprod environment - use preprod database
-    DATABASE_URL = config('DATABASE_URL', default=PREPROD_DATABASE_URL)
-    print(f"[DJANGO] 🚀 PREPROD Environment - Using Railway Preprod Database")
-elif ENVIRONMENT == 'production':
-    # Production environment - use production database with fallback
-    DATABASE_URL = config('DATABASE_URL', default=PRODUCTION_DATABASE_URL)
-    print(f"[DJANGO] 🏭 PRODUCTION Environment - Using Railway Production Database")
-else:
-    # Development or other environments
-    DATABASE_URL = config('DATABASE_URL', default=PREPROD_DATABASE_URL)
-    print(f"[DJANGO] 🔧 {ENVIRONMENT.upper()} Environment - Using fallback database")
+# ── Soft-coded environment → database routing map ────────────────────────────
+# To add a new environment: just add a key here; no other changes needed.
+_ENV_DB_MAP = {
+    'production':  PRODUCTION_DATABASE_URL,
+    'prod':        PRODUCTION_DATABASE_URL,
+    # All non-production environments share the testing database
+    'staging':     TEST_DATABASE_URL,
+    'preprod':     TEST_DATABASE_URL,
+    'development': TEST_DATABASE_URL,
+    'dev':         TEST_DATABASE_URL,
+    'testing':     TEST_DATABASE_URL,
+    'test':        TEST_DATABASE_URL,
+}
 
-print(f"[DJANGO] 🌍 Environment: {ENVIRONMENT}")
-print(f"[DJANGO] 🗄️ Database configured successfully")
+_default_db_url = _ENV_DB_MAP.get(ENVIRONMENT.lower(), TEST_DATABASE_URL)
+DATABASE_URL = config('DATABASE_URL', default=_default_db_url)
+
+_env_labels = {
+    'production': '🏭 PRODUCTION',
+    'prod':       '🏭 PRODUCTION',
+    'staging':    '🚀 STAGING',
+    'preprod':    '🚀 PREPROD',
+    'development':'🔧 DEVELOPMENT',
+    'dev':        '🔧 DEVELOPMENT',
+    'testing':    '🧪 TESTING',
+    'test':       '🧪 TESTING',
+}
+print(f"[DJANGO] {_env_labels.get(ENVIRONMENT.lower(), f'🔧 {ENVIRONMENT.upper()}')} Environment")
+print(f"[DJANGO] 🗄️  DB host: {DATABASE_URL.split('@')[-1]}")
 
 # Parse database configuration
 db_config = dj_database_url.parse(DATABASE_URL)
@@ -344,9 +361,12 @@ db_config['OPTIONS'] = {
     'keepalives_count': 10
 }
 
+# Dedicated test database name so `manage.py test` / pytest never touch the main DB
+if ENVIRONMENT.lower() not in ('production', 'prod'):
+    db_config['TEST'] = {'NAME': 'test_aiflow'}
+
 DATABASES = {'default': db_config}
 
-print(f"[DJANGO] Railway PostgreSQL ONLY")
 print(f"[DJANGO] DB: {db_config.get('HOST')}:{db_config.get('PORT')}")
 print(f"[DJANGO] Timeouts: connect=60s, query=120s, keepalive=60s")
 
@@ -453,10 +473,29 @@ SIMPLE_JWT = {
 # This configuration now uses centralized environment configuration
 # from config/environments.json for proper alignment across all services
 
-# PRODUCTION URLS
-PRODUCTION_FRONTEND = config('FRONTEND_URL', default='https://airflow-frontend.vercel.app')
-PRODUCTION_BACKEND = config('BACKEND_URL', default='https://aiflowbackend-production.up.railway.app')
-FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:5173')  # For email links
+# SOFT-CODED: Sanitize any URL coming from env vars before it enters CORS_ALLOWED_ORIGINS.
+# Fixes two common Railway misconfiguration patterns:
+#   1. Missing scheme  → aiflowbackend.up.railway.app  becomes  https://aiflowbackend.up.railway.app
+#   2. Trailing slash  → https://example.com/           becomes  https://example.com
+# Returns None (skipped) for empty strings.
+def sanitize_cors_origin(url: str) -> str | None:
+    if not url or not url.strip():
+        return None
+    url = url.strip().rstrip('/')
+    if url and '://' not in url:
+        url = 'https://' + url
+    return url or None
+
+# PRODUCTION URLS (sanitized so Railway env values can't break CORS validation)
+PRODUCTION_FRONTEND = sanitize_cors_origin(
+    config('FRONTEND_URL', default='https://airflow-frontend.vercel.app')
+) or 'https://airflow-frontend.vercel.app'
+PRODUCTION_BACKEND = sanitize_cors_origin(
+    config('BACKEND_URL', default='https://aiflowbackend-production.up.railway.app')
+) or 'https://aiflowbackend-production.up.railway.app'
+FRONTEND_URL = sanitize_cors_origin(
+    config('FRONTEND_URL', default='http://localhost:5173')
+) or 'http://localhost:5173'  # For email links
 
 # WARNING CRITICAL: DO NOT CHANGE - CORS_ALLOW_ALL_ORIGINS MUST BE FALSE
 # Setting this to True will break JWT authentication with credentials
@@ -478,8 +517,11 @@ else:
         # Fallback to environment variable or defaults
         CORS_ORIGINS_ENV = config('CORS_ALLOWED_ORIGINS', default='')
         if CORS_ORIGINS_ENV:
-            # If env var is set, use it (comma-separated list)
-            CORS_ALLOWED_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_ENV.split(',')]
+            # If env var is set, use it (comma-separated list) — sanitize each entry
+            CORS_ALLOWED_ORIGINS = [
+                sanitized for origin in CORS_ORIGINS_ENV.split(',')
+                if (sanitized := sanitize_cors_origin(origin))
+            ]
         else:
             # Use default list
             CORS_ALLOWED_ORIGINS = [
@@ -514,12 +556,12 @@ else:
             CORS_ALLOWED_ORIGINS.append(domain)
     
     # Always add backend URL to allowed origins (for Railway health checks)
-    BACKEND_URL_CORS = config('BACKEND_URL', default='')
+    BACKEND_URL_CORS = sanitize_cors_origin(config('BACKEND_URL', default=''))
     if BACKEND_URL_CORS and BACKEND_URL_CORS not in CORS_ALLOWED_ORIGINS:
         CORS_ALLOWED_ORIGINS.append(BACKEND_URL_CORS)
     
     # Always add frontend URL to allowed origins
-    FRONTEND_URL_CORS = config('FRONTEND_URL', default='')
+    FRONTEND_URL_CORS = sanitize_cors_origin(config('FRONTEND_URL', default=''))
     if FRONTEND_URL_CORS and FRONTEND_URL_CORS not in CORS_ALLOWED_ORIGINS:
         CORS_ALLOWED_ORIGINS.append(FRONTEND_URL_CORS)
     
