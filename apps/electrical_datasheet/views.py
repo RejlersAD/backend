@@ -9,6 +9,9 @@ import json
 import os
 import openai
 from django.conf import settings
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     ElectricalEquipmentType,
@@ -762,6 +765,135 @@ Please provide your response as JSON with this exact structure:
                 {"error": f"AI validation failed: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+    
+    @action(detail=False, methods=['post'], url_path='verify-transformer')
+    def verify_transformer_datasheet(self, request):
+        """
+        Verify transformer datasheet against supporting engineering documents
+        Reuses P&ID/PFD verification architecture
+        
+        POST /api/v1/electrical/datasheets/verify-transformer/
+        
+        FormData:
+        - transformer_datasheet: Excel file
+        - transformer_calculation: PDF file (Transformer Sizing Calculation - Power and Distribution)
+        
+        Returns:
+        {
+            "success": true,
+            "verification_results": [
+                {
+                    "parameter": "Transformer Rating",
+                    "datasheet_value": "2500 kVA",
+                    "document_value": "2500 kVA",
+                    "status": "Valid",
+                    "explanation": "...",
+                    "confidence": "High",
+                    "source_document": "Transformer Calculation"
+                },
+                ...
+            ],
+            "summary": {
+                "total_parameters": 13,
+                "valid": 10,
+                "mismatch": 2,
+                "missing": 1
+            }
+        }
+        """
+        from .transformer_verification_service import TransformerVerificationService
+        import tempfile
+        import os
+        
+        try:
+            # Validate required files
+            required_files = [
+                'transformer_datasheet',
+                'transformer_calculation'
+            ]
+            
+            for file_key in required_files:
+                if file_key not in request.FILES:
+                    return Response({
+                        'success': False,
+                        'error': f'Missing required file: {file_key}'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Save uploaded files temporarily
+            temp_files = {}
+            try:
+                for file_key in required_files:
+                    uploaded_file = request.FILES[file_key]
+                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1])
+                    for chunk in uploaded_file.chunks():
+                        temp_file.write(chunk)
+                    temp_file.close()
+                    temp_files[file_key] = temp_file.name
+                
+                # Initialize verification service
+                verification_service = TransformerVerificationService()
+                
+                # Step 1: Extract Excel parameters
+                logger.info("[TransformerVerification] Extracting Excel parameters...")
+                excel_parameters = verification_service.extract_excel_parameters(
+                    temp_files['transformer_datasheet']
+                )
+                
+                if not excel_parameters:
+                    return Response({
+                        'success': False,
+                        'error': 'No parameters could be extracted from Excel datasheet'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                # Step 2: Extract PDF content
+                logger.info("[TransformerVerification] Extracting PDF document...")
+                transformer_calc_text = verification_service.extract_pdf_content(
+                    temp_files['transformer_calculation'],
+                    'Transformer Calculation'
+                )
+                
+                # Step 3: Perform AI verification
+                logger.info("[TransformerVerification] Running AI verification...")
+                verification_results = verification_service.verify_transformer_datasheet(
+                    excel_parameters,
+                    transformer_calc_text
+                )
+                
+                # Step 4: Format results
+                results_dict = verification_service.format_results_as_dict(verification_results)
+                
+                # Calculate summary statistics
+                summary = {
+                    'total_parameters': len(results_dict),
+                    'valid': sum(1 for r in results_dict if r['status'] == 'Valid'),
+                    'mismatch': sum(1 for r in results_dict if r['status'] == 'Mismatch'),
+                    'incorrect': sum(1 for r in results_dict if r['status'] == 'Incorrect'),
+                    'missing': sum(1 for r in results_dict if r['status'] == 'Missing'),
+                }
+                
+                logger.info(f"[TransformerVerification] ✅ Completed: {summary}")
+                
+                return Response({
+                    'success': True,
+                    'verification_results': results_dict,
+                    'extracted_parameters': excel_parameters,
+                    'summary': summary
+                }, status=status.HTTP_200_OK)
+                
+            finally:
+                # Clean up temporary files
+                for temp_file_path in temp_files.values():
+                    try:
+                        os.unlink(temp_file_path)
+                    except:
+                        pass
+        
+        except Exception as e:
+            logger.error(f"[TransformerVerification] ❌ Error: {e}", exc_info=True)
+            return Response({
+                'success': False,
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=False, methods=['post'], url_path='export-validation')
     def export_validation_excel(self, request):
