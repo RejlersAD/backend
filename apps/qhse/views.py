@@ -51,6 +51,33 @@ class QHSERunningProjectViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     ordering_fields = ['sr_no', 'project_starting_date', 'project_closing_date', 'updated_at']
     ordering = ['sr_no']
     
+    def create(self, request, *args, **kwargs):
+        """
+        SOFT-CODED FIX: Override create to convert database IntegrityErrors into
+        descriptive 409 Conflict responses instead of unhandled 500 errors.
+        Root causes caught here:
+          - Concurrent POSTs computing the same sr_no before the first transaction commits
+          - Duplicate project_no submitted by the user
+        """
+        from django.db import IntegrityError
+        from rest_framework.exceptions import ValidationError
+        try:
+            return super().create(request, *args, **kwargs)
+        except IntegrityError as exc:
+            error_str = str(exc).lower()
+            if 'project_no' in error_str or ('unique' in error_str and 'project_no' in error_str):
+                raise ValidationError({
+                    'projectNo': 'A project with this project number already exists. Please use a unique project number.',
+                })
+            if 'sr_no' in error_str:
+                raise ValidationError({
+                    'srNo': 'Serial number conflict due to a concurrent submission. Please try again.',
+                })
+            # Generic fallback - still a 400, not a 500
+            raise ValidationError({
+                'detail': 'A database constraint was violated. Please verify your data and try again.',
+            })
+
     def perform_create(self, serializer):
         """
         Override perform_create to add logging and ensure data is saved
@@ -58,9 +85,9 @@ class QHSERunningProjectViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         print(f"[QHSE ViewSet] Creating new project")
         print(f"[QHSE ViewSet] Request data keys: {list(self.request.data.keys())}")
         print(f"[QHSE ViewSet] User: {self.request.user.email if self.request.user.is_authenticated else 'Anonymous'}")
-        
+
         instance = serializer.save()
-        
+
         print(f"[QHSE ViewSet] Successfully created project ID: {instance.id}, sr_no: {instance.sr_no}")
         return instance
     
