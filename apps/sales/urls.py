@@ -8,6 +8,12 @@ from .views import (
     ClientViewSet, ContactViewSet, DealViewSet, QuoteViewSet,
     SalesActivityViewSet, SalesForecastViewSet, SalesDashboardViewSet
 )
+from .analytics_views import (
+    SalesPipelineAnalyticsView,
+    SalesClientsAnalyticsView,
+    SalesAIInsightsView,
+    SalesActivitiesView,
+)
 
 # Create router and register viewsets
 router = DefaultRouter()
@@ -19,8 +25,16 @@ router.register(r'activities', SalesActivityViewSet, basename='sales-activity')
 router.register(r'forecasts', SalesForecastViewSet, basename='sales-forecast')
 router.register(r'dashboard', SalesDashboardViewSet, basename='sales-dashboard')
 
+# Analytics endpoints — powered by real platform data (no CRM tables needed)
+analytics_urlpatterns = [
+    path('analytics/pipeline/',   SalesPipelineAnalyticsView.as_view(),  name='analytics-pipeline'),
+    path('analytics/clients/',    SalesClientsAnalyticsView.as_view(),   name='analytics-clients'),
+    path('analytics/insights/',   SalesAIInsightsView.as_view(),         name='analytics-insights'),
+    path('analytics/activities/', SalesActivitiesView.as_view(),         name='analytics-activities'),
+]
+
 # URL patterns
-urlpatterns = [
+urlpatterns = analytics_urlpatterns + [
     path('', include(router.urls)),
 ]
 
