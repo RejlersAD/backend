@@ -40,30 +40,21 @@ class ReferenceDocumentProcessor:
             try:
                 print(f"[INFO] Processing reference document: {doc_type}")
                 
-                # SOFT-CODED: PFD cross-verification (P&ID generated from PFD)
-                if doc_type in ['pfd_document', 'pfd']:
-                    extracted_data['pfd_data'] = self._extract_pfd_data(doc_file)
+                # NEW: Equipment List - Structured equipment data
+                if doc_type in ['equipment_list']:
+                    extracted_data['equipment_list'] = self._extract_equipment_list(doc_file)
                 
-                elif doc_type in ['equipment_datasheet', 'equipment_datasheets']:
-                    extracted_data['equipment_specs'] = self._extract_equipment_specs(doc_file)
+                # NEW: Line List - Structured piping data
+                elif doc_type in ['line_list']:
+                    extracted_data['line_list'] = self._extract_line_list(doc_file)
                 
-                elif doc_type in ['instrument_datasheet', 'instrument_datasheets']:
-                    extracted_data['instrument_specs'] = self._extract_instrument_specs(doc_file)
+                # NEW: Alarm & Trip Schedule - Setpoints reference
+                elif doc_type in ['alarm_trip_schedule']:
+                    extracted_data['alarm_trip_schedule'] = self._extract_alarm_trip_schedule(doc_file)
                 
-                elif doc_type in ['legends_symbols']:
-                    extracted_data['legends'] = self._extract_legends(doc_file)
-                
-                elif doc_type in ['pid_standards']:
-                    extracted_data['standards'] = self._extract_standards(doc_file)
-                
-                elif doc_type in ['safety_requirements']:
-                    extracted_data['safety_specs'] = self._extract_safety_requirements(doc_file)
-                
-                elif doc_type in ['process_description']:
-                    extracted_data['process_conditions'] = self._extract_process_conditions(doc_file)
-                
-                elif doc_type in ['iso_standards']:
-                    extracted_data['iso_requirements'] = self._extract_iso_standards(doc_file)
+                # NEW: Legend / Symbol Sheet - Symbol and spec interpretation
+                elif doc_type in ['legend_symbols', 'legends_symbols']:
+                    extracted_data['legend_symbols'] = self._extract_legend_symbols(doc_file)
                 
             except Exception as e:
                 print(f"[ERROR] Failed to process {doc_type}: {e}")
@@ -418,6 +409,339 @@ OUTPUT JSON:
             conditions['temperatures'] = [f"{t[0]} {t[1]}" for t in temp_matches[:5]]
         
         return conditions    
+    
+    def _extract_equipment_list(self, doc_file) -> Dict[str, Any]:
+        """
+        Extract Equipment List data for P&ID cross-verification
+        Equipment List contains structured equipment data: Tag, Type, Design P/T, Size, etc.
+        """
+        if not self.client:
+            return {}
+        
+        try:
+            images = self._pdf_to_images(doc_file)
+            if not images:
+                return {}
+            
+            prompt = """Extract ALL equipment from this Equipment List document.
+
+**REQUIRED INFORMATION:**
+- Equipment Tag Numbers (exact as shown)
+- Equipment Type/Description
+- Design Pressure and Temperature  
+- Operating Pressure and Temperature
+- Equipment Size/Capacity
+- Material of Construction (MOC)
+- Any special requirements or notes
+
+**OUTPUT FORMAT - JSON:**
+{
+    "equipment": [
+        {
+            "tag": "V-101",
+            "description": "Separation Vessel",
+            "type": "Vertical Pressure Vessel",
+            "design_pressure": "50 barg",
+            "design_temp": "200°C",
+            "operating_pressure": "40 barg",
+            "operating_temp": "180°C",
+            "size": "2.5m ID x 6m TT",
+            "moc": "CS with SS316L clad",
+            "notes": "Steam traced, insulated"
+        }
+    ]
+}
+
+Extract ALL equipment accurately."""
+
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are a mechanical engineer extracting equipment data from Equipment Lists."},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{images[0]}"}}
+                    ]}
+                ],
+                temperature=0.1,
+                max_tokens=4000
+            )
+            
+            import json
+            import re
+            result = response.choices[0].message.content
+            json_match = re.search(r'```json\s*(.*?)\s*```', result, re.DOTALL)
+            if json_match:
+                result = json_match.group(1)
+            return json.loads(result)
+        
+        except Exception as e:
+            print(f"[ERROR] Equipment List extraction failed: {e}")
+            return {}
+    
+    def _extract_line_list(self, doc_file) -> Dict[str, Any]:
+        """
+        Extract Line List data for P&ID cross-verification
+        Line List contains piping data: Line numbers, sizes, specs, from/to, etc.
+        """
+        if not self.client:
+            return {}
+        
+        try:
+            images = self._pdf_to_images(doc_file)
+            if not images:
+                return {}
+            
+            prompt = """Extract ALL piping lines from this Line List document.
+
+**REQUIRED INFORMATION:**
+- Line Number (complete as shown, e.g., 2"-D-6155-033842-X-N)
+- Line Size (pipe diameter)
+- Pipe Spec/Class (e.g., CS150, 316SS, 300#)
+- Fluid Service (what flows in the pipe)
+- From (source equipment/location)
+- To (destination equipment/location)
+- Design Pressure and Temperature
+- Operating Pressure and Temperature
+- Insulation/Tracing requirements
+- Any special notes
+
+**OUTPUT FORMAT - JSON:**
+{
+    "lines": [
+        {
+            "line_number": "2\\"-D-6155-033842-X-N",
+            "size": "2 inch",
+            "spec": "CS150",
+            "fluid": "Diesel",
+            "from": "V-101",
+            "to": "P-201",
+            "design_pressure": "16 barg",
+            "design_temp": "120°C",
+            "operating_pressure": "10 barg",
+            "operating_temp": "80°C",
+            "insulation": "Yes",
+            "tracing": "Heat traced",
+            "notes": "Sloped 1:100 for drainage"
+        }
+    ]
+}
+
+Extract ALL line numbers accurately. Line numbers are CRITICAL for verification."""
+
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are a piping engineer extracting line data from Line Lists."},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{images[0]}"}}
+                    ]}
+                ],
+                temperature=0.1,
+                max_tokens=4000
+            )
+            
+            import json
+            import re
+            result = response.choices[0].message.content
+            json_match = re.search(r'```json\s*(.*?)\s*```', result, re.DOTALL)
+            if json_match:
+                result = json_match.group(1)
+            return json.loads(result)
+        
+        except Exception as e:
+            print(f"[ERROR] Line List extraction failed: {e}")
+            return {}
+    
+    def _extract_alarm_trip_schedule(self, doc_file) -> Dict[str, Any]:
+        """
+        Extract Alarm & Trip Schedule for instrument setpoint verification
+        Contains alarm/trip setpoints for all instruments
+        """
+        if not self.client:
+            return {}
+        
+        try:
+            images = self._pdf_to_images(doc_file)
+            if not images:
+                return {}
+            
+            prompt = """Extract ALL alarm and trip setpoints from this Alarm & Trip Schedule.
+
+**REQUIRED INFORMATION:**
+- Instrument Tag (PT-101, TT-202, LT-303, etc.)
+- Process Variable (Pressure, Temperature, Level, Flow, etc.)
+- Units (barg, °C, %, m³/h, etc.)
+- Alarm Setpoints:
+  * LL (Low Low Alarm)
+  * L (Low Alarm)
+  * H (High Alarm)
+  * HH (High High Alarm)
+- Trip Setpoints:
+  * LL (Low Low Trip)
+  * HH (High High Trip)
+- Trip Action (Shutdown, Isolation, etc.)
+
+**OUTPUT FORMAT - JSON:**
+{
+    "alarms_trips": [
+        {
+            "tag": "PT-101",
+            "parameter": "Pressure",
+            "units": "barg",
+            "alarm_ll": "5",
+            "alarm_l": "10",
+            "alarm_h": "45",
+            "alarm_hh": "48",
+            "trip_ll": "3",
+            "trip_hh": "50",
+            "trip_action": "Shutdown feed pump"
+        },
+        {
+            "tag": "TT-202",
+            "parameter": "Temperature",
+            "units": "°C",
+            "alarm_l": "150",
+            "alarm_h": "200",
+            "trip_hh": "210",
+            "trip_action": "Emergency cooling activation"
+        }
+    ]
+}
+
+Extract ALL setpoints accurately. These will be verified against P&ID."""
+
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are an instrumentation engineer extracting alarm/trip data."},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{images[0]}"}}
+                    ]}
+                ],
+                temperature=0.1,
+                max_tokens=4000
+            )
+            
+            import json
+            import re
+            result = response.choices[0].message.content
+            json_match = re.search(r'```json\s*(.*?)\s*```', result, re.DOTALL)
+            if json_match:
+                result = json_match.group(1)
+            return json.loads(result)
+        
+        except Exception as e:
+            print(f"[ERROR] Alarm/Trip Schedule extraction failed: {e}")
+            return {}
+    
+    def _extract_legend_symbols(self, doc_file) -> Dict[str, Any]:
+        """
+        Extract Legend / Symbol Sheet for symbol and specification interpretation
+        Contains symbol definitions, abbreviations, pipe specs, line numbering system
+        """
+        if not self.client:
+            return {}
+        
+        try:
+            images = self._pdf_to_images(doc_file)
+            if not images:
+                return {}
+            
+            prompt = """Extract ALL symbol definitions, abbreviations, and specifications from this Legend/Symbol Sheet.
+
+**REQUIRED INFORMATION:**
+
+1️⃣ **SYMBOLS:**
+   - Equipment symbols (vessels, pumps, valves, etc.)
+   - Instrument symbols (transmitters, controllers, etc.)
+   - Valve symbols and their meanings
+   - Line symbols (process, utility, signal, etc.)
+
+2️⃣ **ABBREVIATIONS:**
+   - Fluid codes (D=Diesel, VG=Vapor Gas, HC=Hydrocarbon, etc.)
+   - Equipment prefixes (V=Vessel, P=Pump, E=Exchanger, etc.)
+   - Specification codes (CS=Carbon Steel, SS=Stainless Steel, etc.)
+
+3️⃣ **PIPE SPECIFICATIONS:**
+   - Pipe class definitions (150#, 300#, 600#)
+   - Material specifications
+   - Rating tables
+
+4️⃣ **LINE NUMBERING SYSTEM:**
+   - Line number format explanation
+   - Serial number ranges
+   - Specification codes
+
+5️⃣ **NOTES AND STANDARDS:**
+   - Drawing standards references (AGES-GL-08-005, etc.)
+   - General notes
+   - Special requirements
+
+**OUTPUT FORMAT - JSON:**
+{
+    "symbols": [
+        {"symbol": "Check Valve", "description": "Flow direction indicated by symbol orientation"},
+        {"symbol": "Control Valve", "description": "Fail position shown (FC/FO/FL)"}
+    ],
+    "abbreviations": {
+        "D": "Diesel",
+        "VG": "Vapor Gas",
+        "HC": "Hydrocarbon",
+        "V": "Vessel",
+        "P": "Pump",
+        "CS": "Carbon Steel",
+        "SS": "Stainless Steel"
+    },
+    "pipe_specs": [
+        {"class": "CS150", "description": "Carbon Steel 150# ANSI"},
+        {"class": "316SS", "description": "Stainless Steel 316"}
+    ],
+    "line_numbering": {
+        "format": "[SIZE]-[FLUID]-[SEQUENCE]-[SPEC]",
+        "example": "2\\"-D-6155-033842-X-N",
+        "serial_range": "Up to 9600"
+    },
+    "standards_references": [
+        "AGES-GL-08-005, Rev B4: Control valve manifold sizing",
+        "AGES-PH-04-001, Rev-1, Table 14.1: Thermowell sizes"
+    ],
+    "notes": [
+        "All dimensions in millimeters unless noted",
+        "All pressures in barg unless noted"
+    ]
+}
+
+Extract ALL information. This is the key reference for P&ID interpretation."""
+
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are a senior P&ID engineer extracting legend and symbol data."},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        *[{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img}"}} 
+                          for img in images[:2]]  # First 2 pages for legend
+                    ]}
+                ],
+                temperature=0.1,
+                max_tokens=4000
+            )
+            
+            import json
+            import re
+            result = response.choices[0].message.content
+            json_match = re.search(r'```json\s*(.*?)\s*```', result, re.DOTALL)
+            if json_match:
+                result = json_match.group(1)
+            return json.loads(result)
+        
+        except Exception as e:
+            print(f"[ERROR] Legend/Symbol Sheet extraction failed: {e}")
+            return {}
+    
     def _extract_pfd_data(self, doc_file) -> Dict[str, Any]:
         """
         Extract PFD (Process Flow Diagram) data for P&ID cross-verification
