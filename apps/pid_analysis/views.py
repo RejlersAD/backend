@@ -162,10 +162,10 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         
         print(f"[DEBUG] Serializer data keys: {list(serializer_data.keys())}")
         
-        # SOFT-CODED: Extract reference documents if present
+        # SOFT-CODED: Extract reference documents if present (5 key documents only)
         reference_documents = {}
-        ref_doc_keys = ['pfd_document', 'iso_standards', 'pid_standards', 'legends_symbols', 'equipment_datasheet', 
-                        'instrument_datasheet', 'process_description', 'safety_requirements', 'other_documents']
+        ref_doc_keys = ['equipment_list', 'line_list', 'alarm_trip_schedule', 
+                        'instrument_datasheet', 'legends_symbols']
         
         for key in ref_doc_keys:
             ref_key = f'reference_{key}'
