@@ -119,8 +119,8 @@ class PIDAnalysisService:
             # The previous threshold of 20 was causing the AI to invent findings.
             second_pass_issues = []
             issues_found = vision_result.get('total_issues', 0)
-            if issues_found < 5:  # Only run if genuinely very few issues (<5), NOT to reach a minimum
-                print(f"[INFO] PASS 5: Second Review Pass ({issues_found} issues found — checking for genuinely missed items)")
+            if issues_found < 15:  # Run second pass if fewer than 15 issues to catch missed elements
+                print(f"[INFO] PASS 5: Second Review Pass ({issues_found} issues found — checking systematically for missed items)")
                 try:
                     second_pass_issues = self._second_review_pass(images_base64, vision_result, consistency_issues)
                 except Exception as e:
@@ -300,512 +300,182 @@ class PIDAnalysisService:
         # Note references: NOTE 1, NOTE 2, HOLD 1, etc.
         note_pattern = r'\b((?:NOTE|HOLD|REF)[\s]*[\d]+)\b'
         self.notes_references = set(re.findall(note_pattern, self.extracted_text, re.IGNORECASE))
+
+    def _build_per_instrument_instructions(self) -> str:
+        """
+        Build an explicit per-loop, per-tag checkbox checklist.
+        Groups OCR instruments by ISA-5.1 loop number, augments with related
+        tags from OCR line_numbers, then generates mandatory per-tag checks.
+        Rule: Each unchecked box = one JSON finding.
+        """
+        import re
+
+        # ISA-5.1 function-code sets (prefix-based match)
+        CTRL      = ('HIC', 'FIC', 'LIC', 'TIC', 'PIC', 'ZIC', 'AIC', 'WIC', 'HC', 'FC', 'LC', 'TC', 'PC')
+        VALVE     = ('XV', 'SDV', 'BDV', 'FCV', 'HV', 'MOV', 'SOV', 'LCV', 'TCV', 'PCV', 'EV', 'PV', 'CV')
+        XMIT      = ('FT', 'PT', 'TT', 'LT', 'AT', 'FE', 'TE', 'PE', 'LE', 'FIT', 'PIT', 'TIT', 'LIT', 'AIT')
+        SOLENOID  = ('XY', 'HY', 'TY', 'PY', 'FY', 'LY')
+        SWITCH    = ('TSHH', 'TSLL', 'PSHH', 'PSLL', 'LSHH', 'LSLL', 'TSH', 'TSL', 'PSH', 'PSL',
+                     'FSH', 'FSL', 'ZSH', 'ZSL', 'XZSH', 'XZSL', 'XZLH', 'XZLL')
+        INDIC     = ('FI', 'PI', 'TI', 'LI', 'AI', 'PG', 'PDI', 'VI', 'TG', 'WI')
+        SAFETY_V  = ('PSV', 'PRV', 'PDSV', 'TSV')
+        ALL_INST  = CTRL + VALVE + XMIT + SOLENOID + SWITCH + INDIC + SAFETY_V
+
+        def func_code(tag: str) -> str:
+            for part in tag.split('-'):
+                if not part.isdigit():
+                    return part.upper()
+            return tag.split('-')[0].upper()
+
+        def loop_num(tag: str) -> str:
+            nums = re.findall(r'\d+', tag)
+            return nums[-1] if nums else '0'
+
+        # --- Build loops dict from OCR instrument tags ---
+        loops: dict = {}
+        for tag in sorted(self.instrument_tags or []):
+            ln = loop_num(tag)
+            loops.setdefault(ln, set()).add(tag)
+
+        # --- Augment loops with instrument-type tags from OCR line_numbers ---
+        # OCR line_numbers often contain area-prefixed instrument references like 13-XY-4513
+        for raw in (self.line_numbers or []):
+            parts = raw.split('-')
+            if len(parts) == 3 and parts[0].isdigit() and not parts[1].isdigit():
+                fc = parts[1].upper()
+                ln = parts[2]
+                short = f"{fc}-{ln}"
+                # Add only genuine instrument function codes (not equipment)
+                if any(fc.startswith(p) for p in ALL_INST):
+                    loops.setdefault(ln, set()).add(short)
+
+        if not loops:
+            return ("No OCR-confirmed instrument tags — visually scan the entire drawing "
+                    "for any instruments and report missing documentation as findings.")
+
+        lines = [
+            "=== MANDATORY INSTRUMENT LOOP VERIFICATION ===",
+            "QC RULE: For every □ item below, look at the drawing image.",
+            "If you CANNOT VISUALLY CONFIRM the element IS present on the drawing → it IS a finding.",
+            "Add one JSON issue per unchecked □ item. Do NOT group multiple checkboxes into one finding.",
+            "Expected: 15-35 findings for a drawing with 10+ instruments at IFC stage.",
+            "",
+        ]
+
+        for lnum in sorted(loops.keys()):
+            tags = sorted(loops[lnum])
+            ctrl_t   = [t for t in tags if any(func_code(t).startswith(p) for p in CTRL)]
+            valve_t  = [t for t in tags if any(func_code(t).startswith(p) for p in VALVE)]
+            xmit_t   = [t for t in tags if any(func_code(t).startswith(p) for p in XMIT)]
+            sol_t    = [t for t in tags if any(func_code(t).startswith(p) for p in SOLENOID)]
+            sw_t     = [t for t in tags if any(func_code(t).startswith(p) for p in SWITCH)]
+            ind_t    = [t for t in tags if any(func_code(t).startswith(p) for p in INDIC)]
+            sfv_t    = [t for t in tags if any(func_code(t).startswith(p) for p in SAFETY_V)]
+
+            lines.append(f"── LOOP {lnum}  ({', '.join(tags)})")
+
+            paired_cv = set()
+
+            # Controller → paired valve checks (controller has highest priority)
+            for ctag in ctrl_t:
+                lines.append(f"  □ [{ctag}] Controller symbol visible and tag labeled on drawing?  → NO = MAJOR")
+                if valve_t:
+                    vtag = valve_t[0]
+                    paired_cv.add(vtag)
+                    lines.append(f"  □ [{ctag}] Is control valve {vtag} body symbol physically drawn near {ctag}?  → NO = CRITICAL")
+                    lines.append(f"  □ [{vtag}] Is fail-safe position FC, FO, or FL annotated ON {vtag} symbol?  → NO = MAJOR")
+                    lines.append(f"  □ [{ctag}→{vtag}] Is control signal dashed line drawn from {ctag} to {vtag}?  → NO = MAJOR")
+                else:
+                    lines.append(f"  □ [{ctag}] Is there any final control element (valve with actuator) in this control loop?  → NO = CRITICAL")
+
+            # Actuated valves not already covered by controller pairing
+            for vtag in valve_t:
+                if vtag in paired_cv:
+                    continue
+                lines.append(f"  □ [{vtag}] Valve body symbol (triangle/gate/globe) visible for {vtag}?  → NO = MAJOR")
+                lines.append(f"  □ [{vtag}] Actuator symbol attached to {vtag}?  → NO = MAJOR")
+                lines.append(f"  □ [{vtag}] Fail-safe FC, FO, or FL labeled on {vtag} symbol?  → NO = MINOR")
+                lines.append(f"  □ [{vtag}] DCS or controller signal connection shown to {vtag}?  → NO = MINOR")
+
+            # Solenoids / I-P converters
+            for stag in sol_t:
+                lines.append(f"  □ [{stag}] Solenoid/I-P {stag} symbol visible and connected to valve?  → NO = MINOR")
+                lines.append(f"  □ [{stag}] DCS signal line to {stag} shown?  → NO = MINOR")
+
+            # Field transmitters / elements
+            for xtag in xmit_t:
+                lines.append(f"  □ [{xtag}] Transmitter/element {xtag} symbol visible on drawing?  → NO = MAJOR")
+                lines.append(f"  □ [{xtag}] Signal type (4-20 mA or dashed line) shown from {xtag}?  → NO = MINOR")
+                if ctrl_t:
+                    lines.append(f"  □ [{xtag}→{ctrl_t[0]}] Signal connection from {xtag} to {ctrl_t[0]} or DCS visible?  → NO = MAJOR")
+
+            # Safety switches / process switches
+            for stag in sw_t:
+                lines.append(f"  □ [{stag}] Switch symbol visible and process tap connected?  → NO = MAJOR")
+                lines.append(f"  □ [{stag}] DCS / SIS / interlock connection shown for {stag}?  → NO = CRITICAL")
+                lines.append(f"  □ [{stag}] Setpoint or trip-function label noted near {stag}?  → NO = MINOR")
+
+            # Indicators / gauges
+            for itag in ind_t:
+                lines.append(f"  □ [{itag}] Indicator {itag} visible and tag label clear?  → NO = MINOR")
+                lines.append(f"  □ [{itag}] Process tap / connection shown for {itag}?  → NO = MINOR")
+
+            # Safety relief valves
+            for svtag in sfv_t:
+                lines.append(f"  □ [{svtag}] PSV/PRV symbol visible and set pressure annotated?  → NO = CRITICAL")
+                lines.append(f"  □ [{svtag}] Discharge line shown with destination (flare / vent)?  → NO = CRITICAL")
+
+            lines.append("")
+
+        return '\n'.join(lines)
     
     def _vision_analysis_pass(self, images_base64: List[str], reference_context: str = "") -> Dict[str, Any]:
-        """PASS 3: Enhanced vision-based analysis with chain-of-thought and reference verification"""
+        """PASS 3: Systematic vision-based P&ID quality analysis"""
         try:
-            # Build system prompt with reference context
-            system_prompt = """-- STRICT ENGINEERING MODE - ZERO HALLUCINATION POLICY --
+            system_prompt = """You are a senior P&ID QA/QC engineer performing a formal quality control review.
+Analyze ONLY the provided drawing — base all findings on what is VISUALLY PRESENT, not assumptions.
 
-You are a senior P&ID QA/QC engineer with strict validation discipline.
+CORE RULES (follow strictly):
+1. ONLY report elements that are visually confirmed on this drawing — never invent tags
+2. LINE NUMBERS format: SIZE-FLUIDCODE-SEQ-SPEC (e.g. 4"-HC-1001-CS150)
+   - P&ID sheet connector numbers like NN-PP-NNN-NNNNN are NOT process piping lines — ignore for piping checks
+   - Tags with area prefix (e.g. 13-FE-4580) are INSTRUMENT TAGS not line numbers
+3. INSTRUMENT CLASSIFICATION (ISA-5.1):
+   - FI, PI, TI, LI, PG = INDICATORS only — no control loop, no alarm setpoints by definition
+   - FIC, PIC, TIC, LIC, HIC = CONTROLLERS — do have control loops (require paired control valve)
+   - PSHH, LSHH, TSHH = Safety switches — verify interlock connection
+   - ZSH, ZSL, XZSH, XZSL = Position/limit switches — NOT primary safety instruments
+   - XV, SDV soft tags inside DCS logic blocks without a valve body symbol = soft references, not physical valves
+4. FAIL-SAFE: FC/FO/FL already annotated on a valve symbol = already specified — do NOT flag again
+5. HEADER-TO-BRANCH: A large pipe reducing to a smaller branch tap is NORMAL — do not flag as missing reducer
+6. NOTES/HOLDS: Read the actual note text. Deleted notes are invisible — only flag active requirements
+7. BEFORE flagging any issue, confirm: "Can I see this element right now on this drawing?"
 
--------------------------------------------------------------------
-                    CRITICAL RULES - ABSOLUTE COMPLIANCE
--------------------------------------------------------------------
-
-[WARNING] RULE 1: DOCUMENT ISOLATION - ZERO CROSS-CONTAMINATION
----
-- ONLY use the CURRENTLY UPLOADED P&ID document
-- DO NOT use prior knowledge from other drawings
-- DO NOT assume standards unless explicitly written on THIS drawing
-- DO NOT reference other users' documents
-- DO NOT mix information from different P&IDs
-- If something is not visible on THIS drawing ? DO NOT mention it
-- If unsure ? IGNORE it completely
-
-[WARNING] RULE 2: ENTITY CLASSIFICATION - STRICT PARSING DISCIPLINE
----
-
-**LINE NUMBER FORMAT:**
-- Pattern: [SIZE]-[FLUID CODE]-[SEQUENCE]-[SPEC]
-- Examples: 
-  - 2"-D-6155-033842-X-N  ? COMPLETE LINE NUMBER (do not split!)
-  - 4"-VG-5277-033842     ? COMPLETE LINE NUMBER
-  - 6"-HC-1001-CS150      ? COMPLETE LINE NUMBER
-- Treatment: Treat FULL string as ONE entity
-- FORBIDDEN: Do NOT extract "D-6155" from "2"-D-6155-033842-X-N" as equipment
-- FORBIDDEN: Do NOT split line numbers into parts
-- FORBIDDEN: Do NOT interpret partial line numbers as equipment tags
-
-**EQUIPMENT TAG FORMAT:**
-- Pattern: [PREFIX]-[NUMBER] or [PREFIX]-[NUMBER][SUFFIX]
-- Examples:
-  - V-101        ? Vessel
-  - P-201A       ? Pump A
-  - E-103        ? Heat Exchanger
-  - T-301        ? Tank
-  - C-401        ? Compressor
-- Must be clearly labeled in drawing with equipment symbol
-- Must NOT be part of a line number string
-
-**CLASSIFICATION DECISION TREE:**
-1. Does string contain size (e.g., 2", 4", 6")? ? Likely LINE NUMBER
-2. Does string have fluid code (D, VG, HC, etc.)? ? Likely LINE NUMBER
-3. Does string have multiple segments separated by dashes with numbers > 4 digits? ? LINE NUMBER
-4. Is string standalone near equipment symbol? ? EQUIPMENT TAG
-5. If ambiguous ? SKIP IT (don't guess!)
-
-RULE 3: NOTES & HOLDS - ACTIVE vs DELETED
----
-- If note says "DELETED" ? COMPLETELY IGNORE (do not reference at all)
-- If HOLD says "DELETED" ? COMPLETELY IGNORE (do not reference at all)
-- ONLY validate ACTIVE notes (not marked as deleted)
-- ONLY validate ACTIVE holds (not marked as deleted)
-- If unclear whether deleted ? DO NOT reference it
-
-RULE 4: ARROWS & CONTINUATION MARKS - NOT PIPELINES
----
-- Small arrows indicating continuation (?, ?, ?, ?) ? PIPELINES
-- Continuation arrows with line numbers nearby = line continues elsewhere
-- DO NOT treat arrows as missing pipelines
-- DO NOT flag arrows as "missing source/destination"
-- Only analyze actual pipe segments, not directional indicators
-
-RULE 5: SPEC BREAKS & MATERIAL TRANSITIONS
----
-- If spec break symbol exists at transition ? DO NOT flag missing transition
-- Spec break symbols: ?, ?, ?, or line break indicators
-- Only flag if NO transition marking exists between different specs
-- Check actual drawing for break symbols before flagging
-
-RULE 6: EQUIPMENT COUNTING - VISUAL CONFIRMATION ONLY
----
-- Count ONLY visually confirmed equipment with symbols
-- Ignore OCR noise (random text fragments)
-- Ignore line numbers misread as equipment
-- Ignore reference drawing titles/headers
-- Equipment must have: (1) Symbol + (2) Clear tag
-- If equipment tag appears in reference title ? NOT equipment on this drawing
-
-RULE 7: ENGINEERING VALIDATION - EVIDENCE-BASED ONLY
----
-
-**ONLY report issues if:**
-- Clearly visible on drawing
-- Explicitly missing
-- Not already present
-
-**DO NOT suggest:**
-- Reducers if already present (check carefully!)
-- Specs if already written (verify first!)
-- Material issues without visual evidence
-- Size changes that are intentional design (header to branch = normal!)
-- NACE requirements not mentioned on this drawing
-- Standards not referenced on this drawing
-
-**HEADER-TO-BRANCH SIZE CHANGES (NORMAL - NOT AN ISSUE):**
-- 4" header with 2" branch = NORMAL DESIGN (do not flag reducer!)
-- 6" header with 3" branch = NORMAL DESIGN
-- 8" header with 4" branch = NORMAL DESIGN
-- Only flag if SAME line number changes size WITHOUT reducer symbol
-
-RULE 8: NO ASSUMPTIONS - EXPLICIT CONTENT ONLY
----
-- Do NOT assume NACE requirements unless written
-- Do NOT assume MOC (material of construction) unless specified
-- Do NOT assume pressure ratings unless noted
-- Do NOT reference industry standards unless cited on drawing
-- Only validate what is EXPLICITLY shown or required by drawing notes
-
-[WARNING] RULE 9: ERROR DETECTION PRIORITY - REAL MISTAKES ONLY
----
-
-**FOCUS ON:**
-[CHECK] Duplicate line numbers (same number used twice)
-[CHECK] Missing specs where required by drawing notes
-[CHECK] Missing reducers where REQUIRED (not header-to-branch!)
-[CHECK] Incorrect sizes (verify actual discrepancy)
-[CHECK] Missing connections (actual pipe dead-ends)
-[CHECK] Real inconsistencies (actual contradictions)
-[CHECK] Specification violations (conflicts with drawing notes)
-
-**IGNORE:**
-[X] Formatting differences
-[X] Label placement (arrow vs inline - both valid!)
-[X] Text position variations
-[X] Normal header-to-branch size reductions
-[X] Items already present (double-check before flagging!)
-
-RULE 10: SELF-CHECK VALIDATION - MANDATORY BEFORE SUBMISSION
----
-
-**BEFORE RETURNING YOUR ANSWER, YOU MUST ASK YOURSELF:**
-
-1. ? Did I misread any line number as equipment?
-   - If YES: Remove those false equipment detections
-
-2. ? Did I reference anything not visible on THIS drawing?
-   - If YES: Remove cross-document references
-
-3. ? Did I suggest something already present on the drawing?
-   - If YES: Remove false suggestions (verify visually!)
-
-4. ? Did I include deleted notes/holds in my analysis?
-   - If YES: Remove all deleted items
-
-5. ? Did I flag normal header-to-branch transitions as missing reducers?
-   - If YES: Remove false reducer suggestions
-
-6. ? Did I reference NACE/standards not mentioned on drawing?
-   - If YES: Remove assumption-based issues
-
-7. ? Did I count OCR artifacts as equipment?
-   - If YES: Recount using only visual symbols
-
-8. ? Did I detect ACTUAL engineering mistakes (duplicates, real missing items, spec violations)?
-   - If NO: Review more carefully for real issues
-
-9. ? Is my equipment count reasonable (matches visual symbols)?
-   - If NO: Recount excluding line numbers and text fragments
-
-10. ? Are ALL my issues based on visible evidence from THIS drawing only?
-    - If NO: Remove speculative/assumed issues
-
--------------------------------------------------------------------
-           EXTENDED RULES (11-18) — EXPERT ENGINEERING DISCIPLINE
--------------------------------------------------------------------
-
-RULE 11: P&ID CONNECTOR / SHEET NUMBERS vs LINE NUMBERS
----
-- P&ID connector/sheet numbers look like: NN-PP-NNN-NNNNN (e.g., 13-PP-152-45060, 13-PP-152-143070)
-  - "PP" = P&ID drawing prefix — this is a SHEET CONNECTOR NUMBER, NOT a process line number
-  - These numbers reference the connected P&ID sheet, not a piping line
-  - DO NOT flag them as "missing line" or "incomplete piping origin/destination"
-  - DO NOT flag them as duplicate or invalid line numbers
-- True process line numbers follow: [SIZE"]-[FLUID_CODE]-[SEQ]-[SPEC] format
-  - Examples: 4"-HC-1001-CS150, 6"-NG-2003-034XX
-  - Fluid codes are typically 2-4 letters describing process service (HC=hydrocarbon, NG=natural gas, etc.)
-  - PP is NOT a fluid code — it is a P&ID sheet prefix
-
-RULE 12: INSTRUMENT FUNCTION CODE CLASSIFICATION (ISA-5.1)
----
-Instrument FIRST LETTER = Measured Variable | Subsequent Letters = Function
-
-**INDICATORS (last letter = I or no controller suffix) — NO CONTROL LOOP, NO ALARM SETPOINTS:**
-- FI  = Flow Indicator       ? Indication ONLY — no control loop exists by definition
-- PI  = Pressure Indicator   ? Indication ONLY
-- TI  = Temperature Indicator ? Indication ONLY
-- LI  = Level Indicator      ? Indication ONLY
-- PG  = Pressure Gauge       ? Gauge ONLY — NO alarm setpoints expected or required
-
-**CONTROLLERS (last letter = C) — HAVE control loops:**
-- FIC = Flow Indicator Controller ? Has control loop
-- PIC = Pressure Indicator Controller ? Has control loop
-- TIC = Temperature Indicator Controller ? Has control loop
-- LIC = Level Indicator Controller ? Has control loop
-
-**SWITCH/ALARM INSTRUMENTS — NOT safety instruments requiring trip documentation:**
-- XZSH, XZLH, XZLL, ZSH, ZSL = Position switch alarms ? NOT primary safety instruments
-  - These are limit/position switches, not pressure/temp/level safety devices
-  - DO NOT flag them as "missing trip setpoint" or classify as safety items
-  - DO NOT flag them as requiring alarm schedule verification unless alarm schedule provided
-
-**VALVE ACTUATOR INSTRUMENTS — NOT equipment:**
-- XY = Valve positioner/solenoid instrument ? NOT independent equipment
-  - XY tags live inside the instrument bubble for the valve, not as standalone equipment
-  - DO NOT classify XY as vessel, pump, or process equipment
-
-**DCS / LOGIC INSTRUMENTS — NOT piping items:**
-- TDA, TA, TDA, XA, XAH, XAL = Alarm/DCS system blocks ? NOT piping components
-  - DCS blocks drawn next to instruments are INSTRUMENT references, not piping
-  - DO NOT classify them as piping items or in-line components
-
-RULE 13: SOFT TAGS vs PHYSICAL INSTRUMENTS / VALVES
----
-- A tag appearing ONLY in a DCS block or logic bubble = SOFT TAG (no physical symbol)
-  - Example: XV-4513 shown inside a DCS block without an actuated valve symbol = soft reference
-  - DO NOT flag soft tags as "missing physical valve" or "missing instrument symbol"
-  - Only flag if a valve SYMBOL (with actuator indicator) is unambiguously visible but has no tag
-- XV / SDV / HV tags require BOTH: (1) valve body symbol + (2) actuator symbol
-  - If only a text reference in a DCS block → soft tag, NOT a missing physical valve
-
-RULE 14: NOTE AND HOLD CONTENT VERIFICATION
----
-- Before generating a note-compliance issue, READ the actual note text on the drawing
-  - If NOTE 1 text is about "Piping material for sour service" → ONLY flag piping material issues
-  - DO NOT assume NOTE 1 is about design pressure if the text does not say so
-  - DO NOT generate compliance checks for topics not covered by the actual note text
-  - "NOTE 1 NOT RELATED TO [topic]" is NOT a valid issue — simply skip it
-- If you cannot clearly read the note text → DO NOT generate note compliance issues for it
-- HOLD numbers: same principle — only flag what the HOLD text actually requires
-
-RULE 15: FAIL-SAFE POSITION — VERIFY BEFORE FLAGGING
----
-- Control valves ALREADY showing FC / FO / FL on their symbol = fail-safe IS specified
-  - FC = Fail Closed, FO = Fail Open, FL = Fail Last
-  - If these letters appear on or directly adjacent to the valve symbol → DO NOT flag as missing
-  - Only flag "fail-safe not specified" AFTER confirming the valve symbol has NO FC/FO/FL annotation
-
-RULE 16: MEASUREMENT RANGE — ONLY FLAG IF REQUIRED BY DRAWING
----
-- Measurement range (span) is NOT universally required for all instruments on a P&ID
-  - It may be shown on instrument datasheets, not the P&ID itself
-  - Only flag measurement range as missing IF the drawing's notes or title block explicitly mandate it
-  - For simple FI, PI, TI indicators → DO NOT flag "measurement range not specified" unless required
-
-RULE 17: SIGNAL TYPE — ONLY FLAG IF ABSENT FROM DRAWING
----
-- Signal type (4-20mA, HART, digital, etc.) shown on instrument symbol = already specified
-  - If the signal line style (dashed = pneumatic, solid = electrical, dotted = capillary) is shown → it IS specified
-  - DO NOT flag "signal type not specified" when the instrument symbol already conveys signal type
-  - Only flag if signal type is genuinely absent from the drawing AND is required by applicable standard
-
-RULE 18: HALLUCINATION GUARD FOR NON-EXISTENT ELEMENTS
----
-- NEVER reference a tag (PSV, valve, instrument, equipment) that is not VISUALLY CONFIRMED on the drawing
-  - PSV example: if no PSV symbol is visible → DO NOT generate a PSV-compliance finding
-  - If OCR text mentions a tag but NO symbol is visible → treat as text artifact, DO NOT flag
-  - Cross-check every tag you reference against what is ACTUALLY DRAWN on the P&ID
-  - The OCR data provided is a HINT only — it may contain errors and false matches
-  - If a tag appears in OCR but not in vision → SKIP it (do not generate an issue based on OCR alone)
-
--------------------------------------------------------------------
-                          QUALITY STANDARD
--------------------------------------------------------------------
-
-- GOOD ISSUE EXAMPLE:
+Return ONLY valid JSON in this exact format:
 {
-  "pid_reference": "2\"-VG-5277-033842",
-  "issue_observed": "Duplicate line number: 2\"-VG-5277-033842 appears twice on drawing (top left near V-101 and bottom right near P-202)",
-  "action_required": "Renumber one instance to avoid confusion",
-  "severity": "major"
-}
-
-- GOOD ISSUE EXAMPLE:
-{
-  "pid_reference": "NOTE 3",
-  "issue_observed": "NOTE 3 requires design pressure 50 barg, but vessel V-101 shows 45 barg on datasheet reference",
-  "action_required": "Update V-101 design pressure to 50 barg per NOTE 3",
-  "severity": "critical"
-}
-
-- BAD ISSUE EXAMPLE (HALLUCINATION):
-{
-  "pid_reference": "Line 2\"-D-6155-033842-X-N",
-  "issue_observed": "D-6155 equipment does not have capacity specified",
-  "severity": "major"
-}
-WRONG: "D-6155" is part of LINE NUMBER, not equipment!
-
-- BAD ISSUE EXAMPLE (CROSS-CONTAMINATION):
-{
-  "pid_reference": "HOLD-4",
-  "issue_observed": "HOLD-4 requires fail-closed valves, but valve on 4\"-D-6153-013842 not specified as FC",
-  "severity": "critical"  
-}
-WRONG: HOLD-4 says "DELETED" on the drawing, should not be referenced!
-
-- BAD ISSUE EXAMPLE (FALSE SUGGESTION):
-{
-  "pid_reference": "4\" header to 2\" line",
-  "issue_observed": "Missing reducer between 4\" header and 2\" branch line",
-  "severity": "major"
-}
-WRONG: This is normal header-to-branch design, not an issue!
-
--------------------------------------------------------------------
-
-**MANDATORY CHAIN-OF-THOUGHT PROCESS:**
-Before listing issues, you MUST think through:
-1. "What instruments do I see? Are all properly specified?"
-2. "What equipment exists? Is each tagged and specified?"
-3. "What are all the line numbers? Do they all have source/destination?"
-4. "What control loops exist? Are they complete?"
-5. "What safety devices exist? Are they properly configured?"
-6. "What notes/holds are ACTIVE (not deleted)? Are they applied?"
-7. "Does the legend match all symbols used?"
-8. "Are there any inconsistencies or missing data?"
-9. "Are pipe classes consistent between equipment nozzles and connected piping?"
-10. "Are dissimilar material connections properly identified with insulating gaskets?"
-11. "Do Restriction Orifices (RO) and LTCS have minimum spool lengths?"
-12. "Are free draining slopes and low point drains provided?"
-13. "Do PSV set pressures comply with equipment design pressures?"
-14. "Have I avoided misreading line numbers as equipment?"
-15. "Have I checked for deleted notes/holds before referencing them?"
-16. "Have I verified items are actually missing before suggesting them?"
-"""
-
-            if reference_context:
-                system_prompt += "\n\n" + reference_context + "\n\n"
-
-            system_prompt += """
-
-**REQUIRED VERIFICATION CHECKLIST - CHECK EVERY ITEM:**
-
-[INSTRUMENTS] (Check ALL visible instruments)
-   - Tag format correct? (TI, TIC, FIC, PSV, LIC, etc.)
-   - Measurement range: ONLY flag if drawing notes/standards ON THIS DRAWING explicitly require it (not a universal requirement)
-   - Alarm setpoints (HH, H, L, LL): ONLY for instruments that have an alarm/trip function suffix (e.g., PSHH, LAH, TAL) — NOT for plain indicators (FI, PI, TI, LI, PG) which have no alarm by definition
-   - Trip setpoints: ONLY for safety instruments that actually act on process (PSHH, LSHH, TSHH, etc.) — NOT for position switches (XZS, ZS, XZSH)
-   - Fail-safe position (FC, FO, FL): ONLY for control valves (FCV, LCV, TCV, PCV, XV with actuator) — VERIFY that FC/FO/FL is NOT already annotated before flagging
-   - Signal type: ONLY flag if NOT already shown on the drawing symbol (check instrument symbol style: dashed=pneumatic, solid=electrical)
-   - Connected to correct equipment/line?
-   - Location accessible for maintenance?
-
-[EQUIPMENT] (Check ALL vessels, pumps, compressors, exchangers)
-   - Tag number visible and correct format?
-   - Equipment type clearly identified?
-   - Design pressure/temperature specified?
-   - Material of construction noted?
-   - Nozzle schedule complete?
-   - Capacity/size specified?
-   - Datasheet reference present?
-
-[PIPING_AND_LINES] (Check EVERY line)
-   - Line number complete and valid format?
-   - Line size specified?
-   - Line specification/class noted?
-   - Source identified (equipment, other line)?
-   - Destination identified (equipment, header, flare)?
-   - Isolation valves present?
-   - Drain points where needed?
-   - Vent points at high elevations?
-   - Slope indicated if required?
-   - Reducers/expanders marked with sizes?
-
-[VALVES] (Check ALL valves)
-   - Valve type appropriate for service?
-   - Valve size matches line size?
-   - Actuator type specified (manual, pneumatic, motor)?
-   - Fail position for automated valves?
-   - Check valve orientation correct?
-   - Block valves for isolation?
-   - Bypass valves where needed?
-   - Three-way valves configured correctly?
-
-[SAFETY_SYSTEMS] (CRITICAL - Pressure Safety Valves MAWP Compliance)
-   - Pressure Safety Valve (PSV): Set pressure specified?
-   - PSV: Set pressure vs Equipment Design Pressure compliance (Must be = MAWP)?
-   - PSV: CRITICAL VERIFICATION - Set pressure must NOT exceed Maximum Allowable Working Pressure
-   - PSV: Discharge routed properly?
-   - PSV: Sized for duty?
-   - Rupture disks: Burst pressure noted?
-   - Flame arrestors: Type and location correct?
-   - ESD valves: Fail position correct?
-   - Fire & Gas detectors: Coverage adequate?
-   - Emergency relief: Path to safe location?
-
-[PIPE_CLASS] & TRIM CLASS CONSISTENCY
-   - Equipment nozzle class matches connected piping class?
-   - Valve trim class compatible with line specification?
-   - Pressure-temperature rating consistency maintained?
-   - Material compatibility between equipment and piping?
-   - Flange rating matches line pressure class?
-   - Gasket material suitable for service conditions?
-
-[DISSIMILAR_MATERIALS] & INSULATING GASKETS
-   - Dissimilar metal connections identified (e.g., carbon steel to stainless steel)?
-   - Insulating gaskets specified where dissimilar materials meet?
-   - Insulating kit complete (gasket, sleeves, washers)?
-   - Galvanic corrosion prevention measures noted?
-   - Material transition points clearly marked?
-   - Electrical isolation requirements met?
-
-[SPOOL_LENGTH] COMPLIANCE
-   - Minimum spool length downstream of Restriction Orifice (RO) met?
-   - RO to first fitting: Minimum 5D (5 - pipe diameter) straight run?
-   - Low Temperature Cut-off Switch (LTCS) installation clearance adequate?
-   - Straight run requirements for flow measurement devices satisfied?
-   - Instrument tapping locations comply with minimum distances?
-   - Upstream/downstream piping interference checked?
-
-[DRAINAGE] & SLOPE REQUIREMENTS
-   - All horizontal lines have proper drainage slope (typically 1:100 or 1:50)?
-   - Low point drains provided at collection points?
-   - High point vents provided at elevation changes?
-   - Dead legs eliminated or minimized?
-   - Pocketing prevented in piping layout?
-   - Drainage direction indicated on drawing?
-   - Drain valve sizing adequate for service?
-   - Winterization provisions noted for outdoor lines?
-
-[CONTROL_LOOPS]
-   - Controller output goes to correct valve?
-   - Measurement source identified?
-   - Control valve has fail-safe specified?
-   - Cascade loops properly connected?
-   - Split-range valves configured correctly?
-   - Override logic documented?
-   - Interlock conditions clear?
-
-[NOTES_AND_DOCUMENTATION]
-   - All referenced notes actually present?
-   - HOLD items identified and tracked?
-   - Notes apply to correct equipment/lines?
-   - Conflicting information in notes?
-   - Missing clarifications needed?
-   - **HOLDS COMPLIANCE**:
-     * Each HOLD requirement verified on drawing?
-     * Any equipment/instrument violating HOLD requirements?
-     * HOLD-specified items clearly marked?
-   - **NOTES COMPLIANCE**:
-     * Design pressure/temp per notes followed?
-     * Material specs per notes implemented?
-     * Safety requirements per notes met?
-     * Operating constraints per notes observed?
-   - **MISSING REQUIREMENTS**:
-     * Items specified in HOLD/NOTE but not shown on drawing?
-     * Violations of mandatory HOLD/NOTE requirements?
-
-[LEGEND_AND_SYMBOLS]
-   - All symbols used are in legend?
-   - Legend items actually used on drawing?
-   - Symbol usage consistent throughout?
-   - Abbreviations defined?
-
-**OUTPUT FORMAT - STRICT JSON:**
-{
-    "reasoning": "Chain-of-thought: First I see X instruments, Y equipment, Z lines. I will check each systematically...",
+    "reasoning": "Summary of what you examined category by category",
     "issues": [
         {
             "serial_number": 1,
-            "pid_reference": "Exact tag/line from drawing",
-            "issue_observed": "Specific detailed issue with exact values",
+            "pid_reference": "Exact tag/line/equipment visible on drawing",
+            "issue_observed": "Specific issue with exact values",
             "action_required": "Clear corrective action",
             "severity": "critical/major/minor/observation",
-            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/dissimilar_materials/spool_length/drainage/psv_compliance/holds_compliance/notes_compliance",
+            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance",
             "location_on_drawing": {
                 "zone": "Top-Left/Top-Center/Top-Right/Middle-Left/Middle-Center/Middle-Right/Bottom-Left/Bottom-Center/Bottom-Right",
                 "drawing_section": "Process area/utility/legend/notes",
-                "proximity_description": "Near equipment X, between lines Y and Z",
-                "visual_cues": "Upper left, center section, etc."
+                "proximity_description": "Near which equipment or line",
+                "visual_cues": "Describe exact position"
             }
         }
     ],
     "total_issues": 0,
     "confidence": "High/Medium/Low"
-}
+}"""
 
-**QUALITY STANDARDS:**
-- QUALITY OVER QUANTITY: Report ONLY real, verified engineering issues
-- DO NOT fabricate or invent findings to reach a target count
-- A drawing with few real issues SHOULD return few findings — that is CORRECT behaviour
-- Each finding must reference a SPECIFIC tag/line/equipment that EXISTS on THIS drawing
-- Include EXACT values only where visually confirmed (pressures, temps, setpoints, sizes)
-- Provide ACTIONABLE recommendations
-- Use PROPER engineering terminology
-- THINK like you're preparing for HAZOP review
-- CHECK pipe class consistency at equipment nozzles
-- VERIFY dissimilar material connections have insulating gaskets
-- CONFIRM minimum spool lengths per industry standards
-- VALIDATE drainage provisions on all horizontal lines
-- ENSURE PSV set pressures comply with equipment ratings — ONLY for PSVs that EXIST on the drawing
-- **EXTRACT and VERIFY ALL ACTIVE HOLDS** (flag violations as CRITICAL) — SKIP deleted holds
-- **EXTRACT and VERIFY ALL ACTIVE NOTES** — READ actual note text before flagging non-compliance
-- **REFERENCE HOLD/NOTE numbers** in issues when applicable
-- **CREATE SEPARATE ISSUES** for each missing HOLD/NOTE requirement
-- **FORMAT**: "HOLD-X NOT IMPLEMENTED: [specific missing element]" or "NOTE-Y NON-COMPLIANT: [specific violation]"
-"""
+            if reference_context:
+                system_prompt += "\n\nREFERENCE DOCUMENTS:\n" + reference_context
             
             messages = [
                 {
@@ -817,42 +487,63 @@ Before listing issues, you MUST think through:
                     "content": [
                         {
                             "type": "text",
-                            "text": f"""Please perform a thorough P&ID Quality Check on this drawing.
+                            "text": f"""Please perform a complete, systematic P&ID Quality Control review on this drawing.
 
-Apply all 18 rules from your system prompt strictly. For every issue you identify, verify it is:
-- Visually confirmed on THIS drawing (not assumed or from memory)
-- Based on an actual tag, line number, or element that EXISTS on the drawing
-- A real engineering problem, not a formatting preference or assumption
-
-OCR text extracted from this drawing (use as hints — cross-check visually before trusting):
-- Instrument tags detected: {', '.join(sorted(self.instrument_tags)[:25]) if self.instrument_tags else 'None'}
-- Line numbers detected: {', '.join(sorted(self.line_numbers)[:25]) if self.line_numbers else 'None'}
-- Equipment tags detected: {', '.join(sorted(self.equipment_tags)[:15]) if self.equipment_tags else 'None'}
-
-NOTE: The OCR may contain errors. The line numbers above may include P&ID sheet connector numbers
-(format: NN-PP-NNN-NNNNN where PP = P&ID prefix) — these are NOT process piping line numbers.
-Treat the OCR data as hints only. Visually verify any tag before including it in a finding.
+This review should follow the standard for an IFC-stage QC check at an EPC oil and gas company.
 
 {reference_context}
 
-Think through each category systematically:
-1. Instruments (tags, fail-safe positions, control loops only where controllers exist)
-2. Equipment (tags, specifications, nozzles)
-3. Piping lines (line numbers, sizes, sources/destinations — ignore OPC continuation arrows)
-4. Valves (type, actuator, fail-safe position if automated)
-5. Safety devices (PSVs — ONLY if PSV symbol is visually present on drawing)
-6. Active notes and holds (read actual note text, only flag what the note actually requires)
-7. Pipe class consistency and spec breaks
-8. Legend vs symbols used
+--- OCR-CONFIRMED ELEMENTS ON THIS DRAWING ---
+These tags were extracted by OCR — use them as a systematic check checklist:
 
-Return your findings as valid JSON only:
+INSTRUMENT TAGS ({len(self.instrument_tags)} total):
+{chr(10).join('  - ' + t for t in sorted(self.instrument_tags)[:30]) if self.instrument_tags else '  None detected'}
+
+LINE NUMBERS ({len(self.line_numbers)} total, first 25):
+{chr(10).join('  - ' + ln for ln in sorted(self.line_numbers)[:25]) if self.line_numbers else '  None detected'}
+
+NOTE: Tags in format AREA-FUNCCODE-NUMBER (e.g. 13-FE-4580) are INSTRUMENT TAGS.
+Line numbers in format NN-PP-NNN-NNNNN are P&ID sheet connectors — exclude from piping line checks.
+
+--- PER-INSTRUMENT SYSTEMATIC CHECK ---
+{self._build_per_instrument_instructions()}
+
+--- PIPING LINE CHECK ---
+For each line number above (excluding PP-prefix connectors):
+  1) Is the full line number visible? (format: SIZE-FLUIDCODE-SEQ-SPEC, e.g. 4"-HC-1001-CS150)
+  2) Is the pipe spec class labeled on the line?
+  3) Are isolation valves present at equipment nozzle connections?
+  4) Are spec breaks indicated where pipe class changes?
+  5) Is the source and destination clear (equipment tag or OPC arrow)?
+
+--- OVERALL DRAWING CHECKS ---
+Equipment: For each visible vessel/pump/compressor/exchanger — tag format, design conditions, nozzle connections
+Safety: Any visible PSV/PRV: set pressure, discharge routing, sizing
+Notes/Holds: Read each active note/hold text — flag non-compliance as separate critical/major issues
+Documentation: Legend completeness, title block revision, legibility, symbol consistency
+
+--- RULES (always apply) ---
+- Report ONLY elements visually confirmed on this drawing
+- FI/PI/TI/LI/PG = indicators only — no control loop or alarm setpoints required
+- FC/FO/FL already on valve symbol = fail-safe IS specified — do NOT re-flag
+- P&ID connector numbers (PP-prefix) are NOT process piping lines
+- XV soft-tags in DCS logic blocks without valve body symbol = not physical valves
+
+--- CRITICAL REPORTING REQUIREMENT ---
+EVERY □ checkbox in the MANDATORY INSTRUMENT LOOP VERIFICATION section above that you
+CANNOT VISUALLY CONFIRM on the drawing MUST become a separate JSON issue entry.
+"Cannot confirm" = element is absent, unclear, or not annotated. One □ = one issue.
+Do NOT merge multiple checkboxes into one finding. Do NOT skip unconfirmed checkboxes.
+The expected issue count for an IFC-stage drawing with 10+ instruments is 15–35.
+
+Return ONLY valid JSON:
 {{
-    "reasoning": "Brief chain-of-thought summary of what you examined",
+    "reasoning": "What you examined: list instruments by category, describe lines, equipment, safety, notes checked",
     "issues": [
         {{
             "serial_number": 1,
-            "pid_reference": "Exact tag/line/equipment from THIS drawing",
-            "issue_observed": "Specific issue with exact values seen on drawing",
+            "pid_reference": "Exact tag/line/equipment visible on drawing",
+            "issue_observed": "Specific issue with exact values",
             "action_required": "Clear corrective action",
             "severity": "critical/major/minor/observation",
             "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance",
@@ -860,7 +551,7 @@ Return your findings as valid JSON only:
                 "zone": "Top-Left/Top-Center/Top-Right/Middle-Left/Middle-Center/Middle-Right/Bottom-Left/Bottom-Center/Bottom-Right",
                 "drawing_section": "Process area/utility/legend/notes",
                 "proximity_description": "Near which equipment or line",
-                "visual_cues": "Describe where on the page"
+                "visual_cues": "Describe exact position on the page"
             }}
         }}
     ],
@@ -868,7 +559,7 @@ Return your findings as valid JSON only:
     "confidence": "High/Medium/Low"
 }}
 
-Return ONLY valid JSON. No other text."""
+Return ONLY valid JSON. No markdown, no text outside the JSON."""
                         }
                     ] + [
                         {
@@ -896,10 +587,19 @@ Return ONLY valid JSON. No other text."""
             if not response or not response.choices:
                 print("[ERROR] OpenAI returned empty response")
                 return {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
-            
-            response_text = response.choices[0].message.content
+
+            msg = response.choices[0].message
+            finish = response.choices[0].finish_reason
+            print(f"[DEBUG] finish_reason={finish}")
+
+            # Check for content-policy refusal
+            if hasattr(msg, 'refusal') and msg.refusal:
+                print(f"[ERROR] OpenAI refusal: {msg.refusal[:200]}")
+                return {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
+
+            response_text = msg.content
             if not response_text:
-                print("[ERROR] OpenAI response content is None")
+                print(f"[ERROR] OpenAI response content is None (finish={finish})")
                 return {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
             
             response_text = response_text.strip()
@@ -991,81 +691,69 @@ Return ONLY valid JSON. No other text."""
         return consistency_issues
     
     def _second_review_pass(self, images_base64: List[str], first_pass: Dict, consistency: List) -> List[Dict[str, Any]]:
-        """PASS 4: Second review to catch missed issues"""
+        """PASS 4: Second review targeting tags not mentioned in the first pass"""
         try:
-            first_pass_issues = [f"{i.get('pid_reference')}: {i.get('issue_observed')[:50]}" 
-                                for i in first_pass.get('issues', [])[:10]]
-            
+            first_pass_issues = first_pass.get('issues', [])
+            first_refs = {i.get('pid_reference', '').upper() for i in first_pass_issues}
+
+            # Find OCR tags not mentioned in first-pass findings
+            all_ocr = sorted(list(self.instrument_tags or []) + list({
+                f"{p.split('-')[1]}-{p.split('-')[2]}"
+                for p in (self.line_numbers or [])
+                if len(p.split('-')) == 3 and p.split('-')[0].isdigit() and not p.split('-')[1].isdigit()
+            }))
+            unchecked = [t for t in all_ocr if not any(t.upper() in ref or ref in t.upper() for ref in first_refs)]
+
+            first_summary = '\n'.join(
+                f"  - {i.get('pid_reference')}: {i.get('issue_observed','')[:60]}"
+                for i in first_pass_issues[:15]
+            )
+
+            unchecked_str = ', '.join(unchecked[:20]) if unchecked else 'All tags were addressed'
+
             messages = [
                 {
                     "role": "system",
-                    "content": """You are performing a SECOND REVIEW pass on a P&ID drawing.
+                    "content": """Perform a focused SECOND REVIEW on a P&ID drawing.
 
-** CRITICAL MISSION: Find REAL issues that were genuinely MISSED in the first analysis **
+STRICT RULES:
+- ONLY report issues visually confirmed on the drawing — never fabricate
+- Apply ISA-5.1: FI/PI/TI/LI/PG = indicators only (no control loop)
+- FC/FO/FL already annotated on valve = fail-safe specified — do NOT re-flag
+- P&ID connector numbers (NN-PP-NNN-NNNNN) are NOT process piping lines
+- If no additional issues exist, return empty issues array
 
-**STRICT RULES FOR THIS PASS:**
-- ONLY report issues you can visually CONFIRM on the drawing
-- DO NOT fabricate issues to reach any minimum count
-- If no additional issues exist, return an empty issues array — that is correct behaviour
-- Apply ALL the same validation rules as the first pass (Rules 1-18)
-- In particular: do NOT flag FI for control loops, PG for alarm setpoints, soft tags as physical valves, P&ID connector numbers as line numbers, or deleted notes/holds
+WHAT TO LOOK FOR:
+- Tags listed as unchecked that need verification on the drawing
+- Any instruments / equipment visible but not addressed in first pass
+- Control loops where signal connections are absent
+- Missing fail-safe annotations on actuated valves
+- Safety switches without interlock wiring shown
 
-**WHAT TO LOOK FOR (genuine missed items only):**
-- Instruments or equipment VISIBLE but not analysed in first pass
-- Lines with genuine missing source/destination (NOT continuation arrows)
-- Duplicate tags or line numbers that were overlooked
-- Real spec break issues not caught in first pass
-- Control loops that are incomplete (FIC/LIC/TIC without a connected control valve)
-- Safety devices (actual PSV or ESD symbols) without required documentation
-
-**OUTPUT FORMAT - JSON ONLY:**
-{
-    "issues": [
-        {
-            "serial_number": 1,
-            "pid_reference": "Exact tag/line visible on drawing",
-            "issue_observed": "What was missed — based ONLY on visual evidence",
-            "action_required": "What to do",
-            "severity": "critical/major/minor/observation",
-            "category": "instrument/equipment/piping/valve/safety/documentation",
-            "location_on_drawing": {
-                "zone": "Zone",
-                "drawing_section": "Section",
-                "proximity_description": "Near X",
-                "visual_cues": "Visual location"
-            }
-        }
-    ],
-    "total_issues": 0
-}"""
+Return ONLY valid JSON with "issues" array and "total_issues" integer."""
                 },
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": f"""Perform SECOND REVIEW PASS to find genuinely MISSED issues only.
+                            "text": f"""SECOND REVIEW PASS — focus on tags NOT yet addressed.
 
-**FIRST PASS FOUND {len(first_pass.get('issues', []))} ISSUES:**
-{chr(10).join(first_pass_issues)}
+FIRST PASS ({len(first_pass_issues)} issues found):
+{first_summary}
 
-**CONSISTENCY CHECK FOUND:**
-- {len(consistency)} additional observations from text/visual cross-validation
+TAGS NOT YET COVERED IN FINDINGS: {unchecked_str}
 
-**YOUR MISSION:**
-Look carefully for REAL engineering issues missed in the first pass. Apply Rules 1-18.
+For each uncovered tag, look at the drawing and check:
+- Is the instrument symbol visible and properly labeled?
+- Is its signal connection / wiring clearly shown?
+- Is required annotation (fail-safe, setpoint reference, etc.) present?
+Report any missing or unclear elements as separate issues.
 
-REMEMBER:
-- FI = Indicator only — NO control loop required
-- PG/PI = Gauge/Indicator — NO alarm setpoints required  
-- XZS/ZS = Position switches — NOT primary safety instruments
-- XY = Valve actuator instrument — NOT equipment
-- TDA/TA = Alarm/DCS blocks — NOT piping items
-- P&ID connector numbers (NN-PP-NNN-NNNNN) are NOT process line numbers
-- Only reference tags you can VISUALLY SEE on the drawing
-- If nothing is missed, return empty issues array
+Also scan the drawing broadly for any visible elements not covered at all (equipment nozzles,
+spec breaks, legend items, title block revision) that have genuine issues.
 
-Return ONLY JSON."""
+Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
                         }
                     ] + [
                         {
@@ -1079,32 +767,33 @@ Return ONLY JSON."""
                     ]
                 }
             ]
-            
+
             print("[INFO] Calling OpenAI for second review pass...")
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages,
-                max_tokens=8000,
-                temperature=0.5,  # Higher creativity to find missed items
-                timeout=60  # 60 second timeout to prevent worker hanging
+                max_tokens=12000,
+                temperature=0.4,
+                timeout=300
             )
-            
+
             # Safely extract response
             if not response or not response.choices:
                 print("[WARNING] Second pass: OpenAI returned empty response")
                 return []
-            
+
             response_text = response.choices[0].message.content
             if not response_text:
                 print("[WARNING] Second pass: Response content is None")
                 return []
-            
+
             response_text = response_text.strip()
+            print(f"[DEBUG RAW SECOND PASS] len={len(response_text)} | preview={response_text[:120]}")
             result = self._parse_analysis_response(response_text, 0)
-            
+
             print(f"[INFO] Second pass found {len(result.get('issues', []))} additional issues")
             return result.get('issues', [])
-            
+
         except Exception as e:
             print(f"[WARNING] Second review pass failed: {str(e)}")
             return []
