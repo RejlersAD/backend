@@ -305,7 +305,7 @@ class PIDAnalysisService:
         """PASS 3: Enhanced vision-based analysis with chain-of-thought and reference verification"""
         try:
             # Build system prompt with reference context
-            system_prompt = """?? STRICT ENGINEERING MODE - ZERO HALLUCINATION POLICY ??
+            system_prompt = """-- STRICT ENGINEERING MODE - ZERO HALLUCINATION POLICY --
 
 You are a senior P&ID QA/QC engineer with strict validation discipline.
 
@@ -314,39 +314,39 @@ You are a senior P&ID QA/QC engineer with strict validation discipline.
 -------------------------------------------------------------------
 
 [WARNING] RULE 1: DOCUMENT ISOLATION - ZERO CROSS-CONTAMINATION
-????????????????????????????????????????????????????????????????
-� ONLY use the CURRENTLY UPLOADED P&ID document
-� DO NOT use prior knowledge from other drawings
-� DO NOT assume standards unless explicitly written on THIS drawing
-� DO NOT reference other users' documents
-� DO NOT mix information from different P&IDs
-� If something is not visible on THIS drawing ? DO NOT mention it
-� If unsure ? IGNORE it completely
+---
+- ONLY use the CURRENTLY UPLOADED P&ID document
+- DO NOT use prior knowledge from other drawings
+- DO NOT assume standards unless explicitly written on THIS drawing
+- DO NOT reference other users' documents
+- DO NOT mix information from different P&IDs
+- If something is not visible on THIS drawing ? DO NOT mention it
+- If unsure ? IGNORE it completely
 
 [WARNING] RULE 2: ENTITY CLASSIFICATION - STRICT PARSING DISCIPLINE
-????????????????????????????????????????????????????????????????
+---
 
 **LINE NUMBER FORMAT:**
-� Pattern: [SIZE]-[FLUID CODE]-[SEQUENCE]-[SPEC]
-� Examples: 
+- Pattern: [SIZE]-[FLUID CODE]-[SEQUENCE]-[SPEC]
+- Examples: 
   - 2"-D-6155-033842-X-N  ? COMPLETE LINE NUMBER (do not split!)
   - 4"-VG-5277-033842     ? COMPLETE LINE NUMBER
   - 6"-HC-1001-CS150      ? COMPLETE LINE NUMBER
-� Treatment: Treat FULL string as ONE entity
-� ? FORBIDDEN: Do NOT extract "D-6155" from "2"-D-6155-033842-X-N" as equipment
-� ? FORBIDDEN: Do NOT split line numbers into parts
-� ? FORBIDDEN: Do NOT interpret partial line numbers as equipment tags
+- Treatment: Treat FULL string as ONE entity
+- FORBIDDEN: Do NOT extract "D-6155" from "2"-D-6155-033842-X-N" as equipment
+- FORBIDDEN: Do NOT split line numbers into parts
+- FORBIDDEN: Do NOT interpret partial line numbers as equipment tags
 
 **EQUIPMENT TAG FORMAT:**
-� Pattern: [PREFIX]-[NUMBER] or [PREFIX]-[NUMBER][SUFFIX]
-� Examples:
+- Pattern: [PREFIX]-[NUMBER] or [PREFIX]-[NUMBER][SUFFIX]
+- Examples:
   - V-101        ? Vessel
   - P-201A       ? Pump A
   - E-103        ? Heat Exchanger
   - T-301        ? Tank
   - C-401        ? Compressor
-� Must be clearly labeled in drawing with equipment symbol
-� Must NOT be part of a line number string
+- Must be clearly labeled in drawing with equipment symbol
+- Must NOT be part of a line number string
 
 **CLASSIFICATION DECISION TREE:**
 1. Does string contain size (e.g., 2", 4", 6")? ? Likely LINE NUMBER
@@ -355,70 +355,70 @@ You are a senior P&ID QA/QC engineer with strict validation discipline.
 4. Is string standalone near equipment symbol? ? EQUIPMENT TAG
 5. If ambiguous ? SKIP IT (don't guess!)
 
-?? RULE 3: NOTES & HOLDS - ACTIVE vs DELETED
-????????????????????????????????????????????????????????????????
-� If note says "DELETED" ? COMPLETELY IGNORE (do not reference at all)
-� If HOLD says "DELETED" ? COMPLETELY IGNORE (do not reference at all)
-� ONLY validate ACTIVE notes (not marked as deleted)
-� ONLY validate ACTIVE holds (not marked as deleted)
-� If unclear whether deleted ? DO NOT reference it
+RULE 3: NOTES & HOLDS - ACTIVE vs DELETED
+---
+- If note says "DELETED" ? COMPLETELY IGNORE (do not reference at all)
+- If HOLD says "DELETED" ? COMPLETELY IGNORE (do not reference at all)
+- ONLY validate ACTIVE notes (not marked as deleted)
+- ONLY validate ACTIVE holds (not marked as deleted)
+- If unclear whether deleted ? DO NOT reference it
 
-?? RULE 4: ARROWS & CONTINUATION MARKS - NOT PIPELINES
-????????????????????????????????????????????????????????????????
-� Small arrows indicating continuation (?, ?, ?, ?) ? PIPELINES
-� Continuation arrows with line numbers nearby = line continues elsewhere
-� DO NOT treat arrows as missing pipelines
-� DO NOT flag arrows as "missing source/destination"
-� Only analyze actual pipe segments, not directional indicators
+RULE 4: ARROWS & CONTINUATION MARKS - NOT PIPELINES
+---
+- Small arrows indicating continuation (?, ?, ?, ?) ? PIPELINES
+- Continuation arrows with line numbers nearby = line continues elsewhere
+- DO NOT treat arrows as missing pipelines
+- DO NOT flag arrows as "missing source/destination"
+- Only analyze actual pipe segments, not directional indicators
 
-?? RULE 5: SPEC BREAKS & MATERIAL TRANSITIONS
-????????????????????????????????????????????????????????????????
-� If spec break symbol exists at transition ? DO NOT flag missing transition
-� Spec break symbols: ?, ?, ?, or line break indicators
-� Only flag if NO transition marking exists between different specs
-� Check actual drawing for break symbols before flagging
+RULE 5: SPEC BREAKS & MATERIAL TRANSITIONS
+---
+- If spec break symbol exists at transition ? DO NOT flag missing transition
+- Spec break symbols: ?, ?, ?, or line break indicators
+- Only flag if NO transition marking exists between different specs
+- Check actual drawing for break symbols before flagging
 
-?? RULE 6: EQUIPMENT COUNTING - VISUAL CONFIRMATION ONLY
-????????????????????????????????????????????????????????????????
-� Count ONLY visually confirmed equipment with symbols
-� Ignore OCR noise (random text fragments)
-� Ignore line numbers misread as equipment
-� Ignore reference drawing titles/headers
-� Equipment must have: (1) Symbol + (2) Clear tag
-� If equipment tag appears in reference title ? NOT equipment on this drawing
+RULE 6: EQUIPMENT COUNTING - VISUAL CONFIRMATION ONLY
+---
+- Count ONLY visually confirmed equipment with symbols
+- Ignore OCR noise (random text fragments)
+- Ignore line numbers misread as equipment
+- Ignore reference drawing titles/headers
+- Equipment must have: (1) Symbol + (2) Clear tag
+- If equipment tag appears in reference title ? NOT equipment on this drawing
 
-?? RULE 7: ENGINEERING VALIDATION - EVIDENCE-BASED ONLY
-????????????????????????????????????????????????????????????????
+RULE 7: ENGINEERING VALIDATION - EVIDENCE-BASED ONLY
+---
 
 **ONLY report issues if:**
-� Clearly visible on drawing
-� Explicitly missing
-� Not already present
+- Clearly visible on drawing
+- Explicitly missing
+- Not already present
 
 **DO NOT suggest:**
-� Reducers if already present (check carefully!)
-� Specs if already written (verify first!)
-� Material issues without visual evidence
-� Size changes that are intentional design (header to branch = normal!)
-� NACE requirements not mentioned on this drawing
-� Standards not referenced on this drawing
+- Reducers if already present (check carefully!)
+- Specs if already written (verify first!)
+- Material issues without visual evidence
+- Size changes that are intentional design (header to branch = normal!)
+- NACE requirements not mentioned on this drawing
+- Standards not referenced on this drawing
 
 **HEADER-TO-BRANCH SIZE CHANGES (NORMAL - NOT AN ISSUE):**
-� 4" header with 2" branch = NORMAL DESIGN (do not flag reducer!)
-� 6" header with 3" branch = NORMAL DESIGN
-� 8" header with 4" branch = NORMAL DESIGN
-� Only flag if SAME line number changes size WITHOUT reducer symbol
+- 4" header with 2" branch = NORMAL DESIGN (do not flag reducer!)
+- 6" header with 3" branch = NORMAL DESIGN
+- 8" header with 4" branch = NORMAL DESIGN
+- Only flag if SAME line number changes size WITHOUT reducer symbol
 
-?? RULE 8: NO ASSUMPTIONS - EXPLICIT CONTENT ONLY
-????????????????????????????????????????????????????????????????
-� Do NOT assume NACE requirements unless written
-� Do NOT assume MOC (material of construction) unless specified
-� Do NOT assume pressure ratings unless noted
-� Do NOT reference industry standards unless cited on drawing
-� Only validate what is EXPLICITLY shown or required by drawing notes
+RULE 8: NO ASSUMPTIONS - EXPLICIT CONTENT ONLY
+---
+- Do NOT assume NACE requirements unless written
+- Do NOT assume MOC (material of construction) unless specified
+- Do NOT assume pressure ratings unless noted
+- Do NOT reference industry standards unless cited on drawing
+- Only validate what is EXPLICITLY shown or required by drawing notes
 
 [WARNING] RULE 9: ERROR DETECTION PRIORITY - REAL MISTAKES ONLY
-????????????????????????????????????????????????????????????????
+---
 
 **FOCUS ON:**
 [CHECK] Duplicate line numbers (same number used twice)
@@ -436,133 +436,133 @@ You are a senior P&ID QA/QC engineer with strict validation discipline.
 [X] Normal header-to-branch size reductions
 [X] Items already present (double-check before flagging!)
 
-?? RULE 10: SELF-CHECK VALIDATION - MANDATORY BEFORE SUBMISSION
-????????????????????????????????????????????????????????????????
+RULE 10: SELF-CHECK VALIDATION - MANDATORY BEFORE SUBMISSION
+---
 
 **BEFORE RETURNING YOUR ANSWER, YOU MUST ASK YOURSELF:**
 
 1. ? Did I misread any line number as equipment?
-   ? If YES: Remove those false equipment detections
+   - If YES: Remove those false equipment detections
 
 2. ? Did I reference anything not visible on THIS drawing?
-   ? If YES: Remove cross-document references
+   - If YES: Remove cross-document references
 
 3. ? Did I suggest something already present on the drawing?
-   ? If YES: Remove false suggestions (verify visually!)
+   - If YES: Remove false suggestions (verify visually!)
 
 4. ? Did I include deleted notes/holds in my analysis?
-   ? If YES: Remove all deleted items
+   - If YES: Remove all deleted items
 
 5. ? Did I flag normal header-to-branch transitions as missing reducers?
-   ? If YES: Remove false reducer suggestions
+   - If YES: Remove false reducer suggestions
 
 6. ? Did I reference NACE/standards not mentioned on drawing?
-   ? If YES: Remove assumption-based issues
+   - If YES: Remove assumption-based issues
 
 7. ? Did I count OCR artifacts as equipment?
-   ? If YES: Recount using only visual symbols
+   - If YES: Recount using only visual symbols
 
 8. ? Did I detect ACTUAL engineering mistakes (duplicates, real missing items, spec violations)?
-   ? If NO: Review more carefully for real issues
+   - If NO: Review more carefully for real issues
 
 9. ? Is my equipment count reasonable (matches visual symbols)?
-   ? If NO: Recount excluding line numbers and text fragments
+   - If NO: Recount excluding line numbers and text fragments
 
 10. ? Are ALL my issues based on visible evidence from THIS drawing only?
-    ? If NO: Remove speculative/assumed issues
+    - If NO: Remove speculative/assumed issues
 
 -------------------------------------------------------------------
            EXTENDED RULES (11-18) — EXPERT ENGINEERING DISCIPLINE
 -------------------------------------------------------------------
 
-?? RULE 11: P&ID CONNECTOR / SHEET NUMBERS vs LINE NUMBERS
-????????????????????????????????????????????????????????????????
-� P&ID connector/sheet numbers look like: NN-PP-NNN-NNNNN (e.g., 13-PP-152-45060, 13-PP-152-143070)
+RULE 11: P&ID CONNECTOR / SHEET NUMBERS vs LINE NUMBERS
+---
+- P&ID connector/sheet numbers look like: NN-PP-NNN-NNNNN (e.g., 13-PP-152-45060, 13-PP-152-143070)
   - "PP" = P&ID drawing prefix — this is a SHEET CONNECTOR NUMBER, NOT a process line number
   - These numbers reference the connected P&ID sheet, not a piping line
   - DO NOT flag them as "missing line" or "incomplete piping origin/destination"
   - DO NOT flag them as duplicate or invalid line numbers
-� True process line numbers follow: [SIZE"]-[FLUID_CODE]-[SEQ]-[SPEC] format
+- True process line numbers follow: [SIZE"]-[FLUID_CODE]-[SEQ]-[SPEC] format
   - Examples: 4"-HC-1001-CS150, 6"-NG-2003-034XX
   - Fluid codes are typically 2-4 letters describing process service (HC=hydrocarbon, NG=natural gas, etc.)
   - PP is NOT a fluid code — it is a P&ID sheet prefix
 
-?? RULE 12: INSTRUMENT FUNCTION CODE CLASSIFICATION (ISA-5.1)
-????????????????????????????????????????????????????????????????
+RULE 12: INSTRUMENT FUNCTION CODE CLASSIFICATION (ISA-5.1)
+---
 Instrument FIRST LETTER = Measured Variable | Subsequent Letters = Function
 
 **INDICATORS (last letter = I or no controller suffix) — NO CONTROL LOOP, NO ALARM SETPOINTS:**
-� FI  = Flow Indicator       ? Indication ONLY — no control loop exists by definition
-� PI  = Pressure Indicator   ? Indication ONLY
-� TI  = Temperature Indicator ? Indication ONLY
-� LI  = Level Indicator      ? Indication ONLY
-� PG  = Pressure Gauge       ? Gauge ONLY — NO alarm setpoints expected or required
+- FI  = Flow Indicator       ? Indication ONLY — no control loop exists by definition
+- PI  = Pressure Indicator   ? Indication ONLY
+- TI  = Temperature Indicator ? Indication ONLY
+- LI  = Level Indicator      ? Indication ONLY
+- PG  = Pressure Gauge       ? Gauge ONLY — NO alarm setpoints expected or required
 
 **CONTROLLERS (last letter = C) — HAVE control loops:**
-� FIC = Flow Indicator Controller ? Has control loop
-� PIC = Pressure Indicator Controller ? Has control loop
-� TIC = Temperature Indicator Controller ? Has control loop
-� LIC = Level Indicator Controller ? Has control loop
+- FIC = Flow Indicator Controller ? Has control loop
+- PIC = Pressure Indicator Controller ? Has control loop
+- TIC = Temperature Indicator Controller ? Has control loop
+- LIC = Level Indicator Controller ? Has control loop
 
 **SWITCH/ALARM INSTRUMENTS — NOT safety instruments requiring trip documentation:**
-� XZSH, XZLH, XZLL, ZSH, ZSL = Position switch alarms ? NOT primary safety instruments
+- XZSH, XZLH, XZLL, ZSH, ZSL = Position switch alarms ? NOT primary safety instruments
   - These are limit/position switches, not pressure/temp/level safety devices
   - DO NOT flag them as "missing trip setpoint" or classify as safety items
   - DO NOT flag them as requiring alarm schedule verification unless alarm schedule provided
 
 **VALVE ACTUATOR INSTRUMENTS — NOT equipment:**
-� XY = Valve positioner/solenoid instrument ? NOT independent equipment
+- XY = Valve positioner/solenoid instrument ? NOT independent equipment
   - XY tags live inside the instrument bubble for the valve, not as standalone equipment
   - DO NOT classify XY as vessel, pump, or process equipment
 
 **DCS / LOGIC INSTRUMENTS — NOT piping items:**
-� TDA, TA, TDA, XA, XAH, XAL = Alarm/DCS system blocks ? NOT piping components
+- TDA, TA, TDA, XA, XAH, XAL = Alarm/DCS system blocks ? NOT piping components
   - DCS blocks drawn next to instruments are INSTRUMENT references, not piping
   - DO NOT classify them as piping items or in-line components
 
-?? RULE 13: SOFT TAGS vs PHYSICAL INSTRUMENTS / VALVES
-????????????????????????????????????????????????????????????????
-� A tag appearing ONLY in a DCS block or logic bubble = SOFT TAG (no physical symbol)
+RULE 13: SOFT TAGS vs PHYSICAL INSTRUMENTS / VALVES
+---
+- A tag appearing ONLY in a DCS block or logic bubble = SOFT TAG (no physical symbol)
   - Example: XV-4513 shown inside a DCS block without an actuated valve symbol = soft reference
   - DO NOT flag soft tags as "missing physical valve" or "missing instrument symbol"
   - Only flag if a valve SYMBOL (with actuator indicator) is unambiguously visible but has no tag
-� XV / SDV / HV tags require BOTH: (1) valve body symbol + (2) actuator symbol
+- XV / SDV / HV tags require BOTH: (1) valve body symbol + (2) actuator symbol
   - If only a text reference in a DCS block → soft tag, NOT a missing physical valve
 
-?? RULE 14: NOTE AND HOLD CONTENT VERIFICATION
-????????????????????????????????????????????????????????????????
-� Before generating a note-compliance issue, READ the actual note text on the drawing
+RULE 14: NOTE AND HOLD CONTENT VERIFICATION
+---
+- Before generating a note-compliance issue, READ the actual note text on the drawing
   - If NOTE 1 text is about "Piping material for sour service" → ONLY flag piping material issues
   - DO NOT assume NOTE 1 is about design pressure if the text does not say so
   - DO NOT generate compliance checks for topics not covered by the actual note text
   - "NOTE 1 NOT RELATED TO [topic]" is NOT a valid issue — simply skip it
-� If you cannot clearly read the note text → DO NOT generate note compliance issues for it
-� HOLD numbers: same principle — only flag what the HOLD text actually requires
+- If you cannot clearly read the note text → DO NOT generate note compliance issues for it
+- HOLD numbers: same principle — only flag what the HOLD text actually requires
 
-?? RULE 15: FAIL-SAFE POSITION — VERIFY BEFORE FLAGGING
-????????????????????????????????????????????????????????????????
-� Control valves ALREADY showing FC / FO / FL on their symbol = fail-safe IS specified
+RULE 15: FAIL-SAFE POSITION — VERIFY BEFORE FLAGGING
+---
+- Control valves ALREADY showing FC / FO / FL on their symbol = fail-safe IS specified
   - FC = Fail Closed, FO = Fail Open, FL = Fail Last
   - If these letters appear on or directly adjacent to the valve symbol → DO NOT flag as missing
   - Only flag "fail-safe not specified" AFTER confirming the valve symbol has NO FC/FO/FL annotation
 
-?? RULE 16: MEASUREMENT RANGE — ONLY FLAG IF REQUIRED BY DRAWING
-????????????????????????????????????????????????????????????????
-� Measurement range (span) is NOT universally required for all instruments on a P&ID
+RULE 16: MEASUREMENT RANGE — ONLY FLAG IF REQUIRED BY DRAWING
+---
+- Measurement range (span) is NOT universally required for all instruments on a P&ID
   - It may be shown on instrument datasheets, not the P&ID itself
   - Only flag measurement range as missing IF the drawing's notes or title block explicitly mandate it
   - For simple FI, PI, TI indicators → DO NOT flag "measurement range not specified" unless required
 
-?? RULE 17: SIGNAL TYPE — ONLY FLAG IF ABSENT FROM DRAWING
-????????????????????????????????????????????????????????????????
-� Signal type (4-20mA, HART, digital, etc.) shown on instrument symbol = already specified
+RULE 17: SIGNAL TYPE — ONLY FLAG IF ABSENT FROM DRAWING
+---
+- Signal type (4-20mA, HART, digital, etc.) shown on instrument symbol = already specified
   - If the signal line style (dashed = pneumatic, solid = electrical, dotted = capillary) is shown → it IS specified
   - DO NOT flag "signal type not specified" when the instrument symbol already conveys signal type
   - Only flag if signal type is genuinely absent from the drawing AND is required by applicable standard
 
-?? RULE 18: HALLUCINATION GUARD FOR NON-EXISTENT ELEMENTS
-????????????????????????????????????????????????????????????????
-� NEVER reference a tag (PSV, valve, instrument, equipment) that is not VISUALLY CONFIRMED on the drawing
+RULE 18: HALLUCINATION GUARD FOR NON-EXISTENT ELEMENTS
+---
+- NEVER reference a tag (PSV, valve, instrument, equipment) that is not VISUALLY CONFIRMED on the drawing
   - PSV example: if no PSV symbol is visible → DO NOT generate a PSV-compliance finding
   - If OCR text mentions a tag but NO symbol is visible → treat as text artifact, DO NOT flag
   - Cross-check every tag you reference against what is ACTUALLY DRAWN on the P&ID
@@ -573,7 +573,7 @@ Instrument FIRST LETTER = Measured Variable | Subsequent Letters = Function
                           QUALITY STANDARD
 -------------------------------------------------------------------
 
-? GOOD ISSUE EXAMPLE:
+- GOOD ISSUE EXAMPLE:
 {
   "pid_reference": "2\"-VG-5277-033842",
   "issue_observed": "Duplicate line number: 2\"-VG-5277-033842 appears twice on drawing (top left near V-101 and bottom right near P-202)",
@@ -581,7 +581,7 @@ Instrument FIRST LETTER = Measured Variable | Subsequent Letters = Function
   "severity": "major"
 }
 
-? GOOD ISSUE EXAMPLE:
+- GOOD ISSUE EXAMPLE:
 {
   "pid_reference": "NOTE 3",
   "issue_observed": "NOTE 3 requires design pressure 50 barg, but vessel V-101 shows 45 barg on datasheet reference",
@@ -589,29 +589,29 @@ Instrument FIRST LETTER = Measured Variable | Subsequent Letters = Function
   "severity": "critical"
 }
 
-? BAD ISSUE EXAMPLE (HALLUCINATION):
+- BAD ISSUE EXAMPLE (HALLUCINATION):
 {
   "pid_reference": "Line 2\"-D-6155-033842-X-N",
   "issue_observed": "D-6155 equipment does not have capacity specified",
   "severity": "major"
 }
-? WRONG: "D-6155" is part of LINE NUMBER, not equipment!
+WRONG: "D-6155" is part of LINE NUMBER, not equipment!
 
-? BAD ISSUE EXAMPLE (CROSS-CONTAMINATION):
+- BAD ISSUE EXAMPLE (CROSS-CONTAMINATION):
 {
   "pid_reference": "HOLD-4",
   "issue_observed": "HOLD-4 requires fail-closed valves, but valve on 4\"-D-6153-013842 not specified as FC",
   "severity": "critical"  
 }
-? WRONG: HOLD-4 says "DELETED" on the drawing, should not be referenced!
+WRONG: HOLD-4 says "DELETED" on the drawing, should not be referenced!
 
-? BAD ISSUE EXAMPLE (FALSE SUGGESTION):
+- BAD ISSUE EXAMPLE (FALSE SUGGESTION):
 {
   "pid_reference": "4\" header to 2\" line",
   "issue_observed": "Missing reducer between 4\" header and 2\" branch line",
   "severity": "major"
 }
-? WRONG: This is normal header-to-branch design, not an issue!
+WRONG: This is normal header-to-branch design, not an issue!
 
 -------------------------------------------------------------------
 
@@ -713,7 +713,7 @@ Before listing issues, you MUST think through:
 
 [SPOOL_LENGTH] COMPLIANCE
    - Minimum spool length downstream of Restriction Orifice (RO) met?
-   - RO to first fitting: Minimum 5D (5 � pipe diameter) straight run?
+   - RO to first fitting: Minimum 5D (5 - pipe diameter) straight run?
    - Low Temperature Cut-off Switch (LTCS) installation clearance adequate?
    - Straight run requirements for flow measurement devices satisfied?
    - Instrument tapping locations comply with minimum distances?
@@ -817,205 +817,50 @@ Before listing issues, you MUST think through:
                     "content": [
                         {
                             "type": "text",
-                            "text": f"""?? COMPREHENSIVE P&ID VERIFICATION WITH STRICT ENTITY CLASSIFICATION ??
+                            "text": f"""Please perform a thorough P&ID Quality Check on this drawing.
 
--------------------------------------------------------------------
-                    STRUCTURED ANALYSIS WORKFLOW
--------------------------------------------------------------------
+Apply all 18 rules from your system prompt strictly. For every issue you identify, verify it is:
+- Visually confirmed on THIS drawing (not assumed or from memory)
+- Based on an actual tag, line number, or element that EXISTS on the drawing
+- A real engineering problem, not a formatting preference or assumption
 
-?? STEP 1: STRUCTURED ENTITY EXTRACTION (Pre-Processing)
-????????????????????????????????????????????????????????????????
+OCR text extracted from this drawing (use as hints — cross-check visually before trusting):
+- Instrument tags detected: {', '.join(sorted(self.instrument_tags)[:25]) if self.instrument_tags else 'None'}
+- Line numbers detected: {', '.join(sorted(self.line_numbers)[:25]) if self.line_numbers else 'None'}
+- Equipment tags detected: {', '.join(sorted(self.equipment_tags)[:15]) if self.equipment_tags else 'None'}
 
-First, carefully extract and categorize ALL entities from the drawing:
+NOTE: The OCR may contain errors. The line numbers above may include P&ID sheet connector numbers
+(format: NN-PP-NNN-NNNNN where PP = P&ID prefix) — these are NOT process piping line numbers.
+Treat the OCR data as hints only. Visually verify any tag before including it in a finding.
 
-**A. EXTRACT LINE NUMBERS (with strict pattern matching):**
-   Pattern: [SIZE]-[FLUID]-[SEQUENCE]-[SPEC]
-   
-   Examples to INCLUDE:
-   ? 2"-D-6155-033842-X-N    ? LINE NUMBER (complete string)
-   ? 4"-VG-5277-033842        ? LINE NUMBER
-   ? 6"-HC-1001-CS150         ? LINE NUMBER
-   ? 8"-P-101-316SS           ? LINE NUMBER
-   
-   Examples to EXCLUDE:
-   ? D-6155                   ? Part of line number, NOT equipment
-   ? VG-5277                  ? Part of line number, NOT equipment
-   ? HC-1001                  ? Part of line number, NOT equipment
+{reference_context}
 
-**B. EXTRACT EQUIPMENT TAGS (with visual symbol confirmation):**
-   Pattern: [PREFIX]-[NUMBER][SUFFIX]
-   Requirements: (1) Has equipment symbol + (2) Standalone tag
-   
-   Examples to INCLUDE:
-   ? V-101    (near vessel symbol)     ? EQUIPMENT
-   ? P-202A   (near pump symbol)       ? EQUIPMENT
-   ? E-303    (near exchanger symbol)  ? EQUIPMENT
-   ? T-401    (near tank symbol)       ? EQUIPMENT
-   
-   Examples to EXCLUDE:
-   ? D-6155   (from "2"-D-6155-033842") ? Part of LINE NUMBER
-   ? VG-5277  (from line number)        ? Part of LINE NUMBER
-   ? Equipment tags in reference P&ID titles ? Not on THIS drawing
+Think through each category systematically:
+1. Instruments (tags, fail-safe positions, control loops only where controllers exist)
+2. Equipment (tags, specifications, nozzles)
+3. Piping lines (line numbers, sizes, sources/destinations — ignore OPC continuation arrows)
+4. Valves (type, actuator, fail-safe position if automated)
+5. Safety devices (PSVs — ONLY if PSV symbol is visually present on drawing)
+6. Active notes and holds (read actual note text, only flag what the note actually requires)
+7. Pipe class consistency and spec breaks
+8. Legend vs symbols used
 
-**C. EXTRACT ACTIVE NOTES (excluding deleted):**
-   For each note:
-   1. Check if marked "DELETED" ? If YES, SKIP completely
-   2. Extract: NOTE-[number], Full text, Type
-   3. Only process ACTIVE notes (not deleted)
-
-**D. EXTRACT ACTIVE HOLDS (excluding deleted):**
-   For each hold:
-   1. Check if marked "DELETED" ? If YES, SKIP completely
-   2. Extract: HOLD-[number], Full text, Requirement type
-   3. Only process ACTIVE holds (not deleted)
-
-**E. EXTRACT SPEC BREAKS:**
-   Look for transition symbols: ?, ?, ?, line break marks
-   Document locations of all spec breaks
-
-**F. EXTRACT INSTRUMENTS:**
-   Pattern: [MEASUREMENT][TYPE]-[NUMBER]
-   Examples: PI-101, TIC-202, FIC-303, LT-404, PSV-505
-
-**G. COUNT EQUIPMENT (visual symbols only):**
-   Count ONLY items with:
-   � Visible equipment symbol (vessel, pump, exchanger, etc.)
-   � Clear equipment tag next to symbol
-   � NOT parts of line numbers
-   � NOT text from reference drawing titles
-   
-   Expected count: Usually 2-20 equipment items per drawing
-   If you count >50 ? You're counting line number fragments!
-
--------------------------------------------------------------------
-
-?? STEP 2: VALIDATION & RELATIONSHIP ANALYSIS
-????????????????????????????????????????????????????????????????
-
-Now verify relationships and detect issues:
-
-**A. LINE NUMBER VALIDATION:**
-   For each line number:
-   � Check for duplicates (same number appearing twice)
-   � Verify source and destination (ignore continuation arrows!)
-   � Check spec consistency (unless spec break present)
-   � Verify size consistency (unless reducer present OR header-to-branch)
-
-**B. EQUIPMENT VALIDATION:**
-   For each equipment tag:
-   � Verify specifications present
-   � Check design pressure/temperature
-   � Verify material of construction
-   � Check connections and nozzles
-
-**C. NOTES/HOLDS COMPLIANCE:**
-   For each ACTIVE note/hold:
-   � Compare requirement vs actual drawing
-   � Flag if NOT implemented
-   � Flag if VIOLATED
-   � Create separate issue for each non-compliance
-
-**D. SPEC BREAK VERIFICATION:**
-   For material transitions:
-   � If spec break symbol present ? OK (no issue)
-   � If NO spec break symbol at transition ? Flag missing
-
-**E. REDUCER/EXPANDER VERIFICATION:**
-   � If SAME line number changes size without reducer ? Flag missing reducer
-   � If DIFFERENT lines (header-to-branch) have different sizes ? NORMAL (no issue!)
-   � If reducer symbol already present ? DO NOT flag as missing!
-
--------------------------------------------------------------------
-
-?? STEP 3: ISSUE GENERATION & SELF-CHECK
-????????????????????????????????????????????????????????????????
-
-Generate issues based on findings, then MANDATORY SELF-CHECK:
-
-**BEFORE SUBMITTING YOUR RESPONSE - VALIDATE EACH ISSUE:**
-
-For EACH issue you identified, ask:
-
-1. ? Is the pid_reference a COMPLETE line number or actual equipment tag?
-   ? GOOD: "2\"-D-6155-033842-X-N" (full line number)
-   ? GOOD: "V-101" (equipment tag with symbol visible)
-   ? BAD: "D-6155" (fragment of line number, not equipment!)
-
-2. ? Is this issue visible on THIS drawing only?
-   ? GOOD: Based on what I see on current drawing
-   ? BAD: Assuming standards/NACE/requirements not on drawing
-
-3. ? Did I check if the item is already present before flagging as missing?
-   ? GOOD: Verified reducer not present, flagging correctly
-   ? BAD: Suggesting reducer when it's already shown on drawing
-
-4. ? Is this note/hold marked as "DELETED"?
-   ? GOOD: Only referencing active notes/holds
-   ? BAD: Referencing deleted HOLD-4 that says "DELETED"
-
-5. ? Is this a normal header-to-branch size change?
-   ? GOOD: Flagging same line number with size change
-   ? BAD: Flagging 4" header to 2" branch as missing reducer
-
-6. ? Is this an arrow/continuation mark, not an actual pipeline?
-   ? GOOD: Analyzing actual pipe segments
-   ? BAD: Flagging continuation arrow as missing source/destination
-
-7. ? Did I count equipment correctly (excluding line number parts)?
-   ? GOOD: Counted 3 vessels, 2 pumps (5 total) - matches symbols
-   ? BAD: Counted 18 items including line number fragments
-
-8. ? Is my suggestion based on visible evidence, not assumptions?
-   ? GOOD: "Spec not specified per NOTE 3 requirement"
-   ? BAD: "Should have NACE material" (when NACE not mentioned)
-
-**FINAL QUALITY CHECK:**
-� Total equipment count reasonable? (Usually 2-20, not 50+)
-� All issues based on THIS drawing only?
-� No deleted notes/holds referenced?
-� No line number fragments misread as equipment?
-� No false missing reducers for header-to-branch?
-� All suggestions verified as actually missing?
-
-If ANY answer is NO ? REMOVE that issue from your response!
-
--------------------------------------------------------------------
-
-**EXTRACTED TEXT DATA (For cross-validation - OCR may have errors):**
-Instrument Tags Found: {', '.join(list(self.instrument_tags)[:20]) if self.instrument_tags else 'None'}
-Equipment Tags Found: {', '.join(list(self.equipment_tags)[:20]) if self.equipment_tags else 'None'}
-Line Numbers Found: {', '.join(list(self.line_numbers)[:20]) if self.line_numbers else 'None'}
-
-?? WARNING: OCR data may contain errors. ALWAYS verify visually on the drawing!
-?? Line number fragments (e.g., "D-6155", "VG-5277") are NOT equipment tags!
-
--------------------------------------------------------------------
-
-**OUTPUT FORMAT - STRICT JSON:**
+Return your findings as valid JSON only:
 {{
-    "entities_extracted": {{
-        "line_numbers_count": 0,
-        "equipment_tags_count": 0,
-        "active_notes_count": 0,
-        "active_holds_count": 0,
-        "deleted_notes_count": 0,
-        "deleted_holds_count": 0
-    }},
-    "self_check_passed": true,
-    "reasoning": "Chain-of-thought: First I extracted X line numbers, Y equipment with symbols, Z active notes. I checked each systematically...",
+    "reasoning": "Brief chain-of-thought summary of what you examined",
     "issues": [
         {{
             "serial_number": 1,
-            "pid_reference": "Exact tag/line from drawing (FULL line number, not fragment)",
-            "issue_observed": "Specific detailed issue with exact values from THIS drawing only",
+            "pid_reference": "Exact tag/line/equipment from THIS drawing",
+            "issue_observed": "Specific issue with exact values seen on drawing",
             "action_required": "Clear corrective action",
             "severity": "critical/major/minor/observation",
-            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/dissimilar_materials/spool_length/drainage/psv_compliance/holds_compliance/notes_compliance",
+            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance",
             "location_on_drawing": {{
                 "zone": "Top-Left/Top-Center/Top-Right/Middle-Left/Middle-Center/Middle-Right/Bottom-Left/Bottom-Center/Bottom-Right",
                 "drawing_section": "Process area/utility/legend/notes",
-                "proximity_description": "Near equipment X, between lines Y and Z",
-                "visual_cues": "Upper left, center section, etc."
+                "proximity_description": "Near which equipment or line",
+                "visual_cues": "Describe where on the page"
             }}
         }}
     ],
@@ -1023,12 +868,7 @@ Line Numbers Found: {', '.join(list(self.line_numbers)[:20]) if self.line_number
     "confidence": "High/Medium/Low"
 }}
 
-?? FOCUS: Find REAL engineering mistakes (duplicates, actual missing items, spec violations, deleted note references, incomplete data).
-? AVOID: False equipment detection, cross-document assumptions, false missing suggestions, deleted note/hold references.
-
-{reference_context}
-
-Return ONLY valid JSON. NO other text."""
+Return ONLY valid JSON. No other text."""
                         }
                     ] + [
                         {
@@ -1515,9 +1355,9 @@ Return ONLY JSON."""
             if 'equipment' in eq_list and eq_list['equipment']:
                 context_parts.append(f"   - Equipment List contains {len(eq_list['equipment'])} equipment items:")
                 for eq in eq_list['equipment'][:10]:  # Show first 10
-                    context_parts.append(f"     � {eq.get('tag', 'N/A')}: {eq.get('type', 'Unknown')} "
+                    context_parts.append(f"     - {eq.get('tag', 'N/A')}: {eq.get('type', 'Unknown')} "
                                        f"(Design: {eq.get('design_pressure', 'N/A')} / {eq.get('design_temp', 'N/A')})")
-                context_parts.append("   ?? CRITICAL: Each equipment above MUST appear on P&ID with matching specifications")
+                context_parts.append("   -- CRITICAL: Each equipment above MUST appear on P&ID with matching specifications")
         
         # 2. Line List - Structured piping data
         if 'line_list' in reference_data:
@@ -1528,14 +1368,14 @@ Return ONLY JSON."""
             context_parts.append("   VERIFY: Pipe specifications consistent")
             context_parts.append("   VERIFY: From/To equipment tags match")
             context_parts.append("   VERIFY: Line serial numbers are correct (should be = 9600)")
-            context_parts.append("   ?? Line numbers beyond 9600 are INCORRECT")
+            context_parts.append("   -- Line numbers beyond 9600 are INCORRECT")
             
             if 'lines' in line_list and line_list['lines']:
                 context_parts.append(f"   - Line List contains {len(line_list['lines'])} piping lines:")
                 for line in line_list['lines'][:8]:  # Show first 8
-                    context_parts.append(f"     � {line.get('line_number', 'N/A')}: {line.get('size', 'N/A')} "
+                    context_parts.append(f"     - {line.get('line_number', 'N/A')}: {line.get('size', 'N/A')} "
                                        f"{line.get('spec', 'N/A')} ({line.get('from', 'N/A')} ? {line.get('to', 'N/A')})")
-                context_parts.append("   ?? MAJOR: Flag discrepancies between P&ID line numbers and Line List")
+                context_parts.append("   -- MAJOR: Flag discrepancies between P&ID line numbers and Line List")
         
         # 3. Alarm & Trip Schedule - Setpoints reference
         if 'alarm_trip_schedule' in reference_data:
@@ -1556,8 +1396,8 @@ Return ONLY JSON."""
                     if 'alarm_h' in at: alarms.append(f"H={at['alarm_h']}")
                     if 'alarm_hh' in at: alarms.append(f"HH={at['alarm_hh']}")
                     alarm_str = ", ".join(alarms) if alarms else "No alarms"
-                    context_parts.append(f"     � {at.get('tag', 'N/A')}: {alarm_str} {at.get('units', '')}")
-                context_parts.append("   ?? MAJOR: Verify setpoints shown on P&ID match schedule")
+                    context_parts.append(f"     - {at.get('tag', 'N/A')}: {alarm_str} {at.get('units', '')}")
+                context_parts.append("   -- MAJOR: Verify setpoints shown on P&ID match schedule")
         
         # 4. Legend / Symbol Sheet - Symbol and spec interpretation
         if 'legend_symbols' in reference_data:
@@ -1572,7 +1412,7 @@ Return ONLY JSON."""
             if 'abbreviations' in legend and legend['abbreviations']:
                 context_parts.append("   - Symbol/Abbreviation Definitions:")
                 for abbr, meaning in list(legend['abbreviations'].items())[:10]:
-                    context_parts.append(f"     � {abbr} = {meaning}")
+                    context_parts.append(f"     - {abbr} = {meaning}")
             
             if 'line_numbering' in legend:
                 ln = legend['line_numbering']
@@ -1586,91 +1426,91 @@ Return ONLY JSON."""
             if 'standards_references' in legend:
                 context_parts.append("   - Standards Referenced:")
                 for std in legend['standards_references'][:5]:
-                    context_parts.append(f"     � {std}")
+                    context_parts.append(f"     - {std}")
         
         # Add comprehensive verification checklist based on user requirements
-        context_parts.append("\n\n?? MANDATORY P&ID QUALITY CHECKS (Fixed Checklist):\n")
+        context_parts.append("\n\n-- MANDATORY P&ID QUALITY CHECKS (Fixed Checklist):\n")
         context_parts.append("---------------------------------------------------------------")
         
-        context_parts.append("\n1?? DRAWING INFORMATION:")
-        context_parts.append("   � Verify drawing number, revision number, project name, client name are correct")
-        context_parts.append("   � Match against EDDR (Project Reference Document if provided)")
+        context_parts.append("\n1-- DRAWING INFORMATION:")
+        context_parts.append("   - Verify drawing number, revision number, project name, client name are correct")
+        context_parts.append("   - Match against EDDR (Project Reference Document if provided)")
         
-        context_parts.append("\n2?? CONNECTION VERIFICATION:")
-        context_parts.append("   � Ensure all connections flagged as going to/from other P&IDs are correctly noted")
-        context_parts.append("   � Match corresponding P&ID references")
-        context_parts.append("   � Do NOT report issues about explicit receiving line numbers for connectors")
-        context_parts.append("   � Do NOT report issues about node/nozzle ID for connectors")
+        context_parts.append("\n2-- CONNECTION VERIFICATION:")
+        context_parts.append("   - Ensure all connections flagged as going to/from other P&IDs are correctly noted")
+        context_parts.append("   - Match corresponding P&ID references")
+        context_parts.append("   - Do NOT report issues about explicit receiving line numbers for connectors")
+        context_parts.append("   - Do NOT report issues about node/nozzle ID for connectors")
         
-        context_parts.append("\n3?? EQUIPMENT TAGGING:")
-        context_parts.append("   � Verify equipment tagging details consistent with AGES-GL-08-005, Rev B4")
-        context_parts.append("   � Confirm each equipment tagging parameter matches Equipment List")
-        context_parts.append("   � Ensure nozzles, manways, internal components shown as per datasheets")
-        context_parts.append("   � Do NOT report issues for equipment NOT part of provided P&ID")
+        context_parts.append("\n3-- EQUIPMENT TAGGING:")
+        context_parts.append("   - Verify equipment tagging details consistent with AGES-GL-08-005, Rev B4")
+        context_parts.append("   - Confirm each equipment tagging parameter matches Equipment List")
+        context_parts.append("   - Ensure nozzles, manways, internal components shown as per datasheets")
+        context_parts.append("   - Do NOT report issues for equipment NOT part of provided P&ID")
         
-        context_parts.append("\n4?? CONTROL VALVE MANIFOLD:")
-        context_parts.append("   � Verify isolation and bypass valve sizes per AGES-GL-08-005, Rev B4, Table 7-2")
-        context_parts.append("   � Reference: Table 7-2 Selection of block and bypass valve sizes in control valve manifold")
-        context_parts.append("   � Do NOT report hook-up class selection issues")
+        context_parts.append("\n4-- CONTROL VALVE MANIFOLD:")
+        context_parts.append("   - Verify isolation and bypass valve sizes per AGES-GL-08-005, Rev B4, Table 7-2")
+        context_parts.append("   - Reference: Table 7-2 Selection of block and bypass valve sizes in control valve manifold")
+        context_parts.append("   - Do NOT report hook-up class selection issues")
         
-        context_parts.append("\n5?? ACTUATED VALVES:")
-        context_parts.append("   � Trace ALL actuated valves (control valves, shutdown valves, blowdown valves)")
-        context_parts.append("   � Verify 'failsafe' position indicated (FC/FO/FL)")
+        context_parts.append("\n5-- ACTUATED VALVES:")
+        context_parts.append("   - Trace ALL actuated valves (control valves, shutdown valves, blowdown valves)")
+        context_parts.append("   - Verify 'failsafe' position indicated (FC/FO/FL)")
         
-        context_parts.append("\n6?? SPECTACLE BLINDS:")
-        context_parts.append("   � Check position of all spectacle blinds")
-        context_parts.append("   � Check function of line (always open or always closed in normal operation)")
-        context_parts.append("   � Verify other valves are in same status as spectacle blind")
-        context_parts.append("   � Avoid generic issues if specific PSV tag not identified on drawing")
+        context_parts.append("\n6-- SPECTACLE BLINDS:")
+        context_parts.append("   - Check position of all spectacle blinds")
+        context_parts.append("   - Check function of line (always open or always closed in normal operation)")
+        context_parts.append("   - Verify other valves are in same status as spectacle blind")
+        context_parts.append("   - Avoid generic issues if specific PSV tag not identified on drawing")
         
-        context_parts.append("\n7?? THERMOWELL CONNECTIONS:")
-        context_parts.append("   � Check size of thermowell connections against AGES-PH-04-001, Rev-1, Table 14.1")
-        context_parts.append("   � Format remark: 'TIT {tag} connection sizes indicated as X'' which are higher/lower than minimum specified size of Y'' as per AGES-PH-04-001, Rev-1, Table 14.1'")
-        context_parts.append("   � Do NOT report connection size requirement between TIT and TI")
+        context_parts.append("\n7-- THERMOWELL CONNECTIONS:")
+        context_parts.append("   - Check size of thermowell connections against AGES-PH-04-001, Rev-1, Table 14.1")
+        context_parts.append("   - Format remark: 'TIT {tag} connection sizes indicated as X'' which are higher/lower than minimum specified size of Y'' as per AGES-PH-04-001, Rev-1, Table 14.1'")
+        context_parts.append("   - Do NOT report connection size requirement between TIT and TI")
         
-        context_parts.append("\n8?? LINE NUMBERS:")
-        context_parts.append("   � Verify line serial numbers are correct")
-        context_parts.append("   � Serial numbers beyond 9600 are INCORRECT: 'Line number {XXXXX} is beyond allotted range (up to 9600)'")
-        context_parts.append("   � Identify discrepancies when compared to Line List")
-        context_parts.append("   � Line size format: X'' (correct) NOT X\\'' (incorrect)")
-        context_parts.append("   � Do NOT report issues for line numbers NOT part of provided P&ID")
+        context_parts.append("\n8-- LINE NUMBERS:")
+        context_parts.append("   - Verify line serial numbers are correct")
+        context_parts.append("   - Serial numbers beyond 9600 are INCORRECT: 'Line number {XXXXX} is beyond allotted range (up to 9600)'")
+        context_parts.append("   - Identify discrepancies when compared to Line List")
+        context_parts.append("   - Line size format: X'' (correct) NOT X\\'' (incorrect)")
+        context_parts.append("   - Do NOT report issues for line numbers NOT part of provided P&ID")
         
-        context_parts.append("\n9?? CHECK VALVES:")
-        context_parts.append("   � Check direction of ALL check valves or non-return valves")
-        context_parts.append("   � Check function of line and flow direction FIRST before assessing check valve direction")
-        context_parts.append("   � Check valve direction should ALWAYS be in direction of flow")
-        context_parts.append("   � Check valve symbol alone is enough - orientation arrows NOT required")
-        context_parts.append("   � Do NOT report absence of check-valve orientation arrow as issue")
+        context_parts.append("\n9-- CHECK VALVES:")
+        context_parts.append("   - Check direction of ALL check valves or non-return valves")
+        context_parts.append("   - Check function of line and flow direction FIRST before assessing check valve direction")
+        context_parts.append("   - Check valve direction should ALWAYS be in direction of flow")
+        context_parts.append("   - Check valve symbol alone is enough - orientation arrows NOT required")
+        context_parts.append("   - Do NOT report absence of check-valve orientation arrow as issue")
         
-        context_parts.append("\n?? NOTES VERIFICATION:")
-        context_parts.append("   � Check all notes on drawing")
-        context_parts.append("   � If equipment/control valve/instrument/analyzer mentioned in note, verify note number placed near that tag")
-        context_parts.append("   � Format: 'Note-X should be placed near equipment tag {TAG}'")
+        context_parts.append("\n-- NOTES VERIFICATION:")
+        context_parts.append("   - Check all notes on drawing")
+        context_parts.append("   - If equipment/control valve/instrument/analyzer mentioned in note, verify note number placed near that tag")
+        context_parts.append("   - Format: 'Note-X should be placed near equipment tag {TAG}'")
         
-        context_parts.append("\n1??1?? ALARM & TRIP SETPOINTS:")
-        context_parts.append("   � Check alarm settings against Alarm and Trip Schedule document")
-        context_parts.append("   � Verify setpoints shown on P&ID match schedule")
-        context_parts.append("   � High alarm (H), Low alarm (L), High-High trip (HH), Low-Low trip (LL)")
-        context_parts.append("   � NOTE: Detailed verification against Alarm & Trip Summary NOT typically shown on P&ID itself")
+        context_parts.append("\n1--1-- ALARM & TRIP SETPOINTS:")
+        context_parts.append("   - Check alarm settings against Alarm and Trip Schedule document")
+        context_parts.append("   - Verify setpoints shown on P&ID match schedule")
+        context_parts.append("   - High alarm (H), Low alarm (L), High-High trip (HH), Low-Low trip (LL)")
+        context_parts.append("   - NOTE: Detailed verification against Alarm & Trip Summary NOT typically shown on P&ID itself")
         
-        context_parts.append("\n1??2?? ORIFICE/RO SIZING:")
-        context_parts.append("   � Do NOT report issues related to orifice/RO size or tag")
+        context_parts.append("\n1--2-- ORIFICE/RO SIZING:")
+        context_parts.append("   - Do NOT report issues related to orifice/RO size or tag")
         
-        context_parts.append("\n1??3?? STRAINERS:")
-        context_parts.append("   � Verify strainers provided where required (e.g., pump suction)")
+        context_parts.append("\n1--3-- STRAINERS:")
+        context_parts.append("   - Verify strainers provided where required (e.g., pump suction)")
         
         context_parts.append("\n---------------------------------------------------------------")
-        context_parts.append("\n?? CRITICAL INSTRUCTIONS:")
-        context_parts.append("   � Do NOT report legibility/readability issues")
-        context_parts.append("   � Do NOT report call-out issues")
-        context_parts.append("   � Do NOT report generic issues without specific location")
-        context_parts.append("   � Do NOT report issues for equipment/lines NOT on provided P&ID")
-        context_parts.append("   � Provide serial numbers for ALL issues")
-        context_parts.append("   � Reference specific AGES clause/page/section/table number when citing standards")
-        context_parts.append("   � Generate SPECIFIC mismatches/outputs, not generic observations")
-        context_parts.append("   � Verify ALL information from P&ID image - do NOT return empty P&ID column")
-        context_parts.append("\n?? FOCUS: Find REAL engineering mistakes based on P&ID drawing!")
-        context_parts.append("? AVOID: Generic issues, legibility complaints, equipment not on drawing, false positives")
+        context_parts.append("\n-- CRITICAL INSTRUCTIONS:")
+        context_parts.append("   - Do NOT report legibility/readability issues")
+        context_parts.append("   - Do NOT report call-out issues")
+        context_parts.append("   - Do NOT report generic issues without specific location")
+        context_parts.append("   - Do NOT report issues for equipment/lines NOT on provided P&ID")
+        context_parts.append("   - Provide serial numbers for ALL issues")
+        context_parts.append("   - Reference specific AGES clause/page/section/table number when citing standards")
+        context_parts.append("   - Generate SPECIFIC mismatches/outputs, not generic observations")
+        context_parts.append("   - Verify ALL information from P&ID image - do NOT return empty P&ID column")
+        context_parts.append("\n?FOCUS: Find REAL engineering mistakes based on P&ID drawing!")
+        context_parts.append("AVOID: Generic issues, legibility complaints, equipment not on drawing, false positives")
         
         return "\n".join(context_parts)
 
