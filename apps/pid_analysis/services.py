@@ -373,9 +373,13 @@ class PIDAnalysisService:
         VALVE     = ('XV', 'SDV', 'BDV', 'FCV', 'HV', 'MOV', 'SOV', 'LCV', 'TCV', 'PCV', 'EV', 'PV', 'CV')
         XMIT      = ('FT', 'PT', 'TT', 'LT', 'AT', 'FE', 'TE', 'PE', 'LE', 'FIT', 'PIT', 'TIT', 'LIT', 'AIT')
         SOLENOID  = ('XY', 'HY', 'TY', 'PY', 'FY', 'LY')
-        SWITCH    = ('TSHH', 'TSLL', 'PSHH', 'PSLL', 'LSHH', 'LSLL', 'TSH', 'TSL', 'PSH', 'PSL',
-                     'FSH', 'FSL', 'ZSH', 'ZSL', 'XZSH', 'XZSL', 'XZLH', 'XZLL')
-        INDIC     = ('FI', 'PI', 'TI', 'LI', 'AI', 'PG', 'PDI', 'VI', 'TG', 'WI')
+        # SIS-level trips (CRITICAL — these must have SIS/interlock connection)
+        SIS_SW    = ('TSHH', 'TSLL', 'PSHH', 'PSLL', 'LSHH', 'LSLL', 'FSHH', 'FSLL')
+        # Process-level switches (MINOR — discrete alarm contact, no SIS required)
+        PROC_SW   = ('TSH', 'TSL', 'PSH', 'PSL', 'LSH', 'LSL', 'FSH', 'FSL',
+                     'ZSH', 'ZSL', 'XZSH', 'XZSL', 'XZLH', 'XZLL', 'XZPH', 'XZPL')
+        SWITCH    = SIS_SW + PROC_SW
+        INDIC     = ('FI', 'PI', 'TI', 'LI', 'AI', 'PG', 'LG', 'PDI', 'VI', 'TG', 'WI')
         SAFETY_V  = ('PSV', 'PRV', 'PDSV', 'TSV')
         ALL_INST  = CTRL + VALVE + XMIT + SOLENOID + SWITCH + INDIC + SAFETY_V
 
@@ -397,14 +401,17 @@ class PIDAnalysisService:
 
         # --- Augment loops with instrument-type tags from OCR line_numbers ---
         # OCR line_numbers often contain area-prefixed instrument references like 13-XY-4513
+        # Explicitly exclude alarm-element prefixes (TA, TDA, TSA etc.) — they are instruments but
+        # not categories that need loop-based QC checks here
+        _NOT_LOOP_INST = {'TA', 'TDA', 'TSA', 'FAL', 'LAL', 'PAL', 'LSA', 'FSA', 'ASA', 'KX'}
         for raw in (self.line_numbers or []):
             parts = raw.split('-')
             if len(parts) == 3 and parts[0].isdigit() and not parts[1].isdigit():
                 fc = parts[1].upper()
                 ln = parts[2]
                 short = f"{fc}-{ln}"
-                # Add only genuine instrument function codes (not equipment)
-                if any(fc.startswith(p) for p in ALL_INST):
+                # Add only genuine instrument function codes (not equipment, not alarm elements)
+                if fc not in _NOT_LOOP_INST and any(fc.startswith(p) for p in ALL_INST):
                     loops.setdefault(ln, set()).add(short)
 
         if not loops:
@@ -426,7 +433,9 @@ class PIDAnalysisService:
             valve_t  = [t for t in tags if any(func_code(t).startswith(p) for p in VALVE)]
             xmit_t   = [t for t in tags if any(func_code(t).startswith(p) for p in XMIT)]
             sol_t    = [t for t in tags if any(func_code(t).startswith(p) for p in SOLENOID)]
-            sw_t     = [t for t in tags if any(func_code(t).startswith(p) for p in SWITCH)]
+            sis_sw_t = [t for t in tags if any(func_code(t).startswith(p) for p in SIS_SW)]
+            proc_sw_t= [t for t in tags if any(func_code(t).startswith(p) for p in PROC_SW)
+                        and not any(func_code(t).startswith(p) for p in SIS_SW)]
             ind_t    = [t for t in tags if any(func_code(t).startswith(p) for p in INDIC)]
             sfv_t    = [t for t in tags if any(func_code(t).startswith(p) for p in SAFETY_V)]
 
@@ -468,10 +477,15 @@ class PIDAnalysisService:
                     lines.append(f"  □ [{xtag}→{ctrl_t[0]}] Signal connection from {xtag} to {ctrl_t[0]} or DCS visible?  → NO = MAJOR")
 
             # Safety switches / process switches
-            for stag in sw_t:
-                lines.append(f"  □ [{stag}] Switch symbol visible and process tap connected?  → NO = MAJOR")
-                lines.append(f"  □ [{stag}] DCS / SIS / interlock connection shown for {stag}?  → NO = CRITICAL")
-                lines.append(f"  □ [{stag}] Setpoint or trip-function label noted near {stag}?  → NO = MINOR")
+            for stag in sis_sw_t:
+                lines.append(f"  □ [{stag}] SIS switch symbol visible and process tap connected?  → NO = MAJOR")
+                lines.append(f"  □ [{stag}] SIS / interlock connection shown for {stag}?  → NO = CRITICAL (SIS requirement)")
+                lines.append(f"  □ [{stag}] Trip setpoint noted near {stag}?  → NO = MINOR")
+
+            for stag in proc_sw_t:
+                lines.append(f"  □ [{stag}] Process switch {stag} symbol visible?  → NO = MINOR")
+                lines.append(f"  □ [{stag}] DCS alarm connection shown for {stag}?  → NO = MINOR")
+                # NOTE: Process switches (XZ-class, single-letter) do NOT require SIS connection
 
             # Indicators / gauges
             for itag in ind_t:
@@ -493,21 +507,55 @@ class PIDAnalysisService:
             system_prompt = """You are a senior P&ID QA/QC engineer performing a formal quality control review.
 Analyze ONLY the provided drawing — base all findings on what is VISUALLY PRESENT, not assumptions.
 
-CORE RULES (follow strictly):
-1. ONLY report elements that are visually confirmed on this drawing — never invent tags
-2. LINE NUMBERS format: SIZE-FLUIDCODE-SEQ-SPEC (e.g. 4"-HC-1001-CS150)
-   - P&ID sheet connector numbers like NN-PP-NNN-NNNNN are NOT process piping lines — ignore for piping checks
-   - Tags with area prefix (e.g. 13-FE-4580) are INSTRUMENT TAGS not line numbers
-3. INSTRUMENT CLASSIFICATION (ISA-5.1):
-   - FI, PI, TI, LI, PG = INDICATORS only — no control loop, no alarm setpoints by definition
-   - FIC, PIC, TIC, LIC, HIC = CONTROLLERS — do have control loops (require paired control valve)
-   - PSHH, LSHH, TSHH = Safety switches — verify interlock connection
-   - ZSH, ZSL, XZSH, XZSL = Position/limit switches — NOT primary safety instruments
-   - XV, SDV soft tags inside DCS logic blocks without a valve body symbol = soft references, not physical valves
-4. FAIL-SAFE: FC/FO/FL already annotated on a valve symbol = already specified — do NOT flag again
-5. HEADER-TO-BRANCH: A large pipe reducing to a smaller branch tap is NORMAL — do not flag as missing reducer
-6. NOTES/HOLDS: Read the actual note text. Deleted notes are invisible — only flag active requirements
-7. BEFORE flagging any issue, confirm: "Can I see this element right now on this drawing?"
+CORE RULES (follow strictly — violations produce INVALID findings):
+1. VISUAL CONFIRMATION MANDATORY — Only report an element if you can see it RIGHT NOW on this drawing.
+   NEVER invent, hallucinate, or assume a tag/PSV/valve exists unless its symbol AND tag are visible.
+
+2. P&ID CONNECTOR NUMBERS → NOT piping lines:
+   Format NN-PP-NNN-NNNNN (e.g. 13-PP-152-45060, 13-PP-152-143070) = sheet-to-sheet connector arrows.
+   These are DRAWING REFERENCE NUMBERS — do NOT flag for missing pipe spec, size, or routing.
+
+3. INSTRUMENT TAG CLASSIFICATION (ISA-5.1 / AGES-GL-08-005):
+   INDICATORS (no alarm, no control loop required):
+     FI, PI, TI, LI, AI, GI, DI, PG, LG = indicators / gauges only.
+     PG (pressure gauge) and LG (level gauge) are LOCAL MECHANICAL INSTRUMENTS — do NOT flag for missing alarm setpoints.
+     Measurement ranges / calibration data are in datasheets, NOT required on P&ID.
+   CONTROLLERS (require a paired final control element):
+     FIC, PIC, TIC, LIC, AIC, HIC, SIC = controllers — verify control valve exists in loop.
+   SAFETY SWITCHES (SIS / interlock connection required):
+     PSHH, PSLL, LSHH, LSLL, TSHH, TSLL, FSHH, FSLL = safety shutdown switches → verify SIS/interlock.
+   PROCESS SWITCHES (discrete alarm contacts, NOT full control loops):
+     PSH, PSL, LSH, LSL, TSH, TSL, FSH, FSL = process switches → do NOT flag for missing controller.
+     XZ-prefix instruments (XZSH, XZSL, XZLH, XZLL, XZPH, XZPL, XZFH, XZFL) = position/limit switches
+       → These are discrete contact outputs. They do NOT need a controller. Do NOT categorize as control_loop.
+   SOLENOIDS & CONVERTERS (not equipment):
+     XY-prefix (e.g. XY-4513, XY-101) = solenoid valve or I/P converter → category: valve or instrument. NEVER equipment.
+   ALARM ELEMENTS (not piping):
+     TA, TDA, TSA, FAL, PAL, LAL, FSA, ASA, LSA = alarm elements → category: instrument. NEVER piping.
+
+4. SOFT TAGS / DCS LOGIC BLOCKS (not physical hardware):
+   XV, HV, SDV, BDV, FCV, PCV tags appearing ONLY inside DCS logic bubbles or interlock diagrams
+   WITHOUT a corresponding physical valve body symbol on the process line = SOFT TAGS.
+   Do NOT flag soft tags for missing fail-safe, actuator type, or physical installation issues.
+   ONLY flag valves with a physical body symbol visually present on a process line.
+
+5. FAIL-SAFE ANNOTATION:
+   FC, FO, FL already shown on the valve symbol = fail-safe IS specified → do NOT re-flag.
+   HV and XV use the same notation — if FC/FO/FL or OPEN/CLOSE is on the handle/stem, it is specified.
+
+6. NOTE INTEGRITY — READ, DO NOT INVENT:
+   Read the exact text of each note from the drawing. ONLY flag a note issue if the OCR/visual confirms
+   the actual note text is non-compliant with what you can read on the drawing.
+   Do NOT fabricate note content. If you cannot read a note clearly, report "Note text not legible" (minor).
+   NOTE 1, NOTE 2 etc. have specific text — never assume what they say.
+
+7. PIPING RULES:
+   Line numbers on the P&ID follow format: SIZE-FLUIDCODE-SEQ-SPEC (e.g. 4"-HC-1001-CS150).
+   Tags like KX-402, TA-4580, TDA-4580 are instrument tags, NOT line numbers — do NOT categorize as piping.
+   A component tag with letters (e.g. 13-KX-402) where letters suggest an instrument → check ISA-5.1 first.
+
+8. MINIMUM TARGET: For an IFC-stage multi-loop P&ID, expect 15-30 genuine findings.
+   If you find fewer than 10, re-scan zone by zone — you likely missed instruments.
 
 Return ONLY valid JSON in this exact format:
 {
@@ -763,20 +811,27 @@ CORROSION_ALLOWANCE_AND_NACE (material, CA annotation, sour/H2S compliance):
   - Heat tracing annotation: for lines in which freezing or solidification is a risk (wax, hydrate, viscous fluid), "HT" or "HEAT TRACED" or "EHT" annotation MUST appear on line label; missing = MAJOR finding (category: corrosion_allowance)
   - Insulation annotation: process lines above 60°C or below 0°C require insulation class (HOT, COLD, PERSONNEL PROTECTION, PP) annotation; missing = MINOR finding (category: corrosion_allowance)
 
---- RULES (always apply) ---
-- Report ONLY elements visually confirmed on this drawing
-- FI/PI/TI/LI/PG = indicators only - no control loop or alarm setpoints required
-- FC/FO/FL already on valve symbol = fail-safe IS specified - do NOT re-flag
-- P&ID connector numbers (PP-prefix) are NOT process piping lines
-- XV soft-tags in DCS logic blocks without valve body symbol = not physical valves
+--- RULES (always apply, violation = false positive) ---
+- VISUAL ONLY: Report ONLY elements visually confirmed on this drawing. Never invent a tag or instrument.
+- PP-PREFIX: Lines like 13-PP-152-45060 are P&ID sheet connectors, NOT piping lines — skip all piping checks.
+- INDICATORS: FI/PI/TI/LI/PG/LG = indicators/gauges — NO alarm setpoints, NO control loop required.
+- MEASUREMENT RANGE: Do NOT flag missing measurement range on P&ID — that belongs in the instrument datasheet.
+- SWITCHES: PSH/PSL/LSH/LSL/TSH/TSL/FSH/FSL = process switches (discrete). Do NOT flag for missing controller.
+- XZ-SWITCHES: XZSH/XZSL/XZLH/XZLL/XZPH/XZPL = position/limit switches. NOT control_loop. NOT safety unless SIS-linked.
+- SOLENOIDS: XY-prefix tags = solenoid/converter. Category = valve or instrument. NEVER equipment.
+- ALARM ELEMENTS: TA/TDA/TSA/LSA/FSA tags = instrument alarm elements. NEVER piping.
+- SOFT TAGS: XV/HV/SDV/BDV appearing in DCS logic blocks without a physical valve body on a process line = soft tags. Do NOT flag.
+- FAIL-SAFE: FC/FO/FL or OPEN/CLOSED already on any valve symbol (XV, HV, SDV, BDV, FCV) = specified. Do NOT re-flag.
+- NOTES: Only report a note issue if you can read the note text and it is genuinely non-compliant. Never fabricate note content.
+- HALLUCINATION CHECK: Before writing any issue, confirm: "I can see this tag's symbol on the drawing right now."
 
 --- CRITICAL REPORTING REQUIREMENT ---
 EVERY instrument, valve, and loop element you can read on the drawing that has a missing or
 non-compliant annotation MUST become a separate JSON issue entry.
 "Cannot confirm" = element is absent, unclear, or not annotated. One element = one issue.
 Do NOT merge multiple issues into one finding.
-MINIMUM TARGET: 20 findings for an IFC-stage drawing. If you find fewer than 20, go back
-and re-scan zone by zone for any instruments or lines you missed.
+MINIMUM TARGET: 20 genuine findings for an IFC-stage drawing. If you find fewer than 15, re-scan
+zone by zone. But do NOT add fabricated findings to reach the target — only real issues.
 
 Return ONLY valid JSON:
 {{
