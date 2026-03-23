@@ -127,27 +127,38 @@ class PIDAnalysisService:
                 print(f"[ERROR] PASS 3 failed: {str(e)}")
                 consistency_issues = []
             
-            # PASS 5: Second Review Pass (only if very few substantive issues found)
-            # Threshold reduced to 5 to avoid forcing fabrication when the drawing is clean.
-            # The previous threshold of 20 was causing the AI to invent findings.
+            # PASS 5: Second Review Pass — ALWAYS run to catch missed elements.
+            # Runs unconditionally so every drawing gets two independent AI scans merged.
+            # The second pass is given the first-pass findings and told not to duplicate them.
             second_pass_issues = []
             issues_found = vision_result.get('total_issues', 0)
-            if issues_found < 15:  # Run second pass if fewer than 15 issues to catch missed elements
-                print(f"[INFO] PASS 5: Second Review Pass ({issues_found} issues found — checking systematically for missed items)")
-                try:
-                    second_pass_issues = self._second_review_pass(images_base64, vision_result, consistency_issues)
-                except Exception as e:
-                    print(f"[WARNING] PASS 5 failed (non-critical): {str(e)}")
-                    second_pass_issues = []
-            else:
-                print(f"[INFO] PASS 5: Skipped ({issues_found} issues already found — no forced second pass)")
+            print(f"[INFO] PASS 5: Second Review Pass ({issues_found} issues from Pass 3 — scanning for missed elements)")
+            try:
+                second_pass_issues = self._second_review_pass(images_base64, vision_result, consistency_issues)
+            except Exception as e:
+                print(f"[WARNING] PASS 5 failed (non-critical): {str(e)}")
+                second_pass_issues = []
+
+            # PASS 6: Engineering Compliance Deep-Scan — dedicated AI call for standards compliance.
+            # Focuses ONLY on advanced engineering domains (valve standards, NACE, tie-ins, PSV,
+            # spec breaks, free-drain, LTCS, corrosion allowance) that Pass 3 often glosses over.
+            print(f"[INFO] PASS 6: Engineering Compliance Deep-Scan (API/ASME/NACE/Tie-in specialist)")
+            engineering_issues = []
+            try:
+                engineering_issues = self._engineering_compliance_pass(
+                    images_base64, vision_result, second_pass_issues
+                )
+            except Exception as e:
+                print(f"[WARNING] PASS 6 failed (non-critical): {str(e)}")
+                engineering_issues = []
 
             
-            # Merge all findings
+            # Merge all findings from all passes
             all_issues = self._merge_and_deduplicate(
                 vision_result.get('issues', []),
                 consistency_issues,
-                second_pass_issues
+                second_pass_issues,
+                engineering_issues
             )
             
             # If NO issues found at all, create at least one from OCR data
@@ -223,7 +234,7 @@ class PIDAnalysisService:
                     'ai_model': 'gpt-4o',
                     'confidence_score': final_confidence,
                     'analysis_type': 'comprehensive',
-                    'analysis_duration': 'Multi-pass (5 passes)',
+                    'analysis_duration': 'Multi-pass (6 passes)',
                     'rag_context_used': bool(reference_documents),
                     'rag_context_length': sum(len(str(v)) for v in reference_data.values()) if reference_data else 0,
                     # OCR extraction statistics
@@ -231,7 +242,7 @@ class PIDAnalysisService:
                     'instrument_tags_found': len(self.instrument_tags),
                     'equipment_tags_found': len(self.equipment_tags),
                     'line_numbers_found': len(self.line_numbers),
-                    'analysis_passes': 5,
+                    'analysis_passes': 6,
                     'multi_pass_enabled': True,
                     'reference_documents_used': bool(reference_documents),
                     'reference_categories': list(reference_data.keys()) if reference_data else []
@@ -1198,27 +1209,267 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
             print(f"[WARNING] Second review pass failed: {str(e)}")
             return []
     
-    def _merge_and_deduplicate(self, pass1: List, pass2: List, pass3: List) -> List[Dict[str, Any]]:
-        """Merge findings from all passes and remove duplicates"""
+    def _engineering_compliance_pass(
+        self,
+        images_base64: List[str],
+        first_pass: Dict,
+        second_pass_issues: List,
+    ) -> List[Dict[str, Any]]:
+        """
+        PASS 6: Engineering Compliance Deep-Scan.
+
+        A dedicated AI call with a specialist prompt focused EXCLUSIVELY on the nine
+        advanced engineering compliance domains that a conventional P&ID instrument-check
+        pass tends to miss.  The results are later merged with Passes 3/4/5.
+
+        Domains covered (all soft-coded — extend by adding to the prompt):
+          1. PSV / PRV / TSV compliance (set pressure, discharge line, sizing note)
+          2. Valve standards (API 6D, ASME B16.34, API 600, ISO 15848)
+          3. Tie-in points & battery limits
+          4. Corrosion allowance (CA), NACE MR0175, PWHT annotations
+          5. Dissimilar-material spec breaks (insulating gaskets)
+          6. LTCS / cryogenic service pipe-class compliance
+          7. Free-drain / slope annotations on gravity and condensate lines
+          8. Restriction orifice (RO) straight-run spool requirements
+          9. Critical stress / CSS / high-temp line annotations
+        """
+        try:
+            # ── Build "already reported" context so the engineer pass doesn't duplicate ──
+            already = []
+            for iss in [*first_pass.get('issues', []), *second_pass_issues]:
+                ref = iss.get('pid_reference', '')
+                obs = iss.get('issue_observed', '')[:60]
+                already.append(f"  - [{ref}] {obs}")
+            already_str = '\n'.join(already[:30]) if already else '  None yet'
+
+            # ── Sparse-OCR guard ──
+            ocr_note = (
+                "NOTE: OCR yielded very few tags — perform a complete visual sweep of the "
+                "drawing before attempting each check below.\n"
+                if len(self.instrument_tags) < 10 else ""
+            )
+
+            system_msg = """You are a senior process/piping/safety engineer performing a
+SPECIALIST engineering compliance review of a P&ID drawing at IFC stage.
+
+Your focus is EXCLUSIVELY on the nine advanced engineering domains listed below.
+You must NOT re-report any issue already captured in the instrument/loop check pass.
+Every finding YOU produce must come from a VISUALLY CONFIRMED element on the drawing.
+
+GOLDEN RULES (same as always):
+- VISUAL CONFIRMATION MANDATORY — never invent a tag, equipment item, or annotation.
+- PP-prefix connector numbers (NN-PP-NNN-NNNNN) are sheet connectors, NOT piping lines.
+- PG/LG are local gauges — they do NOT need alarm setpoints or measurement ranges on P&ID.
+- FC/FO/FL already on a valve symbol = fail-safe specified — do NOT flag again.
+- Indicators (FI/PI/TI/LI/AI/PG/LG) do NOT need a control loop.
+- Soft DCS tags inside logic bubbles without a physical valve body = NOT physical hardware.
+
+MANDATORY JSON FORMAT — return ONLY valid JSON, no markdown:
+{
+  "issues": [
+    {
+      "serial_number": 1,
+      "pid_reference": "exact tag/line/equipment visible on drawing",
+      "issue_observed": "specific non-compliance with exact values",
+      "action_required": "clear corrective action referencing the applicable standard",
+      "severity": "critical|major|minor|observation",
+      "category": "psv_compliance|valve_standard|tie_in_reference|corrosion_allowance|dissimilar_material|ltcs_compliance|free_drain_slope|spool_requirement|critical_stress",
+      "location_on_drawing": {
+        "zone": "Top-Left|Top-Center|Top-Right|Middle-Left|Middle-Center|Middle-Right|Bottom-Left|Bottom-Center|Bottom-Right",
+        "drawing_section": "Process area/utility/legend/notes",
+        "proximity_description": "near which equipment or line",
+        "visual_cues": "describe exact position"
+      }
+    }
+  ],
+  "total_issues": 0
+}"""
+
+            user_text = f"""{ocr_note}
+ENGINEERING COMPLIANCE DEEP-SCAN — 9 specialist domains.
+
+ISSUES ALREADY REPORTED (do NOT repeat these):
+{already_str}
+
+OCR-Confirmed line numbers on this drawing (first 25):
+{chr(10).join('  ' + ln for ln in sorted(self.line_numbers)[:25]) if self.line_numbers else '  None'}
+
+For EVERY visually-confirmed element below, check compliance and flag each deficiency as a
+separate JSON issue.  One element × one deficiency = one issue entry. Do NOT group findings.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOMAIN 1 — PSV / PRV / TSV COMPLIANCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For each PSV, PRV, PDSV, or TSV symbol visible:
+  □ Is the set pressure annotated ON or immediately next to the valve symbol?  → MISSING = CRITICAL
+  □ Is the discharge line drawn to a flare header, vent stack, or safe destination?  → MISSING = CRITICAL
+  □ Is a sizing basis or reference tag (e.g. "SEE PSV DATA SHEET") shown?  → MISSING = MAJOR
+  □ Is the inlet line adequately sized (same bore or larger than PSV inlet nozzle)?  → UNDERSIZED = MAJOR
+  □ Is the PSV tag in the format PSV-XXXX?  → MISSING TAG = MAJOR
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOMAIN 2 — VALVE STANDARDS (API 6D / ASME B16.34 / API 600 / ISO 15848)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For each actuated or specialty valve visible:
+  □ Ball valve NPS ≥ 6" on isolating/ESD duty: is "TRUNNION" annotation present?  → MISSING = MAJOR  (category: valve_standard)
+  □ Ball valve on piggable header: is it full-bore?  → REDUCED BORE = MAJOR  (category: valve_standard)
+  □ ESD / BDV / isolation valve: is "CAVITY RELIEF" or "CR" annotation present?  → MISSING = MAJOR  (category: valve_standard)
+  □ Gate valve NPS ≥ 2": is OS&Y annotation shown?  → MISSING = MAJOR  (category: valve_standard)
+  □ Gate valve in HC service: is "FIRE SAFE" or "FS" annotation shown?  → MISSING = MAJOR  (category: valve_standard)
+  □ Globe / control valve: is flow direction arrow shown on body symbol?  → MISSING = MINOR  (category: valve_standard)
+  □ Check valve at pump discharge in hazardous service: is "SPRING LOADED" annotated?  → MISSING = MAJOR  (category: valve_standard)
+  □ Actuated valve in BTEX/H2S/toxic service: is "FE CLASS A/B" (ISO 15848) annotated?  → MISSING = MAJOR  (category: valve_standard)
+  □ Double-block-and-bleed (DBB) required for HC isolation >150 barg or >6": is it shown?  → SINGLE BLOCK = MAJOR  (category: valve_standard)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOMAIN 3 — TIE-IN POINTS & BATTERY LIMITS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For each tie-in point or BL (battery limit) connection visible:
+  □ Is it tagged TI-XXXX with a unique sequential number?  → UNTAGGED = MAJOR  (category: tie_in_reference)
+  □ Is the existing pipe spec labeled at the tie-in arrow?  → MISSING = MAJOR  (category: tie_in_reference)
+  □ Is an isolation valve shown at the tie-in to allow hot-tap or cold-cut?  → MISSING = CRITICAL  (category: tie_in_reference)
+  □ Is the connection type annotated (HOT TAP / COLD TIE-IN / FLANGED / WELDED)?  → MISSING = MAJOR  (category: tie_in_reference)
+  □ Are vent and drain connections shown on the new spool at the tie-in?  → MISSING = MINOR  (category: tie_in_reference)
+  □ Battery limit box: does it show design P, design T, fluid service, AND pipe class on BOTH sides?  → MISSING ANY = MAJOR  (category: tie_in_reference)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOMAIN 4 — CORROSION ALLOWANCE, NACE, PWHT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For each pressure vessel, column, or major piece of equipment visible:
+  □ Is CA (corrosion allowance, e.g. CA = 3 mm) shown in the operating conditions box?  → MISSING = MAJOR  (category: corrosion_allowance)
+  □ Is the equipment in sour (H2S) service? → "SOUR SERVICE" / "NACE MR0175" REQUIRED  → MISSING = CRITICAL  (category: corrosion_allowance)
+  □ Is the equipment in amine service? → "PWHT REQUIRED" annotation REQUIRED  → MISSING = MAJOR  (category: corrosion_allowance)
+  □ Seawater service lines: alloy (duplex, 6Mo, Cu-Ni) or "SEAWATER GRADE" annotation?  → CS WITHOUT NOTE = CRITICAL  (category: corrosion_allowance)
+  □ Acid (HCl/H2SO4) service: lining annotation (glass-lined, rubber-lined, PVDF)?  → BARE CS = CRITICAL  (category: corrosion_allowance)
+  □ Lines at risk of freezing/solidification: "HT" or "EHT" (electric heat tracing) annotation?  → MISSING = MAJOR  (category: corrosion_allowance)
+  □ Lines >60°C or <0°C: insulation class (HOT / COLD / PP) on line label?  → MISSING = MINOR  (category: corrosion_allowance)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOMAIN 5 — DISSIMILAR MATERIAL SPEC BREAKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For every visible spec break symbol (triangle/diamond/hexagon on a line):
+  □ Is an insulating/dielectric gasket annotation present at CS→SS or CS→Alloy transitions?  → MISSING = MAJOR  (category: dissimilar_material)
+  □ Is the spec break symbol clearly shown at the material transition boundary?  → MISSING SYMBOL = MAJOR  (category: dissimilar_material)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOMAIN 6 — LTCS / CRYOGENIC SERVICE PIPE CLASS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For any line in LNG / LPG / propane / ethylene / cryogenic service:
+  □ Does the pipe class code indicate LTCS (suffix L, CS3L, BNW, BNS, or "LT" in class code)?  → STANDARD CS = CRITICAL  (category: ltcs_compliance)
+  □ Is a low-temperature design temperature annotation on the line or vessel?  → MISSING = MAJOR  (category: ltcs_compliance)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOMAIN 7 — FREE-DRAIN / SLOPE ANNOTATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For horizontal lines in gravity-drain, condensate, or self-draining service:
+  □ Steam condensate return: slope arrow ≥ 1:100 annotated?  → MISSING = MAJOR  (category: free_drain_slope)
+  □ Flare/blowdown drain header: free-drain slope to KO drum annotated?  → MISSING = MAJOR  (category: free_drain_slope)
+  □ OWS (oily water sewer) branch: grade/slope annotation present?  → MISSING = MINOR  (category: free_drain_slope)
+  □ Low-point drain valve (½" or ¾") present at all horizontal low points?  → MISSING = MINOR  (category: free_drain_slope)
+  □ High-point vent at all high points of liquid-filled horizontal lines?  → MISSING = MINOR  (category: free_drain_slope)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOMAIN 8 — RESTRICTION ORIFICE (RO) STRAIGHT-RUN SPOOLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For each RO / VO visible on the drawing:
+  □ Minimum 10D straight spool DOWNSTREAM before any fitting shown?  → MISSING = MAJOR  (category: spool_requirement)
+  □ Minimum 5D straight spool UPSTREAM of RO shown?  → MISSING = MAJOR  (category: spool_requirement)
+  □ Bore diameter and Cd (discharge coefficient) annotation near RO tag?  → MISSING = MINOR  (category: spool_requirement)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DOMAIN 9 — CRITICAL STRESS / CSS LINES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For any line annotated CSS, STRESS CRITICAL, HIGH TEMP, or in H2/steam/cryogenic service:
+  □ Anchor points (△) shown adjacent to vessels, heat exchangers, or rotating equipment?  → MISSING = MAJOR  (category: critical_stress)
+  □ Expansion loops, bellows (∫ symbol), or cold-pull offsets shown on high-temp lines?  → MISSING = MAJOR  (category: critical_stress)
+  □ "STRESS CRITICAL" or "CSS CLASS X" annotation visible near the line tag?  → MISSING = MAJOR  (category: critical_stress)
+  □ CSS-designated line: are flexibility provisions (loop/bellow/offset) drawn?  → MISSING = CRITICAL  (category: critical_stress)
+
+Return ONLY valid JSON with ALL findings from ALL nine domains above."""
+
+            messages = [
+                {"role": "system", "content": system_msg},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                    ] + [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img}",
+                                "detail": "high"
+                            }
+                        }
+                        for img in images_base64
+                    ]
+                }
+            ]
+
+            print("[INFO] Calling OpenAI for engineering compliance deep-scan (Pass 6)...")
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=12000,
+                temperature=0.3,
+                timeout=300
+            )
+
+            if not response or not response.choices:
+                print("[WARNING] Pass 6: OpenAI returned empty response")
+                return []
+
+            response_text = (response.choices[0].message.content or "").strip()
+            print(f"[DEBUG PASS 6] len={len(response_text)} | preview={response_text[:120]}")
+            result = self._parse_analysis_response(response_text, 0)
+            issues = result.get('issues', [])
+            print(f"[INFO] Pass 6 (engineering compliance) found {len(issues)} additional issues")
+            return issues
+
+        except Exception as e:
+            print(f"[WARNING] Engineering compliance pass failed: {str(e)}")
+            return []
+
+    def _merge_and_deduplicate(self, pass1: List, pass2: List, pass3: List, pass4: List = None) -> List[Dict[str, Any]]:
+        """
+        Merge findings from all passes and remove true duplicates using smart key normalization.
+
+        Deduplication strategy (soft-coded, can extend without schema change):
+          • Strip area prefix from tag  (13-FT-4580 → FT-4580)
+          • Normalize category + first 5 words of issue_observed
+          • Two issues are duplicates only when BOTH keys match, so different problems
+            on the same tag (e.g. missing signal AND missing fail-safe) are KEPT distinct.
+        """
+        import re as _re
+
+        def _norm_ref(ref: str) -> str:
+            """Strip leading area prefix like '13-' from a tag string."""
+            return _re.sub(r'^\d+[-]', '', (ref or '').strip().upper())
+
+        def _norm_obs(obs: str) -> str:
+            """First 6 significant words from issue_observed — enough to distinguish."""
+            words = [w for w in _re.split(r'\W+', (obs or '').upper()) if len(w) > 2]
+            return ' '.join(words[:6])
+
+        all_passes = [pass1, pass2, pass3, *(pass4 or [])]
         all_issues = []
-        seen_refs = set()
-        
-        for issue_list in [pass1, pass2, pass3]:
-            for issue in issue_list:
-                ref = issue.get('pid_reference', '')
-                issue_text = issue.get('issue_observed', '')
-                
-                # Create unique key
-                key = f"{ref}:{issue_text[:30]}"
-                
-                if key not in seen_refs:
-                    seen_refs.add(key)
+        seen_keys: set = set()
+
+        for issue_list in all_passes:
+            for issue in (issue_list or []):
+                ref  = _norm_ref(issue.get('pid_reference', ''))
+                obs  = _norm_obs(issue.get('issue_observed', ''))
+                cat  = (issue.get('category', '') or '').upper()[:12]
+                key  = f"{ref}|{cat}|{obs}"
+
+                if key not in seen_keys:
+                    seen_keys.add(key)
                     all_issues.append(issue)
-        
+
         # Renumber serially
         for idx, issue in enumerate(all_issues, 1):
             issue['serial_number'] = idx
-        
+
         print(f"[INFO] Merged {len(all_issues)} unique issues from all passes")
         return all_issues
     
