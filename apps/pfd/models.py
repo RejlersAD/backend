@@ -231,6 +231,8 @@ class PFDIssue(models.Model):
         ('Documentation', 'Documentation'),
         ('Safety', 'Safety'),
         ('Material Balance', 'Material Balance'),
+        ('Utilities', 'Utilities'),
+        ('Process Design', 'Process Design'),
         ('Other', 'Other'),
     ]
     

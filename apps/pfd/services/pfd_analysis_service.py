@@ -1,361 +1,725 @@
 """
-PFD Analysis Service
-AI-powered PFD verification using OpenAI GPT-4 Vision with reference document support
+PFD Analysis Service — Advanced 4-Pass AI Engine
+Multi-stage GPT-4o Vision analysis with reference document text extraction,
+visual inventory scan, deep systematic checks, and gap analysis.
 """
 import os
+import re
 import base64
 import io
 import json
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from django.conf import settings
+from django.core.files.storage import default_storage
 from openai import OpenAI
 import fitz  # PyMuPDF
 from PIL import Image
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _safe_json(text: str) -> dict:
+    """Parse JSON from a model response that may be wrapped in markdown fences."""
+    text = text.strip()
+    # Strip ```json ... ``` or ``` ... ``` fences
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if fence:
+        text = fence.group(1).strip()
+    return json.loads(text)
+
+
+# ---------------------------------------------------------------------------
+# Main service
+# ---------------------------------------------------------------------------
+
 class PFDAnalysisService:
-    """AI-Powered PFD Verification Service with Reference Document Integration"""
-    
-    # Fixed PFD verification checks prompt
-    PFD_VERIFICATION_PROMPT = """
-You are an engineering PFD checker AI.
+    """
+    Advanced 4-Pass AI-Powered PFD Verification Service.
 
-You must generate the report strictly based on the provided PFD image.
-Other documents (BFD, Process Description, Process Design Basis, Equipment Data Sheet, etc.) are for reference only.
+    Pass 1 — Visual Inventory Scan:
+        Examine the PFD image and extract every visible element (equipment tags,
+        stream numbers, title block fields, notes, utility headers, battery limits).
 
-Your task is to fully understand the PFD and identify all issues strictly based on the checks listed below.
-Do not assume missing information unless it is explicitly required by PFD conventions.
+    Pass 2 — Reference Document Content Extraction:
+        Read the text of each uploaded reference document (PDF / text) using
+        PyMuPDF, then build a structured context snippet for the AI.
 
-Provide output ONLY in HTML table format with the following columns:
-Issue Serial No. | Issue Found | Action Required
+    Pass 3 — Deep Systematic Analysis (40+ checks):
+        Comprehensive issue identification against expanded engineering checklist,
+        enriched with inventory from Pass 1 and reference context from Pass 2.
 
-The PFD image is provided as an image URL. Do NOT return empty or generic results.
-Each reported issue must be traceable to a specific location or element on the PFD.
+    Pass 4 — Gap & Missing Element Review:
+        Second-eye sweep focused exclusively on what is ABSENT or INCOMPLETE in
+        the PFD (missing streams, unlabeled equipment, absent utility headers,
+        incomplete title block, missing general notes, etc.).
 
-List of Fixed Checks to be performed on the PFD:
+    All passes are merged, deduplicated and renumbered before returning.
+    """
 
-1. Verify drawing number, revision number, project name, and client name are correct and consistent with the Project Reference Document.
-2. Verify that all major equipment (vessels, pumps, compressors, heat exchangers, columns, reactors) shown on PFD match the Equipment List.
-3. Verify that equipment tag numbers are consistent with project tagging philosophy and Equipment List.
-4. Verify that all major process streams are shown with unique stream numbers.
-5. Check that stream numbering is consistent throughout the PFD without duplication or omission.
-6. Verify that flow direction arrows are correctly shown for all process streams.
-7. Verify that material balance consistency is maintained (no unexplained creation or loss of mass across equipment).
-8. Check that all major utility connections (steam, cooling water, fuel gas, nitrogen, instrument air) are clearly indicated where required.
-9. Verify that operating conditions (pressure, temperature, flow rate) are shown where required as per PFD practice.
-10. Verify that heat exchangers show inlet and outlet process streams clearly.
-11. Verify that pumps and compressors show suction and discharge streams correctly.
-12. Verify that recycle streams are clearly indicated and properly referenced.
-13. Verify that all process control loops shown are consistent with PFD-level representation (no detailed P&ID-level instruments).
-14. Verify that phase changes (vapor/liquid) are logically represented across equipment.
-15. Verify that tie-ins to off-page streams are properly referenced.
-16. Verify that major safety-related process flows (relief, vent, flare connections) are logically indicated if applicable at PFD level.
-17. Verify that feed and product streams are clearly identified and labeled.
-18. Verify that bypasses or alternative flow paths shown on PFD are process-justified.
-19. Verify that PFD symbols used are consistent across the drawing.
-20. Verify that process units and battery limits are clearly identified.
-21. Verify that stream data references match the Stream Data Table when referenced on the PFD.
-22. Verify that process description implied by the PFD is logically consistent (no missing essential process steps).
-23. Verify notes provided on the PFD for correctness and consistency with the diagram.
-24. Verify that equipment counts and parallel trains are correctly represented.
-25. Verify that no P&ID-level details (valve sizes, nozzle numbers, hook-up details) are incorrectly shown on the PFD.
+    # -----------------------------------------------------------------------
+    # Configuration
+    # -----------------------------------------------------------------------
+    MODEL = "gpt-4o"
+    TEMPERATURE = 0.1
+    MAX_TOKENS = 16000
+    # Characters of extracted reference-doc text fed to the AI per document
+    REF_DOC_TEXT_LIMIT = 3000
+    # Resolution multiplier for PDF→image rendering (2.5 × 72 Dpi = ~180 DPI)
+    PDF_ZOOM = 2.5
 
-Instructions you MUST follow:
-
-1. Do NOT report issues related to drawing readability or image quality.
-2. Do NOT report P&ID-level issues (valve orientation, nozzle details, instrument hook-ups).
-3. Do NOT assume missing data as an issue unless required by standard PFD practice.
-4. Provide a serial number for every issue and reference it clearly.
-5. Avoid generic issues; each issue must have a specific technical basis.
-6. Do NOT report issues regarding equipment or streams not present on the provided PFD.
-7. Do NOT report line list or piping specification issues.
-8. Do NOT report control valve bypass sizing issues (PFD level only).
-9. Do NOT report alarm or trip set point issues (PFD does not govern this).
-10. Do NOT report PSV sizing or detailed relief system design issues.
-11. Stream numbers must be verified only if shown on the PFD.
-12. Only issues identifiable directly from the PFD image shall be reported.
-13. Do NOT suggest design changes, identify issues and require corrective actions.
-14. Output MUST be in structured JSON format (not HTML table for API response).
-
-Return your analysis as JSON with this structure:
-{
-  "drawing_info": {
-    "drawing_number": "extracted drawing number",
-    "revision": "extracted revision",
-    "project_name": "extracted project name",
-    "client_name": "extracted client name"
-  },
-  "issues": [
-    {
-      "serial_number": 1,
-      "issue_found": "Specific issue description",
-      "action_required": "Specific corrective action",
-      "severity": "critical|major|minor|observation",
-      "category": "Equipment|Streams|Control|Documentation|Safety|Material Balance",
-      "approval": "Pending",
-      "remark": "Pending"
+    # Expanded engineering categories
+    VALID_CATEGORIES = {
+        "Equipment", "Streams", "Control", "Documentation",
+        "Safety", "Material Balance", "Utilities", "Process Design", "Other"
     }
-  ],
-  "summary": {
-    "total_issues": 0,
-    "critical_count": 0,
-    "major_count": 0,
-    "minor_count": 0,
-    "observation_count": 0
-  }
-}
+    VALID_SEVERITIES = {"critical", "major", "minor", "observation"}
 
-Only answer based on the PFD image provided.
-"""
-    
+    # -----------------------------------------------------------------------
+    # System persona (used in every API call)
+    # -----------------------------------------------------------------------
+    _SYSTEM_PERSONA = (
+        "You are a Principal Process Engineer with 20+ years of experience in "
+        "oil & gas PFD review, HAZOP facilitation, and process design basis. "
+        "You follow IEC, ISO 10628, and project-specific engineering standards. "
+        "You respond only in valid JSON."
+    )
+
     def __init__(self):
-        """Initialize OpenAI client"""
-        # Get API key from settings
-        api_key = None
-        
-        if hasattr(settings, 'OPENAI_API_KEY'):
-            api_key = settings.OPENAI_API_KEY
-        elif os.getenv('OPENAI_API_KEY'):
-            api_key = os.getenv('OPENAI_API_KEY')
-        
+        api_key = (
+            getattr(settings, "OPENAI_API_KEY", None)
+            or os.getenv("OPENAI_API_KEY")
+        )
         if not api_key:
             raise ValueError("OPENAI_API_KEY is not configured")
-        
         self.client = OpenAI(api_key=api_key)
-        self.model = "gpt-4o"  # GPT-4 with vision
-        self.MAX_TOKENS = 16000
-        self.AI_TEMPERATURE = 0.15  # Low temperature for consistent technical analysis
-        
-        print(f"[PFD_ANALYSIS] Initialized with model: {self.model}")
-    
+        print(f"[PFD_ANALYSIS] Initialized — model: {self.MODEL}, passes: 4")
+
+    # -----------------------------------------------------------------------
+    # Public API (unchanged contract)
+    # -----------------------------------------------------------------------
+
     def analyze_pfd_document(
         self,
         pfd_file,
         reference_documents: Dict[str, Any] = None,
-        drawing_metadata: Dict[str, str] = None
+        drawing_metadata: Dict[str, str] = None,
     ) -> Dict[str, Any]:
         """
-        Analyze PFD document with optional reference documents
-        
+        Run 4-pass analysis and return the merged result dict.
+
         Args:
-            pfd_file: PFD file object (PDF)
-            reference_documents: Dict of reference documents {doc_type: file_path}
-            drawing_metadata: Dict with drawing_number, revision, title, etc.
-        
+            pfd_file: file-like object or path to the PFD PDF.
+            reference_documents: {doc_type: file_storage_path} mapping.
+            drawing_metadata: {drawing_number, revision, title, project_name}.
+
         Returns:
-            Analysis results with issues, drawing info, and summary
+            {drawing_info, issues, summary, analysis_metadata}
         """
         try:
-            print(f"[PFD_ANALYSIS] Starting PFD analysis")
-            print(f"[PFD_ANALYSIS] File: {pfd_file.name if hasattr(pfd_file, 'name') else 'Unknown'}")
-            print(f"[PFD_ANALYSIS] Reference docs: {len(reference_documents) if reference_documents else 0}")
-            
-            # Extract PFD pages as images
-            pfd_images_base64 = self._extract_pdf_pages(pfd_file)
-            print(f"[PFD_ANALYSIS] Extracted {len(pfd_images_base64)} page(s) from PFD")
-            
-            # Process reference documents if provided
-            reference_context = ""
-            if reference_documents:
-                reference_context = self._process_reference_documents(reference_documents)
-                print(f"[PFD_ANALYSIS] Processed reference documents context ({len(reference_context)} chars)")
-            
-            # Build enhanced prompt with reference context
-            full_prompt = self.PFD_VERIFICATION_PROMPT
-            
-            if reference_context:
-                full_prompt += f"\n\nREFERENCE DOCUMENTS CONTEXT:\n{reference_context}\n\n"
-                full_prompt += "Use the reference documents above to verify consistency and completeness.\n"
-            
-            if drawing_metadata:
-                full_prompt += f"\n\nDRAWING METADATA PROVIDED:\n"
-                full_prompt += f"- Drawing Number: {drawing_metadata.get('drawing_number', 'Not provided')}\n"
-                full_prompt += f"- Revision: {drawing_metadata.get('revision', 'Not provided')}\n"
-                full_prompt += f"- Title: {drawing_metadata.get('title', 'Not provided')}\n"
-                full_prompt += f"- Project: {drawing_metadata.get('project_name', 'Not provided')}\n\n"
-            
-            # Call OpenAI Vision API
-            analysis_result = self._call_vision_api(pfd_images_base64, full_prompt)
-            
-            print(f"[PFD_ANALYSIS] Analysis completed successfully")
-            print(f"[PFD_ANALYSIS] Total issues found: {analysis_result.get('summary', {}).get('total_issues', 0)}")
-            
-            return analysis_result
-            
+            fname = getattr(pfd_file, "name", "Unknown")
+            print(f"[PFD_ANALYSIS] ▶ Starting 4-pass analysis — file: {fname}")
+
+            # ── Render PFD pages ────────────────────────────────────────────
+            pfd_images = self._render_pdf_pages(pfd_file)
+            print(f"[PFD_ANALYSIS] Rendered {len(pfd_images)} page(s) at {self.PDF_ZOOM}× zoom")
+
+            # ── Pass 1: Visual inventory ────────────────────────────────────
+            inventory = self._pass1_visual_inventory(pfd_images)
+            print(f"[PFD_ANALYSIS] Pass 1 complete — inventory extracted")
+
+            # ── Pass 2: Reference document text extraction ──────────────────
+            ref_context = self._pass2_extract_reference_content(reference_documents or {})
+            print(f"[PFD_ANALYSIS] Pass 2 complete — ref context: {len(ref_context)} chars")
+
+            # ── Pass 3: Deep systematic analysis ───────────────────────────
+            issues_p3 = self._pass3_deep_systematic_check(
+                pfd_images, inventory, ref_context, drawing_metadata or {}
+            )
+            print(f"[PFD_ANALYSIS] Pass 3 complete — {len(issues_p3)} raw issues")
+
+            # ── Pass 4: Gap & missing element review ────────────────────────
+            issues_p4 = self._pass4_gap_analysis(
+                pfd_images, inventory, ref_context, drawing_metadata or {}
+            )
+            print(f"[PFD_ANALYSIS] Pass 4 complete — {len(issues_p4)} gap issues")
+
+            # ── Merge, deduplicate, renumber ────────────────────────────────
+            all_issues = self._merge_and_deduplicate(issues_p3, issues_p4)
+            print(f"[PFD_ANALYSIS] Final merged issues: {len(all_issues)}")
+
+            # ── Build drawing_info from inventory ───────────────────────────
+            drawing_info = self._extract_drawing_info(inventory, drawing_metadata or {})
+
+            # ── Summary ─────────────────────────────────────────────────────
+            summary = self._generate_summary(all_issues)
+            summary["passes_run"] = 4
+            summary["inventory_equipment_count"] = len(
+                inventory.get("equipment_tags", [])
+            )
+            summary["inventory_stream_count"] = len(
+                inventory.get("stream_numbers", [])
+            )
+
+            return {
+                "drawing_info": drawing_info,
+                "issues": all_issues,
+                "summary": summary,
+                "analysis_metadata": {
+                    "engine": "4-pass multi-stage",
+                    "model": self.MODEL,
+                    "pages_analyzed": len(pfd_images),
+                    "reference_docs_used": len([
+                        v for v in (reference_documents or {}).values()
+                        if v and v != "null"
+                    ]),
+                    "timestamp": datetime.now().isoformat(),
+                },
+            }
+
         except Exception as e:
-            print(f"[PFD_ANALYSIS ERROR] {type(e).__name__}: {str(e)}")
+            print(f"[PFD_ANALYSIS ERROR] {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
             raise
-    
-    def _extract_pdf_pages(self, pdf_file) -> List[str]:
-        """Extract PDF pages as base64 encoded images"""
+
+    # -----------------------------------------------------------------------
+    # Pass 1 — Visual Inventory Scan
+    # -----------------------------------------------------------------------
+
+    def _pass1_visual_inventory(self, pfd_images: List[str]) -> dict:
+        """
+        Ask the model to catalogue everything it can see on the PFD.
+        Returns a structured inventory dict.
+        """
+        prompt = """Examine these PFD drawing image(s) in detail.
+
+Extract and list EVERY visible element you can identify. Be exhaustive — do NOT skip anything.
+
+Return a JSON object with EXACTLY these keys:
+{
+  "equipment_tags": ["list of every equipment tag visible, e.g. V-101, P-101A/B, E-201"],
+  "stream_numbers": ["list of every stream number visible, e.g. 1, 2A, S-101"],
+  "title_block": {
+    "drawing_number": "...",
+    "revision": "...",
+    "project_name": "...",
+    "client_name": "...",
+    "date": "...",
+    "document_title": "...",
+    "approved_by": "...",
+    "checked_by": "..."
+  },
+  "utility_headers": ["steam", "cooling water", etc. — every utility header line shown],
+  "battery_limits": ["description of every battery limit / tie-in marker visible"],
+  "process_units": ["names/labels of every process unit or section shown"],
+  "notes": ["full text of every general note on the drawing"],
+  "legend_items": ["list of any legend or symbol key entries visible"],
+  "stream_data_table": true_or_false,
+  "operating_conditions_shown": true_or_false,
+  "control_elements": ["list any PFD-level control loops or symbols visible"],
+  "safety_elements": ["any relief/vent/flare line or symbol visible"],
+  "phase_indicators": ["any L/V/G phase labels or separators shown"],
+  "missing_title_block_fields": ["list any title block field that appears BLANK or NOT FILLED IN"]
+}"""
+
         try:
-            # Read PDF file
-            if hasattr(pdf_file, 'read'):
-                pdf_bytes = pdf_file.read()
-                if hasattr(pdf_file, 'seek'):
-                    pdf_file.seek(0)  # Reset file pointer
-            else:
-                with open(pdf_file, 'rb') as f:
-                    pdf_bytes = f.read()
-            
-            # Open PDF with PyMuPDF
-            pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
-            images_base64 = []
-            
-            for page_num in range(len(pdf_document)):
-                page = pdf_document[page_num]
-                
-                # Render page to image at high resolution
-                zoom = 2.0  # 200% zoom for better quality
-                mat = fitz.Matrix(zoom, zoom)
-                pix = page.get_pixmap(matrix=mat)
-                
-                # Convert to PIL Image
-                img_data = pix.tobytes("png")
-                img = Image.open(io.BytesIO(img_data))
-                
-                # Convert to base64
-                buffered = io.BytesIO()
-                img.save(buffered, format="PNG")
-                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                images_base64.append(img_base64)
-            
-            pdf_document.close()
-            return images_base64
-            
+            result = self._vision_call(prompt, pfd_images, max_tokens=4000)
+            if isinstance(result, dict):
+                return result
         except Exception as e:
-            print(f"[ERROR] Failed to extract PDF pages: {e}")
-            raise
-    
-    def _process_reference_documents(self, reference_docs: Dict[str, Any]) -> str:
-        """Process reference documents and extract relevant context"""
-        context_parts = []
-        
-        doc_type_labels = {
-            'bfd': 'Block Flow Diagram (BFD)',
-            'process_description': 'Process Description',
-            'process_design_basis': 'Process Design Basis',
-            'operation_control_philosophy': 'Operation & Control Philosophy',
-            'scope_of_work': 'Scope of Work',
-            'legends_symbols': 'Legends and Symbols',
-            'equipment_data_sheet': 'Equipment Data Sheet',
-            'other_documents': 'Other Reference Documents'
+            print(f"[PFD_ANALYSIS] Pass 1 error: {e}")
+        return {}
+
+    # -----------------------------------------------------------------------
+    # Pass 2 — Reference Document Text Extraction
+    # -----------------------------------------------------------------------
+
+    def _pass2_extract_reference_content(
+        self, reference_docs: Dict[str, Any]
+    ) -> str:
+        """
+        Read the text content from each uploaded reference document.
+        Returns a single formatted context string for the AI.
+        """
+        LABELS = {
+            "bfd": "Block Flow Diagram (BFD)",
+            "process_description": "Process Description",
+            "process_design_basis": "Process Design Basis",
+            "operation_control_philosophy": "Operation & Control Philosophy",
+            "scope_of_work": "Scope of Work",
+            "legends_symbols": "Legends and Symbols",
+            "equipment_data_sheet": "Equipment Data Sheet",
+            "other_documents": "Other Reference Documents",
         }
-        
+
+        parts = []
         for doc_type, doc_path in reference_docs.items():
-            if doc_path and doc_path != 'null':
-                label = doc_type_labels.get(doc_type, doc_type.replace('_', ' ').title())
-                context_parts.append(f"- {label}: Available for cross-reference")
-        
-        if context_parts:
-            return "\n".join(context_parts)
-        return ""
-    
-    def _call_vision_api(self, images_base64: List[str], prompt: str) -> Dict[str, Any]:
-        """Call OpenAI Vision API with PFD images"""
+            if not doc_path or doc_path == "null":
+                continue
+            label = LABELS.get(doc_type, doc_type.replace("_", " ").title())
+            text = self._read_document_text(doc_path)
+            if text:
+                snippet = text[: self.REF_DOC_TEXT_LIMIT]
+                parts.append(f"=== {label} ===\n{snippet}\n")
+            else:
+                parts.append(f"=== {label} ===\n[File available but text could not be extracted]\n")
+
+        return "\n".join(parts) if parts else ""
+
+    def _read_document_text(self, storage_path: str) -> str:
+        """Extract plain text from a PDF stored in Django's default_storage."""
         try:
-            # Build message content with images
-            message_content = [{"type": "text", "text": prompt}]
-            
-            for idx, img_base64 in enumerate(images_base64):
-                message_content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{img_base64}",
-                        "detail": "high"
-                    }
-                })
-            
-            print(f"[PFD_ANALYSIS] Calling OpenAI API (model: {self.model}) with {len(images_base64)} page(s)...")
-            print(f"[PFD_ANALYSIS] Request timestamp: {datetime.now().isoformat()}")
-            
-            # Call OpenAI API
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a Senior Process Engineer specializing in PFD verification with expertise in oil & gas process design, equipment specification, and process flow documentation standards."
-                    },
-                    {
-                        "role": "user",
-                        "content": message_content
-                    }
-                ],
-                max_tokens=self.MAX_TOKENS,
-                temperature=self.AI_TEMPERATURE,
-                response_format={"type": "json_object"}
-            )
-            
-            # Parse response
-            response_text = response.choices[0].message.content
-            print(f"[PFD_ANALYSIS] Received response ({len(response_text)} chars)")
-            
-            # Parse JSON
-            analysis_result = json.loads(response_text)
-            
-            # Validate and normalize structure
-            if 'issues' not in analysis_result:
-                analysis_result['issues'] = []
-            
-            if 'drawing_info' not in analysis_result:
-                analysis_result['drawing_info'] = {}
-            
-            if 'summary' not in analysis_result:
-                analysis_result['summary'] = self._generate_summary(analysis_result['issues'])
-            
-            return analysis_result
-            
-        except json.JSONDecodeError as e:
-            print(f"[ERROR] Failed to parse JSON response: {e}")
-            print(f"[ERROR] Response text: {response_text[:500]}...")
-            raise ValueError(f"Invalid JSON response from AI: {str(e)}")
-        
+            with default_storage.open(storage_path, "rb") as f:
+                raw = f.read()
+
+            # Try PyMuPDF text extraction
+            doc = fitz.open(stream=raw, filetype="pdf")
+            pages_text = []
+            for page in doc:
+                pages_text.append(page.get_text("text"))
+            doc.close()
+            text = "\n".join(pages_text).strip()
+            if text:
+                return text
         except Exception as e:
-            print(f"[ERROR] Vision API call failed: {type(e).__name__}: {str(e)}")
-            raise
-    
-    def _generate_summary(self, issues: List[Dict]) -> Dict[str, int]:
-        """Generate summary statistics from issues"""
-        summary = {
-            'total_issues': len(issues),
-            'critical_count': 0,
-            'major_count': 0,
-            'minor_count': 0,
-            'observation_count': 0
-        }
-        
-        for issue in issues:
-            severity = issue.get('severity', 'observation').lower()
-            if severity == 'critical':
-                summary['critical_count'] += 1
-            elif severity == 'major':
-                summary['major_count'] += 1
-            elif severity == 'minor':
-                summary['minor_count'] += 1
+            print(f"[PFD_ANALYSIS] ref doc read error ({storage_path}): {e}")
+        return ""
+
+    # -----------------------------------------------------------------------
+    # Pass 3 — Deep Systematic Analysis (40+ checks)
+    # -----------------------------------------------------------------------
+
+    _CHECKS_TEXT = """
+MANDATORY VERIFICATION CHECKS — examine the PFD images and apply ALL 42 checks below.
+Report an issue for EVERY check that fails or cannot be confirmed. Be specific.
+
+=== TITLE BLOCK & DOCUMENTATION (Checks 1–7) ===
+1.  Drawing number visible and matches the provided metadata (if any).
+2.  Revision number / letter is shown and not blank.
+3.  Project name is shown in the title block.
+4.  Client/Owner name is shown in the title block.
+5.  Document title correctly describes the process shown.
+6.  "Approved by" and "Checked by" fields are not blank.
+7.  Issue date or revision date is present.
+
+=== EQUIPMENT (Checks 8–15) ===
+8.  Every major equipment item (vessel, column, reactor, heat exchanger, pump,
+    compressor, fired heater, filter, dryer) has a unique, legible tag number
+    following the project tagging philosophy.
+9.  Equipment tag numbers on PFD are consistent with the Equipment Data Sheet
+    (if provided).
+10. Parallel trains (A/B sparing) are clearly labeled.
+11. Equipment type symbols are consistent and follow legend / ISO 10628-2.
+12. No extra unlabeled equipment symbols exist on the drawing.
+13. Equipment service descriptions (names) are shown next to each tag.
+14. Heat exchangers clearly show shell-side vs tube-side process streams.
+15. Pumps and compressors show suction and discharge directions.
+
+=== PROCESS STREAMS (Checks 16–22) ===
+16. All process stream lines carry a unique stream number (no two identical numbers).
+17. Flow direction arrows are present on every process stream line.
+18. Feed streams entering the battery limit are labeled and numbered.
+19. Product / export streams leaving the battery limit are labeled and numbered.
+20. Recycle streams are clearly marked and numbered.
+21. Off-page / tie-in connectors carry matching reference numbers on both sides.
+22. Stream data table is present or stream conditions (T, P, flow) are annotated.
+
+=== MATERIAL BALANCE & PROCESS LOGIC (Checks 23–28) ===
+23. Mass balance is visually consistent — every stream entering equipment must
+    leave via at least one outlet stream (no orphan inlets or outlets).
+24. Phase changes (L→V, V→L) are logically represented at separation or
+    heat-exchange equipment.
+25. Bypass lines shown are process-justified and numbered.
+26. Process sequence from feed to product follows a logical engineering pathway.
+27. No unexplained stream splits or merges without an equipment item.
+28. All recycle and bypass streams connect back to an appropriate point.
+
+=== UTILITIES (Checks 29–32) ===
+29. Utility supply lines (steam, cooling water, fuel gas, nitrogen, instrument
+    air, potable water, etc.) are shown where process equipment requires them.
+30. Utility header labels are present and legible.
+31. No utility stream is shown feeding into a process stream without a valid
+    process reason.
+32. Utility return / condensate lines are shown if applicable.
+
+=== SAFETY & ENVIRONMENT (Checks 33–36) ===
+33. Relief valve or pressure protection symbol is shown on pressurized vessels /
+    equipment where required at PFD level.
+34. Vent / flare connections are shown at PFD level where required by process safety.
+35. Emergency depressurization or drain-to-safe-location is indicated if required.
+36. Chemical injection points for corrosion inhibitor / neutralizer are noted if
+    applicable to the process.
+
+=== CONTROL & INSTRUMENTATION (Checks 37–39) ===
+37. Only PFD-level control loops are shown (no detailed P&ID valve tags, no
+    nozzle callouts, no hook-up details).
+38. Key process control loops (level, pressure, flow, temperature) relevant to
+    major equipment are indicated at PFD level.
+39. No extraneous P&ID-level instrumentation (FT, LT numbers, etc.) appears.
+
+=== NOTES & LEGENDS (Checks 40–42) ===
+40. A "General Notes" section or note list is present; each note is numbered and
+    referenced to elements on the drawing.
+41. A legend / symbol key is present or referenced.
+42. Notes are technically consistent with the process depicted on the PFD.
+"""
+
+    def _pass3_deep_systematic_check(
+        self,
+        pfd_images: List[str],
+        inventory: dict,
+        ref_context: str,
+        drawing_metadata: dict,
+    ) -> List[dict]:
+        """Run 42-check deep systematic analysis."""
+
+        inventory_block = ""
+        if inventory:
+            inventory_block = (
+                "\n=== PFD INVENTORY (from visual scan) ===\n"
+                + json.dumps(inventory, indent=2)
+                + "\n"
+            )
+
+        metadata_block = ""
+        if drawing_metadata:
+            metadata_block = (
+                "\n=== DRAWING METADATA PROVIDED BY USER ===\n"
+                f"- Drawing Number : {drawing_metadata.get('drawing_number','Not provided')}\n"
+                f"- Revision       : {drawing_metadata.get('revision','Not provided')}\n"
+                f"- Title          : {drawing_metadata.get('title','Not provided')}\n"
+                f"- Project        : {drawing_metadata.get('project_name','Not provided')}\n"
+            )
+
+        ref_block = ""
+        if ref_context:
+            ref_block = (
+                "\n=== REFERENCE DOCUMENT CONTENT ===\n"
+                + ref_context
+                + "\n=== END REFERENCE DOCUMENTS ===\n"
+            )
+
+        prompt = f"""You are performing a deep systematic PFD verification.
+
+{inventory_block}
+{metadata_block}
+{ref_block}
+
+{self._CHECKS_TEXT}
+
+RULES:
+- Report an issue for EVERY check that FAILS or cannot be confirmed from the image.
+- Each issue must reference the specific element (tag number, stream number,
+  title block field) by name.
+- Do NOT invent equipment or streams not visible on the PFD.
+- Do NOT report image quality issues.
+- Severity guide:
+    critical  = missing safety element, undefined battery limit, orphan process stream
+    major     = missing tag, missing stream number, missing stream direction arrow,
+                missing utility that is clearly required, inconsistency with ref docs
+    minor     = missing note reference, blank title block field, unlabeled bypass
+    observation = improvement suggestion, best-practice recommendation
+
+Return ONLY a valid JSON object:
+{{
+  "issues": [
+    {{
+      "serial_number": 1,
+      "issue_found": "Specific finding referencing element name/number",
+      "action_required": "Specific corrective action",
+      "severity": "critical|major|minor|observation",
+      "category": "Equipment|Streams|Control|Documentation|Safety|Material Balance|Utilities|Process Design|Other",
+      "check_number": 1,
+      "approval": "Pending",
+      "remark": "Pending"
+    }}
+  ]
+}}"""
+
+        try:
+            result = self._vision_call(prompt, pfd_images, max_tokens=self.MAX_TOKENS)
+            return result.get("issues", [])
+        except Exception as e:
+            print(f"[PFD_ANALYSIS] Pass 3 error: {e}")
+            return []
+
+    # -----------------------------------------------------------------------
+    # Pass 4 — Gap & Missing Element Review
+    # -----------------------------------------------------------------------
+
+    def _pass4_gap_analysis(
+        self,
+        pfd_images: List[str],
+        inventory: dict,
+        ref_context: str,
+        drawing_metadata: dict,
+    ) -> List[dict]:
+        """Second-eye sweep focused on absent or incomplete elements."""
+
+        inventory_block = ""
+        if inventory:
+            inventory_block = (
+                "\n=== CONFIRMED VISIBLE INVENTORY ===\n"
+                + json.dumps(inventory, indent=2)
+                + "\n"
+            )
+
+        ref_block = ""
+        if ref_context:
+            ref_block = (
+                "\n=== REFERENCE DOCUMENT CONTENT ===\n"
+                + ref_context[:6000]
+                + "\n"
+            )
+
+        prompt = f"""You are performing a PFD Gap Analysis — your sole focus is on what is
+ABSENT, INCOMPLETE, or INCONSISTENT.
+
+{inventory_block}
+{ref_block}
+
+Examine the PFD image(s) and answer these gap questions. Report an issue for
+every gap you find:
+
+GAP-1.  Are there any equipment items in the reference Equipment Data Sheet that
+        are NOT shown on the PFD? (List each missing tag.)
+GAP-2.  Are there streams implied by the process but not numbered on the PFD?
+GAP-3.  Are there equipment items on the PFD with NO connecting process streams?
+GAP-4.  Does the title block have any BLANK fields (drawing number, revision, project,
+        client, date, approved-by, checked-by)?
+GAP-5.  Are there utility connections that appear required by the equipment type but
+        are NOT shown (e.g., cooling water to a condenser, steam to a reboiler)?
+GAP-6.  Is a stream data table referenced but NOT present on the drawing?
+GAP-7.  Are there process notes referenced in the drawing but the note text is missing?
+GAP-8.  Are there battery limit markers without matching stream numbers or labels?
+GAP-9.  Is the legends / symbol key absent or referenced but not present?
+GAP-10. Are there equipment items where phase (L/V/G) cannot be determined from
+        the inlet/outlet streams and no phase indicator is shown?
+GAP-11. If a separator, flash vessel, or distillation column is shown, are both
+        vapour-overhead and liquid-bottom streams present?
+GAP-12. Are any general notes section entirely absent when notes would be expected?
+GAP-13. Are control loop descriptions absent for major process control points?
+GAP-14. Are there any feed or product streams not labeled at the battery limit?
+GAP-15. Based on the process description (if provided), is any major process step
+        such as pre-treatment, separation, heat recovery, or product treating MISSING
+        from the PFD?
+
+RULES:
+- Only report gaps you can confirm from the image or from a discrepancy with
+  the reference documents.
+- Each gap issue must identify the specific missing element by name/number.
+- Do NOT duplicate issues that are clearly already captured in a prior check.
+- If no gap is found for a question, do NOT force an issue.
+
+Return ONLY a valid JSON object:
+{{
+  "issues": [
+    {{
+      "serial_number": 1,
+      "issue_found": "Specific missing element description",
+      "action_required": "Specific corrective action",
+      "severity": "critical|major|minor|observation",
+      "category": "Equipment|Streams|Control|Documentation|Safety|Material Balance|Utilities|Process Design|Other",
+      "gap_check": "GAP-1",
+      "approval": "Pending",
+      "remark": "Pending"
+    }}
+  ]
+}}"""
+
+        try:
+            result = self._vision_call(prompt, pfd_images, max_tokens=8000)
+            return result.get("issues", [])
+        except Exception as e:
+            print(f"[PFD_ANALYSIS] Pass 4 error: {e}")
+            return []
+
+    # -----------------------------------------------------------------------
+    # Merge & deduplicate
+    # -----------------------------------------------------------------------
+
+    def _merge_and_deduplicate(
+        self, issues_p3: List[dict], issues_p4: List[dict]
+    ) -> List[dict]:
+        """
+        Merge Pass-3 and Pass-4 issues, remove near-duplicates, renumber.
+        Deduplication: if two issues share the same first 60 chars of 'issue_found',
+        keep the one with the higher severity.
+        """
+        SEVERITY_RANK = {"critical": 4, "major": 3, "minor": 2, "observation": 1}
+        combined = issues_p3 + issues_p4
+
+        # Normalise fields
+        seen: Dict[str, dict] = {}
+        for issue in combined:
+            # Normalise severity / category
+            sev = issue.get("severity", "observation").lower()
+            if sev not in self.VALID_SEVERITIES:
+                sev = "observation"
+            issue["severity"] = sev
+
+            cat = issue.get("category", "Other")
+            if cat not in self.VALID_CATEGORIES:
+                cat = "Other"
+            issue["category"] = cat
+
+            issue.setdefault("approval", "Pending")
+            issue.setdefault("remark", "Pending")
+
+            # Dedup key = first 60 chars of issue_found (case-insensitive)
+            key = issue.get("issue_found", "")[:60].lower().strip()
+            if key in seen:
+                existing_rank = SEVERITY_RANK.get(seen[key]["severity"], 1)
+                new_rank = SEVERITY_RANK.get(sev, 1)
+                if new_rank > existing_rank:
+                    seen[key] = issue
             else:
-                summary['observation_count'] += 1
-        
+                seen[key] = issue
+
+        # Sort: critical first, then major, minor, observation
+        ordered = sorted(
+            seen.values(),
+            key=lambda x: SEVERITY_RANK.get(x.get("severity", "observation"), 1),
+            reverse=True,
+        )
+
+        # Renumber
+        for idx, issue in enumerate(ordered, start=1):
+            issue["serial_number"] = idx
+            # Remove internal pass metadata keys before returning
+            issue.pop("check_number", None)
+            issue.pop("gap_check", None)
+
+        return ordered
+
+    # -----------------------------------------------------------------------
+    # Draw info helper
+    # -----------------------------------------------------------------------
+
+    def _extract_drawing_info(self, inventory: dict, metadata: dict) -> dict:
+        tb = inventory.get("title_block", {}) if inventory else {}
+        return {
+            "drawing_number": (
+                tb.get("drawing_number")
+                or metadata.get("drawing_number")
+                or ""
+            ),
+            "revision": (
+                tb.get("revision")
+                or metadata.get("revision")
+                or ""
+            ),
+            "project_name": (
+                tb.get("project_name")
+                or metadata.get("project_name")
+                or ""
+            ),
+            "client_name": tb.get("client_name") or "",
+        }
+
+    # -----------------------------------------------------------------------
+    # Low-level OpenAI vision call
+    # -----------------------------------------------------------------------
+
+    def _vision_call(
+        self,
+        prompt: str,
+        images_base64: List[str],
+        max_tokens: int = 8000,
+    ) -> dict:
+        """Single call to GPT-4o Vision; returns parsed JSON dict."""
+        content = [{"type": "text", "text": prompt}]
+        for img in images_base64:
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{img}",
+                    "detail": "high",
+                },
+            })
+
+        response = self.client.chat.completions.create(
+            model=self.MODEL,
+            messages=[
+                {"role": "system", "content": self._SYSTEM_PERSONA},
+                {"role": "user", "content": content},
+            ],
+            max_tokens=max_tokens,
+            temperature=self.TEMPERATURE,
+            response_format={"type": "json_object"},
+        )
+
+        raw = response.choices[0].message.content
+        return _safe_json(raw)
+
+    # -----------------------------------------------------------------------
+    # PDF rendering
+    # -----------------------------------------------------------------------
+
+    def _render_pdf_pages(self, pdf_file) -> List[str]:
+        """Render every PDF page to a high-resolution base64 PNG."""
+        if hasattr(pdf_file, "read"):
+            pdf_bytes = pdf_file.read()
+            if hasattr(pdf_file, "seek"):
+                pdf_file.seek(0)
+        else:
+            with open(pdf_file, "rb") as f:
+                pdf_bytes = f.read()
+
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        images = []
+        mat = fitz.Matrix(self.PDF_ZOOM, self.PDF_ZOOM)
+
+        for page in doc:
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            images.append(base64.b64encode(buf.getvalue()).decode("utf-8"))
+
+        doc.close()
+        return images
+
+    # Keep legacy name as alias for backwards compatibility
+    def _extract_pdf_pages(self, pdf_file) -> List[str]:
+        return self._render_pdf_pages(pdf_file)
+
+    # -----------------------------------------------------------------------
+    # Summary helpers (public — used by views)
+    # -----------------------------------------------------------------------
+
+    def _generate_summary(self, issues: List[dict]) -> dict:
+        summary = {
+            "total_issues": len(issues),
+            "critical_count": 0,
+            "major_count": 0,
+            "minor_count": 0,
+            "observation_count": 0,
+        }
+        for issue in issues:
+            sev = issue.get("severity", "observation").lower()
+            if sev == "critical":
+                summary["critical_count"] += 1
+            elif sev == "major":
+                summary["major_count"] += 1
+            elif sev == "minor":
+                summary["minor_count"] += 1
+            else:
+                summary["observation_count"] += 1
         return summary
-    
-    def generate_report_summary(self, issues: List[Dict]) -> Dict[str, int]:
-        """Generate report summary with approval status counts"""
-        summary = {
-            'approved_count': 0,
-            'ignored_count': 0,
-            'pending_count': 0
-        }
-        
+
+    def generate_report_summary(self, issues: List[dict]) -> dict:
+        """Generate approval-status summary (used by views after bulk updates)."""
+        summary = {"approved_count": 0, "ignored_count": 0, "pending_count": 0}
         for issue in issues:
-            status = issue.get('status', 'pending').lower()
-            if status == 'approved':
-                summary['approved_count'] += 1
-            elif status == 'ignored':
-                summary['ignored_count'] += 1
+            st = issue.get("status", "pending").lower()
+            if st == "approved":
+                summary["approved_count"] += 1
+            elif st == "ignored":
+                summary["ignored_count"] += 1
             else:
-                summary['pending_count'] += 1
-        
+                summary["pending_count"] += 1
         return summary

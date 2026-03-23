@@ -141,3 +141,5 @@ test-results/
 test_*.py
 *.md
 *.txt
+
+pfd_projects/
