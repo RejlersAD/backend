@@ -5,6 +5,7 @@ from .views import (
     PIDAnalysisReportViewSet, 
     PIDIssueViewSet,
     ReferenceDocumentViewSet,
+    import_linelist_from_designiq,
 )
 from .project_views import PIDProjectViewSet
 from .history_views import (
@@ -179,6 +180,8 @@ urlpatterns = [
     path('export/<int:pk>/', export_drawing, name='pid-drawing-export'),
     # Test URL
     path('test-export/<int:pk>/', test_export, name='test-export'),
+    # DesignIQ line list import (SOFT-CODED: fetch structured line list for P&ID cross-checking)
+    path('import-linelist/', import_linelist_from_designiq, name='pid-import-linelist'),
     # Router URLs LAST
     path('', include(router.urls)),
 ]

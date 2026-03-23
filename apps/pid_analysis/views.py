@@ -21,6 +21,65 @@ from .document_processor import DocumentProcessor
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
+def import_linelist_from_designiq(request):
+    """
+    SOFT-CODED: Import line list data from DesignIQ for P&ID cross-checking.
+    GET /api/v1/pid/import-linelist/
+      ?project_id=<int>   — return line list items for a specific DesignIQ project
+      (no params)         — return list of DesignIQ projects that have line list items
+    """
+    try:
+        from apps.designiq.models import EngineeringListItem, DesignProject
+    except ImportError:
+        return Response({'error': 'DesignIQ module not available'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    project_id = request.query_params.get('project_id')
+
+    if not project_id:
+        # Return list of projects that have line list items (scoped to current user's org)
+        projects_with_lists = (
+            DesignProject.objects
+            .filter(items__list_type='line_list')
+            .distinct()
+            .values('id', 'name', 'description', 'created_at')
+            .order_by('-created_at')
+        )
+        return Response({
+            'projects': list(projects_with_lists),
+            'count': len(projects_with_lists)
+        })
+
+    # Return serialised line list items for the given project
+    try:
+        project = DesignProject.objects.get(id=project_id)
+    except DesignProject.DoesNotExist:
+        return Response({'error': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    items = EngineeringListItem.objects.filter(
+        project=project,
+        list_type='line_list'
+    ).values('item_tag', 'data', 'status', 'version')
+
+    line_list = [
+        {
+            'item_tag': item['item_tag'],
+            'data': item['data'] or {},
+            'status': item['status'],
+            'version': item['version'],
+        }
+        for item in items
+    ]
+
+    return Response({
+        'project_id': project.id,
+        'project_name': project.name,
+        'line_list': line_list,
+        'count': len(line_list),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
 def export_report(request, pk):
     """
     Standalone export view for P&ID reports
@@ -172,6 +231,17 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             if ref_key in request.FILES:
                 reference_documents[key] = request.FILES[ref_key]
                 print(f"[DEBUG] Reference document found: {key} - {reference_documents[key].name}")
+        
+        # SOFT-CODED: Handle JSON line list imported from DesignIQ (no file upload needed)
+        line_list_json_raw = request.data.get('line_list_json')
+        if line_list_json_raw:
+            import json as _json
+            try:
+                parsed = _json.loads(line_list_json_raw) if isinstance(line_list_json_raw, str) else line_list_json_raw
+                reference_documents['line_list_json'] = parsed
+                print(f"[DEBUG] DesignIQ line list JSON received: {len(parsed) if isinstance(parsed, list) else 'dict'} items")
+            except Exception as _e:
+                print(f"[WARNING] Failed to parse line_list_json: {_e}")
         
         if reference_documents:
             print(f"[DEBUG] Total reference documents: {len(reference_documents)}")

@@ -89,12 +89,25 @@ class PIDAnalysisService:
             reference_data = {}
             if reference_documents:
                 print(f"[INFO] PASS 2: Reference Document Intelligence Extraction")
+                # SOFT-CODED: Separate JSON-typed references (e.g. DesignIQ line list) from file paths
+                json_references = {}
+                file_references = {}
+                for k, v in reference_documents.items():
+                    if isinstance(v, (dict, list)):
+                        json_references[k] = v
+                    else:
+                        file_references[k] = v
                 try:
-                    reference_data = self._process_reference_documents(reference_documents)
+                    if file_references:
+                        reference_data = self._process_reference_documents(file_references)
                     print(f"[INFO] Reference data extracted: {len(reference_data)} categories")
                 except Exception as e:
                     print(f"[WARNING] Reference document processing failed (non-critical): {e}")
                     reference_data = {}
+                # Merge JSON references directly (already structured — no file processing needed)
+                reference_data.update(json_references)
+                if json_references:
+                    print(f"[INFO] Merged {len(json_references)} JSON reference(s) from DesignIQ: {list(json_references.keys())}")
             else:
                 print(f"[INFO] PASS 2: Skipped (No reference documents provided)")
             
@@ -506,7 +519,7 @@ Return ONLY valid JSON in this exact format:
             "issue_observed": "Specific issue with exact values",
             "action_required": "Clear corrective action",
             "severity": "critical/major/minor/observation",
-            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance",
+            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance/trim_class/dissimilar_material/ltcs_compliance/free_drain_slope/spool_requirement",
             "location_on_drawing": {
                 "zone": "Top-Left/Top-Center/Top-Right/Middle-Left/Middle-Center/Middle-Right/Bottom-Left/Bottom-Center/Bottom-Right",
                 "drawing_section": "Process area/utility/legend/notes",
@@ -646,10 +659,56 @@ For each line number above (excluding PP-prefix connectors):
   5) Is the source and destination clear (equipment tag or OPC arrow)?
 
 --- OVERALL DRAWING CHECKS ---
-Equipment: For each visible vessel/pump/compressor/exchanger - tag format, design conditions, nozzle connections
-Safety: Any visible PSV/PRV: set pressure, discharge routing, sizing
+Equipment: For each visible vessel/pump/compressor/exchanger - tag format, design conditions (P/T), nozzle connections complete
+Safety (PSV_COMPLIANCE): For each PSV/PRV/TSV visible:
+  - Set pressure annotation present on symbol? (MISSING = CRITICAL)
+  - Discharge line shown with destination (flare/vent header)? (MISSING = CRITICAL)
+  - Sizing basis note/reference tag shown near PSV? (MISSING = MAJOR)
+  - If reference Equipment List provided: set pressure must be ≤ equipment design pressure (EXCEEDED = CRITICAL)
 Notes/Holds: Read each active note/hold text - flag non-compliance as separate critical/major issues
 Documentation: Legend completeness, title block revision, legibility, symbol consistency
+
+--- ADVANCED ENGINEERING COMPLIANCE CHECKS ---
+PIPE_CLASS_vs_TRIM_CLASS (flag pipe-to-valve rated pressure mismatches):
+  For each actuated valve (XV, SDV, MOV, BDV, FCV, PCV) connected to equipment nozzles:
+  - Identify pipe spec class from connecting line label (e.g., CS150, A1A, B2S, 300#, 600#)
+  - Identify valve trim pressure class from annotation near valve symbol
+  - RULE: trim class MUST match or EXCEED pipe class rating
+  - Trim class LOWER than pipe class = CRITICAL finding (category: trim_class)
+  - Trim class annotation MISSING on actuated valve at equipment nozzle = MAJOR finding (category: trim_class)
+
+DISSIMILAR_MATERIAL_CONNECTIONS (galvanic isolation check):
+  For every visible spec break or material transition at flanged connections:
+  - CS to SS (stainless steel): insulating/dielectric gasket REQUIRED to prevent galvanic corrosion
+  - CS to Alloy (duplex, Inconel, Monel, titanium): insulating gasket REQUIRED
+  - Spec break symbol (filled triangle/diamond/hexagon) must be present at transition point
+  - 'INS. GASKET', 'INSUL. GASKET', or 'DIELECTRIC UNION' note must appear at dissimilar material joint
+  - Spec break at dissimilar material boundary WITHOUT insulating gasket annotation = MAJOR finding (category: dissimilar_material)
+  - Spec break symbol absent at material transition = MAJOR finding (category: dissimilar_material)
+
+LTCS_SERVICE_COMPLIANCE (cryogenic and low-temperature line check):
+  For any line or service that may operate below -29°C (-20°F):
+  - LNG, LPG, propane, ethylene, methane C3/C4 services: pipe class must indicate LTCS
+  - LTCS designators: suffix L, CS3L, BNW, BNS, or explicit 'LT' in class code
+  - If standard CS pipe class shown on a known cryogenic/LPG/LNG service = CRITICAL finding (category: ltcs_compliance)
+  - CS class where LTCS is required per line service/temperature = MAJOR finding (category: ltcs_compliance)
+
+FREE_DRAIN_and_SLOPE (gravity-drain lines require slope annotation):
+  For horizontal lines in gravity-drain, condensate, or self-draining service:
+  - Steam condensate return lines: slope arrow ≥ 1:100 REQUIRED on drawing
+  - Flare/blowdown drain headers: free-drain slope to KO drum annotation REQUIRED
+  - OWS (oily water sewer) branches: grade/slope annotation REQUIRED
+  - Low-point drain valve (½" or ¾" drain connection) required at all horizontal low points
+  - High-point vent required at all high points of horizontal liquid-filled lines
+  - Horizontal gravity/condensate line without slope annotation = MAJOR finding (category: free_drain_slope)
+  - Missing low-point drain at horizontal run low point = MINOR finding (category: free_drain_slope)
+
+MINIMUM_SPOOL_DOWNSTREAM_RO (restriction orifice straight-run requirement):
+  For each RO (Restriction Orifice) or VO (Variable Orifice) visible on drawing:
+  - Minimum straight pipe spool DOWNSTREAM of RO: 10× pipe diameter (10D) before any fitting
+  - Minimum straight pipe spool UPSTREAM of RO: 5× pipe diameter (5D) from previous fitting
+  - RO immediately followed by elbow, tee, or reducer without visible spool = MAJOR finding (category: spool_requirement)
+  - RO sizing note (bore diameter, calculated Cd) MISSING near RO tag = MINOR finding (category: spool_requirement)
 
 --- RULES (always apply) ---
 - Report ONLY elements visually confirmed on this drawing
@@ -676,7 +735,7 @@ Return ONLY valid JSON:
             "issue_observed": "Specific issue with exact values",
             "action_required": "Clear corrective action",
             "severity": "critical/major/minor/observation",
-            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance",
+            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance/trim_class/dissimilar_material/ltcs_compliance/free_drain_slope/spool_requirement",
             "location_on_drawing": {{
                 "zone": "Top-Left/Top-Center/Top-Right/Middle-Left/Middle-Center/Middle-Right/Bottom-Left/Bottom-Center/Bottom-Right",
                 "drawing_section": "Process area/utility/legend/notes",
@@ -1072,52 +1131,146 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
         return categorized
 
     def _parse_analysis_response(self, response_text: str, tokens_used: int) -> Dict[str, Any]:
-        """Parse OpenAI response and extract JSON"""
+        """Parse OpenAI response and extract JSON — with aggressive JSON recovery"""
         try:
-            # Try to find JSON in response
+            # Strategy 1: Direct JSON parse (response IS a JSON object)
             json_start = response_text.find('{')
             json_end = response_text.rfind('}') + 1
             
             if json_start >= 0 and json_end > json_start:
                 json_str = response_text[json_start:json_end]
-                result = json.loads(json_str)
-                result['tokens_used'] = tokens_used
-                result['raw_response'] = response_text
-                return result
-            else:
-                # Fallback: create basic response
-                return {
-                    'issues': [{
-                        'serial_number': 1,
-                        'pid_reference': 'ANALYSIS',
-                        'issue_observed': 'Analysis completed - see raw response for details',
-                        'action_required': 'Review raw analysis output',
-                        'severity': 'observation',
-                        'category': 'other'
-                    }],
-                    'total_issues': 1,
-                    'confidence': 'Medium',
-                    'tokens_used': tokens_used,
-                    'raw_response': response_text
-                }
-                
-        except json.JSONDecodeError as e:
-            print(f"[ERROR] JSON parsing failed: {str(e)}")
+                # Strategy 1a: Try direct parse
+                try:
+                    result = json.loads(json_str)
+                    result['tokens_used'] = tokens_used
+                    result['raw_response'] = response_text
+                    return result
+                except json.JSONDecodeError:
+                    pass
+                # Strategy 1b: Fix common AI JSON issues (trailing commas, truncated arrays)
+                import re as _re
+                cleaned = _re.sub(r',\s*([\]}])', r'\1', json_str)  # remove trailing commas
+                # Truncation recovery: if json ends mid-array, close it
+                try:
+                    result = json.loads(cleaned)
+                    result['tokens_used'] = tokens_used
+                    result['raw_response'] = response_text
+                    return result
+                except json.JSONDecodeError:
+                    pass
+                # Strategy 1c: Extract just the issues array if full parse failed
+                issues_match = _re.search(r'"issues"\s*:\s*(\[.*?\])', json_str, _re.DOTALL)
+                if issues_match:
+                    try:
+                        issues_list = json.loads(issues_match.group(1))
+                        return {
+                            'issues': issues_list,
+                            'total_issues': len(issues_list),
+                            'confidence': 'Medium',
+                            'tokens_used': tokens_used,
+                            'raw_response': response_text,
+                            'reasoning': 'Partial JSON recovered — issues array extracted successfully'
+                        }
+                    except json.JSONDecodeError:
+                        pass
+
+            # Strategy 2: Look for JSON inside markdown code block
+            md_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            if md_match:
+                try:
+                    result = json.loads(md_match.group(1))
+                    result['tokens_used'] = tokens_used
+                    result['raw_response'] = response_text
+                    return result
+                except json.JSONDecodeError:
+                    pass
+
+            # Strategy 3: Response is plain-text analysis — extract key findings as issues
+            # This handles cases where AI returned prose instead of JSON
+            print(f"[WARNING] Could not parse JSON from AI response (len={len(response_text)}), extracting from text")
+            extracted_issues = self._extract_issues_from_text(response_text)
             return {
-                'issues': [{
-                    'serial_number': 1,
-                    'pid_reference': 'PARSING_ERROR',
-                    'issue_observed': f'Failed to parse AI response: {str(e)}',
-                    'action_required': 'Review raw response',
-                    'severity': 'observation',
-                    'category': 'other'
-                }],
-                'total_issues': 1,
+                'issues': extracted_issues,
+                'total_issues': len(extracted_issues),
+                'confidence': 'Low',
+                'tokens_used': tokens_used,
+                'raw_response': response_text,
+                'reasoning': 'AI returned prose — key findings extracted heuristically'
+            }
+                
+        except Exception as e:
+            print(f"[ERROR] Response parsing failed: {str(e)}")
+            return {
+                'issues': [],
+                'total_issues': 0,
                 'confidence': 'Low',
                 'tokens_used': tokens_used,
                 'raw_response': response_text,
                 'parsing_error': True
             }
+
+    def _extract_issues_from_text(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Fallback: extract numbered issues from AI prose response when JSON parsing fails.
+        Looks for patterns like '1. ...', 'Issue 1:', 'CRITICAL:', 'MAJOR:', etc.
+        """
+        issues = []
+        lines = text.split('\n')
+        current_issue = None
+        serial = 1
+
+        # Severity keywords
+        sev_map = {'critical': 'critical', 'major': 'major', 'minor': 'minor', 'observation': 'observation'}
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Detect numbered items: "1. ", "1) ", "Issue 1:", etc.
+            num_match = re.match(r'^(\d+)[.)]\s+(.+)', stripped)
+            sev_match = re.match(r'^(CRITICAL|MAJOR|MINOR|OBSERVATION)[:\s]+(.+)', stripped, re.IGNORECASE)
+
+            if num_match or sev_match:
+                if current_issue:
+                    issues.append(current_issue)
+                if num_match:
+                    desc = num_match.group(2)
+                elif sev_match:
+                    desc = sev_match.group(2)
+                    # Determine severity
+                else:
+                    desc = stripped
+
+                sev = 'observation'
+                for kw, sv in sev_map.items():
+                    if kw in stripped.lower():
+                        sev = sv
+                        break
+
+                current_issue = {
+                    'serial_number': serial,
+                    'pid_reference': 'DRAWING',
+                    'issue_observed': desc[:300],
+                    'action_required': 'Review and verify on drawing',
+                    'severity': sev,
+                    'category': 'documentation',
+                    'location_on_drawing': {
+                        'zone': 'Middle-Center',
+                        'drawing_section': 'Drawing',
+                        'proximity_description': 'See description',
+                        'visual_cues': desc[:100]
+                    }
+                }
+                serial += 1
+            elif current_issue and len(stripped) > 10:
+                # Continuation of current issue description
+                current_issue['issue_observed'] = (current_issue['issue_observed'] + ' ' + stripped)[:400]
+
+        if current_issue:
+            issues.append(current_issue)
+
+        return issues
 
     def _pdf_to_base64_images(self, pdf_file, dpi: int = 300) -> List[str]:
         """
@@ -1268,7 +1421,7 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
         # 1. Equipment List - Structured equipment data
         if 'equipment_list' in reference_data:
             eq_list = reference_data['equipment_list']
-            context_parts.append("\n? EQUIPMENT LIST PROVIDED:")
+            context_parts.append("\n📦 EQUIPMENT LIST PROVIDED:")
             context_parts.append("   VERIFY: Equipment tags on P&ID match Equipment List exactly")
             context_parts.append("   VERIFY: Equipment tagging parameters consistent with AGES-GL-08-005, Rev B4")
             context_parts.append("   VERIFY: Design pressures and temperatures match")
@@ -1276,28 +1429,58 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
             
             if 'equipment' in eq_list and eq_list['equipment']:
                 context_parts.append(f"   - Equipment List contains {len(eq_list['equipment'])} equipment items:")
-                for eq in eq_list['equipment'][:10]:  # Show first 10
-                    context_parts.append(f"     - {eq.get('tag', 'N/A')}: {eq.get('type', 'Unknown')} "
-                                       f"(Design: {eq.get('design_pressure', 'N/A')} / {eq.get('design_temp', 'N/A')})")
-                context_parts.append("   -- CRITICAL: Each equipment above MUST appear on P&ID with matching specifications")
+                psv_crosscheck_rows = []
+                for eq in eq_list['equipment'][:15]:
+                    design_p = eq.get('design_pressure', 'N/A')
+                    design_t = eq.get('design_temp', 'N/A')
+                    tag = eq.get('tag', 'N/A')
+                    context_parts.append(f"     - {tag}: {eq.get('type', 'Unknown')} "
+                                       f"(Design P: {design_p} / Design T: {design_t})")
+                    # Build PSV cross-check: any PSV/PRV protecting this equipment must have set P ≤ design P
+                    if design_p and design_p != 'N/A':
+                        psv_crosscheck_rows.append(f"       • Equipment {tag}: design pressure = {design_p} → "
+                                                   f"any PSV protecting {tag} MUST have set pressure ≤ {design_p}")
+                context_parts.append("   -- CRITICAL: Each equipment MUST appear on P&ID with matching specifications")
+                if psv_crosscheck_rows:
+                    context_parts.append("\n   🔴 PSV vs EQUIPMENT DESIGN PRESSURE CROSS-CHECK TABLE:")
+                    context_parts.append("   RULE: PSV set pressure MUST BE ≤ equipment design pressure (API 520/521)")
+                    context_parts.append("   ACTION: For each PSV/PRV visible on drawing, locate protecting equipment and verify:")
+                    for row in psv_crosscheck_rows:
+                        context_parts.append(row)
+                    context_parts.append("   → CRITICAL finding if PSV set pressure EXCEEDS any equipment design pressure above")
         
-        # 2. Line List - Structured piping data
+        # 2. Line List - Structured piping data (from uploaded PDF reference)
         if 'line_list' in reference_data:
             line_list = reference_data['line_list']
-            context_parts.append("\n? LINE LIST PROVIDED:")
-            context_parts.append("   VERIFY: All line numbers on P&ID exist in Line List")
-            context_parts.append("   VERIFY: Line sizes match between P&ID and Line List")
-            context_parts.append("   VERIFY: Pipe specifications consistent")
-            context_parts.append("   VERIFY: From/To equipment tags match")
-            context_parts.append("   VERIFY: Line serial numbers are correct (should be = 9600)")
-            context_parts.append("   -- Line numbers beyond 9600 are INCORRECT")
-            
-            if 'lines' in line_list and line_list['lines']:
-                context_parts.append(f"   - Line List contains {len(line_list['lines'])} piping lines:")
-                for line in line_list['lines'][:8]:  # Show first 8
-                    context_parts.append(f"     - {line.get('line_number', 'N/A')}: {line.get('size', 'N/A')} "
-                                       f"{line.get('spec', 'N/A')} ({line.get('from', 'N/A')} ? {line.get('to', 'N/A')})")
-                context_parts.append("   -- MAJOR: Flag discrepancies between P&ID line numbers and Line List")
+            context_parts.append("\n📋 LINE LIST PROVIDED (from uploaded reference):")
+            self._append_line_list_checks(context_parts, line_list.get('lines', []))
+
+        # 2b. Line List from DesignIQ (imported as JSON — already structured)
+        if 'line_list_json' in reference_data:
+            line_list_json = reference_data['line_list_json']
+            context_parts.append("\n📋 LINE LIST PROVIDED (from DesignIQ line-list extractor):")
+            # DesignIQ format: list of {item_tag, data: {service, size, rating, material, fluid, ...}}
+            lines_raw = line_list_json if isinstance(line_list_json, list) else line_list_json.get('lines', [])
+            # Normalise to the shared format [{line_number, size, spec, material, service, fluid}]
+            normalised = []
+            for item in lines_raw:
+                if isinstance(item, dict):
+                    data = item.get('data', item)  # DesignIQ wraps fields inside 'data'
+                    tag = item.get('item_tag') or data.get('line_number') or data.get('tag', 'N/A')
+                    normalised.append({
+                        'line_number': tag,
+                        'size': data.get('size', 'N/A'),
+                        'spec': data.get('rating') or data.get('spec', 'N/A'),
+                        'material': data.get('material', 'N/A'),
+                        'service': data.get('service', 'N/A'),
+                        'fluid': data.get('fluid', 'N/A'),
+                        'from': data.get('from', ''),
+                        'to': data.get('to', ''),
+                        'design_temp': data.get('design_temp') or data.get('temperature', ''),
+                        'insulation_class': data.get('insulation_class') or data.get('insulation', ''),
+                        'ltcs_required': data.get('ltcs_required') or data.get('ltcs', ''),
+                    })
+            self._append_line_list_checks(context_parts, normalised)
         
         # 3. Alarm & Trip Schedule - Setpoints reference
         if 'alarm_trip_schedule' in reference_data:
@@ -1416,13 +1599,16 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
         context_parts.append("   - NOTE: Detailed verification against Alarm & Trip Summary NOT typically shown on P&ID itself")
         
         context_parts.append("\n1--2-- ORIFICE/RO SIZING:")
-        context_parts.append("   - Do NOT report issues related to orifice/RO size or tag")
+        context_parts.append("   - Check minimum straight-pipe spool downstream of every RO (minimum 10× pipe diameter)")
+        context_parts.append("   - Check minimum straight-pipe spool upstream of every RO (minimum 5× pipe diameter)")
+        context_parts.append("   - RO immediately followed by elbow/tee without spool = MAJOR finding")
+        context_parts.append("   - Sizing note (bore diameter, Cd value) missing at RO tag = MINOR finding")
         
         context_parts.append("\n1--3-- STRAINERS:")
         context_parts.append("   - Verify strainers provided where required (e.g., pump suction)")
         
         context_parts.append("\n---------------------------------------------------------------")
-        context_parts.append("\n-- CRITICAL INSTRUCTIONS:")
+        context_parts.append("\n⚠️ CRITICAL INSTRUCTIONS:")
         context_parts.append("   - Do NOT report legibility/readability issues")
         context_parts.append("   - Do NOT report call-out issues")
         context_parts.append("   - Do NOT report generic issues without specific location")
@@ -1431,10 +1617,82 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
         context_parts.append("   - Reference specific AGES clause/page/section/table number when citing standards")
         context_parts.append("   - Generate SPECIFIC mismatches/outputs, not generic observations")
         context_parts.append("   - Verify ALL information from P&ID image - do NOT return empty P&ID column")
-        context_parts.append("\n?FOCUS: Find REAL engineering mistakes based on P&ID drawing!")
+        context_parts.append("\n✅ FOCUS: Find REAL engineering mistakes based on P&ID drawing!")
         context_parts.append("AVOID: Generic issues, legibility complaints, equipment not on drawing, false positives")
         
         return "\n".join(context_parts)
+
+    def _append_line_list_checks(self, context_parts: List[str], lines: List[Dict]) -> None:
+        """
+        SOFT-CODED helper: Append specific per-line engineering compliance checks to context_parts.
+        Works with both PDF-extracted line list data and DesignIQ JSON line list data.
+        Checks: line number format, LTCS compliance, insulation annotation, pipe-class consistency.
+        """
+        context_parts.append("   VERIFY: All line numbers on P&ID exist in Line List")
+        context_parts.append("   VERIFY: Line sizes match between P&ID and Line List")
+        context_parts.append("   VERIFY: Pipe specification classes are consistent")
+        context_parts.append("   VERIFY: From/To equipment tags match P&ID routing")
+        context_parts.append("   VERIFY: Line serial numbers ≤ 9600 (beyond 9600 = INCORRECT)")
+
+        if not lines:
+            return
+
+        context_parts.append(f"   - Line List contains {len(lines)} piping lines (first 20 shown):")
+        ltcs_lines = []
+        insulated_lines = []
+        low_temp_lines = []
+
+        for line in lines[:20]:
+            ln = line.get('line_number', 'N/A')
+            size = line.get('size', 'N/A')
+            spec = line.get('spec') or line.get('rating', 'N/A')
+            frm = line.get('from', '')
+            to = line.get('to', '')
+            service = line.get('service', '')
+            fluid = line.get('fluid', '')
+            material = line.get('material', '')
+            design_temp = str(line.get('design_temp', ''))
+            ins_class = str(line.get('insulation_class', ''))
+            ltcs_req = str(line.get('ltcs_required', ''))
+            routing = f"({frm} → {to})" if (frm or to) else ''
+            context_parts.append(f"     - {ln}: {size} {spec} {material} {routing} | service={service} fluid={fluid}")
+
+            # Flag lines needing LTCS validation
+            is_ltcs_service = any(kw in (service + fluid + spec + material).upper()
+                                  for kw in ('LNG', 'LPG', 'PROPANE', 'ETHYLENE', 'CRYO', 'METHANE', 'C3', 'C4',
+                                             'LTCS', 'LT ', '-L ', 'CS3L', 'BNW', 'BNS'))
+            try:
+                temp_val = float(''.join(c for c in design_temp if c in '-0123456789.'))
+                if temp_val < -29:
+                    low_temp_lines.append((ln, design_temp))
+            except (ValueError, TypeError):
+                pass
+
+            if ltcs_req.upper() in ('YES', 'TRUE', '1', 'REQUIRED', 'Y') or is_ltcs_service:
+                ltcs_lines.append(ln)
+
+            if ins_class and ins_class.upper() not in ('NO', 'NONE', 'N/A', '', 'FALSE', '0'):
+                insulated_lines.append((ln, ins_class))
+
+        context_parts.append("   -- MAJOR: Flag any P&ID line number NOT found in Line List above")
+        context_parts.append("   -- MAJOR: Flag any line where P&ID pipe spec class DIFFERS from Line List spec")
+
+        if ltcs_lines:
+            context_parts.append(f"\n   🧊 LTCS COMPLIANCE CHECK ({len(ltcs_lines)} lines require LTCS or low-temp material):")
+            for ln in ltcs_lines[:10]:
+                context_parts.append(f"     → Line {ln}: verify LTCS pipe class on drawing (suffix L, CS3L, BNW, or SS)")
+            context_parts.append("   → If standard CS class shown for any LTCS-required line = CRITICAL finding")
+
+        if low_temp_lines:
+            context_parts.append(f"\n   🌡️ LOW TEMPERATURE LINES (design temp < -29°C — LTCS mandatory):")
+            for ln, t in low_temp_lines[:10]:
+                context_parts.append(f"     → Line {ln}: design temp {t} — verify LTCS or SS pipe class on drawing")
+
+        if insulated_lines:
+            context_parts.append(f"\n   🔥 INSULATED LINES ({len(insulated_lines)} lines require insulation annotation):")
+            for ln, ins in insulated_lines[:10]:
+                context_parts.append(f"     → Line {ln}: insulation class '{ins}' — verify HOT/COLD/TRACE HEATED annotation on P&ID line")
+            context_parts.append("   → Missing insulation annotation on above lines = MAJOR finding")
 
 
 
