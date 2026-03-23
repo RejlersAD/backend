@@ -1,0 +1,229 @@
+{
+  "_comment": "Centralized Environment Configuration for AIFlow",
+  "_purpose": "This file aligns frontend, backend, and database configurations using soft-coding technique",
+  "_date_created": "2026-03-11",
+  "_based_on_commit": "c6c3a7e (9-3-26 : First Commit)",
+  "_build_version": "2.1.0",
+  "_last_fix": "AbortController upload timeout (13-03-26)",
+  
+  "environments": {
+    "local": {
+      "name": "Local Development",
+      "description": "Docker Compose local development environment",
+      "backend": {
+        "url": "http://localhost:8000",
+        "api_url": "http://localhost:8000/api/v1",
+        "host": "0.0.0.0",
+        "port": 8000,
+        "debug": true,
+        "allowed_hosts": ["localhost", "127.0.0.1", "backend", "backend_local", "aiflow_backend_local", "*"]
+      },
+      "frontend": {
+        "url": "http://localhost:5173",
+        "api_proxy": "/api/v1",
+        "port": 5173,
+        "host": "0.0.0.0"
+      },
+      "database": {
+        "engine": "postgresql",
+        "name": "radai_db",
+        "user": "postgres",
+        "password": "postgres123",
+        "host": "db",
+        "port": 5432
+      },
+      "redis": {
+        "host": "redis",
+        "port": 6379
+      }
+    },
+    
+    "dev": {
+      "name": "Development (Railway)",
+      "description": "Development branch on Railway",
+      "backend": {
+        "url": "https://aiflow-backend-dev.up.railway.app",
+        "api_url": "https://aiflow-backend-dev.up.railway.app/api/v1",
+        "host": "0.0.0.0",
+        "port": 8000,
+        "debug": false,
+        "allowed_hosts": ["*"]
+      },
+      "frontend": {
+        "url": "https://aiflow-dev.vercel.app",
+        "api_proxy": "https://aiflow-backend-dev.up.railway.app/api/v1",
+        "port": 3000,
+        "host": "0.0.0.0"
+      },
+      "database": {
+        "use_url": true,
+        "url_env_var": "DATABASE_URL"
+      },
+      "redis": {
+        "use_url": true,
+        "url_env_var": "REDIS_URL"
+      }
+    },
+    
+    "preprod": {
+      "name": "Pre-Production (Railway)",
+      "description": "Pre-production staging environment on Railway",
+      "backend": {
+        "url": "https://aiflow-backend-preprod.up.railway.app",
+        "api_url": "https://aiflow-backend-preprod.up.railway.app/api/v1",
+        "host": "0.0.0.0",
+        "port": 8000,
+        "debug": false,
+        "allowed_hosts": ["*"]
+      },
+      "frontend": {
+        "url": "https://airflow-frontend-hsx7-git-preprod-rejlers.vercel.app",
+        "api_proxy": "https://aiflow-backend-preprod.up.railway.app/api/v1",
+        "port": 3000,
+        "host": "0.0.0.0"
+      },
+      "database": {
+        "use_url": true,
+        "url_env_var": "DATABASE_URL",
+        "fallback_url": "postgresql://postgres:OPMUckaUZIxVfSsWxgRKuVFbBsVKxPyk@nozomi.proxy.rlwy.net:43647/railway",
+        "host": "nozomi.proxy.rlwy.net",
+        "port": 43647,
+        "name": "railway",
+        "comment": "Preprod PostgreSQL on Railway - uses external proxy URL"
+      },
+      "redis": {
+        "use_url": true,
+        "url_env_var": "REDIS_URL"
+      }
+    },
+    
+    "testing": {
+      "name": "Testing (Railway)",
+      "description": "Railway testing backend — aiflowbackend-production-9bdc.up.railway.app — used for local frontend dev against live backend",
+      "backend": {
+        "url": "https://aiflowbackend-production-9bdc.up.railway.app",
+        "api_url": "https://aiflowbackend-production-9bdc.up.railway.app/api/v1",
+        "host": "0.0.0.0",
+        "port": 8000,
+        "debug": false,
+        "allowed_hosts": ["*"]
+      },
+      "frontend": {
+        "url": "http://localhost:5173",
+        "api_proxy": "/api/v1",
+        "port": 5173,
+        "host": "0.0.0.0"
+      },
+      "database": {
+        "use_url": true,
+        "url_env_var": "DATABASE_URL",
+        "comment": "Uses Railway testing database — managed by Railway backend"
+      },
+      "redis": {
+        "use_url": true,
+        "url_env_var": "REDIS_URL"
+      }
+    },
+
+    "production": {
+      "name": "Production (Railway)",
+      "description": "Production environment on Railway",
+      "backend": {
+        "url": "https://aiflowbackend-production.up.railway.app",
+        "api_url": "https://aiflowbackend-production.up.railway.app/api/v1",
+        "host": "0.0.0.0",
+        "port": 8000,
+        "debug": false,
+        "allowed_hosts": ["*"]
+      },
+      "frontend": {
+        "url": "https://radai.ae",
+        "api_proxy": "https://aiflowbackend-production.up.railway.app/api/v1",
+        "port": 3000,
+        "host": "0.0.0.0"
+      },
+      "database": {
+        "use_url": true,
+        "url_env_var": "DATABASE_URL",
+        "fallback_url": "postgresql://postgres:cJLHOrfvZxZXHKaMCWdLdRedgHgmIneU@shinkansen.proxy.rlwy.net:38534/railway",
+        "host": "shinkansen.proxy.rlwy.net",
+        "port": 38534,
+        "name": "railway",
+        "comment": "Production PostgreSQL on Railway - uses external proxy URL"
+      },
+      "redis": {
+        "use_url": true,
+        "url_env_var": "REDIS_URL"
+      }
+    }
+  },
+  
+  "features": {
+    "cors": {
+      "enabled": true,
+      "allow_credentials": true,
+      "allowed_origins": {
+        "local": ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
+        "testing": ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
+        "dev": ["https://aiflow-dev.vercel.app"],
+        "preprod": [
+          "https://airflow-frontend-hsx7.vercel.app",
+          "https://airflow-frontend-hsx7-git-preprod.vercel.app",
+          "https://airflow-frontend-hsx7-git-preprod-rejlers.vercel.app",
+          "https://airflow-frontend-hsx7-git-dev.vercel.app",
+          "https://aiflowbackend-production-9bdc.up.railway.app"
+        ],
+        "production": ["https://radai.ae", "https://www.radai.ae", "https://aiflowbackend-production.up.railway.app"]
+      }
+    },
+    "csrf": {
+      "enabled": true,
+      "trusted_origins": {
+        "local": ["http://localhost:5173", "http://127.0.0.1:5173"],
+        "testing": ["http://localhost:5173", "http://127.0.0.1:5173"],
+        "dev": ["https://aiflow-dev.vercel.app"],
+        "preprod": [
+          "https://airflow-frontend-hsx7.vercel.app",
+          "https://airflow-frontend-hsx7-git-preprod.vercel.app",
+          "https://airflow-frontend-hsx7-git-preprod-rejlers.vercel.app",
+          "https://aiflowbackend-production-9bdc.up.railway.app"
+        ],
+        "production": ["https://radai.ae", "https://www.radai.ae"]
+      }
+    },
+    "s3_storage": {
+      "enabled": true,
+      "bucket_prefix": {
+        "local": "local-",
+        "dev": "dev-",
+        "preprod": "preprod-",
+        "production": ""
+      }
+    }
+  },
+  
+  "api": {
+    "version": "v1",
+    "timeout": 30000,
+    "timeout_long": 300000,
+    "timeout_upload": 60000,
+    "_timeout_upload_note": "AbortController enforced — cannot be bypassed by Axios",
+    "timeout_poll": 10000,
+    "broker_connect_timeout": 5,
+    "retry_attempts": 3,
+    "retry_delay": 3000,
+    "max_upload_retries": 3,
+    "upload_retry_delay": 4000
+  },
+  
+  "deployment": {
+    "railway": {
+      "backend_service": "backend",
+      "database_service": "postgres",
+      "redis_service": "redis"
+    },
+    "vercel": {
+      "frontend_service": "frontend"
+    }
+  }
+}

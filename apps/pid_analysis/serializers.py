@@ -347,17 +347,117 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
         return {}
     
     def get_holds_and_notes(self, obj):
-        """Extract HOLDS and NOTES compliance from report_data"""
+        """
+        Extract HOLDS and NOTES compliance.
+        SOFT-CODED: Priority 1 = structured AI output (new analyses),
+                    Priority 2 = derive from holds_compliance/notes_compliance/documentation issues (backward compat).
+        """
+        import re as _re
+
         if isinstance(obj.report_data, dict):
-            pfd_compliance = obj.report_data.get('pfd_guidelines_compliance', {})
-            return pfd_compliance.get('holds_and_notes_compliance', {})
+            # Priority 1: structured data produced by updated AI prompt
+            pfd = obj.report_data.get('pfd_guidelines_compliance', {})
+            if isinstance(pfd, dict):
+                holds_data = pfd.get('holds_and_notes_compliance', {})
+                if holds_data and (holds_data.get('holds_list') or holds_data.get('general_notes_list')):
+                    return holds_data
+
+        # Priority 2: derive from DB issues that reference HOLD-x / NOTE-x
+        holds_list = []
+        notes_list = []
+        seen_holds = set()
+        seen_notes = set()
+
+        target_cats = ['holds_compliance', 'notes_compliance', 'documentation']
+        relevant = obj.issues.filter(category__in=target_cats)
+
+        for issue in relevant:
+            combined = f"{issue.pid_reference or ''} {issue.issue_observed or ''}"
+            action = issue.action_required or 'Cross-check requirement against current design'
+
+            for hold_num in _re.findall(r'\bHOLD[\s\-_]*([\d]+)\b', combined, _re.IGNORECASE):
+                key = f'HOLD-{hold_num}'
+                if key not in seen_holds:
+                    seen_holds.add(key)
+                    holds_list.append({
+                        'hold_number': key,
+                        'hold_description': f'HOLD {hold_num} referenced on drawing — verify full compliance',
+                        'compliance_status': 'Under Review',
+                        'verification_notes': action,
+                        'related_issues': [f'#{issue.serial_number}']
+                    })
+
+            for note_num in _re.findall(r'\bNOTE[\s\-_]*([\d]+)\b', combined, _re.IGNORECASE):
+                key = f'NOTE-{note_num}'
+                if key not in seen_notes:
+                    seen_notes.add(key)
+                    notes_list.append({
+                        'note_number': key,
+                        'note_text': f'NOTE {note_num} referenced on drawing — verify applicability and implementation',
+                        'note_category': 'Design Requirement',
+                        'compliance_status': 'Under Review',
+                        'verification_notes': action
+                    })
+
+        if holds_list or notes_list:
+            return {
+                'holds_list': holds_list,
+                'general_notes_list': notes_list,
+                'critical_violations': []
+            }
+
         return {}
     
     def get_specification_breaks(self, obj):
-        """Extract specification breaks from report_data"""
+        """
+        Extract specification breaks.
+        SOFT-CODED: Priority 1 = structured AI output (new analyses),
+                    Priority 2 = derive from pipe_class category issues (backward compat).
+        """
         if isinstance(obj.report_data, dict):
-            return obj.report_data.get('specification_breaks', [])
-        return []
+            # Priority 1: structured field from updated AI output
+            spec_breaks = obj.report_data.get('specification_breaks', [])
+            if spec_breaks:
+                return spec_breaks
+
+        # Priority 2: derive from pipe_class issues that describe spec changes
+        pipe_issues = obj.issues.filter(category__in=['pipe_class', 'piping'])
+        derived = []
+        for idx, issue in enumerate(pipe_issues):
+            loc = issue.location_on_drawing or {}
+            if isinstance(loc, str):
+                import json as _json
+                try:
+                    loc = _json.loads(loc)
+                except Exception:
+                    loc = {}
+
+            cost_map = {'critical': 'High', 'major': 'High', 'minor': 'Low', 'observation': 'Low'}
+            cost = cost_map.get(issue.severity or '', 'Medium')
+
+            derived.append({
+                'spec_break_id': f'SB-{idx + 1:03d}',
+                'location': loc.get('proximity_description', issue.pid_reference or 'See issue details'),
+                'break_properly_marked': 'No',
+                'reason_for_break': issue.issue_observed or '',
+                'cost_impact': cost,
+                'upstream_spec': {
+                    'line_number': issue.pid_reference or 'N/A',
+                    'material_spec': 'See P&ID',
+                    'pressure_class': 'See P&ID',
+                    'special_requirements': 'None'
+                },
+                'downstream_spec': {
+                    'line_number': 'Downstream of spec break',
+                    'material_spec': 'See P&ID',
+                    'pressure_class': 'See P&ID',
+                    'special_requirements': 'None'
+                },
+                'issues_found': [issue.action_required or ''],
+                'transition_piece_required': 'No'
+            })
+
+        return derived
 
 
 class PIDDrawingSerializer(serializers.ModelSerializer):
@@ -371,6 +471,8 @@ class PIDDrawingSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'file', 'original_filename', 'file_size',
             'drawing_number', 'drawing_title', 'revision', 'project_name',
+            # SOFT-CODED: Structured drawing number components (Area-PArea-DocCode-Serial-Rev)
+            'area', 'p_area', 'doc_code', 'serial_number', 'rev', 'sheet_number', 'total_sheets',
             'status', 'analysis_started_at', 'analysis_completed_at',
             'uploaded_by', 'uploaded_by_username', 'analysis_report',
             'created_at', 'updated_at'
