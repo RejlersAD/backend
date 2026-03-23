@@ -34,12 +34,18 @@ class EnvironmentConfig:
     
     def _load_config(self):
         """Load configuration from environments.json"""
-        # Find the config file (walk up from backend to root)
+        # Find the config file — check multiple locations for different deployment contexts:
+        # 1. Monorepo root (local Docker): /config/environments.json
+        # 2. Same directory as this file (Railway nixpacks, backend submodule deployed alone)
         current_dir = Path(__file__).resolve().parent.parent  # backend directory
-        config_file = current_dir.parent / 'config' / 'environments.json'
-        
-        if not config_file.exists():
-            print(f"[CONFIG] WARNING: environments.json not found at {config_file}")
+        candidates = [
+            current_dir.parent / 'config' / 'environments.json',  # monorepo root
+            Path(__file__).resolve().parent / 'environments.json',  # local copy in backend/config/
+        ]
+        config_file = next((p for p in candidates if p.exists()), None)
+
+        if not config_file:
+            print(f"[CONFIG] WARNING: environments.json not found in any of: {[str(p) for p in candidates]}")
             self._config = {}
             return
         
