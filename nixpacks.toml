@@ -1,32 +1,31 @@
 [phases.setup]
-# Core system packages for PFD/P&ID AI analysis
+# System packages for P&ID/PFD AI analysis (OCR, PDF, image processing)
 nixPkgs = [
     'python311',
     'postgresql',
-    'tesseract',       # Tesseract OCR binary for P&ID processing
-    'poppler_utils',   # For PDF processing (pdf2image + PyMuPDF)
-    'libGL',           # Required for image/CV processing
-    'glib',            # Required for image processing
-    'mupdf'            # MuPDF native lib for PyMuPDF (fitz) - 4-pass PFD engine
+    'tesseract',       # Tesseract OCR for P&ID processing
+    'poppler_utils',   # PDF processing (pdf2image)
+    'libGL',           # Image/CV processing
+    'glib'             # Image processing
 ]
 
 [phases.install]
+# onlyIncludeFiles tells nixpacks to explicitly COPY these files into
+# the install stage before running cmds - fixes "requirements.txt not found"
+# when custom cmds bypass nixpacks' automatic Python file-staging.
+onlyIncludeFiles = ['requirements.txt']
 cmds = [
     'python -m venv /opt/venv',
     '. /opt/venv/bin/activate && pip install --upgrade pip',
-    # Soft-coded: use absolute path so pip always finds requirements.txt
-    # regardless of nixpacks working directory during build
-    '. /opt/venv/bin/activate && pip install -r /app/requirements.txt',
-    # Verify key binaries for runtime health
-    'which tesseract || echo "WARNING: Tesseract not found in PATH"',
-    'tesseract --version 2>&1 | head -1 || echo "WARNING: Tesseract version check failed"'
+    '. /opt/venv/bin/activate && pip install -r /app/requirements.txt'
 ]
 
 [phases.build]
 cmds = [
-    '. /opt/venv/bin/activate && python manage.py collectstatic --noinput || echo "Static files collection skipped"'
+    'which tesseract && tesseract --version 2>&1 | head -1 || echo "WARNING: Tesseract not found"',
+    '. /opt/venv/bin/activate && python manage.py collectstatic --noinput || echo "Collectstatic skipped"'
 ]
 
 [start]
-# railway_start.sh handles: migrations, static files, gunicorn
+# railway_start.sh: activates venv, runs migrations, starts gunicorn
 cmd = 'bash railway_start.sh'

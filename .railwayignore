@@ -3,6 +3,11 @@
 # CRITICAL: Excludes ~30MB+ of unnecessary files from Railway deployments
 # ========================================================================
 
+# CRITICAL: Always include Python requirements (must NOT be excluded)
+!requirements.txt
+!requirements-ml.txt
+!requirements-ocr.txt
+
 # Python cache
 __pycache__/
 *.pyc

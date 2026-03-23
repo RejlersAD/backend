@@ -1,6 +1,7 @@
 # ==========================================
 # AIFLOW - SINGLE SOURCE OF TRUTH
 # ONE requirements.txt for all environments
+# Last updated: 2026-03-23 (PFD 4-pass engine)
 # ==========================================
 
 # ==========================================
