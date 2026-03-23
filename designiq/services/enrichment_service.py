@@ -1,4 +1,4 @@
-��"""
+"""
 Smart Enrichment Layer - Enhances base P&ID extraction with HMB/PMS/NACE data
 
 ARCHITECTURE:
@@ -35,9 +35,9 @@ class EnrichmentService:
         self.client = None
         if self.openai_api_key:
             self.client = OpenAI(api_key=self.openai_api_key)
-            logger.info("��� OpenAI client initialized successfully")
+            logger.info("£à OpenAI client initialized successfully")
         else:
-            logger.warning("���)"U%� OPENAI_API_KEY not found in .env - enrichment will return empty columns")
+            logger.warning("Üá)"U%Å OPENAI_API_KEY not found in .env - enrichment will return empty columns")
     
     def enrich_lines(
         self,
@@ -69,8 +69,8 @@ class EnrichmentService:
             return []
         
         logger.info("="*80)
-        logger.info("a"���a"���a"��� ENRICHMENT SERVICE CALLED a"���a"���a"���")
-        logger.info(f"a"��� Base lines: {len(base_lines)}")
+        logger.info("a"ÜÇa"ÜÇa"ÜÇ ENRICHMENT SERVICE CALLED a"ÜÇa"ÜÇa"ÜÇ")
+        logger.info(f"a"ôï Base lines: {len(base_lines)}")
         logger.info("="*80)
         
         # MANDATORY: All 3 documents required for enrichment
@@ -79,37 +79,37 @@ class EnrichmentService:
             if not hmb_text: missing.append("HMB")
             if not pms_text: missing.append("PMS")
             if not nace_text: missing.append("NACE")
-            logger.info(f"���)"U%� Enrichment skipped - Missing documents: {', '.join(missing)}")
-            logger.info("��� Returning base 8 columns from P&ID extraction")
+            logger.info(f"Üá)"U%Å Enrichment skipped - Missing documents: {', '.join(missing)}")
+            logger.info("åÆ Returning base 8 columns from P&ID extraction")
             return base_lines
         
         # DEBUG: Log document sizes
-        logger.info(f"a"��� Document text sizes: HMB={len(hmb_text)} chars, PMS={len(pms_text)} chars, NACE={len(nace_text)} chars")
+        logger.info(f"a"ôè Document text sizes: HMB={len(hmb_text)} chars, PMS={len(pms_text)} chars, NACE={len(nace_text)} chars")
         if pid_text:
-            logger.info(f"a"��� P&ID text size: {len(pid_text)} chars")
-        logger.info(f"a"��� OpenAI API key configured: {'Yes' if self.client else 'No'}")
+            logger.info(f"a"ôè P&ID text size: {len(pid_text)} chars")
+        logger.info(f"a"öæ OpenAI API key configured: {'Yes' if self.client else 'No'}")
         
         # DEBUG: Show first 200 chars of each document to verify content
-        logger.debug(f"a"��� HMB preview: {hmb_text[:200]}...")
-        logger.debug(f"a"��� PMS preview: {pms_text[:200]}...")
-        logger.debug(f"a"��� NACE preview: {nace_text[:200]}...")
+        logger.debug(f"a"ôä HMB preview: {hmb_text[:200]}...")
+        logger.debug(f"a"ôä PMS preview: {pms_text[:200]}...")
+        logger.debug(f"a"ôä NACE preview: {nace_text[:200]}...")
         
-        logger.info(f"a"��� Starting AI-powered enrichment for {len(base_lines)} lines (All 3 docs provided)")
-        logger.info("a"��� Using OpenAI GPT-4 to intelligently extract 26 enrichment columns from documents")
+        logger.info(f"a"ÜÇ Starting AI-powered enrichment for {len(base_lines)} lines (All 3 docs provided)")
+        logger.info("a"ñû Using OpenAI GPT-4 to intelligently extract 26 enrichment columns from documents")
         
         try:
             enriched_lines = []
             
             for idx, line in enumerate(base_lines):
                 line_id = line.get('original_detection', f'Line-{idx+1}')
-                logger.info(f"a"��� Processing line {idx+1}/{len(base_lines)}: {line_id}")
+                logger.info(f"a"öä Processing line {idx+1}/{len(base_lines)}: {line_id}")
                 
                 # Start with ALL base columns (PRESERVED FROM LOCKED LOGIC - 17 columns)
                 # This includes from_line, to_line, from_equipment, to_equipment, etc.
                 enriched_line = dict(line)  # Copy ALL base fields to preserve locked extraction
                 
-                # a"��� AI ENRICHMENT: Extract intelligent values from all 4 documents
-                logger.info(f"   a"��� Calling OpenAI to extract enrichment data for {line_id}...")
+                # a"ñû AI ENRICHMENT: Extract intelligent values from all 4 documents
+                logger.info(f"   a"ºá Calling OpenAI to extract enrichment data for {line_id}...")
                 enrichment_data = self._extract_enrichment_data(
                     line=line,
                     hmb_text=hmb_text,
@@ -125,18 +125,18 @@ class EnrichmentService:
                         enrichment_data[key] = ""
                 
                 filled_count = len([v for v in enrichment_data.values() if v and v.strip()])
-                logger.info(f"   ��� Line {idx+1} enriched: {filled_count}/26 columns filled by AI")
+                logger.info(f"   £à Line {idx+1} enriched: {filled_count}/26 columns filled by AI")
                 
                 # Merge enrichment into base (17 base + 26 enriched = 43 columns GUARANTEED)
                 enriched_line.update(enrichment_data)
                 enriched_lines.append(enriched_line)
                 
                 # Log the enriched line data to verify
-                logger.info(f"a"��� Enriched line {idx+1} data sample: {list(enriched_line.keys())[:5]}... (Total: {len(enriched_line)} keys)")
+                logger.info(f"a"ôª Enriched line {idx+1} data sample: {list(enriched_line.keys())[:5]}... (Total: {len(enriched_line)} keys)")
             
             logger.info("="*80)
             logger.info(f"' Enrichment complete: {len(enriched_lines)} lines with {len(enriched_lines[0].keys())} columns (17 base + 26 enriched = 43 total)")
-            logger.info(f"a"��� First line sample enrichment columns:")
+            logger.info(f"a"öì First line sample enrichment columns:")
             if enriched_lines:
                 sample = enriched_lines[0]
                 logger.info(f"   - flow_medium: {sample.get('flow_medium', 'MISSING')}")
@@ -148,21 +148,21 @@ class EnrichmentService:
             expected_total = 43
             for idx, line in enumerate(enriched_lines):
                 if len(line.keys()) < expected_total:
-                    logger.warning(f"�&� Line {idx} has {len(line.keys())} columns, expected at least {expected_total}. Fixing...")
+                    logger.warning(f" &þ Line {idx} has {len(line.keys())} columns, expected at least {expected_total}. Fixing...")
                     # Add missing enrichment columns
                     empty_enrichment = self._get_empty_enrichment_columns()
                     for key in empty_enrichment:
                         if key not in line:
                             line[key] = ""
             
-            logger.info(f"=�� LOCKED: All {len(enriched_lines)} lines guaranteed to have at least {expected_total} columns (17 base + 26 enriched)")
+            logger.info(f"=ØÝ LOCKED: All {len(enriched_lines)} lines guaranteed to have at least {expected_total} columns (17 base + 26 enriched)")
             logger.info("="*80)
-            logger.info("a"��� RETURNING ENRICHED DATA TO TASK")
+            logger.info("a"ÜÇ RETURNING ENRICHED DATA TO TASK")
             logger.info("="*80)
             return enriched_lines
             
         except Exception as e:
-            logger.error(f"��� Enrichment failed: {e}")
+            logger.error(f"¥î Enrichment failed: {e}")
             logger.error(f"Error type: {type(e).__name__}")
             import traceback
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
@@ -194,28 +194,28 @@ class EnrichmentService:
             
             # Call OpenAI with GPT-4 Turbo for better extraction
             line_id = line.get('original_detection', 'Unknown')
-            logger.info(f"a"��� Calling OpenAI for line {line_id}...")
-            logger.debug(f"a"��� Prompt length: {len(prompt)} chars")
+            logger.info(f"a"ñû Calling OpenAI for line {line_id}...")
+            logger.debug(f"a"ôÅ Prompt length: {len(prompt)} chars")
             
             try:
                 response = self.client.chat.completions.create(
                     model="gpt-4-turbo-preview",
                     messages=[
-                        {"role": "system", "content": "You are an expert piping engineer with 30+ years experience. ABSOLUTE REQUIREMENT: Fill ALL 26 fields with real values. ZERO TOLERANCE for empty strings, null, or N/A. EXTRACTION HIERARCHY: 1) Exact match from documents 2) Similar line specifications 3Piping class standards 4Industry best practices 5) Engineering judgment. ALWAYS provide a concrete value with units. Examples of GOOD responses: '150 psig', 'Sch 40', 'ASME B31.3', 'Water', 'Yes', '300,%�%F', '10%'. Examples of BAD responses: '', 'N/A', 'Not specified', 'See documents'. If uncertain, add qualifier like '(typical for this service)' or '(per piping class)' but ALWAYS include the actual value. Return pure JSON with all 26 fields filled. NO markdown, NO explanations, ONLY JSON."},
+                        {"role": "system", "content": "You are an expert piping engineer with 30+ years experience. ABSOLUTE REQUIREMENT: Fill ALL 26 fields with real values. ZERO TOLERANCE for empty strings, null, or N/A. EXTRACTION HIERARCHY: 1) Exact match from documents 2) Similar line specifications 3Piping class standards 4Industry best practices 5) Engineering judgment. ALWAYS provide a concrete value with units. Examples of GOOD responses: '150 psig', 'Sch 40', 'ASME B31.3', 'Water', 'Yes', '300,%%F', '10%'. Examples of BAD responses: '', 'N/A', 'Not specified', 'See documents'. If uncertain, add qualifier like '(typical for this service)' or '(per piping class)' but ALWAYS include the actual value. Return pure JSON with all 26 fields filled. NO markdown, NO explanations, ONLY JSON."},
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0.2,  # Increased for more creative inference when data missing
                     max_tokens=2500  # Increased to allow more detailed responses
                 )
-                logger.info(f"��� OpenAI API call successful for line {line_id}")
+                logger.info(f"£à OpenAI API call successful for line {line_id}")
             except Exception as api_err:
-                logger.error(f"��� OpenAI API call failed: {api_err}")
+                logger.error(f"¥î OpenAI API call failed: {api_err}")
                 logger.error(f"Error type: {type(api_err).__name__}")
                 raise
             
             result_text = response.choices[0].message.content.strip()
-            logger.info(f"��� OpenAI responded with {len(result_text)} chars for line {line_id}")
-            logger.debug(f"a"��� Raw OpenAI response: {result_text[:500]}..." # Log first 500 chars
+            logger.info(f"£à OpenAI responded with {len(result_text)} chars for line {line_id}")
+            logger.debug(f"a"ôä Raw OpenAI response: {result_text[:500]}..." # Log first 500 chars
             
             # Extract JSON if wrapped in markdown
             if '```json' in result_text:
@@ -224,26 +224,26 @@ class EnrichmentService:
                 result_text = result_text.split('```')[1].split('```')[0].strip()
             
             ai_enrichment = json.loads(result_text)
-            logger.info(f"a"��� Parsed {len(ai_enrichment)} fields from AI response")
-            logger.debug(f"a"��� Parsed JSON keys: {list(ai_enrichment.keys())}")
+            logger.info(f"a"ôè Parsed {len(ai_enrichment)} fields from AI response")
+            logger.debug(f"a"öì Parsed JSON keys: {list(ai_enrichment.keys())}")
             
             # LOCK: Merge AI results into empty structure (ensures all 26 columns exist)
             enrichment.update(ai_enrichment)
             
             # AGGRESSIVE FALLBACK: Fill empty fields with intelligent defaults
             filled_count = len([v for v in ai_enrichment.values(if v and v != "N/A" and v != ""])
-            logger.info(f"a"��� AI filled {filled_count}/26 columns initially")
+            logger.info(f"a"ôè AI filled {filled_count}/26 columns initially")
             
             if filled_count < 26:
-                logger.info(f"a"��� Applying intelligent defaults for {26 - filled_count} empty fields...")
+                logger.info(f"a"öº Applying intelligent defaults for {26 - filled_count} empty fields...")
                 enrichment = self._apply_intelligent_defaults(enrichment, line)
                 new_filled = len([v for v in enrichment.values(if v and v != "N/A" and v != ""])
-                logger.info(f"��� After defaults: {new_filled}/26 columns filled")
+                logger.info(f"£à After defaults: {new_filled}/26 columns filled")
             
             return enrichment
             
         except Exception as e:
-            logger.error(f"��� AI enrichment failed for line {line.get('original_detection')}: {e}", exc_info=True)
+            logger.error(f"¥î AI enrichment failed for line {line.get('original_detection')}: {e}", exc_info=True)
             # Return empty 26-column structure (GUARANTEED fallback)
             return enrichment
     
@@ -268,22 +268,22 @@ class EnrichmentService:
         
         prompt = f"""You are an expert piping engineer analyzing technical documents to extract data for a specific piping line.
 
-a"�Ļ TARGET PIPING LINE (from P&ID):
-������������������������������������������������������������������������������������������������������������������������������������������������������������������������������
+a"Ä» TARGET PIPING LINE (from P&ID):
+öüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöü
 Line Number: {line_id}
 Fluid Code: {fluid_code}
 Size: {size}
 Area: {area}
 PIPR Class: {pipr_class}
-������������������������������������������������������������������������������������������������������������������������������������������������������������������������������
+öüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöü
 
-a"��� YOUR TASK:
+a"ôï YOUR TASK:
 Search through the documents below and extract 26 specific values for this piping line.
 READ CAREFULLY - the information is in tables, line lists, legends, and notes in these documents.
 
-a"��� MANDATORY SEARCH & EXTRACTION STRATEGY:
-������������������������������������������������������������������������������������������������������������������������������������������������������������������������������
-���)"U%� CRITICAL: You MUST fill all 26 fields. DO NOT leave fields empty unless absolutely no information exists.
+a"öì MANDATORY SEARCH & EXTRACTION STRATEGY:
+öüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöü
+Üá)"U%Å CRITICAL: You MUST fill all 26 fields. DO NOT leave fields empty unless absolutely no information exists.
 
 1. EXACT MATCH: Search for line number "{line_id}" in all tables and line lists
 2. FLUID MATCH: If line not found, search for fluid code "{fluid_code}" and use its data
@@ -293,20 +293,20 @@ a"��� MANDATORY SEARCH & EXTRACTION STRATEGY:
    - Apply typical values from similar lines in same fluid service
    - Use general specifications for the piping class
    - Infer from related data (e.g., if design pressure is 150 psig, test pressure is ~225 psig)
-6. UNITS: Always include units (e.g., "150 psig", "300,%�%F", "Sch 40", "ASME B31.3")
+6. UNITS: Always include units (e.g., "150 psig", "300,%%F", "Sch 40", "ASME B31.3")
 7. YES/NO: For boolean fields, answer "Yes", "No", or "N/A" based on document info
 8. STANDARDS: Apply typical industry standards when specifics aren't mentioned
-������������������������������������������������������������������������������������������������������������������������������������������������������������������������������
+öüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöü
 
 """
         
         if hmb_text:
             prompt += f"""
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
-a"��� DOCUMENT 1: HMB/PFD (Process Flow Diagram & Heat Material Balance)
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
+a"ôä DOCUMENT 1: HMB/PFD (Process Flow Diagram & Heat Material Balance)
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
 
-a"�Ļ MANDATORY EXTRACTION (Fill ALL 9 fields using smart inference):
+a"Ä» MANDATORY EXTRACTION (Fill ALL 9 fields using smart inference):
    1. flow_medium: Fluid/chemical name. Search: line lists, stream tables, fluid codes. 
       If not found: Use fluid code "{fluid_code}" description or infer from service (e.g., CW=Cooling Water, ST=Steam)
    
@@ -326,15 +326,15 @@ a"�Ļ MANDATORY EXTRACTION (Fill ALL 9 fields using smart inference):
       If not found: Look for design pressure and use ~80% of it
    
    7. normal_temp: Operating temperature. Search: temperature columns, operating conditions.
-      If not found: Use ambient (70,%�%F/21,%�%C) for utilities, or infer from process type
+      If not found: Use ambient (70,%%F/21,%%C) for utilities, or infer from process type
    
    8. design_pressure: Maximum design pressure. Search: design columns, pressure ratings.
       If not found: Look for piping class pressure rating or use 1.25x normal pressure
    
    9. minimax_design_temp: Design temperature range. Search: min/max temp columns.
-      If not found: Use typical ranges (e.g., "-20,%�%F to 300,%�%F" for general service)
+      If not found: Use typical ranges (e.g., "-20,%%F to 300,%%F" for general service)
 
-a"��� SEARCH LOCATIONS:
+a"öÄ SEARCH LOCATIONS:
    - Line lists (Line No, Fluid, Flow, Pressure, Temp, Density columns)
    - Heat & Material Balance tables
    - Process flow diagrams with operating conditions
@@ -345,16 +345,16 @@ a"��� SEARCH LOCATIONS:
 DOCUMENT TEXT:
 {hmb_text[:3500]}
 
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
 """
         
         if pms_text:
             prompt += f"""
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
-a"��� DOCUMENT 2: PMS (Piping Material Specification)
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
+a"ôä DOCUMENT 2: PMS (Piping Material Specification)
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
 
-a"�Ļ MANDATORY EXTRACTION (Fill ALL 10 fields using smart inference):
+a"Ä» MANDATORY EXTRACTION (Fill ALL 10 fields using smart inference):
    10. design_code: Piping design code. Search: general notes, piping class tables.
        If not found: Use "ASME B31.3" (most common process piping standard)
    
@@ -362,7 +362,7 @@ a"�Ļ MANDATORY EXTRACTION (Fill ALL 10 fields using smart inference):
        If not found: Answer "No" for normal services, "Yes" for toxic/lethal fluids
    
    12. schedule_wall_thk: Pipe schedule. Search: piping class "{pipr_class}" table, size "{size}" row.
-       If not found: Use "Sch 40" for sizes ���3", "Sch STD" for larger sizes
+       If not found: Use "Sch 40" for sizes ëñ3", "Sch STD" for larger sizes
    
    13. stress_relief: Stress relief requirement. Search: PWHT sections, material specs.
        If not found: Answer "No" for carbon steel <1" thick, "Yes" for alloy/thick materials
@@ -385,7 +385,7 @@ a"�Ļ MANDATORY EXTRACTION (Fill ALL 10 fields using smart inference):
    19. piping_rated_pressure: Pressure rating. Search: piping class "{pipr_class}" pressure column.
        If not found: Use "150#" for low-pressure, "300#" for medium, "600#" for high-pressure
 
-a"��� SEARCH LOCATIONS:
+a"öÄ SEARCH LOCATIONS:
    - Piping class tables (Class "{pipr_class}", Size "{size}")
    - Pipe schedule tables
    - NDT requirements sections
@@ -396,16 +396,16 @@ a"��� SEARCH LOCATIONS:
 DOCUMENT TEXT:
 {pms_text[:3500]}
 
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
 """
         
         if nace_text:
             prompt += f"""
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
-a"��� DOCUMENT 3: NACE (Corrosion Control & Testing Requirements)
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
+a"ôä DOCUMENT 3: NACE (Corrosion Control & Testing Requirements)
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
 
-a"�Ļ MANDATORY EXTRACTION (Fill ALL 4 fields using smart inference):
+a"Ä» MANDATORY EXTRACTION (Fill ALL 4 fields using smart inference):
    20. nace_mr_0175: NACE MR-0175 compliance. Search: NACE tables, H2S service, sour service.
        If not found: Answer "Not Required" for non-sour service, "Compliant" if H2S mentioned
    
@@ -418,7 +418,7 @@ a"�Ļ MANDATORY EXTRACTION (Fill ALL 4 fields using smart inference):
    23. criticality_code: Criticality classification. Search: criticality tables, line classifications.
        If not found: Use "C" for utilities, "B" for process lines, "A" for critical/hazardous
 
-a"��� SEARCH LOCATIONS:
+a"öÄ SEARCH LOCATIONS:
    - NACE compliance tables (Fluid "{fluid_code}")
    - H2S service requirements
    - Sour service specifications
@@ -429,16 +429,16 @@ a"��� SEARCH LOCATIONS:
 DOCUMENT TEXT:
 {nace_text[:3500]}
 
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
 """
         
         if pid_text:
             prompt += f"""
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
-a"��� DOCUMENT 4: P&ID (Piping & Instrumentation Diagram) - Title Block & Metadata
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
+a"ôä DOCUMENT 4: P&ID (Piping & Instrumentation Diagram) - Title Block & Metadata
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
 
-a"�Ļ MANDATORY EXTRACTION (Fill ALL 3 fields using smart inference):
+a"Ä» MANDATORY EXTRACTION (Fill ALL 3 fields using smart inference):
    24. pid_no: P&ID drawing number. Search: "DWG NO", "DRAWING NO", "P&ID NO", document number.
        If not found: Look for any alphanumeric ID in title block or headers
    
@@ -448,7 +448,7 @@ a"�Ļ MANDATORY EXTRACTION (Fill ALL 3 fields using smart inference):
    26. date: P&ID issue date. Search: "DATE", "ISSUE DATE", date fields in title block.
        If not found: Look for any date format (MM/DD/YYYY, DD-MMM-YYYYin document
 
-a"��� SEARCH LOCATIONS:
+a"öÄ SEARCH LOCATIONS:
    - Title block (usually bottom right or bottom center of drawing)
    - Drawing header and footer
    - Revision history tables
@@ -457,29 +457,29 @@ a"��� SEARCH LOCATIONS:
 DOCUMENT TEXT (First page with title block):
 {pid_text[:2000]}
 
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
 """
         else:
             prompt += f"""
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
-a"��� DOCUMENT 4: P&ID (Piping & Instrumentation Diagram) - Metadata
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
+a"ôä DOCUMENT 4: P&ID (Piping & Instrumentation Diagram) - Metadata
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
 
-a"�Ļ MANDATORY EXTRACTION (Fill ALL 3 fields using smart inference):
+a"Ä» MANDATORY EXTRACTION (Fill ALL 3 fields using smart inference):
    24. pid_no: Use "PID-001" or similar generic number
    25. pid_rev: Use "0" (initial revision)
    26. date: Use current date or "Feb 2026"
 
-���)"U%� P&ID text not available - use generic values
+Üá)"U%Å P&ID text not available - use generic values
 
-��ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ�ɓ��
+òÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉòÉ
 """
         
         prompt += f"""
 
-���)"U%� OUTPUT FORMAT - RETURN EXACTLY THIS JSON WITH ALL FIELDS FILLED:
-������������������������������������������������������������������������������������������������������������������������������������������������������������������������������
-a"�ܿ ALL 26 FIELDS ARE MANDATORY. FILL EVERY FIELD.
+Üá)"U%Å OUTPUT FORMAT - RETURN EXACTLY THIS JSON WITH ALL FIELDS FILLED:
+öüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöü
+a"Ü¿ ALL 26 FIELDS ARE MANDATORY. FILL EVERY FIELD.
 
 EXAMPLES OF GOOD VALUES:
 - flow_medium: "Cooling Water", "Steam", "Crude Oil", "Natural Gas"
@@ -493,7 +493,7 @@ EXAMPLES OF GOOD VALUES:
 - test_medium: "Water", "Air", "Nitrogen"
 - pid_no: "PID-001", "12345", "Drawing 100-P-001"
 
-������������������������������������������������������������������������������������������������������������������������������������������������������������������������������
+öüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöüöü
 
 {{
   "flow_medium": "MUST FILL",
@@ -524,7 +524,7 @@ EXAMPLES OF GOOD VALUES:
   "criticality_code": "MUST FILL"
 }}
 
-a"��$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFERENCE.
+a"ö$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFERENCE.
 """
         
         return prompt
@@ -609,11 +609,11 @@ a"��$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFERENCE
         if not enrichment.get('normal_pressure'):
             enrichment['normal_pressure'] = "150 psig" if 'LP' in pipr_class else "300 psig"
         if not enrichment.get('normal_temp'):
-            enrichment['normal_temp'] = "70,%�%F" if any(x in fluid_code for x in ['CW', 'WATER', 'AIR']else "300,%�%F"
+            enrichment['normal_temp'] = "70,%%F" if any(x in fluid_code for x in ['CW', 'WATER', 'AIR']else "300,%%F"
         if not enrichment.get('design_pressure'):
             enrichment['design_pressure'] = "225 psig" if 'LP' in pipr_class else "450 psig"
         if not enrichment.get('minimax_design_temp'):
-            enrichment['minimax_design_temp'] = "-20,%�%F to 300,%�%F"
+            enrichment['minimax_design_temp'] = "-20,%%F to 300,%%F"
         
         # Design & Material Specs
         if not enrichment.get('design_code'):
