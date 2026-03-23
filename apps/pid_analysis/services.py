@@ -519,7 +519,7 @@ Return ONLY valid JSON in this exact format:
             "issue_observed": "Specific issue with exact values",
             "action_required": "Clear corrective action",
             "severity": "critical/major/minor/observation",
-            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance/trim_class/dissimilar_material/ltcs_compliance/free_drain_slope/spool_requirement",
+            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance/trim_class/dissimilar_material/ltcs_compliance/free_drain_slope/spool_requirement/critical_stress/valve_standard/tie_in_reference/corrosion_allowance",
             "location_on_drawing": {
                 "zone": "Top-Left/Top-Center/Top-Right/Middle-Left/Middle-Center/Middle-Right/Bottom-Left/Bottom-Center/Bottom-Right",
                 "drawing_section": "Process area/utility/legend/notes",
@@ -710,6 +710,59 @@ MINIMUM_SPOOL_DOWNSTREAM_RO (restriction orifice straight-run requirement):
   - RO immediately followed by elbow, tee, or reducer without visible spool = MAJOR finding (category: spool_requirement)
   - RO sizing note (bore diameter, calculated Cd) MISSING near RO tag = MINOR finding (category: spool_requirement)
 
+CRITICAL_STRESS_LINE_REQUIREMENTS (stress analysis and piping flexibility):
+  For any line annotated CSS, STRESS CRITICAL, CRITICAL, HIGH TEMP, or in hydrogen/steam/cryogenic service:
+  - Are anchor points (triangle symbol △) shown at fixed supports adjacent to vessels, heat exchangers, or rotating equipment?
+  - Are line guides (arrows → ←) placed within 3× pipe diameter of restraint/anchor?
+  - For thermal expansion: are expansion loops, expansion joints (bellow symbol), or offsets shown on high-temp lines (>120°C)?
+  - Annotation "STRESS CRITICAL" or "CSS CLASS X" must appear near the line tag for designated stress lines
+  - For steam, thermal oil, or high-temp service above 250°C piping larger than 4": expansion accommodation REQUIRED
+  - Missing support/anchor annotation on stress-critical or high-temp large-bore line = MAJOR finding (category: critical_stress)
+  - CSS-designated line without flexibility provisions shown = CRITICAL finding (category: critical_stress)
+  - Missing "STRESS CRITICAL" annotation on a line meeting stress analysis criteria = MAJOR finding (category: critical_stress)
+
+VALVE_STANDARDS_COMPLIANCE (API 6D, ASME B16.34, API 600, ISO 15848):
+  For each valve visible on the drawing — check type, annotation, and service compliance:
+  BALL VALVES (API 6D):
+    - NPS 6 and above on full-bore isolating duty: annotation must indicate trunnion-mounted (not floating ball)
+    - Pig-able lines (piggable header): full-bore ball valve REQUIRED; reduced-bore or gate valve on piggable line = MAJOR finding (category: valve_standard)
+    - ESD/HIPPS/safety isolation valves: cavity relief port annotation (CR or CAVITY RELIEF) REQUIRED; missing = MAJOR finding (category: valve_standard)
+  GATE VALVES (API 600 / ASME B16.34):
+    - OS&Y (outside screw and yoke) visible on gate valve symbol for NPS 2" and above? Missing OS&Y annotation = MAJOR finding (category: valve_standard)
+    - Fire-safe design annotation required for gate valves in HC service (any flammable fluid); missing = MAJOR finding (category: valve_standard)
+  GLOBE AND CONTROL VALVES (BS EN 13709 / IEC 60534):
+    - Flow direction arrow REQUIRED on globe valve or control valve body symbol; missing = MINOR finding (category: valve_standard)
+    - Manual globe valve NPS 2" and larger requires handwheel symbol shown; missing handwheel = MINOR finding (category: valve_standard)
+  CHECK VALVES (API 6D / API 594):
+    - Spring-loaded NRV (non-return valve) required at pump discharge where backflow is hazardous; swing check without spring annotation = MAJOR finding (category: valve_standard)
+    - Check valve at compressor discharge without "SLOW CLOSING" or "CONTROLLED CLOSURE" annotation = MAJOR finding (category: valve_standard)
+  FUGITIVE EMISSIONS (ISO 15848):
+    - Actuated valves on BTEX / benzene / H2S / toxic service: "FE CLASS A" or "FE CLASS B" annotation REQUIRED; missing = MAJOR finding (category: valve_standard)
+    - Double-block-and-bleed (DBB) required for all safety isolation on HC service above 150 barg or 6" bore; single block shown = MAJOR finding (category: valve_standard)
+  PRESSURE-TEMPERATURE CHECK (ASME B16.34):
+    - Valve body pressure class must MATCH or EXCEED connecting flange pressure class (e.g., Class 300 flange → requires minimum Class 300 valve body)
+    - Valve body class LOWER than connecting pipe flange class = CRITICAL finding (category: valve_standard)
+    - Valve adjacent to high-temperature service (>200°C): WC6/WC9/P91 body material REQUIRED; WCB shown = MAJOR finding (category: valve_standard)
+
+TIE_IN_POINT_VERIFICATION (tie-in package and battery limit compliance):
+  For each tie-in point or battery limit (BL) connection visible on the drawing:
+  - Must be tagged as TI-XXXX (tie-in number) with unique sequential identifier; untagged tie-in = MAJOR finding (category: tie_in_reference)
+  - Existing pipe spec clearly shown at the tie-in point (upstream/existing spec vs new spec); missing existing spec = MAJOR finding (category: tie_in_reference)
+  - Block valve (isolation valve) shown at tie-in to allow hot tap or cold cut isolation; missing isolation valve at TI = CRITICAL finding (category: tie_in_reference)
+  - Connection type annotated: "HOT TAP", "COLD TIE-IN", "FLANGED TIE-IN", or "WELDED TIE-IN"; missing type = MAJOR finding (category: tie_in_reference)
+  - Vent and drain connections shown at new spool piece adjacent to tie-in for pressure testing/purging; missing = MINOR finding (category: tie_in_reference)
+  - Battery limit boxes at plot limits must show: design pressure, design temperature, fluid service, pipe class on BOTH sides of limit line; missing any = MAJOR finding (category: tie_in_reference)
+
+CORROSION_ALLOWANCE_AND_NACE (material, CA annotation, sour/H2S compliance):
+  For pressure vessels, columns, and process equipment visible on drawing:
+  - Corrosion allowance (CA) annotation REQUIRED in operating condition box (e.g., CA = 3 mm); missing = MAJOR finding (category: corrosion_allowance)
+  - Lines and equipment in sour service (H2S present > trace): "SOUR SERVICE", "NACE", or "MR0175" annotation REQUIRED; missing = CRITICAL finding (category: corrosion_allowance)
+  - Amine service vessels/piping: "PWHT REQUIRED" annotation REQUIRED; missing = MAJOR finding (category: corrosion_allowance)
+  - Seawater service: "DNV-GL", "SEAWATER GRADE", or alloy annotation REQUIRED (duplex SS, 6Mo, Cu-Ni); carbon steel in SW service without annotation = CRITICAL finding (category: corrosion_allowance)
+  - Acid (HCl, H2SO4) service: lining annotation REQUIRED (glass-lined, rubber-lined, PVDF, Hastelloy); bare CS in acid service = CRITICAL finding (category: corrosion_allowance)
+  - Heat tracing annotation: for lines in which freezing or solidification is a risk (wax, hydrate, viscous fluid), "HT" or "HEAT TRACED" or "EHT" annotation MUST appear on line label; missing = MAJOR finding (category: corrosion_allowance)
+  - Insulation annotation: process lines above 60°C or below 0°C require insulation class (HOT, COLD, PERSONNEL PROTECTION, PP) annotation; missing = MINOR finding (category: corrosion_allowance)
+
 --- RULES (always apply) ---
 - Report ONLY elements visually confirmed on this drawing
 - FI/PI/TI/LI/PG = indicators only - no control loop or alarm setpoints required
@@ -735,7 +788,7 @@ Return ONLY valid JSON:
             "issue_observed": "Specific issue with exact values",
             "action_required": "Clear corrective action",
             "severity": "critical/major/minor/observation",
-            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance/trim_class/dissimilar_material/ltcs_compliance/free_drain_slope/spool_requirement",
+            "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance/trim_class/dissimilar_material/ltcs_compliance/free_drain_slope/spool_requirement/critical_stress/valve_standard/tie_in_reference/corrosion_allowance",
             "location_on_drawing": {{
                 "zone": "Top-Left/Top-Center/Top-Right/Middle-Left/Middle-Center/Middle-Right/Bottom-Left/Bottom-Center/Bottom-Right",
                 "drawing_section": "Process area/utility/legend/notes",
@@ -1482,6 +1535,42 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
                     })
             self._append_line_list_checks(context_parts, normalised)
         
+        # 2c. Critical Stress Line List from DesignIQ (imported as JSON)
+        if 'critical_stress_json' in reference_data:
+            css_json = reference_data['critical_stress_json']
+            context_parts.append("\n⚠️ CRITICAL STRESS LINE LIST PROVIDED (from DesignIQ):")
+            context_parts.append("   VERIFY: Every line tagged as stress-critical on P&ID must appear in this list")
+            context_parts.append("   VERIFY: Stress-critical lines on P&ID MUST show anchor points, guides, or expansion provisions")
+            context_parts.append("   VERIFY: Lines in this list must have CSS/STRESS CRITICAL annotation visible on P&ID")
+            lines_raw = css_json if isinstance(css_json, list) else css_json.get('lines', [])
+            if lines_raw:
+                context_parts.append(f"   - Critical Stress List contains {len(lines_raw)} lines:")
+                for item in lines_raw[:20]:
+                    data = item.get('data', item) if isinstance(item, dict) else {}
+                    tag = item.get('item_tag') or data.get('line_number') or data.get('tag', 'N/A')
+                    size = data.get('size', 'N/A')
+                    service = data.get('service', '')
+                    rating = data.get('rating', '')
+                    material = data.get('material', '')
+                    context_parts.append(f"     - {tag}: {size} {rating} {material} | service={service}")
+                context_parts.append("   → CRITICAL finding if a CSS-listed line is visible on P&ID without stress annotations")
+                context_parts.append("   → MAJOR finding if any CSS-listed line tag is missing from the P&ID entirely")
+
+        # 2d. Critical Stress Line List from uploaded PDF reference
+        if 'critical_stress_list' in reference_data:
+            css_data = reference_data['critical_stress_list']
+            context_parts.append("\n⚠️ CRITICAL STRESS LINE LIST PROVIDED (from uploaded reference):")
+            context_parts.append("   VERIFY: All CSS-designated lines on P&ID must appear in this list")
+            context_parts.append("   VERIFY: CSS lines must show anchor, guide, and expansion annotations on P&ID")
+            lines_css = css_data.get('lines', [])
+            if lines_css:
+                context_parts.append(f"   - Critical Stress List contains {len(lines_css)} lines:")
+                for ln in lines_css[:20]:
+                    tag = ln.get('line_number', 'N/A')
+                    size = ln.get('size', 'N/A')
+                    service = ln.get('service', '')
+                    context_parts.append(f"     - {tag}: {size} | service={service}")
+
         # 3. Alarm & Trip Schedule - Setpoints reference
         if 'alarm_trip_schedule' in reference_data:
             ats = reference_data['alarm_trip_schedule']

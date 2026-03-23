@@ -23,10 +23,11 @@ from .document_processor import DocumentProcessor
 @permission_classes([permissions.IsAuthenticated])
 def import_linelist_from_designiq(request):
     """
-    SOFT-CODED: Import line list data from DesignIQ for P&ID cross-checking.
+    SOFT-CODED: Import line list (or critical stress list) data from DesignIQ for P&ID cross-checking.
     GET /api/v1/pid/import-linelist/
-      ?project_id=<int>   — return line list items for a specific DesignIQ project
-      (no params)         — return list of DesignIQ projects that have line list items
+      ?project_id=<int>            — return line list items for a specific DesignIQ project
+      ?project_id=<int>&list_type=critical_stress — return critical stress line list items
+      (no params)                  — return list of DesignIQ projects that have line list items
     """
     try:
         from apps.designiq.models import EngineeringListItem, DesignProject
@@ -34,12 +35,17 @@ def import_linelist_from_designiq(request):
         return Response({'error': 'DesignIQ module not available'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
     project_id = request.query_params.get('project_id')
+    list_type = request.query_params.get('list_type', 'line_list')
+    # Whitelist allowed list types to prevent unintended data exposure
+    allowed_list_types = {'line_list', 'critical_stress', 'equipment_list', 'tie_in_list', 'alarm_trip_list'}
+    if list_type not in allowed_list_types:
+        list_type = 'line_list'
 
     if not project_id:
         # Return list of projects that have line list items (scoped to current user's org)
         projects_with_lists = (
             DesignProject.objects
-            .filter(items__list_type='line_list')
+            .filter(items__list_type=list_type)
             .distinct()
             .values('id', 'name', 'description', 'created_at')
             .order_by('-created_at')
@@ -49,7 +55,7 @@ def import_linelist_from_designiq(request):
             'count': len(projects_with_lists)
         })
 
-    # Return serialised line list items for the given project
+    # Return serialised list items for the given project and list type
     try:
         project = DesignProject.objects.get(id=project_id)
     except DesignProject.DoesNotExist:
@@ -57,7 +63,7 @@ def import_linelist_from_designiq(request):
 
     items = EngineeringListItem.objects.filter(
         project=project,
-        list_type='line_list'
+        list_type=list_type
     ).values('item_tag', 'data', 'status', 'version')
 
     line_list = [
@@ -73,6 +79,7 @@ def import_linelist_from_designiq(request):
     return Response({
         'project_id': project.id,
         'project_name': project.name,
+        'list_type': list_type,
         'line_list': line_list,
         'count': len(line_list),
     })
@@ -242,6 +249,17 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                 print(f"[DEBUG] DesignIQ line list JSON received: {len(parsed) if isinstance(parsed, list) else 'dict'} items")
             except Exception as _e:
                 print(f"[WARNING] Failed to parse line_list_json: {_e}")
+
+        # SOFT-CODED: Handle JSON critical stress line list imported from DesignIQ
+        critical_stress_json_raw = request.data.get('critical_stress_json')
+        if critical_stress_json_raw:
+            import json as _json
+            try:
+                parsed_css = _json.loads(critical_stress_json_raw) if isinstance(critical_stress_json_raw, str) else critical_stress_json_raw
+                reference_documents['critical_stress_json'] = parsed_css
+                print(f"[DEBUG] DesignIQ critical stress JSON received: {len(parsed_css) if isinstance(parsed_css, list) else 'dict'} items")
+            except Exception as _e:
+                print(f"[WARNING] Failed to parse critical_stress_json: {_e}")
         
         if reference_documents:
             print(f"[DEBUG] Total reference documents: {len(reference_documents)}")

@@ -44,6 +44,10 @@ class ReferenceDocumentProcessor:
                 if doc_type in ['equipment_list']:
                     extracted_data['equipment_list'] = self._extract_equipment_list(doc_file)
                 
+                # NEW: Critical Stress Line List - for stress-critical piping verification
+                elif doc_type in ['critical_stress_list']:
+                    extracted_data['critical_stress_list'] = self._extract_critical_stress_list(doc_file)
+
                 # NEW: Line List - Structured piping data
                 elif doc_type in ['line_list']:
                     extracted_data['line_list'] = self._extract_line_list(doc_file)
@@ -553,7 +557,77 @@ Extract ALL line numbers accurately. Line numbers are CRITICAL for verification.
         except Exception as e:
             print(f"[ERROR] Line List extraction failed: {e}")
             return {}
-    
+
+    def _extract_critical_stress_list(self, doc_file) -> Dict[str, Any]:
+        """
+        Extract Critical Stress Line List for stress-analysis and piping flexibility verification.
+        These lines need anchor points, guides, and expansion provisions on the P&ID.
+        """
+        if not self.client:
+            return {}
+
+        try:
+            images = self._pdf_to_images(doc_file)
+            if not images:
+                return {}
+
+            prompt = """Extract ALL critical stress (CSS) piping lines from this document.
+
+**REQUIRED INFORMATION:**
+- Line Number (complete, e.g., 4"-HP-6155-033900-A-H)
+- Line Size (pipe diameter, e.g., 4 inch)
+- Stress Class / CSS Class (e.g., CSS-1, CSS-2, CRITICAL)
+- Fluid Service (e.g., High Pressure Steam, Hot Oil, Condensate)
+- Design Pressure (barg)
+- Design Temperature (°C) — high temp is the primary stress driver
+- Material (e.g., P91, P22, SS316, CS)
+- Rating (pressure class, e.g., Class 600, ANSI 900#)
+- Any special notes (e.g., PWHT required, expansion loop required, cold spring)
+
+**OUTPUT FORMAT - JSON:**
+{
+    "lines": [
+        {
+            "line_number": "4\\"-HP-6155-033900-A-H",
+            "size": "4 inch",
+            "stress_class": "CSS-1",
+            "service": "High Pressure Steam",
+            "design_pressure": "60 barg",
+            "design_temp": "480°C",
+            "material": "P91",
+            "rating": "Class 900",
+            "notes": "Expansion loop required — PWHT mandatory"
+        }
+    ]
+}
+
+Extract ALL stress-critical line numbers carefully. These are safety-critical for flexibility analysis."""
+
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are a piping stress engineer extracting critical stress line data from engineering documents."},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{images[0]}"}}
+                    ]}
+                ],
+                temperature=0.1,
+                max_tokens=4000
+            )
+
+            import json
+            import re
+            result = response.choices[0].message.content
+            json_match = re.search(r'```json\s*(.*?)\s*```', result, re.DOTALL)
+            if json_match:
+                result = json_match.group(1)
+            return json.loads(result)
+
+        except Exception as e:
+            print(f"[ERROR] Critical Stress List extraction failed: {e}")
+            return {}
+
     def _extract_alarm_trip_schedule(self, doc_file) -> Dict[str, Any]:
         """
         Extract Alarm & Trip Schedule for instrument setpoint verification
