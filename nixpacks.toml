@@ -1,23 +1,25 @@
 [phases.setup]
-# Core system packages - lightweight (no ML packages)
+# Core system packages for PFD/P&ID AI analysis
 nixPkgs = [
     'python311',
     'postgresql',
-    'tesseract',  # Tesseract OCR binary for P&ID processing
-    'poppler_utils',  # For PDF processing (pdf2image)
-    'libGL',  # Required for image processing
-    'glib'  # Required for image processing
+    'tesseract',       # Tesseract OCR binary for P&ID processing
+    'poppler_utils',   # For PDF processing (pdf2image + PyMuPDF)
+    'libGL',           # Required for image/CV processing
+    'glib',            # Required for image processing
+    'mupdf'            # MuPDF native lib for PyMuPDF (fitz) - 4-pass PFD engine
 ]
 
 [phases.install]
 cmds = [
     'python -m venv /opt/venv',
     '. /opt/venv/bin/activate && pip install --upgrade pip',
-    '# Use standard requirements file',
-    '. /opt/venv/bin/activate && pip install -r requirements.txt',
-    '# Verify tesseract installation',
-    'which tesseract || echo "❌ Tesseract not found"',
-    'tesseract --version || echo "❌ Tesseract version check failed"'
+    # Soft-coded: use absolute path so pip always finds requirements.txt
+    # regardless of nixpacks working directory during build
+    '. /opt/venv/bin/activate && pip install -r /app/requirements.txt',
+    # Verify key binaries for runtime health
+    'which tesseract || echo "WARNING: Tesseract not found in PATH"',
+    'tesseract --version 2>&1 | head -1 || echo "WARNING: Tesseract version check failed"'
 ]
 
 [phases.build]
@@ -26,5 +28,5 @@ cmds = [
 ]
 
 [start]
-# Files are executable in git (100755), no chmod needed!
+# railway_start.sh handles: migrations, static files, gunicorn
 cmd = 'bash railway_start.sh'
