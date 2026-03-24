@@ -117,23 +117,38 @@ class Command(BaseCommand):
             'permissions_assigned': 0
         }
         
-        # Get or create custom role
+        # Get or create custom role — soft-coded: handles name collision gracefully
         role_code = get_custom_role_code(user.email)
         role_name = get_custom_role_name(user.first_name, user.last_name)
-        
-        custom_role, created = Role.objects.get_or_create(
-            code=role_code,
-            defaults={
-                'name': role_name,
-                'description': f'Custom role for {user.email} with selected modules',
-                'level': MODULE_ASSIGNMENT_CONFIG['custom_role_level'],
-                'is_active': True
-            }
-        )
-        
-        if not created:
-            custom_role.name = role_name
-            custom_role.save()
+
+        # First: try to find by code (fastest path)
+        custom_role = Role.objects.filter(code=role_code).first()
+
+        if custom_role is None:
+            # Fallback: find by name in case a previous run used a different code
+            custom_role = Role.objects.filter(name=role_name).first()
+            if custom_role:
+                # Align the code so future lookups find it correctly
+                custom_role.code = role_code
+                custom_role.save(update_fields=['code'])
+
+        if custom_role is None:
+            # Neither code nor name exists — safe to create
+            custom_role = Role.objects.create(
+                code=role_code,
+                name=role_name,
+                description=f'Custom role for {user.email} with selected modules',
+                level=MODULE_ASSIGNMENT_CONFIG['custom_role_level'],
+                is_active=True
+            )
+        else:
+            # Ensure name stays in sync (user may have changed their display name)
+            if custom_role.name != role_name:
+                try:
+                    custom_role.name = role_name
+                    custom_role.save(update_fields=['name'])
+                except Exception:
+                    pass  # name already taken by another role — keep existing name
         
         result['role_name'] = custom_role.name
         
