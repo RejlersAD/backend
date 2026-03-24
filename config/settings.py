@@ -157,6 +157,7 @@ INSTALLED_APPS = [
     # SOFT-CODED: Electrical Datasheet - RE-ENABLED
     'apps.electrical_datasheet',  # Electrical Datasheet - Transformer & Switchgear Technical Data Sheets
     'apps.usage_tracking',  # Usage Tracking & Metering - Internal Analytics Dashboard
+    'apps.wrench_integration',  # Wrench Project Platform Integration
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
@@ -185,6 +186,9 @@ INSTALLED_APPS.extend([
 ])
 
 MIDDLEWARE = [
+    # Must be first: normalise RFC-invalid Docker hostnames (underscores) before
+    # CommonMiddleware's host-header validation runs. No-op in production (DEBUG=False).
+    'apps.core.middleware.NormaliseDockerHostMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',  # MUST be before CommonMiddleware
