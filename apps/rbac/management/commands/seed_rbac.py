@@ -100,6 +100,13 @@ class Command(BaseCommand):
                 'icon': 'Code',
                 'order': 9
             },
+            {
+                'name': 'QHSE Management',
+                'code': 'qhse',
+                'description': 'Quality, Health, Safety and Environment project management',
+                'icon': 'Shield',
+                'order': 10
+            },
         ]
 
         modules = {}
