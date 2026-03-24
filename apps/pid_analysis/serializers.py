@@ -213,6 +213,7 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
     summary = serializers.SerializerMethodField()
     holds_and_notes = serializers.SerializerMethodField()
     specification_breaks = serializers.SerializerMethodField()
+    line_size_recommendations = serializers.SerializerMethodField()
     
     class Meta:
         model = PIDAnalysisReport
@@ -222,6 +223,7 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
             'report_data', 'pdf_report', 'excel_report',
             'issues', 'debug_info', 'equipment_datasheets', 'instrument_schedule', 
             'line_list', 'summary', 'holds_and_notes', 'specification_breaks',
+            'line_size_recommendations',
             'generated_at', 'updated_at'
         ]
         read_only_fields = ['id', 'generated_at', 'updated_at']
@@ -458,6 +460,16 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
             })
 
         return derived
+
+    def get_line_size_recommendations(self, obj):
+        """
+        Extract AI-generated line size recommendations from report_data.
+        These are produced by Pass 7 (_line_size_validation_pass) and stored
+        under the 'line_size_recommendations' key in report_data JSON.
+        """
+        if isinstance(obj.report_data, dict):
+            return obj.report_data.get('line_size_recommendations', [])
+        return []
 
 
 class PIDDrawingSerializer(serializers.ModelSerializer):

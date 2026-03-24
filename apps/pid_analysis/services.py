@@ -152,13 +152,22 @@ class PIDAnalysisService:
                 print(f"[WARNING] PASS 6 failed (non-critical): {str(e)}")
                 engineering_issues = []
 
-            
-            # Merge all findings from all passes
+            # PASS 7: Line Size Validation & AI Recommendation Engine
+            # Detects line size anomalies (nozzle mismatches, unjustified size jumps,
+            # velocity-based outliers) and produces structured recommendations.
+            print(f"[INFO] PASS 7: Line Size Validation & AI Recommendations")
+            line_size_result = {"issues": [], "line_size_recommendations": []}
+            try:
+                line_size_result = self._line_size_validation_pass(images_base64, reference_data)
+            except Exception as e:
+                print(f"[WARNING] PASS 7 failed (non-critical): {str(e)}")
+
+            # Merge all findings from all passes (including line size issues)
             all_issues = self._merge_and_deduplicate(
                 vision_result.get('issues', []),
                 consistency_issues,
                 second_pass_issues,
-                engineering_issues
+                engineering_issues + line_size_result.get('issues', [])
             )
             
             # If NO issues found at all, create at least one from OCR data
@@ -229,12 +238,14 @@ class PIDAnalysisService:
                 # SOFT-CODED: Structured sections passed through from AI response (present for new analyses)
                 'specification_breaks': vision_result.get('specification_breaks', []),
                 'pfd_guidelines_compliance': vision_result.get('pfd_guidelines_compliance', {}),
+                # PASS 7: Line size recommendations (structured AI output)
+                'line_size_recommendations': line_size_result.get('line_size_recommendations', []),
                 'analysis_metadata': {
                     # AI model info (used by frontend AI Insights panel)
                     'ai_model': 'gpt-4o',
                     'confidence_score': final_confidence,
                     'analysis_type': 'comprehensive',
-                    'analysis_duration': 'Multi-pass (6 passes)',
+                    'analysis_duration': 'Multi-pass (7 passes)',
                     'rag_context_used': bool(reference_documents),
                     'rag_context_length': sum(len(str(v)) for v in reference_data.values()) if reference_data else 0,
                     # OCR extraction statistics
@@ -242,7 +253,8 @@ class PIDAnalysisService:
                     'instrument_tags_found': len(self.instrument_tags),
                     'equipment_tags_found': len(self.equipment_tags),
                     'line_numbers_found': len(self.line_numbers),
-                    'analysis_passes': 6,
+                    'line_size_anomalies_found': len(line_size_result.get('line_size_recommendations', [])),
+                    'analysis_passes': 7,
                     'multi_pass_enabled': True,
                     'reference_documents_used': bool(reference_documents),
                     'reference_categories': list(reference_data.keys()) if reference_data else []
@@ -252,6 +264,7 @@ class PIDAnalysisService:
             print(f"[INFO] ========== ANALYSIS COMPLETE ==========")
             print(f"[INFO] Total Issues: {len(all_issues)}")
             print(f"[INFO] Critical: {len(categorized['critical'])}, Major: {len(categorized['major'])}, Minor: {len(categorized['minor'])}")
+            print(f"[INFO] Line Size Anomalies: {len(line_size_result.get('line_size_recommendations', []))}")
             
             return final_result
             
@@ -1429,6 +1442,228 @@ Return ONLY valid JSON with ALL findings from ALL nine domains above."""
         except Exception as e:
             print(f"[WARNING] Engineering compliance pass failed: {str(e)}")
             return []
+
+    def _line_size_validation_pass(
+        self,
+        images_base64: List[str],
+        reference_data: Dict = None,
+    ) -> Dict[str, Any]:
+        """
+        PASS 7: AI-Powered Line Size Validation & Recommendation Engine.
+
+        Analyses every visible piping line on the drawing and checks whether its
+        annotated nominal size is consistent with:
+          1. Adjacent equipment nozzle sizes (pump, vessel, exchanger connections)
+          2. Size continuity along a flow path (unexpected jumps without reducers)
+          3. Process engineering velocity/flow expectations for the fluid type
+          4. Reference line list (DesignIQ) if supplied
+          5. Common P&ID sizing errors (e.g., over-sized utility drops, under-sized
+             relief discharge headers)
+
+        Returns a dict:
+        {
+          "issues": [...],                       # standard issue dicts (category: line_size)
+          "line_size_recommendations": [...]     # richer recommendation objects
+        }
+        """
+        try:
+            import re as _re
+
+            # ── 1. Parse sizes from OCR line numbers ──────────────────────────────
+            # Format: SIZE"-FLUIDCODE-SEQ-SPEC   (e.g. 4"-HC-1001-CS150)
+            parsed_lines: List[Dict] = []
+            size_pattern = _re.compile(
+                r'^([\d½¼¾]+(?:\.\d+)?)"?[-–]([\w]{1,6})[-–]([\d]{3,5})([-–][\w\d]+)?$',
+                _re.IGNORECASE
+            )
+            for raw_ln in sorted(self.line_numbers or []):
+                m = size_pattern.match(raw_ln.strip())
+                if m:
+                    parsed_lines.append({
+                        'line_number': raw_ln,
+                        'size_inch': m.group(1),
+                        'fluid_code': m.group(2).upper(),
+                        'sequence': m.group(3),
+                        'pipe_class': (m.group(4) or '').lstrip('-–'),
+                    })
+
+            # ── 2. Build reference line list context (if DesignIQ data available) ─
+            ref_linelist_ctx = ""
+            if reference_data:
+                for key, val in reference_data.items():
+                    if 'line' in key.lower() and isinstance(val, (list, dict)):
+                        import json as _json
+                        ref_linelist_ctx = (
+                            "\n\nREFERENCE LINE LIST (from DesignIQ / engineering data):\n"
+                            + _json.dumps(val, indent=2)[:4000]
+                        )
+                        break
+
+            # ── 3. Build prompt ───────────────────────────────────────────────────
+            ocr_lines_str = '\n'.join(
+                f"  {p['line_number']}  → size={p['size_inch']}\", fluid={p['fluid_code']}, class={p['pipe_class']}"
+                for p in parsed_lines[:40]
+            ) or "  None parsed from OCR (use visual scan)"
+
+            system_msg = """You are a senior process engineer specialising in piping line sizing for oil & gas P&IDs.
+
+Your ONLY task is to identify LINE SIZE ERRORS and produce AI-powered sizing recommendations.
+
+═══════════════════════════════════════════════════════════════════
+HOW TO SPOT A LINE SIZE ERROR (check each one visually):
+═══════════════════════════════════════════════════════════════════
+1. EQUIPMENT NOZZLE MISMATCH
+   • Pipe labelled 8" connecting directly to equipment with a 4" nozzle without a reducer symbol indicates a sizing error.
+   • Rule: process pipe ≤ equipment nozzle OR a concentric/eccentric reducer must be shown.
+
+2. SIZE CONTINUITY / UNJUSTIFIED JUMP
+   • A 3" branch suddenly widening to a 10" header with no flow-design reason.
+   • Downstream of a control valve (which reduces ΔP) the line should NOT shrink unexpectedly – flag if it does.
+
+3. VELOCITY-BASED CHECK (engineering estimate)
+   Rough rules of thumb (use when no reference list is available):
+   • Gas / vapour lines:  typical velocity 15–30 m/s  → 1" gas line at high flow could be undersized
+   • Liquid lines:        typical velocity  1–3  m/s  → 10" liquid line at low flow could be oversized
+   • Steam lines:         typical velocity 20–40 m/s
+   • PSV discharge pipes: ALWAYS ≥ same bore as PSV outlet; smaller = CRITICAL error
+
+4. REFERENCE LINE LIST MISMATCH
+   If a reference line list is provided, compare each OCR line number's size against the listed size.
+   Any deviation ≥ 1 nominal size = MAJOR; unexpected bore changes on safety lines = CRITICAL.
+
+5. COMMON PITFALL PATTERNS
+   • Pump suction line SMALLER than pump discharge line (suction must be equal or one size larger).
+   • Flare / blowdown discharge header SMALLER than individual PSV outlets flowing into it.
+   • Utility (instrument air, N2) supply line larger than 2" without a pressure-reducing station.
+
+═══════════════════════════════════════════════════════════════════
+OUTPUT FORMAT — return ONLY valid JSON, no markdown fences:
+═══════════════════════════════════════════════════════════════════
+{
+  "reasoning": "Brief explanation of your scan approach",
+  "line_size_recommendations": [
+    {
+      "line_number": "exact line number as shown on drawing",
+      "current_size_inch": "annotated size from drawing (number only, e.g. '8')",
+      "recommended_size_inch": "AI-suggested correct size (e.g. '4') or 'Verify' if uncertain",
+      "confidence": "High | Medium | Low",
+      "check_type": "nozzle_mismatch | size_jump | velocity_estimate | ref_list_mismatch | psv_discharge | pump_suction | utility_oversized",
+      "engineering_basis": "brief engineering rule or standard applied",
+      "reasoning": "specific explanation referencing visible elements on the drawing",
+      "severity": "critical | major | minor | observation",
+      "location_on_drawing": {
+        "zone": "Top-Left|Top-Center|Top-Right|Middle-Left|Middle-Center|Middle-Right|Bottom-Left|Bottom-Center|Bottom-Right",
+        "drawing_section": "process area description",
+        "proximity_description": "near which equipment or junction",
+        "visual_cues": "describe the exact position"
+      }
+    }
+  ],
+  "total_anomalies": 0
+}
+
+IMPORTANT:
+- Only flag a line if you are VISUALLY CONFIDENT the size annotation is visible on the drawing.
+- Do NOT invent line numbers. Use exactly what is printed on the drawing.
+- If no anomaly is found, return an empty list and total_anomalies: 0.
+- Expected to find 0-8 anomalies per typical P&ID sheet."""
+
+            user_text = f"""Perform a LINE SIZE VALIDATION scan on this P&ID drawing.
+
+OCR-extracted line numbers and parsed sizes (first 40):
+{ocr_lines_str}
+{ref_linelist_ctx}
+
+Steps:
+1. Visually confirm each OCR line number on the drawing
+2. For every line visible, check its annotated size against the five checks above
+3. Flag every anomaly as a separate JSON entry in line_size_recommendations
+4. Return ONLY valid JSON in the format specified
+
+Focus especially on:
+- Pump suction vs discharge sizing
+- PSV inlet/outlet line sizing
+- Lines that abruptly change size without a reducer symbol
+- Any line where the size looks disproportionate to adjacent equipment nozzles
+"""
+
+            messages = [
+                {"role": "system", "content": system_msg},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                    ] + [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img}",
+                                "detail": "high"
+                            }
+                        }
+                        for img in images_base64
+                    ]
+                }
+            ]
+
+            print("[INFO] Calling OpenAI for line size validation (Pass 7)...")
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=8000,
+                temperature=0.2,
+                timeout=240
+            )
+
+            if not response or not response.choices:
+                print("[WARNING] Pass 7: OpenAI returned empty response")
+                return {"issues": [], "line_size_recommendations": []}
+
+            response_text = (response.choices[0].message.content or "").strip()
+            print(f"[DEBUG PASS 7] len={len(response_text)} | preview={response_text[:120]}")
+
+            # Parse the JSON response
+            result = self._parse_analysis_response(response_text, 0)
+            recommendations = result.get('line_size_recommendations', [])
+
+            # Convert each recommendation to a standard issue entry for the main table
+            issues = []
+            for rec in recommendations:
+                line_no = rec.get('line_number', 'UNKNOWN LINE')
+                curr_sz = rec.get('current_size_inch', '?')
+                rec_sz  = rec.get('recommended_size_inch', 'Verify')
+                basis   = rec.get('engineering_basis', '')
+                reason  = rec.get('reasoning', '')
+                loc     = rec.get('location_on_drawing', {
+                    'zone': 'Middle-Center',
+                    'drawing_section': 'Piping',
+                    'proximity_description': 'See line annotation',
+                    'visual_cues': line_no
+                })
+
+                issues.append({
+                    'pid_reference': line_no,
+                    'issue_observed': (
+                        f"Line size anomaly detected: annotated as {curr_sz}\", "
+                        f"AI recommends {rec_sz}\". "
+                        f"Check type: {rec.get('check_type', 'general')}. {reason[:200]}"
+                    ),
+                    'action_required': (
+                        f"Verify line size against process datasheet and hydraulic calculations. "
+                        f"Engineering basis: {basis}. "
+                        f"If {curr_sz}\" is incorrect, update line number and piping isometric."
+                    ),
+                    'severity': rec.get('severity', 'major'),
+                    'category': 'line_size',
+                    'location_on_drawing': loc,
+                })
+
+            print(f"[INFO] Pass 7 (line size validation) found {len(recommendations)} anomalies")
+            return {"issues": issues, "line_size_recommendations": recommendations}
+
+        except Exception as e:
+            print(f"[WARNING] Line size validation pass failed: {str(e)}")
+            return {"issues": [], "line_size_recommendations": []}
 
     def _merge_and_deduplicate(self, pass1: List, pass2: List, pass3: List, pass4: List = None) -> List[Dict[str, Any]]:
         """
