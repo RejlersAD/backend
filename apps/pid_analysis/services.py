@@ -1451,7 +1451,7 @@ Return ONLY valid JSON with ALL findings from ALL nine domains above."""
             words = [w for w in _re.split(r'\W+', (obs or '').upper()) if len(w) > 2]
             return ' '.join(words[:6])
 
-        all_passes = [pass1, pass2, pass3, *(pass4 or [])]
+        all_passes = [p for p in (pass1, pass2, pass3, pass4) if p is not None]
         all_issues = []
         seen_keys: set = set()
 
