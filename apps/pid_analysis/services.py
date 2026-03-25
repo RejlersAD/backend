@@ -128,7 +128,7 @@ class PIDAnalysisService:
         self.notes_references = set()
         print('[INFO] Multi-Pass PID Analysis Service initialized with 180s timeout')
 
-    def analyze_pid_drawing(self, pdf_file, drawing_number: Optional[str] = None, reference_documents: Dict[str, Any] = None) -> Dict[str, Any]:
+    def analyze_pid_drawing(self, pdf_file, drawing_number: Optional[str] = None, reference_documents: Dict[str, Any] = None, analysis_mode: str = 'standard') -> Dict[str, Any]:
         """
         Multi-Pass P&ID Analysis with OCR, Vision, Cross-Validation, and Reference Document Verification
         
@@ -157,6 +157,7 @@ class PIDAnalysisService:
         try:
             print(f"[INFO] ========== MULTI-PASS ANALYSIS WITH REFERENCE VERIFICATION ==========")
             print(f"[INFO] Drawing: {drawing_number or 'Unknown'}")
+            print(f"[INFO] Analysis Mode: {analysis_mode.upper()}")
             if reference_documents:
                 print(f"[INFO] Reference documents provided: {list(reference_documents.keys())}")
             
@@ -375,6 +376,7 @@ class PIDAnalysisService:
                     'line_continuity_issues_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') == 'line_continuity']),
                     'analysis_passes': 8,
                     'multi_pass_enabled': True,
+                    'analysis_mode': analysis_mode,  # 'standard' or 'premium'
                     'reference_documents_used': bool(reference_documents),
                     'reference_categories': list(reference_data.keys()) if reference_data else []
                 }

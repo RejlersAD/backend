@@ -260,7 +260,21 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                 print(f"[DEBUG] DesignIQ critical stress JSON received: {len(parsed_css) if isinstance(parsed_css, list) else 'dict'} items")
             except Exception as _e:
                 print(f"[WARNING] Failed to parse critical_stress_json: {_e}")
-        
+
+        # ── Analysis mode: 'standard' (drawing-only) vs 'premium' (with RAD/external refs) ──
+        # In Standard mode, reference documents are intentionally cleared so Pass 2
+        # is skipped and the AI report is based solely on the uploaded drawing.
+        # In Premium mode, all uploaded reference files and DesignIQ JSON are used.
+        analysis_mode = (request.data.get('analysis_mode') or 'standard').lower()
+        if analysis_mode not in ('standard', 'premium'):
+            analysis_mode = 'standard'
+
+        if analysis_mode == 'standard' and reference_documents:
+            print(f"[INFO] Standard mode selected — clearing {len(reference_documents)} reference doc(s) (drawing-only analysis)")
+            reference_documents = {}
+        elif analysis_mode == 'premium':
+            print(f"[INFO] Premium mode selected — {len(reference_documents)} reference doc(s) will be used")
+
         if reference_documents:
             print(f"[DEBUG] Total reference documents: {len(reference_documents)}")
         
@@ -331,7 +345,8 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                 analysis_result = analysis_service.analyze_pid_drawing(
                     drawing.file.path,  # STRING path, not FieldFile
                     drawing_number=drawing.drawing_number,
-                    reference_documents=saved_reference_files  # Dict of STRING paths
+                    reference_documents=saved_reference_files,  # Dict of STRING paths
+                    analysis_mode=analysis_mode,
                 )
                 print(f"[DEBUG] Analysis completed with reference verification, result keys: {list(analysis_result.keys())}")
                 
