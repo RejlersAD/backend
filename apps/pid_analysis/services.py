@@ -1332,8 +1332,10 @@ MANDATORY JSON FORMAT — return ONLY valid JSON, no markdown:
   "total_issues": 0
 }"""
 
-            user_text = f"""{ocr_note}
-ENGINEERING COMPLIANCE DEEP-SCAN — 9 specialist domains.
+            user_text = f"""You are examining the P&ID engineering drawing image(s) attached to this message.
+Analyze the VISUAL CONTENT of the attached drawing(s) to check engineering compliance.
+
+{ocr_note}ENGINEERING COMPLIANCE DEEP-SCAN — 9 specialist domains.
 
 ISSUES ALREADY REPORTED (do NOT repeat these):
 {already_str}
@@ -2044,7 +2046,10 @@ MANDATORY JSON RESPONSE — return ONLY valid JSON, no markdown fences:
 }"""
 
             # ── User prompt — nine check blocks (softcoded, each independent) ─────
-            user_text = f"""PASS 8 — SMART QC ENHANCEMENT SCAN (9 targeted checks)
+            user_text = f"""You are examining the P&ID engineering drawing image(s) attached to this message.
+Analyze the VISUAL CONTENT of the attached drawing(s) to complete the nine checks below.
+
+PASS 8 — SMART QC ENHANCEMENT SCAN (9 targeted checks)
 
 ISSUES ALREADY REPORTED IN PREVIOUS PASSES (do NOT repeat these):
 {already_str}
