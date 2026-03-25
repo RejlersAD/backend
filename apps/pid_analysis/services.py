@@ -162,12 +162,34 @@ class PIDAnalysisService:
             except Exception as e:
                 print(f"[WARNING] PASS 7 failed (non-critical): {str(e)}")
 
-            # Merge all findings from all passes (including line size issues)
+            # PASS 8: Smart QC Enhancement — four targeted specialist checks:
+            #   1. Duplicate / near-duplicate line number detection (programmatic + AI confirm)
+            #   2. Dynamic valve size consistency (any project standard, fully AI-driven)
+            #   3. Deep NOTES & HOLDS cross-verification (full-stack process engineer view)
+            #   4. Equipment TYPE designation validation (e.g. TYPE 01A vs TYPE 09A)
+            # Purely additive — does NOT modify any previous pass logic.
+            print(f"[INFO] PASS 8: Smart QC Enhancement (Dup Lines + Valve Size + Notes/Holds + TYPE Designations)")
+            smart_qc_result = {"issues": [], "total_issues": 0}
+            try:
+                _merged_for_pass8 = (
+                    vision_result.get('issues', []) +
+                    consistency_issues +
+                    second_pass_issues +
+                    engineering_issues +
+                    line_size_result.get('issues', [])
+                )
+                smart_qc_result = self._smart_qc_enhancement_pass(
+                    images_base64, reference_data, _merged_for_pass8
+                )
+            except Exception as e:
+                print(f"[WARNING] PASS 8 failed (non-critical): {str(e)}")
+
+            # Merge all findings from all passes (including line size and smart QC issues)
             all_issues = self._merge_and_deduplicate(
                 vision_result.get('issues', []),
                 consistency_issues,
                 second_pass_issues,
-                engineering_issues + line_size_result.get('issues', [])
+                engineering_issues + line_size_result.get('issues', []) + smart_qc_result.get('issues', [])
             )
             
             # If NO issues found at all, create at least one from OCR data
@@ -245,7 +267,7 @@ class PIDAnalysisService:
                     'ai_model': 'gpt-4o',
                     'confidence_score': final_confidence,
                     'analysis_type': 'comprehensive',
-                    'analysis_duration': 'Multi-pass (7 passes)',
+                    'analysis_duration': 'Multi-pass (8 passes)',
                     'rag_context_used': bool(reference_documents),
                     'rag_context_length': sum(len(str(v)) for v in reference_data.values()) if reference_data else 0,
                     # OCR extraction statistics
@@ -254,7 +276,12 @@ class PIDAnalysisService:
                     'equipment_tags_found': len(self.equipment_tags),
                     'line_numbers_found': len(self.line_numbers),
                     'line_size_anomalies_found': len(line_size_result.get('line_size_recommendations', [])),
-                    'analysis_passes': 7,
+                    # Pass 8: Smart QC Enhancement statistics
+                    'smart_qc_issues_found': len(smart_qc_result.get('issues', [])),
+                    'line_duplicates_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') == 'line_duplicate']),
+                    'valve_size_issues_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') == 'valve_size']),
+                    'type_designation_issues_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') == 'type_designation']),
+                    'analysis_passes': 8,
                     'multi_pass_enabled': True,
                     'reference_documents_used': bool(reference_documents),
                     'reference_categories': list(reference_data.keys()) if reference_data else []
@@ -265,6 +292,7 @@ class PIDAnalysisService:
             print(f"[INFO] Total Issues: {len(all_issues)}")
             print(f"[INFO] Critical: {len(categorized['critical'])}, Major: {len(categorized['major'])}, Minor: {len(categorized['minor'])}")
             print(f"[INFO] Line Size Anomalies: {len(line_size_result.get('line_size_recommendations', []))}")
+            print(f"[INFO] Smart QC Enhancement (Pass 8): {len(smart_qc_result.get('issues', []))} issues")
             
             return final_result
             
@@ -1664,6 +1692,413 @@ Focus especially on:
         except Exception as e:
             print(f"[WARNING] Line size validation pass failed: {str(e)}")
             return {"issues": [], "line_size_recommendations": []}
+
+    # =========================================================================
+    # PASS 8 — SMART QC ENHANCEMENT (pure additive layer, no existing logic changed)
+    # =========================================================================
+
+    def _detect_near_duplicate_lines(self) -> List[Dict[str, Any]]:
+        """
+        Programmatically detect exact-duplicate and near-duplicate line numbers from OCR data.
+
+        Near-duplicate definition: same size + fluid code + pipe specification suffix,
+        with sequence numbers differing by ≤ 2.  These are high-risk for:
+          - Construction-package confusion (wrong isometric pulled)
+          - Material take-off (MTO) errors
+          - Valve / instrument tagging mistakes in the field
+
+        Returns a list of standard issue dicts, one per detected pair.
+        Soft-coded: the near-duplicate threshold (default: 2) can be adjusted by changing
+        NEAR_DUP_THRESHOLD below without touching any other logic.
+        """
+        import re as _re
+
+        NEAR_DUP_THRESHOLD = 2  # sequences within this delta → near-duplicate
+
+        # Extended line-number parser: covers both common formats
+        # Format A: SIZE"-FLUID-SEQ-SPEC          e.g. 4"-HC-1001-CS150
+        # Format B: SIZE"-FLUID-SEQ-SPEC-X-Y       e.g. 2"-D-6150-033842-X-N
+        line_num_pattern = _re.compile(
+            r'^([\d½¼¾]+(?:\.\d+)?)"?[-–]([A-Z]{1,6})[-–](\d{3,6})((?:[-–][\w\d]+)*)$',
+            _re.IGNORECASE,
+        )
+
+        parsed: List[Dict] = []
+        for raw in sorted(self.line_numbers or []):
+            m = line_num_pattern.match(raw.strip())
+            if m:
+                parsed.append({
+                    'raw': raw,
+                    'size': m.group(1),
+                    'fluid': m.group(2).upper(),
+                    'sequence': m.group(3),
+                    'suffix': m.group(4).upper().lstrip('-–'),
+                })
+
+        issues: List[Dict] = []
+        seen_pairs: set = set()
+
+        for i, a in enumerate(parsed):
+            for b in parsed[i + 1:]:
+                pair_key = tuple(sorted([a['raw'], b['raw']]))
+                if pair_key in seen_pairs:
+                    continue
+
+                # Only compare lines with same size, fluid code, AND spec suffix
+                if (a['size'] == b['size'] and
+                        a['fluid'] == b['fluid'] and
+                        a['suffix'] == b['suffix']):
+                    try:
+                        seq_a = int(a['sequence'])
+                        seq_b = int(b['sequence'])
+                        diff = abs(seq_a - seq_b)
+
+                        if diff == 0:
+                            severity = 'critical'
+                            obs = (
+                                f"Exact duplicate line number detected: '{a['raw']}' and '{b['raw']}' share "
+                                f"identical size, fluid code, sequence AND specification. "
+                                f"Duplicate line numbers violate piping data-integrity requirements and will "
+                                f"cause errors in isometric numbering, MTO, and valve tagging."
+                            )
+                            action = (
+                                "Remove one occurrence or reassign a unique sequential number. "
+                                "Each process piping line must have a globally unique identifier per "
+                                "the project line-numbering procedure."
+                            )
+                        elif diff <= NEAR_DUP_THRESHOLD:
+                            severity = 'major'
+                            obs = (
+                                f"Near-duplicate line numbers detected: '{a['raw']}' and '{b['raw']}' share "
+                                f"the same fluid code ({a['fluid']}), pipe specification, and nominal size ({a['size']}\"), "
+                                f"with only a {diff}-digit sequence difference. "
+                                f"These are easily confused in construction documents, isometrics, MTO, and valve/instrument tagging."
+                            )
+                            action = (
+                                "Verify both lines are genuine separate process streams (cross-check PFD/FEED data). "
+                                "If the same line, consolidate and correct. "
+                                "If separate, confirm against process flow data and ensure their distinct routing "
+                                "is unambiguous on the drawing (unique from/to, equipment, and valve tags)."
+                            )
+                        else:
+                            continue
+
+                        seen_pairs.add(pair_key)
+                        issues.append({
+                            'pid_reference': f"{a['raw']} / {b['raw']}",
+                            'issue_observed': obs,
+                            'action_required': action,
+                            'severity': severity,
+                            'category': 'line_duplicate',
+                            'location_on_drawing': {
+                                'zone': 'Multiple',
+                                'drawing_section': 'Piping / Line Routing',
+                                'proximity_description': (
+                                    f"Two lines in same fluid service ({a['fluid']}) with near-identical numbers"
+                                ),
+                                'visual_cues': (
+                                    f"Search for line labels '{a['raw']}' and '{b['raw']}' on this drawing"
+                                ),
+                            },
+                        })
+
+                    except ValueError:
+                        continue
+
+        return issues
+
+    def _smart_qc_enhancement_pass(
+        self,
+        images_base64: List[str],
+        reference_data: Dict,
+        all_previous_issues: List[Dict],
+    ) -> Dict[str, Any]:
+        """
+        PASS 8: Smart QC Enhancement — four targeted specialist checks.
+
+        This pass is PURELY ADDITIVE: it does not touch or replace any logic from
+        Passes 1-7.  Each check is a self-contained block in the AI prompt, so new
+        checks can be appended without changing the base prompt or any other pass.
+
+          Check A — Duplicate / near-duplicate line number verification
+                    (programmatic pre-scan + AI visual confirmation)
+          Check B — Dynamic valve-size consistency
+                    (AI extracts annotations, compares to nominal pipe bore,
+                     applies project-agnostic oil & gas engineering rules)
+          Check C — Deep NOTES & HOLDS cross-verification
+                    (full-stack process-engineer perspective: reads every note/hold
+                     verbatim and audits whether its requirement is implemented)
+          Check D — Equipment TYPE designation validation
+                    (flags TYPE 09A vs TYPE 01A style transposition errors,
+                     conflicts with adjacent service/pipe-class context)
+        """
+        try:
+            # ── Enhancement A: programmatic near-duplicate line detection ─────────
+            dup_issues = self._detect_near_duplicate_lines()
+            if dup_issues:
+                print(f"[INFO] Pass 8 — programmatic near-dup scan: {len(dup_issues)} pair(s) flagged")
+
+            # ── Context: issues already reported (dedup guard for AI) ─────────────
+            already_str = '\n'.join(
+                f"  - [{i.get('pid_reference', '')}] {i.get('issue_observed', '')[:55]}"
+                for i in all_previous_issues[:30]
+            ) or '  None yet'
+
+            # ── Context: near-dup pairs for AI visual confirmation ────────────────
+            if dup_issues:
+                dup_pairs_str = '\n'.join(f"  ⚠ {d['pid_reference']}" for d in dup_issues)
+                dup_context = (
+                    "PROGRAMMATICALLY DETECTED NEAR-DUPLICATE LINE NUMBERS:\n"
+                    f"{dup_pairs_str}\n"
+                    "→ For each pair: confirm BOTH labels appear on the drawing AND have distinct routing.\n"
+                    "  If you spot additional near-duplicate pairs, report those too.\n"
+                )
+            else:
+                dup_context = (
+                    "Programmatic near-duplicate scan: no pairs found by pattern matching.\n"
+                    "Visually scan the drawing for any line number labels that look nearly identical.\n"
+                )
+
+            # ── Context: OCR line numbers for valve-size comparison ───────────────
+            ocr_lines_str = (
+                '\n'.join(f"  {ln}" for ln in sorted(self.line_numbers)[:40])
+                if self.line_numbers else "  None from OCR — rely on visual scan"
+            )
+
+            # ── Context: OCR notes/holds refs ─────────────────────────────────────
+            if self.notes_references:
+                notes_ctx = (
+                    f"OCR-detected note/hold references ({len(self.notes_references)} total):\n" +
+                    '\n'.join(f"  {n}" for n in sorted(self.notes_references))
+                )
+            else:
+                notes_ctx = (
+                    "OCR note/hold detection: none found by pattern matching — scan visually."
+                )
+
+            # ── System prompt ─────────────────────────────────────────────────────
+            system_msg = """You are a highly experienced FULL-STACK PROCESS ENGINEER performing a
+targeted QC scan.  You specialize in four domains:
+  A. Line-number uniqueness (piping data integrity)
+  B. Valve-size vs pipe-size consistency (dynamic, any project standard)
+  C. Notes and holds cross-compliance (every requirement checked against the drawing)
+  D. Equipment type designation accuracy (TYPE codes, class designations)
+
+CORE RULES (identical to all other passes — violations produce false positives):
+- VISUAL CONFIRMATION MANDATORY — report ONLY what is visually confirmed on this drawing.
+- PP-prefix connector numbers (NN-PP-NNN-NNNNN) are sheet connectors, NOT piping lines.
+- FC/FO/FL already annotated on any valve symbol = fail-safe specified — do NOT re-flag.
+- Indicators (FI/PI/TI/LI/PG/LG) do NOT need a control loop.
+- Do NOT re-report issues from previous passes already listed in ISSUES ALREADY REPORTED.
+
+MANDATORY JSON RESPONSE — return ONLY valid JSON, no markdown fences:
+{
+  "issues": [
+    {
+      "serial_number": 1,
+      "pid_reference": "exact reference visible on drawing (tag / line number / note number)",
+      "issue_observed": "specific description with exact values extracted from the drawing",
+      "action_required": "clear corrective action",
+      "severity": "critical|major|minor|observation",
+      "category": "line_duplicate|valve_size|notes_compliance|holds_compliance|type_designation|piping|valve|documentation",
+      "location_on_drawing": {
+        "zone": "Top-Left|Top-Center|Top-Right|Middle-Left|Middle-Center|Middle-Right|Bottom-Left|Bottom-Center|Bottom-Right",
+        "drawing_section": "Process area / notes section / title block / equipment schedule",
+        "proximity_description": "near which equipment, line, or symbol",
+        "visual_cues": "exact position description"
+      }
+    }
+  ],
+  "total_issues": 0
+}"""
+
+            # ── User prompt — four check blocks (softcoded, each independent) ─────
+            user_text = f"""PASS 8 — SMART QC ENHANCEMENT SCAN (4 targeted checks)
+
+ISSUES ALREADY REPORTED IN PREVIOUS PASSES (do NOT repeat these):
+{already_str}
+
+OCR-CONFIRMED LINE NUMBERS ON THIS DRAWING (first 40):
+{ocr_lines_str}
+
+{notes_ctx}
+
+{dup_context}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECK A — DUPLICATE & NEAR-DUPLICATE LINE NUMBER DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Examine every visible line-number label on the drawing.
+Rule: each process line MUST have a completely unique line number.
+
+□ Are there any two lines with IDENTICAL line numbers on this drawing?
+  → IDENTICAL = CRITICAL  (category: line_duplicate)
+□ Near-duplicate line numbers (same fluid code, same spec suffix, sequence differs by 1–2)?
+  → NEAR-DUP = MAJOR  (category: line_duplicate)
+□ For any near-duplicate pair in the programmatic list above: visually confirm both labels
+  exist on the drawing AND each has a distinct routing/from-to.
+  → UNCONFIRMED DISTINCT ROUTING = MAJOR  (category: line_duplicate)
+
+Industry context: Near-duplicate line numbers (e.g. 2"-D-6150-033842-X-N vs 2"-D-6152-033842-X-N)
+cause downstream errors in isometric numbering, MTO, valve tagging, and construction packages.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECK B — DYNAMIC VALVE SIZE CONSISTENCY (project-agnostic oil & gas standard)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Apply dynamic engineering judgement — works for ANY project standard.
+Do NOT hardcode rules. Extract and compare what IS annotated on the drawing.
+
+For EACH visible process line:
+  Step 1 – Read the nominal pipe size from the line number label.
+           (e.g. 4"-HC-1001-CS150  →  nominal size = 4")
+  Step 2 – Read the annotated size (inch) of EVERY valve on that line.
+           Valve sizes appear as: standalone "4"", bore note, or embedded in valve tag (e.g. 8"-MOV-XXX).
+  Step 3 – Compare each valve bore annotation to the pipe nominal size.
+
+RULE (dynamic — applies to all oil & gas P&IDs by default):
+  • Inline valve bore MUST equal pipe nominal bore.
+  • Exception: intentional reduced-bore globe/control valve WITH a concentric/eccentric reducer shown.
+  • Exception: a pressure-reducing station with explicit design annotation.
+  • A valve annotated at a DIFFERENT bore than adjacent pipe WITHOUT a reducer symbol = DISCREPANCY.
+
+□ Any inline valve annotated at a different size than the pipe it sits on?
+  → MISMATCH WITHOUT REDUCER = MAJOR  (category: valve_size)
+□ Multiple different valve sizes found on the SAME process line without clear engineering justification?
+  → UNEXPLAINED SIZE MIX = MAJOR  (category: valve_size)
+
+REPORTING FORMAT for valve-size findings:
+  pid_reference : "<LINE-NUMBER> / <VALVE-TAG if visible>"
+  issue_observed: "Line annotated as X\" but inline valve shown/tagged as Y\" without reducer symbol.
+                   All visible valve size annotations on this line: [list them all]."
+  action_required: "Verify against valve datasheet and hydraulic calculation.
+                    If Y\" is incorrect, re-annotate. Add reducer symbol if bore change is intentional."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECK C — DEEP NOTES & HOLDS CROSS-VERIFICATION (full-stack process-engineer review)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Act as an experienced full-stack process engineer reviewing this drawing at IFC stage.
+Read EVERY NOTE and HOLD on the drawing VERBATIM, then cross-check each one against:
+  1. Symbols and annotations on the main drawing body
+  2. Instrument tags and their configurations
+  3. Piping line specifications and routing
+  4. Equipment shown and its design conditions
+  5. Surrounding process context (upstream/downstream equipment, fluid service)
+
+For EACH NOTE visible on the drawing:
+  □ Read the EXACT text of the note.
+  □ Identify WHAT requirement the note imposes (material, construction, inspection, process, safety).
+  □ Check if that requirement IS visually implemented on this drawing.
+  □ NOT implemented → MAJOR finding with note number and specific gap  (category: notes_compliance)
+  □ Partially implemented or ambiguous → MINOR finding  (category: notes_compliance)
+  □ Future-scope item (FOR FUTURE USE, TBC, TO BE CONFIRMED) → MAJOR  (category: notes_compliance)
+  □ Note number in title block / list NOT referenced at its location on the drawing body → MINOR  (category: notes_compliance)
+
+For EACH HOLD visible on the drawing:
+  □ Read the EXACT text of the hold.
+  □ Check if the hold has been signed off / resolved (closure signature or annotation near it).
+  □ OPEN (no resolution) → CRITICAL finding  (category: holds_compliance)
+  □ Hold references a requirement not visible or legible → MAJOR  (category: holds_compliance)
+
+Engineering checks (process-engineer perspective):
+  □ Does any note reference a pipe class, material, or spec that conflicts with what is shown
+    elsewhere on the drawing?  → INCONSISTENCY = MAJOR
+  □ Do notes collectively describe a consistent process design, or do they contradict each other?
+    → CONTRADICTION = MAJOR
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECK D — EQUIPMENT TYPE DESIGNATION VALIDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Equipment type designations (TYPE 01A, TYPE 09A, TYPE III, TRIM CLASS I, etc.) define
+materials, valve trim, flange class, and construction methods.  Transposition errors
+(e.g. TYPE 09A where TYPE 01A is expected) are common and have procurement consequences.
+
+Scan for ALL type designation annotations on this drawing:
+  - Equipment schedules or tables listing types / classes
+  - Inline annotations like "TYPE 01A", "TYPE 09A", "CLASS II"
+  - Valve trim type codes (e.g. TRIM CLASS I, TRIM TYPE A3)
+  - Instrument or equipment type references in notes or title block
+
+□ Are there TYPE annotations visible? List each one with its associated equipment/line.
+□ Does any TYPE designation appear inconsistent with adjacent equipment of the same service
+  (e.g. one item showing TYPE 09A while all similar nearby items show TYPE 01A)?
+  → INCONSISTENT TYPE = MAJOR  (category: type_designation)
+□ Does any TYPE designation appear to be a transposition error based on engineering context
+  (service conditions, pressure class, fluid, temperature visible on the drawing)?
+  → POSSIBLE TRANSPOSITION = MAJOR  (category: type_designation)
+□ Is any TYPE designation cross-referenced to a legend, schedule, or standard visible on or
+  referenced by the drawing?  → MISSING REFERENCE = MINOR  (category: type_designation)
+□ Does any TYPE designation conflict with the pipe class, pressure rating, or service
+  conditions annotated on the same line or equipment?
+  → CONFLICT WITH SERVICE = MAJOR  (category: type_designation)
+
+REPORTING FORMAT for TYPE designation findings:
+  pid_reference : "Equipment tag / line number where TYPE annotation appears"
+  issue_observed: "TYPE DESIGNATION reads 'TYPE 09A'. Adjacent equipment of the same
+                   [service/fluid/pressure class] shows 'TYPE 01A'. Engineering context
+                   [describe what you can see] suggests this may be a transposition error."
+  action_required: "Cross-check against TYPE designation schedule / equipment spec. Correct if
+                    transposition confirmed.  Ensure all equipment of same service uses consistent type."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FINAL INSTRUCTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Report EACH deficiency as a SEPARATE JSON issue entry.
+Do NOT group multiple problems into one finding.
+Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
+
+            messages = [
+                {"role": "system", "content": system_msg},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                    ] + [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img}",
+                                "detail": "high",
+                            },
+                        }
+                        for img in images_base64
+                    ],
+                },
+            ]
+
+            print("[INFO] Calling OpenAI for Pass 8 (Smart QC Enhancement)...")
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=10000,
+                temperature=0.3,
+                timeout=300,
+            )
+
+            if not response or not response.choices:
+                print("[WARNING] Pass 8: OpenAI returned empty response")
+                return {"issues": dup_issues, "total_issues": len(dup_issues)}
+
+            response_text = (response.choices[0].message.content or "").strip()
+            print(f"[DEBUG PASS 8] len={len(response_text)} | preview={response_text[:120]}")
+            result = self._parse_analysis_response(response_text, 0)
+            ai_issues = result.get("issues", [])
+
+            # Merge: programmatic near-dup findings (authoritative) + AI findings
+            all_enhancement_issues = dup_issues + ai_issues
+            print(
+                f"[INFO] Pass 8 found {len(all_enhancement_issues)} issues "
+                f"({len(dup_issues)} programmatic + {len(ai_issues)} AI)"
+            )
+            return {"issues": all_enhancement_issues, "total_issues": len(all_enhancement_issues)}
+
+        except Exception as e:
+            print(f"[WARNING] Pass 8 (Smart QC Enhancement) failed (non-critical): {str(e)}")
+            # Graceful fallback: return programmatic near-dup findings even if AI call fails
+            try:
+                fallback_dups = self._detect_near_duplicate_lines()
+                return {"issues": fallback_dups, "total_issues": len(fallback_dups)}
+            except Exception:
+                return {"issues": [], "total_issues": 0}
 
     def _merge_and_deduplicate(self, pass1: List, pass2: List, pass3: List, pass4: List = None) -> List[Dict[str, Any]]:
         """
