@@ -18,6 +18,92 @@ from .reference_processor import ReferenceDocumentProcessor
 class PIDAnalysisService:
     """AI-Powered P&ID Analysis Service with Multi-Pass Validation"""
 
+    # ── Model cascade (vision-capable only — gpt-3.5 does NOT support images) ──
+    # Primary model is used for all passes.  If it refuses to process the image
+    # (e.g. due to context overload on long prompts), FALLBACK_MODEL is tried
+    # automatically.  Both support vision; mini is lighter and more tolerant.
+    _PRIMARY_MODEL   = "gpt-4o"
+    _FALLBACK_MODEL  = "gpt-4o-mini"
+
+    # Phrases that indicate the model refused / couldn't see the image.
+    # Checked case-insensitively.  Extend here; no other code changes needed.
+    _REFUSAL_PHRASES = (
+        "i'm unable to process",
+        "i'm sorry, i can't",
+        "i cannot process",
+        "i can't process",
+        "cannot view",
+        "unable to view",
+        "no image",
+        "don't see any image",
+        "no image was provided",
+        "i don't have the ability to view",
+        "i'm not able to view",
+    )
+
+    @classmethod
+    def _model_refused_image(cls, text: str) -> bool:
+        """Return True if the model response is a vision-refusal (not a real result)."""
+        lower = text.lower()
+        return any(phrase in lower for phrase in cls._REFUSAL_PHRASES)
+
+    def _call_with_vision_fallback(
+        self,
+        messages: list,
+        pass_label: str,
+        primary_tokens: int,
+        fallback_tokens: int,
+        primary_timeout: int,
+        fallback_timeout: int,
+    ) -> str:
+        """
+        Call _PRIMARY_MODEL; if it refuses the image, transparently retry with
+        _FALLBACK_MODEL.  Returns the raw response text (empty string on total failure).
+        Both models are vision-capable — GPT-3.5 / GPT-4-base are NOT used.
+        """
+        # ── Primary attempt ────────────────────────────────────────────────────
+        print(f"[INFO] {pass_label}: calling {self._PRIMARY_MODEL}...")
+        try:
+            resp = self.client.chat.completions.create(
+                model=self._PRIMARY_MODEL,
+                messages=messages,
+                max_tokens=primary_tokens,
+                temperature=0.3,
+                timeout=primary_timeout,
+            )
+            text = (resp.choices[0].message.content or "").strip() if resp and resp.choices else ""
+        except Exception as ex:
+            print(f"[WARNING] {pass_label}: {self._PRIMARY_MODEL} call failed ({ex}) — trying fallback.")
+            text = ""
+
+        if text and not self._model_refused_image(text):
+            print(f"[DEBUG {pass_label}] {self._PRIMARY_MODEL} OK | len={len(text)} | preview={text[:120]}")
+            return text
+
+        # ── Fallback to lighter vision model ───────────────────────────────────
+        reason = "refused image" if text else "empty response"
+        print(f"[WARNING] {pass_label}: {self._PRIMARY_MODEL} {reason} — retrying with {self._FALLBACK_MODEL}...")
+        try:
+            fb_resp = self.client.chat.completions.create(
+                model=self._FALLBACK_MODEL,
+                messages=messages,
+                max_tokens=fallback_tokens,
+                temperature=0.3,
+                timeout=fallback_timeout,
+            )
+            fb_text = (fb_resp.choices[0].message.content or "").strip() if fb_resp and fb_resp.choices else ""
+        except Exception as fb_ex:
+            print(f"[WARNING] {pass_label}: {self._FALLBACK_MODEL} also failed ({fb_ex}).")
+            return ""
+
+        if fb_text and not self._model_refused_image(fb_text):
+            print(f"[DEBUG {pass_label}] {self._FALLBACK_MODEL} OK | len={len(fb_text)} | preview={fb_text[:120]}")
+            print(f"[INFO] {pass_label}: {self._FALLBACK_MODEL} succeeded as fallback.")
+            return fb_text
+
+        print(f"[WARNING] {pass_label}: both models refused / returned empty — returning empty.")
+        return ""
+
     def __init__(self):
         """Initialize OpenAI client with timeout"""
         api_key = (
@@ -1455,21 +1541,17 @@ Return ONLY valid JSON with ALL findings from ALL nine domains above."""
                 }
             ]
 
-            print("[INFO] Calling OpenAI for engineering compliance deep-scan (Pass 6)...")
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                max_tokens=12000,
-                temperature=0.3,
-                timeout=300
+            response_text = self._call_with_vision_fallback(
+                messages,
+                pass_label="PASS 6",
+                primary_tokens=12000,
+                fallback_tokens=10000,
+                primary_timeout=300,
+                fallback_timeout=270,
             )
-
-            if not response or not response.choices:
-                print("[WARNING] Pass 6: OpenAI returned empty response")
+            if not response_text:
+                print("[INFO] Pass 6 (engineering compliance) found 0 additional issues")
                 return []
-
-            response_text = (response.choices[0].message.content or "").strip()
-            print(f"[DEBUG PASS 6] len={len(response_text)} | preview={response_text[:120]}")
             result = self._parse_analysis_response(response_text, 0)
             issues = result.get('issues', [])
             print(f"[INFO] Pass 6 (engineering compliance) found {len(issues)} additional issues")
@@ -2400,21 +2482,16 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
                 },
             ]
 
-            print("[INFO] Calling OpenAI for Pass 8 (Smart QC Enhancement — 9 checks)...")
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                max_tokens=16000,
-                temperature=0.3,
-                timeout=360,
+            response_text = self._call_with_vision_fallback(
+                messages,
+                pass_label="PASS 8",
+                primary_tokens=16000,
+                fallback_tokens=12000,
+                primary_timeout=360,
+                fallback_timeout=300,
             )
-
-            if not response or not response.choices:
-                print("[WARNING] Pass 8: OpenAI returned empty response")
+            if not response_text:
                 return {"issues": dup_issues, "total_issues": len(dup_issues)}
-
-            response_text = (response.choices[0].message.content or "").strip()
-            print(f"[DEBUG PASS 8] len={len(response_text)} | preview={response_text[:120]}")
             result = self._parse_analysis_response(response_text, 0)
             ai_issues = result.get("issues", [])
 
