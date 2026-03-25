@@ -281,6 +281,12 @@ class PIDAnalysisService:
                     'line_duplicates_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') == 'line_duplicate']),
                     'valve_size_issues_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') == 'valve_size']),
                     'type_designation_issues_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') == 'type_designation']),
+                    # New Pass 8 extended checks (E-I)
+                    'revision_changes_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') == 'revision_change']),
+                    'line_number_anomalies_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') in ('line_number_anomaly', 'spec_break')]),
+                    'missing_fittings_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') == 'missing_fitting']),
+                    'instrument_downgrades_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') == 'instrument_downgrade']),
+                    'line_continuity_issues_found': len([i for i in smart_qc_result.get('issues', []) if i.get('category') == 'line_continuity']),
                     'analysis_passes': 8,
                     'multi_pass_enabled': True,
                     'reference_documents_used': bool(reference_documents),
@@ -1805,6 +1811,90 @@ Focus especially on:
                     except ValueError:
                         continue
 
+        # ── Enhancement: same-line-identity with different SIZE or SPEC ──────────
+        # Group parsed lines by (fluid_code, sequence_number).
+        # The combination (fluid, sequence) is the unique identity of a piping line.
+        # If the SAME identity appears with multiple sizes OR specs on this drawing,
+        # it indicates a size/spec change that was not consistently applied.
+        from collections import defaultdict as _dd
+        by_identity: dict = _dd(list)
+        for p in parsed:
+            by_identity[(p['fluid'], p['sequence'])].append(p)
+
+        for (_fluid, _seq), _entries in by_identity.items():
+            if len(_entries) < 2:
+                continue
+            _sizes = [e['size'] for e in _entries]
+            _specs = [e['suffix'] for e in _entries]
+            _unique_sizes = sorted(set(_sizes))
+            _unique_specs = sorted(set(_specs))
+
+            # SIZE CONFLICT on same line identity
+            if len(_unique_sizes) > 1:
+                _raws = ' / '.join(e['raw'] for e in _entries)
+                _pair_key = tuple(sorted(e['raw'] for e in _entries))
+                if _pair_key not in seen_pairs:
+                    seen_pairs.add(_pair_key)
+                    issues.append({
+                        'pid_reference': _raws,
+                        'issue_observed': (
+                            f"Line identity {_fluid}-{_seq} appears on this drawing with CONFLICTING NOMINAL SIZES: "
+                            f"{', '.join(_unique_sizes)}\". "
+                            f"Same fluid code and sequence number must carry a single consistent nominal size. "
+                            f"This is a strong indicator that the pipe size was changed in a recent revision "
+                            f"but not all line-number labels were updated."
+                        ),
+                        'action_required': (
+                            f"Verify the correct nominal size for line {_fluid}-{_seq} against the PFD, "
+                            f"process datasheet, and hydraulic calculation. "
+                            f"Correct all inconsistent line-number labels on the drawing. "
+                            f"If the change is intentional, ensure a reducer/expander fitting is shown at the transition."
+                        ),
+                        'severity': 'major',
+                        'category': 'line_number_anomaly',
+                        'location_on_drawing': {
+                            'zone': 'Multiple',
+                            'drawing_section': 'Piping / Line Number Labels',
+                            'proximity_description': (
+                                f"Search for all line-number annotations containing {_fluid}-{_seq} on this drawing"
+                            ),
+                            'visual_cues': f"Conflicting labels: {_raws}",
+                        },
+                    })
+
+            # SPEC CONFLICT on same line identity (only if size is consistent to avoid double-report)
+            if len(_unique_specs) > 1 and len(_unique_sizes) < 2:
+                _raws = ' / '.join(e['raw'] for e in _entries)
+                _pair_key = tuple(sorted(e['raw'] for e in _entries))
+                if _pair_key not in seen_pairs:
+                    seen_pairs.add(_pair_key)
+                    issues.append({
+                        'pid_reference': _raws,
+                        'issue_observed': (
+                            f"Line identity {_fluid}-{_seq} appears on this drawing with CONFLICTING PIPE SPECIFICATIONS: "
+                            f"{', '.join(_unique_specs)}. "
+                            f"Same fluid code and sequence number must carry a single consistent pipe class. "
+                            f"This indicates a spec/class change in a recent revision that was not consistently "
+                            f"applied to all line-number labels, or an unmarked spec break."
+                        ),
+                        'action_required': (
+                            f"Verify the correct pipe class for line {_fluid}-{_seq} against the line list and "
+                            f"piping class definition document. "
+                            f"Correct all inconsistent spec annotations on the drawing. "
+                            f"If a spec-break is intentional, add the required spec-break flange symbol and annotation."
+                        ),
+                        'severity': 'major',
+                        'category': 'spec_break',
+                        'location_on_drawing': {
+                            'zone': 'Multiple',
+                            'drawing_section': 'Piping / Line Number Labels',
+                            'proximity_description': (
+                                f"Search for all line-number annotations containing {_fluid}-{_seq} on this drawing"
+                            ),
+                            'visual_cues': f"Conflicting labels: {_raws}",
+                        },
+                    })
+
         return issues
 
     def _smart_qc_enhancement_pass(
@@ -1814,7 +1904,7 @@ Focus especially on:
         all_previous_issues: List[Dict],
     ) -> Dict[str, Any]:
         """
-        PASS 8: Smart QC Enhancement — four targeted specialist checks.
+        PASS 8: Smart QC Enhancement — nine targeted specialist checks.
 
         This pass is PURELY ADDITIVE: it does not touch or replace any logic from
         Passes 1-7.  Each check is a self-contained block in the AI prompt, so new
@@ -1831,6 +1921,21 @@ Focus especially on:
           Check D — Equipment TYPE designation validation
                     (flags TYPE 09A vs TYPE 01A style transposition errors,
                      conflicts with adjacent service/pipe-class context)
+          Check E — Revision cloud & change indicator identification
+                    (finds ALL revision clouds/delta markers, evaluates engineering
+                     impact of each change: size/spec/type/fitting/line removal)
+          Check F — Line number component integrity analysis
+                    (SIZE-FLUID-SEQ-SPEC breakdown: size vs nozzle, spec vs adjacent
+                     lines, seq anomalies — catches size/spec/seq-number changes)
+          Check G — Missing reducer / expander at size transitions
+                    (every pipe-size change point must have fitting symbol or explicit
+                     equipment-nozzle exception — catches "expander removed" class bugs)
+          Check H — Instrument function regression detection
+                    (PI/FI/TI/LI where PIC/FIC/TIC/LIC expected; CV without controller;
+                     catches downgrade from controller to indicator)
+          Check I — Process line continuity & missing connection detection
+                    (dead-end lines, orphaned nozzles, lines referenced in notes/tables
+                     but absent from drawing — catches "line removed" class bugs)
         """
         try:
             # ── Enhancement A: programmatic near-duplicate line detection ─────────
@@ -1865,6 +1970,26 @@ Focus especially on:
                 if self.line_numbers else "  None from OCR — rely on visual scan"
             )
 
+            # ── Context: parsed line-number components (for Checks E, F) ─────────
+            import re as _re_ctx
+            _line_pat = _re_ctx.compile(
+                r'^([\d½¼¾]+(?:\.\d+)?)["\u2019]?[-\u2013]([A-Z]{1,6})[-\u2013](\d{3,6})((?:[-\u2013][\w\d]+)*)$',
+                _re_ctx.IGNORECASE,
+            )
+            _parsed_ctx = []
+            for _ln in sorted(self.line_numbers)[:60]:
+                _m = _line_pat.match(_ln.strip())
+                if _m:
+                    _parsed_ctx.append(
+                        f"  {_ln:35s}  size={_m.group(1)}\", fluid={_m.group(2).upper()}, "
+                        f"seq={_m.group(3)}, spec={_m.group(4).lstrip('-') or '(none)'}"
+                    )
+                else:
+                    _parsed_ctx.append(f"  {_ln:35s}  (non-standard format)")
+            line_parsed_str = (
+                '\n'.join(_parsed_ctx) if _parsed_ctx else "  None parsed from OCR — rely on visual scan"
+            )
+
             # ── Context: OCR notes/holds refs ─────────────────────────────────────
             if self.notes_references:
                 notes_ctx = (
@@ -1877,18 +2002,24 @@ Focus especially on:
                 )
 
             # ── System prompt ─────────────────────────────────────────────────────
-            system_msg = """You are a highly experienced FULL-STACK PROCESS ENGINEER performing a
-targeted QC scan.  You specialize in four domains:
+            system_msg = """You are a highly experienced FULL-STACK PROCESS ENGINEER and P&ID REVISION AUDITOR
+performing a targeted QC scan.  You specialize in NINE domains:
   A. Line-number uniqueness (piping data integrity)
   B. Valve-size vs pipe-size consistency (dynamic, any project standard)
   C. Notes and holds cross-compliance (every requirement checked against the drawing)
   D. Equipment type designation accuracy (TYPE codes, class designations)
+  E. Revision cloud identification & change impact assessment
+  F. Line number component integrity (size / spec / sequence consistency)
+  G. Missing fitting detection at pipe size transitions
+  H. Instrument function regression (indicator replacing controller / transmitter)
+  I. Process line continuity & dead-end / missing-connection detection
 
 CORE RULES (identical to all other passes — violations produce false positives):
 - VISUAL CONFIRMATION MANDATORY — report ONLY what is visually confirmed on this drawing.
 - PP-prefix connector numbers (NN-PP-NNN-NNNNN) are sheet connectors, NOT piping lines.
 - FC/FO/FL already annotated on any valve symbol = fail-safe specified — do NOT re-flag.
-- Indicators (FI/PI/TI/LI/PG/LG) do NOT need a control loop.
+- Indicators (FI/PI/TI/LI/PG/LG) do NOT need a control loop UNLESS a control valve is nearby.
+- Local gauges (PG, LG) intentionally indicator-only — do NOT flag.
 - Do NOT re-report issues from previous passes already listed in ISSUES ALREADY REPORTED.
 
 MANDATORY JSON RESPONSE — return ONLY valid JSON, no markdown fences:
@@ -1900,7 +2031,7 @@ MANDATORY JSON RESPONSE — return ONLY valid JSON, no markdown fences:
       "issue_observed": "specific description with exact values extracted from the drawing",
       "action_required": "clear corrective action",
       "severity": "critical|major|minor|observation",
-      "category": "line_duplicate|valve_size|notes_compliance|holds_compliance|type_designation|piping|valve|documentation",
+      "category": "line_duplicate|valve_size|notes_compliance|holds_compliance|type_designation|revision_change|line_number_anomaly|spec_break|missing_fitting|instrument_downgrade|line_continuity|piping|valve|documentation",
       "location_on_drawing": {
         "zone": "Top-Left|Top-Center|Top-Right|Middle-Left|Middle-Center|Middle-Right|Bottom-Left|Bottom-Center|Bottom-Right",
         "drawing_section": "Process area / notes section / title block / equipment schedule",
@@ -1912,14 +2043,17 @@ MANDATORY JSON RESPONSE — return ONLY valid JSON, no markdown fences:
   "total_issues": 0
 }"""
 
-            # ── User prompt — four check blocks (softcoded, each independent) ─────
-            user_text = f"""PASS 8 — SMART QC ENHANCEMENT SCAN (4 targeted checks)
+            # ── User prompt — nine check blocks (softcoded, each independent) ─────
+            user_text = f"""PASS 8 — SMART QC ENHANCEMENT SCAN (9 targeted checks)
 
 ISSUES ALREADY REPORTED IN PREVIOUS PASSES (do NOT repeat these):
 {already_str}
 
 OCR-CONFIRMED LINE NUMBERS ON THIS DRAWING (first 40):
 {ocr_lines_str}
+
+PARSED LINE NUMBER COMPONENTS (size / fluid / sequence / spec) for Check E & F:
+{line_parsed_str}
 
 {notes_ctx}
 
@@ -2040,10 +2174,206 @@ REPORTING FORMAT for TYPE designation findings:
                     transposition confirmed.  Ensure all equipment of same service uses consistent type."
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECK E — REVISION CLOUD & CHANGE INDICATOR IDENTIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+P&ID revisions are visually marked with REVISION CLOUDS (irregular outline around changed
+area), REVISION TRIANGLES (delta △ with revision letter/number), STRIKETHROUGH text showing
+what was removed, or "REVISED REV X" labels. EVERY revision marker represents a deliberate
+change that MUST be audited for engineering impact.
+
+Step 1 — IDENTIFY all revision markers on this drawing:
+  Look for: irregular cloud/bubble outlines surrounding an area; △ delta symbols with revision
+  letters next to them; strikethrough text showing old values; circled revision numbers; any
+  annotation containing "REV", "REVISED", "REVISION", or a revision letter in a triangle.
+
+Step 2 — For EACH revision cloud / marker found, evaluate engineering impact:
+  □ LINE SIZE CHANGED (line number says 4" but was previously 6", or vice versa):
+      Is the new size consistent with connected equipment nozzles?
+      Is there a missing reducer/expander now needed at the transition?
+      → SIZE CHANGE IMPACT = MAJOR  (category: revision_change)
+  □ PIPE SPEC / CLASS CHANGED (e.g., CS150 → CS300 or vice versa):
+      Is the new spec consistent with the process design conditions?
+      Are adjacent directly-connected lines updated to match?
+      Is a spec-break marker added if spec changes mid-line?
+      → SPEC CHANGE IMPACT = MAJOR  (category: revision_change)
+  □ INSTRUMENT DOWNGRADED (PIC/FIC/TIC → PI/FI/TI, losing control function):
+      Is the control function now missing from the loop?
+      Is there still a control valve with no controller?
+      → INSTRUMENT DOWNGRADE IMPACT = MAJOR  (category: instrument_downgrade)
+  □ FITTING REMOVED (expander, reducer, strainer, check valve missing):
+      Does removal leave a size mismatch or missing safety element?
+      → MISSING FITTING IMPACT = MAJOR  (category: missing_fitting)
+  □ LINE REMOVED (process pipe completely removed):
+      Does this leave dead-end nozzles or disconnected equipment?
+      Does any note or instrument still reference the removed line?
+      → LINE REMOVAL IMPACT = MAJOR  (category: line_continuity)
+  □ SEQUENCE NUMBER CHANGED (e.g., 1001 → 1012 in a line number):
+      Does the old sequence still appear elsewhere creating a duplicate or gap?
+      → SEQ CHANGE IMPACT = MAJOR  (category: line_number_anomaly)
+  □ SAFETY ELEMENT CHANGED (PSV, ESD, SIS element modified):
+      → SAFETY CHANGE = CRITICAL  (category: revision_change)
+
+REPORTING FORMAT for revision-change findings:
+  pid_reference : "Line/Tag/Equipment enclosed by revision cloud (Rev X if visible)"
+  issue_observed: "REVISION CLOUD detected enclosing [exact description of element].
+                   Apparent change: [describe what changed and the engineering implication]."
+  action_required: "Verify revision against the Approved-for-Issue markup or change register.
+                    Confirm the modified element complies with current process design intent,
+                    line list, and all affected downstream documents."
+
+IMPORTANT: If NO revision clouds are visible on this drawing, state "No revision clouds
+found" as an observation entry (severity: observation). Do NOT invent revision markers.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECK F — LINE NUMBER COMPONENT INTEGRITY ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Line numbers encode key engineering data: SIZE"-FLUID-SEQUENCE-SPEC (e.g. 4"-HC-1001-CS150).
+Each component must be INTERNALLY CONSISTENT with what is drawn.
+
+USE THE PARSED LINE NUMBER COMPONENTS TABLE ABOVE as context.
+
+For EACH line number visible on the drawing:
+
+□ SIZE COMPONENT CHECK:
+  At the line's connection to equipment: visible nozzle ID should match the line size.
+  At a direct weld/flange connection to another line (no reducer shown), BOTH line numbers
+  should show the SAME nominal size.
+  If the line number says 4" but the pipe visually connects to a 6" pipe without a
+  reducer → SIZE VS NOZZLE MISMATCH = MAJOR  (category: line_number_anomaly)
+
+□ SPEC COMPONENT CHECK:
+  Lines of the same fluid service on the same continuous flow path SHOULD have the
+  same pipe class, UNLESS a spec-break marker (double slash /) is shown at the transition.
+  If two directly connected lines show DIFFERENT spec classes without a spec-break marker
+  between them → UNMARKED SPEC CHANGE = MAJOR  (category: spec_break)
+  If a line's spec class appears inconsistent with its fluid service and pressure context
+  (e.g., CS150 annotated on a high-pressure stream) → SPEC vs SERVICE FLAG = MAJOR  (category: spec_break)
+
+□ SEQUENCE NUMBER ANOMALY:
+  Within the same fluid code, sequence numbers should be broadly sequential.
+  Large unexplained GAPS in sequence (e.g., 1001, 1002, then jumps to 1050)
+  may indicate lines were deleted without updating the drawing.
+  → SEQUENCE GAP = MINOR  (category: line_number_anomaly)
+  Any sequence number > 9600 → OUT OF ALLOTTED RANGE = MAJOR  (category: line_number_anomaly)
+
+REPORTING FORMAT:
+  pid_reference : "Full line number as annotated on drawing (e.g., 6\"-HC-1001-CS150)"
+  issue_observed: "LINE NUMBER COMPONENT ANOMALY: [specific component] reads [value A] but
+                   [drawing context] shows [value B]. [Exact engineering description]."
+  action_required: "Verify correct [size/spec/sequence] against line list and PFD.
+                    Correct the line number label or the drawing accordingly."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECK G — MISSING REDUCER / EXPANDER AT SIZE TRANSITIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Every point where pipeline NOMINAL SIZE CHANGES must show the appropriate fitting symbol.
+  • Concentric Reducer  (larger→smaller): standard inline size reduction
+  • Eccentric Reducer   (larger→smaller): pump suction, sloping lines to prevent pooling
+  • Expander/Increaser  (smaller→larger): velocity reduction after compressor, flow meter
+
+A size transition WITHOUT a fitting symbol is a documentation gap (fitting will still be
+included in construction but MTO and isometrics will miss it).
+
+For EACH point on the drawing where two different nominal pipe sizes connect:
+  □ Is a reducer or expander SYMBOL shown at the transition?
+  □ If NO symbol: is the change occurring AT an equipment nozzle (natural transition point)?
+  □ If neither a fitting symbol NOR an obvious equipment nozzle: → MISSING FITTING = MAJOR
+            (category: missing_fitting)
+
+ACCEPTABLE EXCEPTIONS (do NOT flag):
+  ✓ Connection directly at vessel/exchanger/pump nozzle (nozzle absorbs size transition)
+  ✓ Fitting label "RDR", "ECC RDR", or "EXP" visible near the transition point
+  ✓ Control valve body (inherently reduced bore — annotated or standard practice)
+  ✓ Restriction orifice (designed bore reduction)
+
+REPORTING FORMAT:
+  pid_reference : "LINE-A / LINE-B (or location description near equipment)"
+  issue_observed: "SIZE TRANSITION from X\" (line [A]) to Y\" (line [B] or nozzle) at
+                   [location] shows NO reducer or expander fitting symbol. The two lines
+                   connect directly without an intermediate fitting."
+  action_required: "Add the appropriate concentric or eccentric reducer / expander symbol
+                    at the transition. Confirm fitting type against the 3D model or
+                    isometric. Add nozzle size annotation if transition is at equipment."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECK H — INSTRUMENT FUNCTION REGRESSION DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+A FUNCTION REGRESSION occurs when a CONTROL / TRANSMITTER instrument is replaced by a
+simple INDICATOR, removing the feedback control capability from the loop.
+
+ISA-5.1 FUNCTION HIERARCHY:
+  Indicator     :  PI / FI / TI / LI / AI  — displays value, NO control action
+  Transmitter   :  PT / FT / TT / LT / AT  — signal output (feeds controller/DCS)
+  Controller    :  PIC / FIC / TIC / LIC   — closed-loop automatic control
+  Final element :  PCV / FCV / TCV / LCV   — actuated valve responding to controller
+
+A COMPLETE control loop requires: [Transmitter] → [Controller] → [Actuated Valve]
+
+DETECTION RULES (apply with engineering judgement — DO NOT over-flag):
+  □ Actuated CONTROL VALVE (FCV/PCV/TCV/LCV) visible on a line, but ONLY a plain
+    INDICATOR (FI/PI/TI/LI) shown as the measurement device (no FT/PT/TT, no FIC/PIC/TIC
+    controller bubble visible anywhere on the loop)
+    → CONTROL LOOP MISSING TRANSMITTER/CONTROLLER = MAJOR  (category: instrument_downgrade)
+  □ A FLOW measurement tag visible as FI (indicator) at a point where the process context
+    strongly suggests active flow control (e.g., immediately upstream of an FCV)
+    → FI WHERE FIC EXPECTED = MAJOR  (category: instrument_downgrade)
+  □ A PRESSURE indicator (PI) on a header that clearly has a pressure-control valve (PCV)
+    downstream, with no PIC or PT visible
+    → PI WHERE PIC/PT EXPECTED = MAJOR  (category: instrument_downgrade)
+  □ An instrument TAG NUMBER that matches a controller convention (e.g., FIC-301 on a
+    bubble drawn as FI rather than FIC) — tag number says controller, symbol says indicator
+    → TAG vs SYMBOL CONFLICT = MAJOR  (category: instrument_downgrade)
+
+DO NOT FLAG:
+  ✓ Local gauges (PG, LG) — always indicator-only by design
+  ✓ PSV / PRV — self-acting, not a control loop instrument
+  ✓ Indicators supplemental to existing FT/FIC loop (dual indication is acceptable)
+  ✓ Indicators in utility lines where automatic control is designed to be absent
+  ✓ XZ-prefix position switches (XZSH, XZSL) — not control loop instruments
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECK I — PROCESS LINE CONTINUITY & MISSING CONNECTION DETECTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Process lines must be continuous: start from a SOURCE (equipment nozzle, battery limit,
+or sheet connector) and end at a DESTINATION (equipment nozzle, battery limit, sheet
+connector, or intentional termination). DEAD-ENDS indicate removed connections.
+
+DETECTION RULES:
+  □ A line bearing a LINE NUMBER that originates from an equipment nozzle but ENDS
+    without connecting to another equipment, battery-limit marker, or sheet connector
+    → PROCESS LINE DEAD-END = MAJOR  (category: line_continuity)
+  □ An equipment NOZZLE STUB visible (short pipe protruding from vessel/exchanger)
+    with no line number, no connecting line shown, and no "FUTURE" annotation
+    → ORPHAN NOZZLE = MAJOR  (category: line_continuity)
+  □ A line ending at a BLIND FLANGE or cap without a "FUTURE" / "SPARE" / "TBC" label
+    and without being inside an obvious maintenance isolation or test connection
+    → UNRESOLVED BLIND TERMINATION = MINOR  (category: line_continuity)
+  □ Two pieces of equipment that the process CLEARLY requires to be connected
+    (e.g., pump discharge with no outlet pipe, compressor suction unconnected) but
+    NO process line is shown between them
+    → MISSING PROCESS CONNECTION = MAJOR  (category: line_continuity)
+
+ACCEPTABLE TERMINATIONS (do NOT flag):
+  ✓ Line ending at a TIE-IN point labelled "TI-XXXX" or "TIE-IN"
+  ✓ Line ending at battery limit (BL) or area limit (AL) marker
+  ✓ Deliberately stubbed "FUTURE" or "FPSO" connections with labels
+  ✓ Lines continuing on another sheet via PP sheet connector
+  ✓ Utility stubs labelled "UB" or "UTILITY CONNECTION AS REQUIRED"
+
+REPORTING FORMAT:
+  pid_reference : "LINE NUMBER or EQUIPMENT TAG + NOZZLE (e.g., V-101 N3)"
+  issue_observed: "DEAD-END / MISSING CONNECTION: Line [X] or nozzle at [location]
+                   terminates at [description] without a connection destination or
+                   proper termination annotation."
+  action_required: "Verify process flow sheet for correct from/to. Add the missing
+                    connection, or annotate with TIE-IN / FUTURE / BL marker."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FINAL INSTRUCTION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Report EACH deficiency as a SEPARATE JSON issue entry.
 Do NOT group multiple problems into one finding.
+Do NOT invent issues — every finding must be visually confirmed on the drawing.
 Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
 
             messages = [
@@ -2065,13 +2395,13 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
                 },
             ]
 
-            print("[INFO] Calling OpenAI for Pass 8 (Smart QC Enhancement)...")
+            print("[INFO] Calling OpenAI for Pass 8 (Smart QC Enhancement — 9 checks)...")
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages,
-                max_tokens=10000,
+                max_tokens=16000,
                 temperature=0.3,
-                timeout=300,
+                timeout=360,
             )
 
             if not response or not response.choices:
