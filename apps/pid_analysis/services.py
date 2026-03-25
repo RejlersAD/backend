@@ -956,7 +956,7 @@ VALVE_STANDARDS_COMPLIANCE (API 6D, ASME B16.34, API 600, ISO 15848):
 
 TIE_IN_POINT_VERIFICATION (tie-in package and battery limit compliance):
   For each tie-in point or battery limit (BL) connection visible on the drawing:
-  - Must be tagged as TI-XXXX (tie-in number) with unique sequential identifier; untagged tie-in = MAJOR finding (category: tie_in_reference)
+  - Must have a readable sequential tie-in tag visible on the drawing (e.g. TI-0001); untagged or unreadable tie-in tag = MAJOR finding (category: tie_in_reference)
   - Existing pipe spec clearly shown at the tie-in point (upstream/existing spec vs new spec); missing existing spec = MAJOR finding (category: tie_in_reference)
   - Block valve (isolation valve) shown at tie-in to allow hot tap or cold cut isolation; missing isolation valve at TI = CRITICAL finding (category: tie_in_reference)
   - Connection type annotated: "HOT TAP", "COLD TIE-IN", "FLANGED TIE-IN", or "WELDED TIE-IN"; missing type = MAJOR finding (category: tie_in_reference)
@@ -1409,6 +1409,7 @@ Every finding YOU produce must come from a VISUALLY CONFIRMED element on the dra
 
 GOLDEN RULES (same as always):
 - VISUAL CONFIRMATION MANDATORY — never invent a tag, equipment item, or annotation.
+- pid_reference MUST be the EXACT tag you read from the drawing. NEVER echo placeholder text from these instructions (e.g. never write "PSV-XXXX", "TI-XXXX", or any other template — always write the actual tag you can see, or describe as "PSV [tag unreadable]" if you cannot read it).
 - PP-prefix connector numbers (NN-PP-NNN-NNNNN) are sheet connectors, NOT piping lines.
 - PG/LG are local gauges — they do NOT need alarm setpoints or measurement ranges on P&ID.
 - FC/FO/FL already on a valve symbol = fail-safe specified — do NOT flag again.
@@ -1458,7 +1459,7 @@ For each PSV, PRV, PDSV, or TSV symbol visible:
   □ Is the discharge line drawn to a flare header, vent stack, or safe destination?  → MISSING = CRITICAL
   □ Is a sizing basis or reference tag (e.g. "SEE PSV DATA SHEET") shown?  → MISSING = MAJOR
   □ Is the inlet line adequately sized (same bore or larger than PSV inlet nozzle)?  → UNDERSIZED = MAJOR
-  □ Is the PSV tag in the format PSV-XXXX?  → MISSING TAG = MAJOR
+  □ Does the PSV symbol have a readable tag label visible on the drawing?  → NO READABLE TAG = MAJOR
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DOMAIN 2 — VALVE STANDARDS (API 6D / ASME B16.34 / API 600 / ISO 15848)
@@ -1478,7 +1479,7 @@ For each actuated or specialty valve visible:
 DOMAIN 3 — TIE-IN POINTS & BATTERY LIMITS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 For each tie-in point or BL (battery limit) connection visible:
-  □ Is it tagged TI-XXXX with a unique sequential number?  → UNTAGGED = MAJOR  (category: tie_in_reference)
+  □ Does the tie-in point have a readable sequential tag visible on the drawing (e.g. TI-0001)?  → NO READABLE TAG = MAJOR  (category: tie_in_reference)
   □ Is the existing pipe spec labeled at the tie-in arrow?  → MISSING = MAJOR  (category: tie_in_reference)
   □ Is an isolation valve shown at the tie-in to allow hot-tap or cold-cut?  → MISSING = CRITICAL  (category: tie_in_reference)
   □ Is the connection type annotated (HOT TAP / COLD TIE-IN / FLANGED / WELDED)?  → MISSING = MAJOR  (category: tie_in_reference)
@@ -2459,7 +2460,7 @@ DETECTION RULES:
     → MISSING PROCESS CONNECTION = MAJOR  (category: line_continuity)
 
 ACCEPTABLE TERMINATIONS (do NOT flag):
-  ✓ Line ending at a TIE-IN point labelled "TI-XXXX" or "TIE-IN"
+  ✓ Line ending at a TIE-IN point labelled with a tie-in tag number (e.g. TI-0001) or "TIE-IN"
   ✓ Line ending at battery limit (BL) or area limit (AL) marker
   ✓ Deliberately stubbed "FUTURE" or "FPSO" connections with labels
   ✓ Lines continuing on another sheet via PP sheet connector
