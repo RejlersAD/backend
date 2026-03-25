@@ -478,10 +478,10 @@ class PIDAnalysisService:
         
         # Filter equipment tags: exclude P&ID reference patterns and line-number-style tags
         # TAG CONVENTION RULES (expert-validated):
-        #   D-XXXX where XXXX >= 1000 → Drain/Disposal SERVICE LINE number (e.g. D-6159), NOT a drum/vessel
-        #   D-XXX  where XXX  <  200  → P&ID sheet reference number → skip both
-        #   P-XXXX-NN where XXXX >= 1000 and NN is 2-digit number → Process line number (e.g. P-3610-02), NOT a pump
-        #   True equipment: V-XXXX, E-XXX, K-XXX, H-XXX, P-XX to P-999 (pumps), D-XXX 200-999 (drums)
+        #   P = PUMP  → P-3610, P-3610-02 are ALL equipment (pump tags). NEVER a line number.
+        #   D-XXXX where XXXX >= 1000 → Drain service LINE number (e.g. D-6159), NOT a vessel/drum
+        #   D-XXX  where XXX  <  200  → P&ID sheet reference → skip
+        #   D-XXX  where 200 <= XXX < 1000 → Could be drum (equipment) → keep
         service_line_number_candidates = set()  # will be merged into self.line_numbers below
         self.equipment_tags = set()
         for tag in potential_equipment:
@@ -489,20 +489,15 @@ class PIDAnalysisService:
             if len(parts) >= 2:
                 prefix = parts[0]
                 number = parts[1]
-                # Exclude D-XXX patterns where XXX < 200 (likely P&ID page/sheet numbers)
+                # Exclude D-XXX patterns where XXX < 200 (P&ID page/sheet numbers)
                 if prefix == 'D' and number.isdigit() and int(number) < 200:
                     continue  # Skip P&ID sheet reference
-                # Exclude D-XXXX patterns where XXXX >= 1000 (Drain/service line numbers e.g. D-6159)
+                # Exclude D-XXXX patterns where XXXX >= 1000 (Drain service lines e.g. D-6159)
                 if prefix == 'D' and number.isdigit() and int(number) >= 1000:
-                    service_line_number_candidates.add(tag)  # It's a service-code line number
+                    service_line_number_candidates.add(tag)  # It's a drain-service line number
                     continue
-                # Exclude P-XXX patterns where XXX < 400 (likely line numbers or P&ID refs)
-                if prefix == 'P' and number.isdigit() and int(number) < 400:
-                    continue  # Skip likely line/P&ID reference
-                # Exclude P-XXXX-NN where XXXX >= 1000 and suffix NN is purely numeric (process line e.g. P-3610-02)
-                if prefix == 'P' and number.isdigit() and int(number) >= 1000 and len(parts) >= 3 and parts[2].isdigit():
-                    service_line_number_candidates.add(tag)  # It's a process line number
-                    continue
+                # P = PUMP: all P-XXX tags are equipment regardless of number magnitude
+                # P-3610, P-3610-02 etc. are pump tags — do NOT reclassify as line numbers
                 self.equipment_tags.add(tag)
         
         # Line number patterns: 6"-N2-1001-C4N, 3"-HC-2003, etc.
@@ -714,11 +709,10 @@ CORE RULES (follow strictly — violations produce INVALID findings):
 
 7. PIPING RULES:
    Line numbers on the P&ID follow format: SIZE-FLUIDCODE-SEQ-SPEC (e.g. 4"-HC-1001-CS150).
-   SERVICE-CODE LINE NUMBERS: Single-letter service prefix + 4-digit sequence (e.g. D-6159, D-5690, P-3610-02):
-     - D-XXXX (XXXX ≥ 1000) = Drain/Disposal service line number → classify as PIPING, NOT equipment
-     - P-XXXX-NN (XXXX ≥ 1000, NN = 2-digit) = Process line number → classify as PIPING, NOT equipment
-   TRUE EQUIPMENT TAGS: V-XXXX (vessel), E-XXX (exchanger), K-XXX (compressor), H-XXX (heater),
-     P-XXX (pump with 3-digit number ≤ 999). If uncertain, look for an equipment box/shape symbol.
+   SERVICE-CODE DRAIN LINES: D-XXXX where XXXX ≥ 1000 (e.g. D-6159, D-5690, D-6156) = Drain service line → PIPING.
+   PUMP TAGS: P = PUMP. P-3610, P-3610-02, P-101A are ALL pump (equipment) tags — NEVER a line number.
+     A pump tag with a suffix (e.g. P-3610-02) denotes pump train/unit 02 — still equipment.
+   TRUE EQUIPMENT TAGS: V-XXXX (vessel/drum), E-XXX (exchanger), K-XXX (compressor), H-XXX (heater), P-XXX (pump).
    Tags like KX-402, TA-4580, TDA-4580 are instrument tags, NOT line numbers — do NOT categorize as piping.
    A component tag with letters (e.g. 13-KX-402) where letters suggest an instrument → check ISA-5.1 first.
 
