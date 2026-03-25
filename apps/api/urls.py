@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.exceptions import ValidationError, AuthenticationFailed
 from apps.users.serializers_jwt import EmailTokenObtainPairSerializer
-from .views import UserViewSet, HealthCheckView, CORSDiagnosticView, dashboard_metrics, recent_activity, predictive_analytics, projects_stats, pid_stats
+from .views import UserViewSet, HealthCheckView, CORSDiagnosticView, dashboard_metrics, recent_activity, predictive_analytics, projects_stats, pid_stats, usage_daily
 from .export_wrapper import pid_export_wrapper
 from .email_views import verify_email, resend_verification_email, check_verification_status
 
@@ -85,6 +85,9 @@ urlpatterns = [
     # SOFT-CODED: Stats endpoints for dashboard integration
     path('projects/stats/', projects_stats, name='projects-stats'),
     path('pid/stats/', pid_stats, name='pid-stats'),
+
+    # Usage analytics (daily trend from usage_log table)
+    path('dashboard/usage/', usage_daily, name='dashboard-usage'),
     
     # Authentication
     path('auth/login/', EmailTokenObtainPairView.as_view(), name='token_obtain_pair'),

@@ -923,3 +923,139 @@ def pid_stats(request):
             'message': str(e)
         }, status=200)  # Return 200 to prevent dashboard errors
 
+
+# ============================================================================
+# USAGE ANALYTICS — Daily trend from usage_log table
+# Soft-coded: discipline labels come from UsageLog.DISCIPLINE_MAP so adding
+# a new module only requires updating that map, not touching this view.
+# ============================================================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def usage_daily(request):
+    """
+    Daily usage analytics aggregated from the UsageLog table.
+
+    Query params
+    ------------
+    days   int  Number of days to look back (1–365, default 30).
+
+    Response shape
+    --------------
+    {
+      "summary": {
+        "total_requests":  int,
+        "active_users":    int,
+        "success_rate":    float (%),
+        "avg_response_ms": int,
+        "peak_day":        str (YYYY-MM-DD) | null,
+        "peak_count":      int,
+        "days":            int
+      },
+      "daily_totals": [
+        { "date": "YYYY-MM-DD", "total": int, "success": int, "failed": int }
+        ...                             # one entry per day in range, zeros for empty days
+      ],
+      "discipline_breakdown": [
+        { "key": str, "label": str, "count": int, "percentage": float }
+        ...                             # sorted descending, max 10 entries
+      ]
+    }
+    """
+    try:
+        from apps.usage_tracking.models import UsageLog
+        from django.db.models import Count, Avg, Q
+        from django.db.models.functions import TruncDate
+
+        # ── Sanitise input ───────────────────────────────────────────────────
+        days_back  = min(max(int(request.GET.get('days', 30)), 1), 365)
+        start_date = timezone.now() - timedelta(days=days_back)
+
+        qs = UsageLog.objects.filter(timestamp__gte=start_date)
+
+        # ── Daily totals ─────────────────────────────────────────────────────
+        by_day = (
+            qs.annotate(date=TruncDate('timestamp'))
+              .values('date')
+              .annotate(
+                  total   = Count('id'),
+                  success = Count('id', filter=Q(success=True)),
+                  failed  = Count('id', filter=Q(success=False)),
+              )
+              .order_by('date')
+        )
+
+        date_map   = {str(r['date']): r for r in by_day}
+        date_range = [
+            (start_date.date() + timedelta(days=i)).isoformat()
+            for i in range(days_back)
+        ]
+        daily_totals = [
+            {
+                'date':    d,
+                'total':   date_map[d]['total']   if d in date_map else 0,
+                'success': date_map[d]['success'] if d in date_map else 0,
+                'failed':  date_map[d]['failed']  if d in date_map else 0,
+            }
+            for d in date_range
+        ]
+
+        # ── Discipline breakdown ──────────────────────────────────────────────
+        disc_qs     = (
+            qs.values('discipline_key', 'discipline_label')
+              .annotate(count=Count('id'))
+              .order_by('-count')
+        )
+        grand_total = sum(r['count'] for r in disc_qs) or 1
+        discipline_breakdown = [
+            {
+                'key':        r['discipline_key'],
+                'label':      r['discipline_label'],
+                'count':      r['count'],
+                'percentage': round(r['count'] / grand_total * 100, 1),
+            }
+            for r in disc_qs
+            if r['discipline_key'] not in ('other', '')
+        ][:10]
+
+        # ── Summary ───────────────────────────────────────────────────────────
+        agg = qs.aggregate(
+            total      = Count('id'),
+            success_ct = Count('id', filter=Q(success=True)),
+            avg_ms     = Avg('response_time_ms'),
+        )
+        active_users = qs.values('user_email').exclude(user_email='').distinct().count()
+        total_ct     = agg['total'] or 0
+        success_rate = round(agg['success_ct'] / total_ct * 100, 1) if total_ct else 100.0
+        peak         = max(daily_totals, key=lambda d: d['total'], default={'date': None, 'total': 0})
+
+        return Response({
+            'summary': {
+                'total_requests':  total_ct,
+                'active_users':    active_users,
+                'success_rate':    success_rate,
+                'avg_response_ms': round(agg['avg_ms'] or 0),
+                'peak_day':        peak['date'],
+                'peak_count':      peak['total'],
+                'days':            days_back,
+            },
+            'daily_totals':         daily_totals,
+            'discipline_breakdown': discipline_breakdown,
+        })
+
+    except Exception as e:
+        print(f"[STATS ERROR] usage_daily: {e}")
+        import traceback
+        traceback.print_exc()
+        return Response({
+            'summary': {
+                'total_requests': 0, 'active_users': 0, 'success_rate': 100.0,
+                'avg_response_ms': 0, 'peak_day': None, 'peak_count': 0,
+                'days': int(request.GET.get('days', 30)),
+            },
+            'daily_totals': [],
+            'discipline_breakdown': [],
+            'status': 'error',
+            'message': str(e),
+        }, status=200)
+
