@@ -98,6 +98,12 @@
       "s3_bucket_env": "AWS_STORAGE_BUCKET_NAME",
       "s3_prefix": "pid_analysis_cache/",
       "ttl_days": 0
-    }
+    },
+
+    "_suppress_comment": "Categories to exclude from the final report. Any finding whose 'category' field (case-insensitive, partial match) appears in this list is silently dropped before the report is saved. Full category list: instrument, equipment, piping, valve, safety, control_loop, documentation, legend, pipe_class, psv_compliance, holds_compliance, notes_compliance, trim_class, dissimilar_material, ltcs_compliance, free_drain_slope, spool_requirement, critical_stress, valve_standard, tie_in_reference, corrosion_allowance. To re-enable a category, remove it from this list — no code deploy required.",
+    "suppressed_categories": [
+      "psv_compliance",
+      "safety"
+    ]
   }
 }

@@ -227,6 +227,13 @@ class PIDAnalysisService:
             self.cache_s3_prefix     = _ca.get('s3_prefix', 'pid_analysis_cache/')
             self.cache_ttl_days      = int(_ca.get('ttl_days', 0))
 
+            # Suppressed categories (soft-coded: add/remove without code deploy)
+            self.suppressed_categories = [
+                c.lower().strip() for c in cfg.get('suppressed_categories', [])
+            ]
+            if self.suppressed_categories:
+                print(f'[INFO] Suppressed categories: {self.suppressed_categories}')
+
             print('[INFO] pid_analysis_config.json loaded successfully')
 
         except Exception as _ex:
@@ -276,6 +283,7 @@ class PIDAnalysisService:
             self.cache_s3_bucket_env    = 'AWS_STORAGE_BUCKET_NAME'
             self.cache_s3_prefix        = 'pid_analysis_cache/'
             self.cache_ttl_days         = 0
+            self.suppressed_categories  = []
 
     # =========================================================================
     # GEMINI PROVIDER — init, vision call, unified routing wrapper (soft-coded)
@@ -3261,6 +3269,19 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
             iss for iss in all_issues
             if 'unreadable' not in (iss.get('pid_reference') or '').lower()
         ]
+
+        # Fourth-pass filter: suppressed categories (soft-coded via pid_analysis_config.json)
+        # Any category whose name contains a suppressed token is dropped entirely.
+        _suppressed = [s.lower() for s in getattr(self, 'suppressed_categories', [])]
+        if _suppressed:
+            before = len(all_issues)
+            all_issues = [
+                iss for iss in all_issues
+                if not any(token in (iss.get('category') or '').lower() for token in _suppressed)
+            ]
+            dropped = before - len(all_issues)
+            if dropped:
+                print(f'[INFO] Suppressed {dropped} finding(s) from categories: {_suppressed}')
 
         # Renumber serially
         for idx, issue in enumerate(all_issues, 1):
