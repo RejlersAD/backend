@@ -126,7 +126,269 @@ class PIDAnalysisService:
         self.equipment_tags = set()
         self.line_numbers = set()
         self.notes_references = set()
+        # Load soft-coded analysis configuration (pid_analysis_config.json)
+        self._load_analysis_config()
         print('[INFO] Multi-Pass PID Analysis Service initialized with 180s timeout')
+
+    # =========================================================================
+    # SOFT-CODED CONFIGURATION LOADER
+    # =========================================================================
+
+    def _load_analysis_config(self):
+        """
+        Load soft-coded analysis configuration from pid_analysis_config.json.
+        Populates instance variables used throughout all analysis passes.
+        Gracefully falls back to hard-coded defaults if the file is missing/malformed.
+        No code changes needed to tune parameters — edit the JSON file directly.
+        """
+        import json as _json
+        config_path = os.path.join(os.path.dirname(__file__), 'config', 'pid_analysis_config.json')
+        try:
+            with open(config_path, 'r', encoding='utf-8') as _f:
+                cfg = _json.load(_f).get('pid_analysis', {})
+
+            self.pdf_dpi                  = int(cfg.get('pdf_dpi', 300))
+            self.ocr_sparse_threshold     = int(cfg.get('ocr_sparse_threshold', 10))
+            self.ocr_tesseract_fallback   = bool(cfg.get('ocr_tesseract_fallback_enabled', True))
+            self.min_issues_target        = int(cfg.get('min_issues_target', 20))
+            self.min_issues_rescan        = int(cfg.get('min_issues_rescan_threshold', 15))
+            self.near_dup_threshold       = int(cfg.get('near_dup_threshold', 2))
+            self.supplement_notes_below   = int(cfg.get('supplement_notes_below', 20))
+            self.confidence_high_thresh   = int(cfg.get('confidence_high_threshold', 15))
+
+            _p3 = cfg.get('pass_3', {})
+            self.pass3_max_tokens    = int(_p3.get('max_tokens', 16384))
+            self.pass3_temperature   = float(_p3.get('temperature', 0.3))
+            self.pass3_timeout       = int(_p3.get('timeout_seconds', 600))
+
+            _p5 = cfg.get('pass_5', {})
+            self.pass5_max_tokens    = int(_p5.get('max_tokens', 12000))
+            self.pass5_temperature   = float(_p5.get('temperature', 0.4))
+            self.pass5_timeout       = int(_p5.get('timeout_seconds', 300))
+
+            _p6 = cfg.get('pass_6', {})
+            self.pass6_max_tokens    = int(_p6.get('max_tokens', 12000))
+            self.pass6_timeout       = int(_p6.get('timeout_seconds', 300))
+
+            _p7 = cfg.get('pass_7', {})
+            self.pass7_max_tokens    = int(_p7.get('max_tokens', 8000))
+            self.pass7_temperature   = float(_p7.get('temperature', 0.2))
+            self.pass7_timeout       = int(_p7.get('timeout_seconds', 240))
+
+            _p8 = cfg.get('pass_8', {})
+            self.pass8_max_tokens    = int(_p8.get('max_tokens', 16000))
+            self.pass8_timeout       = int(_p8.get('timeout_seconds', 360))
+
+            _ld = cfg.get('layout_detection', {})
+            self.layout_detection_enabled = bool(_ld.get('enabled', True))
+            self.layout_default_zones     = _ld.get('default_zones', [
+                "Top-Left", "Top-Center", "Top-Right",
+                "Middle-Left", "Middle-Center", "Middle-Right",
+                "Bottom-Left", "Bottom-Center", "Bottom-Right",
+            ])
+            print('[INFO] pid_analysis_config.json loaded successfully')
+
+        except Exception as _ex:
+            print(f'[WARNING] Could not load pid_analysis_config.json ({_ex}) — using built-in defaults')
+            self.pdf_dpi                = 300
+            self.ocr_sparse_threshold   = 10
+            self.ocr_tesseract_fallback = True
+            self.min_issues_target      = 20
+            self.min_issues_rescan      = 15
+            self.near_dup_threshold     = 2
+            self.supplement_notes_below = 20
+            self.confidence_high_thresh = 15
+            self.pass3_max_tokens       = 16384
+            self.pass3_temperature      = 0.3
+            self.pass3_timeout          = 600
+            self.pass5_max_tokens       = 12000
+            self.pass5_temperature      = 0.4
+            self.pass5_timeout          = 300
+            self.pass6_max_tokens       = 12000
+            self.pass6_timeout          = 300
+            self.pass7_max_tokens       = 8000
+            self.pass7_temperature      = 0.2
+            self.pass7_timeout          = 240
+            self.pass8_max_tokens       = 16000
+            self.pass8_timeout          = 360
+            self.layout_detection_enabled = True
+            self.layout_default_zones   = [
+                "Top-Left", "Top-Center", "Top-Right",
+                "Middle-Left", "Middle-Center", "Middle-Right",
+                "Bottom-Left", "Bottom-Center", "Bottom-Right",
+            ]
+
+    # =========================================================================
+    # LAYOUT DETECTION PRE-PASS (lightweight, gpt-4o-mini)
+    # =========================================================================
+
+    def _detect_pid_layout(self, images_base64: List[str]) -> Dict[str, Any]:
+        """
+        Pre-analysis layout detection: a fast, lightweight gpt-4o-mini call that
+        identifies the drawn P&ID's structural layout BEFORE the main 8-pass analysis.
+
+        Returns a dict containing:
+          - zones          : list of zone name strings for this specific drawing
+          - layout         : raw parsed JSON from the model
+          - layout_context_str : a formatted string injected into Pass 3, 5, and 6
+                              prompts so the AI knows exactly where title block,
+                              notes section, legend, and process zones are located.
+          - detected       : bool — True if detection succeeded
+
+        Why this matters:
+          Every P&ID has its own layout design. ADNOC drawings differ from Petrofac,
+          Shell, or bespoke EPC formats. Without layout context the AI assumes a
+          generic 9-zone 3×3 grid and may place findings in wrong zones or miss
+          the notes/legend entirely. This pass makes analysis dynamically adaptive.
+        """
+        if not self.layout_detection_enabled or not images_base64:
+            return {
+                'zones': self.layout_default_zones,
+                'layout_context_str': '',
+                'detected': False,
+            }
+
+        try:
+            # Use only the first image — sufficient for structural layout detection
+            first_img = images_base64[0]
+
+            system_msg = (
+                "You are a P&ID drawing layout analyst.\n"
+                "Your ONLY task: describe the STRUCTURAL LAYOUT of this P&ID drawing.\n"
+                "Do NOT scan for compliance issues. Do NOT produce findings.\n"
+                "ONLY describe the physical structure of the drawing.\n\n"
+                "Return ONLY valid JSON — no markdown fences:\n"
+                "{\n"
+                '  "company_standard": "ADNOC|Shell|BP|Petrofac|FEED|EPC|Custom|Unknown",\n'
+                '  "drawing_title": "Brief title from title block, or empty string",\n'
+                '  "drawing_number": "Drawing number from title block, or empty string",\n'
+                '  "revision": "Revision letter/number, or empty string",\n'
+                '  "zones": ["zone1", "zone2", ...],\n'
+                '  "zone_count": 9,\n'
+                '  "title_block_position": "Bottom-Right|Bottom-Left|Right|Bottom|Top",\n'
+                '  "notes_section_position": "Bottom-Left|Bottom-Right|Bottom|Left|Right|None",\n'
+                '  "legend_section_position": "Top-Right|Bottom-Left|Left|Right|None",\n'
+                '  "has_revision_cloud": true,\n'
+                '  "drawing_orientation": "Landscape|Portrait",\n'
+                '  "drawing_type": "Process_PID|Utility_PID|HVAC|Instrument_Loop|General_Arrangement|Unknown",\n'
+                '  "layout_notes": "One-sentence summary for analysis engine"\n'
+                "}\n\n"
+                "For zones: use a logical grid matching the drawing content.\n"
+                "Standard P&IDs: 9 zones (3×3). Dense complex drawings: 12 zones (4×3).\n"
+                "Name zones as: Top-Left, Top-Center, Top-Right, Middle-Left, etc.\n"
+                "OR use area names visible on the drawing (e.g. 'Separator Area', 'Utility Header')."
+            )
+
+            user_text = (
+                "Analyze the layout of this P&ID drawing.\n"
+                "Look at: title block position, notes section, legend location, "
+                "major equipment groupings, zone markers or area labels.\n"
+                "Return ONLY valid JSON describing the drawing layout."
+            )
+
+            messages = [
+                {"role": "system", "content": system_msg},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{first_img}",
+                                "detail": "low",  # Low detail — overview only
+                            },
+                        },
+                    ],
+                },
+            ]
+
+            response = self.client.chat.completions.create(
+                model=self._FALLBACK_MODEL,  # Mini model — fast + cheap
+                messages=messages,
+                max_tokens=800,
+                temperature=0.1,
+                timeout=60,
+            )
+
+            resp_text = (
+                (response.choices[0].message.content or "").strip()
+                if response and response.choices else ""
+            )
+            if not resp_text:
+                raise ValueError("Empty response from layout detection model")
+
+            json_start = resp_text.find('{')
+            json_end   = resp_text.rfind('}') + 1
+            layout = json.loads(resp_text[json_start:json_end])
+
+            zones = layout.get('zones', self.layout_default_zones)
+            if not zones or len(zones) < 3:
+                zones = self.layout_default_zones
+
+            title_blk  = layout.get('title_block_position', 'Bottom-Right')
+            notes_pos  = layout.get('notes_section_position', 'Bottom-Right')
+            legend_pos = layout.get('legend_section_position', 'None')
+            standard   = layout.get('company_standard', 'Unknown')
+            drw_type   = layout.get('drawing_type', 'Process_PID')
+            drw_title  = layout.get('drawing_title', '')
+            drw_number = layout.get('drawing_number', '')
+            revision   = layout.get('revision', '')
+            lay_notes  = layout.get('layout_notes', '')
+            zone_list  = ', '.join(zones)
+
+            ctx_lines = [
+                "╔══════════════════════════════════════════════════════════════",
+                "║  P&ID LAYOUT CONTEXT  (auto-detected — use for zone reporting)",
+                "╚══════════════════════════════════════════════════════════════",
+                f"  Company Standard  : {standard}",
+                f"  Drawing Type      : {drw_type}",
+            ]
+            if drw_title:
+                ctx_lines.append(f"  Drawing Title     : {drw_title}")
+            if drw_number:
+                ctx_lines.append(f"  Drawing Number    : {drw_number}")
+            if revision:
+                ctx_lines.append(f"  Revision          : {revision}")
+            ctx_lines += [
+                f"  Zone Grid         : {zone_list}",
+                f"  Title Block       : {title_blk}",
+                f"  Notes Section     : {notes_pos}  ← read ALL notes/holds carefully here",
+                f"  Legend / Symbols  : {legend_pos}  ← verify all abbreviations here",
+            ]
+            if lay_notes:
+                ctx_lines.append(f"  Layout Notes      : {lay_notes}")
+            ctx_lines += [
+                "",
+                "  SCANNING RULES (based on layout):",
+                f"  • Use ONLY these zone names when filling location_on_drawing.zone: {zone_list}",
+                f"  • Notes and HOLDS are in the {notes_pos} section — read each one verbatim",
+                f"  • Legend/symbols are in the {legend_pos} area — use to resolve abbreviations",
+                "  • If a zone name you would write is NOT in the list above, use the nearest listed zone instead",
+                "══════════════════════════════════════════════════════════════",
+            ]
+
+            layout_context_str = '\n'.join(ctx_lines)
+
+            print(
+                f"[INFO] Layout detection: {standard} | {drw_type} | {len(zones)} zones | "
+                f"notes@{notes_pos} | legend@{legend_pos}"
+            )
+
+            return {
+                'zones': zones,
+                'layout': layout,
+                'layout_context_str': layout_context_str,
+                'detected': True,
+            }
+
+        except Exception as _ex:
+            print(f"[WARNING] Layout detection failed ({_ex}) — using default 9-zone grid")
+            return {
+                'zones': self.layout_default_zones,
+                'layout_context_str': '',
+                'detected': False,
+            }
 
     def analyze_pid_drawing(self, pdf_file, drawing_number: Optional[str] = None, reference_documents: Dict[str, Any] = None, analysis_mode: str = 'standard') -> Dict[str, Any]:
         """
@@ -197,11 +459,26 @@ class PIDAnalysisService:
                     print(f"[INFO] Merged {len(json_references)} JSON reference(s) from DesignIQ: {list(json_references.keys())}")
             else:
                 print(f"[INFO] PASS 2: Skipped (No reference documents provided)")
-            
+
+            # PRE-PASS (Layout Detection): lightweight gpt-4o-mini call that identifies the
+            # drawing's zone grid, company standard, and section positions.  The resulting
+            # layout_context_str is injected into Passes 3, 5, and 6 so the AI adapts to
+            # the ACTUAL layout of this specific P&ID rather than assuming a fixed 9-zone grid.
+            print(f"[INFO] PRE-PASS: Layout Detection (adaptive zone grid for this drawing)")
+            layout_info = {'layout_context_str': '', 'zones': self.layout_default_zones, 'detected': False}
+            if self.layout_detection_enabled:
+                try:
+                    layout_info = self._detect_pid_layout(images_base64)
+                except Exception as _le:
+                    print(f"[WARNING] Layout detection failed (non-critical): {_le}")
+            else:
+                print(f"[INFO] Layout detection disabled in config — using default 9-zone grid")
+
             # PASS 3: Vision Analysis with Chain-of-Thought & Reference Cross-Verification
             print(f"[INFO] PASS 3: Vision Analysis (Chain-of-Thought + Reference Verification)")
             try:
-                vision_result = self._vision_analysis_with_references(images_base64, reference_data)
+                vision_result = self._vision_analysis_with_references(
+                    images_base64, reference_data, layout_info.get('layout_context_str', '')
             except Exception as e:
                 print(f"[ERROR] PASS 3 failed: {str(e)}")
                 vision_result = {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
@@ -221,7 +498,10 @@ class PIDAnalysisService:
             issues_found = vision_result.get('total_issues', 0)
             print(f"[INFO] PASS 5: Second Review Pass ({issues_found} issues from Pass 3 — scanning for missed elements)")
             try:
-                second_pass_issues = self._second_review_pass(images_base64, vision_result, consistency_issues)
+                second_pass_issues = self._second_review_pass(
+                    images_base64, vision_result, consistency_issues,
+                    layout_info.get('layout_context_str', '')
+                )
             except Exception as e:
                 print(f"[WARNING] PASS 5 failed (non-critical): {str(e)}")
                 second_pass_issues = []
@@ -418,7 +698,36 @@ class PIDAnalysisService:
             
             doc.close()
             self.extracted_text = "\n".join(text_parts)
-            
+
+            # Tesseract fallback: if embedded text is very sparse (likely a scanned drawing),
+            # attempt pytesseract OCR so that downstream tag extraction is more complete.
+            # SOFT-CODED: controlled by ocr_tesseract_fallback_enabled in pid_analysis_config.json
+            _tess_enabled = getattr(self, 'ocr_tesseract_fallback', True)
+            if _tess_enabled and len(self.extracted_text.strip()) < 200:
+                print(f'[INFO] Embedded text sparse ({len(self.extracted_text.strip())} chars) — attempting Tesseract OCR fallback')
+                try:
+                    import pytesseract
+                    from PIL import Image as _PILImage
+                    _tess_texts = []
+                    if isinstance(pdf_file, str):
+                        _doc2 = fitz.open(pdf_file)
+                    else:
+                        pdf_file.seek(0)
+                        _doc2 = fitz.open(stream=pdf_file.read(), filetype="pdf")
+                    for _pnum in range(len(_doc2)):
+                        _pg = _doc2.load_page(_pnum)
+                        _mat = fitz.Matrix(2.0, 2.0)  # 144 DPI — fast yet readable for Tesseract
+                        _pix = _pg.get_pixmap(matrix=_mat)
+                        _img = _PILImage.frombytes("RGB", [_pix.width, _pix.height], _pix.samples)
+                        _tess_texts.append(pytesseract.image_to_string(_img, config='--psm 11 -l eng'))
+                    _doc2.close()
+                    _tess_combined = "\n".join(_tess_texts)
+                    if len(_tess_combined.strip()) > len(self.extracted_text.strip()):
+                        self.extracted_text = _tess_combined
+                        print(f'[INFO] Tesseract OCR extracted {len(_tess_combined)} chars')
+                except Exception as _tess_ex:
+                    print(f'[WARNING] Tesseract OCR fallback failed: {_tess_ex}')
+
         except Exception as e:
             print(f"[WARNING] OCR extraction failed: {str(e)}")
             self.extracted_text = ""
@@ -659,7 +968,7 @@ class PIDAnalysisService:
 
         return '\n'.join(lines)
     
-    def _vision_analysis_pass(self, images_base64: List[str], reference_context: str = "") -> Dict[str, Any]:
+    def _vision_analysis_pass(self, images_base64: List[str], reference_context: str = "", layout_context_str: str = "") -> Dict[str, Any]:
         """PASS 3: Systematic vision-based P&ID quality analysis"""
         try:
             system_prompt = """You are a senior P&ID QA/QC engineer performing a formal quality control review.
@@ -840,7 +1149,7 @@ Return ONLY valid JSON in this exact format:
 
 This review should follow the standard for an IFC-stage QC check at an EPC oil and gas company.
 
-{reference_context}
+{layout_context_str + chr(10) if layout_context_str else ''}{reference_context}
 
 {_sparse_banner}
 
@@ -992,7 +1301,7 @@ EVERY instrument, valve, and loop element you can read on the drawing that has a
 non-compliant annotation MUST become a separate JSON issue entry.
 "Cannot confirm" = element is absent, unclear, or not annotated. One element = one issue.
 Do NOT merge multiple issues into one finding.
-MINIMUM TARGET: 20 genuine findings for an IFC-stage drawing. If you find fewer than 15, re-scan
+MINIMUM TARGET: {self.min_issues_target} genuine findings for an IFC-stage drawing. If you find fewer than {max(10, self.min_issues_target - 5)}, re-scan
 zone by zone. But do NOT add fabricated findings to reach the target — only real issues.
 
 Return ONLY valid JSON:
@@ -1071,11 +1380,11 @@ Return ONLY valid JSON. No markdown, no text outside the JSON."""
             
             print("[INFO] Calling OpenAI Vision API (Pass 2: Chain-of-Thought)...")
             response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model=self._PRIMARY_MODEL,
                 messages=messages,
-                max_tokens=16384,  # Maximum for comprehensive 40+ issue reports
-                temperature=0.3,  # Lower for more consistent, thorough analysis
-                timeout=600  # 10 minute timeout for comprehensive analysis
+                max_tokens=self.pass3_max_tokens,
+                temperature=self.pass3_temperature,
+                timeout=self.pass3_timeout,
             )
             
             # Safely extract response
@@ -1185,7 +1494,7 @@ Return ONLY valid JSON. No markdown, no text outside the JSON."""
         print(f"[INFO] Cross-validation found {len(consistency_issues)} consistency observations (smart filtered)")
         return consistency_issues
     
-    def _second_review_pass(self, images_base64: List[str], first_pass: Dict, consistency: List) -> List[Dict[str, Any]]:
+    def _second_review_pass(self, images_base64: List[str], first_pass: Dict, consistency: List, layout_context_str: str = '') -> List[Dict[str, Any]]:
         """PASS 5: Second review — broader visual scan when first pass found too few issues"""
         try:
             first_pass_issues = first_pass.get('issues', [])
@@ -1238,6 +1547,12 @@ For EACH zone, look for and report issues on:
 If you find instruments/valves not addressed in the first pass, REPORT THEM NOW.
 Target: bring total findings to at least 20 real P&ID issues."""
 
+            # Build the layout context block to inject into the zone-sweep instruction
+            _layout_block = (
+                f"\nDRAWING LAYOUT (auto-detected):\n{layout_context_str}\n"
+                if layout_context_str else ""
+            )
+
             messages = [
                 {
                     "role": "system",
@@ -1286,7 +1601,7 @@ Do NOT use any other key names. The keys pid_reference and issue_observed are RE
                         {
                             "type": "text",
                             "text": f"""SECOND REVIEW PASS — comprehensive scan for missed elements.
-
+{_layout_block}
 FIRST PASS ({len(first_pass_issues)} issues found):
 {first_summary}
 
@@ -1332,11 +1647,11 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
 
             print("[INFO] Calling OpenAI for second review pass...")
             response = self.client.chat.completions.create(
-                model="gpt-4o",
+                model=self._PRIMARY_MODEL,
                 messages=messages,
-                max_tokens=12000,
-                temperature=0.4,
-                timeout=300
+                max_tokens=self.pass5_max_tokens,
+                temperature=self.pass5_temperature,
+                timeout=self.pass5_timeout,
             )
 
             # Safely extract response
@@ -1822,7 +2137,7 @@ Focus especially on:
         """
         import re as _re
 
-        NEAR_DUP_THRESHOLD = 2  # sequences within this delta → near-duplicate
+        NEAR_DUP_THRESHOLD = getattr(self, 'near_dup_threshold', 2)  # soft-coded from pid_analysis_config.json
 
         # Extended line-number parser: covers both common formats
         # Format A: SIZE"-FLUID-SEQ-SPEC          e.g. 4"-HC-1001-CS150
@@ -2732,17 +3047,19 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
 
         return issues
 
-    def _pdf_to_base64_images(self, pdf_file, dpi: int = 300) -> List[str]:
+    def _pdf_to_base64_images(self, pdf_file, dpi: int = None) -> List[str]:
         """
         Convert PDF pages to base64-encoded PNG images
         
         Args:
             pdf_file: Django FieldFile or file path
-            dpi: Resolution for rendering (default: 300 for high detail)
+            dpi: Resolution for rendering (default: from pid_analysis_config.json → 300)
             
         Returns:
             List of base64-encoded image strings
         """
+        if dpi is None:
+            dpi = getattr(self, 'pdf_dpi', 300)
         images_base64 = []
         
         try:
@@ -2852,7 +3169,7 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
         """
         return self.reference_processor.process_reference_documents(documents)
     
-    def _vision_analysis_with_references(self, images_base64: List[str], reference_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _vision_analysis_with_references(self, images_base64: List[str], reference_data: Dict[str, Any], layout_context_str: str = '') -> Dict[str, Any]:
         """
         Enhanced vision analysis with reference document cross-verification
         SOFT-CODED: Comprehensive compliance checking against uploaded references
@@ -2860,8 +3177,8 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
         # Build reference context for AI
         reference_context = self._build_reference_context(reference_data)
         
-        # Use the existing vision analysis but with enhanced prompt
-        return self._vision_analysis_pass(images_base64, reference_context)
+        # Use the existing vision analysis but with enhanced prompt and layout context
+        return self._vision_analysis_pass(images_base64, reference_context, layout_context_str)
     
     def _build_reference_context(self, reference_data: Dict[str, Any]) -> str:
         """

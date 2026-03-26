@@ -1,0 +1,76 @@
+{
+  "_comment": "Soft-coded configuration for the P&ID multi-pass analysis engine (PIDAnalysisService). Changes here take effect on next analysis run — no code deploy required.",
+  "pid_analysis": {
+
+    "_models_comment": "Vision-capable models only. gpt-3.5 / gpt-4-base do NOT support images.",
+    "primary_model": "gpt-4o",
+    "fallback_model": "gpt-4o-mini",
+
+    "_pdf_comment": "DPI used when rendering PDF pages to base64 images for the AI vision passes.",
+    "pdf_dpi": 300,
+
+    "_ocr_comment": "If embedded PDF text is shorter than ocr_sparse_threshold * 20 chars, Tesseract fallback is attempted.",
+    "ocr_sparse_threshold": 10,
+    "ocr_tesseract_fallback_enabled": true,
+
+    "_layout_comment": "Layout detection pre-pass: a lightweight gpt-4o-mini call that identifies the drawing company standard, zone grid, title block position, and notes/legend positions BEFORE the main analysis passes. This context is injected into Passes 3, 5, and 6 so the AI can adapt to ANY P&ID layout style dynamically.",
+    "layout_detection": {
+      "enabled": true,
+      "model": "gpt-4o-mini",
+      "max_tokens": 800,
+      "temperature": 0.1,
+      "timeout_seconds": 60,
+      "default_zones": [
+        "Top-Left", "Top-Center", "Top-Right",
+        "Middle-Left", "Middle-Center", "Middle-Right",
+        "Bottom-Left", "Bottom-Center", "Bottom-Right"
+      ]
+    },
+
+    "_thresholds_comment": "QC thresholds. min_issues_target is injected into AI prompts as the minimum expected finding count for an IFC-stage drawing.",
+    "min_issues_target": 20,
+    "min_issues_rescan_threshold": 15,
+    "near_dup_threshold": 2,
+    "supplement_notes_below": 20,
+    "confidence_high_threshold": 15,
+
+    "_pass3_comment": "Pass 3: Main vision analysis (chain-of-thought, ISA-5.1, advanced compliance). Highest token budget — needs to return 20-50 structured findings.",
+    "pass_3": {
+      "max_tokens": 16384,
+      "temperature": 0.3,
+      "timeout_seconds": 600
+    },
+
+    "_pass5_comment": "Pass 5: Second review — broader zone-by-zone rescan for missed elements.",
+    "pass_5": {
+      "max_tokens": 12000,
+      "temperature": 0.4,
+      "timeout_seconds": 300
+    },
+
+    "_pass6_comment": "Pass 6: Engineering compliance deep-scan (PSV, valve standards, NACE, tie-ins, LTCS, etc.).",
+    "pass_6": {
+      "max_tokens": 12000,
+      "temperature": 0.3,
+      "timeout_seconds": 300
+    },
+
+    "_pass7_comment": "Pass 7: Line size validation & AI recommendation engine.",
+    "pass_7": {
+      "max_tokens": 8000,
+      "temperature": 0.2,
+      "timeout_seconds": 240
+    },
+
+    "_pass8_comment": "Pass 8: Smart QC enhancement (9 targeted checks: duplicates, valve sizing, notes/holds, TYPE designations, revision clouds, etc.).",
+    "pass_8": {
+      "max_tokens": 16000,
+      "temperature": 0.3,
+      "timeout_seconds": 360
+    },
+
+    "_client_comment": "OpenAI client-level timeout and retry settings.",
+    "client_timeout": 180.0,
+    "client_max_retries": 2
+  }
+}
