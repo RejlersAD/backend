@@ -1436,15 +1436,13 @@ MINIMUM_SPOOL_DOWNSTREAM_RO (restriction orifice straight-run requirement):
   - RO sizing note (bore diameter, calculated Cd) MISSING near RO tag = MINOR finding (category: spool_requirement)
 
 CRITICAL_STRESS_LINE_REQUIREMENTS (stress analysis and piping flexibility):
-  For any line annotated CSS, STRESS CRITICAL, CRITICAL, HIGH TEMP, or in hydrogen/steam/cryogenic service:
-  - Are anchor points (triangle symbol △) shown at fixed supports adjacent to vessels, heat exchangers, or rotating equipment?
-  - Are line guides (arrows → ←) placed within 3× pipe diameter of restraint/anchor?
-  - For thermal expansion: are expansion loops, expansion joints (bellow symbol), or offsets shown on high-temp lines (>120°C)?
-  - Annotation "STRESS CRITICAL" or "CSS CLASS X" must appear near the line tag for designated stress lines
-  - For steam, thermal oil, or high-temp service above 250°C piping larger than 4": expansion accommodation REQUIRED
-  - Missing support/anchor annotation on stress-critical or high-temp large-bore line = MAJOR finding (category: critical_stress)
-  - CSS-designated line without flexibility provisions shown = CRITICAL finding (category: critical_stress)
-  - Missing "STRESS CRITICAL" annotation on a line meeting stress analysis criteria = MAJOR finding (category: critical_stress)
+  NOTE: Anchor points (△), pipe guides, supports, and hangers are shown on PIPING ISOMETRICS and
+  SUPPORT DRAWINGS — NOT on P&IDs. DO NOT flag missing anchor points or pipe supports on a P&ID.
+  ONLY report critical_stress findings if the P&ID itself carries a CSS or STRESS CRITICAL annotation:
+  - If "STRESS CRITICAL" or "CSS" annotation is visible on a line: check that expansion loops or
+    bellows (∫ symbol) are drawn for that line.  MISSING = MAJOR  (category: critical_stress)
+  - CSS-designated line without any flexibility provision shown = CRITICAL finding (category: critical_stress)
+  DO NOT generate findings for anchor points, guides, or pipe supports — they are not P&ID items.
 
 VALVE_STANDARDS_COMPLIANCE (API 6D, ASME B16.34, API 600, ISO 15848):
   For each valve visible on the drawing — check type, annotation, and service compliance:
@@ -2041,11 +2039,18 @@ For each RO / VO visible on the drawing:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DOMAIN 9 — CRITICAL STRESS / CSS LINES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-For any line annotated CSS, STRESS CRITICAL, HIGH TEMP, or in H2/steam/cryogenic service:
-  □ Anchor points (△) shown adjacent to vessels, heat exchangers, or rotating equipment?  → MISSING = MAJOR  (category: critical_stress)
-  □ Expansion loops, bellows (∫ symbol), or cold-pull offsets shown on high-temp lines?  → MISSING = MAJOR  (category: critical_stress)
-  □ "STRESS CRITICAL" or "CSS CLASS X" annotation visible near the line tag?  → MISSING = MAJOR  (category: critical_stress)
-  □ CSS-designated line: are flexibility provisions (loop/bellow/offset) drawn?  → MISSING = CRITICAL  (category: critical_stress)
+NOTE: Anchor points, guides, hangers, and stress calculations are shown on PIPING
+ISOTOMETRICS and STRESS ANALYSIS drawings — NOT on the P&ID. Do NOT flag their absence
+on a P&ID; it is not a P&ID deficiency.
+
+For any line that is explicitly annotated CSS, STRESS CRITICAL, or HIGH TEMP on THIS P&ID:
+  □ If a CSS annotation is visible: check that expansion loops, bellows (∫ symbol), or
+    cold-pull offsets are drawn on the line.  MISSING = MAJOR  (category: critical_stress)
+  □ Any line in H2 / steam / cryogenic service explicitly noted as CSS on this drawing:
+    verify flexibility provisions are shown.  MISSING = CRITICAL  (category: critical_stress)
+
+IF no CSS or STRESS CRITICAL annotation is visible anywhere on the drawing — skip this domain.
+DO NOT generate critical_stress findings based on assumptions about the service alone.
 
 Return ONLY valid JSON with ALL findings from ALL nine domains above."""
 
@@ -2167,20 +2172,16 @@ HOW TO SPOT A LINE SIZE ERROR (check each one visually):
    • Downstream of a control valve (which reduces ΔP) the line should NOT shrink unexpectedly – flag if it does.
 
 3. VELOCITY-BASED CHECK (engineering estimate)
-   Rough rules of thumb (use when no reference list is available):
-   • Gas / vapour lines:  typical velocity 15–30 m/s  → 1" gas line at high flow could be undersized
-   • Liquid lines:        typical velocity  1–3  m/s  → 10" liquid line at low flow could be oversized
-   • Steam lines:         typical velocity 20–40 m/s
-   • PSV discharge pipes: ALWAYS ≥ same bore as PSV outlet; smaller = CRITICAL error
+   Rough rules of thumb (use ONLY when a visible nozzle or line label gives direct evidence):
+   • Gas / vapour lines:  typical velocity 15–30 m/s  → flag ONLY if a very small line feeds a large-bore nozzle
+   • Liquid lines:        typical velocity  1–3  m/s  → flag ONLY if a very large line connects to a small nozzle
+   • PSV discharge pipes: ONLY flag if the discharge pipe bore is VISIBLY smaller than the PSV outlet nozzle symbol
+     shown on the drawing. Do NOT infer or calculate a 'recommended' size.
 
-4. REFERENCE LINE LIST MISMATCH
-   If a reference line list is provided, compare each OCR line number's size against the listed size.
-   Any deviation ≥ 1 nominal size = MAJOR; unexpected bore changes on safety lines = CRITICAL.
-
-5. COMMON PITFALL PATTERNS
-   • Pump suction line SMALLER than pump discharge line (suction must be equal or one size larger).
-   • Flare / blowdown discharge header SMALLER than individual PSV outlets flowing into it.
-   • Utility (instrument air, N2) supply line larger than 2" without a pressure-reducing station.
+   IMPORTANT: Do NOT apply the following rules — they are engineering assumptions, not P&ID observable facts:
+   ✕ DO NOT flag: pump suction line vs discharge line sizing comparison
+   ✕ DO NOT recommend a specific pipe size based on flow calculations (no flow data on P&ID)
+   ✕ DO NOT flag: utility line oversizing without visible evidence of a mismatch
 
 ═══════════════════════════════════════════════════════════════════
 CRITICAL EXCLUSIONS — never flag these as line size issues:
@@ -2206,7 +2207,7 @@ OUTPUT FORMAT — return ONLY valid JSON, no markdown fences:
       "current_size_inch": "annotated size from drawing (number only, e.g. '8')",
       "recommended_size_inch": "AI-suggested correct size (e.g. '4') or 'Verify' if uncertain",
       "confidence": "High | Medium | Low",
-      "check_type": "nozzle_mismatch | size_jump | velocity_estimate | ref_list_mismatch | psv_discharge | pump_suction | utility_oversized",
+      "check_type": "nozzle_mismatch | size_jump | velocity_estimate | ref_list_mismatch | flare_header",
       "engineering_basis": "brief engineering rule or standard applied",
       "reasoning": "specific explanation referencing visible elements on the drawing",
       "severity": "critical | major | minor | observation",
@@ -3099,6 +3100,29 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
                 if key not in seen_keys:
                     seen_keys.add(key)
                     all_issues.append(issue)
+
+        # Second-pass dedup: same tag + same issue concept reported in different categories
+        # (e.g. "PT-4501 — not connected to loop" appearing as both 'instrument' and 'control_loop')
+        # Key: just ref + first 5 words of issue — ignore category differences
+        seen_cross_cat: set = set()
+        deduped: list = []
+        for issue in all_issues:
+            ref  = _norm_ref(issue.get('pid_reference', ''))
+            obs  = _norm_obs(issue.get('issue_observed', ''))
+            # Shorter key: ref + 5 words (no category) — catches cross-category duplicates
+            cross_key = f"{ref}|{' '.join(obs.split()[:5])}"
+            if cross_key not in seen_cross_cat:
+                seen_cross_cat.add(cross_key)
+                deduped.append(issue)
+
+        all_issues = deduped
+
+        # Third-pass filter: drop findings where pid_reference contains '[tag unreadable]'
+        # (if we cannot read the tag, we cannot reliably assert there is a P&ID issue)
+        all_issues = [
+            iss for iss in all_issues
+            if 'unreadable' not in (iss.get('pid_reference') or '').lower()
+        ]
 
         # Renumber serially
         for idx, issue in enumerate(all_issues, 1):

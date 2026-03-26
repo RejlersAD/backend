@@ -161,6 +161,10 @@ HEAT EXCHANGERS (E-xxxx):
 
 [F] DOCUMENTATION AND ANNOTATION CHECKS
 
+TAG READABILITY RULE: If you cannot fully read a tag (partial blur, occlusion, unresolved character),
+  DO NOT generate a finding for that element. Never write "[tag unreadable]" in the pid_reference field.
+  A finding with no readable tag cannot be actioned by engineers — omit it entirely.
+
 TAG COMPLETENESS: Every instrument, valve, and equipment item must carry a readable, complete tag.
 REVISION CLOUDS: Any element inside a revision cloud must appear in the revision table with a revision code.
 LEGEND INTEGRITY: Every symbol used in the drawing body must be defined in the legend.
