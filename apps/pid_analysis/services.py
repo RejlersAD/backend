@@ -128,6 +128,8 @@ class PIDAnalysisService:
         self.notes_references = set()
         # Load soft-coded analysis configuration (pid_analysis_config.json)
         self._load_analysis_config()
+        # Initialize optional Google Gemini client (controlled by pid_analysis_config.json)
+        self._init_gemini_client()
         print('[INFO] Multi-Pass PID Analysis Service initialized with 180s timeout')
 
     # =========================================================================
@@ -186,6 +188,22 @@ class PIDAnalysisService:
                 "Middle-Left", "Middle-Center", "Middle-Right",
                 "Bottom-Left", "Bottom-Center", "Bottom-Right",
             ])
+
+            # Gemini provider config (soft-coded)
+            _gem = cfg.get('gemini', {})
+            self.gemini_enabled         = bool(_gem.get('enabled', False))
+            self._GEMINI_PRIMARY_MODEL  = _gem.get('primary_model', 'gemini-1.5-pro')
+            self._GEMINI_FALLBACK_MODEL = _gem.get('fallback_model', 'gemini-1.5-flash')
+            self.gemini_api_key_env     = _gem.get('api_key_env', 'GEMINI_API_KEY')
+            self.gemini_max_tokens      = int(_gem.get('max_output_tokens', 32768))
+
+            # Per-pass provider routing (soft-coded: 'gemini' or 'openai')
+            _rt = cfg.get('provider_routing', {})
+            self.pass3_provider = _rt.get('pass_3', 'openai')
+            self.pass5_provider = _rt.get('pass_5', 'openai')
+            self.pass6_provider = _rt.get('pass_6', 'openai')
+            self.pass7_provider = _rt.get('pass_7', 'openai')
+
             print('[INFO] pid_analysis_config.json loaded successfully')
 
         except Exception as _ex:
@@ -217,10 +235,159 @@ class PIDAnalysisService:
                 "Middle-Left", "Middle-Center", "Middle-Right",
                 "Bottom-Left", "Bottom-Center", "Bottom-Right",
             ]
+            self.gemini_enabled         = False
+            self._GEMINI_PRIMARY_MODEL  = 'gemini-1.5-pro'
+            self._GEMINI_FALLBACK_MODEL = 'gemini-1.5-flash'
+            self.gemini_api_key_env     = 'GEMINI_API_KEY'
+            self.gemini_max_tokens      = 32768
+            self.pass3_provider         = 'openai'
+            self.pass5_provider         = 'openai'
+            self.pass6_provider         = 'openai'
+            self.pass7_provider         = 'openai'
 
     # =========================================================================
-    # LAYOUT DETECTION PRE-PASS (lightweight, gpt-4o-mini)
+    # GEMINI PROVIDER — init, vision call, unified routing wrapper (soft-coded)
     # =========================================================================
+
+    def _init_gemini_client(self):
+        """
+        Initialize Google Gemini AI client if enabled in pid_analysis_config.json.
+        Stores the configured genai module as self._gemini_module (None if disabled/failed).
+        API key is read from the GEMINI_API_KEY environment variable — never hardcoded.
+        SOFT-CODED: enabled/disabled via pid_analysis_config.json → gemini.enabled
+        """
+        self._gemini_module = None
+        if not getattr(self, 'gemini_enabled', False):
+            print('[INFO] Gemini provider disabled in config (gemini.enabled=false)')
+            return
+        try:
+            import google.generativeai as genai
+            api_key = (
+                os.getenv(getattr(self, 'gemini_api_key_env', 'GEMINI_API_KEY'))
+                or os.getenv('GEMINI_API_KEY')
+                or getattr(settings, 'GEMINI_API_KEY', None)
+            )
+            if not api_key:
+                print('[WARNING] Gemini enabled but GEMINI_API_KEY env var not set — Gemini disabled')
+                return
+            genai.configure(api_key=api_key)
+            self._gemini_module = genai
+            print(f'[INFO] Google Gemini client initialized (primary={self._GEMINI_PRIMARY_MODEL})')
+        except ImportError:
+            print('[WARNING] google-generativeai not installed — Gemini disabled. '
+                  'Run: pip install google-generativeai>=0.8.0')
+        except Exception as _ex:
+            print(f'[WARNING] Gemini initialization failed: {_ex} — falling back to OpenAI only')
+
+    def _call_gemini_vision(
+        self,
+        messages: list,
+        pass_label: str,
+        max_tokens: int = 32768,
+        temperature: float = 0.3,
+        timeout: int = 600,
+    ) -> str:
+        """
+        Call Google Gemini vision API using OpenAI-format messages.
+        Converts the messages list to Gemini native parts format:
+          - role='system' content  → GenerativeModel system_instruction
+          - role='user' text parts → text strings
+          - role='user' image_url  → {mime_type, data: bytes}
+        Returns response text string or '' on any failure (caller falls back to OpenAI).
+        SOFT-CODED: model controlled by pid_analysis_config.json → gemini.primary_model
+        """
+        if not getattr(self, '_gemini_module', None):
+            return ''
+        import base64 as _b64
+        genai = self._gemini_module
+        try:
+            system_prompt = next(
+                (m.get('content', '') for m in messages if m.get('role') == 'system'), ''
+            )
+            model = genai.GenerativeModel(
+                model_name=getattr(self, '_GEMINI_PRIMARY_MODEL', 'gemini-1.5-pro'),
+                system_instruction=system_prompt or None,
+            )
+            parts = []
+            for msg in messages:
+                if msg.get('role') != 'user':
+                    continue
+                content = msg.get('content', '')
+                if isinstance(content, str):
+                    parts.append(content)
+                elif isinstance(content, list):
+                    for part in content:
+                        ptype = part.get('type', '')
+                        if ptype == 'text':
+                            parts.append(part.get('text', ''))
+                        elif ptype == 'image_url':
+                            img_url = part.get('image_url', {}).get('url', '')
+                            if img_url.startswith('data:image/'):
+                                header, b64data = img_url.split(',', 1)
+                                mime = header.split(';')[0].replace('data:', '')
+                                parts.append({
+                                    'mime_type': mime,
+                                    'data': _b64.b64decode(b64data),
+                                })
+            if not parts:
+                print(f'[WARNING] {pass_label}: no content parts for Gemini — skipping')
+                return ''
+            print(
+                f'[INFO] {pass_label}: calling Gemini {getattr(self, "_GEMINI_PRIMARY_MODEL", "gemini-1.5-pro")}'
+                f' ({len(parts)} parts, max_tokens={max_tokens})...'
+            )
+            response = model.generate_content(
+                parts,
+                generation_config=genai.GenerationConfig(
+                    max_output_tokens=min(max_tokens, 32768),
+                    temperature=temperature,
+                ),
+            )
+            result_text = (response.text or '').strip()
+            _meta = getattr(response, 'usage_metadata', None)
+            tokens_in  = getattr(_meta, 'prompt_token_count', 0)
+            tokens_out = getattr(_meta, 'candidates_token_count', 0)
+            print(f'[INFO] {pass_label}: Gemini ✓ {len(result_text)} chars | in={tokens_in} out={tokens_out}')
+            return result_text
+        except Exception as _gex:
+            print(f'[WARNING] {pass_label}: Gemini call failed ({_gex}) — cascading to OpenAI')
+            return ''
+
+    def _call_ai_vision(
+        self,
+        messages: list,
+        pass_label: str,
+        provider: str = 'openai',
+        max_tokens: int = 16384,
+        temperature: float = 0.3,
+        timeout: int = 600,
+    ) -> str:
+        """
+        Unified AI vision routing wrapper — Gemini or OpenAI.
+          provider='gemini'  → try Gemini first; cascade to OpenAI chain if empty/refused
+          provider='openai'  → existing gpt-4o → gpt-4o-mini fallback chain (unchanged)
+        SOFT-CODED: per-pass provider in pid_analysis_config.json → provider_routing.
+        """
+        if provider == 'gemini' and getattr(self, '_gemini_module', None):
+            gemini_text = self._call_gemini_vision(
+                messages=messages,
+                pass_label=pass_label,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=timeout,
+            )
+            if gemini_text and not self._model_refused_image(gemini_text):
+                return gemini_text
+            print(f'[INFO] {pass_label}: Gemini empty/refused — cascading to OpenAI')
+        # OpenAI chain: primary gpt-4o → fallback gpt-4o-mini
+        return self._call_with_vision_fallback(
+            messages=messages,
+            pass_label=pass_label,
+            primary_tokens=max_tokens,
+            fallback_tokens=min(max_tokens, 12000),
+            primary_timeout=timeout,
+            fallback_timeout=max(timeout // 2, 120),
+        )
 
     def _detect_pid_layout(self, images_base64: List[str]) -> Dict[str, Any]:
         """
@@ -1403,40 +1570,25 @@ Return ONLY valid JSON. No markdown, no text outside the JSON."""
                 }
             ]
             
-            print("[INFO] Calling OpenAI Vision API (Pass 2: Chain-of-Thought)...")
-            response = self.client.chat.completions.create(
-                model=self._PRIMARY_MODEL,
+            print("[INFO] Calling AI Vision API (Pass 3: Chain-of-Thought)...")
+            _p3_provider = getattr(self, 'pass3_provider', 'openai')
+            response_text = self._call_ai_vision(
                 messages=messages,
+                pass_label="PASS 3",
+                provider=_p3_provider,
                 max_tokens=self.pass3_max_tokens,
                 temperature=self.pass3_temperature,
                 timeout=self.pass3_timeout,
             )
-            
-            # Safely extract response
-            if not response or not response.choices:
-                print("[ERROR] OpenAI returned empty response")
-                return {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
 
-            msg = response.choices[0].message
-            finish = response.choices[0].finish_reason
-            print(f"[DEBUG] finish_reason={finish}")
-
-            # Check for content-policy refusal
-            if hasattr(msg, 'refusal') and msg.refusal:
-                print(f"[ERROR] OpenAI refusal: {msg.refusal[:200]}")
-                return {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
-
-            response_text = msg.content
             if not response_text:
-                print(f"[ERROR] OpenAI response content is None (finish={finish})")
+                print("[ERROR] AI provider returned empty response for Pass 3")
                 return {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
-            
+
             response_text = response_text.strip()
-            tokens_used = response.usage.total_tokens if response.usage else 0
-            
-            print(f"[INFO] Vision analysis complete. Tokens: {tokens_used}")
-            
-            return self._parse_analysis_response(response_text, tokens_used)
+            print(f"[INFO] Pass 3 complete. Response length: {len(response_text)} chars")
+
+            return self._parse_analysis_response(response_text, 0)
             
         except Exception as e:
             print(f"[ERROR] Vision analysis failed: {str(e)}")
@@ -1670,23 +1822,19 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
                 }
             ]
 
-            print("[INFO] Calling OpenAI for second review pass...")
-            response = self.client.chat.completions.create(
-                model=self._PRIMARY_MODEL,
+            _p5_provider = getattr(self, 'pass5_provider', 'openai')
+            print(f"[INFO] Calling AI Vision API (Pass 5) — provider={_p5_provider}...")
+            response_text = self._call_ai_vision(
                 messages=messages,
+                pass_label="PASS 5",
+                provider=_p5_provider,
                 max_tokens=self.pass5_max_tokens,
                 temperature=self.pass5_temperature,
                 timeout=self.pass5_timeout,
             )
 
-            # Safely extract response
-            if not response or not response.choices:
-                print("[WARNING] Second pass: OpenAI returned empty response")
-                return []
-
-            response_text = response.choices[0].message.content
             if not response_text:
-                print("[WARNING] Second pass: Response content is None")
+                print("[WARNING] Pass 5: AI provider returned empty response")
                 return []
 
             response_text = response_text.strip()
