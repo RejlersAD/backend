@@ -479,6 +479,7 @@ class PIDAnalysisService:
             try:
                 vision_result = self._vision_analysis_with_references(
                     images_base64, reference_data, layout_info.get('layout_context_str', '')
+                )
             except Exception as e:
                 print(f"[ERROR] PASS 3 failed: {str(e)}")
                 vision_result = {'issues': [], 'total_issues': 0, 'confidence': 'Low'}
