@@ -419,6 +419,8 @@ class PIDAnalysisService:
         try:
             print(f"[INFO] ========== MULTI-PASS ANALYSIS WITH REFERENCE VERIFICATION ==========")
             print(f"[INFO] Drawing: {drawing_number or 'Unknown'}")
+            # Store for use across passes (e.g. Pass 7 drawing-number exclusion)
+            self._supplied_drawing_number = drawing_number or ''
             print(f"[INFO] Analysis Mode: {analysis_mode.upper()}")
             if reference_documents:
                 print(f"[INFO] Reference documents provided: {list(reference_documents.keys())}")
@@ -526,7 +528,15 @@ class PIDAnalysisService:
             print(f"[INFO] PASS 7: Line Size Validation & AI Recommendations")
             line_size_result = {"issues": [], "line_size_recommendations": []}
             try:
-                line_size_result = self._line_size_validation_pass(images_base64, reference_data)
+                # Pass the confirmed drawing number so Pass 7 never mistakes it for a line size
+                _confirmed_drw_num = (
+                    layout_info.get('layout', {}).get('drawing_number', '')
+                    or getattr(self, '_supplied_drawing_number', '')
+                    or next(iter(getattr(self, 'drawing_number_candidates', set())), '')
+                )
+                line_size_result = self._line_size_validation_pass(
+                    images_base64, reference_data, confirmed_drawing_number=_confirmed_drw_num
+                )
             except Exception as e:
                 print(f"[WARNING] PASS 7 failed (non-critical): {str(e)}")
 
@@ -822,6 +832,16 @@ class PIDAnalysisService:
         
         # Merge service-code line numbers (D-XXXX, P-XXXX-NN) reclassified above from equipment pattern
         self.line_numbers.update(service_line_number_candidates)
+
+        # ── Drawing-number extraction (soft-coded) ────────────────────────────
+        # Drawing numbers use DOT separators: NN.NN.NN.NNNN or NN.NN.NNNN etc.
+        # Common in ADNOC/Gulf-region P&IDs (e.g. 16.01.08.1678).
+        # Stored in self.drawing_number_candidates to be explicitly excluded from
+        # line-size validation and instrument tag checks.
+        drw_num_pattern = re.compile(
+            r'\b(\d{1,4}\.\d{1,4}\.\d{1,4}\.\d{2,6})\b'
+        )
+        self.drawing_number_candidates = set(re.findall(drw_num_pattern, self.extracted_text))
         
         # Note references: NOTE 1, NOTE 2, HOLD 1, etc.
         note_pattern = r'\b((?:NOTE|HOLD|REF)[\s]*[\d]+)\b'
@@ -1023,6 +1043,10 @@ CORE RULES (follow strictly — violations produce INVALID findings):
    PUMP TAGS: P = PUMP. P-3610, P-3610-02, P-101A are ALL pump (equipment) tags — NEVER a line number.
      A pump tag with a suffix (e.g. P-3610-02) denotes pump train/unit 02 — still equipment.
    TRUE EQUIPMENT TAGS: V-XXXX (vessel/drum), E-XXX (exchanger), K-XXX (compressor), H-XXX (heater), P-XXX (pump).
+   DRAWING NUMBER (NOT a line number or pipe size):
+     Numbers in format NN.NN.NN.NNNN using DOT separators (e.g. 16.01.08.1678) are DRAWING NUMBERS
+     found in the title block. NEVER flag a drawing number as a line size, missing pipe spec, or missing annotation.
+     Confirm the drawing number from the title block FIRST — use it as an anchor to avoid confusion.
    Tags like KX-402, TA-4580, TDA-4580 are instrument tags, NOT line numbers — do NOT categorize as piping.
    A component tag with letters (e.g. 13-KX-402) where letters suggest an instrument → check ISA-5.1 first.
 
@@ -1900,6 +1924,7 @@ Return ONLY valid JSON with ALL findings from ALL nine domains above."""
         self,
         images_base64: List[str],
         reference_data: Dict = None,
+        confirmed_drawing_number: str = '',
     ) -> Dict[str, Any]:
         """
         PASS 7: AI-Powered Line Size Validation & Recommendation Engine.
@@ -1990,6 +2015,19 @@ HOW TO SPOT A LINE SIZE ERROR (check each one visually):
    • Utility (instrument air, N2) supply line larger than 2" without a pressure-reducing station.
 
 ═══════════════════════════════════════════════════════════════════
+CRITICAL EXCLUSIONS — never flag these as line size issues:
+═══════════════════════════════════════════════════════════════════
+DRAWING NUMBERS (DOT-NOTATION) — NOT pipe sizes or line numbers:
+  Numbers formatted with DOT separators such as  16.01.08.1678  or  22.03.12.4521
+  are DRAWING REFERENCE NUMBERS printed in the title block, revision panel, or
+  document index. They follow the pattern  NN.NN.NN.NNNN  (area.system.sheet.sequence).
+  RULE: If a number you see on the drawing contains 3 or more dot-separated segments,
+        it is a DRAWING NUMBER — do NOT report it as a line size anomaly.
+  PROCESS: Before scanning for line sizes, locate the title block and READ OFF the
+           drawing number. Record it mentally as ⛔ EXCLUDED and skip any reference
+           to that number in your line-size findings.
+
+═══════════════════════════════════════════════════════════════════
 OUTPUT FORMAT — return ONLY valid JSON, no markdown fences:
 ═══════════════════════════════════════════════════════════════════
 {
@@ -2021,17 +2059,28 @@ IMPORTANT:
 - If no anomaly is found, return an empty list and total_anomalies: 0.
 - Expected to find 0-8 anomalies per typical P&ID sheet."""
 
-            user_text = f"""Perform a LINE SIZE VALIDATION scan on this P&ID drawing.
+            # Build the confirmed drawing number exclusion note for the user prompt
+            _drw_excl_note = (
+                f"\n⛔ CONFIRMED DRAWING NUMBER (EXCLUDE from all line-size checks): {confirmed_drawing_number}\n"
+                f"   This is the document reference number from the title block — NOT a pipe size or line number.\n"
+                f"   Do NOT flag it, mention it in findings, or reference it as a line number.\n"
+                if confirmed_drawing_number else
+                "\n⛔ DRAWING NUMBER NOTE: Locate the title block first. Any number with dot-separators\n"
+                "   (e.g. 16.01.08.1678) is a DRAWING NUMBER — exclude it from all line-size findings.\n"
+            )
 
+            user_text = f"""Perform a LINE SIZE VALIDATION scan on this P&ID drawing.
+{_drw_excl_note}
 OCR-extracted line numbers and parsed sizes (first 40):
 {ocr_lines_str}
 {ref_linelist_ctx}
 
 Steps:
-1. Visually confirm each OCR line number on the drawing
-2. For every line visible, check its annotated size against the five checks above
-3. Flag every anomaly as a separate JSON entry in line_size_recommendations
-4. Return ONLY valid JSON in the format specified
+1. READ the title block — identify and record the drawing number (dot-notation). EXCLUDE it.
+2. Visually confirm each OCR line number on the drawing
+3. For every piping line visible, check its annotated size against the five checks above
+4. Flag every anomaly as a separate JSON entry in line_size_recommendations
+5. Return ONLY valid JSON in the format specified
 
 Focus especially on:
 - Pump suction vs discharge sizing
