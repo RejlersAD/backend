@@ -73,13 +73,13 @@
     "client_timeout": 180.0,
     "client_max_retries": 2,
 
-    "_gemini_comment": "Google Gemini provider. Set enabled=true and supply GEMINI_API_KEY env var to activate. Gemini 1.5 Pro supports 1M token context which yields richer, more complete reports. soft-coded: change models here without touching any Python code.",
+    "_gemini_comment": "Google Gemini provider. Set enabled=true and supply GEMINI_API_KEY env var to activate. Gemini 2.0 Flash supports 1M token context which yields richer, more complete reports. soft-coded: change models here without touching any Python code.",
     "gemini": {
       "enabled": true,
-      "primary_model": "gemini-1.5-pro",
-      "fallback_model": "gemini-1.5-flash",
+      "primary_model": "gemini-2.0-flash",
+      "fallback_model": "gemini-2.0-flash-lite",
       "api_key_env": "GEMINI_API_KEY",
-      "max_output_tokens": 32768
+      "max_output_tokens": 65536
     },
 
     "_routing_comment": "Per-pass provider routing. Values: 'gemini' (Gemini first, OpenAI fallback) | 'openai' (OpenAI only). Changing a value here instantly re-routes that pass without any code change.",

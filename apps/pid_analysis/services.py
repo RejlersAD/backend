@@ -192,8 +192,8 @@ class PIDAnalysisService:
             # Gemini provider config (soft-coded)
             _gem = cfg.get('gemini', {})
             self.gemini_enabled         = bool(_gem.get('enabled', False))
-            self._GEMINI_PRIMARY_MODEL  = _gem.get('primary_model', 'gemini-1.5-pro')
-            self._GEMINI_FALLBACK_MODEL = _gem.get('fallback_model', 'gemini-1.5-flash')
+            self._GEMINI_PRIMARY_MODEL  = _gem.get('primary_model', 'gemini-2.0-flash')
+            self._GEMINI_FALLBACK_MODEL = _gem.get('fallback_model', 'gemini-2.0-flash-lite')
             self.gemini_api_key_env     = _gem.get('api_key_env', 'GEMINI_API_KEY')
             self.gemini_max_tokens      = int(_gem.get('max_output_tokens', 32768))
 
@@ -236,8 +236,8 @@ class PIDAnalysisService:
                 "Bottom-Left", "Bottom-Center", "Bottom-Right",
             ]
             self.gemini_enabled         = False
-            self._GEMINI_PRIMARY_MODEL  = 'gemini-1.5-pro'
-            self._GEMINI_FALLBACK_MODEL = 'gemini-1.5-flash'
+            self._GEMINI_PRIMARY_MODEL  = 'gemini-2.0-flash'
+            self._GEMINI_FALLBACK_MODEL = 'gemini-2.0-flash-lite'
             self.gemini_api_key_env     = 'GEMINI_API_KEY'
             self.gemini_max_tokens      = 32768
             self.pass3_provider         = 'openai'
@@ -256,12 +256,12 @@ class PIDAnalysisService:
         API key is read from the GEMINI_API_KEY environment variable — never hardcoded.
         SOFT-CODED: enabled/disabled via pid_analysis_config.json → gemini.enabled
         """
-        self._gemini_module = None
+        self._gemini_client = None
         if not getattr(self, 'gemini_enabled', False):
             print('[INFO] Gemini provider disabled in config (gemini.enabled=false)')
             return
         try:
-            import google.generativeai as genai
+            from google import genai
             api_key = (
                 os.getenv(getattr(self, 'gemini_api_key_env', 'GEMINI_API_KEY'))
                 or os.getenv('GEMINI_API_KEY')
@@ -270,12 +270,11 @@ class PIDAnalysisService:
             if not api_key:
                 print('[WARNING] Gemini enabled but GEMINI_API_KEY env var not set — Gemini disabled')
                 return
-            genai.configure(api_key=api_key)
-            self._gemini_module = genai
+            self._gemini_client = genai.Client(api_key=api_key)
             print(f'[INFO] Google Gemini client initialized (primary={self._GEMINI_PRIMARY_MODEL})')
         except ImportError:
-            print('[WARNING] google-generativeai not installed — Gemini disabled. '
-                  'Run: pip install google-generativeai>=0.8.0')
+            print('[WARNING] google-genai not installed — Gemini disabled. '
+                  'Run: pip install google-genai>=0.8.0')
         except Exception as _ex:
             print(f'[WARNING] Gemini initialization failed: {_ex} — falling back to OpenAI only')
 
@@ -296,18 +295,16 @@ class PIDAnalysisService:
         Returns response text string or '' on any failure (caller falls back to OpenAI).
         SOFT-CODED: model controlled by pid_analysis_config.json → gemini.primary_model
         """
-        if not getattr(self, '_gemini_module', None):
+        if not getattr(self, '_gemini_client', None):
             return ''
         import base64 as _b64
-        genai = self._gemini_module
+        from google.genai import types as _gtypes
+        client = self._gemini_client
         try:
             system_prompt = next(
                 (m.get('content', '') for m in messages if m.get('role') == 'system'), ''
             )
-            model = genai.GenerativeModel(
-                model_name=getattr(self, '_GEMINI_PRIMARY_MODEL', 'gemini-1.5-pro'),
-                system_instruction=system_prompt or None,
-            )
+            # Build content parts list from OpenAI-format messages
             parts = []
             for msg in messages:
                 if msg.get('role') != 'user':
@@ -325,23 +322,27 @@ class PIDAnalysisService:
                             if img_url.startswith('data:image/'):
                                 header, b64data = img_url.split(',', 1)
                                 mime = header.split(';')[0].replace('data:', '')
-                                parts.append({
-                                    'mime_type': mime,
-                                    'data': _b64.b64decode(b64data),
-                                })
+                                parts.append(_gtypes.Part.from_bytes(
+                                    data=_b64.b64decode(b64data),
+                                    mime_type=mime,
+                                ))
             if not parts:
                 print(f'[WARNING] {pass_label}: no content parts for Gemini — skipping')
                 return ''
+            model_name = getattr(self, '_GEMINI_PRIMARY_MODEL', 'gemini-2.0-flash')
             print(
-                f'[INFO] {pass_label}: calling Gemini {getattr(self, "_GEMINI_PRIMARY_MODEL", "gemini-1.5-pro")}'
+                f'[INFO] {pass_label}: calling Gemini {model_name}'
                 f' ({len(parts)} parts, max_tokens={max_tokens})...'
             )
-            response = model.generate_content(
-                parts,
-                generation_config=genai.GenerationConfig(
-                    max_output_tokens=min(max_tokens, 32768),
-                    temperature=temperature,
-                ),
+            config = _gtypes.GenerateContentConfig(
+                system_instruction=system_prompt or None,
+                max_output_tokens=min(max_tokens, 65536),
+                temperature=temperature,
+            )
+            response = client.models.generate_content(
+                model=model_name,
+                contents=parts,
+                config=config,
             )
             result_text = (response.text or '').strip()
             _meta = getattr(response, 'usage_metadata', None)
@@ -368,7 +369,7 @@ class PIDAnalysisService:
           provider='openai'  → existing gpt-4o → gpt-4o-mini fallback chain (unchanged)
         SOFT-CODED: per-pass provider in pid_analysis_config.json → provider_routing.
         """
-        if provider == 'gemini' and getattr(self, '_gemini_module', None):
+        if provider == 'gemini' and getattr(self, '_gemini_client', None):
             gemini_text = self._call_gemini_vision(
                 messages=messages,
                 pass_label=pass_label,
