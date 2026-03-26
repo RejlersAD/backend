@@ -36,6 +36,7 @@
 
     "_pass3_comment": "Pass 3: Main vision analysis (chain-of-thought, ISA-5.1, advanced compliance). Highest token budget — needs to return 20-50 structured findings.",
     "pass_3": {
+      "system_prompt_file": "pass3_system_prompt.txt",
       "max_tokens": 16384,
       "temperature": 0.3,
       "timeout_seconds": 600

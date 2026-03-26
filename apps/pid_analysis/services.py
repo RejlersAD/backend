@@ -162,6 +162,16 @@ class PIDAnalysisService:
             self.pass3_max_tokens    = int(_p3.get('max_tokens', 16384))
             self.pass3_temperature   = float(_p3.get('temperature', 0.3))
             self.pass3_timeout       = int(_p3.get('timeout_seconds', 600))
+            # Load Pass 3 system prompt from external txt file (soft-coded)
+            _p3_prompt_file = _p3.get('system_prompt_file', 'pass3_system_prompt.txt')
+            _p3_prompt_path = os.path.join(os.path.dirname(__file__), 'config', _p3_prompt_file)
+            try:
+                with open(_p3_prompt_path, 'r', encoding='utf-8') as _pf:
+                    self.pass3_system_prompt = _pf.read().strip()
+                print(f'[INFO] Pass 3 prompt loaded from {_p3_prompt_file} ({len(self.pass3_system_prompt)} chars)')
+            except Exception as _pe:
+                self.pass3_system_prompt = None
+                print(f'[WARNING] Could not load {_p3_prompt_file} ({_pe}) — using built-in Pass 3 prompt')
 
             _p5 = cfg.get('pass_5', {})
             self.pass5_max_tokens    = int(_p5.get('max_tokens', 12000))
@@ -219,6 +229,7 @@ class PIDAnalysisService:
             self.pass3_max_tokens       = 16384
             self.pass3_temperature      = 0.3
             self.pass3_timeout          = 600
+            self.pass3_system_prompt    = None  # built-in prompt used as fallback
             self.pass5_max_tokens       = 12000
             self.pass5_temperature      = 0.4
             self.pass5_timeout          = 300
@@ -1160,7 +1171,8 @@ class PIDAnalysisService:
     def _vision_analysis_pass(self, images_base64: List[str], reference_context: str = "", layout_context_str: str = "") -> Dict[str, Any]:
         """PASS 3: Systematic vision-based P&ID quality analysis"""
         try:
-            system_prompt = """You are a senior P&ID QA/QC engineer performing a formal quality control review.
+            # Use soft-coded prompt from pass3_system_prompt.txt if available, else use built-in
+            system_prompt = getattr(self, 'pass3_system_prompt', None) or """You are a senior P&ID QA/QC engineer performing a formal quality control review.
 Analyze ONLY the provided drawing — base all findings on what is VISUALLY PRESENT, not assumptions.
 
 CORE RULES (follow strictly — violations produce INVALID findings):
