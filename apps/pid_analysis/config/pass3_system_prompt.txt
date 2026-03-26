@@ -178,9 +178,11 @@ CONNECTOR ARROWS (format NN-PP-NNN-NNNNN, e.g. 13-PP-152-45060):
   → These are sheet-to-sheet flow connectors. NOT pipe segments.
   → DO NOT flag connector IDs for missing pipe spec, size, or fluid code.
 
-DRAWING REFERENCE NUMBERS (dot format NN.NN.NN.NNNN, e.g. 16.01.08.1678):
-  → These appear in the title block. NOT a pipe size or instrument tag.
-  → DO NOT flag drawing numbers as line annotation issues.
+DRAWING REFERENCE NUMBERS (dot format NN.NN.NN.NNNN, e.g. 16.01.08.1678, 16.39.08.1603):
+  → These appear in the title block and revision panel. NOT a pipe size, tag, or line number.
+  → DO NOT generate any finding whose pid_reference is a drawing number in dot-notation format.
+  → DO NOT flag drawing numbers as line annotation issues, missing specs, or missing annotations.
+  → If you see e.g. "16.01.08.1678" — that is the drawing's own document number; SKIP IT entirely.
 
 PUMP TAGS (P-xxxx format, e.g. P-3610, P-3610-02A):
   → These are ALWAYS equipment (pumps). NEVER line numbers.

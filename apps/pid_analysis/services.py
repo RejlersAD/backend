@@ -3283,6 +3283,20 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
             if 'unreadable' not in (iss.get('pid_reference') or '').lower()
         ]
 
+        # Fifth-pass filter: drop findings where pid_reference IS a drawing number.
+        # Drawing numbers use dot-notation: NN.NN.NN.NNNN (e.g. 16.01.08.1678, 16.39.08.1603).
+        # Any finding whose entire pid_reference matches this pattern is a false positive —
+        # the AI confused the title-block drawing number for a line number or tag.
+        import re as _re_drw
+        _drw_num_re = _re_drw.compile(r'^\s*\d{2,3}\.\d{2,3}\.\d{2,3}\.\d{2,6}\s*$')
+        before_drw = len(all_issues)
+        all_issues = [
+            iss for iss in all_issues
+            if not _drw_num_re.match(iss.get('pid_reference', '') or '')
+        ]
+        if len(all_issues) < before_drw:
+            print(f'[INFO] Dropped {before_drw - len(all_issues)} finding(s) with drawing numbers as pid_reference')
+
         # Fourth-pass filter: suppressed categories (soft-coded via pid_analysis_config.json)
         # Any category whose name contains a suppressed token is dropped entirely.
         _suppressed = [s.lower() for s in getattr(self, 'suppressed_categories', [])]
