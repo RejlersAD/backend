@@ -2,6 +2,20 @@ from rest_framework import serializers
 from .models import PIDProject, PIDDrawing, PIDAnalysisReport, PIDIssue, ReferenceDocument
 
 
+def _load_suppressed_categories():
+    """Read suppressed_categories from pid_analysis_config.json.
+    Returns a list of lowercase tokens.  Safe to call on every request—file is tiny and
+    cached by the OS page cache after the first read."""
+    import os, json
+    try:
+        cfg_path = os.path.join(os.path.dirname(__file__), 'config', 'pid_analysis_config.json')
+        with open(cfg_path, 'r', encoding='utf-8') as _f:
+            data = json.load(_f)
+        return [c.lower().strip() for c in data.get('pid_analysis', {}).get('suppressed_categories', [])]
+    except Exception:
+        return []
+
+
 # ========== PID PROJECT SERIALIZERS (RBAC-enabled) ==========
 
 class PIDDrawingListSerializer(serializers.ModelSerializer):
@@ -243,6 +257,12 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
         # PRIORITY METHOD 1: Database PIDIssue objects (have proper IDs for updates)
         db_issues_qs = obj.issues.all().order_by('serial_number')
         if db_issues_qs.exists():
+            # Apply suppression filter BEFORE serializing so existing reports respect config
+            _suppressed = _load_suppressed_categories()
+            if _suppressed:
+                db_issues_qs = db_issues_qs.exclude(
+                    **{'category__iregex': '|'.join(_suppressed)}
+                )
             db_issues_count = db_issues_qs.count()
             result_issues = PIDIssueSerializer(db_issues_qs, many=True, context={'report': obj}).data
             debug_info['methods_tried'].append(f'database PIDIssue objects - found {db_issues_count} issues (WITH IDs)')

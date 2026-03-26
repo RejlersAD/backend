@@ -652,6 +652,19 @@ class PIDAnalysisService:
             obj = s3.get_object(Bucket=bucket, Key=s3_key)
             compressed = obj['Body'].read()
             result = _json.loads(_gz.decompress(compressed).decode('utf-8'))
+            # Re-apply suppression filter in case config changed after this result was cached
+            _sup = [s.lower() for s in getattr(self, 'suppressed_categories', [])]
+            if _sup and isinstance(result.get('issues'), list):
+                before = len(result['issues'])
+                result['issues'] = [
+                    i for i in result['issues']
+                    if not any(tok in (i.get('category') or '').lower() for tok in _sup)
+                ]
+                # Renumber after filter
+                for idx, i in enumerate(result['issues'], 1):
+                    i['serial_number'] = idx
+                if len(result['issues']) < before:
+                    print(f'[CACHE] Suppressed {before - len(result["issues"])} cached finding(s)')
             print(f'[CACHE HIT] {s3_key} — returning stored report ({len(compressed):,} bytes compressed)')
             return result
         except Exception as _e:
