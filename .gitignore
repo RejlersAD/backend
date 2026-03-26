@@ -141,5 +141,7 @@ test-results/
 test_*.py
 *.md
 *.txt
+# Allow P&ID analysis config prompt files (engineers tune these without code deploys)
+!apps/pid_analysis/config/*.txt
 
 pfd_projects/
