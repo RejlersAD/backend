@@ -423,6 +423,24 @@ RULES:
     minor     = missing note reference, blank title block field, unlabeled bypass
     observation = improvement suggestion, best-practice recommendation
 
+EVIDENCE FIELD — MANDATORY WRITING STANDARD:
+Every finding MUST include an "evidence" field following this three-part VISUAL → GAP → STANDARD structure:
+  VISUAL:   Describe exactly what IS drawn — element name/tag, position on drawing (quadrant/zone),
+            visible connections, labels present.
+  GAP:      State precisely what annotation, element, or connection is absent or non-compliant.
+  STANDARD: Name the governing standard and clause, e.g. ISO 10628-2:2012 §5.3, IEC 61511-1:2016 §10,
+            API 14C:2017, ASME VIII UG-135.  Never write 'per applicable standard' — name it explicitly.
+
+Examples of GOOD evidence:
+  "VISUAL: Condenser E-101 symbol is drawn in Top-Right zone connected to column C-101 overhead.
+  GAP: No cooling water supply and return utility connection lines are shown at E-101 shell-side.
+  STANDARD: ISO 10628-2:2012 §5.3 requires all utility connections to be shown on the PFD."
+
+  "VISUAL: Separator V-201 is visible in the Middle-Center zone with a feed inlet stream.
+  GAP: No liquid-draw bottom outlet stream is shown leaving V-201; only the vapour overhead stream is present.
+  STANDARD: ISO 10628-2:2012 §5.3 — all process outlet streams from vessels must be shown;
+  engineering practice requires both vapour overhead and liquid bottom streams on a separator."
+
 Return ONLY a valid JSON object:
 {{
   "issues": [
@@ -430,6 +448,7 @@ Return ONLY a valid JSON object:
       "serial_number": 1,
       "issue_found": "Specific finding referencing element name/number",
       "action_required": "Specific corrective action",
+      "evidence": "VISUAL: [what is drawn]. GAP: [what is missing]. STANDARD: [standard and clause]",
       "severity": "critical|major|minor|observation",
       "category": "Equipment|Streams|Control|Documentation|Safety|Material Balance|Utilities|Process Design|Other",
       "check_number": 1,
@@ -514,6 +533,14 @@ RULES:
 - Do NOT duplicate issues that are clearly already captured in a prior check.
 - If no gap is found for a question, do NOT force an issue.
 
+EVIDENCE FIELD — MANDATORY WRITING STANDARD:
+Every finding MUST include an "evidence" field following this three-part VISUAL → GAP → STANDARD structure:
+  VISUAL:   Describe exactly what IS drawn — element name/tag, position on drawing (quadrant/zone),
+            visible connections, labels present.
+  GAP:      State precisely what annotation, element, or connection is absent or non-compliant.
+  STANDARD: Name the governing standard and clause, e.g. ISO 10628-2:2012 §5.3, IEC 61508, API 14C:2017.
+            Never write 'per applicable standard' — name it explicitly.
+
 Return ONLY a valid JSON object:
 {{
   "issues": [
@@ -521,6 +548,7 @@ Return ONLY a valid JSON object:
       "serial_number": 1,
       "issue_found": "Specific missing element description",
       "action_required": "Specific corrective action",
+      "evidence": "VISUAL: [what is drawn]. GAP: [what is missing/incomplete]. STANDARD: [standard and clause]",
       "severity": "critical|major|minor|observation",
       "category": "Equipment|Streams|Control|Documentation|Safety|Material Balance|Utilities|Process Design|Other",
       "gap_check": "GAP-1",

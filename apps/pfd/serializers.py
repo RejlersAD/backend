@@ -157,13 +157,17 @@ class PFDProjectCreateSerializer(serializers.ModelSerializer):
 
 class PFDIssueSerializer(serializers.ModelSerializer):
     """Serializer for PFD verification issues"""
-    
+    # Evidence is not a DB column — it lives in the report's report_data JSON blob
+    # (same soft-coded pattern as P&ID: no migration required).
+    evidence = serializers.SerializerMethodField()
+
     class Meta:
         model = PFDIssue
         fields = [
             'id',
             'serial_number',
             'issue_found',
+            'evidence',
             'action_required',
             'severity',
             'category',
@@ -174,6 +178,21 @@ class PFDIssueSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_evidence(self, obj):
+        """Read evidence from the parent report's report_data JSON blob by serial_number.
+        Returns '' for old reports that pre-date the evidence field — backwards-safe."""
+        try:
+            report = obj.report
+            report_data = report.report_data
+            if not isinstance(report_data, dict):
+                return ''
+            for issue in report_data.get('issues', []):
+                if issue.get('serial_number') == obj.serial_number:
+                    return issue.get('evidence', '')
+        except Exception:
+            pass
+        return ''
 
 
 class IssueUpdateSerializer(serializers.Serializer):
