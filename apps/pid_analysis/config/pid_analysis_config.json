@@ -18,7 +18,7 @@
       "enabled": true,
       "model": "gpt-4o-mini",
       "max_tokens": 800,
-      "temperature": 0.1,
+      "temperature": 0.0,
       "timeout_seconds": 60,
       "default_zones": [
         "Top-Left", "Top-Center", "Top-Right",
@@ -38,35 +38,35 @@
     "pass_3": {
       "system_prompt_file": "pass3_system_prompt.txt",
       "max_tokens": 16384,
-      "temperature": 0.3,
+      "temperature": 0.0,
       "timeout_seconds": 600
     },
 
     "_pass5_comment": "Pass 5: Second review — broader zone-by-zone rescan for missed elements.",
     "pass_5": {
       "max_tokens": 12000,
-      "temperature": 0.4,
+      "temperature": 0.0,
       "timeout_seconds": 300
     },
 
     "_pass6_comment": "Pass 6: Engineering compliance deep-scan (PSV, valve standards, NACE, tie-ins, LTCS, etc.).",
     "pass_6": {
       "max_tokens": 12000,
-      "temperature": 0.3,
+      "temperature": 0.0,
       "timeout_seconds": 300
     },
 
     "_pass7_comment": "Pass 7: Line size validation & AI recommendation engine.",
     "pass_7": {
       "max_tokens": 8000,
-      "temperature": 0.2,
+      "temperature": 0.0,
       "timeout_seconds": 240
     },
 
     "_pass8_comment": "Pass 8: Smart QC enhancement (9 targeted checks: duplicates, valve sizing, notes/holds, TYPE designations, revision clouds, etc.).",
     "pass_8": {
       "max_tokens": 16000,
-      "temperature": 0.3,
+      "temperature": 0.0,
       "timeout_seconds": 360
     },
 

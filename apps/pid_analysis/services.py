@@ -55,6 +55,7 @@ class PIDAnalysisService:
         fallback_tokens: int,
         primary_timeout: int,
         fallback_timeout: int,
+        temperature: float = 0.0,
     ) -> str:
         """
         Call _PRIMARY_MODEL; if it refuses the image, transparently retry with
@@ -68,7 +69,8 @@ class PIDAnalysisService:
                 model=self._PRIMARY_MODEL,
                 messages=messages,
                 max_tokens=primary_tokens,
-                temperature=0.3,
+                temperature=temperature,
+                seed=42,
                 timeout=primary_timeout,
             )
             text = (resp.choices[0].message.content or "").strip() if resp and resp.choices else ""
@@ -88,7 +90,8 @@ class PIDAnalysisService:
                 model=self._FALLBACK_MODEL,
                 messages=messages,
                 max_tokens=fallback_tokens,
-                temperature=0.3,
+                temperature=temperature,
+                seed=42,
                 timeout=fallback_timeout,
             )
             fb_text = (fb_resp.choices[0].message.content or "").strip() if fb_resp and fb_resp.choices else ""
@@ -180,6 +183,7 @@ class PIDAnalysisService:
 
             _p6 = cfg.get('pass_6', {})
             self.pass6_max_tokens    = int(_p6.get('max_tokens', 12000))
+            self.pass6_temperature   = float(_p6.get('temperature', 0.0))
             self.pass6_timeout       = int(_p6.get('timeout_seconds', 300))
 
             _p7 = cfg.get('pass_7', {})
@@ -189,6 +193,7 @@ class PIDAnalysisService:
 
             _p8 = cfg.get('pass_8', {})
             self.pass8_max_tokens    = int(_p8.get('max_tokens', 16000))
+            self.pass8_temperature   = float(_p8.get('temperature', 0.0))
             self.pass8_timeout       = int(_p8.get('timeout_seconds', 360))
 
             _ld = cfg.get('layout_detection', {})
@@ -227,18 +232,20 @@ class PIDAnalysisService:
             self.supplement_notes_below = 20
             self.confidence_high_thresh = 15
             self.pass3_max_tokens       = 16384
-            self.pass3_temperature      = 0.3
+            self.pass3_temperature      = 0.0
             self.pass3_timeout          = 600
             self.pass3_system_prompt    = None  # built-in prompt used as fallback
             self.pass5_max_tokens       = 12000
-            self.pass5_temperature      = 0.4
+            self.pass5_temperature      = 0.0
             self.pass5_timeout          = 300
             self.pass6_max_tokens       = 12000
+            self.pass6_temperature      = 0.0
             self.pass6_timeout          = 300
             self.pass7_max_tokens       = 8000
-            self.pass7_temperature      = 0.2
+            self.pass7_temperature      = 0.0
             self.pass7_timeout          = 240
             self.pass8_max_tokens       = 16000
+            self.pass8_temperature      = 0.0
             self.pass8_timeout          = 360
             self.layout_detection_enabled = True
             self.layout_default_zones   = [
@@ -349,6 +356,7 @@ class PIDAnalysisService:
                 system_instruction=system_prompt or None,
                 max_output_tokens=min(max_tokens, 65536),
                 temperature=temperature,
+                seed=42,
             )
             response = client.models.generate_content(
                 model=model_name,
@@ -399,6 +407,7 @@ class PIDAnalysisService:
             fallback_tokens=min(max_tokens, 12000),
             primary_timeout=timeout,
             fallback_timeout=max(timeout // 2, 120),
+            temperature=temperature,
         )
 
     def _detect_pid_layout(self, images_base64: List[str]) -> Dict[str, Any]:
@@ -486,7 +495,8 @@ class PIDAnalysisService:
                 model=self._FALLBACK_MODEL,  # Mini model — fast + cheap
                 messages=messages,
                 max_tokens=800,
-                temperature=0.1,
+                temperature=0.0,
+                seed=42,
                 timeout=60,
             )
 
@@ -2080,6 +2090,7 @@ Return ONLY valid JSON with ALL findings from ALL nine domains above."""
                 fallback_tokens=10000,
                 primary_timeout=300,
                 fallback_timeout=270,
+                temperature=self.pass6_temperature,
             )
             if not response_text:
                 print("[INFO] Pass 6 (engineering compliance) found 0 additional issues")
@@ -2282,7 +2293,8 @@ Focus especially on:
                 model="gpt-4o",
                 messages=messages,
                 max_tokens=8000,
-                temperature=0.2,
+                temperature=self.pass7_temperature,
+                seed=42,
                 timeout=240
             )
 
@@ -3042,6 +3054,7 @@ Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
                 fallback_tokens=12000,
                 primary_timeout=360,
                 fallback_timeout=300,
+                temperature=self.pass8_temperature,
             )
             if not response_text:
                 return {"issues": dup_issues, "total_issues": len(dup_issues)}
