@@ -263,7 +263,16 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
                 db_issues_qs = db_issues_qs.exclude(
                     **{'category__iregex': '|'.join(_suppressed)}
                 )
-            db_issues_count = db_issues_qs.count()
+            # Drop any row whose pid_reference is a dot-notation drawing number
+            # (e.g. 16.01.08.1678, 16.39.08.1603) — these are title-block document numbers,
+            # not instrument/line tags. Applied here so ALL existing reports are cleaned.
+            import re as _re_ser
+            _drw_pat = _re_ser.compile(r'^\d{2,3}\.\d{2,3}\.\d{2,3}\.\d{2,6}$')
+            db_issues_qs = [
+                iss for iss in db_issues_qs
+                if not _drw_pat.match((iss.pid_reference or '').strip())
+            ]
+            db_issues_count = len(db_issues_qs)
             result_issues = PIDIssueSerializer(db_issues_qs, many=True, context={'report': obj}).data
             debug_info['methods_tried'].append(f'database PIDIssue objects - found {db_issues_count} issues (WITH IDs)')
             logger.info(f"[get_issues] ✅ Found {db_issues_count} issues WITH IDs in database for report {obj.id}")
