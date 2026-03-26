@@ -209,6 +209,8 @@
     "timeout_upload": 60000,
     "_timeout_upload_note": "AbortController enforced — cannot be bypassed by Axios",
     "timeout_poll": 10000,
+    "timeout_extraction_poll": 3600000,
+    "_timeout_extraction_poll_note": "Max time (ms) the frontend will poll for OCR extraction results. 60 min — Railway OCR on dense multi-page P&IDs can take 30-45 min.",
     "broker_connect_timeout": 5,
     "retry_attempts": 3,
     "retry_delay": 3000,

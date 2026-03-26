@@ -110,9 +110,20 @@
     "show_project_creation": true,
     "show_ai_recommendations": true
   },
+  "extraction_settings": {
+    "_comment": "Soft-coded validation tolerances for P&ID line number extraction.  Change these values here to tune how aggressively the OCR extractor accepts / rejects candidates — no code changes required.",
+    "ocr_resolution_scale": 3.0,
+    "onshore_seq_len_min": 3,
+    "onshore_seq_len_max": 6,
+    "onshore_pipr_class_len_min": 4,
+    "onshore_pipr_class_len_max": 8,
+    "onshore_pipr_class_alphanumeric": true,
+    "fluid_code_max_len_onshore": 3,
+    "fluid_code_max_len_offshore": 3
+  },
   "metadata": {
-    "version": "1.0",
-    "last_updated": "2026-02-05",
+    "version": "1.1",
+    "last_updated": "2026-03-26",
     "description": "DesignIQ module visibility configuration - enables/disables design modules and features"
   }
 }

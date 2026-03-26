@@ -50,6 +50,7 @@ class PIDLineExtractorV2:
         self.openai_client = None
         self.geometric_detector = None
         self.pytesseract_available = PYTESSERACT_AVAILABLE
+        self._load_extraction_config()
         self._init_engines()
         self._init_geometric_detector()
         
@@ -69,7 +70,44 @@ class PIDLineExtractorV2:
         else:
             logger.warning("⚠️ P&ID Extractor V2 initialized with NO OCR engines - extraction quality will be limited")
         self._init_geometric_detector()
-    
+
+    def _load_extraction_config(self):
+        """
+        Load extraction validation parameters from
+        apps/designiq/config/module_config.json → extraction_settings.
+
+        Every value has a hard-coded fallback so the extractor works
+        correctly even if the config file is missing or incomplete.
+        All tolerances are intentionally more permissive than the original
+        hard-coded values to maximise line-number recall.
+        """
+        settings = {}
+        try:
+            import os, json as _json
+            _cfg_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                'config', 'module_config.json'
+            )
+            with open(_cfg_path, 'r') as _fh:
+                settings = _json.load(_fh).get('extraction_settings', {})
+            logger.info(f"[PIDExtractor] extraction_settings loaded: {settings}")
+        except Exception as _e:
+            logger.warning(f"[PIDExtractor] Could not load extraction_settings: {_e} — using defaults")
+
+        # OCR rendering DPI scale (higher = better quality, slower)
+        self.ocr_resolution_scale = float(settings.get('ocr_resolution_scale', 3.0))
+        # Onshore without-area: sequence digit length tolerance
+        self.onshore_seq_len_min = int(settings.get('onshore_seq_len_min', 3))
+        self.onshore_seq_len_max = int(settings.get('onshore_seq_len_max', 6))
+        # Onshore without-area: pipe-class length tolerance
+        self.onshore_pipr_class_len_min = int(settings.get('onshore_pipr_class_len_min', 4))
+        self.onshore_pipr_class_len_max = int(settings.get('onshore_pipr_class_len_max', 8))
+        # Allow alphanumeric pipe classes (e.g. "A1BA1V") in onshore format
+        self.onshore_pipr_class_alphanumeric = bool(settings.get('onshore_pipr_class_alphanumeric', True))
+        # Max fluid code length per format
+        self.fluid_code_max_len_onshore  = int(settings.get('fluid_code_max_len_onshore', 3))
+        self.fluid_code_max_len_offshore = int(settings.get('fluid_code_max_len_offshore', 3))
+
     def _init_geometric_detector(self):
         """Initialize Geometric Line-based FROM-TO detector"""
         if GEOMETRIC_DETECTOR_AVAILABLE:
@@ -437,25 +475,28 @@ class PIDLineExtractorV2:
                 r'(?:^|\s)(\d{1,2})"?\s*-\s*(\d{2,3})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{4,5})\s*-\s*([A-Za-z0-9]{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
             ]
         else:
-            # WITHOUT AREA PATTERNS (ORIGINAL): SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+            # WITHOUT AREA PATTERNS — tolerances driven by module_config.json → extraction_settings
+            # Sequence: \d{3,6}  (was \d{4}, now allows 3-6 digits)
+            # Pipe class: \d{4,8} (was \d{5,6}, now allows 4-8 chars)
+            # Fluid code: {1,3}   (was {1,2}, now allows 3-letter codes e.g. LNG, SWR)
             patterns = [
                 # Pattern 1: Standard with word boundaries (most reliable)
-                r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{3,6})\s*-\s*([A-Z0-9]{4,8})(?:\s*-\s*([A-Z]{1,2}))?\b',
+
                 # Pattern 2: With optional quote after size
-                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,3})\s*-\s*(\d{3,6})\s*-\s*([A-Z0-9]{4,8})(?:\s*-\s*([A-Z]{1,2}))?\b',
+
                 # Pattern 3: More lenient spacing
-                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
-            
+                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,3})\s*-+\s*(\d{3,6})\s*-+\s*([A-Z0-9]{4,8})(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
+
                 # Pattern 4: Compact (no spaces at all)
-                r'\b(\d{1,2})-([A-Z]{1,2})-(\d{4})-(\d{5,6})(?:-([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})-([A-Z]{1,3})-(\d{3,6})-([A-Z0-9]{4,8})(?:-([A-Z]{1,2}))?\b',
+
                 # Pattern 5: With flexible separators (space or hyphen)
-                r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})[\s-]+([A-Z]{1,3})[\s-]+(\d{3,6})[\s-]+([A-Z0-9]{4,8})(?:[\s-]+([A-Z]{1,2}))?\b',
+
                 # Pattern 6: Case insensitive with word boundaries
-                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{3,6})\s*-\s*([A-Za-z0-9]{4,8})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
             ]
         
         found_lines = []
@@ -513,20 +554,25 @@ class PIDLineExtractorV2:
                 else:
                     area = ''  # Ensure area is empty for without-area format
                 
-                # 3. FLUID: Must be 1-3 uppercase letters
-                max_fluid_len = 3 if (include_area or format_type == 'offshore') else 2
+                # 3. FLUID: Max length from module_config.json → fluid_code_max_len_onshore / _offshore
+                max_fluid_len = (
+                    self.fluid_code_max_len_offshore
+                    if (include_area or format_type == 'offshore')
+                    else self.fluid_code_max_len_onshore
+                )
                 if not fluid or not fluid.isalpha() or len(fluid) > max_fluid_len:
                     rejected.append(f"Invalid fluid: {fluid}")
                     continue
                 
-                # 4. SEQUENCE: Must be 3-5 digits for offshore/area formats (ADNOC uses 3-4 digits like 0007, 0011), 4 for standard
+                # 4. SEQUENCE: soft-coded length tolerances from module_config.json
                 if format_type == 'offshore' or include_area:
                     if not seq or not seq.isdigit() or len(seq) < 3 or len(seq) > 5:
                         rejected.append(f"Invalid sequence: {seq}")
                         continue
                 else:
-                    if not seq or not seq.isdigit() or len(seq) != 4:
-                        rejected.append(f"Invalid sequence: {seq}")
+                    # onshore_seq_len_min / max from extraction_settings (default 3-6)
+                    if not seq or not seq.isdigit() or len(seq) < self.onshore_seq_len_min or len(seq) > self.onshore_seq_len_max:
+                        rejected.append(f"Invalid sequence (len {len(seq)} not in [{self.onshore_seq_len_min},{self.onshore_seq_len_max}]): {seq}")
                         continue
                 
                 # 5. PIPE CLASS: Flexible validation for offshore/area formats (ADNOC uses variable length like AN1NLO, ASSNLO, BC2CA0)
@@ -539,14 +585,21 @@ class PIDLineExtractorV2:
                         rejected.append(f"Invalid pipe class (not alphanumeric): {pipr_class}")
                         continue
                 else:
-                    # Without area: 5-6 digits only
-                    if not pipr_class or len(pipr_class) not in [5, 6]:
-                        rejected.append(f"Invalid pipe class: {pipr_class}")
+                    # Without area: tolerances from module_config.json → extraction_settings
+                    if not pipr_class or len(pipr_class) < self.onshore_pipr_class_len_min or len(pipr_class) > self.onshore_pipr_class_len_max:
+                        rejected.append(f"Invalid pipe class length ({len(pipr_class)} not in [{self.onshore_pipr_class_len_min},{self.onshore_pipr_class_len_max}]): {pipr_class}")
                         continue
-                    pipr_class = re.sub(r'[^0-9]', '', pipr_class)
-                    if not pipr_class.isdigit():
-                        rejected.append(f"Invalid pipe class (not numeric): {pipr_class}")
-                        continue
+                    if self.onshore_pipr_class_alphanumeric:
+                        # Accept alphanumeric pipe classes (e.g. A1BA1V, BC2CA0)
+                        if not pipr_class.isalnum():
+                            rejected.append(f"Invalid pipe class (not alphanumeric): {pipr_class}")
+                            continue
+                    else:
+                        # Legacy mode: numeric digits only
+                        pipr_class = re.sub(r'[^0-9]', '', pipr_class)
+                        if not pipr_class.isdigit():
+                            rejected.append(f"Invalid pipe class (not numeric): {pipr_class}")
+                            continue
                 
                 # 6. INSULATION: Optional, must be 1-2 letters if present
                 if insulation and (not insulation.isalpha() or len(insulation) > 2):
@@ -1235,8 +1288,9 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 logger.info(f"📄 PAGE {page_num + 1}/{len(doc)}")
                 logger.info(f"{'='*60}")
                 
-                # High-resolution rendering (2.5x for crisp text)
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+                # High-resolution rendering — scale from module_config.json → ocr_resolution_scale
+                # (default 3.0x; was 2.5x, bumped to catch small text on large P&IDs)
+                pix = page.get_pixmap(matrix=fitz.Matrix(self.ocr_resolution_scale, self.ocr_resolution_scale))
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 img = img.convert('L')  # Grayscale for better OCR
                 
