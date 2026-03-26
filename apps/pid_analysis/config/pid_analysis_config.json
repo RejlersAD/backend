@@ -104,6 +104,102 @@
     "suppressed_categories": [
       "psv_compliance",
       "safety"
-    ]
+    ],
+
+    "_evidence_comment": "Evidence writing standard injected into every AI pass system prompt. Controls how the AI justifies each finding. Edit here — no code deploy needed. The AI must follow this format for every 'evidence' field: VISUAL → GAP → STANDARD.",
+    "evidence_guidance": {
+      "format_template": "VISUAL: [describe exactly what is drawn — symbol present, tag readable, position on drawing, connections shown]. GAP: [state precisely what annotation, element, or connection is absent or non-compliant]. STANDARD: [cite the governing standard and clause, e.g. ISA-5.1 §6.4, API 520 Pt II §5.7.2, IEC 61511-1:2016 §11.6.5].",
+      "quality_rules": [
+        "NEVER write 'not visible' without first stating exactly what IS visible and WHERE it is on the drawing.",
+        "NEVER cite a standard generically — name it explicitly (e.g. 'per applicable standard' is REJECTED; 'per ISA-5.1-2009 §6.4' is ACCEPTED).",
+        "NEVER reference a document not on the P&ID (datasheets, line lists, equipment schedules) as the location of the deficiency — the deficiency must be drawings observable.",
+        "If the element symbol IS visible but the annotation is missing, state: '[Tag] symbol is visible at [zone] on [line/equipment] — [annotation] is absent from the symbol/actuator.'",
+        "If the element itself is missing, state: 'No [element type] symbol is drawn on [specific line or nozzle] despite [equipment/standard] requiring one.'",
+        "For programmatic detections (OCR cross-checks, note references), state: 'Programmatically detected via OCR text extraction — visual confirmation by engineer recommended.'",
+        "Evidence must be specific enough that a different engineer reading it could locate the exact element on the drawing within 30 seconds."
+      ],
+      "standards_library": {
+        "instrument": [
+          "ISA-5.1-2009 (Instrumentation Symbols and Identification) §6.4 — every transmitter must show a signal line to a receiver (DCS, controller, indicator)",
+          "IEC 61511-1:2016 (Functional Safety — SIS for Process Industry) §10 — SIL-rated instruments must show the SIS loop connection",
+          "ISA-TR84.00.02 (SIL Verification) — safety instrumented function requires sensor → logic solver → final element chain traceable on P&ID",
+          "AGES-GL-08-005 / ADNOC Instrument Standard — project-specific tag completeness and signal routing rules"
+        ],
+        "valve": [
+          "ISA-75.05.01 (Control Valve Terminology) — fail-safe position (FC/FO/FL) is a required annotation on every actuated valve symbol",
+          "IEC 61511-1:2016 §11.6.5 — all SIS final elements (SDV, BDV, XV) must show fail-safe mode on P&ID",
+          "API RP 14C:2017 (Offshore Safety Systems) — BDV must be annotated fail-open (FO) on the P&ID",
+          "API 6D:2021 (Pipeline and Piping Valves) — valve tag identification and pressure class marking on P&ID",
+          "ASME B16.34:2017 (Valves — Flanged, Threaded, Welding End) — pressure class designation required on P&ID valve annotation"
+        ],
+        "piping": [
+          "ISO 10628-2:2012 (P&ID Diagram Symbols) — line number format: Diameter-FluidCode-Sequence-PipeClass (e.g. 4\"-HC-1001-CS150)",
+          "ASME B31.3:2022 (Process Piping) — pipe class applicability defines material, pressure rating, temperature range",
+          "AGES-SP-08-002 (Company Piping Material Class Specification) — spec break symbol and both upstream/downstream classes must be shown at every pipe class change",
+          "ISO 10628-1:2014 §6 — vent and drain connection requirements on vessels and pump casings"
+        ],
+        "psv_compliance": [
+          "API 520 Part II:2015 §5.7.2 — inlet block valve must be car-sealed open (CSO) on the P&ID; absence of CSO valve is a P&ID deficiency",
+          "API 521:2014 §5.15 — PSV discharge routed to flare header, vent stack, or labeled closed drain system must be shown on P&ID",
+          "ASME Section VIII Div 1 UG-135 — every pressure vessel requires a pressure relief device shown on the P&ID",
+          "API 520 Part I:2020 — set pressure, relieving capacity, back pressure are DATASHEET items NOT required on P&ID"
+        ],
+        "equipment": [
+          "API 610:2021 (Centrifugal Pumps for Petroleum) §7.3.1 — suction strainer (Y-type or basket) must be shown on suction side of all process pumps",
+          "API 610:2021 §9.3 — check valve on pump discharge line required to prevent backflow; must appear on P&ID",
+          "API 650:2021 (Welded Tanks for Oil Storage) — vent nozzle, drain, and level instrument connections must be shown",
+          "ASME Section VIII Div 1 — vessel design conditions (P/T) in data box on P&ID when included in IFC package",
+          "API 661:2006 (Air-Cooled Heat Exchangers) — block and isolation valves on inlet/outlet headers shown on P&ID"
+        ],
+        "control_loop": [
+          "ISA-5.1-2009 §6 — every PID controller (FIC, PIC, TIC, LIC) requires a visible, tagged final control element (FCV, PCV, TCV) on the same process loop on the P&ID",
+          "ISA-5.4-1991 (Instrument Loop Diagrams) — signal line must be traceable from sensor through controller to final element",
+          "IEC 61511-1:2016 §10 — SIS loop completeness: sensor → logic solver → final element chain must be traceable on P&ID"
+        ],
+        "documentation": [
+          "ISO 10628-1:2014 §7.4 — every symbol used in the drawing body must be defined in the drawing legend; undefined symbols are legend integrity failures",
+          "ISO 10628-1:2014 §7.6 — elements inside a revision cloud must cross-reference the revision table with a revision code and date",
+          "IFC Review Checklist (EPC standard) — all HOLD items must show a resolution status, responsible engineer, or target date",
+          "ASME Y14.5 / ISO 1101 — tag identification completeness and drawing number format"
+        ],
+        "safety": [
+          "IEC 61511-1:2016 §11.6 — SIS field devices (PSHH, LSHH, TSHH) must show their SIS/ESD signal line connection on P&ID",
+          "API RP 505:1994 (Fire and Gas Detection) — F&G detector positions shown on P&ID and layout must be consistent",
+          "AGES-SP-17-001 (ESD Philosophy) — ESD valve numbering convention and SIS signal lines must be on P&ID"
+        ]
+      },
+      "examples": [
+        {
+          "category": "valve",
+          "pid_reference": "BDV-2101",
+          "good_evidence": "VISUAL: BDV-2101 actuated valve symbol with a solenoid (XY) actuator is clearly drawn in the Middle-Right zone on the 6\"-BD-2101-CS300 blowdown header. The SIS signal line from XY is present. GAP: No fail-safe position annotation (FO, FC, or FL) is shown adjacent to the actuator symbol; the standard position next to the actuator body is blank. STANDARD: ISA-75.05.01 requires fail-safe position on every actuated valve; IEC 61511-1:2016 §11.6.5 mandates it for all SIS final elements; API RP 14C:2017 specifically requires FO (fail-open) annotation for blowdown valves in hydrocarbon gas service."
+        },
+        {
+          "category": "instrument",
+          "pid_reference": "PT-3105",
+          "good_evidence": "VISUAL: PT-3105 pressure transmitter circle-bubble is visible in the Top-Right zone, connected to the 3\"-HC-3105-CS150 suction header tapping. The transmitter symbol itself is correctly drawn with a readable tag. GAP: No signal line (dashed or solid) extends from PT-3105 to any DCS node, indicator, or controller; the output side of the bubble terminates without a connection. STANDARD: ISA-5.1-2009 §6.4 requires every transmitter to show a signal line to a receiving element. An unconnected transmitter cannot perform its measurement function and will not be wired during construction."
+        },
+        {
+          "category": "psv_compliance",
+          "pid_reference": "PSV-1015",
+          "good_evidence": "VISUAL: PSV-1015 relief valve symbol is drawn at the top nozzle of Vessel V-1015 in the Middle-Left zone with a readable tag. The inlet pipe connects directly from the vessel nozzle to the PSV inlet. GAP: No flanged gate valve with a car-sealed open (CSO) annotation is drawn between the vessel nozzle and PSV-1015; the connection is a direct stub without any isolation valve. STANDARD: API 520 Part II:2015 §5.7.2 requires a CSO block valve on every PSV inlet to enable maintenance isolation without depressurising the vessel. Absence on the P&ID means it will not be installed during construction."
+        },
+        {
+          "category": "piping",
+          "pid_reference": "6\"-HC-2201",
+          "good_evidence": "VISUAL: A 6-inch horizontal process line is visible across the Bottom-Center zone between Pump P-2201A discharge nozzle and the shell-side inlet of Heat Exchanger E-2201. The line carries the annotation '6\"-HC-2201'. GAP: The pipe specification/class designator (e.g. CS150, SS300, A1A) is absent from the line number; only the size (6\"), fluid code (HC), and sequence (2201) are shown. STANDARD: ISO 10628-2:2012 line number format requires SIZE-FluidCode-Sequence-PipeClass. Without the class designator, construction teams cannot select compliant flanges, fittings, bolting, and gaskets per ASME B31.3:2022 Table A-1."
+        },
+        {
+          "category": "equipment",
+          "pid_reference": "P-3601A",
+          "good_evidence": "VISUAL: Centrifugal pump P-3601A symbol is visible in the Bottom-Left zone. A gate valve and straight pipe run are drawn on the suction side between Vessel V-3601 bottom outlet and the pump suction nozzle. GAP: No strainer symbol (Y-type or basket) is drawn on the suction pipe between the isolation valve and P-3601A suction nozzle — the suction run is a plain pipe with only a gate valve. STANDARD: API 610:2021 §7.3.1 requires a suction strainer on all centrifugal pumps in hydrocarbon service to protect impeller and mechanical seal from solid particles. Absence on the IFC P&ID means it will not be installed, risking pump damage at commissioning startup."
+        },
+        {
+          "category": "control_loop",
+          "pid_reference": "FIC-4201",
+          "good_evidence": "VISUAL: FIC-4201 flow indicating controller bubble is visible in the Top-Center zone with a dashed signal line from FT-4201 transmitter on the 4\"-HC-4201-CS150 line. The controller bubble is complete with tag. GAP: No control valve (FCV-4201 or tagged equivalent) is shown anywhere on the 4\"-HC-4201-CS150 line downstream — the process line runs from FT-4201 to the downstream vessel without any final control element in the loop. STANDARD: ISA-5.1-2009 §6 requires every PID controller to have a visible, tagged final control element as part of the same control loop on the P&ID. An incomplete control loop at IFC stage means the valve will be missing from the construction bill of materials."
+        }
+      ]
+    }
   }
 }

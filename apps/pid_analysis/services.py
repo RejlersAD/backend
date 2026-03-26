@@ -234,6 +234,13 @@ class PIDAnalysisService:
             if self.suppressed_categories:
                 print(f'[INFO] Suppressed categories: {self.suppressed_categories}')
 
+            # Evidence writing guidance (SOFT-CODED: controls how the AI justifies every finding)
+            # Injected as a block into every pass system prompt so all passes enforce the same standard.
+            _ev = cfg.get('evidence_guidance', {})
+            self.evidence_guidance_block = self._build_evidence_block(_ev)
+            if self.evidence_guidance_block:
+                print(f'[INFO] Evidence guidance block loaded ({len(self.evidence_guidance_block)} chars)')
+
             print('[INFO] pid_analysis_config.json loaded successfully')
 
         except Exception as _ex:
@@ -284,6 +291,47 @@ class PIDAnalysisService:
             self.cache_s3_prefix        = 'pid_analysis_cache/'
             self.cache_ttl_days         = 0
             self.suppressed_categories  = []
+            self.evidence_guidance_block = ''  # no evidence guidance when config fails
+
+    # =========================================================================
+    # EVIDENCE GUIDANCE FORMATTER  (soft-coded via pid_analysis_config.json)
+    # =========================================================================
+
+    def _build_evidence_block(self, ev_cfg: dict) -> str:
+        """
+        Format the soft-coded evidence_guidance config into a prompt injection block.
+        Called by _load_analysis_config(). The returned string is appended to every
+        pass system prompt so all AI passes enforce the same evidence quality standard.
+        SOFT-CODED: edit pid_analysis_config.json → evidence_guidance to change behaviour.
+        """
+        if not ev_cfg:
+            return ''
+        sep = '=' * 59
+        lines = [
+            sep,
+            'EVIDENCE FIELD — MANDATORY WRITING STANDARD',
+            sep,
+            '',
+            'Format EVERY "evidence" value using this exact template:',
+            f'  {ev_cfg.get("format_template", "")}',
+            '',
+            'QUALITY RULES — violations produce findings that senior engineers will reject:',
+        ]
+        for rule in ev_cfg.get('quality_rules', []):
+            lines.append(f'  \u2192 {rule}')
+        lines.append('')
+        lines.append('APPLICABLE STANDARDS LIBRARY — cite the most specific clause:')
+        for cat, standards in ev_cfg.get('standards_library', {}).items():
+            lines.append(f'  [{cat.upper()}]')
+            for s in standards:
+                lines.append(f'    \u2022 {s}')
+        lines.append('')
+        lines.append('EVIDENCED EXAMPLES — every evidence field must match this depth and precision:')
+        for i, ex in enumerate(ev_cfg.get('examples', []), 1):
+            lines.append(f'  Example {i} (category: {ex.get("category", "")}, ref: {ex.get("pid_reference", "")})')
+            lines.append(f'  "{ex.get("good_evidence", "")}"')
+            lines.append('')
+        return '\n'.join(lines)
 
     # =========================================================================
     # GEMINI PROVIDER — init, vision call, unified routing wrapper (soft-coded)
@@ -1499,6 +1547,11 @@ Return ONLY valid JSON in this exact format:
                 _ocr_label = "use them as a systematic check checklist"
                 _none_msg = "  None detected"
 
+            # Inject soft-coded evidence guidance block (SOFT-CODED: pid_analysis_config.json → evidence_guidance)
+            _ev_block = getattr(self, 'evidence_guidance_block', '')
+            if _ev_block:
+                system_prompt = system_prompt + '\n\n' + _ev_block
+
             messages = [
                 {
                     "role": "system",
@@ -1947,6 +2000,7 @@ MANDATORY JSON FORMAT - each issue MUST have ALL these exact keys:
 }
 
 Do NOT use any other key names. The keys pid_reference and issue_observed are REQUIRED in every issue."""
+                + ('\n\n' + getattr(self, 'evidence_guidance_block', '') if getattr(self, 'evidence_guidance_block', '') else '')
                 },
                 {
                     "role": "user",
@@ -2219,6 +2273,11 @@ DO NOT generate critical_stress findings based on assumptions about the service 
 
 Return ONLY valid JSON with ALL findings from ALL nine domains above."""
 
+            # Inject soft-coded evidence guidance (SOFT-CODED: pid_analysis_config.json → evidence_guidance)
+            _ev_block6 = getattr(self, 'evidence_guidance_block', '')
+            if _ev_block6:
+                system_msg += '\n\n' + _ev_block6
+
             messages = [
                 {"role": "system", "content": system_msg},
                 {
@@ -2423,6 +2482,11 @@ Focus especially on:
 - Lines that abruptly change size without a reducer symbol
 - Any line where the size looks disproportionate to adjacent equipment nozzles
 """
+
+            # Inject soft-coded evidence guidance (SOFT-CODED: pid_analysis_config.json → evidence_guidance)
+            _ev_block7 = getattr(self, 'evidence_guidance_block', '')
+            if _ev_block7:
+                system_msg += '\n\n' + _ev_block7
 
             messages = [
                 {"role": "system", "content": system_msg},
@@ -3183,6 +3247,11 @@ Report EACH deficiency as a SEPARATE JSON issue entry.
 Do NOT group multiple problems into one finding.
 Do NOT invent issues — every finding must be visually confirmed on the drawing.
 Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
+
+            # Inject soft-coded evidence guidance (SOFT-CODED: pid_analysis_config.json → evidence_guidance)
+            _ev_block8 = getattr(self, 'evidence_guidance_block', '')
+            if _ev_block8:
+                system_msg += '\n\n' + _ev_block8
 
             messages = [
                 {"role": "system", "content": system_msg},
