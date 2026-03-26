@@ -237,6 +237,7 @@ OUTPUT FORMAT — return ONLY valid JSON, no other text
             "pid_reference": "Exact tag or line number as visible on drawing (e.g. FT-1001, 4\"-HC-1001-CS150)",
             "issue_observed": "Specific gap — include exact values, not generic descriptions",
             "action_required": "Clear corrective action for the engineering team",
+            "evidence": "State exactly what you visually confirmed (or could NOT find) on the drawing. If standard-based, name the standard. Example: 'BDV-102 symbol is visible at Middle-Right but no FO/FC annotation is shown next to the valve actuator.'",
             "severity": "critical/major/minor/observation",
             "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance/trim_class/dissimilar_material/ltcs_compliance/free_drain_slope/spool_requirement/critical_stress/valve_standard/tie_in_reference/corrosion_allowance",
             "location_on_drawing": {

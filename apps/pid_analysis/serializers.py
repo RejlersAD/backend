@@ -157,12 +157,13 @@ class PIDIssueSerializer(serializers.ModelSerializer):
     engineering_impact = serializers.SerializerMethodField()
     standard_reference = serializers.SerializerMethodField()
     related_issues = serializers.SerializerMethodField()
+    evidence = serializers.SerializerMethodField()
     
     class Meta:
         model = PIDIssue
         fields = [
             'id', 'serial_number', 'pid_reference', 'issue_observed',
-            'action_required', 'severity', 'category', 'status',
+            'action_required', 'evidence', 'severity', 'category', 'status',
             'approval', 'remark', 'location_on_drawing', 'engineering_impact',
             'standard_reference', 'related_issues', 'created_at', 'updated_at'
         ]
@@ -209,6 +210,20 @@ class PIDIssueSerializer(serializers.ModelSerializer):
                     if issue.get('serial_number') == obj.serial_number:
                         return issue.get('related_issues', [])
         return []
+
+    def get_evidence(self, obj):
+        """Extract evidence (AI justification) from analysis report JSON if available"""
+        report = self.context.get('report')
+        if not report and hasattr(obj, 'analysis_report'):
+            report = obj.analysis_report
+
+        if report and hasattr(report, 'report_data'):
+            report_data = report.report_data
+            if isinstance(report_data, dict) and 'issues' in report_data:
+                for issue in report_data.get('issues', []):
+                    if issue.get('serial_number') == obj.serial_number:
+                        return issue.get('evidence', '')
+        return ''
 
 
 class PIDAnalysisReportSerializer(serializers.ModelSerializer):

@@ -910,6 +910,7 @@ class PIDAnalysisService:
                     'pid_reference': 'DRAWING ANALYSIS',
                     'issue_observed': f'Automated analysis completed. Found {len(self.instrument_tags)} instruments, {len(self.equipment_tags)} equipment tags, {len(self.line_numbers)} line numbers. Manual review recommended.',
                     'action_required': 'Perform detailed manual review of the P&ID drawing for completeness and compliance',
+                    'evidence': 'Programmatically generated observation — derived from OCR text extraction counts, not from AI visual inspection. No specific defect was identified; this is a summary placeholder.',
                     'severity': 'observation',
                     'category': 'documentation',
                     'location_on_drawing': {
@@ -934,6 +935,7 @@ class PIDAnalysisService:
                             'pid_reference': note_ref.upper().replace(' ', '-'),
                             'issue_observed': f"{'Open hold' if is_hold else 'Note'} reference found on drawing — individual compliance not verified by AI scan.",
                             'action_required': f"{'Verify this HOLD is resolved or obtain written approval for each outstanding requirement.' if is_hold else 'Verify that the requirement stated in this NOTE is implemented on the drawing.'}",
+                            'evidence': f"Programmatically detected: {'HOLD' if is_hold else 'NOTE'} reference '{note_ref}' was extracted from the drawing text. Individual compliance against drawing content was not verified by AI visual scan.",
                             'severity': 'major' if is_hold else 'minor',
                             'category': 'holds_compliance' if is_hold else 'notes_compliance',
                             'location_on_drawing': {
@@ -1398,6 +1400,7 @@ Return ONLY valid JSON in this exact format:
             "pid_reference": "Exact tag/line/equipment visible on drawing",
             "issue_observed": "Specific issue with exact values",
             "action_required": "Clear corrective action",
+            "evidence": "State exactly what you visually confirmed (or could NOT find) on the drawing. If the finding is inferred from an engineering standard, name the standard. Example: 'Tag X symbol is visible at Bottom-Right but no FO annotation is present next to the actuator.'",
             "severity": "critical/major/minor/observation",
             "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance/trim_class/dissimilar_material/ltcs_compliance/free_drain_slope/spool_requirement/critical_stress/valve_standard/tie_in_reference/corrosion_allowance",
             "location_on_drawing": {
@@ -1673,6 +1676,7 @@ Return ONLY valid JSON:
             "pid_reference": "Exact tag/line/equipment visible on drawing",
             "issue_observed": "Specific issue with exact values",
             "action_required": "Clear corrective action",
+            "evidence": "State exactly what you visually confirmed (or could NOT find) on the drawing. If the finding is inferred from an engineering standard, name the standard.",
             "severity": "critical/major/minor/observation",
             "category": "instrument/equipment/piping/valve/safety/control_loop/documentation/legend/pipe_class/psv_compliance/holds_compliance/notes_compliance/trim_class/dissimilar_material/ltcs_compliance/free_drain_slope/spool_requirement/critical_stress/valve_standard/tie_in_reference/corrosion_allowance",
             "location_on_drawing": {{
@@ -1789,6 +1793,7 @@ Return ONLY valid JSON. No markdown, no text outside the JSON."""
                 'pid_reference': f"OCR Text Reference: {', '.join(list(missing_in_vision)[:5])}... ({len(missing_in_vision)} total)",
                 'issue_observed': f'Found {len(missing_in_vision)} instrument tag strings in extracted text that were not visually confirmed on drawing. These may be: (1) references to instruments on connected OPC/drawings, (2) OCR artifacts, (3) tags in notes/title block, or (4) instruments with symbol recognition limitations. Visual confirmation required.',
                 'action_required': 'Review if these tags are cross-references to connected drawings. If they should be on this drawing, verify instrument symbols are physically present.',
+                'evidence': 'Programmatically generated: these tag strings were found by OCR text extraction but were NOT visually confirmed as physical instrument symbols on the drawing. Source may be text in notes, title block, or connected drawing references.',
                 'severity': 'observation',
                 'category': 'instrument',
                 'location_on_drawing': {
@@ -1809,6 +1814,7 @@ Return ONLY valid JSON. No markdown, no text outside the JSON."""
                 'pid_reference': f"Equipment: {', '.join(list(missing_equipment)[:5])}... ({len(missing_equipment)} total)",
                 'issue_observed': f'Found {len(missing_equipment)} equipment tags in text not verified visually. These may be: (1) Equipment in connected systems/drawings, (2) Legend references, or (3) OCR artifacts.',
                 'action_required': 'Review if these are intentional cross-references. Verify critical equipment is properly shown with symbols and datasheets.',
+                'evidence': 'Programmatically generated: equipment tags found by OCR text extraction but NOT visually confirmed as symbols on the drawing. Possible sources: legend, notes section, connected drawing references, or OCR artifacts.',
                 'severity': 'observation',
                 'category': 'equipment',
                 'location_on_drawing': {
@@ -1826,6 +1832,7 @@ Return ONLY valid JSON. No markdown, no text outside the JSON."""
                 'pid_reference': f"NOTES: {', '.join(list(self.notes_references)[:5])}",
                 'issue_observed': f'Found {len(self.notes_references)} note/hold references. Verify all notes are applicable and properly implemented in the design.',
                 'action_required': 'Cross-check each note/hold requirement is addressed in equipment specs, line specs, and instrumentation.',
+                'evidence': 'Programmatically generated: note/hold reference text was extracted by OCR. Individual note compliance was not verified by AI visual scan; this is a reminder to cross-check each note against the design.',
                 'severity': 'observation',
                 'category': 'documentation',
                 'location_on_drawing': {
@@ -1925,6 +1932,7 @@ MANDATORY JSON FORMAT - each issue MUST have ALL these exact keys:
       "pid_reference": "exact tag or line number visible on drawing (e.g. FT-3601-03)",
       "issue_observed": "specific description of what is missing or non-compliant",
       "action_required": "clear corrective action",
+      "evidence": "State exactly what you visually confirmed (or could NOT find) on the drawing. If standard-based, name the standard.",
       "severity": "critical|major|minor|observation",
       "category": "instrument|equipment|piping|valve|safety|control_loop|documentation",
       "location_on_drawing": {
@@ -2080,6 +2088,7 @@ MANDATORY JSON FORMAT — return ONLY valid JSON, no markdown:
       "pid_reference": "exact tag/line/equipment visible on drawing",
       "issue_observed": "specific non-compliance with exact values",
       "action_required": "clear corrective action referencing the applicable standard",
+      "evidence": "State exactly what you visually confirmed (or could NOT find) on the drawing. If based on a standard, name it.",
       "severity": "critical|major|minor|observation",
       "category": "psv_compliance|valve_standard|tie_in_reference|corrosion_allowance|dissimilar_material|ltcs_compliance|free_drain_slope|spool_requirement|critical_stress",
       "location_on_drawing": {
@@ -2825,6 +2834,7 @@ MANDATORY JSON RESPONSE — return ONLY valid JSON, no markdown fences:
       "pid_reference": "exact reference visible on drawing (tag / line number / note number)",
       "issue_observed": "specific description with exact values extracted from the drawing",
       "action_required": "clear corrective action",
+      "evidence": "State exactly what you visually confirmed (or could NOT find) on the drawing. If standard-based, name the standard.",
       "severity": "critical|major|minor|observation",
       "category": "line_duplicate|valve_size|notes_compliance|holds_compliance|type_designation|revision_change|line_number_anomaly|spec_break|missing_fitting|instrument_downgrade|line_continuity|piping|valve|documentation",
       "location_on_drawing": {
