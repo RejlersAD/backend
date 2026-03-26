@@ -1147,7 +1147,7 @@ class PIDAnalysisService:
             for stag in sis_sw_t:
                 lines.append(f"  □ [{stag}] SIS switch symbol visible and process tap connected?  → NO = MAJOR")
                 lines.append(f"  □ [{stag}] SIS / interlock connection shown for {stag}?  → NO = CRITICAL (SIS requirement)")
-                lines.append(f"  □ [{stag}] Trip setpoint noted near {stag}?  → NO = MINOR")
+                # NOTE: trip setpoints belong in SIS cause-and-effect / datasheet, NOT on P&ID — do not flag
 
             for stag in proc_sw_t:
                 lines.append(f"  □ [{stag}] Process switch {stag} symbol visible?  → NO = MINOR")
@@ -1384,11 +1384,12 @@ For each line number above (excluding PP-prefix connectors):
 
 --- OVERALL DRAWING CHECKS ---
 Equipment: For each visible vessel/pump/compressor/exchanger - tag format, design conditions (P/T), nozzle connections complete
-Safety (PSV_COMPLIANCE): For each PSV/PRV/TSV visible:
-  - Set pressure annotation present on symbol? (MISSING = CRITICAL)
-  - Discharge line shown with destination (flare/vent header)? (MISSING = CRITICAL)
-  - Sizing basis note/reference tag shown near PSV? (MISSING = MAJOR)
-  - If reference Equipment List provided: set pressure must be ≤ equipment design pressure (EXCEEDED = CRITICAL)
+Safety (PSV_COMPLIANCE): For each PSV/PRV/TSV visible on this drawing:
+  - Tag label readable on drawing? (MISSING = MAJOR)
+  - Inlet isolation valve present, car-sealed open (CSO)? (MISSING = CRITICAL)
+  - Discharge line drawn with labeled destination (flare header, vent stack, or closed system)? (MISSING = CRITICAL)
+  NOT ON P&ID — DO NOT FLAG: set pressure value, relieving capacity, back pressure, sizing basis.
+    These are DATASHEET values. They do NOT appear on P&ID drawings.
 Notes/Holds: Read each active note/hold text - flag non-compliance as separate critical/major issues
 Documentation: Legend completeness, title block revision, legibility, symbol consistency
 
@@ -1955,12 +1956,18 @@ separate JSON issue.  One element × one deficiency = one issue entry. Do NOT gr
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DOMAIN 1 — PSV / PRV / TSV COMPLIANCE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-For each PSV, PRV, PDSV, or TSV symbol visible:
-  □ Is the set pressure annotated ON or immediately next to the valve symbol?  → MISSING = CRITICAL
-  □ Is the discharge line drawn to a flare header, vent stack, or safe destination?  → MISSING = CRITICAL
-  □ Is a sizing basis or reference tag (e.g. "SEE PSV DATA SHEET") shown?  → MISSING = MAJOR
-  □ Is the inlet line adequately sized (same bore or larger than PSV inlet nozzle)?  → UNDERSIZED = MAJOR
-  □ Does the PSV symbol have a readable tag label visible on the drawing?  → NO READABLE TAG = MAJOR
+For each PSV, PRV, PDSV, or TSV symbol visible on the drawing:
+  □ Does the PSV have a readable, complete tag label (e.g. PSV-1015)?  → NO READABLE TAG = MAJOR
+  □ Is a car-sealed open (CSO) block valve shown on the PSV inlet line?  → MISSING = CRITICAL
+  □ Is the discharge line drawn to a flare header, vent stack, or labeled closed system?  → MISSING = CRITICAL
+  □ Is the inlet line size equal to or larger than the PSV inlet nozzle (no reducers on PSV inlet)?  → REDUCER ON INLET = MAJOR
+
+NOT REQUIRED ON P&ID (do NOT flag these — they belong in the PSV datasheet, not the drawing):
+  ✕ Set pressure value (e.g. "10 barg") — this is a DATASHEET item
+  ✕ Relieving capacity (e.g. "1200 kg/h") — this is a DATASHEET item
+  ✕ Back pressure, superimposed back pressure — this is a DATASHEET item
+  ✕ Sizing basis note / reference tag — this is a DATASHEET item
+  ✕ "SEE PSV DATA SHEET" annotation — not required on P&ID
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DOMAIN 2 — VALVE STANDARDS (API 6D / ASME B16.34 / API 600 / ISO 15848)
