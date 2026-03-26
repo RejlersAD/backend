@@ -89,6 +89,15 @@
       "pass_5": "gemini",
       "pass_6": "openai",
       "pass_7": "openai"
+    },
+
+    "_cache_comment": "S3 result cache. When enabled, the SHA-256 hash of the raw PDF bytes is used as a content-addressable key. Uploading the SAME file again (any filename, any user) immediately returns the stored report — all 8 AI passes are skipped. Set enabled=false to force a fresh analysis. ttl_days=0 means objects never expire automatically.",
+    "cache": {
+      "enabled": true,
+      "backend": "s3",
+      "s3_bucket_env": "AWS_STORAGE_BUCKET_NAME",
+      "s3_prefix": "pid_analysis_cache/",
+      "ttl_days": 0
     }
   }
 }

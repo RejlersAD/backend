@@ -219,6 +219,14 @@ class PIDAnalysisService:
             self.pass6_provider = _rt.get('pass_6', 'openai')
             self.pass7_provider = _rt.get('pass_7', 'openai')
 
+            # S3 analysis result cache (soft-coded: change enabled/prefix without code deploy)
+            _ca = cfg.get('cache', {})
+            self.cache_enabled       = bool(_ca.get('enabled', False))
+            self.cache_backend       = _ca.get('backend', 's3')
+            self.cache_s3_bucket_env = _ca.get('s3_bucket_env', 'AWS_STORAGE_BUCKET_NAME')
+            self.cache_s3_prefix     = _ca.get('s3_prefix', 'pid_analysis_cache/')
+            self.cache_ttl_days      = int(_ca.get('ttl_days', 0))
+
             print('[INFO] pid_analysis_config.json loaded successfully')
 
         except Exception as _ex:
@@ -262,6 +270,12 @@ class PIDAnalysisService:
             self.pass5_provider         = 'openai'
             self.pass6_provider         = 'openai'
             self.pass7_provider         = 'openai'
+            # Cache defaults (off by default when config is unavailable)
+            self.cache_enabled          = False
+            self.cache_backend          = 's3'
+            self.cache_s3_bucket_env    = 'AWS_STORAGE_BUCKET_NAME'
+            self.cache_s3_prefix        = 'pid_analysis_cache/'
+            self.cache_ttl_days         = 0
 
     # =========================================================================
     # GEMINI PROVIDER — init, vision call, unified routing wrapper (soft-coded)
@@ -579,6 +593,102 @@ class PIDAnalysisService:
                 'detected': False,
             }
 
+    # =========================================================================
+    # S3 ANALYSIS RESULT CACHE — content-addressable, soft-coded via config
+    # =========================================================================
+    # Key  : SHA-256(raw PDF bytes) + analysis_mode  →  unique per file content
+    # Store: gzip-compressed JSON in S3 under pid_analysis_cache/{hash}_{mode}.json.gz
+    # Hit  : full 8-pass analysis is skipped; cached result returned in <1 second
+    # Miss : analysis runs normally; result stored to S3 before returning
+    # =========================================================================
+
+    def _read_pdf_bytes(self, pdf_file) -> bytes:
+        """Read raw bytes from either a file-path string or a Django FieldFile.
+        After reading the file pointer is reset to 0 so later passes can re-read."""
+        if isinstance(pdf_file, str):
+            with open(pdf_file, 'rb') as _fh:
+                return _fh.read()
+        pdf_file.seek(0)
+        data = pdf_file.read()
+        pdf_file.seek(0)   # reset so Pass 1 / _pdf_to_base64_images can read it again
+        return data
+
+    def _compute_cache_key(self, pdf_bytes: bytes, analysis_mode: str) -> str:
+        """Return the S3 object key for this (content, mode) pair.
+        Format: {prefix}{sha256}_{mode}.json.gz
+        The key is purely content-based — renaming or re-uploading the same P&ID
+        always maps to the exact same cache slot."""
+        import hashlib as _hl
+        digest = _hl.sha256(pdf_bytes).hexdigest()
+        prefix = getattr(self, 'cache_s3_prefix', 'pid_analysis_cache/')
+        return f"{prefix}{digest}_{analysis_mode}.json.gz"
+
+    def _cache_get(self, s3_key: str):
+        """Fetch a cached analysis result from S3.
+        Returns the parsed dict on cache HIT, or None on miss / error / disabled."""
+        if not getattr(self, 'cache_enabled', False):
+            return None
+        try:
+            import boto3 as _boto3, gzip as _gz, json as _json
+            from decouple import config as _dcfg
+            bucket = _dcfg(self.cache_s3_bucket_env, default='')
+            if not bucket:
+                print('[CACHE] AWS_STORAGE_BUCKET_NAME not set — cache disabled')
+                return None
+            s3 = _boto3.client(
+                's3',
+                aws_access_key_id=_dcfg('AWS_ACCESS_KEY_ID', default=''),
+                aws_secret_access_key=_dcfg('AWS_SECRET_ACCESS_KEY', default=''),
+                region_name=_dcfg('AWS_S3_REGION_NAME', default='us-east-1'),
+            )
+            obj = s3.get_object(Bucket=bucket, Key=s3_key)
+            compressed = obj['Body'].read()
+            result = _json.loads(_gz.decompress(compressed).decode('utf-8'))
+            print(f'[CACHE HIT] {s3_key} — returning stored report ({len(compressed):,} bytes compressed)')
+            return result
+        except Exception as _e:
+            code = getattr(getattr(_e, 'response', None) or {}, 'get', lambda *a: '')('Error', {}).get('Code', '')
+            if code not in ('NoSuchKey', '404'):
+                print(f'[CACHE] S3 get error ({_e}) — proceeding with fresh analysis')
+            return None
+
+    def _cache_put(self, s3_key: str, result: dict) -> None:
+        """Store an analysis result in S3 as gzip-compressed JSON (non-fatal).
+        Any upload failure is logged and swallowed — the caller always gets its result."""
+        if not getattr(self, 'cache_enabled', False):
+            return
+        try:
+            import boto3 as _boto3, gzip as _gz, json as _json, datetime as _dt
+            from decouple import config as _dcfg
+            bucket = _dcfg(self.cache_s3_bucket_env, default='')
+            if not bucket:
+                return
+            s3 = _boto3.client(
+                's3',
+                aws_access_key_id=_dcfg('AWS_ACCESS_KEY_ID', default=''),
+                aws_secret_access_key=_dcfg('AWS_SECRET_ACCESS_KEY', default=''),
+                region_name=_dcfg('AWS_S3_REGION_NAME', default='us-east-1'),
+            )
+            payload    = _json.dumps(result, default=str).encode('utf-8')
+            compressed = _gz.compress(payload, compresslevel=6)
+            put_kwargs = dict(
+                Bucket=bucket,
+                Key=s3_key,
+                Body=compressed,
+                ContentType='application/gzip',
+                ContentEncoding='gzip',
+                Metadata={'cached_at': _dt.datetime.utcnow().isoformat()},
+            )
+            # Optional: set object expiry via S3 lifecycle or explicit Expires header
+            ttl = getattr(self, 'cache_ttl_days', 0)
+            if ttl > 0:
+                import datetime as _dt2
+                put_kwargs['Expires'] = _dt2.datetime.utcnow() + _dt2.timedelta(days=ttl)
+            s3.put_object(**put_kwargs)
+            print(f'[CACHE STORED] {s3_key} ({len(compressed):,} bytes compressed / {len(payload):,} raw)')
+        except Exception as _e:
+            print(f'[CACHE] S3 put error ({_e}) — result still returned to caller')
+
     def analyze_pid_drawing(self, pdf_file, drawing_number: Optional[str] = None, reference_documents: Dict[str, Any] = None, analysis_mode: str = 'standard') -> Dict[str, Any]:
         """
         Multi-Pass P&ID Analysis with OCR, Vision, Cross-Validation, and Reference Document Verification
@@ -613,7 +723,19 @@ class PIDAnalysisService:
             print(f"[INFO] Analysis Mode: {analysis_mode.upper()}")
             if reference_documents:
                 print(f"[INFO] Reference documents provided: {list(reference_documents.keys())}")
-            
+
+            # ── S3 cache check ───────────────────────────────────────────────────────
+            # Compute a content-based key from the raw PDF bytes.  If the SAME file
+            # was analysed before, return the stored result immediately (< 1 second)
+            # and skip all 8 AI passes entirely.  Cache miss → run full analysis.
+            _pdf_raw   = self._read_pdf_bytes(pdf_file)
+            _cache_key = self._compute_cache_key(_pdf_raw, analysis_mode)
+            _cached    = self._cache_get(_cache_key)
+            if _cached is not None:
+                _cached.setdefault('analysis_metadata', {})['cache_hit'] = True
+                return _cached
+            print('[CACHE MISS] No cached result found — running full 8-pass analysis')
+
             # PASS 1: OCR Text Extraction
             print(f"[INFO] PASS 1: OCR Text Extraction")
             images_base64 = self._pdf_to_base64_images(pdf_file)
@@ -867,7 +989,10 @@ class PIDAnalysisService:
             print(f"[INFO] Critical: {len(categorized['critical'])}, Major: {len(categorized['major'])}, Minor: {len(categorized['minor'])}")
             print(f"[INFO] Line Size Anomalies: {len(line_size_result.get('line_size_recommendations', []))}")
             print(f"[INFO] Smart QC Enhancement (Pass 8): {len(smart_qc_result.get('issues', []))} issues")
-            
+
+            # ── Store result in S3 cache ─────────────────────────────────────────────
+            self._cache_put(_cache_key, final_result)
+
             return final_result
             
         except Exception as e:
