@@ -100,6 +100,9 @@
       "ttl_days": 0
     },
 
+    "_hide_no_evidence_comment": "When true, any finding returned to the report that has an empty or blank 'evidence' field is silently hidden from the engineer's view. This prevents undefended comments from reaching the P&ID review table. Set to false to show all findings regardless of evidence quality. No code deploy required — change this value and it takes effect on the next page load.",
+    "hide_findings_without_evidence": true,
+
     "_suppress_comment": "Categories to exclude from the final report. Any finding whose 'category' field (case-insensitive, partial match) appears in this list is silently dropped before the report is saved. Full category list: instrument, equipment, piping, valve, safety, control_loop, documentation, legend, pipe_class, psv_compliance, holds_compliance, notes_compliance, trim_class, dissimilar_material, ltcs_compliance, free_drain_slope, spool_requirement, critical_stress, valve_standard, tie_in_reference, corrosion_allowance. To re-enable a category, remove it from this list — no code deploy required.",
     "suppressed_categories": [
       "psv_compliance",

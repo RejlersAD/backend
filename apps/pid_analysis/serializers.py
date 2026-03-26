@@ -16,6 +16,21 @@ def _load_suppressed_categories():
         return []
 
 
+def _load_hide_no_evidence_flag():
+    """Read hide_findings_without_evidence from pid_analysis_config.json.
+    When True, findings with an empty evidence field are suppressed from the report
+    view — they cannot mislead a process engineer reviewing the P&ID.
+    Soft-coded: flip the flag in the JSON file; no code deploy required."""
+    import os, json
+    try:
+        cfg_path = os.path.join(os.path.dirname(__file__), 'config', 'pid_analysis_config.json')
+        with open(cfg_path, 'r', encoding='utf-8') as _f:
+            data = json.load(_f)
+        return bool(data.get('pid_analysis', {}).get('hide_findings_without_evidence', False))
+    except Exception:
+        return False
+
+
 # ========== PID PROJECT SERIALIZERS (RBAC-enabled) ==========
 
 class PIDDrawingListSerializer(serializers.ModelSerializer):
@@ -331,6 +346,17 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
             debug_info['has_report_data'] = False
             debug_info['methods_tried'].append('no report_data available')
         
+        # SOFT-CODED: hide findings with no evidence so engineers only see defended findings
+        if _load_hide_no_evidence_flag():
+            before = len(result_issues)
+            result_issues = [
+                issue for issue in result_issues
+                if isinstance(issue, dict) and issue.get('evidence', '').strip()
+            ]
+            hidden = before - len(result_issues)
+            if hidden:
+                logger.info(f"[get_issues] 🔕 Hid {hidden} finding(s) with no evidence for report {obj.id} (hide_findings_without_evidence=true)")
+
         # Log debug information
         debug_info['final_count'] = len(result_issues)
         debug_info['has_issues'] = len(result_issues) > 0
