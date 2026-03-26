@@ -60,39 +60,55 @@ class EnvironmentConfig:
     def get_environment(self) -> str:
         """
         Detect current environment (local, dev, preprod, production)
-        
+
+        Detection priority (highest → lowest):
+        1. AIFLOW_ENVIRONMENT env var (explicit override — set this in Railway service vars)
+        2. RAILWAY_ENVIRONMENT env var (Railway-native, set to 'production' in prod service)
+        3. FRONTEND_URL env var — if it points to radai.ae we are in production
+        4. RAILWAY_GIT_BRANCH heuristic — 'main'/'production' → production, 'preprod' → preprod, 'dev' → dev
+        5. DATABASE_URL present but none of the above matched → default 'production'
+           (safer than 'dev': production CORS list is a superset; 'dev' would block radai.ae)
+        6. No DATABASE_URL → local
+
         Returns:
             str: Environment name
         """
-        # Check for explicit environment variable
+        # 1. Check for explicit environment variable (most reliable — set this in Railway)
         env = os.environ.get('AIFLOW_ENVIRONMENT', '').lower()
-        if env in ['local', 'dev', 'preprod', 'production']:
+        if env in ['local', 'dev', 'preprod', 'production', 'testing']:
             return env
-        
-        # Detect based on Railway environment
+
+        # 2. Railway-native environment name (set automatically by Railway)
         railway_env = os.environ.get('RAILWAY_ENVIRONMENT', '').lower()
         if railway_env:
             if railway_env == 'production':
                 return 'production'
-            elif railway_env == 'preprod':
+            elif railway_env in ('preprod', 'staging'):
                 return 'preprod'
             elif railway_env == 'dev':
                 return 'dev'
-        
-        # Check for DATABASE_URL (Railway/production indicator)
+
+        # 3. FRONTEND_URL points to the production domain → must be production
+        frontend_url = os.environ.get('FRONTEND_URL', '').lower()
+        if 'radai.ae' in frontend_url:
+            return 'production'
+
+        # 4. RAILWAY_GIT_BRANCH heuristic
         if os.environ.get('DATABASE_URL'):
-            # If DATABASE_URL exists, we're in Railway - check branch
-            git_branch = os.environ.get('RAILWAY_GIT_BRANCH', '')
-            if 'main' in git_branch or 'production' in git_branch:
-                return 'production'
-            elif 'preprod' in git_branch:
-                return 'preprod'
-            elif 'dev' in git_branch:
-                return 'dev'
-            # Default Railway to dev
-            return 'dev'
-        
-        # Default to local
+            git_branch = os.environ.get('RAILWAY_GIT_BRANCH', '').lower()
+            if git_branch:
+                if 'main' in git_branch or 'production' in git_branch:
+                    return 'production'
+                elif 'preprod' in git_branch or 'staging' in git_branch:
+                    return 'preprod'
+                elif 'dev' in git_branch:
+                    return 'dev'
+            # 5. DATABASE_URL present but no branch signal → safer to assume production
+            # (production CORS list includes radai.ae; 'dev' would block it entirely)
+            print('[CONFIG] WARNING: Could not detect environment from branch — defaulting to production (DATABASE_URL present)')
+            return 'production'
+
+        # 6. Default to local
         return 'local'
     
     def get(self, key: str, environment: Optional[str] = None, default: Any = None) -> Any:

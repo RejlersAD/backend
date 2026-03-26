@@ -173,7 +173,14 @@
           "https://airflow-frontend-hsx7-git-dev.vercel.app",
           "https://aiflowbackend-production-9bdc.up.railway.app"
         ],
-        "production": ["https://radai.ae", "https://www.radai.ae", "https://aiflowbackend-production.up.railway.app"]
+        "production": [
+          "https://radai.ae",
+          "https://www.radai.ae",
+          "http://radai.ae",
+          "http://www.radai.ae",
+          "https://aiflowbackend-production.up.railway.app",
+          "https://airflow-frontend.vercel.app"
+        ]
       }
     },
     "csrf": {
@@ -188,7 +195,13 @@
           "https://airflow-frontend-hsx7-git-preprod-rejlers.vercel.app",
           "https://aiflowbackend-production-9bdc.up.railway.app"
         ],
-        "production": ["https://radai.ae", "https://www.radai.ae"]
+        "production": [
+          "https://radai.ae",
+          "https://www.radai.ae",
+          "http://radai.ae",
+          "http://www.radai.ae",
+          "https://aiflowbackend-production.up.railway.app"
+        ]
       }
     },
     "s3_storage": {
