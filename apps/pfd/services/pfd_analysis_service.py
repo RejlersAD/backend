@@ -9,12 +9,22 @@ import base64
 import io
 import json
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set
 from django.conf import settings
 from django.core.files.storage import default_storage
 from openai import OpenAI
 import fitz  # PyMuPDF
 from PIL import Image
+
+
+# ---------------------------------------------------------------------------
+# CAG helpers
+# ---------------------------------------------------------------------------
+
+def _pfd_inventory_contains(inventory_set: Set[str], token: str) -> bool:
+    """True if *token* is a substring of any item in inventory_set."""
+    token_up = token.upper()
+    return any(token_up in item for item in inventory_set)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +159,9 @@ class PFDAnalysisService:
             # ── Merge, deduplicate, renumber ────────────────────────────────
             all_issues = self._merge_and_deduplicate(issues_p3, issues_p4)
             print(f"[PFD_ANALYSIS] Final merged issues: {len(all_issues)}")
-
+            # ── CAG post-filter: remove hallucinated findings ─────────────────
+            all_issues = self._cag_post_filter(all_issues, inventory)
+            print(f"[PFD_ANALYSIS] After CAG post-filter: {len(all_issues)} issues")
             # ── Build drawing_info from inventory ───────────────────────────
             drawing_info = self._extract_drawing_info(inventory, drawing_metadata or {})
 
@@ -384,6 +396,8 @@ Report an issue for EVERY check that fails or cannot be confirmed. Be specific.
                 + "\n"
             )
 
+        cag_block = self._build_cag_context(inventory)
+
         metadata_block = ""
         if drawing_metadata:
             metadata_block = (
@@ -407,6 +421,7 @@ Report an issue for EVERY check that fails or cannot be confirmed. Be specific.
 {inventory_block}
 {metadata_block}
 {ref_block}
+{cag_block}
 
 {self._CHECKS_TEXT}
 
@@ -494,11 +509,14 @@ Return ONLY a valid JSON object:
                 + "\n"
             )
 
+        cag_block = self._build_cag_context(inventory)
+
         prompt = f"""You are performing a PFD Gap Analysis — your sole focus is on what is
 ABSENT, INCOMPLETE, or INCONSISTENT.
 
 {inventory_block}
 {ref_block}
+{cag_block}
 
 Examine the PFD image(s) and answer these gap questions. Report an issue for
 every gap you find:
@@ -564,6 +582,227 @@ Return ONLY a valid JSON object:
         except Exception as e:
             print(f"[PFD_ANALYSIS] Pass 4 error: {e}")
             return []
+
+    # -----------------------------------------------------------------------
+    # CAG — Context-Augmented Generation
+    # -----------------------------------------------------------------------
+
+    def _build_cag_context(self, inventory: dict) -> str:
+        """
+        Build a CAG boundary block from Pass 1 inventory to inject into
+        Passes 3 and 4. Forces the model to only reference elements that
+        were visually confirmed on the drawing, preventing hallucination of
+        equipment tags, stream numbers, and notes that do not exist.
+        """
+        sep = '═' * 68
+        equipment_tags = inventory.get("equipment_tags", [])
+        stream_numbers = [str(s) for s in inventory.get("stream_numbers", [])]
+        notes = inventory.get("notes", [])
+        utility_headers = inventory.get("utility_headers", [])
+        battery_limits = inventory.get("battery_limits", [])
+        process_units = inventory.get("process_units", [])
+
+        lines = [
+            sep,
+            'CAG CONTEXT — CONTEXT-AUGMENTED GENERATION BOUNDARY',
+            sep,
+            '',
+            'You are operating in CAG (Context-Augmented Generation) mode.',
+            'ONLY generate findings for elements confirmed by the inventory below',
+            'OR elements you visually confirm RIGHT NOW on the attached drawing image.',
+            'Do NOT use training-data memory to invent elements not present here.',
+            '',
+            '── CONFIRMED EQUIPMENT TAGS ON THIS PFD ──',
+        ]
+
+        if equipment_tags:
+            for tag in sorted(equipment_tags)[:60]:
+                lines.append(f'  {tag}')
+            lines.append(f'  (Total: {len(equipment_tags)} equipment tags from visual scan)')
+            lines.append('')
+            lines.append(
+                'RULE ➜ Every equipment finding MUST reference one of the tags above '
+                'OR a tag you can READ directly on the image.'
+            )
+            lines.append('Do NOT invent equipment tags not listed here.')
+        else:
+            lines.append('  (No equipment tags extracted — rely entirely on visual scan.)')
+
+        lines += [
+            '',
+            '── CONFIRMED STREAM NUMBERS ON THIS PFD ──',
+        ]
+        if stream_numbers:
+            for sn in sorted(stream_numbers)[:60]:
+                lines.append(f'  {sn}')
+            lines.append(f'  (Total: {len(stream_numbers)} stream numbers from visual scan)')
+            lines.append('')
+            lines.append(
+                'RULE ➜ Every stream finding MUST reference one of the numbers above '
+                'OR a number you can READ directly on the image.'
+            )
+            lines.append('Do NOT invent stream numbers not listed here.')
+        else:
+            lines.append('  (No stream numbers extracted — rely on visual scan.)')
+
+        lines += [
+            '',
+            '── UTILITY HEADERS VISIBLE ON THIS PFD ──',
+        ]
+        if utility_headers:
+            for uh in utility_headers:
+                lines.append(f'  {uh}')
+            lines.append(
+                'RULE ➜ Only report missing utility connections for equipment listed '
+                'in the confirmed equipment tags above.'
+            )
+        else:
+            lines.append('  (No utility headers detected by visual scan.)')
+
+        lines += [
+            '',
+            '── BATTERY LIMITS / TIE-INS ──',
+        ]
+        if battery_limits:
+            for bl in battery_limits:
+                lines.append(f'  {bl}')
+        else:
+            lines.append('  (No battery limits extracted — rely on visual scan.)')
+
+        lines += [
+            '',
+            '── PROCESS UNITS / SECTIONS ──',
+        ]
+        if process_units:
+            for pu in process_units:
+                lines.append(f'  {pu}')
+        else:
+            lines.append('  (No process unit labels extracted — rely on visual scan.)')
+
+        lines += [
+            '',
+            '── NOTES INVENTORY ──',
+        ]
+        if notes:
+            lines.append(f'Visual scan detected {len(notes)} note(s) on this drawing:')
+            for n in notes:
+                lines.append(f'  {n}')
+            lines.append('')
+            lines.append(
+                'RULE ➜ Only generate notes-related findings for the notes listed above.'
+            )
+        else:
+            lines += [
+                '  Visual scan detected ZERO general notes on this drawing.',
+                '',
+                '⚠ CRITICAL RULE: Because NO notes were found by visual scan, you MUST NOT',
+                '  generate any finding about missing or incorrect general notes.',
+                '  Do NOT invent a General Notes section that does not exist on this drawing.',
+                '  If you cannot visually confirm a NOTES section in the image, skip those checks.',
+            ]
+
+        lines += [
+            '',
+            'CAG SUMMARY RULES (apply to EVERY finding):',
+            '  1. Equipment refs  → must match confirmed equipment tags above or visible on image.',
+            '  2. Stream refs     → must match confirmed stream numbers above or visible on image.',
+            '  3. Notes findings  → skip entirely if ZERO notes detected by visual scan (see above).',
+            '  4. Utility gaps    → only for equipment confirmed in the tag list above.',
+            '  5. Never fabricate tags, stream numbers, or note references from training memory.',
+            '  6. If uncertain whether an element exists — it is NOT a finding.',
+            sep,
+        ]
+        return '\n'.join(lines)
+
+    def _cag_post_filter(self, issues: List[dict], inventory: dict) -> List[dict]:
+        """
+        Post-processing CAG filter: removes or demotes findings referencing
+        elements not confirmed in the Pass 1 inventory.
+
+        Conservative:
+        - Removes notes-related findings when inventory shows no notes.
+        - Demotes major/critical findings that reference specific equipment or
+          stream numbers not found in inventory to 'observation'.
+        - Keeps all observation-severity findings unchanged.
+        """
+        equipment_set: Set[str] = {
+            t.upper().strip() for t in inventory.get("equipment_tags", [])
+        }
+        stream_set: Set[str] = {
+            str(s).upper().strip() for s in inventory.get("stream_numbers", [])
+        }
+        no_notes = not inventory.get("notes", [])
+
+        # Build partial-match fragments for equipment tags (e.g. "V-101" from "V-101A/B")
+        eq_fragments: Set[str] = set()
+        for tag in equipment_set:
+            parts = tag.split('-')
+            if len(parts) >= 2:
+                eq_fragments.add('-'.join(parts[:2]))
+                eq_fragments.add('-'.join(parts[:3]))
+
+        def matches_inventory(text: str) -> bool:
+            text_up = text.upper()
+            for tag in equipment_set:
+                if tag in text_up:
+                    return True
+            for frag in eq_fragments:
+                if frag in text_up:
+                    return True
+            for sn in stream_set:
+                if re.search(r'\b' + re.escape(sn) + r'\b', text_up):
+                    return True
+            return False
+
+        NOTES_KEYWORDS = (
+            "general note", "notes section", "note list",
+            "note reference", "general notes", "notes are absent",
+        )
+        CHECKABLE_CATEGORIES = {"equipment", "streams", "material balance", "utilities"}
+
+        kept, removed_count = [], 0
+        for issue in issues:
+            issue_text = issue.get("issue_found", "")
+            evidence = issue.get("evidence", "")
+            severity = (issue.get("severity") or "observation").lower()
+            category = (issue.get("category") or "").lower()
+
+            # Rule 1: notes-related findings when no notes exist → remove
+            if no_notes and any(kw in issue_text.lower() for kw in NOTES_KEYWORDS):
+                removed_count += 1
+                continue
+
+            # Rule 2: for checkable categories with known inventory, verify references
+            if category in CHECKABLE_CATEGORIES and (equipment_set or stream_set):
+                if not matches_inventory(issue_text) and not matches_inventory(evidence):
+                    # Visual evidence phrase overrides the filter
+                    visual_phrases = (
+                        'visually confirm', 'visible on', 'can see', 'visible in',
+                        'drawing shows', 'shown on', 'present on',
+                    )
+                    if any(ph in evidence.lower() for ph in visual_phrases):
+                        kept.append(issue)
+                        continue
+                    # Observation severity: keep as-is
+                    if severity == 'observation':
+                        kept.append(issue)
+                        continue
+                    # Demote to observation with CAG annotation
+                    issue = dict(issue)
+                    issue['severity'] = 'observation'
+                    issue['evidence'] = (
+                        (issue.get('evidence') or '') +
+                        ' [CAG: referenced element could not be confirmed in visual'
+                        ' inventory — finding demoted to observation]'
+                    ).strip()
+                    kept.append(issue)
+                    continue
+
+            kept.append(issue)
+
+        if removed_count:
+            print(f'[CAG-PFD] Post-filter removed {removed_count} hallucinated note findings')
+        return kept
 
     # -----------------------------------------------------------------------
     # Merge & deduplicate
