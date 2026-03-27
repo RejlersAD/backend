@@ -227,17 +227,22 @@ class PIDIssueSerializer(serializers.ModelSerializer):
         return []
 
     def get_evidence(self, obj):
-        """Extract evidence (AI justification) from analysis report JSON if available"""
+        """Return evidence from the model field (primary), falling back to report_data JSON lookup.
+        The model field is populated for all new analyses; the JSON fallback handles legacy reports
+        that were created before the evidence column was added to PIDIssue."""
+        # Primary: use the stored model field (fast, no O(n) scan needed)
+        if hasattr(obj, 'evidence') and obj.evidence:
+            return obj.evidence
+        # Fallback: scan report_data.issues for legacy records without the DB field
         report = self.context.get('report')
-        if not report and hasattr(obj, 'analysis_report'):
-            report = obj.analysis_report
-
         if report and hasattr(report, 'report_data'):
             report_data = report.report_data
             if isinstance(report_data, dict) and 'issues' in report_data:
                 for issue in report_data.get('issues', []):
                     if issue.get('serial_number') == obj.serial_number:
-                        return issue.get('evidence', '')
+                        ev = issue.get('evidence', '')
+                        if ev:
+                            return ev
         return ''
 
 
@@ -349,10 +354,15 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
         # SOFT-CODED: hide findings with no evidence so engineers only see defended findings
         if _load_hide_no_evidence_flag():
             before = len(result_issues)
-            result_issues = [
-                issue for issue in result_issues
-                if isinstance(issue, dict) and issue.get('evidence', '').strip()
-            ]
+            # For DB-backed serialized dicts the evidence key is always present (from get_evidence).
+            # For raw JSON fallback dicts evidence may also be present.  Either way, filter on the
+            # 'evidence' key of each dict.
+            def _has_evidence(issue):
+                if not isinstance(issue, dict):
+                    return False
+                ev = issue.get('evidence', '') or ''
+                return bool(str(ev).strip())
+            result_issues = [i for i in result_issues if _has_evidence(i)]
             hidden = before - len(result_issues)
             if hidden:
                 logger.info(f"[get_issues] 🔕 Hid {hidden} finding(s) with no evidence for report {obj.id} (hide_findings_without_evidence=true)")

@@ -327,6 +327,7 @@ class PIDIssue(models.Model):
     pid_reference = models.CharField(max_length=200, help_text='P&ID element reference (tag, line number, etc.)')
     issue_observed = models.TextField(help_text='Detailed description of the issue')
     action_required = models.TextField(help_text='Recommended corrective action')
+    evidence = models.TextField(blank=True, default='', help_text='AI justification: VISUAL → GAP → STANDARD evidence chain')
     
     # Classification
     severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default='observation')

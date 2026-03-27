@@ -15,6 +15,16 @@ from PIL import Image
 from .reference_processor import ReferenceDocumentProcessor
 
 
+def ocr_inventory_contains(inventory: set, token: str) -> bool:
+    """Return True if any item in inventory starts with or contains the given token.
+    Used by _cag_post_filter for partial-match lookups (e.g. token '4"-BD-4860'
+    matches inventory item '4"-BD-4860-033842-X-N')."""
+    t = token.upper().strip()
+    if not t or len(t) < 4:
+        return False
+    return any(item.startswith(t) or t in item for item in inventory)
+
+
 class PIDAnalysisService:
     """AI-Powered P&ID Analysis Service with Multi-Pass Validation"""
 
@@ -714,6 +724,12 @@ class PIDAnalysisService:
                 if len(result['issues']) < before:
                     print(f'[CACHE] Suppressed {before - len(result["issues"])} cached finding(s)')
             print(f'[CACHE HIT] {s3_key} — returning stored report ({len(compressed):,} bytes compressed)')
+            # Guard: if the cached result has issues but none have an evidence field,
+            # this is a stale pre-v2 cache entry — invalidate and force fresh analysis.
+            issues = result.get('issues') or []
+            if issues and not any(i.get('evidence') for i in issues):
+                print('[CACHE] Stale cache entry detected (no evidence fields) — invalidating, running fresh analysis')
+                return None
             return result
         except Exception as _e:
             code = getattr(getattr(_e, 'response', None) or {}, 'get', lambda *a: '')('Error', {}).get('Code', '')
@@ -949,6 +965,16 @@ class PIDAnalysisService:
                 second_pass_issues,
                 engineering_issues + line_size_result.get('issues', []) + smart_qc_result.get('issues', [])
             )
+
+            # CAG post-filter: remove or demote issues that reference elements not confirmed
+            # by OCR and not grounded in visual evidence (anti-hallucination pass).
+            try:
+                before_cag = len(all_issues)
+                all_issues = self._cag_post_filter(all_issues)
+                if len(all_issues) < before_cag:
+                    print(f"[CAG] Post-filter: removed/demoted {before_cag - len(all_issues)} hallucinated finding(s)")
+            except Exception as _cag_ex:
+                print(f"[WARNING] CAG post-filter failed (non-critical): {_cag_ex}")
             
             # If NO issues found at all, create at least one from OCR data
             if len(all_issues) == 0:
@@ -1232,6 +1258,226 @@ class PIDAnalysisService:
         note_pattern = r'\b((?:NOTE|HOLD|REF)[\s]*[\d]+)\b'
         self.notes_references = set(re.findall(note_pattern, self.extracted_text, re.IGNORECASE))
 
+    def _build_cag_context(self) -> str:
+        """
+        Context Augmented Generation (CAG) block.
+
+        Builds a hard-boundary inventory injected into every AI pass so the model
+        can ONLY generate findings for elements that are either:
+          (a) present in the OCR-confirmed inventory below, OR
+          (b) directly and unambiguously visible on the attached drawing image.
+
+        This prevents the AI from:
+          • Hallucinating line numbers from memory or training data
+          • Fabricating notes/holds compliance issues when no notes exist
+          • Referencing elements from other drawings or design packages
+
+        SOFT-CODED: adjust suppression thresholds in pid_analysis_config.json.
+        """
+        sep = '═' * 68
+        lines = [
+            sep,
+            'CAG CONTEXT — CONTEXT-AUGMENTED GENERATION BOUNDARY',
+            sep,
+            '',
+            'You are operating in CAG (Context-Augmented Generation) mode.',
+            'ONLY generate findings for elements confirmed by the inventory below',
+            'OR elements you visually confirm RIGHT NOW on the attached drawing image.',
+            'Do NOT use training-data memory to invent elements not present here.',
+            '',
+            '── OCR-CONFIRMED LINE NUMBERS ON THIS DRAWING ──',
+        ]
+
+        if self.line_numbers:
+            for ln in sorted(self.line_numbers)[:60]:
+                lines.append(f'  {ln}')
+            lines.append(
+                f'  (Total: {len(self.line_numbers)} line numbers extracted by OCR)'
+            )
+            lines.append('')
+            lines.append(
+                'RULE ➜ Every "pid_reference" for a PIPING finding MUST match one of the '
+                'line numbers above OR be a line number you can READ directly on the image.'
+            )
+            lines.append(
+                'Do NOT invent or paraphrase line numbers — use the exact tag as written on the drawing.'
+            )
+        else:
+            lines.append(
+                '  (No line numbers extracted by OCR — rely entirely on visual scan of image.)'
+            )
+
+        lines += [
+            '',
+            '── OCR-CONFIRMED INSTRUMENT TAGS ON THIS DRAWING ──',
+        ]
+        if self.instrument_tags:
+            for tag in sorted(self.instrument_tags)[:60]:
+                lines.append(f'  {tag}')
+            lines.append(f'  (Total: {len(self.instrument_tags)} tags extracted by OCR)')
+            lines.append('')
+            lines.append(
+                'RULE ➜ Every "pid_reference" for an INSTRUMENT finding MUST match one of the '
+                'tags above OR be a tag you can READ on the image.'
+            )
+        else:
+            lines.append('  (No instrument tags extracted by OCR — rely on visual scan.)')
+
+        lines += [
+            '',
+            '── OCR-CONFIRMED EQUIPMENT TAGS ON THIS DRAWING ──',
+        ]
+        if self.equipment_tags:
+            for tag in sorted(self.equipment_tags)[:30]:
+                lines.append(f'  {tag}')
+        else:
+            lines.append('  (No equipment tags extracted by OCR — rely on visual scan.)')
+
+        lines += ['', '── NOTES & HOLDS INVENTORY ──']
+        if self.notes_references:
+            lines.append(
+                f'OCR detected {len(self.notes_references)} note/hold reference(s) on this drawing:'
+            )
+            for n in sorted(self.notes_references):
+                lines.append(f'  {n}')
+            lines.append('')
+            lines.append(
+                'RULE ➜ Only generate notes_compliance / holds_compliance findings for the '
+                'note/hold numbers listed above. Read their EXACT text from the drawing image.'
+            )
+        else:
+            lines += [
+                '  OCR detected ZERO note or hold references on this drawing.',
+                '',
+                '⚠ CRITICAL RULE: Because NO notes or holds were found by OCR, you MUST NOT',
+                '  generate any "notes_compliance" or "holds_compliance" issue.',
+                '  Do NOT invent a Notes section that does not exist on this drawing.',
+                '  If you cannot visually confirm a NOTES section in the image, skip those checks.',
+            ]
+
+        lines += [
+            '',
+            '── DRAWING NUMBER (DO NOT USE AS A LINE NUMBER OR TAG) ──',
+        ]
+        if self.drawing_number_candidates:
+            for dn in sorted(self.drawing_number_candidates):
+                lines.append(f'  {dn}  ← drawing/document number, NOT a pipe specification')
+        else:
+            lines.append('  (none detected)')
+
+        lines += [
+            '',
+            'CAG SUMMARY RULES (apply to EVERY finding in EVERY pass):',
+            '  1. pid_reference  → must be in the inventory above OR visually readable on drawing.',
+            '  2. issue_observed → must reference only elements confirmed in the inventory or image.',
+            '  3. notes/holds    → skip entirely if ZERO notes/holds detected by OCR (see above).',
+            '  4. Never fabricate tags, line numbers, or document references from memory.',
+            '  5. If uncertain whether an element exists — it is NOT a finding.',
+            sep,
+        ]
+        return '\n'.join(lines)
+
+    def _cag_post_filter(self, issues: List[Dict]) -> List[Dict]:
+        """
+        Post-processing CAG filter: removes findings whose pid_reference cannot be
+        matched to any OCR-confirmed element AND whose issue_observed contains only
+        references to elements not found in the OCR inventory.
+
+        Conservative approach — only removes issues that are clearly hallucinated
+        (ref and issue_observed both reference non-existent elements AND there is
+        zero visual evidence sentence in the evidence field).
+
+        SOFT-CODED: controlled via pid_analysis_config.json → cag_post_filter_enabled.
+        """
+        import os as _os, json as _js
+        try:
+            cfg_path = _os.path.join(_os.path.dirname(__file__), 'config', 'pid_analysis_config.json')
+            with open(cfg_path, 'r', encoding='utf-8') as _f:
+                _cfg = _js.load(_f)
+            enabled = bool(_cfg.get('pid_analysis', {}).get('cag_post_filter_enabled', True))
+        except Exception:
+            enabled = True
+
+        if not enabled:
+            return issues
+
+        # Build OCR inventory as a set of uppercase tokens for fast lookup
+        ocr_inventory: Set[str] = set()
+        for tag in (self.instrument_tags or []):
+            ocr_inventory.add(tag.upper().strip())
+        for ln in (self.line_numbers or []):
+            ocr_inventory.add(ln.upper().strip())
+        for eq in (self.equipment_tags or []):
+            ocr_inventory.add(eq.upper().strip())
+        # Also add individual fragments (e.g. "4\"-BD-4860" matches "4\"-BD-4860-033842-X-N")
+        fragments: Set[str] = set()
+        for item in ocr_inventory:
+            parts = item.split('-')
+            if len(parts) >= 2:
+                fragments.add('-'.join(parts[:2]).upper())
+                fragments.add('-'.join(parts[:3]).upper())
+        ocr_inventory.update(fragments)
+
+        # Note/hold keywords — if OCR found none, these categories are hallucinated
+        no_notes = not self.notes_references
+        hallucinated_cats = {'notes_compliance', 'holds_compliance'} if no_notes else set()
+
+        kept, removed = [], []
+        for issue in issues:
+            cat = (issue.get('category') or '').lower().strip()
+            pid_ref = (issue.get('pid_reference') or '').upper().strip()
+            evidence = (issue.get('evidence') or '').lower()
+
+            # Rule 1: notes/holds when OCR found none → remove
+            if cat in hallucinated_cats:
+                removed.append(pid_ref)
+                continue
+
+            # Rule 2: if the pid_reference matches anything in OCR or contains a
+            # drawing-number-like DOT-separated pattern → keep (drawing numbers are valid refs)
+            import re as _re_cag
+            if _re_cag.search(r'\d+\.\d+\.\d+\.\d+', pid_ref):
+                # Drawing number reference — let other filters handle it
+                kept.append(issue)
+                continue
+
+            # Rule 3: check if ANY part of pid_reference matches OCR inventory
+            ref_matched = any(
+                tok in ocr_inventory or ocr_inventory_contains(ocr_inventory, tok)
+                for tok in pid_ref.replace('/', ' ').replace(',', ' ').split()
+                if len(tok) > 2
+            )
+            if ref_matched:
+                kept.append(issue)
+                continue
+
+            # Rule 4: if the evidence has "visually confirmed" / "visible" phrasing, keep
+            visual_phrases = ('visually confirm', 'visible on', 'can see', 'visible in',
+                              'drawing shows', 'shown on', 'present on')
+            if any(ph in evidence for ph in visual_phrases):
+                kept.append(issue)
+                continue
+
+            # Rule 5: observation-severity issues with unmatched refs are kept as-is
+            # (they may be valid visual-only items with no OCR counterpart)
+            if (issue.get('severity') or '').lower() == 'observation':
+                kept.append(issue)
+                continue
+
+            # Default: if ref not in inventory AND no visual evidence phrase → flag as suspect
+            # We demote to 'observation' rather than silently dropping, so engineers can still see it
+            issue = dict(issue)
+            issue['severity'] = 'observation'
+            issue['evidence'] = (
+                (issue.get('evidence') or '') +
+                ' [CAG: pid_reference could not be confirmed in OCR inventory — finding demoted to observation]'
+            ).strip()
+            kept.append(issue)
+
+        if removed:
+            print(f'[CAG] Post-filter removed {len(removed)} hallucinated note/hold issues: {removed[:5]}')
+        return kept
+
     def _build_per_instrument_instructions(self) -> str:
         """
         Build an explicit per-loop, per-tag checkbox checklist.
@@ -1501,7 +1747,12 @@ Return ONLY valid JSON in this exact format:
 
             if reference_context:
                 system_prompt += "\n\nREFERENCE DOCUMENTS:\n" + reference_context
-            
+
+            # CAG context block — injected into system prompt so the model knows
+            # exactly what OCR confirmed ON THIS DRAWING before it starts generating.
+            cag_context = self._build_cag_context()
+            system_prompt = system_prompt + '\n\n' + cag_context
+
             # Pre-compute sparse-OCR conditional blocks (avoids nested triple-quotes inside f-string)
             _few_ocr = len(self.instrument_tags) < 10
             _eq70 = '=' * 70
@@ -2009,6 +2260,8 @@ Do NOT use any other key names. The keys pid_reference and issue_observed are RE
                             "type": "text",
                             "text": f"""SECOND REVIEW PASS — comprehensive scan for missed elements.
 {_layout_block}
+{self._build_cag_context()}
+
 FIRST PASS ({len(first_pass_issues)} issues found):
 {first_summary}
 
@@ -2023,19 +2276,9 @@ Report any missing or unclear elements as separate issues.
 
 --- NOTES/HOLDS COMPLIANCE CHECK ---
 OCR found these {len(self.notes_references)} note/hold references on the drawing:
-{chr(10).join('  - ' + n for n in sorted(self.notes_references)) if self.notes_references else '  None found'}
+{chr(10).join('  - ' + n for n in sorted(self.notes_references)) if self.notes_references else '  None found — DO NOT generate notes/holds issues'}
 
-For each HOLD visible on the drawing:
-- Read the hold text carefully
-- Check if the hold requirement is actually addressed/resolved on this drawing
-- If the hold is OPEN (not resolved), report it as a CRITICAL documentation issue
-
-For each NOTE visible on the drawing:
-- Read the note text carefully
-- Check if what the note requires is shown/implemented on this drawing
-- If a note requirement is NOT met on the drawing, report it as a MAJOR documentation issue
-
-Treat each unresolved hold and each non-compliant note as a SEPARATE finding.
+{'For each HOLD visible on the drawing, read the exact text and check if the requirement is resolved. OPEN holds = CRITICAL. For each NOTE, check if its requirement is implemented. Non-compliant notes = MAJOR.' if self.notes_references else 'There are NO notes or holds on this drawing. Skip all notes/holds checks.'}
 
 Return ONLY valid JSON: {{"issues": [...], "total_issues": N}}"""
                         }
@@ -2917,6 +3160,8 @@ MANDATORY JSON RESPONSE — return ONLY valid JSON, no markdown fences:
 Analyze the VISUAL CONTENT of the attached drawing(s) to complete the nine checks below.
 
 PASS 8 — SMART QC ENHANCEMENT SCAN (9 targeted checks)
+
+{self._build_cag_context()}
 
 ISSUES ALREADY REPORTED IN PREVIOUS PASSES (do NOT repeat these):
 {already_str}

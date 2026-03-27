@@ -291,19 +291,42 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
         print(f"[DEBUG] Serializer validated successfully")
         print(f"[DEBUG] Validated data: {serializer.validated_data.keys()}")
         
-        # Create PIDDrawing
+        # Create or reuse PIDDrawing
+        # If the same user uploads the same filename, reuse the existing drawing record
+        # so the report URL stays stable and the latest analysis always overwrites the previous one.
         file = serializer.validated_data['file']
-        drawing = PIDDrawing.objects.create(
-            file=file,
-            original_filename=file.name,
-            file_size=file.size,
-            drawing_number=serializer.validated_data.get('drawing_number', ''),
-            drawing_title=serializer.validated_data.get('drawing_title', ''),
-            revision=serializer.validated_data.get('revision', ''),
-            project_name=serializer.validated_data.get('project_name', ''),
+        existing_drawing = PIDDrawing.objects.filter(
             uploaded_by=request.user,
-            status='uploaded'
-        )
+            original_filename=file.name
+        ).order_by('-created_at').first()
+
+        if existing_drawing:
+            print(f'[UPLOAD_VIEW] Existing drawing found (ID: {existing_drawing.id}) for filename "{file.name}" — reusing record')
+            # Delete previous report and issues so a fresh analysis is saved
+            if hasattr(existing_drawing, 'analysis_report'):
+                existing_drawing.analysis_report.issues.all().delete()
+                existing_drawing.analysis_report.delete()
+            # Update the drawing record with the new file
+            existing_drawing.file = file
+            existing_drawing.file_size = file.size
+            existing_drawing.status = 'uploaded'
+            existing_drawing.error_message = ''
+            existing_drawing.analysis_started_at = None
+            existing_drawing.analysis_completed_at = None
+            existing_drawing.save()
+            drawing = existing_drawing
+        else:
+            drawing = PIDDrawing.objects.create(
+                file=file,
+                original_filename=file.name,
+                file_size=file.size,
+                drawing_number=serializer.validated_data.get('drawing_number', ''),
+                drawing_title=serializer.validated_data.get('drawing_title', ''),
+                revision=serializer.validated_data.get('revision', ''),
+                project_name=serializer.validated_data.get('project_name', ''),
+                uploaded_by=request.user,
+                status='uploaded'
+            )
         
         # SOFT-CODED: Save reference documents if provided and pass to analysis
         saved_reference_docs = {}
@@ -365,9 +388,10 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                         pid_reference=issue_data.get('pid_reference', ''),
                         issue_observed=issue_data.get('issue_observed', ''),
                         action_required=issue_data.get('action_required', ''),
+                        evidence=issue_data.get('evidence', ''),
                         severity=issue_data.get('severity', 'observation'),
                         category=issue_data.get('category', ''),
-                        location_on_drawing=issue_data.get('location_on_drawing'),  # Include location data
+                        location_on_drawing=issue_data.get('location_on_drawing'),
                         status=issue_data.get('status', 'pending'),
                         approval=issue_data.get('approval', 'Pending'),
                         remark=issue_data.get('remark', 'Pending'),
@@ -487,9 +511,10 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                     pid_reference=issue_data.get('pid_reference', ''),
                     issue_observed=issue_data.get('issue_observed', ''),
                     action_required=issue_data.get('action_required', ''),
+                    evidence=issue_data.get('evidence', ''),
                     severity=issue_data.get('severity', 'observation'),
                     category=issue_data.get('category', ''),
-                    location_on_drawing=issue_data.get('location_on_drawing'),  # Include location data
+                    location_on_drawing=issue_data.get('location_on_drawing'),
                     status=issue_data.get('status', 'pending'),
                     approval=issue_data.get('approval', 'Pending'),
                     remark=issue_data.get('remark', 'Pending'),
