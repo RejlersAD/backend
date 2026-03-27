@@ -2,11 +2,28 @@
 RBAC Models - Enterprise Role-Based Access Control
 Designed for regulated Oil & Gas environment
 """
+import os
 import uuid
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from apps.core.models import TimeStampedModel
+
+
+def get_profile_photo_storage():
+    """Return AvatarStorage (S3) when USE_S3 is enabled, otherwise local FileSystemStorage.
+    Used as a callable for the profile_photo ImageField so the correct backend is
+    selected at runtime without a hard dependency on boto3.
+    """
+    if os.environ.get('USE_S3', 'False').lower() == 'true':
+        try:
+            from apps.core.storage_backends import AvatarStorage
+            return AvatarStorage()
+        except Exception:
+            pass
+    from django.core.files.storage import FileSystemStorage
+    from django.conf import settings
+    return FileSystemStorage(location=str(getattr(settings, 'MEDIA_ROOT', 'media')))
 
 User = get_user_model()
 
@@ -273,9 +290,10 @@ class UserProfile(TimeStampedModel):
     # Profile customization
     profile_photo = models.ImageField(
         upload_to='profile_photos/',
+        storage=get_profile_photo_storage,
         null=True,
         blank=True,
-        help_text="User profile photo stored in S3"
+        help_text="User profile photo — stored in S3 (production) or local media (dev)"
     )
     phone = models.CharField(max_length=20, blank=True)
     bio = models.TextField(blank=True, max_length=500)
