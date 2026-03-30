@@ -133,6 +133,12 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         cache.set(f'mov_task_{job_id}_progress', 30, timeout=3600)
         cache.set(f'mov_task_{job_id}_stage', 'Extracting HMB data with Vision AI (this may take 2-5 minutes)...', timeout=3600)
 
+        # ── Soft-coded HMB extraction timeout ──────────────────────────────────
+        # Increase HMB_VISION_TIMEOUT_SEC to allow longer AI processing.
+        # With Gemini Flash processing up to 15 pages this may need 5–8 minutes.
+        HMB_VISION_TIMEOUT_SEC = int(os.getenv('HMB_VISION_TIMEOUT_SEC', '480'))  # 8 min default
+        # ────────────────────────────────────────────────────────────────────────
+
         # STEP 2: Extract HMB data using Vision
         # NOTE: signal.SIGALRM only works in main thread; use concurrent.futures instead.
         def _run_hmb_extraction():
@@ -141,12 +147,12 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _hmb_pool:
                 _hmb_future = _hmb_pool.submit(_run_hmb_extraction)
-                hmb_data = _hmb_future.result(timeout=180)  # 3-minute cap
+                hmb_data = _hmb_future.result(timeout=HMB_VISION_TIMEOUT_SEC)
             log_and_print(f"[MOV {job_id[:8]}] HMB extracted: {len(hmb_data.get('streams', []))} streams")
             if not hmb_data.get('streams'):
                 raise ValueError("HMB Vision returned 0 streams")
         except concurrent.futures.TimeoutError:
-            log_and_print(f"[MOV {job_id[:8]}] HMB Vision timed out (>180s), using mock data")
+            log_and_print(f"[MOV {job_id[:8]}] HMB Vision timed out (>{HMB_VISION_TIMEOUT_SEC}s), using mock data")
             from apps.process_datasheet.mock_extractors import MockHMBExtractor
             hmb_data = MockHMBExtractor().extract_from_pdf(hmb_file_path)
         except Exception as e:
@@ -214,8 +220,31 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
             log_and_print(f"âš ï¸ [MOV {job_id[:8]}] AI failed, using basic mapping from P&ID data...")
             
             # Fallback: Create basic mapped data from P&ID valves
+            # Pull HMB values from the first matching stream (or first stream as best-effort)
+            # ─── Soft-coded: extend _hmb_stream_lookup to add more matching keys ───
+            _hmb_streams = hmb_data.get('streams', [])
+            def _best_hmb_stream(line_no):
+                """Return the HMB stream whose line_no best matches the valve's line_no."""
+                if line_no:
+                    for s in _hmb_streams:
+                        if s.get('line_no') and line_no in str(s.get('line_no', '')):
+                            return s
+                return _hmb_streams[0] if _hmb_streams else {}
+
             mapped_valves = []
             for valve in pid_data.get('valves', []):
+                _hs = _best_hmb_stream(valve.get('line_no', ''))
+                # Temperature — prefer HMB stream; valve fields only as last resort
+                _t_min    = _hs.get('temp_min')    or valve.get('temp_min', '')
+                _t_normal = _hs.get('temp_normal') or _hs.get('temp_max') or _hs.get('temp_min') or valve.get('temp_max', '')
+                _t_max    = _hs.get('temp_max')    or _hs.get('temp_min') or valve.get('temp_max', '')
+                _t_unit   = _hs.get('temp_unit')   or '°C'
+                _dt_min   = _hs.get('design_temp_min') or _t_min
+                _dt_max   = _hs.get('design_temp_max') or _t_max
+                # Pressure — prefer HMB stream
+                _p_normal = _hs.get('pressure_normal') or valve.get('pressure', '')
+                _p_unit   = _hs.get('pressure_unit')   or 'barg'
+                _dp_max   = _hs.get('pressure_design') or valve.get('design_pressure', '')
                 mapped_valve = {
                     'tag_no': valve.get('tag_no', valve.get('tag', 'UNKNOWN')),
                     'tag': valve.get('tag', valve.get('tag_no', 'UNKNOWN')),
@@ -223,19 +252,23 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
                     'line_no': valve.get('line_no', ''),
                     'service': valve.get('service', valve.get('description', '')),
                     'piping_class': valve.get('piping_class', ''),
-                    'fluid': 'See HMB',
-                    'phase': 'TBD',
-                    'operating_pressure_normal': valve.get('pressure', ''),
-                    'operating_temp_min': valve.get('temp_min', ''),
-                    'operating_temp_max': valve.get('temp_max', ''),
+                    'fluid': _hs.get('fluid', 'See HMB'),
+                    'phase': _hs.get('phase', 'TBD'),
+                    'operating_pressure_normal': _p_normal,
+                    'operating_pressure_unit': _p_unit,
+                    'operating_temp_min': _t_min,
+                    'operating_temp_normal': _t_normal,
+                    'operating_temp_max': _t_max,
+                    'operating_temp_unit': _t_unit,
                     # Keep single-value form for backwards compat AND provide split fields
-                    'design_pressure': valve.get('design_pressure', ''),
+                    'design_pressure': _dp_max,
                     'design_pressure_min': valve.get('design_pressure_min', '0'),
-                    'design_pressure_max': valve.get('design_pressure_max') or valve.get('design_pressure', ''),
-                    'design_temp_min': valve.get('design_temp_min', ''),
-                    'design_temp_max': valve.get('design_temp_max', ''),
+                    'design_pressure_max': _dp_max,
+                    'design_temp_min': _dt_min,
+                    'design_temp_max': _dt_max,
                     'sour_service': valve.get('sour_service', 'No'),
-                    'special_conditions': valve.get('special_conditions', 'None'),
+                    # Use P&ID notes field for special conditions; default to 'None'
+                    'special_conditions': valve.get('special_conditions') or valve.get('notes') or 'None',
                 }
                 mapped_valves.append(mapped_valve)
             

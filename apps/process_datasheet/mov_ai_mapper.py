@@ -354,29 +354,51 @@ Return ONLY valid JSON:
                 'fluid': stream.get('fluid'),
                 'phase': stream.get('phase'),
                 'state': stream.get('state'),
-                # Operating temperatures
-                'operating_temp_min':    _pick(temp_dict.get('min'),    'temp_min'),
-                'operating_temp_normal': _pick(temp_dict.get('normal'), 'temp_normal'),
-                'operating_temp_max':    _pick(temp_dict.get('max'),    'temp_max'),
-                'operating_temp_unit':   _pick(temp_dict.get('unit'),   'temp_unit'),
-                # Design temperatures
-                'design_temp_min':  _pick(design_temp_dict.get('min'),  'design_temp_min'),
-                'design_temp_max':  _pick(design_temp_dict.get('max'),  'design_temp_max'),
-                'design_temp_unit': _pick(design_temp_dict.get('unit'), 'design_temp_unit'),
-                # Operating pressures
+            }
+
+            # ── Operating temperatures ────────────────────────────────────────────
+            # Soft-coded fallback chain: nested mock dict → flat real Vision keys → derive from neighbour.
+            # Add or reorder keys here to change the resolution priority.
+            _t_min    = _pick(temp_dict.get('min'),    'temp_min')
+            _t_normal = _pick(temp_dict.get('normal'), 'temp_normal')
+            _t_max    = _pick(temp_dict.get('max'),    'temp_max')
+            _t_unit   = _pick(temp_dict.get('unit'),   'temp_unit')
+            # If Gemini only gives temp_max (single-row HMB table), treat it as the normal value
+            if _t_normal is None:
+                _t_normal = _t_max or _t_min
+            # If only normal/max is available, mirror so min/max aren't blank
+            if _t_min is None and _t_normal is not None:
+                _t_min = _t_normal
+            if _t_max is None and _t_normal is not None:
+                _t_max = _t_normal
+
+            flat_stream['operating_temp_min']    = _t_min
+            flat_stream['operating_temp_normal'] = _t_normal
+            flat_stream['operating_temp_max']    = _t_max
+            flat_stream['operating_temp_unit']   = _t_unit or '°C'
+
+            # ── Design temperatures ───────────────────────────────────────────────
+            _dt_min  = _pick(design_temp_dict.get('min'),  'design_temp_min')
+            _dt_max  = _pick(design_temp_dict.get('max'),  'design_temp_max')
+            _dt_unit = _pick(design_temp_dict.get('unit'), 'design_temp_unit')
+            flat_stream['design_temp_min']  = _dt_min  or _t_min
+            flat_stream['design_temp_max']  = _dt_max  or _t_max
+            flat_stream['design_temp_unit'] = _dt_unit or _t_unit or '°C'
+
+            # ── Pressures ─────────────────────────────────────────────────────────
+            flat_stream.update({
                 'operating_pressure_min':    _pick(pressure_dict.get('min'),    'pressure_min'),
                 'operating_pressure_normal': _pick(pressure_dict.get('normal'), 'pressure_normal'),
                 'operating_pressure_max':    _pick(pressure_dict.get('max'),    'pressure_max'),
                 'operating_pressure_design': _pick(pressure_dict.get('design'), 'pressure_design'),
                 'shut_off_pressure':         _pick(pressure_dict.get('shutoff'), 'shut_off_pressure'),
                 'pressure_unit':             _pick(pressure_dict.get('unit'),   'pressure_unit'),
-                # Design pressures
                 'design_pressure_min': _pick(design_pressure_dict.get('min'), 'design_pressure_min') or '0',
                 'design_pressure_max': (
                     _pick(design_pressure_dict.get('max'), 'design_pressure_max')
                     or _pick(pressure_dict.get('design'), 'pressure_design')
                 ),
-            }
+            })
             flattened_hmb['streams'].append(flat_stream)
 
         return flattened_hmb
