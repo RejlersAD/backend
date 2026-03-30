@@ -193,6 +193,7 @@ class PIDAnalysisService:
             self.pass5_timeout       = int(_p5.get('timeout_seconds', 300))
 
             _p6 = cfg.get('pass_6', {})
+            self.pass6_enabled       = bool(_p6.get('enabled', True))
             self.pass6_max_tokens    = int(_p6.get('max_tokens', 12000))
             self.pass6_temperature   = float(_p6.get('temperature', 0.0))
             self.pass6_timeout       = int(_p6.get('timeout_seconds', 300))
@@ -280,6 +281,7 @@ class PIDAnalysisService:
             self.pass8_max_tokens       = 16000
             self.pass8_temperature      = 0.0
             self.pass8_timeout          = 360
+            self.pass6_enabled          = True   # defaults to on if config missing
             self.layout_detection_enabled = True
             self.layout_default_zones   = [
                 "Top-Left", "Top-Center", "Top-Right",
@@ -611,7 +613,11 @@ class PIDAnalysisService:
                 "╔══════════════════════════════════════════════════════════════",
                 "║  P&ID LAYOUT CONTEXT  (auto-detected — use for zone reporting)",
                 "╚══════════════════════════════════════════════════════════════",
-                f"  Company Standard  : {standard}",
+                "  ⚠️  CONSISTENCY-ONLY MODE: Base ALL findings on drawing-internal",
+                "      inconsistencies ONLY. Do NOT apply any external company or",
+                "      industry standards (ADNOC, ARAMCO, SHELL, ISA, API, ASME,",
+                "      NACE, IEC etc.) unless explicitly referenced in this drawing's",
+                "      own notes or title block.",
                 f"  Drawing Type      : {drw_type}",
             ]
             if drw_title:
@@ -909,15 +915,20 @@ class PIDAnalysisService:
             # PASS 6: Engineering Compliance Deep-Scan — dedicated AI call for standards compliance.
             # Focuses ONLY on advanced engineering domains (valve standards, NACE, tie-ins, PSV,
             # spec breaks, free-drain, LTCS, corrosion allowance) that Pass 3 often glosses over.
-            print(f"[INFO] PASS 6: Engineering Compliance Deep-Scan (API/ASME/NACE/Tie-in specialist)")
+            # Disabled by default via config (pass_6.enabled=false) — this pass applies external
+            # industry standards which are NOT project-specific and produce false positives.
             engineering_issues = []
-            try:
-                engineering_issues = self._engineering_compliance_pass(
-                    images_base64, vision_result, second_pass_issues
-                )
-            except Exception as e:
-                print(f"[WARNING] PASS 6 failed (non-critical): {str(e)}")
-                engineering_issues = []
+            if getattr(self, 'pass6_enabled', False):
+                print(f"[INFO] PASS 6: Engineering Compliance Deep-Scan (API/ASME/NACE/Tie-in specialist)")
+                try:
+                    engineering_issues = self._engineering_compliance_pass(
+                        images_base64, vision_result, second_pass_issues
+                    )
+                except Exception as e:
+                    print(f"[WARNING] PASS 6 failed (non-critical): {str(e)}")
+                    engineering_issues = []
+            else:
+                print(f"[INFO] PASS 6: Skipped (pass_6.enabled=false in config — consistency-only mode)")
 
             # PASS 7: Line Size Validation & AI Recommendation Engine
             # Detects line size anomalies (nozzle mismatches, unjustified size jumps,
@@ -2189,7 +2200,8 @@ For EACH zone, look for and report issues on:
    - Nozzle connections complete?
 
 If you find instruments/valves not addressed in the first pass, REPORT THEM NOW.
-Target: bring total findings to at least 20 real P&ID issues."""
+Target: report every genuine drawing-internal inconsistency you can observe.
+Do NOT invent findings. Do NOT apply external company or industry standards."""
 
             # Build the layout context block to inject into the zone-sweep instruction
             _layout_block = (
@@ -2204,7 +2216,11 @@ Target: bring total findings to at least 20 real P&ID issues."""
 
 STRICT RULES:
 - ONLY report issues visually confirmed on the drawing - never fabricate
-- Apply ISA-5.1: FI/PI/TI/LI/PG = indicators only (no control loop)
+- CONSISTENCY-ONLY: compare each element ONLY to similar elements on this same drawing
+- Do NOT apply external standards (ISA, API, ASME, ADNOC, ARAMCO, SHELL) unless
+  they are explicitly referenced in this drawing's own notes or title block
+- Indicators (FI/PI/TI/LI/PG/LG): flag a missing signal line ONLY if other same-type
+  instruments on this drawing DO show signal lines — flag the inconsistency, not the absence
 - FC/FO/FL already annotated on valve = fail-safe specified - do NOT re-flag
 - P&ID connector numbers (NN-PP-NNN-NNNNN) are NOT process piping lines
 
@@ -2224,7 +2240,7 @@ MANDATORY JSON FORMAT - each issue MUST have ALL these exact keys:
       "pid_reference": "exact tag or line number visible on drawing (e.g. FT-3601-03)",
       "issue_observed": "specific description of what is missing or non-compliant",
       "action_required": "clear corrective action",
-      "evidence": "State exactly what you visually confirmed (or could NOT find) on the drawing. If standard-based, name the standard.",
+      "evidence": "VISUAL: [what is drawn]. GAP: [what is missing/inconsistent]. DRAWING BASIS: [reference to other similar elements on THIS drawing that establish the requirement — never cite external standards].",
       "severity": "critical|major|minor|observation",
       "category": "instrument|equipment|piping|valve|safety|control_loop|documentation",
       "location_on_drawing": {
@@ -2373,7 +2389,7 @@ MANDATORY JSON FORMAT — return ONLY valid JSON, no markdown:
       "pid_reference": "exact tag/line/equipment visible on drawing",
       "issue_observed": "specific non-compliance with exact values",
       "action_required": "clear corrective action referencing the applicable standard",
-      "evidence": "State exactly what you visually confirmed (or could NOT find) on the drawing. If based on a standard, name it.",
+      "evidence": "VISUAL: [what is drawn]. GAP: [what is missing or inconsistent with other elements on this drawing]. DRAWING BASIS: [what on this drawing establishes the requirement — compare to other similar elements on the same drawing].",
       "severity": "critical|major|minor|observation",
       "category": "psv_compliance|valve_standard|tie_in_reference|corrosion_allowance|dissimilar_material|ltcs_compliance|free_drain_slope|spool_requirement|critical_stress",
       "location_on_drawing": {
@@ -3129,7 +3145,7 @@ MANDATORY JSON RESPONSE — return ONLY valid JSON, no markdown fences:
       "pid_reference": "exact reference visible on drawing (tag / line number / note number)",
       "issue_observed": "specific description with exact values extracted from the drawing",
       "action_required": "clear corrective action",
-      "evidence": "State exactly what you visually confirmed (or could NOT find) on the drawing. If standard-based, name the standard.",
+      "evidence": "VISUAL: [what is drawn — symbol, tag, zone, connections]. GAP: [what is missing/inconsistent with other elements on this drawing]. DRAWING BASIS: [reference to other similar elements on THIS drawing — never cite external standards unless explicitly written on this drawing].",
       "severity": "critical|major|minor|observation",
       "category": "line_duplicate|valve_size|notes_compliance|holds_compliance|type_designation|revision_change|line_number_anomaly|spec_break|missing_fitting|instrument_downgrade|line_continuity|piping|valve|documentation",
       "location_on_drawing": {

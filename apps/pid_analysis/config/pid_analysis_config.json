@@ -49,8 +49,9 @@
       "timeout_seconds": 300
     },
 
-    "_pass6_comment": "Pass 6: Engineering compliance deep-scan (PSV, valve standards, NACE, tie-ins, LTCS, etc.).",
+    "_pass6_comment": "Pass 6: Engineering compliance deep-scan (PSV, valve standards, NACE, tie-ins, LTCS, etc.). Set enabled=false to disable entirely — no code deploy required. DISABLED by default: this pass applies external industry standards (ASME, API, NACE, ISO) which are NOT project-specific and produce false positives when the project has its own documentation standards.",
     "pass_6": {
+      "enabled": false,
       "max_tokens": 12000,
       "temperature": 0.0,
       "timeout_seconds": 300
