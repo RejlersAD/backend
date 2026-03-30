@@ -41,10 +41,12 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         cache.set(f'mov_task_{job_id}_stage', 'Extracting P&ID data...', timeout=3600)
         
         # Import here to avoid issues
+        import concurrent.futures
         from apps.process_datasheet.mock_extractors import MockPIDExtractor, match_lines_to_streams
         from apps.process_datasheet.hmb_vision_extractor import HMBVisionExtractor
         from apps.process_datasheet.mov_ai_mapper import MOVDatasheetAIMapper
         from apps.process_datasheet.mov_excel_generator_dynamic import MOVExcelGeneratorDynamic
+        from apps.process_datasheet.tag_validator import validate_and_filter_valves
         
         # STEP 0: Upload source documents to S3 for permanent storage
         log_and_print(f'[MOV {job_id[:8]}] STEP 0: Uploading source documents to S3...')
@@ -87,53 +89,61 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
             # Check if real extraction produced results
             if not pid_data.get('valves') or len(pid_data.get('valves', [])) == 0:
                 raise ValueError("Real extraction returned 0 valves")
-            
-            log_and_print(f"âœ… [MOV {job_id[:8]}] REAL extraction: {len(pid_data.get('valves', []))} MOV valves")
+
+            log_and_print(f"[MOV {job_id[:8]}] REAL extraction: {len(pid_data.get('valves', []))} MOV valves")
         except Exception as e:
-            logger.warning(f"[MOV Thread {job_id}] Real extraction failed, using mock fallback: {e}")
-            log_and_print(f"âš ï¸ [MOV {job_id[:8]}] Using mock data fallback...")
+            logger.warning(f"[MOV Thread {job_id}] Real extraction failed: {e}")
+            log_and_print(f"[MOV {job_id[:8]}] Real P&ID extraction failed. Cause: {e}")
+            log_and_print(f"[MOV {job_id[:8]}] Check: 1) OpenAI Vision API key 2) PDF has visible tag circles 3) Tags start with MOV/SDV/XV etc.")
             pid_extractor = MockPIDExtractor()
             pid_data = pid_extractor.extract_from_pdf(pid_file_path, original_filename=pid_filename)
-            
+
             # Filter for MOV valves from mock data
             all_valves = pid_data.get('valves', [])
             mov_valves = [v for v in all_valves if v.get('type', '').upper() == 'MOV' or 'MOV' in v.get('tag_no', '').upper()]
             pid_data['valves'] = mov_valves
-            log_and_print(f"âœ… [MOV {job_id[:8]}] Mock extraction: {len(mov_valves)} MOV valves")
-        
+            log_and_print(f"[MOV {job_id[:8]}] Mock extraction: {len(mov_valves)} valves (DEMO data - not real)")
+
+        # -- TAG VALIDATION (soft-coded rules in tag_validator.py) ---------------
+        raw_valve_count = len(pid_data.get('valves', []))
+        pid_data['valves'], tag_warnings = validate_and_filter_valves(pid_data.get('valves', []))
+        for w in tag_warnings:
+            log_and_print(f"[MOV {job_id[:8]}] TAG VALIDATION: {w}")
+        if tag_warnings:
+            demo_removed = raw_valve_count - len(pid_data['valves'])
+            log_and_print(f"[MOV {job_id[:8]}] {demo_removed} DEMO/mock tag(s) removed. {len(pid_data['valves'])} real tag(s) remain.")
+        if len(pid_data.get('valves', [])) == 0:
+            raise ValueError(
+                "No valid engineering tags found after filtering DEMO/mock data. "
+                "Ensure your P&ID PDF contains clearly visible valve tag numbers "
+                "(e.g. MOV-8001, SDV-100) inside circles, and that the OpenAI Vision API is active."
+            )
+        # -------------------------------------------------------------------------
+
         cache.set(f'mov_task_{job_id}_progress', 30, timeout=3600)
         cache.set(f'mov_task_{job_id}_stage', 'Extracting HMB data with Vision AI (this may take 2-5 minutes)...', timeout=3600)
-        
-        # STEP 2: Extract HMB data using Vision (this is the slow part)
-        import signal
-        from contextlib import contextmanager
-        
-        @contextmanager
-        def timeout_context(seconds):
-            def timeout_handler(signum, frame):
-                raise TimeoutError(f"Operation timed out after {seconds} seconds")
-            original_handler = signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(seconds)
-            try:
-                yield
-            finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, original_handler)
-        
+
+        # STEP 2: Extract HMB data using Vision
+        # NOTE: signal.SIGALRM only works in main thread; use concurrent.futures instead.
+        def _run_hmb_extraction():
+            return HMBVisionExtractor().extract_from_pdf(hmb_file_path)
+
         try:
-            with timeout_context(120):  # 2 minute timeout
-                vision_extractor = HMBVisionExtractor()
-                hmb_data = vision_extractor.extract_from_pdf(hmb_file_path)
-                log_and_print(f"âœ… [MOV {job_id[:8]}] HMB extracted: {len(hmb_data.get('streams', []))} streams")
-                if not hmb_data.get('streams'):
-                    raise ValueError("Vision returned 0 streams")
-        except (Exception, TimeoutError) as e:
-            logger.warning(f"[MOV Thread {job_id}] Vision failed/timeout, using mock: {e}")
-            log_and_print(f" [MOV {job_id[:8]}] HMB Vision failed, using mock data...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _hmb_pool:
+                _hmb_future = _hmb_pool.submit(_run_hmb_extraction)
+                hmb_data = _hmb_future.result(timeout=180)  # 3-minute cap
+            log_and_print(f"[MOV {job_id[:8]}] HMB extracted: {len(hmb_data.get('streams', []))} streams")
+            if not hmb_data.get('streams'):
+                raise ValueError("HMB Vision returned 0 streams")
+        except concurrent.futures.TimeoutError:
+            log_and_print(f"[MOV {job_id[:8]}] HMB Vision timed out (>180s), using mock data")
             from apps.process_datasheet.mock_extractors import MockHMBExtractor
-            hmb_extractor = MockHMBExtractor()
-            hmb_data = hmb_extractor.extract_from_pdf(hmb_file_path)
-            log_and_print(f" [MOV {job_id[:8]}] Mock HMB: {len(hmb_data.get('streams', []))} streams")
+            hmb_data = MockHMBExtractor().extract_from_pdf(hmb_file_path)
+        except Exception as e:
+            logger.warning(f"[MOV Thread {job_id}] HMB Vision failed: {e}")
+            log_and_print(f"[MOV {job_id[:8]}] HMB Vision failed ({e}), using mock data")
+            from apps.process_datasheet.mock_extractors import MockHMBExtractor
+            hmb_data = MockHMBExtractor().extract_from_pdf(hmb_file_path)
         
         # STEP 2.5: Extract Line List data if provided (optional)
         line_list_data = None

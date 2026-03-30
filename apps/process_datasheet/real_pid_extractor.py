@@ -290,9 +290,17 @@ If no valves are visible on this page, return an empty array [].
                     )
 
                     content = response.choices[0].message.content.strip()
+                    logger.info(f"[RealPIDExtractor] Page {page_num + 1} raw response (first 400 chars): {content[:400]}")
                     content = re.sub(r'```json\s*', '', content)
                     content = re.sub(r'```\s*', '', content)
                     content = content.strip()
+
+                    # If response starts with prose instead of JSON, try to find the array
+                    if not content.startswith('['):
+                        bracket = content.find('[')
+                        if bracket != -1:
+                            content = content[bracket:]
+                            logger.warning(f"[RealPIDExtractor] Page {page_num + 1}: JSON array found at offset {bracket}")
 
                     page_valves = json.loads(content)
 
@@ -311,9 +319,9 @@ If no valves are visible on this page, return an empty array [].
                     logger.info(f"✅ [RealPIDExtractor] Page {page_num + 1}: {len(page_valves)} valves found, {new_count} new (total: {len(all_valves)})")
 
                 except json.JSONDecodeError as e:
-                    logger.error(f"❌ [RealPIDExtractor] Failed to parse JSON for page {page_num + 1}: {e}")
+                    logger.error(f"[RealPIDExtractor] Failed to parse JSON for page {page_num + 1}: {e}. Raw content: {content[:300]}")
                 except Exception as e:
-                    logger.error(f"❌ [RealPIDExtractor] Vision API failed for page {page_num + 1}: {e}")
+                    logger.error(f"[RealPIDExtractor] Vision API failed for page {page_num + 1}: {e}")
 
             doc.close()
 
