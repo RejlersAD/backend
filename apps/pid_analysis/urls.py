@@ -21,6 +21,11 @@ from .pressure_instrument_views import (
     download_pressure_instrument_excel,
     get_instrument_types
 )
+from .instrument_index_views import (
+    extract_instrument_index,
+    download_instrument_index_excel,
+    get_instrument_categories,
+)
 from .equipment_analysis_views import (
     analyze_pid_equipment,
     analyze_pid_equipment_batch,
@@ -160,6 +165,11 @@ urlpatterns = [
     path('pressure-instruments/analyze/', analyze_pid_for_pressure_instruments, name='pressure-instrument-analyze'),
     path('pressure-instruments/download-excel/', download_pressure_instrument_excel, name='pressure-instrument-download'),
     path('pressure-instruments/types/', get_instrument_types, name='pressure-instrument-types'),
+
+    # Instrument Index — ALL instruments extraction
+    path('instrument-index/analyze/', extract_instrument_index, name='instrument-index-analyze'),
+    path('instrument-index/download-excel/<str:upload_id>/', download_instrument_index_excel, name='instrument-index-download'),
+    path('instrument-index/categories/', get_instrument_categories, name='instrument-index-categories'),
     
     # Equipment Analysis endpoints
     path('equipment/analyze/', analyze_pid_equipment, name='equipment-analyze'),
