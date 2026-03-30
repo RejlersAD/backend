@@ -180,17 +180,17 @@ class S3Service:
             
             # Upload file
             if hasattr(file_obj, 'read'):
-                # File-like object
+                # File-like object — measure size before upload (boto3 may close the stream)
                 file_obj.seek(0)
+                file_content = file_obj.read()
+                file_size = len(file_content)
+                import io as _io
                 self.s3_client.upload_fileobj(
-                    file_obj, 
-                    self.bucket_name, 
+                    _io.BytesIO(file_content),
+                    self.bucket_name,
                     s3_key,
                     ExtraArgs=extra_args
                 )
-                file_obj.seek(0)
-                file_size = len(file_obj.read())
-                file_obj.seek(0)
             else:
                 # File path
                 self.s3_client.upload_file(

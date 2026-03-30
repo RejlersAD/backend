@@ -113,11 +113,21 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
             demo_removed = raw_valve_count - len(pid_data['valves'])
             log_and_print(f"[MOV {job_id[:8]}] {demo_removed} DEMO/mock tag(s) removed. {len(pid_data['valves'])} real tag(s) remain.")
         if len(pid_data.get('valves', [])) == 0:
-            raise ValueError(
-                "No valid engineering tags found after filtering DEMO/mock data. "
-                "Ensure your P&ID PDF contains clearly visible valve tag numbers "
-                "(e.g. MOV-8001, SDV-100) inside circles, and that the OpenAI Vision API is active."
+            # Store a helpful user-facing error — do NOT raise so the except handler
+            # can produce a clean 'failed' result rather than a raw traceback message.
+            user_msg = (
+                "No valve tags could be extracted from your P&ID. "
+                "Possible causes:\n"
+                "1. The PDF page is a scanned image — ensure it has selectable text or clear circles with tag numbers.\n"
+                "2. Valve tags do not start with a known prefix (MOV, SDV, XV, FV, PG, XI, PT, etc.).\n"
+                "3. The OpenAI Vision API key may be missing or over quota.\n"
+                "Please check these and re-upload."
             )
+            log_and_print(f"[MOV {job_id[:8]}] FAILED: {user_msg}")
+            error_result = {'success': False, 'error': user_msg}
+            cache.set(f'mov_task_{job_id}_result', error_result, timeout=3600)
+            cache.set(f'mov_task_{job_id}_stage', 'Error: No valve tags found', timeout=3600)
+            return error_result
         # -------------------------------------------------------------------------
 
         cache.set(f'mov_task_{job_id}_progress', 30, timeout=3600)

@@ -177,10 +177,13 @@ def check_mov_job_status(request, job_id):
         
         if result:
             # Task complete
+            is_success = result.get('success', False)
             return JsonResponse({
-                'status': 'completed' if result.get('success') else 'failed',
-                'progress': 100 if result.get('success') else 0,
-                'stage': 'Complete' if result.get('success') else 'Error',
+                'status': 'completed' if is_success else 'failed',
+                'progress': 100 if is_success else 0,
+                'stage': 'Complete' if is_success else 'Error',
+                # Surface the error message at the TOP LEVEL so the frontend can read it
+                'error': result.get('error') if not is_success else None,
                 'result': result
             })
         elif progress > 0:

@@ -327,17 +327,35 @@ If no valves are visible on this page, return an empty array [].
 
             valves_list = all_valves
 
-            # Filter by valve type if specified (broad match: type field OR prefix in tag_no)
+            # Filter by valve type if specified.
+            # If the strict filter yields 0 results but we DID find other valves,
+            # fall back to ALL found valves so real data is never silently discarded.
             if valve_type:
                 original_count = len(valves_list)
                 vt_upper = valve_type.upper()
-                valves_list = [
+                filtered = [
                     v for v in valves_list
                     if v.get('type', '').upper() == vt_upper
                     or v.get('tag_no', '').upper().startswith(vt_upper)
                     or v.get('tag', '').upper().startswith(vt_upper)
                 ]
-                logger.info(f"🔍 [RealPIDExtractor] Filtered {original_count} → {len(valves_list)} {valve_type} valves")
+                if filtered:
+                    valves_list = filtered
+                    logger.info(f"[RealPIDExtractor] Filtered {original_count} → {len(valves_list)} {valve_type} valves")
+                elif original_count > 0:
+                    # Strict filter dropped everything — return all valves so caller
+                    # can decide instead of silently getting 0.
+                    found_types = list({
+                        (v.get('type') or v.get('tag_no', '')[:3]).upper()
+                        for v in valves_list
+                    })
+                    logger.warning(
+                        f"[RealPIDExtractor] {valve_type} filter yielded 0 from {original_count} valves. "
+                        f"Tag types found: {found_types}. Returning all {original_count} valves."
+                    )
+                    # Keep valves_list as-is (all found valves)
+                else:
+                    logger.info(f"[RealPIDExtractor] No valves found on any page.")
 
             # Extract P&ID number from filename
             pid_no = self._extract_pid_number(original_filename or pdf_path)
