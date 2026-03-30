@@ -72,245 +72,290 @@ class RealPIDExtractor:
     
     def _extract_text_with_ocr(self, pdf_path: str) -> str:
         """
-        Extract ALL text from PDF using multiple OCR engines
+        Extract ALL text from ALL pages of the PDF using multiple OCR engines.
         Priority: EasyOCR > PaddleOCR > Tesseract
-        Returns combined text from all engines
+        Returns combined text from all engines across all pages.
         """
-        logger.info("📝 [OCR] Extracting text from PDF using multi-engine OCR...")
-        
+        logger.info("📝 [OCR] Extracting text from ALL pages using multi-engine OCR...")
+
         try:
-            # Convert PDF to image
             doc = fitz.open(pdf_path)
-            page = doc[0]
-            
-            # High resolution for OCR (2.5x for better text detection)
-            zoom = 2.5
-            mat = fitz.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat)
-            
-            # Convert to PIL Image
-            img_data = pix.tobytes("png")
-            img = Image.open(io.BytesIO(img_data))
-            
-            ocr_texts = []
-            
-            # Try EasyOCR (best for engineering drawings)
-            if self.easyocr_reader:
-                try:
-                    results = self.easyocr_reader.readtext(img_data, detail=0, paragraph=False)
-                    easy_text = ' '.join(results)
-                    if easy_text.strip():
-                        ocr_texts.append(f"[EasyOCR Results]\n{easy_text}")
-                        logger.info(f"✅ EasyOCR extracted {len(results)} text elements")
-                except Exception as e:
-                    logger.warning(f"⚠️ EasyOCR failed: {e}")
-            
-            # Try PaddleOCR
-            if self.paddleocr_reader:
-                try:
-                    results = self.paddleocr_reader.ocr(img_data, cls=False)
-                    if results and results[0]:
-                        paddle_text = ' '.join([line[1][0] for line in results[0]])
-                        if paddle_text.strip():
-                            ocr_texts.append(f"[PaddleOCR Results]\n{paddle_text}")
-                            logger.info(f"✅ PaddleOCR extracted {len(results[0])} text elements")
-                except Exception as e:
-                    logger.warning(f"⚠️ PaddleOCR failed: {e}")
-            
-            # Try Tesseract
-            try:
-                tess_text = pytesseract.image_to_string(img, config='--psm 11')
-                if tess_text.strip():
-                    ocr_texts.append(f"[Tesseract Results]\n{tess_text}")
-                    logger.info(f"✅ Tesseract extracted text")
-            except Exception as e:
-                logger.warning(f"⚠️ Tesseract failed: {e}")
-            
+            num_pages = len(doc)
+            logger.info(f"📄 [OCR] PDF has {num_pages} page(s)")
+
+            all_page_texts = []
+
+            for page_num in range(num_pages):
+                page = doc[page_num]
+
+                # High resolution for OCR (3.0x for better text detection in circles)
+                zoom = 3.0
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat)
+
+                # Convert to PIL Image
+                img_data = pix.tobytes("png")
+                img = Image.open(io.BytesIO(img_data))
+
+                page_texts = []
+
+                # Try EasyOCR (best for engineering drawings with circles/bubbles)
+                if self.easyocr_reader:
+                    try:
+                        results = self.easyocr_reader.readtext(img_data, detail=0, paragraph=False)
+                        easy_text = ' '.join(results)
+                        if easy_text.strip():
+                            page_texts.append(f"[EasyOCR Page {page_num + 1}]\n{easy_text}")
+                            logger.info(f"✅ EasyOCR page {page_num + 1}: {len(results)} text elements")
+                    except Exception as e:
+                        logger.warning(f"⚠️ EasyOCR page {page_num + 1} failed: {e}")
+
+                # Try PaddleOCR
+                if self.paddleocr_reader:
+                    try:
+                        results = self.paddleocr_reader.ocr(img_data, cls=False)
+                        if results and results[0]:
+                            paddle_text = ' '.join([line[1][0] for line in results[0]])
+                            if paddle_text.strip():
+                                page_texts.append(f"[PaddleOCR Page {page_num + 1}]\n{paddle_text}")
+                                logger.info(f"✅ PaddleOCR page {page_num + 1}: {len(results[0])} text elements")
+                    except Exception as e:
+                        logger.warning(f"⚠️ PaddleOCR page {page_num + 1} failed: {e}")
+
+                # Tesseract with PSM 11 (sparse text) + PSM 6 for denser regions
+                for psm in [11, 6]:
+                    try:
+                        tess_text = pytesseract.image_to_string(img, config=f'--psm {psm}')
+                        if tess_text.strip():
+                            page_texts.append(f"[Tesseract PSM{psm} Page {page_num + 1}]\n{tess_text}")
+                            logger.info(f"✅ Tesseract PSM{psm} page {page_num + 1}: extracted text")
+                            break
+                    except Exception as e:
+                        logger.warning(f"⚠️ Tesseract PSM{psm} page {page_num + 1} failed: {e}")
+
+                if page_texts:
+                    all_page_texts.extend(page_texts)
+
             doc.close()
-            
-            # Combine all OCR results
-            combined_text = '\n\n'.join(ocr_texts)
-            
+
+            combined_text = '\n\n'.join(all_page_texts)
+
             if combined_text.strip():
-                logger.info(f"✅ [OCR] Total extracted text length: {len(combined_text)} chars")
+                logger.info(f"✅ [OCR] Total extracted text: {len(combined_text)} chars across {num_pages} page(s)")
                 logger.info(f"📝 [OCR] Text preview: {combined_text[:200]}...")
                 return combined_text
             else:
-                logger.warning("⚠️ [OCR] No text extracted by any engine")
+                logger.warning("⚠️ [OCR] No text extracted by any engine on any page")
                 return ""
-                
+
         except Exception as e:
             logger.error(f"❌ [OCR] Failed: {e}", exc_info=True)
             return ""
-    
-    def extract_valves_from_pdf(self, pdf_path: str, original_filename: str = None, valve_type: str = None) -> Dict:
+
+    def extract_valves_from_pdf(self, pdf_path: str, original_filename: str = None, valve_type: str = None) -> dict:
         """
-        HYBRID extraction: OCR + OpenAI Vision
-        
-        STEP 1: Extract all text using OCR engines (Tesseract, EasyOCR, PaddleOCR)
-        STEP 2: Send OCR text + image to Vision for intelligent structuring
-        
+        HYBRID extraction: Multi-engine OCR + OpenAI Vision across ALL pages.
+
+        STEP 1: Extract all text from ALL pages using OCR engines
+        STEP 2: For each page, send OCR context + page image to Vision API
+        STEP 3: Merge valve lists from all pages, deduplicate by tag_no
+
         Args:
             pdf_path: Path to P&ID PDF
             original_filename: Original filename (for P&ID number extraction)
             valve_type: Filter for specific valve type ('SDV', 'MOV', or None for all)
-        
+
         Returns:
             Dict with valves list and drawing info
         """
         if not self.openai_client:
             raise ValueError("OpenAI client not initialized")
-        
-        logger.info(f"🚀 [RealPIDExtractor] Starting HYBRID extraction (OCR + Vision) from: {original_filename or pdf_path}")
+
+        logger.info(f"🚀 [RealPIDExtractor] Starting HYBRID extraction from: {original_filename or pdf_path}")
         logger.info(f"🎯 [RealPIDExtractor] Target valve type: {valve_type or 'ALL'}")
-        
+
         try:
-            # STEP 1: Run multi-engine OCR to extract ALL text
-            logger.info("📝 [RealPIDExtractor] STEP 1: Running OCR engines...")
+            # STEP 1: Run multi-engine OCR on ALL pages
+            logger.info("📝 [RealPIDExtractor] STEP 1: Running OCR on all pages...")
             ocr_text = self._extract_text_with_ocr(pdf_path)
-            
+
             if ocr_text:
                 logger.info(f"✅ [RealPIDExtractor] OCR extracted {len(ocr_text)} characters")
             else:
                 logger.warning("⚠️ [RealPIDExtractor] OCR returned no text, Vision will work alone")
-            
-            # STEP 2: Convert PDF to image for Vision
-            logger.info("🖼️ [RealPIDExtractor] STEP 2: Preparing image for Vision...")
-            # Open PDF and convert first page to image
-            doc = fitz.open(pdf_path)
-            page = doc[0]  # Process first page (main drawing)
-            
-            # High-resolution rendering for better OCR
-            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-            
-            # Convert to base64 for OpenAI Vision
-            buffered = io.BytesIO()
-            img.save(buffered, format="PNG")
-            img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            
-            logger.info("📸 [RealPIDExtractor] Image prepared, calling OpenAI Vision with OCR context...")
-            
-            # Build intelligent prompt with OCR context
-            valve_filter_text = f"Focus specifically on {valve_type} type valves." if valve_type else "Extract all valve types (SDV, MOV, PSV, etc.)."
-            
-            ocr_context = ""
-            if ocr_text:
-                ocr_context = f"""\n\n=== OCR EXTRACTED TEXT ===
-The following text was extracted from the drawing using OCR engines:
 
-{ocr_text[:3000]}\n
+            # STEP 2: Process each page with Vision API
+            logger.info("🖼️ [RealPIDExtractor] STEP 2: Processing all pages with Vision AI...")
+
+            doc = fitz.open(pdf_path)
+            num_pages = len(doc)
+            logger.info(f"📄 [RealPIDExtractor] PDF has {num_pages} page(s)")
+
+            valve_filter_text = (
+                f"Focus specifically on {valve_type} type valves." if valve_type
+                else "Extract ALL valve types (SDV, MOV, PSV, XV, etc.)."
+            )
+
+            all_valves = []
+            seen_tag_nos = set()
+
+            import json
+            import re
+
+            for page_num in range(num_pages):
+                page = doc[page_num]
+                logger.info(f"🔍 [RealPIDExtractor] Processing page {page_num + 1}/{num_pages}...")
+
+                # High-resolution rendering (3.0x to read small text inside circles)
+                pix = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0))
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+
+                # Trim image size to stay within API token limits (~4000x4000 max)
+                max_dim = 4096
+                if img.width > max_dim or img.height > max_dim:
+                    scale = max_dim / max(img.width, img.height)
+                    img = img.resize(
+                        (int(img.width * scale), int(img.height * scale)),
+                        Image.LANCZOS
+                    )
+
+                buffered = io.BytesIO()
+                img.save(buffered, format="PNG")
+                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+                ocr_context = ""
+                if ocr_text:
+                    # Include OCR text segment (first 3000 chars shared across all pages)
+                    ocr_context = f"""\n\n=== OCR EXTRACTED TEXT (All Pages) ===
+{ocr_text[:3000]}
 === END OCR TEXT ===
 
 Use this OCR text to help identify valve tag numbers, line numbers, and other text in the drawing.
 """
-            
-            prompt = f"""You are an expert P&ID (Piping & Instrumentation Diagram) analyst. 
-Analyze this P&ID drawing and extract ALL valve information.
+
+                prompt = f"""You are an expert P&ID (Piping & Instrumentation Diagram) analyst.
+Analyze page {page_num + 1} of this P&ID drawing and extract ALL valve information.
 {ocr_context}
 {valve_filter_text}
 
-For EACH valve you find, extract:
-1. Tag Number (e.g., SDV-XXX-NNN, MOV-XXX-NNN, XV-XXX-NNN — use EXACT tags from drawing)
-2. Valve Type (SDV, MOV, PSV, XV, etc.) - from the tag prefix
-3. Line Number (the piping line it's on, e.g., 6"-GA-100-1501-A2B)
-4. Service/Description (what the valve controls, e.g., "Main Gas Line Shutdown")
-5. Location/Area on drawing
-6. Any visible specifications (size, class, fail position if shown)
+IMPORTANT: Valve tag numbers in P&ID drawings are typically written INSIDE CIRCLES or BUBBLES.
+Look carefully for any circle symbols (○ ◎ ⊙) containing text — these are valve tags.
+Tag formats vary: MOV-8001, MOV-200-001, SDV-100A, XV-5001 etc. Extract EXACTLY as shown.
 
-Return the data as a JSON array with this structure:
+For EACH valve you find, extract:
+1. Tag Number — copy EXACTLY from the circle/bubble in the drawing
+2. Valve Type (MOV, SDV, PSV, XV, etc.) — inferred from tag prefix
+3. Line Number (the piping line it connects to, e.g. 6\"-GA-100-1501-A2B)
+4. Service/Description (what the valve controls)
+5. Location/Area on drawing
+6. Any visible specifications (size, class, fail position)
+
+Return a JSON array ONLY (no other text):
 [
   {{
-    "tag_no": "SDV-100-001",
-    "tag": "SDV-100-001",
-    "type": "SDV",
-    "line_no": "6\\"-GA-100-1501-A2B",
-    "service": "Natural Gas Main Line Shutdown",
-    "location": "Main Gas Line Inlet",
-    "piping_class": "ASME B16.5 150#",
-    "notes": "any additional info visible"
+    "tag_no": "<exact tag from drawing circle>",
+    "tag": "<exact tag from drawing circle>",
+    "type": "<prefix, e.g. MOV>",
+    "line_no": "<piping line number>",
+    "service": "<valve service/description>",
+    "location": "<area on drawing>",
+    "piping_class": "<if visible>",
+    "notes": "<other visible info>"
   }}
 ]
 
-Be thorough - extract EVERY valve visible in the drawing. Return ONLY the JSON array, no other text."""
-            
-            # Call OpenAI Vision API
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4o",  # GPT-4 Vision model
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
+If no valves are visible on this page, return an empty array [].
+"""
+
+                try:
+                    response = self.openai_client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
                             {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{img_base64}",
-                                    "detail": "high"
-                                }
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/png;base64,{img_base64}",
+                                            "detail": "high"
+                                        }
+                                    }
+                                ]
                             }
-                        ]
-                    }
-                ],
-                max_tokens=4000,
-                temperature=0.1  # Low temperature for factual extraction
-            )
-            
-            # Parse response
-            content = response.choices[0].message.content.strip()
-            logger.info(f"📥 [RealPIDExtractor] Received response from OpenAI Vision")
-            
-            # Extract JSON from response (handle markdown code blocks)
-            import json
-            import re
-            
-            # Remove markdown code blocks if present
-            content = re.sub(r'```json\s*', '', content)
-            content = re.sub(r'```\s*', '', content)
-            content = content.strip()
-            
-            try:
-                valves_list = json.loads(content)
-            except json.JSONDecodeError as e:
-                logger.error(f"❌ [RealPIDExtractor] Failed to parse JSON: {e}")
-                logger.error(f"Response content: {content[:500]}")
-                raise ValueError(f"Failed to parse Vision API response: {e}")
-            
-            # Filter by valve type if specified
+                        ],
+                        max_tokens=4000,
+                        temperature=0.1
+                    )
+
+                    content = response.choices[0].message.content.strip()
+                    content = re.sub(r'```json\s*', '', content)
+                    content = re.sub(r'```\s*', '', content)
+                    content = content.strip()
+
+                    page_valves = json.loads(content)
+
+                    # Deduplicate by tag_no across pages
+                    new_count = 0
+                    for valve in page_valves:
+                        tag = (valve.get('tag_no') or valve.get('tag') or '').strip().upper()
+                        if tag and tag not in seen_tag_nos:
+                            seen_tag_nos.add(tag)
+                            all_valves.append(valve)
+                            new_count += 1
+                        elif not tag:
+                            all_valves.append(valve)
+                            new_count += 1
+
+                    logger.info(f"✅ [RealPIDExtractor] Page {page_num + 1}: {len(page_valves)} valves found, {new_count} new (total: {len(all_valves)})")
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ [RealPIDExtractor] Failed to parse JSON for page {page_num + 1}: {e}")
+                except Exception as e:
+                    logger.error(f"❌ [RealPIDExtractor] Vision API failed for page {page_num + 1}: {e}")
+
+            doc.close()
+
+            valves_list = all_valves
+
+            # Filter by valve type if specified (broad match: type field OR prefix in tag_no)
             if valve_type:
                 original_count = len(valves_list)
+                vt_upper = valve_type.upper()
                 valves_list = [
-                    v for v in valves_list 
-                    if v.get('type', '').upper() == valve_type.upper() or 
-                       valve_type.upper() in v.get('tag_no', '').upper()
+                    v for v in valves_list
+                    if v.get('type', '').upper() == vt_upper
+                    or v.get('tag_no', '').upper().startswith(vt_upper)
+                    or v.get('tag', '').upper().startswith(vt_upper)
                 ]
-                logger.info(f"🔍 [RealPIDExtractor] Filtered {original_count} valves → {len(valves_list)} {valve_type} valves")
-            
+                logger.info(f"🔍 [RealPIDExtractor] Filtered {original_count} → {len(valves_list)} {valve_type} valves")
+
             # Extract P&ID number from filename
             pid_no = self._extract_pid_number(original_filename or pdf_path)
-            
-            # Build result structure
+
             result = {
                 'valves': valves_list,
                 'drawing_info': {
                     'pid_no': pid_no,
                     'date': datetime.now().strftime('%d-%b-%Y'),
-                    'extraction_method': 'HYBRID: OCR (Tesseract/EasyOCR/PaddleOCR) + OpenAI Vision',
+                    'extraction_method': f'HYBRID: OCR (Tesseract/EasyOCR/PaddleOCR) + OpenAI Vision ({num_pages} page(s))',
                     'ocr_text_length': len(ocr_text) if ocr_text else 0,
-                    'source_file': original_filename or os.path.basename(pdf_path)
+                    'source_file': original_filename or os.path.basename(pdf_path),
+                    'pages_processed': num_pages,
                 }
             }
-            
-            logger.info(f"✅ [RealPIDExtractor] Successfully extracted {len(valves_list)} valves")
+
+            logger.info(f"✅ [RealPIDExtractor] Complete: {len(valves_list)} valves from {num_pages} page(s)")
             if valves_list:
-                logger.info(f"📋 [RealPIDExtractor] Sample valve: {valves_list[0].get('tag_no')} ({valves_list[0].get('type')})")
-            
+                logger.info(f"📋 [RealPIDExtractor] All tags found: {[v.get('tag_no') for v in valves_list]}")
+
             return result
-            
+
         except Exception as e:
             logger.error(f"❌ [RealPIDExtractor] Extraction failed: {e}", exc_info=True)
             raise
-    
+
     def _extract_pid_number(self, filename: str) -> str:
         """Extract P&ID number from filename"""
         if not filename:

@@ -20,7 +20,7 @@ MOV_DATASHEET_FIELDS = {
                 'type': 'text',
                 'required': True,
                 'extraction_keywords': ['tag', 'tag number', 'equipment no', 'valve no'],
-                'pattern': r'[A-Z]{2,4}[-_]?\d{3,5}[A-Z]?',
+                'pattern': r'[A-Z]{2,4}[-_]\d{1,5}(?:[-_]\d{1,5})?[A-Z]?',
                 'example': 'MOV-101A',
                 'excel_cell': 'B3'
             },

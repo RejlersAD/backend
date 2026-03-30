@@ -117,6 +117,15 @@ def extract_mov_equipment(request):
             for chunk in hmb_file.chunks():
                 hmb_temp.write(chunk)
             hmb_temp_path = hmb_temp.name
+
+        # Save optional other_doc (linelist) to temp file
+        other_doc_temp_path = None
+        if other_doc:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as linelist_temp:
+                for chunk in other_doc.chunks():
+                    linelist_temp.write(chunk)
+                other_doc_temp_path = linelist_temp.name
+            logger.info(f'[MOV Equipment] Other doc saved to temp: {other_doc_temp_path}')
         
         # Start async task using threading (works with or without Celery)
         from apps.process_datasheet.mov_threading_processor import start_async_processing
@@ -125,7 +134,8 @@ def extract_mov_equipment(request):
             pid_file_path=pid_temp_path,
             hmb_file_path=hmb_temp_path,
             pid_filename=pid_file.name,
-            user_email=request.user.email if hasattr(request.user, 'email') else 'anonymous'
+            user_email=request.user.email if hasattr(request.user, 'email') else 'anonymous',
+            linelist_file_path=other_doc_temp_path,
         )
         
         logger.info(f"[MOV Equipment] ✅ Job started: {job_id}")

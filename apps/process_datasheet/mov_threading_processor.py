@@ -282,7 +282,7 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
             logger.warning(f"[MOV Thread {job_id}] Cleanup error: {e}")
 
 
-def start_async_processing(pid_file_path, hmb_file_path, pid_filename, user_email):
+def start_async_processing(pid_file_path, hmb_file_path, pid_filename, user_email, linelist_file_path=None):
     """
     Start async processing in a background thread
     
@@ -294,10 +294,10 @@ def start_async_processing(pid_file_path, hmb_file_path, pid_filename, user_emai
     # Start thread
     thread = threading.Thread(
         target=process_mov_in_thread,
-        args=(pid_file_path, hmb_file_path, pid_filename, user_email, job_id),
+        args=(pid_file_path, hmb_file_path, pid_filename, user_email, job_id, linelist_file_path),
         daemon=True  # Thread will not prevent program exit
     )
     thread.start()
     
-    logger.info(f"[MOV] Started background thread with job_id: {job_id}")
+    logger.info(f"[MOV] Started background thread with job_id: {job_id}, linelist: {bool(linelist_file_path)}")
     return job_id
