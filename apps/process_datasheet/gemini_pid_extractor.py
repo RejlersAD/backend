@@ -37,7 +37,54 @@ from apps.process_datasheet.tag_validator import (
 
 logger = logging.getLogger(__name__)
 
-# ─── Shared prompt ────────────────────────────────────────────────────────────
+# ─── Drawing number extraction — soft-coded patterns ─────────────────────────
+# Patterns are tried in order; first match wins.
+# Add or reorder entries here without touching any other code.
+_DWG_NUMBER_PATTERNS = [
+    # Long compound codes like PJ6-EXD-MRI-BQDA-0022
+    re.compile(r'\b([A-Z0-9]{2,8}-[A-Z0-9]{2,8}-[A-Z0-9]{2,8}-[A-Z0-9]{2,8}-\d{3,5})\b'),
+    # Three-part codes like PJ6-P&ID-0022 or ABC-XYZ-12345
+    re.compile(r'\b([A-Z0-9]{2,8}-[A-Z0-9]{2,8}-\d{3,5})\b'),
+    # DWG / Drawing No. labelled values
+    re.compile(r'(?:DWG\.?\s*No\.?|Drawing\s*No\.?|DOC\.?\s*No\.?)\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-_]{4,30})', re.IGNORECASE),
+    # P&ID No. labelled values
+    re.compile(r'(?:P&ID\s*No\.?|PID\s*No\.?)\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-_]{4,30})', re.IGNORECASE),
+]
+
+
+def _extract_drawing_number(ocr_text: str, fallback_filename: str = None) -> str:
+    """
+    Extract the actual engineering drawing number from OCR text.
+
+    Strategy (soft-coded via _DWG_NUMBER_PATTERNS above):
+      1. Try each pattern against the OCR text in order.
+      2. Reject hits that look like tag numbers (start with a known valve prefix).
+      3. If nothing found, fall back to the filename stem.
+
+    To add a new pattern format, append to _DWG_NUMBER_PATTERNS — no other code changes needed.
+    """
+    if ocr_text:
+        for pattern in _DWG_NUMBER_PATTERNS:
+            for match in pattern.finditer(ocr_text):
+                candidate = match.group(1).strip()
+                # Skip candidates that are just valve/instrument tags
+                if has_valid_engineering_prefix(candidate):
+                    continue
+                # Skip very short or obviously bad hits
+                if len(candidate) < 6:
+                    continue
+                logger.info(f"[DWGExtract] Found drawing number: {candidate} (pattern: {pattern.pattern[:40]})")
+                return candidate
+
+    # Fallback: use filename stem (strips extension)
+    if fallback_filename:
+        stem = Path(fallback_filename).stem
+        logger.info(f"[DWGExtract] No drawing number in OCR; using filename stem: {stem}")
+        return stem
+
+    return 'UNKNOWN'
+
+
 _VALVE_PROMPT_TEMPLATE = """You are an expert P&ID (Piping & Instrumentation Diagram) analyst.
 Analyse page {page} of this P&ID drawing and extract ALL valve / instrument tags.
 
@@ -355,7 +402,7 @@ class GeminiPIDExtractor:
                     f"found types: {found_types}. Returning all {len(all_valves)} valves."
                 )
 
-        pid_no = Path(original_filename).stem if original_filename else Path(pdf_path).stem
+        pid_no = _extract_drawing_number(ocr_text, fallback_filename=original_filename or os.path.basename(pdf_path))
 
         return {
             'valves': all_valves,

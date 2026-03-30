@@ -124,9 +124,9 @@ class MOVExcelGeneratorDynamic:
         self._apply_cell_style(ws, f'C{current_row}', f'N{current_row}')
         current_row += 1
         
-        # Row 3: P&ID No.
+        # Row 3: DWG. No.
         ws[f'C{current_row}'] = '3'
-        ws[f'D{current_row}'] = 'P&ID No.'
+        ws[f'D{current_row}'] = 'DWG. No.'
         ws.merge_cells(f'E{current_row}:N{current_row}')
         ws[f'E{current_row}'] = valve_data.get('pid_no', '')
         self._apply_cell_style(ws, f'C{current_row}', f'N{current_row}')

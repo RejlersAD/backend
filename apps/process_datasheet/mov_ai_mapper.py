@@ -192,7 +192,7 @@ class MOVDatasheetAIMapper:
 Sources: P&ID (primary) + Line List + Legend
 - tag_no: From P&ID (e.g., "MOV-100-001")
 - service: From Legend P&ID (abbreviations) or P&ID description
-- **pid_no: EXACTLY from pid_data['drawing_info']['pid_no']**
+- **pid_no (DWG. No.): EXACTLY from pid_data['drawing_info']['pid_no'] — this is the engineering drawing number, NOT the filename**
 - line_no: From P&ID (match valve to line)
 - piping_class: From **P&ID** (line specification on P&ID drawing)
 - fluid: From **Line List** and **H&MB** (both sources)

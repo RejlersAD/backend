@@ -33,12 +33,12 @@ MOV_DATASHEET_FIELDS = {
                 'excel_cell': 'B4'
             },
             'pid_no': {
-                'label': '3. P&ID No.',
+                'label': '3. DWG. No.',
                 'type': 'text',
                 'required': False,
-                'extraction_keywords': ['p&id', 'pid', 'drawing no', 'dwg no'],
-                'pattern': r'[A-Z0-9]{2,6}[-_][A-Z0-9]{3,6}[-_]\d{3,5}',
-                'example': 'P-1001-001',
+                'extraction_keywords': ['dwg no', 'drawing no', 'drawing number', 'p&id', 'pid', 'document no'],
+                'pattern': r'[A-Z0-9]{2,6}[-_][A-Z0-9]{3,6}[-_][A-Z0-9]{2,6}[-_][A-Z0-9]{3,8}[-_]\d{3,5}|[A-Z0-9]{2,6}[-_][A-Z0-9]{3,6}[-_]\d{3,5}',
+                'example': 'PJ6-EXD-MRI-BQDA-0022',
                 'excel_cell': 'B5'
             },
             'line_number': {
