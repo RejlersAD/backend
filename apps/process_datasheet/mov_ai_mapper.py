@@ -172,10 +172,13 @@ Sources: H&MB (primary) + Line List (fallback) - MUST EXTRACT ALL AVAILABLE VALU
 - operating_temp_min: From H&MB min value OR calculate as normal - 10°C/20°F if only normal available
 - operating_temp_max: From H&MB max value OR calculate as normal + 10°C/20°F if only normal available
 - operating_temp_unit: From H&MB or Line List (°C, °F, K) - DO NOT leave as N/A
-- design_pressure: **REQUIRED** - From Line List "Design Pressure" (primary) or H&MB or calculate as operating_max × 1.1
-- design_temp: **REQUIRED** - From Line List "Design Temperature" (primary) or H&MB or calculate as operating_max + 20°C
+- design_pressure_min: From Line List "Min Design Pressure", or leave as 0 if full-vacuum not a concern
+- design_pressure_max: **REQUIRED** - From Line List "Design Pressure" (primary) or H&MB field 'operating_pressure_design', or calculate operating_pressure_normal × 1.15
+- design_temp_min: From Line List "Min Design Temperature", or calculate as operating_temp_min - 10
+- design_temp_max: **REQUIRED** - From Line List "Design Temperature" (primary) or H&MB or calculate as operating_temp_max + 20
 - sour_service: Check H&MB for H2S content (if H2S > 0 ppm or mentioned → "Yes", else "No") - Default to "No" if unclear
-- shut_off_pressure: Look for upstream equipment pressure in P&ID, or use design_pressure × 1.05 as estimate
+- special_conditions: Extract any special notes from P&ID or Line List (e.g. insulation, heat tracing, vibration, fire safe, NACE) - use "None" if nothing found
+- shut_off_pressure: Look for upstream equipment pressure in P&ID, or use design_pressure_max × 1.05 as estimate
 
 📋 SECTION 3 - VALVE DETAILS:
 Sources: P&ID + Instrumentation Department + Vendor (if available)
@@ -208,8 +211,14 @@ Sources: P&ID + Instrumentation Department + Vendor (if available)
    - If H&MB has stream data, match by line number or stream ID to get correct values for the valve's line
 6. **DESIGN PRESSURE & TEMP** - CRITICAL:
    - Primary source: Line List (search for "Design Pressure", "Design Temp", "Maximum Allowable")
-   - Fallback: H&MB or calculate as operating_max × 1.1 for pressure, operating_max + 20 for temperature
-   - Design values are typically higher than operating values for safety margin
+   - Fallback: H&MB fields 'design_pressure_max' / 'operating_pressure_design', or calculate operating_pressure_normal × 1.15
+   - For design temp fallback: operating_temp_max + 20 degrees for safety margin
+   - ALWAYS produce BOTH min and max fields (design_pressure_min + design_pressure_max, design_temp_min + design_temp_max)
+   - Design values are higher than operating values for safety margin
+6.5. **SPECIAL CONDITIONS**:
+   - Scan P&ID annotations and Line List columns for: insulation, heat tracing, fire safe, NACE MR0175, sour service, vibration
+   - Output as comma-separated string, e.g. "Insulated, Fire Safe"
+   - Output "None" if nothing found
 7. **SOUR SERVICE**: 
    - Check H&MB for H2S content
    - If H2S > 0 ppm or H2S mentioned → "Yes"
@@ -261,9 +270,12 @@ Return ONLY valid JSON:
       "phase": "Single Phase",
       "operating_pressure_normal": "75 barg",
       "operating_temp_normal": "25°C",
-      "design_pressure": "90 barg",
-      "design_temp": "85°C",
+      "design_pressure_min": "0 barg",
+      "design_pressure_max": "90 barg",
+      "design_temp_min": "-20°C",
+      "design_temp_max": "85°C",
       "sour_service": "No",
+      "special_conditions": "None",
       "shut_off_pressure": "95 barg",
       "fail_position": "FC",
       "diff_pressure_delta_p": null,
@@ -278,14 +290,27 @@ Return ONLY valid JSON:
     
     def _flatten_hmb_streams(self, hmb_data: Dict) -> Dict:
         """
-        Flatten nested HMB stream structure for AI
+        Flatten HMB stream structure for AI.
+        Handles BOTH:
+          - Nested dict format (MockHMBExtractor): {temperature: {min, max, unit}, pressure: {normal, design, unit}}
+          - Flat format (HMBVisionExtractor real output): {temp_min, temp_max, pressure_normal, pressure_design, ...}
         """
         flattened_hmb = {
             'streams': [],
             'process_conditions': hmb_data.get('process_conditions', {})
         }
-        
+
         for stream in hmb_data.get('streams', []):
+            # Support nested dict (mock) OR flat (real Vision) structure
+            temp_dict = stream.get('temperature') or {}
+            design_temp_dict = stream.get('design_temperature') or {}
+            pressure_dict = stream.get('pressure') or {}
+            design_pressure_dict = stream.get('design_pressure') or {}
+
+            def _pick(nested_val, flat_key):
+                """Return nested value if truthy, else fall back to flat field."""
+                return nested_val if nested_val is not None else stream.get(flat_key)
+
             flat_stream = {
                 'stream_id': stream.get('stream_id'),
                 'line_no': stream.get('line_no'),
@@ -293,29 +318,32 @@ Return ONLY valid JSON:
                 'phase': stream.get('phase'),
                 'state': stream.get('state'),
                 # Operating temperatures
-                'operating_temp_min': stream.get('temperature', {}).get('min'),
-                'operating_temp_normal': stream.get('temperature', {}).get('normal'),
-                'operating_temp_max': stream.get('temperature', {}).get('max'),
-                'operating_temp_unit': stream.get('temperature', {}).get('unit'),
+                'operating_temp_min':    _pick(temp_dict.get('min'),    'temp_min'),
+                'operating_temp_normal': _pick(temp_dict.get('normal'), 'temp_normal'),
+                'operating_temp_max':    _pick(temp_dict.get('max'),    'temp_max'),
+                'operating_temp_unit':   _pick(temp_dict.get('unit'),   'temp_unit'),
                 # Design temperatures
-                'design_temp_min': stream.get('design_temperature', {}).get('min'),
-                'design_temp_max': stream.get('design_temperature', {}).get('max'),
-                'design_temp_unit': stream.get('design_temperature', {}).get('unit'),
+                'design_temp_min':  _pick(design_temp_dict.get('min'),  'design_temp_min'),
+                'design_temp_max':  _pick(design_temp_dict.get('max'),  'design_temp_max'),
+                'design_temp_unit': _pick(design_temp_dict.get('unit'), 'design_temp_unit'),
                 # Operating pressures
-                'operating_pressure_min': stream.get('pressure', {}).get('min'),
-                'operating_pressure_normal': stream.get('pressure', {}).get('normal'),
-                'operating_pressure_max': stream.get('pressure', {}).get('max'),
-                'operating_pressure_design': stream.get('pressure', {}).get('design'),
-                'shut_off_pressure': stream.get('pressure', {}).get('shutoff'),
-                'pressure_unit': stream.get('pressure', {}).get('unit'),
+                'operating_pressure_min':    _pick(pressure_dict.get('min'),    'pressure_min'),
+                'operating_pressure_normal': _pick(pressure_dict.get('normal'), 'pressure_normal'),
+                'operating_pressure_max':    _pick(pressure_dict.get('max'),    'pressure_max'),
+                'operating_pressure_design': _pick(pressure_dict.get('design'), 'pressure_design'),
+                'shut_off_pressure':         _pick(pressure_dict.get('shutoff'), 'shut_off_pressure'),
+                'pressure_unit':             _pick(pressure_dict.get('unit'),   'pressure_unit'),
                 # Design pressures
-                'design_pressure_min': stream.get('design_pressure', {}).get('min', '0'),
-                'design_pressure_max': stream.get('design_pressure', {}).get('max', stream.get('pressure', {}).get('design'))
+                'design_pressure_min': _pick(design_pressure_dict.get('min'), 'design_pressure_min') or '0',
+                'design_pressure_max': (
+                    _pick(design_pressure_dict.get('max'), 'design_pressure_max')
+                    or _pick(pressure_dict.get('design'), 'pressure_design')
+                ),
             }
             flattened_hmb['streams'].append(flat_stream)
-        
+
         return flattened_hmb
-    
+
     def _build_user_prompt(
         self,
         pid_data: Dict,

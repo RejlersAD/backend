@@ -138,24 +138,24 @@ def generate_html_preview(mapped_data: Dict) -> str:
                     <td>8</td>
                     <td>Design Pressure</td>
                     <td>Min</td>
-                    <td colspan="4">{valve.get('design_pressure_min', 'N/A')}</td>
+                    <td colspan="4">{valve.get('design_pressure_min') or '0'}</td>
                     <td>Max</td>
-                    <td colspan="7">{valve.get('design_pressure_max', 'N/A')}</td>
+                    <td colspan="7">{valve.get('design_pressure_max') or valve.get('design_pressure') or 'N/A'}</td>
                 </tr>
                 <tr>
                     <td>9</td>
                     <td>Design Temperature</td>
                     <td>Min</td>
-                    <td colspan="4">{valve.get('design_temp_min', 'N/A')}</td>
+                    <td colspan="4">{valve.get('design_temp_min') or valve.get('design_temp') or 'N/A'}</td>
                     <td>Max</td>
-                    <td colspan="7">{valve.get('design_temp_max', 'N/A')}</td>
+                    <td colspan="7">{valve.get('design_temp_max') or valve.get('design_temp') or 'N/A'}</td>
                 </tr>
                 <tr>
                     <td>10</td>
                     <td>Sour Service</td>
-                    <td colspan="5">{valve.get('sour_service', 'N/A')}</td>
+                    <td colspan="5">{valve.get('sour_service') or 'N/A'}</td>
                     <td colspan="2">Special Conditions</td>
-                    <td colspan="6">{valve.get('special_conditions', 'N/A')}</td>
+                    <td colspan="6">{valve.get('special_conditions') or 'None'}</td>
                 </tr>
                 <tr>
                     <td>11</td>

@@ -208,9 +208,14 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
                     'operating_pressure_normal': valve.get('pressure', ''),
                     'operating_temp_min': valve.get('temp_min', ''),
                     'operating_temp_max': valve.get('temp_max', ''),
+                    # Keep single-value form for backwards compat AND provide split fields
                     'design_pressure': valve.get('design_pressure', ''),
+                    'design_pressure_min': valve.get('design_pressure_min', '0'),
+                    'design_pressure_max': valve.get('design_pressure_max') or valve.get('design_pressure', ''),
                     'design_temp_min': valve.get('design_temp_min', ''),
                     'design_temp_max': valve.get('design_temp_max', ''),
+                    'sour_service': valve.get('sour_service', 'No'),
+                    'special_conditions': valve.get('special_conditions', 'None'),
                 }
                 mapped_valves.append(mapped_valve)
             
