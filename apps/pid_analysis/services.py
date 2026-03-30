@@ -139,6 +139,7 @@ class PIDAnalysisService:
         self.equipment_tags = set()
         self.line_numbers = set()
         self.notes_references = set()
+        self.drawing_number_candidates = set()  # populated by _parse_extracted_data; safe default here
         # Load soft-coded analysis configuration (pid_analysis_config.json)
         self._load_analysis_config()
         # Initialize optional Google Gemini client (controlled by pid_analysis_config.json)
@@ -995,12 +996,13 @@ class PIDAnalysisService:
                     }
                 }]
 
-            # Supplement with individual note/hold compliance items when below 20 issues
+            # Supplement with individual note/hold compliance items when below threshold
             # Each extracted note/hold reference is a legitimate QC check item
-            if len(all_issues) < 20 and self.notes_references:
+            _supp_limit = getattr(self, 'supplement_notes_below', 10)
+            if len(all_issues) < _supp_limit and self.notes_references:
                 already_refs = {iss.get('pid_reference', '').upper() for iss in all_issues}
                 for note_ref in sorted(self.notes_references):
-                    if len(all_issues) >= 20:
+                    if len(all_issues) >= _supp_limit:
                         break
                     nr_upper = note_ref.upper().replace(' ', '-')
                     if not any(nr_upper in ref or note_ref.upper() in ref for ref in already_refs):
@@ -1031,7 +1033,7 @@ class PIDAnalysisService:
             # Categorize by severity
             categorized = self._categorize_by_severity(all_issues)
 
-            final_confidence = 'High' if len(all_issues) >= 15 else 'Medium'
+            final_confidence = 'High' if len(all_issues) >= getattr(self, 'confidence_high_thresh', 10) else 'Medium'
 
             final_result = {
                 'issues': all_issues,
