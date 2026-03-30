@@ -46,6 +46,37 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         from apps.process_datasheet.mov_ai_mapper import MOVDatasheetAIMapper
         from apps.process_datasheet.mov_excel_generator_dynamic import MOVExcelGeneratorDynamic
         
+        # STEP 0: Upload source documents to S3 for permanent storage
+        log_and_print(f'[MOV {job_id[:8]}] STEP 0: Uploading source documents to S3...')
+        s3_keys = {}
+        try:
+            from apps.core.s3_service import S3Service
+            _s3 = S3Service()
+            import os as _os
+            _docs_to_upload = [
+                (pid_file_path, pid_filename or _os.path.basename(pid_file_path), 'pid'),
+                (hmb_file_path, _os.path.basename(hmb_file_path), 'hmb'),
+            ]
+            if linelist_file_path:
+                _docs_to_upload.append((linelist_file_path, _os.path.basename(linelist_file_path), 'linelist'))
+            for _fpath, _fname, _dtype in _docs_to_upload:
+                with open(_fpath, 'rb') as _fobj:
+                    _s3_result = _s3.upload_file(
+                        _fobj,
+                        'mov_documents',
+                        filename=f'{job_id[:8]}_{_dtype}_{_fname}',
+                        content_type='application/pdf',
+                        metadata={'job_id': job_id, 'doc_type': _dtype, 'user_email': user_email}
+                    )
+                if _s3_result.get('success'):
+                    s3_keys[_dtype] = _s3_result.get('key')
+                    log_and_print(f'[MOV {job_id[:8]}] S3 stored {_dtype}: {_s3_result.get("key")}')
+                else:
+                    log_and_print(f'[MOV {job_id[:8]}] S3 upload failed for {_dtype}: {_s3_result.get("error")}')
+            cache.set(f'mov_task_{job_id}_s3_keys', s3_keys, timeout=3600)
+        except Exception as _s3_err:
+            logger.warning(f'[MOV Thread {job_id}] S3 upload step failed (non-fatal): {_s3_err}')
+
         # STEP 1: Extract P&ID data with REAL extraction (Vision AI + OCR)
         log_and_print(f"ðŸ“„ [MOV {job_id[:8]}] STEP 1: Extracting P&ID with Vision AI...")
         try:
@@ -125,6 +156,24 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         log_and_print(f"ðŸ”— [MOV {job_id[:8]}] STEP 3: Matching lines...")
         line_context = match_lines_to_streams(pid_data, hmb_data)
         log_and_print(f"âœ… [MOV {job_id[:8]}] Lines matched")
+
+        # Cross-document interlinking audit
+        _all_valves = pid_data.get('valves', [])
+        _hmb_line_nos = {s.get('line_no', '').strip() for s in hmb_data.get('streams', []) if s.get('line_no')}
+        _linked = [v for v in _all_valves if v.get('line_no', '').strip() in _hmb_line_nos]
+        _unlinked = [v for v in _all_valves if v.get('line_no', '').strip() not in _hmb_line_nos]
+        _audit = {
+            'total_valves': len(_all_valves),
+            'linked_to_hmb': len(_linked),
+            'unlinked_valves': [v.get('tag_no', v.get('tag')) for v in _unlinked],
+            'hmb_streams': len(hmb_data.get('streams', [])),
+            'linelist_provided': linelist_file_path is not None,
+            's3_documents_stored': list(s3_keys.keys()),
+        }
+        cache.set(f'mov_task_{job_id}_doc_links', _audit, timeout=3600)
+        log_and_print(f'[MOV {job_id[:8]}] Interlinking: {len(_linked)}/{len(_all_valves)} valves linked to HMB streams')
+        if _unlinked:
+            log_and_print(f'[MOV {job_id[:8]}] Unlinked valves (no matching HMB line): {[v.get("tag_no", v.get("tag")) for v in _unlinked]}')
         
         cache.set(f'mov_task_{job_id}_progress', 75, timeout=3600)
         cache.set(f'mov_task_{job_id}_stage', 'AI intelligent mapping...', timeout=3600)
@@ -192,7 +241,9 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
             'success': True,
             'html_preview': html_preview,
             'excel_file': excel_base64,
-            'filename': f'MOV_Datasheet_{pid_data.get("drawing_info", {}).get("pid_no", "Unknown")}.xlsx'
+            'filename': f'MOV_Datasheet_{pid_data.get("drawing_info", {}).get("pid_no", "Unknown")}.xlsx',
+            's3_keys': s3_keys,
+            'doc_links': _audit,
         }
         
         cache.set(f'mov_task_{job_id}_result', result, timeout=3600)

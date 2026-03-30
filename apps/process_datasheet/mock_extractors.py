@@ -26,7 +26,7 @@ class MockPIDExtractor:
         Returns:
             Dict with structured P&ID data
         """
-        logger.info("[MockPIDExtractor] Extracting from P&ID...")
+        logger.warning("[MockPIDExtractor] ⚠️ USING DEMO DATA — Real extraction returned 0 valves or API unavailable. Check OpenAI API key and PDF quality.")
         
         # Extract P&ID number from filename or PDF metadata
         pid_no = self._extract_pid_number(pdf_file, original_filename)
@@ -36,8 +36,8 @@ class MockPIDExtractor:
         pid_data = {
             'valves': [
                 {
-                    'tag_no': 'SDV-100-001',
-                    'tag': 'SDV-100-001',
+                    'tag_no': 'DEMO-SDV-001',
+                    'tag': 'DEMO-SDV-001',
                     'type': 'SDV',
                     'location': 'Main Gas Line Inlet',
                     'service': 'Natural Gas Main Line Shutdown',
@@ -54,8 +54,8 @@ class MockPIDExtractor:
                     'nace_requirement': 'MR0175'
                 },
                 {
-                    'tag_no': 'SDV-100-002',
-                    'tag': 'SDV-100-002',
+                    'tag_no': 'DEMO-SDV-002',
+                    'tag': 'DEMO-SDV-002',
                     'type': 'SDV',
                     'location': 'Gas Line Branch A',
                     'service': 'Natural Gas Branch Shutdown',
@@ -72,8 +72,8 @@ class MockPIDExtractor:
                     'nace_requirement': 'MR0175'
                 },
                 {
-                    'tag_no': 'MOV-200-001',
-                    'tag': 'MOV-200-001',
+                    'tag_no': 'DEMO-MOV-001',
+                    'tag': 'DEMO-MOV-001',
                     'type': 'MOV',
                     'location': 'Main Gas Line Control',
                     'service': 'Natural Gas Flow Control',
@@ -91,8 +91,8 @@ class MockPIDExtractor:
                     'nace_requirement': 'MR0175'
                 },
                 {
-                    'tag_no': 'MOV-200-002',
-                    'tag': 'MOV-200-002',
+                    'tag_no': 'DEMO-MOV-002',
+                    'tag': 'DEMO-MOV-002',
                     'type': 'MOV',
                     'location': 'Gas Line Branch B',
                     'service': 'Natural Gas Branch Control',
@@ -110,8 +110,8 @@ class MockPIDExtractor:
                     'nace_requirement': 'MR0175'
                 },
                 {
-                    'tag_no': 'XV-100-003',
-                    'tag': 'XV-100-003',
+                    'tag_no': 'DEMO-XV-001',
+                    'tag': 'DEMO-XV-001',
                     'type': 'XV',
                     'location': 'Isolation Valve',
                     'service': 'Main Line Isolation',

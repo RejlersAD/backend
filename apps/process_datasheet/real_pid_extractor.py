@@ -211,7 +211,7 @@ Analyze this P&ID drawing and extract ALL valve information.
 {valve_filter_text}
 
 For EACH valve you find, extract:
-1. Tag Number (e.g., SDV-100-001, MOV-200-001, XV-100-003)
+1. Tag Number (e.g., SDV-XXX-NNN, MOV-XXX-NNN, XV-XXX-NNN — use EXACT tags from drawing)
 2. Valve Type (SDV, MOV, PSV, XV, etc.) - from the tag prefix
 3. Line Number (the piping line it's on, e.g., 6"-GA-100-1501-A2B)
 4. Service/Description (what the valve controls, e.g., "Main Gas Line Shutdown")

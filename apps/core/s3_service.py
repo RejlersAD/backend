@@ -46,6 +46,7 @@ class S3Service:
         'backups_db': 'backups/database/',
         'backups_reports': 'backups/reports/',
         'logs': 'logs/',
+        'mov_documents': 'media/mov_documents/',
     }
     
     # Keep FOLDERS for backward compatibility
