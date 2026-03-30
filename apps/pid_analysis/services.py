@@ -976,25 +976,11 @@ class PIDAnalysisService:
                     print(f"[CAG] Post-filter: removed/demoted {before_cag - len(all_issues)} hallucinated finding(s)")
             except Exception as _cag_ex:
                 print(f"[WARNING] CAG post-filter failed (non-critical): {_cag_ex}")
-            
-            # If NO issues found at all, create at least one from OCR data
+
+            # If NO issues found at all, log a warning but do NOT fabricate a placeholder finding.
+            # A clean drawing with genuinely zero findings should return an empty list.
             if len(all_issues) == 0:
-                print("[WARNING] No issues found in any pass - creating summary observation")
-                all_issues = [{
-                    'serial_number': 1,
-                    'pid_reference': 'DRAWING ANALYSIS',
-                    'issue_observed': f'Automated analysis completed. Found {len(self.instrument_tags)} instruments, {len(self.equipment_tags)} equipment tags, {len(self.line_numbers)} line numbers. Manual review recommended.',
-                    'action_required': 'Perform detailed manual review of the P&ID drawing for completeness and compliance',
-                    'evidence': 'Programmatically generated observation — derived from OCR text extraction counts, not from AI visual inspection. No specific defect was identified; this is a summary placeholder.',
-                    'severity': 'observation',
-                    'category': 'documentation',
-                    'location_on_drawing': {
-                        'zone': 'Middle-Center',
-                        'drawing_section': 'Overall Drawing',
-                        'proximity_description': 'Entire drawing scope',
-                        'visual_cues': 'Complete drawing review'
-                    }
-                }]
+                print("[WARNING] No issues found in any pass — returning empty findings list (no placeholder injected)")
 
             # Supplement with individual note/hold compliance items when below threshold
             # Each extracted note/hold reference is a legitimate QC check item
