@@ -79,11 +79,11 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         except Exception as _s3_err:
             logger.warning(f'[MOV Thread {job_id}] S3 upload step failed (non-fatal): {_s3_err}')
 
-        # STEP 1: Extract P&ID data with REAL extraction (Vision AI + OCR)
-        log_and_print(f"ðŸ“„ [MOV {job_id[:8]}] STEP 1: Extracting P&ID with Vision AI...")
+        # STEP 1: Extract P&ID data with REAL extraction (Gemini Vision AI + OCR)
+        log_and_print(f"📄 [MOV {job_id[:8]}] STEP 1: Extracting P&ID with Gemini Vision AI...")
         try:
-            from apps.process_datasheet.real_pid_extractor import RealPIDExtractor
-            real_extractor = RealPIDExtractor()
+            from apps.process_datasheet.gemini_pid_extractor import GeminiPIDExtractor
+            real_extractor = GeminiPIDExtractor()
             pid_data = real_extractor.extract_valves_from_pdf(pid_file_path, original_filename=pid_filename, valve_type='MOV')
             
             # Check if real extraction produced results
@@ -93,8 +93,8 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
             log_and_print(f"[MOV {job_id[:8]}] REAL extraction: {len(pid_data.get('valves', []))} MOV valves")
         except Exception as e:
             logger.warning(f"[MOV Thread {job_id}] Real extraction failed: {e}")
-            log_and_print(f"[MOV {job_id[:8]}] Real P&ID extraction failed. Cause: {e}")
-            log_and_print(f"[MOV {job_id[:8]}] Check: 1) OpenAI Vision API key 2) PDF has visible tag circles 3) Tags start with MOV/SDV/XV etc.")
+            log_and_print(f"[MOV {job_id[:8]}] Gemini P&ID extraction failed. Cause: {e}")
+            log_and_print(f"[MOV {job_id[:8]}] Check: 1) GEMINI_API_KEY set 2) PDF has visible tag circles 3) Tags start with MOV/SDV/XV etc.")
             pid_extractor = MockPIDExtractor()
             pid_data = pid_extractor.extract_from_pdf(pid_file_path, original_filename=pid_filename)
 

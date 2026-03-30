@@ -5,9 +5,16 @@ Smart mapping between extracted P&ID and HMB data for Motor Operated Valves
 import logging
 import sys
 from typing import Dict, List, Optional
-from openai import OpenAI
 from django.conf import settings
 import json
+
+from apps.process_datasheet.ai_provider import (
+    get_fallback_chain,
+    build_gemini_client,
+    build_openai_client,
+    GEMINI_TEXT_MODEL,
+    OPENAI_TEXT_MODEL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +38,10 @@ class MOVDatasheetAIMapper:
     """
     
     def __init__(self):
-        """Initialize OpenAI client"""
-        self.client = OpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            timeout=60.0
-        )
-        log_and_print("[MOVDatasheetAIMapper] Initialized with OpenAI GPT-4")
+        """Clients are lazily initialised on first use."""
+        self._gemini = None
+        self._openai = None
+        log_and_print("[MOVDatasheetAIMapper] Initialized (Gemini primary, OpenAI fallback)")
     
     def map_pid_hmb_to_datasheet(
         self,
@@ -89,19 +94,51 @@ class MOVDatasheetAIMapper:
                 log_and_print(f"[MOVDatasheetAIMapper] 🌡️ Sample HMB stream:")
                 log_and_print(f"    {json.dumps(hmb_data['streams'][0], indent=2)}")
             
-            # Call OpenAI
-            response = self.client.chat.completions.create(
-                model="gpt-4o",  # Use GPT-4o for better extraction
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.2,
-                response_format={"type": "json_object"}
-            )
-            
-            # Parse response
-            result_text = response.choices[0].message.content
+            # Call AI provider (Gemini first, OpenAI fallback)
+            result_text = None
+            for provider in get_fallback_chain('mov_mapping'):
+                try:
+                    if provider == 'gemini':
+                        if self._gemini is None:
+                            self._gemini = build_gemini_client()
+                        if self._gemini is None:
+                            raise RuntimeError("GEMINI_API_KEY not set")
+                        resp = self._gemini.models.generate_content(
+                            model=GEMINI_TEXT_MODEL,
+                            contents=system_prompt + "\n\n" + user_prompt,
+                        )
+                        result_text = resp.text
+                    elif provider == 'openai':
+                        if self._openai is None:
+                            self._openai = build_openai_client()
+                        if self._openai is None:
+                            raise RuntimeError("OPENAI_API_KEY not set")
+                        response = self._openai.chat.completions.create(
+                            model=OPENAI_TEXT_MODEL,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt}
+                            ],
+                            temperature=0.2,
+                            response_format={"type": "json_object"}
+                        )
+                        result_text = response.choices[0].message.content
+                    if result_text:
+                        log_and_print(f"[MOVDatasheetAIMapper] Using {provider} for mapping")
+                        break
+                except Exception as _pe:
+                    log_and_print(f"[MOVDatasheetAIMapper] {provider} failed: {_pe}")
+
+            if not result_text:
+                raise RuntimeError("All AI providers failed for MOV mapping")
+
+            # Strip markdown fences if present (Gemini sometimes adds them)
+            _clean = result_text.strip()
+            if _clean.startswith('```'):
+                _clean = _clean.split('```')[1]
+                if _clean.startswith('json'):
+                    _clean = _clean[4:]
+            result_text = _clean.strip().rstrip('`')
             mapped_data = json.loads(result_text)
             
             log_and_print(f"[MOVDatasheetAIMapper] ✅ AI mapping complete")
