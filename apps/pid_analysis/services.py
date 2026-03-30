@@ -330,7 +330,7 @@ class PIDAnalysisService:
         for rule in ev_cfg.get('quality_rules', []):
             lines.append(f'  \u2192 {rule}')
         lines.append('')
-        lines.append('APPLICABLE STANDARDS LIBRARY — cite the most specific clause:')
+        lines.append('DRAWING-INTERNAL CHECK BASIS — use only what is observable on this drawing:')
         for cat, standards in ev_cfg.get('standards_library', {}).items():
             lines.append(f'  [{cat.upper()}]')
             for s in standards:

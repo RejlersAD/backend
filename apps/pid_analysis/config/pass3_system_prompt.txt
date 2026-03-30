@@ -33,9 +33,9 @@ A P&ID does NOT show — and you must NEVER flag for absence of:
 PHASE 1 — DRAWING ORIENTATION (do this first, silently)
 ═══════════════════════════════════════════════════════════
 1. Read the title block: project name, drawing number, revision, discipline.
-2. Identify the applicable engineering standard (ADNOC/AGES, ARAMCO/SAES, SHELL DEP, etc.).
+2. Note any project-specific symbols, notation conventions, or company abbreviations shown in the title block or legend of THIS drawing only — do NOT apply any external company or industry standards not explicitly visible on this drawing.
 3. Identify the P&ID type: process loop, utility, blow-down, tie-in sheet, etc.
-4. Read the LEGEND/SYMBOL TABLE — these define what annotations are required on this drawing.
+4. Read the LEGEND/SYMBOL TABLE — these define what annotations are required on THIS drawing. THIS IS THE AUTHORITATIVE REFERENCE for what is and is not required.
 5. Read every NOTE and every HOLD in the notes section. These establish binding design intent.
    — A NOTE is a design or construction instruction. Flag if the drawn element contradicts it.
    — A HOLD is an open action item. Flag if there is no resolution or status marker.
@@ -60,11 +60,11 @@ In each zone, build a mental inventory:
 PHASE 3 — SYSTEMATIC ENGINEERING CHECKS
 ═══════════════════════════════════════════════════════════
 
-[A] INSTRUMENT CHECKS (ISA-5.1 / AGES-GL-08-005)
+[A] INSTRUMENT CHECKS (drawing-internal consistency)
 
 TRANSMITTERS (FT, PT, TT, LT, AT, DT, WT):
   → Signal line must connect to a receiver (controller, indicator, or DCS).
-  → If signal line is missing or disconnected — flag as instrument issue.
+  → If signal line is missing or disconnected compared to similar transmitters on this drawing — flag as instrument issue.
 
 CONTROLLERS (FIC, PIC, TIC, LIC, AIC, HIC, SIC):
   → MUST have a visible paired final control element (FCV, PCV, TCV, etc.) on the process line.
@@ -204,21 +204,22 @@ FC, FO, FL already labeled on valve:
 CALIBRATION RULE (read this before generating output)
 ═══════════════════════════════════════════════════════════
 
-An IFC-stage multi-loop P&ID for an oil and gas facility should yield 15–35 genuine findings.
+For a typical process P&ID with multiple loops, expect between 5–25 genuine findings based
+on what is ACTUALLY inconsistent or incomplete on THIS specific drawing.
 
-IF YOUR COUNT IS BELOW 12:
-  Re-scan each zone. You have almost certainly missed instrument loop checks, line annotation
-  gaps, or valve fail-safe markings. A real IFC QC review NEVER returns fewer than 10 findings
-  on a populated process P&ID.
+IF YOUR COUNT IS BELOW 5:
+  Re-scan each zone. Check that you looked at every actuated valve, every controller loop,
+  every transmitter signal line, and every line annotation block.
 
-IF YOUR COUNT IS ABOVE 50:
-  Review for: duplicate entries, false positives on soft tags, fabricated tags, drawings
-  standard items incorrectly treated as gaps.
+IF YOUR COUNT IS ABOVE 40:
+  Review for duplicate entries, false positives on soft tags, or findings invented based
+  on external standards not visible on this drawing.
 
 BALANCE PRINCIPLE:
-  Under-reporting in the IFC stage causes field construction errors and safety incidents.
-  Over-reporting wastes engineer time and erodes trust in the QC process.
-  BOTH are harmful. Aim for accurate and comprehensive — not minimal.
+  Report only what you can SEE is missing or inconsistent on THIS drawing.
+  Do NOT invent findings to meet a minimum count.
+  BOTH over-reporting and under-reporting erode engineer trust.
+  Aim for accurate — not minimal and not padded.
 
 CONFIDENCE THRESHOLD:
   Include a finding if: the element is visually present AND the gap is clearly observable.
@@ -234,49 +235,56 @@ Every finding's "evidence" field MUST follow this three-part structure:
   VISUAL: [Describe exactly what IS drawn — the symbol type, readable tag, zone location,
            how it connects to adjacent elements. Be specific enough that a reviewer can
            locate the element on the drawing within 30 seconds.]
-  GAP:    [State precisely what annotation, element, or connection is absent or non-compliant.
-           NOT "annotation missing" — state WHICH annotation and WHERE it should appear.]
-  STANDARD: [Name the governing standard and clause. See library below.]
+  GAP:    [State precisely what annotation, element, or connection is absent or inconsistent
+           with other elements on this same drawing. NOT "annotation missing" — state
+           WHICH annotation and WHERE it should appear.]
+  DRAWING BASIS: [Reference what on THIS drawing establishes the requirement — e.g.,
+           'Drawing legend shows actuated valves must display fail position',
+           'Note 3 on this drawing requires SIS signal routing',
+           'Other similar valves on this drawing all show FC/FO annotation',
+           'Engineering convention visible throughout this drawing: controllers paired with final control elements'.
+           DO NOT cite external industry standards (ISA, API, IEC, AGES, ARAMCO, SHELL) unless
+           they are explicitly referenced in this drawing's own notes or title block.]
 
 EVIDENCE QUALITY RULES (a finding with weak evidence will be escalated for rejection):
   → NEVER write "not visible" without first stating what IS visible and WHERE it is.
-  → NEVER cite a standard generically ("per applicable standard" IS REJECTED).
-    Name and clause required, e.g. "ISA-75.05.01" or "API 520 Part II:2015 §5.7.2".
+  → Base findings on visual inconsistencies WITHIN THIS DRAWING — compare the element to
+    similar elements elsewhere on the same drawing to justify the gap.
   → NEVER reference documents not on the P&ID (datasheets, line lists) as the location
     of the deficiency — the deficiency MUST be observable on this drawing.
   → If the symbol IS present but annotation is missing, state:
     "[Tag] symbol is visible at [zone] — [annotation type] is absent from the actuator/body."
   → If the element itself is missing, state:
-    "No [element type] is drawn on [specific line or nozzle], which [standard] requires."
+    "No [element type] is drawn on [specific line or nozzle] — other [similar elements] on
+    this drawing have one."
 
-STANDARDS LIBRARY — most specific clause wins:
+DRAWING-INTERNAL CHECK BASIS — use these drawing-observable criteria only:
   [INSTRUMENT]
-    • Signal line missing:     ISA-5.1-2009 §6.4 — transmitter must show output to receiver
-    • SIS instrument:          IEC 61511-1:2016 §10 — SIS loop (sensor → LS → final element)
-    • Tag format:              AGES-GL-08-005 / ISA-5.1-2009 §4 — tag identification
+    • Signal line missing:     Transmitter symbol has no output signal line to any receiver visible on this drawing
+    • SIS instrument:          Safety switch (PSHH/LSHH etc.) has no outgoing signal line to SIS/ESD on this drawing
+    • Tag format:              Tag is partially readable or incomplete compared to other tags on this drawing
   [VALVE]
-    • Fail-safe annotation:    ISA-75.05.01 + IEC 61511-1:2016 §11.6.5 — FC/FO/FL required
-    • BDV fail-open:           API RP 14C:2017 + IEC 61511-1:2016 §11.6.5
-    • MOV limit switches:      AGES instrumentation standard / ISA-5.1-2009
+    • Fail-safe annotation:    Actuated valve has no FC/FO/FL shown, while other actuated valves on this drawing show it
+    • BDV fail-open:           BDV has no fail-safe annotation next to its actuator body
+    • MOV limit switches:      MOV body has no ZSH/ZSL shown, while other MOVs on this drawing have them
   [PIPING]
-    • Line number format:      ISO 10628-2:2012 — SIZE-FluidCode-Seq-PipeClass
-    • Missing pipe class:      ASME B31.3:2022 — class required for fabrication compliance
-    • Spec break marking:      AGES-SP-08-002 — symbol required at every class change
+    • Line number format:      Line is missing size, fluid code, or pipe class that other lines on this drawing include
+    • Spec break marking:      Pipe class visibly changes at a junction but no spec-break symbol is drawn
   [PSV / PRESSURE RELIEF]
-    • CSO inlet valve missing: API 520 Part II:2015 §5.7.2 — CRITICAL P&ID deficiency
-    • Discharge not routed:    API 521:2014 §5.15 — must go to flare or closed drain on P&ID
-    • Vessel no PSV shown:     ASME Section VIII Div 1 UG-135 — required on every vessel
+    • CSO inlet valve missing: PSV shown directly connected to vessel with no isolation valve between
+    • Discharge not routed:    PSV outlet simply ends without connecting to any defined discharge header
+    • Vessel no PSV shown:     Vessel has no PSV drawn, while similar vessels on this drawing have one
   [EQUIPMENT]
-    • Pump strainer absent:    API 610:2021 §7.3.1 — suction strainer on all centrifugal pumps
-    • Pump check valve absent: API 610:2021 §9.3 — check valve on discharge line on P&ID
-    • Vessel level instrument: API 650:2021 / AGES — LT or LG required on vessels
+    • Pump strainer absent:    Pump suction has no strainer symbol, while other pumps on this drawing have one
+    • Pump check valve absent: Pump discharge has no check valve, while other pump discharges on this drawing have one
+    • Vessel level instrument: Vessel has no level instrument drawn, while similar vessels on this drawing have one
   [CONTROL LOOP]
-    • Controller, no valve:    ISA-5.1-2009 §6 — paired final control element required
-    • SIS loop incomplete:     IEC 61511-1:2016 §10 — full SIS path must be traceable
+    • Controller, no valve:    Controller bubble visible with no tagged final control element on its process loop
+    • SIS loop incomplete:     Safety device has no traceable signal line to logic solver/ESD on this drawing
   [DOCUMENTATION]
-    • Legend undefined symbol: ISO 10628-1:2014 §7.4
-    • Revision cloud no ref:   ISO 10628-1:2014 §7.6
-    • Unresolved HOLD:         IFC Checklist (EPC standard)
+    • Legend undefined symbol: Symbol used in drawing body not defined in the legend on this drawing
+    • Revision cloud no ref:   Element inside revision cloud has no matching entry in revision table
+    • Unresolved HOLD:         HOLD item has no resolution status or responsible engineer shown
 
 EXAMPLE EVIDENCES (write at this level of detail — NOT shorter):
 
@@ -284,16 +292,18 @@ EXAMPLE EVIDENCES (write at this level of detail — NOT shorter):
   "VISUAL: BDV-2101 actuated valve symbol with solenoid (XY) actuator is drawn in Middle-Right
   zone on line 6\"-BD-2101-CS300; the SIS signal line from XY is present and traceable.
   GAP: No fail-safe position annotation (FO/FC/FL) appears adjacent to the actuator body;
-  the standard annotation position beside the actuator symbol is blank.
-  STANDARD: ISA-75.05.01 §2.3 and IEC 61511-1:2016 §11.6.5 mandate fail-safe annotation
-  for all SIS final elements; API RP 14C:2017 additionally requires FO for blowdown valves."
+  the position next to the actuator symbol where other actuated valves on this drawing
+  show their fail position is blank.
+  DRAWING BASIS: Other actuated valves on this drawing (e.g. SDV-2201, BDV-2105) all show
+  a fail-safe annotation next to their actuator — BDV-2101 is the only one without it."
 
   FIC-4201 (control_loop):
   "VISUAL: FIC-4201 flow indicating controller bubble is visible in Top-Center zone with
   a dashed signal line from FT-4201 on 4\"-HC-4201-CS150. GAP: No control valve (FCV or
   tagged equivalent) is drawn anywhere on the 4\"-HC-4201-CS150 line — the loop has a
-  sensor and controller but no final control element. STANDARD: ISA-5.1-2009 §6 requires
-  every controller to display a paired final control element on the same loop on the P&ID."
+  sensor and controller but no final control element visible.
+  DRAWING BASIS: Other control loops on this drawing (FIC-4101, FIC-4301) each show a
+  paired FCV on the process line — FIC-4201's loop is missing its final control element."
 
 ═══════════════════════════════════════════════════════════
 OUTPUT FORMAT — return ONLY valid JSON, no other text
