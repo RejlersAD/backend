@@ -104,6 +104,120 @@ SUCCESS_MESSAGES = {
     'user_created': 'User created successfully with assigned roles and modules.',
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SOFT-CODED ROLE → MODULE POLICY
+# Maps role codes to the module codes that role should always have access to.
+# Used by: management commands (apply_role_module_policy, seed_rbac)
+# When a user is assigned a role, they automatically receive all modules in that
+# role's policy list.  This is the SINGLE source of truth for role-based module
+# access — edit here to change what any role can see.
+# ─────────────────────────────────────────────────────────────────────────────
+ROLE_MODULE_POLICY = {
+    # Process-focused engineers: datasheets + P&ID tools
+    'process_engineer': [
+        'process_datasheet',
+        'pid_analysis',
+        'pfd_to_pid',
+        'designiq',
+    ],
+    # Electrical discipline
+    'electrical_engineer': [
+        'electrical_datasheet',
+        'electrical_sld',
+        'pid_analysis',
+    ],
+    # Instrument discipline
+    'instrument_engineer': [
+        'instrument_datasheet',
+        'instrument_index',
+        'pid_analysis',
+    ],
+    # Mechanical discipline
+    'mechanical_engineer': [
+        'mechanical_datasheet',
+        'pid_analysis',
+    ],
+    # Civil / structural discipline
+    'civil_engineer': [
+        'civil_datasheet',
+    ],
+    # Piping discipline
+    'piping_engineer': [
+        'piping_datasheet',
+        'piping_pms',
+        'pid_analysis',
+    ],
+    # QHSE discipline
+    'qhse_engineer': [
+        'qhse',
+    ],
+    # DesignIQ / digital twin roles
+    'design_engineer': [
+        'designiq',
+        'pfd_to_pid',
+        'pid_analysis',
+    ],
+    # Project managers — read access across engineering disciplines
+    'project_manager': [
+        'pid_analysis',
+        'process_datasheet',
+        'designiq',
+        'reports',
+    ],
+    # Admin has access to all application modules
+    'admin': [
+        'pid_analysis',
+        'pfd_to_pid',
+        'crs_documents',
+        'process_datasheet',
+        'electrical_datasheet',
+        'electrical_sld',
+        'instrument_datasheet',
+        'instrument_index',
+        'mechanical_datasheet',
+        'civil_datasheet',
+        'piping_datasheet',
+        'piping_pms',
+        'designiq',
+        'qhse',
+        'user_mgmt',
+        'org_settings',
+        'audit_logs',
+        'reports',
+        'api_access',
+        'digitization_datasheet',
+        'spec_customization',
+    ],
+    # Super-admins bypass module checks in the app, but listed for completeness
+    'super_admin': [],
+}
+
+# Which module codes map to which discipline (used for diagnostics)
+MODULE_DISCIPLINE_MAP = {
+    'process_datasheet': 'Process',
+    'pid_analysis':      'Process / P&ID',
+    'pfd_to_pid':        'Process',
+    'designiq':          'DesignIQ',
+    'electrical_datasheet': 'Electrical',
+    'electrical_sld':    'Electrical',
+    'instrument_datasheet': 'Instrument',
+    'instrument_index':  'Instrument',
+    'mechanical_datasheet': 'Mechanical',
+    'civil_datasheet':   'Civil',
+    'piping_datasheet':  'Piping',
+    'piping_pms':        'Piping',
+    'digitization_datasheet': 'Digitization',
+    'spec_customization': 'Digitization',
+    'qhse':              'QHSE',
+    'user_mgmt':         'Admin',
+    'org_settings':      'Admin',
+    'audit_logs':        'Admin',
+    'reports':           'Admin',
+    'api_access':        'Admin',
+    'crs_documents':     'CRS',
+}
+
+
 def get_custom_role_code(email):
     """Generate custom role code from email"""
     username = email.split('@')[0]

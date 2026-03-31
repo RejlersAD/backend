@@ -107,6 +107,91 @@ class Command(BaseCommand):
                 'icon': 'Shield',
                 'order': 10
             },
+            # ── Engineering Discipline Modules ──────────────────────────
+            {
+                'name': 'Process Datasheet',
+                'code': 'process_datasheet',
+                'description': 'Process equipment datasheets — MOV, SDV, pumps, pressure instruments',
+                'icon': 'FileText',
+                'order': 20
+            },
+            {
+                'name': 'Electrical Datasheet',
+                'code': 'electrical_datasheet',
+                'description': 'Electrical equipment and SLD-based datasheet generation',
+                'icon': 'Zap',
+                'order': 21
+            },
+            {
+                'name': 'Electrical SLD',
+                'code': 'electrical_sld',
+                'description': 'Single Line Diagram analysis and tagging',
+                'icon': 'Zap',
+                'order': 22
+            },
+            {
+                'name': 'Instrument Datasheet',
+                'code': 'instrument_datasheet',
+                'description': 'Instrument equipment datasheets and tag lists',
+                'icon': 'Activity',
+                'order': 23
+            },
+            {
+                'name': 'Instrument Index',
+                'code': 'instrument_index',
+                'description': 'AI extraction of instrument index from P&ID drawings',
+                'icon': 'List',
+                'order': 24
+            },
+            {
+                'name': 'Mechanical Datasheet',
+                'code': 'mechanical_datasheet',
+                'description': 'Mechanical equipment datasheets and inspection records',
+                'icon': 'Tool',
+                'order': 25
+            },
+            {
+                'name': 'Civil Datasheet',
+                'code': 'civil_datasheet',
+                'description': 'Civil and structural engineering datasheets',
+                'icon': 'Home',
+                'order': 26
+            },
+            {
+                'name': 'Piping Datasheet',
+                'code': 'piping_datasheet',
+                'description': 'Piping material specifications and critical line list',
+                'icon': 'GitBranch',
+                'order': 27
+            },
+            {
+                'name': 'Piping Material Specification',
+                'code': 'piping_pms',
+                'description': 'Piping material specification management',
+                'icon': 'Database',
+                'order': 28
+            },
+            {
+                'name': 'DesignIQ',
+                'code': 'designiq',
+                'description': 'AI-powered design intelligence and PFD verification',
+                'icon': 'Cpu',
+                'order': 29
+            },
+            {
+                'name': 'Digitization Datasheet',
+                'code': 'digitization_datasheet',
+                'description': 'AI-powered digitization of legacy datasheets',
+                'icon': 'Scan',
+                'order': 30
+            },
+            {
+                'name': 'Spec Customization',
+                'code': 'spec_customization',
+                'description': 'Engineering specification customization tools',
+                'icon': 'Settings',
+                'order': 31
+            },
         ]
 
         modules = {}
