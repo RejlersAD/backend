@@ -1,0 +1,209 @@
+"""
+STRICT VALIDATION RULES - P&ID ANALYSIS
+These rules prevent hallucinations and ensure grounded analysis
+
+🔒 CONTEXT ISOLATION RULES:
+═══════════════════════════════════════════════════════════════════
+
+1. ONLY analyze the CURRENT P&ID image(s) attached to THIS message
+2. NEVER reference elements from:
+   - Previous analyses or uploads
+   - Other users' documents
+   - Training data memory
+   - Standard industry examples
+3. If multiple files provided:
+   - Each must be tagged with unique source_id
+   - NEVER mix findings across different sources
+4. Notes/Holds MUST be extracted ONLY from current P&ID canvas
+5. Session ID isolation: Each analysis is independent
+
+═══════════════════════════════════════════════════════════════════
+🛡️ ELEMENT CLASSIFICATION GUARDS:
+═══════════════════════════════════════════════════════════════════
+
+LINE NUMBER vs EQUIPMENT TAG:
+✓ CORRECT: "2"-D-6155-033842-X-N" → LINE NUMBER (starts with pipe size)
+✗ WRONG:   "D-6155" extracted from above → NOT equipment
+
+RULE: If text starts with digit + quote + dash → ALWAYS line number
+      NEVER extract fragments as separate equipment tags
+
+EXAMPLES:
+- "2"-VG-5277-033842" → Line number (NOT equipment VG-5277)
+- "4"-HC-1001-CS150"  → Line number (NOT equipment HC-1001)
+- "P-3610"           → Equipment tag (pump, no size prefix)
+- "V-201"            → Equipment tag (vessel, no size prefix)
+
+DRAIN LINE NUMBERS (D-XXXX where XXXX ≥ 1000):
+- D-6155, D-6159, D-5000 → These are DRAIN LINES, NOT drums/vessels
+- D-255, D-301         → These ARE equipment (200 ≤ XXX < 1000)
+
+═══════════════════════════════════════════════════════════════════
+🚫 DELETED NOTES FILTER:
+═══════════════════════════════════════════════════════════════════
+
+IF a note contains "DELETED" keyword:
+→ IGNORE COMPLETELY
+→ DO NOT generate findings based on deleted notes
+→ DO NOT reference in compliance checks
+
+EXAMPLES:
+✗ "NOTE 5 DELETED" → IGNORE (do not check compliance)
+✗ "HOLD 3 - DELETED" → IGNORE
+✓ "NOTE 1: CS piping..." → ACTIVE (check compliance)
+
+═══════════════════════════════════════════════════════════════════
+🔍 VISUAL CONFIRMATION MANDATORY:
+═══════════════════════════════════════════════════════════════════
+
+BEFORE raising ANY issue:
+1. Confirm element EXISTS on drawing (visual + OCR)
+2. Confirm symbol/annotation PRESENT or ABSENT
+3. Reference exact location on drawing
+
+IF cannot visually confirm → Mark as "low confidence" or SKIP
+
+VISUAL + TEXT CROSS-VALIDATION:
+- Spec break: BOTH text label AND symbol must match
+- Reducer: BOTH size change AND symbol must be visible
+- Valve annotation: BOTH valve symbol AND text must exist
+
+═══════════════════════════════════════════════════════════════════
+📐 SPEC BREAK VALIDATION:
+═══════════════════════════════════════════════════════════════════
+
+BEFORE flagging "spec break missing":
+1. Check for spec break SYMBOL (triangle/diamond/hexagon)
+2. Check for material transition annotation
+3. Verify line numbers actually have different specs
+
+DO NOT flag if:
+- Spec break symbol is present (even if small/unclear)
+- No actual material change occurring
+- Same pipe class on both sides
+
+═══════════════════════════════════════════════════════════════════
+🔧 REDUCER/EXPANDER VALIDATION:
+═══════════════════════════════════════════════════════════════════
+
+BEFORE suggesting "add reducer":
+1. Visually confirm reducer symbol NOT present
+2. Verify size change is significant (>1 size)
+3. Check if it's a branch connection (different rules)
+
+DO NOT suggest reducer if:
+- Reducer symbol already visible on drawing
+- Branch from header (e.g., 2" from 4" header = normal takeoff)
+- Concentric/eccentric reducer shown (any type)
+
+BRANCH TAKEOFF RULE:
+- 2" branch from 4" header → NO reducer needed (standard connection)
+- This is a TEE or OLET connection, not an inline reduction
+
+═══════════════════════════════════════════════════════════════════
+➡️ ARROW vs LINE DISTINCTION:
+═══════════════════════════════════════════════════════════════════
+
+ARROWS are NOT pipelines:
+- Small arrows indicating line destination → Connector, not line
+- Arrow with text "To XYZ" → Reference indicator
+- Flow direction arrow on existing line → Annotation only
+
+DO NOT:
+- Treat arrows as missing line numbers
+- Suggest specs for direction indicators
+- Flag arrows as "origin/destination not specified"
+
+═══════════════════════════════════════════════════════════════════
+📋 NOTE/LEGEND READING:
+═══════════════════════════════════════════════════════════════════
+
+ONLY count notes VISIBLE on THIS drawing:
+- Notes are typically in a text box/table
+- Numbered: NOTE 1, NOTE 2, etc.
+- MUST match EXACT text from drawing
+
+DO NOT:
+- Invent note numbers not shown
+- Reference notes from legends uploaded separately
+- Assume deleted notes are active
+
+═══════════════════════════════════════════════════════════════════
+📍 TITLE BLOCK EXCLUSION:
+═══════════════════════════════════════════════════════════════════
+
+Text in title block is NOT equipment:
+- Drawing numbers, revision codes, dates
+- Company names, project names
+- Approver names, signatures
+
+DO NOT flag title block text as:
+- Missing equipment specifications
+- Equipment without capacity/size
+- Instruments without loops
+
+═══════════════════════════════════════════════════════════════════
+🎯 CONFIDENCE SCORING:
+═══════════════════════════════════════════════════════════════════
+
+HIGH confidence:
+- Visual confirmation + OCR confirmation
+- Element clearly visible on drawing
+- Exact tag/line number matches inventory
+
+MEDIUM confidence:
+- Visual OR OCR confirmation (not both)
+- Partial match with inventory
+- Inferred from context
+
+LOW confidence:
+- OCR only, no visual confirmation
+- No match in inventory
+- Assumption-based finding
+
+→ EXCLUDE low confidence from final output
+
+═══════════════════════════════════════════════════════════════════
+🔁 DETERMINISTIC OUTPUT:
+═══════════════════════════════════════════════════════════════════
+
+MUST RETURN IDENTICAL RESULTS FOR SAME INPUT:
+1. Sort all findings by:
+   a) Category (alphabetically)
+   b) PID reference (alphabetically)
+   c) Severity (critical > major > minor > observation)
+
+2. Use FIXED wording (no paraphrasing between runs)
+3. Reference EXACT tag/line numbers (no variations)
+4. Do NOT add random examples or context
+
+TEMPLATE FORMAT (STRICT):
+{
+  "serial_number": 1,
+  "pid_reference": "EXACT-TAG-FROM-DRAWING",
+  "issue_observed": "Specific issue with exact values",
+  "action_required": "Clear action",
+  "evidence": "VISUAL: [what is visible]. GAP: [what is missing].",
+  "severity": "critical|major|minor|observation",
+  "category": "category_from_list",
+  "confidence": "high|medium|low"
+}
+
+═══════════════════════════════════════════════════════════════════
+✅ VALIDATION CHECKLIST (Before outputting ANY finding):
+═══════════════════════════════════════════════════════════════════
+
+□ Element exists on THIS drawing (not from memory)
+□ PID reference matches OCR inventory OR visually confirmed
+□ NOT a deleted note/hold
+□ NOT from title block or legends
+□ NOT a line number fragment misclassified as equipment
+□ NOT an arrow misclassified as pipeline
+□ Spec break/reducer checked visually (if applicable)
+□ Evidence describes EXACT visual observation
+□ Confidence level assigned correctly
+
+IF ANY checkbox unchecked → DO NOT OUTPUT THE FINDING
+
+═══════════════════════════════════════════════════════════════════
+"""

@@ -38,7 +38,7 @@ drf-spectacular==0.27.0
 # 4. AI APIs (Required)
 # ==========================================
 openai==1.54.3
-google-genai>=0.8.0  # Google Gemini AI — multi-modal vision with 1M token context
+google-genai>=0.8.0  # Google Gemini AI  new SDK for genai
 anthropic>=0.18.0
 httpx==0.27.2
 requests>=2.31.0

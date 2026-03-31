@@ -7,12 +7,14 @@ import base64
 import io
 import json
 import re
+import uuid
 from typing import Dict, List, Any, Optional, Set, Tuple
 from django.conf import settings
 from openai import OpenAI
 import fitz  # PyMuPDF
 from PIL import Image
 from .reference_processor import ReferenceDocumentProcessor
+from .element_classifier import get_classifier, ElementType
 
 
 def ocr_inventory_contains(inventory: set, token: str) -> bool:
@@ -118,31 +120,52 @@ class PIDAnalysisService:
         return ""
 
     def __init__(self):
-        """Initialize OpenAI client with timeout"""
-        api_key = (
-            os.getenv('OPENAI_API_KEY') or
-            getattr(settings, 'OPENAI_API_KEY', None)
-        )
+        """Initialize Multi-Model AI client (OpenAI + Gemini)"""
+        from .multi_model_service import MultiModelAIService
         
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY not configured")
+        # Initialize multi-model AI service (supports both OpenAI and Gemini)
+        try:
+            self.ai_service = MultiModelAIService()
+            print('[INFO] ✅ Multi-Model AI Service initialized (OpenAI + Gemini)')
+        except Exception as e:
+            print(f'[WARNING] Multi-model service failed, falling back to OpenAI only: {e}')
+            # Fallback to OpenAI only
+            api_key = (
+                os.getenv('OPENAI_API_KEY') or
+                getattr(settings, 'OPENAI_API_KEY', None)
+            )
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not configured")
+            self.client = OpenAI(api_key=api_key, timeout=180.0, max_retries=2)
+            self.ai_service = None
         
-        # Initialize OpenAI client with default timeout
-        self.client = OpenAI(
-            api_key=api_key,
-            timeout=180.0,  # 3 minute default timeout for all API calls
-            max_retries=2   # Retry failed requests twice
-        )
+        # Keep legacy OpenAI client for backward compatibility
+        api_key = os.getenv('OPENAI_API_KEY') or getattr(settings, 'OPENAI_API_KEY', None)
+        if api_key:
+            self.client = OpenAI(
+                api_key=api_key,
+                timeout=180.0,
+                max_retries=2
+            )
+        
         self.reference_processor = ReferenceDocumentProcessor()
         self.extracted_text = ""
         self.instrument_tags = set()
         self.equipment_tags = set()
         self.line_numbers = set()
         self.notes_references = set()
-        self.drawing_number_candidates = set()  # populated by _parse_extracted_data; safe default here
-        # Load soft-coded analysis configuration (pid_analysis_config.json)
+        self.drawing_number_candidates = set()
+        
+        # CONTEXT ISOLATION: Generate unique session ID for this analysis
+        self.session_id = str(uuid.uuid4())
+        print(f'[CONTEXT ISOLATION] Session ID: {self.session_id}')
+        
+        # Get deterministic classifier instance
+        self.classifier = get_classifier()
+        
+        # Load soft-coded analysis configuration
         self._load_analysis_config()
-        # Initialize optional Google Gemini client (controlled by pid_analysis_config.json)
+        # Initialize optional Google Gemini client
         self._init_gemini_client()
         print('[INFO] Multi-Pass PID Analysis Service initialized with 180s timeout')
 
@@ -466,11 +489,52 @@ class PIDAnalysisService:
         timeout: int = 600,
     ) -> str:
         """
-        Unified AI vision routing wrapper — Gemini or OpenAI.
-          provider='gemini'  → try Gemini first; cascade to OpenAI chain if empty/refused
-          provider='openai'  → existing gpt-4o → gpt-4o-mini fallback chain (unchanged)
-        SOFT-CODED: per-pass provider in pid_analysis_config.json → provider_routing.
+        Unified AI vision routing wrapper — Multi-Model (Gemini + OpenAI).
+        Uses MultiModelAIService for automatic provider routing and fallback.
+          provider='gemini'  → try Gemini first; cascade to OpenAI if empty/refused
+          provider='openai'  → try OpenAI first; cascade to Gemini if fails
+          provider='both'    → intelligent routing based on AI_MODEL_PROVIDER env var
         """
+        # Use multi-model service if available (supports both OpenAI and Gemini with auto-fallback)
+        if hasattr(self, 'ai_service') and self.ai_service:
+            try:
+                print(f"[INFO] {pass_label}: Using multi-model service (provider: {provider})...")
+                
+                # Extract images from messages for vision analysis
+                images_base64 = []
+                text_prompt = ""
+                for msg in messages:
+                    if msg.get('role') == 'user':
+                        content = msg.get('content', [])
+                        if isinstance(content, list):
+                            for item in content:
+                                if item.get('type') == 'text':
+                                    text_prompt = item.get('text', '')
+                                elif item.get('type') == 'image_url':
+                                    # Extract base64 from data URL
+                                    img_url = item.get('image_url', {}).get('url', '')
+                                    if 'base64,' in img_url:
+                                        base64_data = img_url.split('base64,')[1]
+                                        images_base64.append(base64_data)
+                
+                # Use multi-model vision analysis
+                response_text = self.ai_service.vision_analysis(
+                    images_base64=images_base64,
+                    prompt=text_prompt,
+                    model="auto" if provider == 'both' else provider,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+                
+                if response_text:
+                    print(f"[INFO] {pass_label}: Multi-model vision analysis successful")
+                    return response_text
+                    
+            except Exception as e:
+                print(f"[WARNING] {pass_label}: Multi-model service failed: {e}")
+                print(f"[INFO] {pass_label}: Falling back to legacy OpenAI chain...")
+        
+        # Legacy fallback: use original provider-based routing
         if provider == 'gemini' and getattr(self, '_gemini_client', None):
             gemini_text = self._call_gemini_vision(
                 messages=messages,
@@ -1154,9 +1218,20 @@ class PIDAnalysisService:
             self.extracted_text = ""
     
     def _parse_extracted_data(self):
-        """Parse extracted text to identify tags, line numbers, notes with smart filtering"""
+        """
+        Parse extracted text to identify tags, line numbers, notes with STRICT filtering
+        
+        🔒 DETERMINISTIC CLASSIFICATION:
+        - Uses element_classifier.py to prevent misclassifications
+        - Line numbers (2"-D-6155-...) will NEVER be classified as equipment
+        - DELETED notes are completely filtered out
+        - Drawing numbers are never confused with line numbers
+        - Context isolation enforced (session-specific)
+        """
         if not self.extracted_text:
             return
+            
+        print(f"[PARSE] Session {self.session_id[:8]}: Starting deterministic classification")
         
         # Valid instrument prefixes (ISA-5.1 standard)
         valid_instrument_prefixes = {
@@ -1191,57 +1266,47 @@ class PIDAnalysisService:
         self.instrument_tags = set()
         for tag in potential_instruments:
             prefix = tag.split('-')[0].upper()
-            # Check if prefix matches valid instrument tag or starts with valid prefix
-            is_valid_instrument = any(
-                prefix == valid_prefix or prefix.startswith(valid_prefix) 
-                for valid_prefix in valid_instrument_prefixes
-            )
-            # Exclude if it's a line number prefix
-            is_line_number = prefix in line_number_prefixes
             
-            if is_valid_instrument and not is_line_number:
-                self.instrument_tags.add(tag)
+            # ═══ USE CLASSIFIER to prevent misclassification ═══
+            classified = self.classifier.classify_element(tag, self.extracted_text)
+            
+            if classified.element_type == ElementType.INSTRUMENT_TAG:
+                self.instrument_tags.add(tag.upper())
+            elif classified.element_type == ElementType.LINE_NUMBER:
+                # This is part of a line number, not an instrument
+                continue
+            else:
+                # Additional validation for non-classified
+                is_valid_instrument = any(
+                    prefix == valid_prefix or prefix.startswith(valid_prefix) 
+                    for valid_prefix in valid_instrument_prefixes
+                )
+                is_line_number = prefix in line_number_prefixes
+                
+                if is_valid_instrument and not is_line_number:
+                    self.instrument_tags.add(tag.upper())
         
-        # Equipment tag patterns: V-3610-01, E-101, K-102, etc. (exclude single letter + small numbers that are likely P&ID refs)
-        equipment_pattern = r'\b([VEKPCHMXDTRS][-_][\d]{3,4}(?:[-_][\d]{1,2}[A-Z]?)?)\b'
-        potential_equipment = set(re.findall(equipment_pattern, self.extracted_text))
+        print(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.instrument_tags)} instrument tags")
         
-        # Filter equipment tags: exclude P&ID reference patterns and line-number-style tags
-        # TAG CONVENTION RULES (expert-validated):
-        #   P = PUMP  → P-3610, P-3610-02 are ALL equipment (pump tags). NEVER a line number.
-        #   D-XXXX where XXXX >= 1000 → Drain service LINE number (e.g. D-6159), NOT a vessel/drum
-        #   D-XXX  where XXX  <  200  → P&ID sheet reference → skip
-        #   D-XXX  where 200 <= XXX < 1000 → Could be drum (equipment) → keep
-        service_line_number_candidates = set()  # will be merged into self.line_numbers below
-        self.equipment_tags = set()
-        for tag in potential_equipment:
-            parts = tag.split('-')
-            if len(parts) >= 2:
-                prefix = parts[0]
-                number = parts[1]
-                # Exclude D-XXX patterns where XXX < 200 (P&ID page/sheet numbers)
-                if prefix == 'D' and number.isdigit() and int(number) < 200:
-                    continue  # Skip P&ID sheet reference
-                # Exclude D-XXXX patterns where XXXX >= 1000 (Drain service lines e.g. D-6159)
-                if prefix == 'D' and number.isdigit() and int(number) >= 1000:
-                    service_line_number_candidates.add(tag)  # It's a drain-service line number
-                    continue
-                # P = PUMP: all P-XXX tags are equipment regardless of number magnitude
-                # P-3610, P-3610-02 etc. are pump tags — do NOT reclassify as line numbers
-                self.equipment_tags.add(tag)
+        # ═══════════════════════════════════════════════════════════════════
+        # LINE NUMBERS (using deterministic classifier)
+        # ═══════════════════════════════════════════════════════════════════
+        # Use classifier to extract ONLY line numbers (never misclassify equipment)
+        self.line_numbers = self.classifier.extract_line_numbers_only(self.extracted_text)
         
-        # Line number patterns: 6"-N2-1001-C4N, 3"-HC-2003, etc.
-        # EXCLUDE P&ID connector/sheet numbers: format NN-PP-NNN-NNNNN where "PP" is a P&ID prefix
-        # (e.g., 13-PP-152-45060 is a sheet connector number, NOT a process piping line number)
-        line_pattern = r'\b([\d]+"?[-][A-Z]{1,4}[-][\d]{3,4}(?:[-][A-Z\d]+)?)\b'
-        raw_line_numbers = set(re.findall(line_pattern, self.extracted_text))
-        
-        # Filter out P&ID connector numbers: pattern like NN-PP-DDD-DDDDD (starts with digits, then PP, then numbers)
+        # Filter out P&ID connector numbers: NN-PP-NNN-NNNNN format
         pid_connector_pattern = re.compile(r'^\d+[-]PP[-]\d+[-]\d+', re.IGNORECASE)
-        self.line_numbers = {ln for ln in raw_line_numbers if not pid_connector_pattern.match(ln)}
+        self.line_numbers = {ln for ln in self.line_numbers if not pid_connector_pattern.match(ln)}
         
-        # Merge service-code line numbers (D-XXXX, P-XXXX-NN) reclassified above from equipment pattern
-        self.line_numbers.update(service_line_number_candidates)
+        print(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.line_numbers)} line numbers")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # EQUIPMENT TAGS (using deterministic classifier)
+        # ═══════════════════════════════════════════════════════════════════
+        # Use classifier to extract ONLY equipment (never include line fragments)
+        self.equipment_tags = self.classifier.extract_equipment_tags_only(self.extracted_text)
+        
+        print(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.equipment_tags)} equipment tags")
 
         # ── Drawing-number extraction (soft-coded) ────────────────────────────
         # Drawing numbers use DOT separators: NN.NN.NN.NNNN or NN.NN.NNNN etc.
@@ -1253,9 +1318,37 @@ class PIDAnalysisService:
         )
         self.drawing_number_candidates = set(re.findall(drw_num_pattern, self.extracted_text))
         
-        # Note references: NOTE 1, NOTE 2, HOLD 1, etc.
-        note_pattern = r'\b((?:NOTE|HOLD|REF)[\s]*[\d]+)\b'
-        self.notes_references = set(re.findall(note_pattern, self.extracted_text, re.IGNORECASE))
+        print(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.drawing_number_candidates)} drawing numbers")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # NOTE REFERENCES (with DELETED filtering)
+        # ═══════════════════════════════════════════════════════════════════
+        # Extract all note/hold references
+        note_pattern = r'\b((?:NOTE|HOLD|REF)[\s]*[\d]+(?:[:\-].*?(?:\n|$))?)\b'
+        all_notes = list(set(re.findall(note_pattern, self.extracted_text, re.IGNORECASE | re.MULTILINE)))
+        
+        # ═══ CRITICAL: Filter out DELETED notes ═══
+        active_notes = self.classifier.filter_deleted_notes(all_notes)
+        self.notes_references = set(active_notes)
+        
+        deleted_count = len(all_notes) - len(active_notes)
+        if deleted_count > 0:
+            print(f"[PARSE] Session {self.session_id[:8]}: Filtered out {deleted_count} DELETED notes")
+        
+        print(f"[PARSE] Session {self.session_id[:8]}: Found {len(self.notes_references)} active notes/holds")
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # VALIDATION: Ensure no cross-contamination
+        # ═══════════════════════════════════════════════════════════════════
+        # Verify line numbers don't overlap with equipment tags
+        overlap = self.line_numbers.intersection(self.equipment_tags)
+        if overlap:
+            print(f"[WARNING] Session {self.session_id[:8]}: Found {len(overlap)} overlapping tags - reclassifying")
+            for item in overlap:
+                # Line numbers take priority (they contain size prefix)
+                self.equipment_tags.discard(item)
+        
+        print(f"[PARSE] Session {self.session_id[:8]}: Classification complete - context isolated")
 
     def _build_cag_context(self) -> str:
         """
@@ -1273,16 +1366,26 @@ class PIDAnalysisService:
 
         SOFT-CODED: adjust suppression thresholds in pid_analysis_config.json.
         """
+        # Load strict validation rules
+        rules_path = os.path.join(os.path.dirname(__file__), 'config', 'strict_validation_rules.txt')
+        strict_rules = ""
+        try:
+            with open(rules_path, 'r', encoding='utf-8') as f:
+                strict_rules = f.read().strip()
+        except Exception as e:
+            print(f"[WARNING] Could not load strict validation rules: {e}")
+        
         sep = '═' * 68
         lines = [
             sep,
-            'CAG CONTEXT — CONTEXT-AUGMENTED GENERATION BOUNDARY',
+            f'CAG CONTEXT — SESSION {self.session_id[:8]} — CONTEXT ISOLATION ENFORCED',
             sep,
             '',
-            'You are operating in CAG (Context-Augmented Generation) mode.',
-            'ONLY generate findings for elements confirmed by the inventory below',
-            'OR elements you visually confirm RIGHT NOW on the attached drawing image.',
-            'Do NOT use training-data memory to invent elements not present here.',
+            '🔒 CONTEXT ISOLATION ACTIVE:',
+            f'- Session ID: {self.session_id}',
+            '- Analyze ONLY the attached image(s) from THIS upload',
+            '- DO NOT reference previous analyses, other users\' documents, or training data',
+            '- Each finding MUST be grounded in THIS drawing',
             '',
             '── OCR-CONFIRMED LINE NUMBERS ON THIS DRAWING ──',
         ]
@@ -1292,6 +1395,16 @@ class PIDAnalysisService:
                 lines.append(f'  {ln}')
             lines.append(
                 f'  (Total: {len(self.line_numbers)} line numbers extracted by OCR)'
+            )
+            lines.append('')
+            lines.append(
+                '⚠️ CRITICAL: These line numbers (e.g., 2"-D-6155-033842) are COMPLETE IDENTIFIERS.'
+            )
+            lines.append(
+                '   DO NOT extract fragments (e.g., D-6155) and treat as separate equipment tags.'
+            )
+            lines.append(
+                '   ANY reference starting with SIZE + QUOTE + DASH is a LINE NUMBER, NOT EQUIPMENT.'
             )
             lines.append('')
             lines.append(
@@ -1332,13 +1445,21 @@ class PIDAnalysisService:
         else:
             lines.append('  (No equipment tags extracted by OCR — rely on visual scan.)')
 
-        lines += ['', '── NOTES & HOLDS INVENTORY ──']
+        lines += ['', '── NOTES & HOLDS INVENTORY (ACTIVE ONLY) ──']
         if self.notes_references:
             lines.append(
-                f'OCR detected {len(self.notes_references)} note/hold reference(s) on this drawing:'
+                f'OCR detected {len(self.notes_references)} ACTIVE note/hold reference(s) on this drawing:'
             )
+            lines.append('  (DELETED notes have been automatically removed from this list)')
             for n in sorted(self.notes_references):
                 lines.append(f'  {n}')
+            lines.append('')
+            lines.append(
+                '🚫 DELETED NOTE RULE: If a note contains "DELETED" keyword, it has been removed from above list.'
+            )
+            lines.append(
+                '   DO NOT generate findings for deleted notes. Only check compliance for ACTIVE notes shown above.'
+            )
             lines.append('')
             lines.append(
                 'RULE ➜ Only generate notes_compliance / holds_compliance findings for the '
@@ -1366,14 +1487,25 @@ class PIDAnalysisService:
 
         lines += [
             '',
+            sep,
             'CAG SUMMARY RULES (apply to EVERY finding in EVERY pass):',
+            sep,
             '  1. pid_reference  → must be in the inventory above OR visually readable on drawing.',
             '  2. issue_observed → must reference only elements confirmed in the inventory or image.',
-            '  3. notes/holds    → skip entirely if ZERO notes/holds detected by OCR (see above).',
+            '  3. notes/holds    → skip entirely if ZERO notes/holds detected (see above). Ignore DELETED notes.',
             '  4. Never fabricate tags, line numbers, or document references from memory.',
             '  5. If uncertain whether an element exists — it is NOT a finding.',
+            '  6. Line number fragments (e.g., D-6155 from 2"-D-6155-033842) are NOT separate equipment.',
+            '  7. Arrows indicating direction/destination are NOT missing pipelines.',
+            '  8. VISUAL + OCR confirmation required — mark low confidence if only one method.',
             sep,
         ]
+        
+        # Append strict validation rules if loaded
+        if strict_rules:
+            lines.append('')
+            lines.append(strict_rules)
+        
         return '\n'.join(lines)
 
     def _cag_post_filter(self, issues: List[Dict]) -> List[Dict]:

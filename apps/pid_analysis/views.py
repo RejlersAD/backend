@@ -360,18 +360,21 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                 drawing.analysis_started_at = timezone.now()
                 drawing.save()
                 
-                # Perform analysis with reference documents
-                print(f"[DEBUG] Initializing PIDAnalysisService with {len(saved_reference_docs)} reference documents")
+                # Perform analysis with COMPREHENSIVE SERVICE (multi-pass LLM with reference documents)
+                print(f"[DEBUG] Using PIDAnalysisService with reference document cross-verification")
+                from .services import PIDAnalysisService
+                
                 analysis_service = PIDAnalysisService()
-                print(f"[DEBUG] Calling analyze_pid_drawing with file path: {drawing.file.path}")
-                # Pass the file PATH STRING (not FieldFile) and reference file paths for pickle-safe processing
+                print(f"[DEBUG] Calling analyze_pid_drawing() with reference documents")
+                
+                # Pass file object and reference documents to service
                 analysis_result = analysis_service.analyze_pid_drawing(
-                    drawing.file.path,  # STRING path, not FieldFile
+                    drawing.file,  # File object (works with both S3 and local storage)
                     drawing_number=drawing.drawing_number,
-                    reference_documents=saved_reference_files,  # Dict of STRING paths
-                    analysis_mode=analysis_mode,
+                    reference_documents=saved_reference_files,
+                    analysis_mode='comprehensive'  # Full multi-pass analysis
                 )
-                print(f"[DEBUG] Analysis completed with reference verification, result keys: {list(analysis_result.keys())}")
+                print(f"[DEBUG] Analysis completed, result keys: {list(analysis_result.keys())}")
                 
                 # Create report
                 report = PIDAnalysisReport.objects.create(
@@ -469,11 +472,20 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def analyze(self, request, pk=None):
         """
-        Trigger analysis for a specific drawing
+        Trigger analysis for a specific drawing using HYBRID PIPELINE
         
         POST /api/v1/pid/drawings/{id}/analyze/
+        
+        Query Params:
+            mode: 'hybrid' (default) or 'legacy'
+            
+        This uses the new discriminative + rule engine + agentic pipeline by default.
+        Output format remains IDENTICAL to the existing system.
         """
+        from .pipeline.main_pipeline import PIDValidationPipeline
+        
         drawing = self.get_object()
+        analysis_mode = request.query_params.get('mode', 'hybrid')
         
         if drawing.status == 'processing':
             return Response(
@@ -487,24 +499,58 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             drawing.analysis_started_at = timezone.now()
             drawing.save()
             
-            # Perform analysis
-            analysis_service = PIDAnalysisService()
-            # Pass the file object directly (works with both S3 and local storage)
-            analysis_result = analysis_service.analyze_pid_drawing(drawing.file)
+            print(f"[ANALYZE] Starting analysis - Mode: {analysis_mode}")
             
             # Delete existing report if any
             if hasattr(drawing, 'analysis_report'):
+                drawing.analysis_report.issues.all().delete()
                 drawing.analysis_report.delete()
+            
+            if analysis_mode == 'legacy':
+                # LEGACY: Use old LLM-only PIDAnalysisService
+                analysis_service = PIDAnalysisService()
+                analysis_result = analysis_service.analyze_pid_drawing(drawing.file)
+                issues = analysis_result.get('issues', [])
+            else:
+                # HYBRID (DEFAULT): Discriminative + Rules + Agentic
+                pipeline = PIDValidationPipeline()
+                result = pipeline.validate(
+                    pdf_file=drawing.file.path if hasattr(drawing.file, 'path') else drawing.file,
+                    drawing_number=drawing.drawing_number
+                )
+                
+                # Transform issues to match existing format
+                issues = []
+                for idx, issue in enumerate(result['issues'], 1):
+                    issues.append({
+                        'serial_number': idx,
+                        'pid_reference': issue.get('line_number', 'N/A'),
+                        'issue_observed': issue.get('description', ''),
+                        'action_required': issue.get('recommendation', ''),
+                        'evidence': f"Confidence: {issue.get('confidence', 'medium')}",
+                        'severity': 'observation',
+                        'category': issue.get('issue_type', 'other'),
+                        'location_on_drawing': None,
+                        'status': 'pending',
+                        'approval': 'Pending',
+                        'remark': f"Source: {issue.get('rule_name', issue.get('source', 'hybrid_pipeline'))}"
+                    })
+                
+                analysis_result = {
+                    'issues': issues,
+                    'metadata': result.get('metadata', {}),
+                    'analysis_method': 'hybrid_discriminative_agentic'
+                }
             
             # Create new report
             report = PIDAnalysisReport.objects.create(
                 pid_drawing=drawing,
                 report_data=analysis_result,
-                total_issues=len(analysis_result.get('issues', [])),
+                total_issues=len(issues),
             )
             
             # Create issues
-            for issue_data in analysis_result.get('issues', []):
+            for issue_data in issues:
                 PIDIssue.objects.create(
                     report=report,
                     serial_number=issue_data.get('serial_number', 0),
@@ -521,10 +567,9 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
                 )
             
             # Update report summary
-            summary = analysis_service.generate_report_summary(analysis_result.get('issues', []))
-            report.approved_count = summary['approved_count']
-            report.ignored_count = summary['ignored_count']
-            report.pending_count = summary['pending_count']
+            report.approved_count = 0
+            report.ignored_count = 0
+            report.pending_count = len(issues)
             report.save()
             
             # Update drawing status
@@ -532,16 +577,143 @@ class PIDDrawingViewSet(viewsets.ModelViewSet):
             drawing.analysis_completed_at = timezone.now()
             drawing.save()
             
+            print(f"[ANALYZE] Complete - {len(issues)} issues found")
+            
             return Response(
                 PIDDrawingSerializer(drawing).data,
                 status=status.HTTP_200_OK
             )
             
         except Exception as e:
+            import traceback
+            print(f"[ANALYZE ERROR] {e}")
+            traceback.print_exc()
             drawing.status = 'failed'
             drawing.save()
             return Response(
                 {'error': f'Analysis failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['post'])
+    def analyze_hybrid(self, request, pk=None):
+        """
+        Analyze drawing using NEW HYBRID PIPELINE (Discriminative + Deterministic + Agentic)
+        
+        POST /api/v1/pid/drawings/{id}/analyze_hybrid/
+        
+        This endpoint uses the refactored validation pipeline:
+        1. Discriminative extraction (OCR + Regex) - Source of truth
+        2. Deterministic rule engine - No hallucination
+        3. Controlled agentic LLM - Grounded validation
+        
+        Output format: IDENTICAL to existing system
+        """
+        from .pipeline.main_pipeline import PIDValidationPipeline
+        
+        print(f"[HYBRID PIPELINE] ===== STARTING HYBRID ANALYSIS =====")
+        
+        drawing = self.get_object()
+        
+        # Delete existing report if present
+        if hasattr(drawing, 'analysis_report'):
+            drawing.analysis_report.issues.all().delete()
+            drawing.analysis_report.delete()
+        
+        # Update status
+        drawing.status = 'processing'
+        drawing.analysis_started_at = timezone.now()
+        drawing.save()
+        
+        try:
+            # Initialize hybrid pipeline
+            pipeline = PIDValidationPipeline()
+            
+            # Run validation
+            result = pipeline.validate(
+                pdf_file=drawing.file.path,
+                drawing_number=drawing.drawing_number
+            )
+            
+            # Transform issues to match existing format
+            transformed_issues = []
+            for idx, issue in enumerate(result['issues'], 1):
+                transformed_issues.append({
+                    'serial_number': idx,
+                    'pid_reference': issue.get('line_number', 'N/A'),
+                    'issue_observed': issue.get('description', ''),
+                    'action_required': issue.get('recommendation', ''),
+                    'evidence': f"Confidence: {issue.get('confidence', 'medium')}",
+                    'severity': 'observation',
+                    'category': issue.get('issue_type', 'other'),
+                    'location_on_drawing': None,
+                    'status': 'pending',
+                    'approval': 'Pending',
+                    'remark': f"Source: {issue.get('rule_name', issue.get('source', 'hybrid_pipeline'))}"
+                })
+            
+            # Create report
+            report = PIDAnalysisReport.objects.create(
+                pid_drawing=drawing,
+                report_data={
+                    'issues': transformed_issues,
+                    'metadata': result['metadata'],
+                    'analysis_method': 'hybrid_discriminative_agentic'
+                },
+                total_issues=len(transformed_issues)
+            )
+            
+            # Create issue records
+            for issue_data in transformed_issues:
+                PIDIssue.objects.create(
+                    report=report,
+                    serial_number=issue_data['serial_number'],
+                    pid_reference=issue_data['pid_reference'],
+                    issue_observed=issue_data['issue_observed'],
+                    action_required=issue_data['action_required'],
+                    evidence=issue_data['evidence'],
+                    severity=issue_data['severity'],
+                    category=issue_data['category'],
+                    location_on_drawing=issue_data['location_on_drawing'],
+                    status=issue_data['status'],
+                    approval=issue_data['approval'],
+                    remark=issue_data['remark']
+                )
+            
+            # Update counts
+            report.pending_count = len(transformed_issues)
+            report.approved_count = 0
+            report.ignored_count = 0
+            report.save()
+            
+            # Complete
+            drawing.status = 'completed'
+            drawing.analysis_completed_at = timezone.now()
+            drawing.save()
+            
+            print(f"[HYBRID PIPELINE] Analysis complete - {len(transformed_issues)} issues found")
+            
+            return Response(
+                {
+                    'status': 'success',
+                    'drawing': PIDDrawingSerializer(drawing).data,
+                    'report': PIDAnalysisReportSerializer(report).data,
+                    'metadata': result['metadata']
+                },
+                status=status.HTTP_200_OK
+            )
+            
+        except Exception as e:
+            import traceback
+            print(f"[HYBRID PIPELINE ERROR] {e}")
+            traceback.print_exc()
+            
+            drawing.status = 'failed'
+            drawing.error_message = str(e)
+            drawing.save()
+            
+            return Response(
+                {'error': f'Hybrid analysis failed: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
