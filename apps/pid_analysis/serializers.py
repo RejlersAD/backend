@@ -252,6 +252,9 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
     issues = serializers.SerializerMethodField()
     pid_drawing_number = serializers.CharField(source='pid_drawing.drawing_number', read_only=True)
     
+    # Override total_issues to return FILTERED count instead of database count
+    total_issues = serializers.SerializerMethodField()
+    
     # Debug information for troubleshooting
     debug_info = serializers.SerializerMethodField()
     
@@ -276,6 +279,16 @@ class PIDAnalysisReportSerializer(serializers.ModelSerializer):
             'generated_at', 'updated_at'
         ]
         read_only_fields = ['id', 'generated_at', 'updated_at']
+    
+    def get_total_issues(self, obj):
+        """
+        Return the FILTERED count of issues (after evidence filtering)
+        instead of the raw database total_issues count.
+        This ensures the count matches what's actually displayed.
+        """
+        # Get filtered issues using the same method
+        filtered_issues = self.get_issues(obj)
+        return len(filtered_issues)
     
     def get_issues(self, obj):
         """Get issues with comprehensive fallback strategies and debugging"""
