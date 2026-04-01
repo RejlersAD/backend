@@ -5,6 +5,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from apps.rbac.permissions import HasDisciplineAccess
+
 from .models import CrossRecommendationLink
 from .serializers import LinkCreateSerializer, CrossRecommendationLinkSerializer
 from .services.recommendation_engine import get_recommendations
@@ -13,8 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasDisciplineAccess])
 def recommendations(request):
+    """Get cross-feature recommendations with discipline-based access control"""
+    recommendations.module_required = 'cross_recommendation'
     source_type = (request.query_params.get('source_type') or '').strip().lower()
     if source_type not in {'pid', 'pfd'}:
         return Response({'error': 'source_type must be pid or pfd'}, status=status.HTTP_400_BAD_REQUEST)
@@ -40,8 +44,10 @@ def recommendations(request):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasDisciplineAccess])
 def create_or_update_link(request):
+    """Create/update recommendation link with discipline-based access control"""
+    create_or_update_link.module_required = 'cross_recommendation'
     serializer = LinkCreateSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

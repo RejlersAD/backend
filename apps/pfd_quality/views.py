@@ -28,6 +28,9 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from apps.rbac.permissions import HasDisciplineAccess
+from apps.core.queue_service import RobustQueueService, QueueUnavailableException
+
 from .models import PFDQProject, PFDQDocument, PFDQFinding
 from .serializers import (
     PFDQProjectSerializer,
@@ -89,9 +92,18 @@ def project_detail(request, project_id):
 # ===========================================================================
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasDisciplineAccess])
 @parser_classes([MultiPartParser, FormParser])
 def upload_pfd(request):
+    """
+    Upload and queue PFD document for quality checking.
+    
+    RBAC: User must have "process_engineering" or "qa_qc" discipline or be admin.
+    Queue: Intelligent fallback to synchronous processing if queue unavailable.
+    """
+    # Set module requirement for discipline check
+    upload_pfd.module_required = 'pfd_quality'
+    
     serializer = UploadSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -126,16 +138,83 @@ def upload_pfd(request):
         uploaded_by   = request.user,
     )
 
-    # Dispatch Celery task
+    # Dispatch Celery task with intelligent fallback
     from .tasks import process_pfd_document
-    process_pfd_document.delay(str(doc.document_id))
+    
+    # Define synchronous fallback (for when queue unavailable)
+    def sync_process_fallback(doc_id):
+        """Synchronous processing fallback called when queue fails"""
+        logger.warning(f"[PFDQUpload] Using synchronous fallback for doc_id={doc_id}")
+        try:
+            # Import locally to avoid circular import
+            from apps.pfd_quality.services.segmentation import segment_document
+            from apps.pfd_quality.services.extraction import extract_drawing
+            from apps.pfd_quality.services.rule_engine import run_rules
+            
+            doc = PFDQDocument.objects.get(document_id=doc_id)
+            file_path = doc.original_file.path if doc.original_file else None
+            
+            if not file_path:
+                raise ValueError(f"Document {doc_id} has no original file")
+            
+            doc.status = PFDQDocument.Status.PROCESSING
+            doc.save(update_fields=["status", "updated_at"])
+            
+            # Run synchronous pipeline
+            segment_document(str(doc.document_id), file_path)
+            extract_drawing(doc)
+            run_rules(doc)
+            
+            doc.status = PFDQDocument.Status.COMPLETED
+            doc.save(update_fields=["status", "updated_at"])
+            logger.info(f"[PFDQUpload] Sync fallback completed for doc_id={doc_id}")
+        except Exception as e:
+            logger.error(f"[PFDQUpload] Sync fallback failed: {e}", exc_info=True)
+            try:
+                doc.status = PFDQDocument.Status.FAILED
+                doc.error_message = f"Sync processing failed: {e}"
+                doc.save(update_fields=["status", "error_message", "updated_at"])
+            except:
+                pass
+    
+    # Use robust queue service with fallback
+    try:
+        result = RobustQueueService.queue_task(
+            process_pfd_document,
+            args=(str(doc.document_id),),
+            sync_fallback=sync_process_fallback,
+            max_retries=3
+        )
+        logger.info("[PFDQUpload] Task queued (async or sync fallback): doc_id=%s", doc.document_id)
+    except QueueUnavailableException as queue_exc:
+        logger.error("[PFDQUpload] Queue unavailable and sync fallback failed: %s", queue_exc)
+        doc.status = PFDQDocument.Status.FAILED
+        doc.error_message = "Processing service unavailable. Please try again."
+        doc.save(update_fields=["status", "error_message", "updated_at"])
+        return Response(
+            {"error": "Processing queue unavailable. Please try again shortly."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except Exception as exc:
+        logger.error("[PFDQUpload] Unexpected error setting up task: %s", exc)
+        doc.status = PFDQDocument.Status.FAILED
+        doc.error_message = f"Failed to start processing: {exc}"
+        doc.save(update_fields=["status", "error_message", "updated_at"])
+        return Response(
+            {"error": "Failed to process document. Please try again."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
-    # Soft-hook: keep cross-feature snapshot updated in background.
+    # Soft-hook: keep cross-feature snapshot updated in background (non-blocking)
     try:
         from apps.cross_recommendation.tasks import sync_s3_snapshot
-        sync_s3_snapshot.delay()
+        exec_result = RobustQueueService.queue_task(
+            sync_s3_snapshot,
+            max_retries=1
+        )
+        logger.debug("[PFDQUpload] Queued cross-recommendation snapshot sync")
     except Exception as exc:
-        logger.warning("[PFDQUpload] Cross snapshot queue skipped: %s", exc)
+        logger.warning("[PFDQUpload] Cross snapshot sync skipped: %s", exc)
 
     return Response({
         "document_id": str(doc.document_id),
