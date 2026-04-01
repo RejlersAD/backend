@@ -269,7 +269,7 @@ def _check_line_sizes(extraction: Dict[str, Any]) -> List[RuleFinding]:
                 ))
 
     # LSZ-003: Explicit valve-size vs line-size mismatch found in text
-    out.extend(_check_valve_line_size_mismatch(raw_text))
+    out.extend(_check_valve_line_size_mismatch(raw_text, line_sizes))
 
     return out
 
@@ -285,7 +285,7 @@ def _normalize_size_token(token: str) -> str:
     return f'{t}"'
 
 
-def _check_valve_line_size_mismatch(raw_text: str) -> List[RuleFinding]:
+def _check_valve_line_size_mismatch(raw_text: str, line_sizes: List[Dict[str, Any]] | None = None) -> List[RuleFinding]:
     """
     Detect mismatch patterns like:
       6" valve ... 4" line
@@ -323,6 +323,114 @@ def _check_valve_line_size_mismatch(raw_text: str) -> List[RuleFinding]:
                     direction='N/A',
                     severity='critical',
                 ))
+
+    # Fallback heuristic for noisy OCR where "valve" word is not detected but
+    # valve callouts often end with "-V" and include inch-size text.
+    if not out:
+        fallback = _check_valve_line_size_mismatch_fallback(raw_text, line_sizes or [])
+        out.extend(fallback)
+
+    return out
+
+
+def _check_valve_line_size_mismatch_fallback(raw_text: str, line_sizes: List[Dict[str, Any]]) -> List[RuleFinding]:
+    out: List[RuleFinding] = []
+    if not raw_text:
+        return out
+
+    inch_pattern = re.compile(r'\b(\d{1,2}(?:\.\d+)?)\s*(?:"|\'\')')
+    valve_inch_pattern = re.compile(r'\b(\d{1,4}(?:\.\d+)?)\s*(?:"|\'\')')
+    valve_like_line = re.compile(r'\b\S*-V\b', flags=re.IGNORECASE)
+
+    def _is_reasonable_size(s: str) -> bool:
+        try:
+            v = float(s.replace('"', '').strip())
+            return 2.0 <= v <= 24.0
+        except Exception:
+            return False
+
+    def _coerce_ocr_size(raw_num: str) -> str | None:
+        """Coerce noisy OCR size token into a plausible inch value (2-24)."""
+        try:
+            v = float(raw_num)
+        except Exception:
+            return None
+
+        if 2.0 <= v <= 24.0:
+            if float(v).is_integer():
+                return f'{int(v)}"'
+            return f'{v}"'
+
+        # OCR can merge nearby digits, e.g. 4546" where true valve size is 6".
+        # Try trailing 2-digit / 1-digit recovery.
+        s = str(int(v))
+        if len(s) >= 2:
+            tail2 = int(s[-2:])
+            if 2 <= tail2 <= 24:
+                return f'{tail2}"'
+        tail1 = int(s[-1])
+        if 2 <= tail1 <= 24:
+            return f'{tail1}"'
+        return None
+
+    # Prefer extracted line-size annotations for line side of the comparison.
+    drawing_line_sizes = []
+    for ls in line_sizes:
+        text = str(ls.get('text', '')).strip()
+        if text.endswith('"') and _is_reasonable_size(text) and text not in drawing_line_sizes:
+            drawing_line_sizes.append(text)
+
+    # Fallback if extractor could not map line_sizes list.
+    if not drawing_line_sizes:
+        all_inch_sizes = [f"{m.group(1)}\"" for m in inch_pattern.finditer(raw_text)]
+        for s in all_inch_sizes:
+            if _is_reasonable_size(s) and s not in drawing_line_sizes:
+                drawing_line_sizes.append(s)
+
+    # Candidate valve sizes from lines that look like valve callouts
+    valve_size_candidates = []
+    valve_evidence_line = ''
+    for line in raw_text.splitlines():
+        if not valve_like_line.search(line):
+            continue
+        matches = [m.group(1) for m in valve_inch_pattern.finditer(line)]
+        for raw_num in matches:
+            size = _coerce_ocr_size(raw_num)
+            if size and _is_reasonable_size(size) and size not in valve_size_candidates:
+                valve_size_candidates.append(size)
+                valve_evidence_line = line.strip()[:240]
+
+    # Secondary fallback: raw drawing sizes not present in primary line-size set.
+    if not valve_size_candidates:
+        all_inch_sizes = [f"{m.group(1)}\"" for m in inch_pattern.finditer(raw_text)]
+        for size in all_inch_sizes:
+            if _is_reasonable_size(size) and size not in drawing_line_sizes and size not in valve_size_candidates:
+                valve_size_candidates.append(size)
+
+    if not valve_size_candidates or not drawing_line_sizes:
+        return out
+
+    # Use most likely valve size (largest inch value) vs primary line size (smallest)
+    # as a deterministic fallback under noisy OCR.
+    def _size_value(s: str) -> float:
+        try:
+            return float(s.replace('"', '').strip())
+        except Exception:
+            return 0.0
+
+    valve_size = max(valve_size_candidates, key=_size_value)
+    line_size = min(drawing_line_sizes, key=_size_value)
+
+    if valve_size != line_size:
+        out.append(RuleFinding(
+            category='line_size',
+            rule_id='LSZ-003',
+            issue_observed=f"Valve size '{valve_size}' does not match connected line size '{line_size}'",
+            action_required='Verify valve bore size against line size and correct drawing/specification mismatch',
+            evidence=valve_evidence_line or 'OCR fallback: valve-like callout vs line-size annotation',
+            direction='N/A',
+            severity='critical',
+        ))
 
     return out
 

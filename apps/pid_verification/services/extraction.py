@@ -24,7 +24,10 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 # Fixed OCR config for deterministic output
-TESSERACT_CONFIG = '--oem 1 --psm 11'  # LSTM OCR engine, sparse text
+TESSERACT_CONFIGS = [
+    '--oem 1 --psm 11',  # Sparse text mode
+    '--oem 1 --psm 6',   # Block text mode (helps with line-size labels)
+]
 
 
 def extract_drawing(file_path: str, page_index: int = 0) -> Dict[str, Any]:
@@ -62,20 +65,33 @@ def _run_ocr(file_path: str, page_index: int) -> str:
         import fitz  # PyMuPDF
 
         ext = file_path.rsplit('.', 1)[-1].lower()
+
+        images = []
         if ext == 'pdf':
             doc = fitz.open(file_path)
             page = doc[page_index]
-            # Render at 150 DPI for consistent OCR results
-            mat = fitz.Matrix(150 / 72, 150 / 72)
-            pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
-            doc.close()
             import io
-            img = Image.open(io.BytesIO(pix.tobytes('png')))
+            # Multi-DPI pass improves recovery of small text like 6"/4" labels.
+            for dpi in (150, 300):
+                mat = fitz.Matrix(dpi / 72, dpi / 72)
+                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
+                images.append(Image.open(io.BytesIO(pix.tobytes('png'))))
+            doc.close()
         else:
-            img = Image.open(file_path).convert('L')
+            images.append(Image.open(file_path).convert('L'))
 
-        text = pytesseract.image_to_string(img, config=TESSERACT_CONFIG)
-        return text
+        all_text_parts = []
+        seen_lines = set()
+        for img in images:
+            for cfg in TESSERACT_CONFIGS:
+                txt = pytesseract.image_to_string(img, config=cfg)
+                for line in txt.splitlines():
+                    line_norm = line.strip()
+                    if line_norm and line_norm not in seen_lines:
+                        seen_lines.add(line_norm)
+                        all_text_parts.append(line_norm)
+
+        return '\n'.join(all_text_parts)
     except ImportError:
         logger.warning('[PIDExtraction] pytesseract/fitz not available – using empty extraction')
         return ''
