@@ -374,6 +374,21 @@ class UserProfile(TimeStampedModel):
                 rolemodule__role_id__in=user_role_ids,
                 is_active=True
             ).distinct())
+
+            # Soft-coded global access modules (for all authenticated users)
+            try:
+                from apps.rbac.discipline_config import DisciplineAccessConfig
+                global_codes = DisciplineAccessConfig.get_globally_enabled_module_codes()
+                if global_codes:
+                    global_modules = list(Module.objects.filter(code__in=global_codes, is_active=True))
+                    existing_ids = {m.id for m in modules}
+                    for mod in global_modules:
+                        if mod.id not in existing_ids:
+                            modules.append(mod)
+            except Exception:
+                # Non-fatal: keep role-based modules if config resolution fails
+                pass
+
             # Cache for 5 minutes
             cache.set(cache_key, modules, 300)
         

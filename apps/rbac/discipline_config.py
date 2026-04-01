@@ -79,6 +79,24 @@ class DisciplineAccessConfig:
             'accessible_by_roles': ['super_admin', 'admin', 'manager', 'engineer', 'reviewer'],
             'required_permission': 'pfd_quality.upload'
         },
+
+        # Process Datasheet module
+        'process_datasheet': {
+            'code': 'process_datasheet',
+            'name': 'Process Datasheet',
+            'description': 'Process engineering datasheet tools and forms',
+            # Soft-coded global toggle: expose Datasheet to all authenticated users.
+            'allow_all_authenticated': True,
+            'accessible_by_disciplines': [
+                'process_engineering',
+                'engineering',
+                'qa_qc',
+                'admin',
+                'super_admin',
+            ],
+            'accessible_by_roles': ['super_admin', 'admin', 'manager', 'engineer', 'reviewer'],
+            'required_permission': 'process_datasheet.use'
+        },
         
         # Cross-feature recommendations
         'cross_recommendation': {
@@ -334,6 +352,15 @@ class DisciplineAccessConfig:
         
         logger.info(f"[DisciplineAccess] User accessible modules: {accessible}")
         return accessible
+
+    @classmethod
+    def get_globally_enabled_module_codes(cls):
+        """Return module codes soft-coded to be available to all authenticated users."""
+        codes = []
+        for module_code, cfg in cls.get_all_modules().items():
+            if cfg.get('allow_all_authenticated'):
+                codes.append(module_code)
+        return codes
     
     @classmethod
     def invalidate_cache(cls):
