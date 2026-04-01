@@ -219,6 +219,7 @@ def _check_line_sizes(extraction: Dict[str, Any]) -> List[RuleFinding]:
     out = []
     pipelines  = extraction.get('pipelines', [])
     line_sizes = extraction.get('line_sizes', [])
+    raw_text = extraction.get('raw_text', '')
 
     # LSZ-001: Pipelines with no recorded size
     for pipeline in pipelines:
@@ -251,19 +252,77 @@ def _check_line_sizes(extraction: Dict[str, Any]) -> List[RuleFinding]:
             else:
                 pipeline_sizes[lid] = size
 
-    # Flag line size texts that could not be attributed to any pipeline
-    attributed_sizes = {p.get('size') for p in pipelines if p.get('size')}
-    for ls in line_sizes:
-        if ls['text'] not in attributed_sizes:
-            out.append(RuleFinding(
-                category='line_size',
-                rule_id='LSZ-001',
-                issue_observed=f"Line size '{ls['text']}' found on drawing but not mapped to any pipeline",
-                action_required='Associate line size annotation with its pipeline designation',
-                evidence=ls['text'],
-                direction=ls.get('direction', 'unknown'),
-                severity='minor',
-            ))
+    # Flag line size texts that could not be attributed to any pipeline.
+    # If no pipelines are extracted, this becomes noisy and misleading.
+    if pipelines:
+        attributed_sizes = {p.get('size') for p in pipelines if p.get('size')}
+        for ls in line_sizes:
+            if ls['text'] not in attributed_sizes:
+                out.append(RuleFinding(
+                    category='line_size',
+                    rule_id='LSZ-001',
+                    issue_observed=f"Line size '{ls['text']}' found on drawing but not mapped to any pipeline",
+                    action_required='Associate line size annotation with its pipeline designation',
+                    evidence=ls['text'],
+                    direction=ls.get('direction', 'unknown'),
+                    severity='minor',
+                ))
+
+    # LSZ-003: Explicit valve-size vs line-size mismatch found in text
+    out.extend(_check_valve_line_size_mismatch(raw_text))
+
+    return out
+
+
+def _normalize_size_token(token: str) -> str:
+    """Normalize size token to canonical display (e.g., 6 -> 6\")."""
+    t = token.strip().lower().replace(' ', '')
+    t = t.replace("''", '"')
+    if t.endswith('mm'):
+        return t
+    if t.endswith('"'):
+        return t
+    return f'{t}"'
+
+
+def _check_valve_line_size_mismatch(raw_text: str) -> List[RuleFinding]:
+    """
+    Detect mismatch patterns like:
+      6" valve ... 4" line
+    and return a critical, actionable finding.
+    """
+    out: List[RuleFinding] = []
+    if not raw_text:
+        return out
+
+    for line in raw_text.splitlines():
+        line_lower = line.lower()
+        if 'valve' not in line_lower:
+            continue
+        if 'line' not in line_lower and 'pipe' not in line_lower:
+            continue
+
+        size_tokens = re.findall(r'(\d+(?:\.\d+)?(?:\s*(?:"|\'\'|mm))?)', line, flags=re.IGNORECASE)
+        normalized = [_normalize_size_token(s) for s in size_tokens if s.strip()]
+
+        unique_sizes = []
+        for s in normalized:
+            if s not in unique_sizes:
+                unique_sizes.append(s)
+
+        if len(unique_sizes) >= 2:
+            valve_size = unique_sizes[0]
+            line_size = unique_sizes[1]
+            if valve_size != line_size:
+                out.append(RuleFinding(
+                    category='line_size',
+                    rule_id='LSZ-003',
+                    issue_observed=f"Valve size '{valve_size}' does not match connected line size '{line_size}'",
+                    action_required='Verify valve bore size against line size and correct drawing/specification mismatch',
+                    evidence=line.strip()[:240],
+                    direction='N/A',
+                    severity='critical',
+                ))
 
     return out
 
