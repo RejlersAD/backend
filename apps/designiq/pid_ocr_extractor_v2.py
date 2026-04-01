@@ -702,91 +702,166 @@ class PIDLineExtractorV2:
         logger.info(f"  📋 ADNOC format: SIZE\"-FLUID-PIPINGCLASS-SEQUENCE")
         logger.info(f"  📋 Examples: 6\"-CD-AC3N-8256, 8\"-HO-BD2A-1023, 10\"-AG-XY1Z-9999")
         
-        # Normalize text (same as other formats)
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 1: Normalize INCH SYMBOL variants from OCR
+        # ═══════════════════════════════════════════════════════════════
+        # OCR often misreads the inch symbol (") as various characters
         normalized_text = extracted_text
-        for char in ['=', '~', '—', '–', '―', '─', '|', '/', '°', '″', '\'']:
+        
+        # Normalize various inch symbol representations to standard quote
+        inch_variants = [
+            '"', '"',   # Curly/smart double quotes
+            '″',        # Unicode double prime (U+2033)
+            '˝',        # Unicode double acute accent (U+02DD)
+            "''",       # Two single quotes
+            "''",       # Two fancy single quotes (right)
+            "``",       # Two backticks
+            '´´',       # Two acute accents
+            '„',        # Double low-9 quote
+            '‟',        # Double high-reversed-9 quote
+        ]
+        for variant in inch_variants:
+            normalized_text = normalized_text.replace(variant, '"')
+        
+        # Also handle single quote followed by another (with potential space)
+        normalized_text = re.sub(r"'\s*'", '"', normalized_text)
+        normalized_text = re.sub(r"'\s*'", '"', normalized_text)
+        normalized_text = re.sub(r"`\s*`", '"', normalized_text)
+        
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 2: Normalize HYPHEN variants (same as other formats)
+        # ═══════════════════════════════════════════════════════════════
+        for char in ['=', '~', '—', '–', '―', '─', '|', '°', '·']:
             normalized_text = normalized_text.replace(char, '-')
         normalized_text = re.sub(r'-{2,}', '-', normalized_text)
         normalized_text = re.sub(r'\s+-\s+', '-', normalized_text)
         
-        # ADNOC PATTERN: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
-        # ^(\d+)"-([A-Z]{2,3})-([A-Z0-9]+)-(\d{4})$
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 3: Normalize common OCR errors
+        # ═══════════════════════════════════════════════════════════════
+        # OCR sometimes reads 0 as O, 1 as I/l, etc.
+        # We'll be permissive and check both in patterns
+        
+        logger.info(f"  📝 Normalized text length: {len(normalized_text)} chars")
+        
+        # ═══════════════════════════════════════════════════════════════
+        # ADNOC PATTERNS: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
+        # Examples: 2"-CD-AC3N-8714, 2"-PL-DC3N-8700, 6"-AG-BB2A-1234
+        # ═══════════════════════════════════════════════════════════════
         ADNOC_PATTERNS = [
             # Pattern 1: Strict format with inch symbol (primary)
+            # Matches: 2"-CD-AC3N-8714
             r'\b(\d{1,2})"-([A-Z]{2,3})-([A-Z0-9]{2,6})-(\d{4})\b',
             
             # Pattern 2: With optional spaces around hyphens
+            # Matches: 2" - CD - AC3N - 8714
             r'\b(\d{1,2})"\s*-\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]{2,6})\s*-\s*(\d{4})\b',
             
-            # Pattern 3: Flexible spacing with multiple hyphens
+            # Pattern 3: No dash after inch (OCR sometimes misses)
+            # Matches: 2"CD-AC3N-8714
+            r'\b(\d{1,2})"([A-Z]{2,3})-([A-Z0-9]{2,6})-(\d{4})\b',
+            
+            # Pattern 4: Flexible spacing with multiple hyphens
             r'\b(\d{1,2})"\s*-+\s*([A-Z]{2,3})\s*-+\s*([A-Z0-9]{2,6})\s*-+\s*(\d{4})\b',
             
-            # Pattern 4: Word boundary with lookahead
-            r'(?:^|\s)(\d{1,2})"\s*-\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]{2,6})\s*-\s*(\d{4})(?=\s|$|-)',
+            # Pattern 5: Word boundary with lookahead (for embedded text)
+            r'(?:^|\s)(\d{1,2})"\s*-?\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]{2,6})\s*-\s*(\d{4})(?=\s|$|-)',
+            
+            # Pattern 6: Handle spaces within line number (OCR artifact)
+            # Matches: 2" -CD- AC3N -8714
+            r'\b(\d{1,2})"\s*-?\s*([A-Z]{2,3})\s*-?\s*([A-Z0-9]{2,6})\s*-?\s*(\d{4})\b',
+            
+            # Pattern 7: Handle inch symbol with space before dash
+            # Matches: 2" -CD-AC3N-8714 or 2 "-CD-AC3N-8714
+            r'\b(\d{1,2})\s*"\s*-?\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]{2,6})\s*-\s*(\d{4})\b',
+            
+            # Pattern 8: Handle OCR reading " as single quote or missing
+            # Try to match NUMBER-LETTERS-ALPHANUM-4DIGITS where size is small (1-2 digit)
+            r'(?:^|[^0-9])(\d{1,2})[\s"\']*-?\s*([A-Z]{2,3})\s*-\s*([A-Z][A-Z0-9]{1,5})\s*-\s*(\d{4})(?:[^0-9]|$)',
         ]
         
         found_lines = []
         seen_lines = set()
         rejected = []
         
-        for pattern_idx, pattern in enumerate(ADNOC_PATTERNS, 1):
-            matches = re.finditer(pattern, normalized_text, re.IGNORECASE)
-            
-            for match in matches:
-                # Extract components
-                size = match.group(1).strip()
-                fluid = match.group(2).strip().upper()
-                pipr_class = match.group(3).strip().upper()
-                seq = match.group(4).strip()
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 4: Search in BOTH full text AND line-by-line
+        # ═══════════════════════════════════════════════════════════════
+        # OCR text can have line breaks that break patterns, so search both ways
+        text_sources = [normalized_text]
+        
+        # Also split by newlines and search each line
+        lines = normalized_text.split('\n')
+        text_sources.extend(lines)
+        
+        # Also try joining lines that might be split
+        for i in range(len(lines) - 1):
+            combined = lines[i].strip() + ' ' + lines[i+1].strip()
+            text_sources.append(combined)
+        
+        for source_text in text_sources:
+            for pattern_idx, pattern in enumerate(ADNOC_PATTERNS, 1):
+                matches = re.finditer(pattern, source_text, re.IGNORECASE)
                 
-                # STRICT VALIDATION for ADNOC format
-                
-                # 1. SIZE: Must be 1-2 digits
-                if not size or not size.isdigit() or len(size) > 2:
-                    rejected.append(f"Invalid size: {size}")
-                    continue
-                
-                # 2. FLUID: Must be 2-3 uppercase letters
-                if not fluid or not fluid.isalpha() or len(fluid) < 2 or len(fluid) > 3:
-                    rejected.append(f"Invalid fluid code: {fluid}")
-                    continue
-                
-                # 3. PIPING CLASS: Must be alphanumeric (2-6 chars)
-                if not pipr_class or not pipr_class.isalnum() or len(pipr_class) < 2 or len(pipr_class) > 6:
-                    rejected.append(f"Invalid piping class: {pipr_class}")
-                    continue
-                
-                # 4. SEQUENCE: MUST be exactly 4 digits
-                if not seq or not seq.isdigit() or len(seq) != 4:
-                    rejected.append(f"Invalid sequence (must be 4 digits): {seq}")
-                    continue
-                
-                # Build ADNOC line number: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
-                line_number = f'{size}"-{fluid}-{pipr_class}-{seq}'
-                
-                # Deduplicate
-                if line_number in seen_lines:
-                    continue
-                seen_lines.add(line_number)
-                
-                # Create line entry with ADNOC format identifier
-                line_entry = {
-                    'line_number': line_number,
-                    'size': f'{size}"',
-                    'fluid_code': fluid,
-                    'pipr_class': pipr_class,
-                    'sequence_no': seq,
-                    'insulation': '',  # ADNOC format has no insulation
-                    'area': '',  # ADNOC format has no area
-                    'page': page_num,
-                    'from_equipment': '',
-                    'to_equipment': '',
-                    'format': 'Abu Dhabi Oil Co. Ltd',  # Format identifier
-                    'extraction_method': 'regex_adnoc',
-                    'original_detection': match.group(0).strip()
-                }
-                
-                found_lines.append(line_entry)
+                for match in matches:
+                    # Extract components
+                    size = match.group(1).strip()
+                    fluid = match.group(2).strip().upper()
+                    pipr_class = match.group(3).strip().upper()
+                    seq = match.group(4).strip()
+                    
+                    # VALIDATION for ADNOC format (relaxed for OCR)
+                    
+                    # 1. SIZE: Must be 1-2 digits
+                    if not size or not size.isdigit() or len(size) > 2:
+                        rejected.append(f"Invalid size: {size}")
+                        continue
+                    
+                    # 2. FLUID: Must be 2-3 uppercase letters
+                    if not fluid or not fluid.isalpha() or len(fluid) < 2 or len(fluid) > 3:
+                        rejected.append(f"Invalid fluid code: {fluid}")
+                        continue
+                    
+                    # 3. PIPING CLASS: Must be alphanumeric (2-6 chars), starts with letter
+                    if not pipr_class or len(pipr_class) < 2 or len(pipr_class) > 6:
+                        rejected.append(f"Invalid piping class: {pipr_class}")
+                        continue
+                    # Allow alphanumeric piping class
+                    if not re.match(r'^[A-Z][A-Z0-9]*$', pipr_class):
+                        rejected.append(f"Invalid piping class format: {pipr_class}")
+                        continue
+                    
+                    # 4. SEQUENCE: MUST be exactly 4 digits
+                    if not seq or not seq.isdigit() or len(seq) != 4:
+                        rejected.append(f"Invalid sequence (must be 4 digits): {seq}")
+                        continue
+                    
+                    # Build ADNOC line number: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
+                    line_number = f'{size}"-{fluid}-{pipr_class}-{seq}'
+                    
+                    # Deduplicate
+                    if line_number in seen_lines:
+                        continue
+                    seen_lines.add(line_number)
+                    
+                    # Create line entry with ADNOC format identifier
+                    line_entry = {
+                        'line_number': line_number,
+                        'size': f'{size}"',
+                        'fluid_code': fluid,
+                        'pipr_class': pipr_class,
+                        'sequence_no': seq,
+                        'insulation': '',  # ADNOC format has no insulation
+                        'area': '',  # ADNOC format has no area
+                        'page': page_num,
+                        'from_equipment': '',
+                        'to_equipment': '',
+                        'format': 'Abu Dhabi Oil Co. Ltd',  # Format identifier
+                        'extraction_method': 'regex_adnoc',
+                        'original_detection': match.group(0).strip()
+                    }
+                    
+                    found_lines.append(line_entry)
         
         # Log summary
         if rejected and len(rejected) <= 20:
