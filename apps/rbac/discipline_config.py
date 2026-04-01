@@ -67,6 +67,9 @@ class DisciplineAccessConfig:
             'code': 'pfd_quality',
             'name': 'PFD Quality Verification',
             'description': 'Process Flow Diagram quality and compliance checks',
+            # Soft-coded global toggle: when True, all authenticated users can access
+            # this module without discipline/role mapping maintenance.
+            'allow_all_authenticated': True,
             'accessible_by_disciplines': [
                 'process_engineering',
                 'qa_qc',  # QA/QC can verify PFD
@@ -270,6 +273,11 @@ class DisciplineAccessConfig:
         if not module_config:
             logger.warning(f"[DisciplineAccess] Module config not found: {module_code}")
             return False
+
+        # Soft-coded global access mode for a module.
+        if module_config.get('allow_all_authenticated'):
+            logger.info("[DisciplineAccess] Module '%s' allows all authenticated users", module_code)
+            return True
         
         # Check discipline access (normalized + alias-aware)
         user_discipline_raw = user_profile.department or ''
