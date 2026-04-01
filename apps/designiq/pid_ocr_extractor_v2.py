@@ -337,6 +337,9 @@ class PIDLineExtractorV2:
         Line format (offshore): AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
         Example: 604-HO-8-BC2GA0-1071-H
         
+        Line format (ADNOC): SIZE"-FLUID-PIPECLASS-SEQUENCE
+        Example: 6"-CD-AC3N-8256
+        
         This is MORE RELIABLE than OpenAI because:
         - Deterministic pattern matching
         - No API failures or hallucinations
@@ -357,9 +360,12 @@ class PIDLineExtractorV2:
                 logger.info(f"  ✅ GENERAL format detected WITHOUT AREA: {len(results_without_area)} lines")
                 return results_without_area
         
-        format_label = 'OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA')
+        format_label = 'ADNOC' if format_type == 'adnoc' else ('OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA'))
         logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({format_label})")
-        if format_type == 'offshore':
+        if format_type == 'adnoc':
+            logger.info(f"  📋 ADNOC format: SIZE\"-FLUIDCODE-PIPECLASS-SEQUENCE")
+            logger.info(f"  📋 Examples: 6\"-CD-AC3N-8256, 8\"-HO-BD2A-1023, 10\"-AG-XY1Z-9999")
+        elif format_type == 'offshore':
             logger.info(f"  📋 Offshore format: AREA-FLUIDCODE-SIZE-PIPECLASS-SEQUENCE-INSULATION")
             logger.info(f"  📋 ADNOC examples: 604-RO-4-AN1NLO-0011-P, 604-HO-8-BC2CA0-1071-H, 604-AG-3-ASSNLO-0007")
         
@@ -389,8 +395,31 @@ class PIDLineExtractorV2:
         #
         # Format OFFSHORE: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
         # Examples: 604-HO-8-BC2GA0-1071-H, 41-SWR-16-A2AU16-64313-V
+        #
+        # Format ADNOC (Abu Dhabi Oil Co. Ltd): SIZE"-FLUID-PIPECLASS-SEQUENCE
+        # Examples: 6"-CD-AC3N-8256, 8"-HO-BD2A-1023, 10"-AG-XY1Z-9999
         
-        if format_type == 'offshore':
+        if format_type == 'adnoc':
+            # ADNOC PATTERNS: SIZE"-FLUIDCODE-PIPECLASS-SEQUENCE
+            # Standard Example: 6"-CD-AC3N-8256
+            # Format: [1-2 digits]"[-][2-3 uppercase letters][-][alphanumeric pipe class][-][4 digits]
+            patterns = [
+                # Pattern 1: Standard ADNOC format with quote
+                r'\b(\d{1,2})"\s*-\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{4})\b',
+                
+                # Pattern 2: Flexible spacing
+                r'\b(\d{1,2})"?\s*-+\s*([A-Z]{2,3})\s*-+\s*([A-Z0-9]+)\s*-+\s*(\d{4})\b',
+                
+                # Pattern 3: Compact format
+                r'\b(\d{1,2})"-([A-Z]{2,3})-([A-Z0-9]+)-(\d{4})\b',
+                
+                # Pattern 4: With word boundaries and lookahead
+                r'(?:^|\s)(\d{1,2})"?\s*-\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{4})(?=\s|$|-)',
+                
+                # Pattern 5: Case insensitive for OCR errors
+                r'(?:^|\s)(\d{1,2})"?\s*-\s*([A-Za-z]{2,3})\s*-\s*([A-Za-z0-9]+)\s*-\s*(\d{4})(?=\s|$|-)',
+            ]
+        elif format_type == 'offshore':
             # OFFSHORE PATTERNS: AREA-FLUIDCODE-LINESIZE-PIPECLASS-SEQUENCE-INSULATION
             # Standard Example: 604-HO-8-BC2CA0-1071-H
             # ADNOC Examples: 604-RO-4-AN1NLO-0011-P, 604-HO-8-BC2CA0-1071-H, 604-AG-3-ASSNLO-0007
@@ -467,7 +496,15 @@ class PIDLineExtractorV2:
             
             for match in matches:
                 # Extract and clean components
-                if format_type == 'offshore':
+                if format_type == 'adnoc':
+                    # ADNOC: SIZE"-FLUID-PIPECLASS-SEQUENCE
+                    size = match.group(1).strip()
+                    fluid = match.group(2).strip().upper()
+                    pipr_class = match.group(3).strip()
+                    seq = match.group(4).strip()
+                    area = ''
+                    insulation = ''
+                elif format_type == 'offshore':
                     # Offshore: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
                     area = match.group(1).strip()
                     fluid = match.group(2).strip().upper()
@@ -498,6 +535,55 @@ class PIDLineExtractorV2:
                 seq = re.sub(r'[^0-9]', '', seq)
                 if insulation:
                     insulation = re.sub(r'[^A-Z]', '', insulation)
+                
+                # ADNOC FORMAT VALIDATION (separate rules)
+                if format_type == 'adnoc':
+                    # 1. SIZE: Must be 1-2 digits
+                    if not size or not size.isdigit() or len(size) > 2:
+                        rejected.append(f"Invalid ADNOC size: {size}")
+                        continue
+                    
+                    # 2. FLUID: Must be 2-3 uppercase letters
+                    if not fluid or not fluid.isalpha() or len(fluid) < 2 or len(fluid) > 3:
+                        rejected.append(f"Invalid ADNOC fluid: {fluid}")
+                        continue
+                    
+                    # 3. SEQUENCE: Must be exactly 4 digits
+                    if not seq or not seq.isdigit() or len(seq) != 4:
+                        rejected.append(f"Invalid ADNOC sequence: {seq}")
+                        continue
+                    
+                    # 4. PIPE CLASS: Alphanumeric, flexible length (3-6 chars typical)
+                    if not pipr_class or not pipr_class.isalnum() or len(pipr_class) < 3:
+                        rejected.append(f"Invalid ADNOC pipe class: {pipr_class}")
+                        continue
+                    
+                    # Build ADNOC line number: SIZE"-FLUID-PIPECLASS-SEQUENCE
+                    line_number = f"{size}\"-{fluid}-{pipr_class}-{seq}"
+                    
+                    # Deduplicate
+                    if line_number in seen_lines:
+                        continue
+                    seen_lines.add(line_number)
+                    
+                    # Create line entry for ADNOC
+                    line_entry = {
+                        'line_number': line_number,
+                        'size': f'{size}"',
+                        'fluid_code': fluid,
+                        'sequence_no': seq,
+                        'pipr_class': pipr_class,
+                        'insulation': '',
+                        'area': '',
+                        'page': page_num,
+                        'from_equipment': '',
+                        'to_equipment': '',
+                        'extraction_method': 'regex_adnoc',
+                        'original_detection': match.group(0).strip()
+                    }
+                    
+                    found_lines.append(line_entry)
+                    continue  # Skip standard validation below
                 
                 # SMART VALIDATION (flexible for ADNOC offshore formats)
                 # 1. SIZE: Must be 1+ digits (ADNOC can have any size)
@@ -1221,7 +1307,9 @@ Example 4: "10\"-PG-0003-033842-X-H"
             logger.info(f"📄 File: {pdf_path}")
             logger.info(f"📄 Pages: {len(doc)}")
             logger.info(f"🧠 Strategy: OCR ALL TEXT → AI INTELLIGENCE → STRICT VALIDATION")
-            if format_type == 'offshore':
+            if format_type == 'adnoc':
+                format_msg = 'ADNOC Abu Dhabi Oil Co. Ltd (SIZE"-FLUID-PIPECLASS-SEQUENCE)'
+            elif format_type == 'offshore':
                 format_msg = 'OFFSHORE (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)'
             elif include_area:
                 format_msg = 'WITH AREA (SIZE"-AREA-FLUID-SEQ-PIPECLASS)'
