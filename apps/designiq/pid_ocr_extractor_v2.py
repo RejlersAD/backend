@@ -50,7 +50,6 @@ class PIDLineExtractorV2:
         self.openai_client = None
         self.geometric_detector = None
         self.pytesseract_available = PYTESSERACT_AVAILABLE
-        self._load_extraction_config()
         self._init_engines()
         self._init_geometric_detector()
         
@@ -70,44 +69,7 @@ class PIDLineExtractorV2:
         else:
             logger.warning("⚠️ P&ID Extractor V2 initialized with NO OCR engines - extraction quality will be limited")
         self._init_geometric_detector()
-
-    def _load_extraction_config(self):
-        """
-        Load extraction validation parameters from
-        apps/designiq/config/module_config.json → extraction_settings.
-
-        Every value has a hard-coded fallback so the extractor works
-        correctly even if the config file is missing or incomplete.
-        All tolerances are intentionally more permissive than the original
-        hard-coded values to maximise line-number recall.
-        """
-        settings = {}
-        try:
-            import os, json as _json
-            _cfg_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                'config', 'module_config.json'
-            )
-            with open(_cfg_path, 'r') as _fh:
-                settings = _json.load(_fh).get('extraction_settings', {})
-            logger.info(f"[PIDExtractor] extraction_settings loaded: {settings}")
-        except Exception as _e:
-            logger.warning(f"[PIDExtractor] Could not load extraction_settings: {_e} — using defaults")
-
-        # OCR rendering DPI scale (higher = better quality, slower)
-        self.ocr_resolution_scale = float(settings.get('ocr_resolution_scale', 3.0))
-        # Onshore without-area: sequence digit length tolerance
-        self.onshore_seq_len_min = int(settings.get('onshore_seq_len_min', 3))
-        self.onshore_seq_len_max = int(settings.get('onshore_seq_len_max', 6))
-        # Onshore without-area: pipe-class length tolerance
-        self.onshore_pipr_class_len_min = int(settings.get('onshore_pipr_class_len_min', 4))
-        self.onshore_pipr_class_len_max = int(settings.get('onshore_pipr_class_len_max', 8))
-        # Allow alphanumeric pipe classes (e.g. "A1BA1V") in onshore format
-        self.onshore_pipr_class_alphanumeric = bool(settings.get('onshore_pipr_class_alphanumeric', True))
-        # Max fluid code length per format
-        self.fluid_code_max_len_onshore  = int(settings.get('fluid_code_max_len_onshore', 3))
-        self.fluid_code_max_len_offshore = int(settings.get('fluid_code_max_len_offshore', 3))
-
+    
     def _init_geometric_detector(self):
         """Initialize Geometric Line-based FROM-TO detector"""
         if GEOMETRIC_DETECTOR_AVAILABLE:
@@ -375,23 +337,12 @@ class PIDLineExtractorV2:
         Line format (offshore): AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
         Example: 604-HO-8-BC2GA0-1071-H
         
-        Line format (adnoc - Abu Dhabi Oil Co. Ltd): SIZE"-FLUID-PIPINGCLASS-SEQUENCE
-        Example: 6"-CD-AC3N-8256, 8"-HO-BD2A-1023
-        
         This is MORE RELIABLE than OpenAI because:
         - Deterministic pattern matching
         - No API failures or hallucinations
         - Faster processing
         - Consistent results
         """
-        # ═══════════════════════════════════════════════════════════════
-        # NEW: Abu Dhabi Oil Co. Ltd FORMAT (ADNOC)
-        # Pattern: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
-        # Examples: 6"-CD-AC3N-8256, 8"-HO-BD2A-1023, 10"-AG-XY1Z-9999
-        # ═══════════════════════════════════════════════════════════════
-        if format_type == 'adnoc':
-            return self._parse_adnoc_format(extracted_text, page_num)
-        
         # 🔧 GENERAL FORMAT FIX: Auto-detect area by trying both patterns
         if format_type == 'general':
             # Try WITH AREA first (more specific pattern), then WITHOUT AREA
@@ -658,207 +609,6 @@ class PIDLineExtractorV2:
                 logger.info(f"     - {r}")
         
         logger.info(f"  🎯 REGEX found {len(found_lines)} unique line numbers from {len(patterns)} patterns")
-        return found_lines
-    
-    def _parse_adnoc_format(self, extracted_text: str, page_num: int) -> List[Dict]:
-        """
-        ═══════════════════════════════════════════════════════════════
-        NEW: Abu Dhabi Oil Co. Ltd FORMAT PARSER
-        ═══════════════════════════════════════════════════════════════
-        
-        Pattern: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
-        Examples: 6"-CD-AC3N-8256, 8"-HO-BD2A-1023, 10"-AG-XY1Z-9999
-        
-        Field breakdown:
-        - Line Size: Number + " (e.g., 6", 8", 10")
-        - Fluid Code: 2-3 uppercase letters (e.g., CD, HO, AG)
-        - Piping Class: Alphanumeric (e.g., AC3N, BD2A, XY1Z)
-        - Sequence Number: Exactly 4 digits (e.g., 8256, 1023, 9999)
-        
-        ⚠️ EDGE CASES (MUST REJECT):
-        - Sequence not 4 digits → REJECT
-        - No inch symbol (") → REJECT
-        - Lowercase formats → REJECT
-        - Partial matches → REJECT
-        
-        This format runs AFTER existing offshore/onshore/general checks
-        """
-        logger.info(f"  🔍 Using REGEX pattern matching on OCR text (ADNOC - Abu Dhabi Oil Co. Ltd)")
-        logger.info(f"  📋 ADNOC format: SIZE\"-FLUID-PIPINGCLASS-SEQUENCE")
-        logger.info(f"  📋 Examples: 6\"-CD-AC3N-8256, 8\"-HO-BD2A-1023, 10\"-AG-XY1Z-9999")
-        
-        # ═══════════════════════════════════════════════════════════════
-        # STEP 1: Normalize INCH SYMBOL variants from OCR
-        # ═══════════════════════════════════════════════════════════════
-        # OCR often misreads the inch symbol (") as various characters
-        normalized_text = extracted_text
-        
-        # Normalize various inch symbol representations to standard quote
-        inch_variants = [
-            '"', '"',   # Curly/smart double quotes
-            '″',        # Unicode double prime (U+2033)
-            '˝',        # Unicode double acute accent (U+02DD)
-            "''",       # Two single quotes
-            "''",       # Two fancy single quotes (right)
-            "``",       # Two backticks
-            '´´',       # Two acute accents
-            '„',        # Double low-9 quote
-            '‟',        # Double high-reversed-9 quote
-        ]
-        for variant in inch_variants:
-            normalized_text = normalized_text.replace(variant, '"')
-        
-        # Also handle single quote followed by another (with potential space)
-        normalized_text = re.sub(r"'\s*'", '"', normalized_text)
-        normalized_text = re.sub(r"'\s*'", '"', normalized_text)
-        normalized_text = re.sub(r"`\s*`", '"', normalized_text)
-        
-        # ═══════════════════════════════════════════════════════════════
-        # STEP 2: Normalize HYPHEN variants (same as other formats)
-        # ═══════════════════════════════════════════════════════════════
-        for char in ['=', '~', '—', '–', '―', '─', '|', '°', '·']:
-            normalized_text = normalized_text.replace(char, '-')
-        normalized_text = re.sub(r'-{2,}', '-', normalized_text)
-        normalized_text = re.sub(r'\s+-\s+', '-', normalized_text)
-        
-        # ═══════════════════════════════════════════════════════════════
-        # STEP 3: Normalize common OCR errors
-        # ═══════════════════════════════════════════════════════════════
-        # OCR sometimes reads 0 as O, 1 as I/l, etc.
-        # We'll be permissive and check both in patterns
-        
-        logger.info(f"  📝 Normalized text length: {len(normalized_text)} chars")
-        
-        # ═══════════════════════════════════════════════════════════════
-        # ADNOC PATTERNS: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
-        # Examples: 2"-CD-AC3N-8714, 2"-PL-DC3N-8700, 6"-AG-BB2A-1234
-        # ═══════════════════════════════════════════════════════════════
-        ADNOC_PATTERNS = [
-            # Pattern 1: Strict format with inch symbol (primary)
-            # Matches: 2"-CD-AC3N-8714
-            r'\b(\d{1,2})"-([A-Z]{2,3})-([A-Z0-9]{2,6})-(\d{4})\b',
-            
-            # Pattern 2: With optional spaces around hyphens
-            # Matches: 2" - CD - AC3N - 8714
-            r'\b(\d{1,2})"\s*-\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]{2,6})\s*-\s*(\d{4})\b',
-            
-            # Pattern 3: No dash after inch (OCR sometimes misses)
-            # Matches: 2"CD-AC3N-8714
-            r'\b(\d{1,2})"([A-Z]{2,3})-([A-Z0-9]{2,6})-(\d{4})\b',
-            
-            # Pattern 4: Flexible spacing with multiple hyphens
-            r'\b(\d{1,2})"\s*-+\s*([A-Z]{2,3})\s*-+\s*([A-Z0-9]{2,6})\s*-+\s*(\d{4})\b',
-            
-            # Pattern 5: Word boundary with lookahead (for embedded text)
-            r'(?:^|\s)(\d{1,2})"\s*-?\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]{2,6})\s*-\s*(\d{4})(?=\s|$|-)',
-            
-            # Pattern 6: Handle spaces within line number (OCR artifact)
-            # Matches: 2" -CD- AC3N -8714
-            r'\b(\d{1,2})"\s*-?\s*([A-Z]{2,3})\s*-?\s*([A-Z0-9]{2,6})\s*-?\s*(\d{4})\b',
-            
-            # Pattern 7: Handle inch symbol with space before dash
-            # Matches: 2" -CD-AC3N-8714 or 2 "-CD-AC3N-8714
-            r'\b(\d{1,2})\s*"\s*-?\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]{2,6})\s*-\s*(\d{4})\b',
-            
-            # Pattern 8: Handle OCR reading " as single quote or missing
-            # Try to match NUMBER-LETTERS-ALPHANUM-4DIGITS where size is small (1-2 digit)
-            r'(?:^|[^0-9])(\d{1,2})[\s"\']*-?\s*([A-Z]{2,3})\s*-\s*([A-Z][A-Z0-9]{1,5})\s*-\s*(\d{4})(?:[^0-9]|$)',
-        ]
-        
-        found_lines = []
-        seen_lines = set()
-        rejected = []
-        
-        # ═══════════════════════════════════════════════════════════════
-        # STEP 4: Search in BOTH full text AND line-by-line
-        # ═══════════════════════════════════════════════════════════════
-        # OCR text can have line breaks that break patterns, so search both ways
-        text_sources = [normalized_text]
-        
-        # Also split by newlines and search each line
-        lines = normalized_text.split('\n')
-        text_sources.extend(lines)
-        
-        # Also try joining lines that might be split
-        for i in range(len(lines) - 1):
-            combined = lines[i].strip() + ' ' + lines[i+1].strip()
-            text_sources.append(combined)
-        
-        for source_text in text_sources:
-            for pattern_idx, pattern in enumerate(ADNOC_PATTERNS, 1):
-                matches = re.finditer(pattern, source_text, re.IGNORECASE)
-                
-                for match in matches:
-                    # Extract components
-                    size = match.group(1).strip()
-                    fluid = match.group(2).strip().upper()
-                    pipr_class = match.group(3).strip().upper()
-                    seq = match.group(4).strip()
-                    
-                    # VALIDATION for ADNOC format (relaxed for OCR)
-                    
-                    # 1. SIZE: Must be 1-2 digits
-                    if not size or not size.isdigit() or len(size) > 2:
-                        rejected.append(f"Invalid size: {size}")
-                        continue
-                    
-                    # 2. FLUID: Must be 2-3 uppercase letters
-                    if not fluid or not fluid.isalpha() or len(fluid) < 2 or len(fluid) > 3:
-                        rejected.append(f"Invalid fluid code: {fluid}")
-                        continue
-                    
-                    # 3. PIPING CLASS: Must be alphanumeric (2-6 chars), starts with letter
-                    if not pipr_class or len(pipr_class) < 2 or len(pipr_class) > 6:
-                        rejected.append(f"Invalid piping class: {pipr_class}")
-                        continue
-                    # Allow alphanumeric piping class
-                    if not re.match(r'^[A-Z][A-Z0-9]*$', pipr_class):
-                        rejected.append(f"Invalid piping class format: {pipr_class}")
-                        continue
-                    
-                    # 4. SEQUENCE: MUST be exactly 4 digits
-                    if not seq or not seq.isdigit() or len(seq) != 4:
-                        rejected.append(f"Invalid sequence (must be 4 digits): {seq}")
-                        continue
-                    
-                    # Build ADNOC line number: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
-                    line_number = f'{size}"-{fluid}-{pipr_class}-{seq}'
-                    
-                    # Deduplicate
-                    if line_number in seen_lines:
-                        continue
-                    seen_lines.add(line_number)
-                    
-                    # Create line entry with ADNOC format identifier
-                    line_entry = {
-                        'line_number': line_number,
-                        'size': f'{size}"',
-                        'fluid_code': fluid,
-                        'pipr_class': pipr_class,
-                        'sequence_no': seq,
-                        'insulation': '',  # ADNOC format has no insulation
-                        'area': '',  # ADNOC format has no area
-                        'page': page_num,
-                        'from_equipment': '',
-                        'to_equipment': '',
-                        'format': 'Abu Dhabi Oil Co. Ltd',  # Format identifier
-                        'extraction_method': 'regex_adnoc',
-                        'original_detection': match.group(0).strip()
-                    }
-                    
-                    found_lines.append(line_entry)
-        
-        # Log summary
-        if rejected and len(rejected) <= 20:
-            logger.info(f"  ⚠️ ADNOC: Rejected {len(rejected)} potential matches:")
-            for r in rejected[:10]:
-                logger.info(f"     - {r}")
-        elif rejected:
-            logger.info(f"  ⚠️ ADNOC: Rejected {len(rejected)} potential matches (showing first 10):")
-            for r in rejected[:10]:
-                logger.info(f"     - {r}")
-        
-        logger.info(f"  🎯 ADNOC REGEX found {len(found_lines)} unique line numbers")
         return found_lines
     
     def parse_with_openai(self, extracted_text: str, page_num: int) -> List[Dict]:
@@ -1456,7 +1206,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
             pdf_path: Path to P&ID PDF file
             include_area: If True, detect format with Area (SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS)
                          If False, detect standard format (SIZE-FLUID-SEQUENCE-PIPECLASS)
-            format_type: 'onshore' (default), 'offshore', 'general', or 'adnoc' (Abu Dhabi Oil Co. Ltd)
+            format_type: 'onshore' (default) or 'offshore' (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)
             
         Returns:
             List of validated line items
@@ -1471,9 +1221,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
             logger.info(f"📄 File: {pdf_path}")
             logger.info(f"📄 Pages: {len(doc)}")
             logger.info(f"🧠 Strategy: OCR ALL TEXT → AI INTELLIGENCE → STRICT VALIDATION")
-            if format_type == 'adnoc':
-                format_msg = 'ADNOC - Abu Dhabi Oil Co. Ltd (SIZE"-FLUID-PIPINGCLASS-SEQUENCE)'
-            elif format_type == 'offshore':
+            if format_type == 'offshore':
                 format_msg = 'OFFSHORE (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)'
             elif include_area:
                 format_msg = 'WITH AREA (SIZE"-AREA-FLUID-SEQ-PIPECLASS)'
@@ -1487,9 +1235,8 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 logger.info(f"📄 PAGE {page_num + 1}/{len(doc)}")
                 logger.info(f"{'='*60}")
                 
-                # High-resolution rendering — scale from module_config.json → ocr_resolution_scale
-                # (default 3.0x; was 2.5x, bumped to catch small text on large P&IDs)
-                pix = page.get_pixmap(matrix=fitz.Matrix(self.ocr_resolution_scale, self.ocr_resolution_scale))
+                # High-resolution rendering (2.5x for crisp text)
+                pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 img = img.convert('L')  # Grayscale for better OCR
                 
