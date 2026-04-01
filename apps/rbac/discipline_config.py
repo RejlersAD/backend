@@ -31,7 +31,9 @@ class DisciplineAccessConfig:
     # Alias mapping for real-world department values from HR/user onboarding.
     DISCIPLINE_ALIASES = {
         'process engineer': 'process_engineering',
+        'process_engineer': 'process_engineering',
         'process engineers': 'process_engineering',
+        'process_engineers': 'process_engineering',
         'process engineering': 'process_engineering',
         'process-engineering': 'process_engineering',
         'process_eng': 'process_engineering',
