@@ -1073,10 +1073,7 @@ print("=" * 60 + "\n")
 from apps.rbac.discipline_config import DisciplineAccessConfig
 
 # Default soft-coded configuration (can be overridden via environment)
-DISCIPLINE_MODULE_ACCESS = getattr(
-    settings, 'DISCIPLINE_MODULE_ACCESS',
-    DisciplineAccessConfig.DEFAULT_DISCIPLINE_MODULES
-)
+DISCIPLINE_MODULE_ACCESS = DisciplineAccessConfig.DEFAULT_DISCIPLINE_MODULES
 
 print("\n" + "=" * 60)
 print("DISCIPLINE-BASED ACCESS CONTROL (SOFT-CODED RBAC)")

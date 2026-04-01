@@ -5,6 +5,7 @@ Enables flexible, runtime-configurable access control for 300+ users
 """
 import logging
 import json
+import re
 from functools import lru_cache
 from django.conf import settings
 from django.core.cache import cache
@@ -26,6 +27,17 @@ class DisciplineAccessConfig:
     # Cache timeout (1 hour) - config changes propagate within 1 hour
     CACHE_TIMEOUT = 3600
     CACHE_KEY = 'discipline_module_access_config'
+
+    # Alias mapping for real-world department values from HR/user onboarding.
+    DISCIPLINE_ALIASES = {
+        'process engineer': 'process_engineering',
+        'process engineers': 'process_engineering',
+        'process engineering': 'process_engineering',
+        'process-engineering': 'process_engineering',
+        'process_eng': 'process_engineering',
+        'process': 'process_engineering',
+        'proc eng': 'process_engineering',
+    }
     
     # Default configuration - used as fallback
     DEFAULT_DISCIPLINE_MODULES = {
@@ -257,11 +269,16 @@ class DisciplineAccessConfig:
             logger.warning(f"[DisciplineAccess] Module config not found: {module_code}")
             return False
         
-        # Check discipline access
-        user_discipline = user_profile.department or ''
-        accessible_disciplines = module_config.get('accessible_by_disciplines', [])
-        
-        if user_discipline.lower() in [d.lower() for d in accessible_disciplines]:
+        # Check discipline access (normalized + alias-aware)
+        user_discipline_raw = user_profile.department or ''
+        user_discipline = cls._normalize_discipline(user_discipline_raw)
+        accessible_disciplines = {
+            cls._normalize_discipline(d)
+            for d in module_config.get('accessible_by_disciplines', [])
+            if d
+        }
+
+        if user_discipline in accessible_disciplines:
             logger.info(f"[DisciplineAccess] User discipline '{user_discipline}' has access to {module_code}")
             return True
         
@@ -275,10 +292,18 @@ class DisciplineAccessConfig:
                 return True
         
         logger.warning(
-            f"[DisciplineAccess] User '{user_profile.user.email}' (discipline: {user_discipline}) "
+            f"[DisciplineAccess] User '{user_profile.user.email}' (discipline: {user_discipline_raw} -> {user_discipline}) "
             f"NOT granted access to {module_code}"
         )
         return False
+
+    @classmethod
+    def _normalize_discipline(cls, value: str) -> str:
+        """Normalize free-text department names to canonical discipline codes."""
+        if not value:
+            return ''
+        normalized = re.sub(r'[^a-z0-9]+', '_', value.strip().lower()).strip('_')
+        return cls.DISCIPLINE_ALIASES.get(normalized, normalized)
     
     @classmethod
     def get_user_accessible_modules(cls, user_profile):
