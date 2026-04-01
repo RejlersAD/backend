@@ -46,6 +46,13 @@ class RegexClassifier:
         re.IGNORECASE
     )
     
+    # ADNOC LINE NUMBER (Abu Dhabi Oil Co. Ltd): SIZE"-FLUID-PIPINGCLASS-SEQUENCE
+    # Examples: 6"-CD-AC3N-8256, 8"-HO-BD2A-1023, 10"-AG-XY1Z-9999
+    ADNOC_LINE_NUMBER_PATTERN = re.compile(
+        r'^(\d{1,2})"\s*[-–—]\s*([A-Z]{2,3})\s*[-–—]\s*([A-Z0-9]{2,6})\s*[-–—]\s*(\d{4})$',
+        re.IGNORECASE
+    )
+    
     # EQUIPMENT TAG: Letter-Number format (NOT from line numbers)
     # Examples: P-3610, V-201, E-301
     # Exclusion: D-XXXX where XXXX >= 1000 (drain lines)
@@ -135,6 +142,10 @@ class RegexClassifier:
         # RULE 2: Line numbers (HIGHEST PRIORITY - starts with size)
         if self.LINE_NUMBER_PATTERN.match(token):
             return (ElementType.LINE_NUMBER, "starts with pipe size")
+        
+        # RULE 2b: ADNOC Line numbers (Abu Dhabi Oil Co. Ltd format)
+        if self.ADNOC_LINE_NUMBER_PATTERN.match(token):
+            return (ElementType.LINE_NUMBER, "ADNOC format line number")
         
         # RULE 3: Drawing numbers (NOT line numbers)
         if self.DRAWING_NUMBER_PATTERN.match(token):

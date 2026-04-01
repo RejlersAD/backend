@@ -375,12 +375,23 @@ class PIDLineExtractorV2:
         Line format (offshore): AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
         Example: 604-HO-8-BC2GA0-1071-H
         
+        Line format (adnoc - Abu Dhabi Oil Co. Ltd): SIZE"-FLUID-PIPINGCLASS-SEQUENCE
+        Example: 6"-CD-AC3N-8256, 8"-HO-BD2A-1023
+        
         This is MORE RELIABLE than OpenAI because:
         - Deterministic pattern matching
         - No API failures or hallucinations
         - Faster processing
         - Consistent results
         """
+        # ═══════════════════════════════════════════════════════════════
+        # NEW: Abu Dhabi Oil Co. Ltd FORMAT (ADNOC)
+        # Pattern: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
+        # Examples: 6"-CD-AC3N-8256, 8"-HO-BD2A-1023, 10"-AG-XY1Z-9999
+        # ═══════════════════════════════════════════════════════════════
+        if format_type == 'adnoc':
+            return self._parse_adnoc_format(extracted_text, page_num)
+        
         # 🔧 GENERAL FORMAT FIX: Auto-detect area by trying both patterns
         if format_type == 'general':
             # Try WITH AREA first (more specific pattern), then WITHOUT AREA
@@ -662,6 +673,132 @@ class PIDLineExtractorV2:
                 logger.info(f"     - {r}")
         
         logger.info(f"  🎯 REGEX found {len(found_lines)} unique line numbers from {len(patterns)} patterns")
+        return found_lines
+    
+    def _parse_adnoc_format(self, extracted_text: str, page_num: int) -> List[Dict]:
+        """
+        ═══════════════════════════════════════════════════════════════
+        NEW: Abu Dhabi Oil Co. Ltd FORMAT PARSER
+        ═══════════════════════════════════════════════════════════════
+        
+        Pattern: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
+        Examples: 6"-CD-AC3N-8256, 8"-HO-BD2A-1023, 10"-AG-XY1Z-9999
+        
+        Field breakdown:
+        - Line Size: Number + " (e.g., 6", 8", 10")
+        - Fluid Code: 2-3 uppercase letters (e.g., CD, HO, AG)
+        - Piping Class: Alphanumeric (e.g., AC3N, BD2A, XY1Z)
+        - Sequence Number: Exactly 4 digits (e.g., 8256, 1023, 9999)
+        
+        ⚠️ EDGE CASES (MUST REJECT):
+        - Sequence not 4 digits → REJECT
+        - No inch symbol (") → REJECT
+        - Lowercase formats → REJECT
+        - Partial matches → REJECT
+        
+        This format runs AFTER existing offshore/onshore/general checks
+        """
+        logger.info(f"  🔍 Using REGEX pattern matching on OCR text (ADNOC - Abu Dhabi Oil Co. Ltd)")
+        logger.info(f"  📋 ADNOC format: SIZE\"-FLUID-PIPINGCLASS-SEQUENCE")
+        logger.info(f"  📋 Examples: 6\"-CD-AC3N-8256, 8\"-HO-BD2A-1023, 10\"-AG-XY1Z-9999")
+        
+        # Normalize text (same as other formats)
+        normalized_text = extracted_text
+        for char in ['=', '~', '—', '–', '―', '─', '|', '/', '°', '″', '\'']:
+            normalized_text = normalized_text.replace(char, '-')
+        normalized_text = re.sub(r'-{2,}', '-', normalized_text)
+        normalized_text = re.sub(r'\s+-\s+', '-', normalized_text)
+        
+        # ADNOC PATTERN: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
+        # ^(\d+)"-([A-Z]{2,3})-([A-Z0-9]+)-(\d{4})$
+        ADNOC_PATTERNS = [
+            # Pattern 1: Strict format with inch symbol (primary)
+            r'\b(\d{1,2})"-([A-Z]{2,3})-([A-Z0-9]{2,6})-(\d{4})\b',
+            
+            # Pattern 2: With optional spaces around hyphens
+            r'\b(\d{1,2})"\s*-\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]{2,6})\s*-\s*(\d{4})\b',
+            
+            # Pattern 3: Flexible spacing with multiple hyphens
+            r'\b(\d{1,2})"\s*-+\s*([A-Z]{2,3})\s*-+\s*([A-Z0-9]{2,6})\s*-+\s*(\d{4})\b',
+            
+            # Pattern 4: Word boundary with lookahead
+            r'(?:^|\s)(\d{1,2})"\s*-\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]{2,6})\s*-\s*(\d{4})(?=\s|$|-)',
+        ]
+        
+        found_lines = []
+        seen_lines = set()
+        rejected = []
+        
+        for pattern_idx, pattern in enumerate(ADNOC_PATTERNS, 1):
+            matches = re.finditer(pattern, normalized_text, re.IGNORECASE)
+            
+            for match in matches:
+                # Extract components
+                size = match.group(1).strip()
+                fluid = match.group(2).strip().upper()
+                pipr_class = match.group(3).strip().upper()
+                seq = match.group(4).strip()
+                
+                # STRICT VALIDATION for ADNOC format
+                
+                # 1. SIZE: Must be 1-2 digits
+                if not size or not size.isdigit() or len(size) > 2:
+                    rejected.append(f"Invalid size: {size}")
+                    continue
+                
+                # 2. FLUID: Must be 2-3 uppercase letters
+                if not fluid or not fluid.isalpha() or len(fluid) < 2 or len(fluid) > 3:
+                    rejected.append(f"Invalid fluid code: {fluid}")
+                    continue
+                
+                # 3. PIPING CLASS: Must be alphanumeric (2-6 chars)
+                if not pipr_class or not pipr_class.isalnum() or len(pipr_class) < 2 or len(pipr_class) > 6:
+                    rejected.append(f"Invalid piping class: {pipr_class}")
+                    continue
+                
+                # 4. SEQUENCE: MUST be exactly 4 digits
+                if not seq or not seq.isdigit() or len(seq) != 4:
+                    rejected.append(f"Invalid sequence (must be 4 digits): {seq}")
+                    continue
+                
+                # Build ADNOC line number: SIZE"-FLUID-PIPINGCLASS-SEQUENCE
+                line_number = f'{size}"-{fluid}-{pipr_class}-{seq}'
+                
+                # Deduplicate
+                if line_number in seen_lines:
+                    continue
+                seen_lines.add(line_number)
+                
+                # Create line entry with ADNOC format identifier
+                line_entry = {
+                    'line_number': line_number,
+                    'size': f'{size}"',
+                    'fluid_code': fluid,
+                    'pipr_class': pipr_class,
+                    'sequence_no': seq,
+                    'insulation': '',  # ADNOC format has no insulation
+                    'area': '',  # ADNOC format has no area
+                    'page': page_num,
+                    'from_equipment': '',
+                    'to_equipment': '',
+                    'format': 'Abu Dhabi Oil Co. Ltd',  # Format identifier
+                    'extraction_method': 'regex_adnoc',
+                    'original_detection': match.group(0).strip()
+                }
+                
+                found_lines.append(line_entry)
+        
+        # Log summary
+        if rejected and len(rejected) <= 20:
+            logger.info(f"  ⚠️ ADNOC: Rejected {len(rejected)} potential matches:")
+            for r in rejected[:10]:
+                logger.info(f"     - {r}")
+        elif rejected:
+            logger.info(f"  ⚠️ ADNOC: Rejected {len(rejected)} potential matches (showing first 10):")
+            for r in rejected[:10]:
+                logger.info(f"     - {r}")
+        
+        logger.info(f"  🎯 ADNOC REGEX found {len(found_lines)} unique line numbers")
         return found_lines
     
     def parse_with_openai(self, extracted_text: str, page_num: int) -> List[Dict]:
@@ -1259,7 +1396,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
             pdf_path: Path to P&ID PDF file
             include_area: If True, detect format with Area (SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS)
                          If False, detect standard format (SIZE-FLUID-SEQUENCE-PIPECLASS)
-            format_type: 'onshore' (default) or 'offshore' (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)
+            format_type: 'onshore' (default), 'offshore', 'general', or 'adnoc' (Abu Dhabi Oil Co. Ltd)
             
         Returns:
             List of validated line items
@@ -1274,7 +1411,9 @@ Example 4: "10\"-PG-0003-033842-X-H"
             logger.info(f"📄 File: {pdf_path}")
             logger.info(f"📄 Pages: {len(doc)}")
             logger.info(f"🧠 Strategy: OCR ALL TEXT → AI INTELLIGENCE → STRICT VALIDATION")
-            if format_type == 'offshore':
+            if format_type == 'adnoc':
+                format_msg = 'ADNOC - Abu Dhabi Oil Co. Ltd (SIZE"-FLUID-PIPINGCLASS-SEQUENCE)'
+            elif format_type == 'offshore':
                 format_msg = 'OFFSHORE (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)'
             elif include_area:
                 format_msg = 'WITH AREA (SIZE"-AREA-FLUID-SEQ-PIPECLASS)'

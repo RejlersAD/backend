@@ -61,6 +61,14 @@ class StrictElementClassifier:
         re.IGNORECASE
     )
     
+    # ADNOC LINE NUMBER (Abu Dhabi Oil Co. Ltd): SIZE"-FLUID-PIPINGCLASS-SEQUENCE
+    # Examples: 6"-CD-AC3N-8256, 8"-HO-BD2A-1023, 10"-AG-XY1Z-9999
+    # Pattern: number + " + dash + 2-3 letters + dash + alphanumeric + dash + 4 digits
+    ADNOC_LINE_NUMBER_PATTERN = re.compile(
+        r'^(\d{1,2})"\s*[-–—]\s*([A-Z]{2,3})\s*[-–—]\s*([A-Z0-9]{2,6})\s*[-–—]\s*(\d{4})$',
+        re.IGNORECASE
+    )
+    
     # EQUIPMENT TAG: Letter-Number (NOT starting with size)
     # Examples: P-3610, V-201, E-301, D-255 (but NOT D-6155 from line number)
     # Rule: D-XXXX where XXXX >= 1000 is a DRAIN LINE, not equipment
@@ -174,6 +182,21 @@ class StrictElementClassifier:
                 element_type=ElementType.LINE_NUMBER,
                 confidence="high",
                 reason=f'Starts with pipe size {size}" - NEVER equipment',
+                context_snippet=context
+            )
+        
+        # ═══════════════════════════════════════════════════════════
+        # RULE 4b: ADNOC LINE NUMBERS (Abu Dhabi Oil Co. Ltd format)
+        # Pattern: SIZE"-FLUID-PIPINGCLASS-SEQUENCE (e.g., 6"-CD-AC3N-8256)
+        # ═══════════════════════════════════════════════════════════
+        adnoc_match = self.ADNOC_LINE_NUMBER_PATTERN.match(text)
+        if adnoc_match:
+            size, fluid_code, piping_class, sequence = adnoc_match.groups()
+            return ClassifiedElement(
+                raw_text=text,
+                element_type=ElementType.LINE_NUMBER,
+                confidence="high",
+                reason=f'ADNOC format: {size}"-{fluid_code}-{piping_class}-{sequence}',
                 context_snippet=context
             )
         

@@ -181,7 +181,7 @@ def process_pid_upload_async(
         storage_type: 'local' or 's3'
         s3_url: S3 URL if stored in S3
         include_area: Include area field in line number format
-        format_type: 'onshore', 'offshore', or 'general'
+        format_type: 'onshore', 'offshore', 'general', or 'adnoc' (Abu Dhabi Oil Co. Ltd)
         enrichment_files: Optional dict with HMB/PMS/NACE file data
         
     Returns:
@@ -707,7 +707,7 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
         file_path: Absolute path to the temporary PDF file
         filename: Original uploaded filename (for logging)
         include_area: Include area code in line number format
-        format_type: 'onshore', 'offshore', or 'general'
+        format_type: 'onshore', 'offshore', 'general', or 'adnoc' (Abu Dhabi Oil Co. Ltd)
 
     Returns:
         dict with success, total_lines, data, columns, message
