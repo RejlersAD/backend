@@ -4,6 +4,7 @@ Smart data validation and transformation.
 """
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from .models import UserProfile
 
 User = get_user_model()
@@ -67,6 +68,8 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         password = validated_data.pop('password')
         user = User.objects.create_user(**validated_data)
         user.set_password(password)
+        user.last_password_change = timezone.now()
+        user.must_reset_password = False
         user.save()
         
         # Create associated profile

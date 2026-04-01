@@ -459,6 +459,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             user.first_name = first_name
             user.last_name = last_name
             user.set_password(password)
+            user.last_password_change = timezone.now()
             user.phone_number = phone
             user.is_active = True
             user.is_superuser = is_super_admin
@@ -666,7 +667,11 @@ class UserProfileSerializer(serializers.ModelSerializer):
             instance.user.last_name = validated_data.pop('last_name')
             instance.user.save()
         if 'password' in validated_data:
+            from django.utils import timezone
             instance.user.set_password(validated_data.pop('password'))
+            instance.user.last_password_change = timezone.now()
+            instance.user.must_reset_password = False
+            instance.user.is_first_login = False
             instance.user.save()
         
         # Update profile

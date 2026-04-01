@@ -169,17 +169,47 @@ def upload_pid(request):
                 from apps.pid_verification.services.extraction import extract_drawing
                 from apps.pid_verification.services.graph_builder import build_graph
                 from apps.pid_verification.services.rule_engine import run_rules
+                from apps.pid_verification.models import PIDVDrawing, PIDVFinding
                 
                 doc = PIDVDocument.objects.get(document_id=doc_id)
                 doc.status = PIDVDocument.Status.PROCESSING
                 doc.save(update_fields=["status", "updated_at"])
                 
-                # Run synchronous pipeline
-                doc.status = PIDVDocument.Status.PROCESSING
-                segment_document(doc)
-                extract_drawing(doc)
-                build_graph(doc)
-                run_rules(doc)
+                # Run synchronous pipeline with same deterministic flow as Celery task
+                file_path = doc.original_file.path
+                segments = segment_document(str(doc.document_id), file_path)
+
+                for seg in segments:
+                    drawing_obj, _ = PIDVDrawing.objects.get_or_create(
+                        document=doc,
+                        drawing_id=seg.drawing_id,
+                        defaults={
+                            'title': seg.title,
+                            'page_index': seg.page_index,
+                            'metadata': seg.metadata,
+                        },
+                    )
+                    drawing_obj.findings.all().delete()
+
+                    extraction = extract_drawing(file_path, page_index=seg.page_index)
+                    graph = build_graph(extraction)
+                    rule_findings = run_rules(extraction, graph)
+
+                    bulk = []
+                    for sl, rf in enumerate(rule_findings, start=1):
+                        bulk.append(PIDVFinding(
+                            drawing=drawing_obj,
+                            sl_no=sl,
+                            category=rf.category,
+                            rule_id=rf.rule_id,
+                            issue_observed=rf.issue_observed,
+                            action_required=rf.action_required,
+                            evidence=rf.evidence,
+                            direction=rf.direction,
+                            severity=rf.severity,
+                            status='open',
+                        ))
+                    PIDVFinding.objects.bulk_create(bulk)
                 
                 doc.status = PIDVDocument.Status.COMPLETED
                 doc.save(update_fields=["status", "updated_at"])
@@ -190,7 +220,7 @@ def upload_pid(request):
                     doc.status = PIDVDocument.Status.FAILED
                     doc.error_message = f"Sync processing failed: {e}"
                     doc.save(update_fields=["status", "error_message", "updated_at"])
-                except:
+                except Exception:
                     pass
         
         # Use robust queue service with fallback
