@@ -99,46 +99,6 @@ class PIDLineExtractorV2:
         
         Solution: Force replace ALL 'O' with '0' everywhere
         - In line numbers
-        - In fluid codes  
-        - In pipe classes
-        - In ALL extracted fields
-        
-        Example:
-        - "AS5NLO-2014" → "AS5NL0-2014"
-        - "604-RO-4-AN1NLO-0011" → "604-R0-4-AN1NL0-0011"
-        
-        This eliminates duplicates automatically:
-        - Before: ["AS5NLO-2014", "AS5NL0-2014"] (2 entries)
-        - After: ["AS5NL0-2014"] (1 entry)
-        
-        Args:
-            text: Raw OCR text that may contain letter 'O'
-            
-        Returns:
-            Normalized text with all 'O' → '0'
-        """
-        if not text:
-            return text
-        
-        # Convert to uppercase first for consistency
-        normalized = text.upper()
-        
-        # Force replace ALL 'O' (letter) with '0' (digit)
-        normalized = normalized.replace('O', '0')
-        
-        return normalized
-    
-    def _normalize_ocr_text(self, text: str) -> str:
-        """
-        🔧 STRICT OCR NORMALIZATION - Force O → 0 conversion
-        
-        Domain Rule: Line numbers NEVER contain letter 'O', only digit '0'
-        
-        Problem: OCR confuses:
-        - 'O' (letter O) ↔ '0' (digit zero)
-        
-        Solution: Force replace ALL 'O' with '0' everywhere
-        - In line numbers
         - In fluid codes
         - In pipe classes
         - In ALL extracted fields
@@ -632,9 +592,12 @@ class PIDLineExtractorV2:
                         rejected.append(f"Invalid ADNOC size: {size}")
                         continue
                     
-                    # 2. FLUID: Must be 2-3 uppercase letters
-                    if not fluid or not fluid.isalpha() or len(fluid) < 2 or len(fluid) > 3:
+                    # 2. FLUID: Must be 2-3 uppercase letters/digits (after O→0 normalization)
+                    if not fluid or len(fluid) < 2 or len(fluid) > 3:
                         rejected.append(f"Invalid ADNOC fluid: {fluid}")
+                        continue
+                    if not re.match(r'^[A-Z0-9]+$', fluid):
+                        rejected.append(f"Invalid ADNOC fluid characters: {fluid}")
                         continue
                     
                     # 3. SEQUENCE: Must be exactly 4 digits
@@ -688,10 +651,14 @@ class PIDLineExtractorV2:
                 else:
                     area = ''  # Ensure area is empty for without-area format
                 
-                # 3. FLUID: Must be 1-3 uppercase letters
+                # 3. FLUID: Must be 1-3 uppercase letters/digits (after O→0 normalization)
                 max_fluid_len = 3 if (include_area or format_type == 'offshore') else 2
-                if not fluid or not fluid.isalpha() or len(fluid) > max_fluid_len:
+                if not fluid or len(fluid) > max_fluid_len:
                     rejected.append(f"Invalid fluid: {fluid}")
+                    continue
+                # Fluid should be mostly alphabetic (allow digits from normalization)
+                if not re.match(r'^[A-Z0-9]+$', fluid):
+                    rejected.append(f"Invalid fluid characters: {fluid}")
                     continue
                 
                 # 4. SEQUENCE: Must be 3-5 digits for offshore/area formats (ADNOC uses 3-4 digits like 0007, 0011), 4 for standard
@@ -723,9 +690,12 @@ class PIDLineExtractorV2:
                         rejected.append(f"Invalid pipe class (not numeric): {pipr_class}")
                         continue
                 
-                # 6. INSULATION: Optional, must be 1-2 letters if present
-                if insulation and (not insulation.isalpha() or len(insulation) > 2):
-                    rejected.append(f"Invalid insulation: {insulation}")
+                # 6. INSULATION: Optional, must be 1-2 letters/digits if present (after O→0 normalization)
+                if insulation and len(insulation) > 2:
+                    rejected.append(f"Invalid insulation length: {insulation}")
+                    continue
+                if insulation and not re.match(r'^[A-Z0-9]+$', insulation):
+                    rejected.append(f"Invalid insulation characters: {insulation}")
                     continue
                 
                 # Build line number string (dynamic based on segments - supports 5 or 6 segments)
@@ -750,6 +720,9 @@ class PIDLineExtractorV2:
                         line_number = f"{size}-{fluid}-{seq}-{pipr_class}-{insulation}"
                     else:
                         line_number = f"{size}-{fluid}-{seq}-{pipr_class}"
+                
+                # 🔧 FINAL NORMALIZATION: Ensure complete O→0 conversion in final line number
+                line_number = self._normalize_ocr_text(line_number)
                 
                 # Deduplicate
                 if line_number in seen_lines:
