@@ -158,6 +158,9 @@ INSTALLED_APPS = [
     'apps.electrical_datasheet',  # Electrical Datasheet - Transformer & Switchgear Technical Data Sheets
     'apps.usage_tracking',  # Usage Tracking & Metering - Internal Analytics Dashboard
     'apps.wrench_integration',  # Wrench Project Platform Integration
+    'apps.pid_verification',   # P&ID Quality Checker — deterministic rule engine
+    'apps.pfd_quality',          # PFD Quality Checker — deterministic rule engine
+    'apps.cross_recommendation', # Cross PID/PFD recommendation bridge
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
@@ -1058,4 +1061,48 @@ print("=" * 60)
 print(f"Enabled: {ENABLE_USAGE_TRACKING}")
 print(f"Log Retention: {USAGE_LOG_RETENTION_DAYS} days")
 print(f"Cache TTL: {USAGE_CACHE_TTL} seconds")
+print("=" * 60 + "\n")
+
+# ========================================================================
+# DISCIPLINE-BASED MODULE ACCESS CONFIGURATION (Soft-Coded RBAC)
+# ========================================================================
+# Maps user disciplines/departments to module access for 300+ concurrent users
+# No code changes needed - update via Django admin or environment config
+# Supports unlimited disciplines and modules through DisciplineAccessConfig
+
+from apps.rbac.discipline_config import DisciplineAccessConfig
+
+# Default soft-coded configuration (can be overridden via environment)
+DISCIPLINE_MODULE_ACCESS = DisciplineAccessConfig.DEFAULT_DISCIPLINE_MODULES
+
+print("\n" + "=" * 60)
+print("DISCIPLINE-BASED ACCESS CONTROL (SOFT-CODED RBAC)")
+print("=" * 60)
+for module_code, config_dict in DISCIPLINE_MODULE_ACCESS.items():
+    accessible_depts = config_dict.get('accessible_by_disciplines', [])
+    print(f"  {module_code:25} → {len(accessible_depts)} department(s)")
+print("=" * 60 + "\n")
+
+# ========================================================================
+# ROBUST QUEUE SERVICE CONFIGURATION
+# ========================================================================
+# Circuit breaker settings for Celery queue reliability
+# Auto-fallback to sync processing if queue unavailable (300+ user support)
+
+QUEUE_CIRCUIT_BREAKER_MAX_FAILURES = safe_cast_int(
+    config('QUEUE_CIRCUIT_BREAKER_MAX_FAILURES', default='5'), 5
+)
+QUEUE_CIRCUIT_BREAKER_TIMEOUT = safe_cast_int(
+    config('QUEUE_CIRCUIT_BREAKER_TIMEOUT', default='300'), 300
+)
+QUEUE_MAX_RETRIES = safe_cast_int(
+    config('QUEUE_MAX_RETRIES', default='3'), 3
+)
+
+print("\n" + "=" * 60)
+print("ROBUST QUEUE SERVICE (FALLBACK)")
+print("=" * 60)
+print(f"Circuit Breaker Max Failures: {QUEUE_CIRCUIT_BREAKER_MAX_FAILURES}")
+print(f"Circuit Breaker Timeout: {QUEUE_CIRCUIT_BREAKER_TIMEOUT}s")
+print(f"Max Retries: {QUEUE_MAX_RETRIES}")
 print("=" * 60 + "\n")

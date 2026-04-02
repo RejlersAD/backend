@@ -179,6 +179,21 @@ if is_app_installed('apps.wrench_integration'):
     urlpatterns.append(path('api/v1/wrench/', include('apps.wrench_integration.urls')))
     print("[URL] ✅ Wrench Integration URLs registered")
 
+# P&ID Verification — deterministic quality checker
+if is_app_installed('apps.pid_verification'):
+    urlpatterns.append(path('api/v1/pid-verification/', include('apps.pid_verification.urls')))
+    print("[URL] ✅ P&ID Verification URLs registered")
+
+# PFD Quality Checker — deterministic rule engine
+if is_app_installed('apps.pfd_quality'):
+    urlpatterns.append(path('api/v1/pfd-quality/', include('apps.pfd_quality.urls')))
+    print("[URL] ✅ PFD Quality URLs registered")
+
+# Cross Recommendation Bridge — PID ↔ PFD smart suggestions
+if is_app_installed('apps.cross_recommendation'):
+    urlpatterns.append(path('api/v1/cross-recommendation/', include('apps.cross_recommendation.urls')))
+    print("[URL] ✅ Cross Recommendation URLs registered")
+
 # MLflow Model Orchestration API (DISABLED - not in use)
 # urlpatterns.extend([
 #     path('api/v1/mlflow/', include('apps.mlflow_integration.urls')),

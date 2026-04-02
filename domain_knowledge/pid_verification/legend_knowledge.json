@@ -1,0 +1,42 @@
+{
+  "instrument_prefixes": [
+    "AI",
+    "AT",
+    "FI",
+    "FIC",
+    "FT",
+    "FY",
+    "LI",
+    "LIC",
+    "LT",
+    "LY",
+    "PI",
+    "PIC",
+    "PT",
+    "PY",
+    "TI",
+    "TIC",
+    "TT"
+  ],
+  "valve_prefixes": [
+    "BDV",
+    "CV",
+    "FV",
+    "HV",
+    "LV",
+    "PRV",
+    "PSV",
+    "PV",
+    "SDV",
+    "TV",
+    "XV"
+  ],
+  "note_keywords": [],
+  "hold_keywords": [
+    "HOLD"
+  ],
+  "raw_line_count": 514,
+  "sources": [
+    "/tmp/legends.pdf"
+  ]
+}

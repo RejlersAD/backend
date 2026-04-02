@@ -223,3 +223,42 @@ class ReadOnly(permissions.BasePermission):
     """
     def has_permission(self, request, view):
         return request.method in permissions.SAFE_METHODS
+
+
+class HasDisciplineAccess(permissions.BasePermission):
+    """
+    Permission class to check if user has access to a module based on discipline/department
+    Soft-coded configuration for scalability with 300+ users
+    
+    Uses UserProfile.department field mapped to module access via DisciplineAccessConfig
+    
+    Usage in ViewSet:
+        permission_classes = [IsAuthenticated, HasDisciplineAccess]
+        module_required = 'pid_verification'  # or 'pfd_quality', etc.
+    
+    Configuration:
+        - No code changes needed to allow new disciplines
+        - Update DisciplineAccessConfig in apps.rbac.discipline_config
+        - Add discipline to accessible_by_disciplines list for module
+        - Cache automatically invalidates (1-hour TTL)
+    """
+    message = "Your discipline does not have access to this module."
+    
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        
+        try:
+            user_profile = request.user.rbac_profile
+        except UserProfile.DoesNotExist:
+            return False
+        
+        # Get module requirement from view
+        module_required = getattr(view, 'module_required', None)
+        if not module_required:
+            return True  # No specific module required
+        
+        # Import here to avoid circular imports
+        from .discipline_config import DisciplineAccessConfig
+        
+        return DisciplineAccessConfig.user_has_module_access(user_profile, module_required)

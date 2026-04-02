@@ -158,7 +158,27 @@ def comprehensive_health_check(request):
             'error': str(e)
         }
     
-    # 7. Security Check
+    # 7. Queue Service Check (Robust Queue with Fallback)
+    try:
+        from apps.core.queue_service import RobustQueueService
+        queue_health = RobustQueueService.get_queue_health()
+        
+        checks['services']['queue'] = {
+            'status': 'available' if queue_health['available'] else 'circuit_open',
+            'circuit_breaker_open': queue_health['circuit_breaker_open'],
+            'failures': queue_health['failures'],
+            'note': 'Falls back to sync processing' if queue_health['circuit_breaker_open'] else 'Async processing'
+        }
+        
+        if queue_health['circuit_breaker_open']:
+            checks['overall_status'] = 'degraded'  # Degraded but operational
+    except Exception as e:
+        checks['services']['queue'] = {
+            'status': 'unknown',
+            'error': str(e)
+        }
+    
+    # 8. Security Check
     try:
         checks['services']['security'] = {
             'debug_mode': settings.DEBUG,

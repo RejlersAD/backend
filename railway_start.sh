@@ -81,6 +81,27 @@ python manage.py migrate --noinput 2>&1 || {
 
 echo "================================"
 echo "✅ Pre-flight checks passed"
+echo "================================"
+
+# ── SOFT-CODED: Start Celery worker alongside Gunicorn ────────────────────
+# Controlled by CELERY_WORKER_ENABLED env var (default: true)
+# Set CELERY_WORKER_ENABLED=false to disable (e.g. dedicated Celery service)
+if [ "${CELERY_WORKER_ENABLED:-true}" = "true" ]; then
+    echo "🔧 Starting Celery worker in background..."
+    celery -A config worker \
+        --loglevel=info \
+        --concurrency="${CELERY_CONCURRENCY:-2}" \
+        --pool=prefork \
+        --max-tasks-per-child="${CELERY_MAX_TASKS_PER_CHILD:-100}" \
+        --without-heartbeat \
+        --without-mingle \
+        2>&1 | stdbuf -oL sed 's/^/[Celery] /' &
+    CELERY_PID=$!
+    echo "✅ Celery worker started (PID: ${CELERY_PID})"
+else
+    echo "⚠️  Celery worker disabled (CELERY_WORKER_ENABLED=false)"
+fi
+
 echo "🚀 Starting Gunicorn server..."
 echo "================================"
 

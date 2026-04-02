@@ -1,8 +1,154 @@
 """
 RBAC Configuration
-Centralized configuration for Role-Based Access Control system
-All RBAC settings in one place using soft coding principles
+Centralized configuration for Role-Based Access Control system.
+All RBAC settings live here — edit this file to change roles, modules, and policies.
+Follows soft-coding principles: no role/module names are hardcoded in views or logic.
+
+Cross-verified against:
+  - user_management/  (standalone RBAC microservice package)
+  - data-management/  (document/dataset microservice with append-only audit)
 """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPLETE MODULE CATALOGUE
+# Single source of truth — seed_rbac.py reads this list.
+# Each entry maps to Module.code in the DB.
+# ─────────────────────────────────────────────────────────────────────────────
+ALL_MODULES_CATALOGUE = [
+    # ── Core Engineering ──────────────────────────────────────────────────
+    {'code': 'pid_analysis',           'name': 'P&ID Analysis',               'icon': 'FileText',    'order': 1,  'description': 'P&ID document analysis and processing'},
+    {'code': 'pfd_to_pid',             'name': 'PFD to P&ID Converter',        'icon': 'RefreshCw',   'order': 2,  'description': 'AI-powered conversion of PFD to P&ID drawings'},
+    {'code': 'crs_documents',          'name': 'CRS Document Management',      'icon': 'FolderOpen',  'order': 3,  'description': 'Upload and manage CRS documents with AI analysis'},
+    {'code': 'designiq',               'name': 'DesignIQ',                     'icon': 'Cpu',         'order': 4,  'description': 'AI-powered design intelligence and PFD verification'},
+    {'code': 'qhse',                   'name': 'QHSE Management',              'icon': 'Shield',      'order': 5,  'description': 'Quality, Health, Safety and Environment project management'},
+    # ── Discipline Datasheets ─────────────────────────────────────────────
+    {'code': 'process_datasheet',      'name': 'Process Datasheet',            'icon': 'FileText',    'order': 10, 'description': 'Process equipment datasheets — MOV, SDV, pumps, pressure instruments'},
+    {'code': 'electrical_datasheet',   'name': 'Electrical Datasheet',         'icon': 'Zap',         'order': 11, 'description': 'Electrical equipment and SLD-based datasheet generation'},
+    {'code': 'electrical_sld',         'name': 'Electrical SLD',               'icon': 'Zap',         'order': 12, 'description': 'Single Line Diagram analysis and tagging'},
+    {'code': 'instrument_datasheet',   'name': 'Instrument Datasheet',         'icon': 'Activity',    'order': 13, 'description': 'Instrument equipment datasheets and tag lists'},
+    {'code': 'instrument_index',       'name': 'Instrument Index',             'icon': 'List',        'order': 14, 'description': 'AI extraction of instrument index from P&ID drawings'},
+    {'code': 'mechanical_datasheet',   'name': 'Mechanical Datasheet',         'icon': 'Tool',        'order': 15, 'description': 'Mechanical equipment datasheets and inspection records'},
+    {'code': 'civil_datasheet',        'name': 'Civil Datasheet',              'icon': 'Home',        'order': 16, 'description': 'Civil and structural engineering datasheets'},
+    {'code': 'piping_datasheet',       'name': 'Piping Datasheet',             'icon': 'GitBranch',   'order': 17, 'description': 'Piping material specifications and critical line list'},
+    {'code': 'piping_pms',             'name': 'Piping Material Specification', 'icon': 'Database',   'order': 18, 'description': 'Piping material specification management'},
+    {'code': 'digitization_datasheet', 'name': 'Digitization Datasheet',       'icon': 'Scan',        'order': 19, 'description': 'AI-powered digitization of legacy datasheets'},
+    {'code': 'spec_customization',     'name': 'Spec Customization',           'icon': 'Settings',    'order': 20, 'description': 'Engineering specification customization tools'},
+    # ── Admin / Platform ─────────────────────────────────────────────────
+    {'code': 'user_mgmt',              'name': 'User Management',              'icon': 'Users',       'order': 50, 'description': 'Manage users, roles, and permissions'},
+    {'code': 'org_settings',           'name': 'Organization Settings',        'icon': 'Settings',    'order': 51, 'description': 'Configure organization settings and preferences'},
+    {'code': 'audit_logs',             'name': 'Audit Logs',                   'icon': 'FileSearch',  'order': 52, 'description': 'View system audit logs and activity (append-only per data-management spec)'},
+    {'code': 'file_storage',           'name': 'File Storage',                 'icon': 'Database',    'order': 53, 'description': 'Manage files and documents in S3'},
+    {'code': 'reports',                'name': 'Reports & Analytics',          'icon': 'BarChart',    'order': 54, 'description': 'Generate reports and view analytics'},
+    {'code': 'api_access',             'name': 'API Access',                   'icon': 'Code',        'order': 55, 'description': 'Access REST APIs programmatically'},
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SYSTEM ROLES CONFIGURATION
+# All system roles with their display metadata.
+# Seed and migrations read this — never hardcode role names elsewhere.
+#
+# level hierarchy (from user_management package spec):
+#   1 = Super Admin  |  2 = Admin  |  3 = Manager
+#   4 = Engineer     |  5 = Reviewer  |  6 = Viewer
+# ─────────────────────────────────────────────────────────────────────────────
+SYSTEM_ROLES_CONFIG = [
+    {
+        'code': 'super_admin',
+        'name': 'Super Administrator',
+        'level': 1,
+        'description': 'Full system access — manages all organizations and users. Bypasses all module checks.',
+        'is_system_role': True,
+        'badge_color': 'red',
+    },
+    {
+        'code': 'admin',
+        'name': 'Administrator',
+        'level': 2,
+        'description': 'Organization administrator — manages users, roles, modules, and settings.',
+        'is_system_role': True,
+        'badge_color': 'orange',
+    },
+    {
+        'code': 'process_engineer',
+        'name': 'Process Engineer',
+        'level': 4,
+        'description': 'Process discipline engineer — access to process datasheets, P&ID, PFD tools.',
+        'is_system_role': True,
+        'badge_color': 'blue',
+    },
+    {
+        'code': 'electrical_engineer',
+        'name': 'Electrical Engineer',
+        'level': 4,
+        'description': 'Electrical discipline engineer — access to electrical datasheets and SLD analysis.',
+        'is_system_role': True,
+        'badge_color': 'yellow',
+    },
+    {
+        'code': 'instrument_engineer',
+        'name': 'Instrument Engineer',
+        'level': 4,
+        'description': 'Instrument discipline engineer — access to instrument datasheets and index.',
+        'is_system_role': True,
+        'badge_color': 'purple',
+    },
+    {
+        'code': 'mechanical_engineer',
+        'name': 'Mechanical Engineer',
+        'level': 4,
+        'description': 'Mechanical discipline engineer — access to mechanical datasheets.',
+        'is_system_role': True,
+        'badge_color': 'gray',
+    },
+    {
+        'code': 'civil_engineer',
+        'name': 'Civil Engineer',
+        'level': 4,
+        'description': 'Civil/structural discipline engineer — access to civil datasheets.',
+        'is_system_role': True,
+        'badge_color': 'green',
+    },
+    {
+        'code': 'piping_engineer',
+        'name': 'Piping Engineer',
+        'level': 4,
+        'description': 'Piping discipline engineer — access to piping datasheets and PMS.',
+        'is_system_role': True,
+        'badge_color': 'indigo',
+    },
+    {
+        'code': 'qhse_engineer',
+        'name': 'QHSE Engineer',
+        'level': 4,
+        'description': 'Quality, Health, Safety and Environment engineer.',
+        'is_system_role': True,
+        'badge_color': 'teal',
+    },
+    {
+        'code': 'design_engineer',
+        'name': 'Design Engineer',
+        'level': 4,
+        'description': 'Design/digital twin engineer — DesignIQ, PFD to P&ID, P&ID analysis.',
+        'is_system_role': True,
+        'badge_color': 'cyan',
+    },
+    {
+        'code': 'project_manager',
+        'name': 'Project Manager',
+        'level': 3,
+        'description': 'Cross-discipline project manager — read access across engineering modules.',
+        'is_system_role': True,
+        'badge_color': 'pink',
+    },
+    {
+        'code': 'viewer',
+        'name': 'Viewer',
+        'level': 6,
+        'description': 'Read-only access. No module access unless explicitly assigned.',
+        'is_system_role': True,
+        'badge_color': 'slate',
+    },
+]
 
 # Module Assignment Strategy
 MODULE_ASSIGNMENT_CONFIG = {
@@ -103,6 +249,120 @@ SUCCESS_MESSAGES = {
     'permission_granted': 'Permission granted successfully.',
     'user_created': 'User created successfully with assigned roles and modules.',
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SOFT-CODED ROLE → MODULE POLICY
+# Maps role codes to the module codes that role should always have access to.
+# Used by: management commands (apply_role_module_policy, seed_rbac)
+# When a user is assigned a role, they automatically receive all modules in that
+# role's policy list.  This is the SINGLE source of truth for role-based module
+# access — edit here to change what any role can see.
+# ─────────────────────────────────────────────────────────────────────────────
+ROLE_MODULE_POLICY = {
+    # Process-focused engineers: datasheets + P&ID tools
+    'process_engineer': [
+        'process_datasheet',
+        'pid_analysis',
+        'pfd_to_pid',
+        'designiq',
+    ],
+    # Electrical discipline
+    'electrical_engineer': [
+        'electrical_datasheet',
+        'electrical_sld',
+        'pid_analysis',
+    ],
+    # Instrument discipline
+    'instrument_engineer': [
+        'instrument_datasheet',
+        'instrument_index',
+        'pid_analysis',
+    ],
+    # Mechanical discipline
+    'mechanical_engineer': [
+        'mechanical_datasheet',
+        'pid_analysis',
+    ],
+    # Civil / structural discipline
+    'civil_engineer': [
+        'civil_datasheet',
+    ],
+    # Piping discipline
+    'piping_engineer': [
+        'piping_datasheet',
+        'piping_pms',
+        'pid_analysis',
+    ],
+    # QHSE discipline
+    'qhse_engineer': [
+        'qhse',
+    ],
+    # DesignIQ / digital twin roles
+    'design_engineer': [
+        'designiq',
+        'pfd_to_pid',
+        'pid_analysis',
+    ],
+    # Project managers — read access across engineering disciplines
+    'project_manager': [
+        'pid_analysis',
+        'process_datasheet',
+        'designiq',
+        'reports',
+    ],
+    # Admin has access to all application modules
+    'admin': [
+        'pid_analysis',
+        'pfd_to_pid',
+        'crs_documents',
+        'process_datasheet',
+        'electrical_datasheet',
+        'electrical_sld',
+        'instrument_datasheet',
+        'instrument_index',
+        'mechanical_datasheet',
+        'civil_datasheet',
+        'piping_datasheet',
+        'piping_pms',
+        'designiq',
+        'qhse',
+        'user_mgmt',
+        'org_settings',
+        'audit_logs',
+        'reports',
+        'api_access',
+        'digitization_datasheet',
+        'spec_customization',
+    ],
+    # Super-admins bypass module checks in the app, but listed for completeness
+    'super_admin': [],
+}
+
+# Which module codes map to which discipline (used for diagnostics)
+MODULE_DISCIPLINE_MAP = {
+    'process_datasheet': 'Process',
+    'pid_analysis':      'Process / P&ID',
+    'pfd_to_pid':        'Process',
+    'designiq':          'DesignIQ',
+    'electrical_datasheet': 'Electrical',
+    'electrical_sld':    'Electrical',
+    'instrument_datasheet': 'Instrument',
+    'instrument_index':  'Instrument',
+    'mechanical_datasheet': 'Mechanical',
+    'civil_datasheet':   'Civil',
+    'piping_datasheet':  'Piping',
+    'piping_pms':        'Piping',
+    'digitization_datasheet': 'Digitization',
+    'spec_customization': 'Digitization',
+    'qhse':              'QHSE',
+    'user_mgmt':         'Admin',
+    'org_settings':      'Admin',
+    'audit_logs':        'Admin',
+    'reports':           'Admin',
+    'api_access':        'Admin',
+    'crs_documents':     'CRS',
+}
+
 
 def get_custom_role_code(email):
     """Generate custom role code from email"""

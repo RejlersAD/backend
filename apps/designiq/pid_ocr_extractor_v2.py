@@ -637,6 +637,55 @@ class PIDLineExtractorV2:
                     found_lines.append(line_entry)
                     continue  # Skip standard validation below
                 
+                # ADNOC FORMAT VALIDATION (separate rules)
+                if format_type == 'adnoc':
+                    # 1. SIZE: Must be 1-2 digits
+                    if not size or not size.isdigit() or len(size) > 2:
+                        rejected.append(f"Invalid ADNOC size: {size}")
+                        continue
+                    
+                    # 2. FLUID: Must be 2-3 uppercase letters
+                    if not fluid or not fluid.isalpha() or len(fluid) < 2 or len(fluid) > 3:
+                        rejected.append(f"Invalid ADNOC fluid: {fluid}")
+                        continue
+                    
+                    # 3. SEQUENCE: Must be exactly 4 digits
+                    if not seq or not seq.isdigit() or len(seq) != 4:
+                        rejected.append(f"Invalid ADNOC sequence: {seq}")
+                        continue
+                    
+                    # 4. PIPE CLASS: Alphanumeric, flexible length (3-6 chars typical)
+                    if not pipr_class or not pipr_class.isalnum() or len(pipr_class) < 3:
+                        rejected.append(f"Invalid ADNOC pipe class: {pipr_class}")
+                        continue
+                    
+                    # Build ADNOC line number: SIZE"-FLUID-PIPECLASS-SEQUENCE
+                    line_number = f"{size}\"-{fluid}-{pipr_class}-{seq}"
+                    
+                    # Deduplicate
+                    if line_number in seen_lines:
+                        continue
+                    seen_lines.add(line_number)
+                    
+                    # Create line entry for ADNOC
+                    line_entry = {
+                        'line_number': line_number,
+                        'size': f'{size}"',
+                        'fluid_code': fluid,
+                        'sequence_no': seq,
+                        'pipr_class': pipr_class,
+                        'insulation': '',
+                        'area': '',
+                        'page': page_num,
+                        'from_equipment': '',
+                        'to_equipment': '',
+                        'extraction_method': 'regex_adnoc',
+                        'original_detection': match.group(0).strip()
+                    }
+                    
+                    found_lines.append(line_entry)
+                    continue  # Skip standard validation below
+                
                 # SMART VALIDATION (flexible for ADNOC offshore formats)
                 # 1. SIZE: Must be 1+ digits (ADNOC can have any size)
                 if not size or not size.isdigit():

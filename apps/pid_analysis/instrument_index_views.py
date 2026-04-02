@@ -49,10 +49,11 @@ def extract_instrument_index(request):
 
     Accepts multipart/form-data:
       pid_file        — uploaded PDF (required)
-      drawing_number  — drawing number string
+    drawing_number  — drawing number string
       drawing_title   — title string
       revision        — revision string (default "0")
       project_name    — project name string
+    legend_file     — optional legend/symbol sheet PDF for cross-verification
 
     Returns JSON:
       {
@@ -66,11 +67,15 @@ def extract_instrument_index(request):
       }
     """
     pid_file = request.FILES.get("pid_file")
+    legend_file = request.FILES.get("legend_file")
     if not pid_file:
         return Response({"error": "No P&ID file uploaded. Please attach a PDF."}, status=400)
 
     if not pid_file.name.lower().endswith(".pdf"):
         return Response({"error": "Only PDF files are supported."}, status=400)
+
+    if legend_file and not legend_file.name.lower().endswith(".pdf"):
+        return Response({"error": "Legend sheet must be a PDF file."}, status=400)
 
     # Drawing metadata (all optional)
     pid_bytes = pid_file.read()
@@ -90,7 +95,20 @@ def extract_instrument_index(request):
     )
 
     service = _get_service()
-    instruments = service.extract_instruments(pid_bytes, drawing_info)
+    legend_context_override = None
+    if legend_file:
+        legend_bytes = legend_file.read()
+        legend_context_override = service.build_legend_context_from_uploaded_file(
+            legend_bytes,
+            legend_file.name,
+        )
+        drawing_info["legend_sheet_name"] = legend_file.name
+
+    instruments = service.extract_instruments(
+        pid_bytes,
+        drawing_info,
+        legend_context_override=legend_context_override,
+    )
 
     if not instruments:
         logger.warning("[InstrumentIndex] No instruments extracted — returning empty result")

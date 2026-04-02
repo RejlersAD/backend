@@ -1,10 +1,14 @@
 """
 Management command to seed initial RBAC data.
 Creates default organization, modules, permissions, and roles.
+
+Soft-coded: reads ALL_MODULES_CATALOGUE, SYSTEM_ROLES_CONFIG, and ROLE_MODULE_POLICY
+from rbac_config.py — edit those dicts to change what gets created, never edit this file.
 """
 from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
 from apps.rbac.models import Organization, Module, Permission, Role, RolePermission, RoleModule, UserProfile
+from apps.rbac.rbac_config import ALL_MODULES_CATALOGUE, SYSTEM_ROLES_CONFIG, ROLE_MODULE_POLICY
 
 User = get_user_model()
 
@@ -107,7 +111,98 @@ class Command(BaseCommand):
                 'icon': 'Shield',
                 'order': 10
             },
+            # ── Engineering Discipline Modules ──────────────────────────
+            {
+                'name': 'Process Datasheet',
+                'code': 'process_datasheet',
+                'description': 'Process equipment datasheets — MOV, SDV, pumps, pressure instruments',
+                'icon': 'FileText',
+                'order': 20
+            },
+            {
+                'name': 'Electrical Datasheet',
+                'code': 'electrical_datasheet',
+                'description': 'Electrical equipment and SLD-based datasheet generation',
+                'icon': 'Zap',
+                'order': 21
+            },
+            {
+                'name': 'Electrical SLD',
+                'code': 'electrical_sld',
+                'description': 'Single Line Diagram analysis and tagging',
+                'icon': 'Zap',
+                'order': 22
+            },
+            {
+                'name': 'Instrument Datasheet',
+                'code': 'instrument_datasheet',
+                'description': 'Instrument equipment datasheets and tag lists',
+                'icon': 'Activity',
+                'order': 23
+            },
+            {
+                'name': 'Instrument Index',
+                'code': 'instrument_index',
+                'description': 'AI extraction of instrument index from P&ID drawings',
+                'icon': 'List',
+                'order': 24
+            },
+            {
+                'name': 'Mechanical Datasheet',
+                'code': 'mechanical_datasheet',
+                'description': 'Mechanical equipment datasheets and inspection records',
+                'icon': 'Tool',
+                'order': 25
+            },
+            {
+                'name': 'Civil Datasheet',
+                'code': 'civil_datasheet',
+                'description': 'Civil and structural engineering datasheets',
+                'icon': 'Home',
+                'order': 26
+            },
+            {
+                'name': 'Piping Datasheet',
+                'code': 'piping_datasheet',
+                'description': 'Piping material specifications and critical line list',
+                'icon': 'GitBranch',
+                'order': 27
+            },
+            {
+                'name': 'Piping Material Specification',
+                'code': 'piping_pms',
+                'description': 'Piping material specification management',
+                'icon': 'Database',
+                'order': 28
+            },
+            {
+                'name': 'DesignIQ',
+                'code': 'designiq',
+                'description': 'AI-powered design intelligence and PFD verification',
+                'icon': 'Cpu',
+                'order': 29
+            },
+            {
+                'name': 'Digitization Datasheet',
+                'code': 'digitization_datasheet',
+                'description': 'AI-powered digitization of legacy datasheets',
+                'icon': 'Scan',
+                'order': 30
+            },
+            {
+                'name': 'Spec Customization',
+                'code': 'spec_customization',
+                'description': 'Engineering specification customization tools',
+                'icon': 'Settings',
+                'order': 31
+            },
         ]
+
+        # ── Merge: add any catalogue entries missing from the hardcoded list ──
+        existing_codes = {m['code'] for m in modules_data}
+        for cat_entry in ALL_MODULES_CATALOGUE:
+            if cat_entry['code'] not in existing_codes:
+                modules_data.append(cat_entry)
 
         modules = {}
         for module_data in modules_data:
@@ -190,58 +285,59 @@ class Command(BaseCommand):
 
         self.stdout.write(f'  Total permissions: {len(permissions)}')
 
-        # Define Roles with Permissions
-        # Only Super Admin and Admin roles - all other users get custom roles based on selected features
-        roles_data = [
-            {
-                'name': 'Super Administrator',
-                'code': 'super_admin',
-                'level': 1,
-                'description': 'Full system access - manages all organizations and users',
-                'permissions': list(permissions.keys()),  # All permissions
-                'modules': list(modules.keys())  # All modules
-            },
-            {
-                'name': 'Administrator',
-                'code': 'admin',
-                'level': 2,
-                'description': 'Organization administrator - manages users and settings',
-                'permissions': list(permissions.keys()),  # All permissions
-                'modules': list(modules.keys())  # All modules
-            },
-        ]
+        # ── Create all system roles (soft-coded from SYSTEM_ROLES_CONFIG) ───
+        # super_admin and admin get ALL permissions + ALL modules.
+        # Discipline roles get modules from ROLE_MODULE_POLICY.
+        all_perm_codes = list(permissions.keys())
+        all_module_codes = list(modules.keys())
 
-        for role_data in roles_data:
-            perm_codes = role_data.pop('permissions')
-            module_codes = role_data.pop('modules')
-            
+        created_roles = 0
+        for role_cfg in SYSTEM_ROLES_CONFIG:
+            role_code = role_cfg['code']
             role, created = Role.objects.get_or_create(
-                code=role_data['code'],
-                defaults=role_data
+                code=role_code,
+                defaults={
+                    'name': role_cfg['name'],
+                    'level': role_cfg['level'],
+                    'description': role_cfg['description'],
+                    'is_system_role': role_cfg.get('is_system_role', True),
+                    'is_active': True,
+                }
             )
-            
-            if created:
-                self.stdout.write(self.style.SUCCESS(f'✓ Created role: {role.name}'))
-                
-                # Assign permissions
-                for perm_code in perm_codes:
-                    if perm_code in permissions:
-                        RolePermission.objects.get_or_create(
-                            role=role,
-                            permission=permissions[perm_code]
-                        )
-                
-                # Assign modules
-                for module_code in module_codes:
-                    if module_code in modules:
-                        RoleModule.objects.get_or_create(
-                            role=role,
-                            module=modules[module_code]
-                        )
-                
-                self.stdout.write(f'  → Assigned {len(perm_codes)} permissions and {len(module_codes)} modules')
-            else:
+            if not created:
+                # Ensure system flag is set for existing roles
+                if not role.is_system_role:
+                    role.is_system_role = True
+                    role.save(update_fields=['is_system_role'])
                 self.stdout.write(f'  Role already exists: {role.name}')
+            else:
+                created_roles += 1
+                self.stdout.write(self.style.SUCCESS(f'✓ Created role: {role.name}'))
+
+            # Assign permissions (super_admin and admin get all)
+            if role_code in ('super_admin', 'admin'):
+                for perm_code in all_perm_codes:
+                    if perm_code in permissions:
+                        RolePermission.objects.get_or_create(role=role, permission=permissions[perm_code])
+
+            # Assign modules from ROLE_MODULE_POLICY
+            if role_code in ('super_admin', 'admin'):
+                role_module_codes = all_module_codes
+            else:
+                role_module_codes = ROLE_MODULE_POLICY.get(role_code, [])
+
+            assigned = 0
+            for module_code in role_module_codes:
+                if module_code in modules:
+                    _, m_created = RoleModule.objects.get_or_create(role=role, module=modules[module_code])
+                    if m_created:
+                        assigned += 1
+
+            if assigned:
+                self.stdout.write(f'    → Assigned {assigned} new modules to {role.name}')
+
+        self.stdout.write(f'  Created {created_roles} new roles ({len(SYSTEM_ROLES_CONFIG)} total configured)')
+
 
         # Create UserProfiles for existing users
         users_without_profile = User.objects.filter(rbac_profile__isnull=True)
@@ -257,8 +353,8 @@ class Command(BaseCommand):
         self.stdout.write(f'''
 Summary:
   - Organization: {org.name}
-  - Modules: {len(modules)}
+  - Modules: {Module.objects.count()} in DB
   - Permissions: {len(permissions)}
-  - Roles: {len(roles_data)}
+  - Roles: {Role.objects.count()} in DB ({len(SYSTEM_ROLES_CONFIG)} system roles configured)
   - User Profiles: {UserProfile.objects.count()}
         ''')

@@ -12,7 +12,8 @@ from datetime import timedelta
 PASSWORD_EXPIRY_DAYS = 30
 
 # Warning period before expiry (in days)
-PASSWORD_EXPIRY_WARNING_DAYS = 7
+# UX requirement: remind users only in the final 3 days.
+PASSWORD_EXPIRY_WARNING_DAYS = 3
 
 # Grace period after expiry (in days) before forcing logout
 PASSWORD_EXPIRY_GRACE_DAYS = 3

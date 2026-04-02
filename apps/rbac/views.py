@@ -481,6 +481,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         Admin-only action for security
         """
         from django.contrib.auth.hashers import make_password
+        from django.utils import timezone
         from django.conf import settings
         
         profile = self.get_object()
@@ -491,6 +492,9 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         
         # Set the password
         user.password = make_password(default_password)
+        user.last_password_change = timezone.now()
+        user.must_reset_password = True
+        user.is_first_login = False
         user.save()
         
         # Set must_change_password flag
@@ -523,6 +527,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         Clears must_change_password flag on success
         """
         from django.contrib.auth.hashers import check_password, make_password
+        from django.utils import timezone
         
         user = request.user
         old_password = request.data.get('old_password')
@@ -551,6 +556,9 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         
         # Update password
         user.password = make_password(new_password)
+        user.last_password_change = timezone.now()
+        user.must_reset_password = False
+        user.is_first_login = False
         user.save()
         
         # Clear must_change_password flag

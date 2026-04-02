@@ -1,0 +1,100 @@
+{
+  "timestamp_utc": "2026-04-02T08:29:14.908323+00:00",
+  "document": {
+    "document_id": "5d6a411e-4346-457e-8d9a-550bdc1df798",
+    "file_name": "test_01.pdf",
+    "status": "completed",
+    "drawings": 1
+  },
+  "legend_knowledge": {
+    "sources": [
+      "/tmp/legends.pdf"
+    ],
+    "instrument_prefixes": [
+      "AI",
+      "AT",
+      "FI",
+      "FIC",
+      "FT",
+      "FY",
+      "LI",
+      "LIC",
+      "LT",
+      "LY",
+      "PI",
+      "PIC",
+      "PT",
+      "PY",
+      "TI",
+      "TIC",
+      "TT"
+    ],
+    "valve_prefixes": [
+      "BDV",
+      "CV",
+      "FV",
+      "HV",
+      "LV",
+      "PRV",
+      "PSV",
+      "PV",
+      "SDV",
+      "TV",
+      "XV"
+    ]
+  },
+  "before_defaults_only": {
+    "summary": {
+      "tags": 1,
+      "instruments": 0,
+      "valves": 0,
+      "equipment": 0,
+      "line_sizes": 2,
+      "notes": 0,
+      "holds": 0
+    },
+    "line_sizes_unique": [
+      "4\"",
+      "6\""
+    ],
+    "tags": [
+      "BD-4860"
+    ]
+  },
+  "after_legend_backed": {
+    "summary": {
+      "tags": 1,
+      "instruments": 0,
+      "valves": 0,
+      "equipment": 0,
+      "line_sizes": 2,
+      "notes": 0,
+      "holds": 0
+    },
+    "line_sizes_unique": [
+      "4\"",
+      "6\""
+    ],
+    "tags": [
+      "BD-4860"
+    ]
+  },
+  "delta_after_minus_before": {
+    "equipment": 0,
+    "holds": 0,
+    "instruments": 0,
+    "line_sizes": 0,
+    "notes": 0,
+    "tags": 0,
+    "valves": 0
+  },
+  "report_findings": {
+    "total_findings": 1,
+    "severity_counts": {
+      "critical": 1,
+      "major": 0,
+      "minor": 0,
+      "info": 0
+    }
+  }
+}

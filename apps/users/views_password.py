@@ -543,6 +543,9 @@ def reset_password_with_token(request):
         # Reset password
         with transaction.atomic():
             user.set_password(new_password)
+            user.last_password_change = timezone.now()
+            user.must_reset_password = False
+            user.is_first_login = False
             user.save()
             
             # Clear reset token and update flags
