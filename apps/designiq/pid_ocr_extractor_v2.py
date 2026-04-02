@@ -729,15 +729,16 @@ class PIDLineExtractorV2:
                     continue
                 seen_lines.add(line_number)
                 
-                # Create line entry
+                # 🔧 TRIPLE-SAFE: Normalize ALL output fields to guarantee NO 'O' in any field
+                # Create line entry with normalized fields
                 line_entry = {
-                    'line_number': line_number,
-                    'size': f'{size}"',
-                    'fluid_code': fluid,
-                    'sequence_no': seq,
-                    'pipr_class': pipr_class,
-                    'insulation': insulation,
-                    'area': area if (format_type == 'offshore' or include_area) else '',
+                    'line_number': self._normalize_ocr_text(line_number),
+                    'size': self._normalize_ocr_text(f'{size}"'),
+                    'fluid_code': self._normalize_ocr_text(fluid),
+                    'sequence_no': self._normalize_ocr_text(seq),
+                    'pipr_class': self._normalize_ocr_text(pipr_class),
+                    'insulation': self._normalize_ocr_text(insulation) if insulation else '',
+                    'area': self._normalize_ocr_text(area) if (format_type == 'offshore' or include_area) and area else '',
                     'page': page_num,
                     'from_equipment': '',
                     'to_equipment': '',
