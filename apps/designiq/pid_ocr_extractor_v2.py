@@ -87,6 +87,86 @@ class PIDLineExtractorV2:
         else:
             self.geometric_detector = None
             logger.info("ℹ️ Geometric detector not available (missing dependencies)")
+    
+    def _normalize_ocr_text(self, text: str) -> str:
+        """
+        🔧 STRICT OCR NORMALIZATION - Force O → 0 conversion
+        
+        Domain Rule: Line numbers NEVER contain letter 'O', only digit '0'
+        
+        Problem: OCR confuses:
+        - 'O' (letter O) ↔ '0' (digit zero)
+        
+        Solution: Force replace ALL 'O' with '0' everywhere
+        - In line numbers
+        - In fluid codes  
+        - In pipe classes
+        - In ALL extracted fields
+        
+        Example:
+        - "AS5NLO-2014" → "AS5NL0-2014"
+        - "604-RO-4-AN1NLO-0011" → "604-R0-4-AN1NL0-0011"
+        
+        This eliminates duplicates automatically:
+        - Before: ["AS5NLO-2014", "AS5NL0-2014"] (2 entries)
+        - After: ["AS5NL0-2014"] (1 entry)
+        
+        Args:
+            text: Raw OCR text that may contain letter 'O'
+            
+        Returns:
+            Normalized text with all 'O' → '0'
+        """
+        if not text:
+            return text
+        
+        # Convert to uppercase first for consistency
+        normalized = text.upper()
+        
+        # Force replace ALL 'O' (letter) with '0' (digit)
+        normalized = normalized.replace('O', '0')
+        
+        return normalized
+    
+    def _normalize_ocr_text(self, text: str) -> str:
+        """
+        🔧 STRICT OCR NORMALIZATION - Force O → 0 conversion
+        
+        Domain Rule: Line numbers NEVER contain letter 'O', only digit '0'
+        
+        Problem: OCR confuses:
+        - 'O' (letter O) ↔ '0' (digit zero)
+        
+        Solution: Force replace ALL 'O' with '0' everywhere
+        - In line numbers
+        - In fluid codes
+        - In pipe classes
+        - In ALL extracted fields
+        
+        Example:
+        - "AS5NLO-2014" → "AS5NL0-2014"
+        - "604-RO-4-AN1NLO-0011" → "604-R0-4-AN1NL0-0011"
+        
+        This eliminates duplicates automatically:
+        - Before: ["AS5NLO-2014", "AS5NL0-2014"] (2 entries)
+        - After: ["AS5NL0-2014"] (1 entry)
+        
+        Args:
+            text: Raw OCR text that may contain letter 'O'
+            
+        Returns:
+            Normalized text with all 'O' → '0'
+        """
+        if not text:
+            return text
+        
+        # Convert to uppercase first for consistency
+        normalized = text.upper()
+        
+        # Force replace ALL 'O' (letter) with '0' (digit)
+        normalized = normalized.replace('O', '0')
+        
+        return normalized
 
     
     def _init_engines(self):
@@ -529,12 +609,21 @@ class PIDLineExtractorV2:
                     pipr_class = match.group(4).strip()
                     insulation = match.group(5).strip().upper() if match.lastindex >= 5 and match.group(5) else ''
                 
+                # 🔧 CRITICAL: Normalize all fields - Force O → 0 conversion BEFORE any processing
+                # This eliminates OCR confusion between letter O and digit 0
+                size = self._normalize_ocr_text(size)
+                fluid = self._normalize_ocr_text(fluid)
+                seq = self._normalize_ocr_text(seq)
+                pipr_class = self._normalize_ocr_text(pipr_class)
+                insulation = self._normalize_ocr_text(insulation) if insulation else ''
+                area = self._normalize_ocr_text(area) if area else ''
+                
                 # Smart cleaning: remove any non-alphanumeric from edges
                 size = re.sub(r'[^0-9]', '', size)
-                fluid = re.sub(r'[^A-Z]', '', fluid)
+                fluid = re.sub(r'[^A-Z0-9]', '', fluid)  # Keep digits for normalized 0
                 seq = re.sub(r'[^0-9]', '', seq)
                 if insulation:
-                    insulation = re.sub(r'[^A-Z]', '', insulation)
+                    insulation = re.sub(r'[^A-Z0-9]', '', insulation)
                 
                 # ADNOC FORMAT VALIDATION (separate rules)
                 if format_type == 'adnoc':
@@ -640,10 +729,11 @@ class PIDLineExtractorV2:
                     continue
                 
                 # Build line number string (dynamic based on segments - supports 5 or 6 segments)
+                # All components are already normalized (O → 0) above
                 if format_type == 'offshore':
                     # Offshore format: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
-                    # 5 segments: 604-AG-3-ASSNLO-0007
-                    # 6 segments: 604-HO-8-BC2CA0-1071-H
+                    # 5 segments: 604-AG-3-ASSNL0-0007 (normalized)
+                    # 6 segments: 604-H0-8-BC2CA0-1071-H (normalized)
                     if insulation:
                         line_number = f"{area}-{fluid}-{size}-{pipr_class}-{seq}-{insulation}"
                     else:
@@ -1572,129 +1662,23 @@ Example 4: "10\"-PG-0003-033842-X-H"
     
     def _deduplicate_items(self, items: List[Dict]) -> List[Dict]:
         """
-        Remove duplicate line numbers with intelligent 0 vs O confusion handling
+        Remove duplicate line numbers
         
-        Problem: OCR sometimes confuses:
-        - '0' (zero) ↔ 'O' (letter O)
-        
-        Solution:
-        1. Normalize for comparison (O → 0) internally
-        2. Detect duplicates caused by 0/O confusion
-        3. Keep the better version based on:
-           - More numeric correctness in numeric segments
-           - Better format validation confidence
-        4. Keep original values intact in output (NO replacement)
-        
-        Example:
-        - "AS5NLO-2014" and "AS5NL0-2014" → detected as duplicates
-        - Choose the version that makes more sense contextually
-        - Display winner AS-IS (no modification)
+        Note: O→0 normalization happens during extraction, so duplicates
+        caused by OCR confusion are automatically eliminated here.
         """
-        def normalize_for_comparison(line_number: str) -> str:
-            """
-            Create normalized key for duplicate detection
-            ONLY for internal comparison - original value preserved
-            """
-            if not line_number:
-                return ''
-            # Normalize: O → 0 (treat both as same for deduplication)
-            return line_number.upper().replace('O', '0')
-        
-        def calculate_quality_score(item: Dict) -> int:
-            """
-            Score quality of line number extraction
-            Higher score = better quality = preferred version
-            """
-            line_number = item.get('line_number', '')
-            score = 0
-            
-            # 1. Prefer lines with 4-digit sequences (standard format)
-            if re.search(r'\d{4}', line_number):
-                score += 5
-            
-            # 2. Penalize suspicious 'O' in numeric-looking segments
-            # Pattern: letters followed by O then digits → likely should be 0
-            if re.search(r'[A-Z]+O\d', line_number):
-                score -= 3
-            
-            # 3. Reward proper numeric sequences without letters
-            if re.search(r'-\d+-', line_number):
-                score += 3
-            
-            # 4. Check for valid format components
-            parts = line_number.split('-')
-            if len(parts) >= 4:
-                score += 2
-                
-                # Size should be numeric (with optional quote)
-                if parts[0].replace('"', '').replace("'", '').isdigit():
-                    score += 2
-                
-                # Sequence number should be purely numeric
-                if len(parts) >= 3 and parts[2].isdigit():
-                    score += 3
-            
-            # 5. Prefer items with FROM-TO data (more complete extraction)
-            if item.get('from_line') or item.get('to_line'):
-                score += 2
-            
-            # 6. Check detection confidence if available
-            confidence = item.get('flow_confidence', '')
-            if confidence == 'high':
-                score += 2
-            elif confidence == 'medium':
-                score += 1
-            
-            return score
-        
-        # Use map with normalized keys to detect duplicates
-        unique_map = {}
-        duplicates_detected = []
+        seen = set()
+        unique = []
         
         for item in items:
-            original = item.get('line_number', '')
-            if not original:
-                continue
-            
-            # Create normalized comparison key
-            normalized = normalize_for_comparison(original)
-            
-            if normalized not in unique_map:
-                # First occurrence - store it
-                unique_map[normalized] = item
-            else:
-                # Duplicate detected! Choose the better version
-                existing_item = unique_map[normalized]
-                existing_score = calculate_quality_score(existing_item)
-                new_score = calculate_quality_score(item)
-                
-                # Log duplicate detection for debugging
-                if existing_item['line_number'] != original:
-                    duplicates_detected.append({
-                        'version_a': existing_item['line_number'],
-                        'version_b': original,
-                        'normalized': normalized,
-                        'score_a': existing_score,
-                        'score_b': new_score,
-                        'winner': 'version_b' if new_score > existing_score else 'version_a'
-                    })
-                
-                # Keep the higher-scoring version
-                if new_score > existing_score:
-                    unique_map[normalized] = item
+            key = item.get('line_number', '')
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(item)
         
-        # Log duplicate resolution summary
-        if duplicates_detected:
-            logger.info(f"  🔍 Detected {len(duplicates_detected)} duplicates due to 0/O confusion:")
-            for dup in duplicates_detected[:5]:  # Show first 5
-                logger.info(f"     '{dup['version_a']}' vs '{dup['version_b']}' → kept '{unique_map[dup['normalized']]['line_number']}' (score: {max(dup['score_a'], dup['score_b'])})")
-            if len(duplicates_detected) > 5:
-                logger.info(f"     ... and {len(duplicates_detected) - 5} more")
-        
-        # Convert map back to list (preserving original order roughly)
-        unique = list(unique_map.values())
-        
-        logger.info(f"  ✅ Deduplication: {len(items)} → {len(unique)} items (removed {len(items) - len(unique)} duplicates)")
+        removed_count = len(items) - len(unique)
+        if removed_count > 0:
+            logger.info(f"  ✅ Deduplication: {len(items)} → {len(unique)} items (removed {removed_count} duplicates)")
         
         return unique
     
