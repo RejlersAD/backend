@@ -13,6 +13,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Soft-coded: categories excluded from all exports (Excel + PDF).
+# Connectivity findings are omitted — orphan-node graph checks produce too many
+# false-positives on scanned drawings and are not useful to process engineers.
+HIDDEN_CATEGORIES = {'connectivity'}
+
 # Column order for the findings report
 FINDINGS_COLUMNS = [
     'SL No', 'Drawing ID', 'Category', 'Rule ID',
@@ -92,6 +97,8 @@ def generate_excel(document) -> Optional[bytes]:
     rows = []
     for drawing in document.drawings.order_by('page_index'):
         for finding in drawing.findings.order_by('sl_no'):
+            if finding.category in HIDDEN_CATEGORIES:
+                continue
             rows.append({
                 'SL No':           finding.sl_no,
                 'Drawing ID':      drawing.drawing_id,
@@ -256,6 +263,8 @@ def generate_pdf(document) -> Optional[bytes]:
     total_count = 0
     for drw in document.drawings.order_by('page_index'):
         for f in drw.findings.all():
+            if f.category in HIDDEN_CATEGORIES:
+                continue
             sk = f.severity.upper()
             sev_counts[sk] = sev_counts.get(sk, 0) + 1
             total_count += 1
@@ -482,7 +491,8 @@ def generate_pdf(document) -> Optional[bytes]:
 
     # ── Per-drawing sections: annotated image + findings table ────────────────
     for drw in document.drawings.order_by('page_index'):
-        findings = list(drw.findings.order_by('sl_no'))
+        findings = [f for f in drw.findings.order_by('sl_no')
+                   if f.category not in HIDDEN_CATEGORIES]
         if not findings:
             continue
 
