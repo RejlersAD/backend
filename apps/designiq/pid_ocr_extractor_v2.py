@@ -1571,15 +1571,130 @@ Example 4: "10\"-PG-0003-033842-X-H"
             return []
     
     def _deduplicate_items(self, items: List[Dict]) -> List[Dict]:
-        """Remove duplicate line numbers"""
-        seen = set()
-        unique = []
+        """
+        Remove duplicate line numbers with intelligent 0 vs O confusion handling
+        
+        Problem: OCR sometimes confuses:
+        - '0' (zero) ↔ 'O' (letter O)
+        
+        Solution:
+        1. Normalize for comparison (O → 0) internally
+        2. Detect duplicates caused by 0/O confusion
+        3. Keep the better version based on:
+           - More numeric correctness in numeric segments
+           - Better format validation confidence
+        4. Keep original values intact in output (NO replacement)
+        
+        Example:
+        - "AS5NLO-2014" and "AS5NL0-2014" → detected as duplicates
+        - Choose the version that makes more sense contextually
+        - Display winner AS-IS (no modification)
+        """
+        def normalize_for_comparison(line_number: str) -> str:
+            """
+            Create normalized key for duplicate detection
+            ONLY for internal comparison - original value preserved
+            """
+            if not line_number:
+                return ''
+            # Normalize: O → 0 (treat both as same for deduplication)
+            return line_number.upper().replace('O', '0')
+        
+        def calculate_quality_score(item: Dict) -> int:
+            """
+            Score quality of line number extraction
+            Higher score = better quality = preferred version
+            """
+            line_number = item.get('line_number', '')
+            score = 0
+            
+            # 1. Prefer lines with 4-digit sequences (standard format)
+            if re.search(r'\d{4}', line_number):
+                score += 5
+            
+            # 2. Penalize suspicious 'O' in numeric-looking segments
+            # Pattern: letters followed by O then digits → likely should be 0
+            if re.search(r'[A-Z]+O\d', line_number):
+                score -= 3
+            
+            # 3. Reward proper numeric sequences without letters
+            if re.search(r'-\d+-', line_number):
+                score += 3
+            
+            # 4. Check for valid format components
+            parts = line_number.split('-')
+            if len(parts) >= 4:
+                score += 2
+                
+                # Size should be numeric (with optional quote)
+                if parts[0].replace('"', '').replace("'", '').isdigit():
+                    score += 2
+                
+                # Sequence number should be purely numeric
+                if len(parts) >= 3 and parts[2].isdigit():
+                    score += 3
+            
+            # 5. Prefer items with FROM-TO data (more complete extraction)
+            if item.get('from_line') or item.get('to_line'):
+                score += 2
+            
+            # 6. Check detection confidence if available
+            confidence = item.get('flow_confidence', '')
+            if confidence == 'high':
+                score += 2
+            elif confidence == 'medium':
+                score += 1
+            
+            return score
+        
+        # Use map with normalized keys to detect duplicates
+        unique_map = {}
+        duplicates_detected = []
         
         for item in items:
-            key = item.get('line_number', '')
-            if key and key not in seen:
-                seen.add(key)
-                unique.append(item)
+            original = item.get('line_number', '')
+            if not original:
+                continue
+            
+            # Create normalized comparison key
+            normalized = normalize_for_comparison(original)
+            
+            if normalized not in unique_map:
+                # First occurrence - store it
+                unique_map[normalized] = item
+            else:
+                # Duplicate detected! Choose the better version
+                existing_item = unique_map[normalized]
+                existing_score = calculate_quality_score(existing_item)
+                new_score = calculate_quality_score(item)
+                
+                # Log duplicate detection for debugging
+                if existing_item['line_number'] != original:
+                    duplicates_detected.append({
+                        'version_a': existing_item['line_number'],
+                        'version_b': original,
+                        'normalized': normalized,
+                        'score_a': existing_score,
+                        'score_b': new_score,
+                        'winner': 'version_b' if new_score > existing_score else 'version_a'
+                    })
+                
+                # Keep the higher-scoring version
+                if new_score > existing_score:
+                    unique_map[normalized] = item
+        
+        # Log duplicate resolution summary
+        if duplicates_detected:
+            logger.info(f"  🔍 Detected {len(duplicates_detected)} duplicates due to 0/O confusion:")
+            for dup in duplicates_detected[:5]:  # Show first 5
+                logger.info(f"     '{dup['version_a']}' vs '{dup['version_b']}' → kept '{unique_map[dup['normalized']]['line_number']}' (score: {max(dup['score_a'], dup['score_b'])})")
+            if len(duplicates_detected) > 5:
+                logger.info(f"     ... and {len(duplicates_detected) - 5} more")
+        
+        # Convert map back to list (preserving original order roughly)
+        unique = list(unique_map.values())
+        
+        logger.info(f"  ✅ Deduplication: {len(items)} → {len(unique)} items (removed {len(items) - len(unique)} duplicates)")
         
         return unique
     
