@@ -26,4 +26,12 @@ urlpatterns = [
 
     # Engineer review — finding overrides
     path('findings/<int:finding_id>/',         views.update_finding,  name='update-finding'),
+
+    # Legend-backed recognition controls
+    path('legend-knowledge/',                  views.legend_knowledge,           name='legend-knowledge'),
+    path('legend-knowledge/build/',            views.build_legend_knowledge_api, name='build-legend-knowledge'),
+    path('compare/<str:document_id>/',         views.compare_accuracy,           name='compare-accuracy'),
+
+    # Drawing page image renderer (for frontend overlay)
+    path('drawing-image/<str:document_id>/<int:page_index>/', views.drawing_image, name='drawing-image'),
 ]

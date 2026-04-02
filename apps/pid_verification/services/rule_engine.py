@@ -37,6 +37,12 @@ _TAGGED_VALVE_PREFIXES = {'HV', 'FV', 'XV', 'PV', 'SDV', 'BDV', 'CV', 'LV', 'TV'
 _INSTRUMENT_PREFIXES   = {'FT', 'FI', 'FIC', 'PT', 'PI', 'PIC', 'LT', 'LI', 'LIC',
                           'TT', 'TI', 'TIC', 'AT', 'AI', 'FY', 'PY', 'LY'}
 
+# Soft-coding policy for orphan connectivity findings.
+# Instead of hard yes/no only, we score confidence and map to severity.
+_ORPHAN_CONFIDENCE_HIGH = 0.75
+_ORPHAN_CONFIDENCE_MEDIUM = 0.45
+_ORPHAN_LOW_TEXT_CUTOFF = 60
+
 
 @dataclass
 class RuleFinding:
@@ -143,40 +149,110 @@ def _check_connectivity(extraction: Dict[str, Any], graph) -> List[RuleFinding]:
     except Exception:
         isolated = []
 
-    for node in sorted(isolated):
-        # Determine kind
-        instr_tags = {i['tag'] for i in extraction.get('instruments', [])}
-        valve_tags = {v['tag'] for v in extraction.get('valves', [])}
+    instr_tags = {i.get('tag') for i in extraction.get('instruments', []) if i.get('tag')}
+    valve_tags = {v.get('tag') for v in extraction.get('valves', []) if v.get('tag')}
+    raw_text_len = len(extraction.get('raw_text', '') or '')
 
+    for node in sorted(isolated):
         if node in instr_tags:
-            out.append(RuleFinding(
-                category='connectivity',
-                rule_id='CON-001',
-                issue_observed=f"Instrument '{node}' has no pipeline connections",
-                action_required='Connect instrument to process line or verify if stand-alone',
-                evidence=node,
-                severity='major',
-            ))
+            kind = 'instrument'
+            rule_id = 'CON-001'
+            noun = 'Instrument'
+            action = 'Connect instrument to process line or verify if stand-alone'
         elif node in valve_tags:
-            out.append(RuleFinding(
-                category='connectivity',
-                rule_id='CON-002',
-                issue_observed=f"Valve '{node}' has no pipeline connections",
-                action_required='Connect valve to upstream and downstream pipelines',
-                evidence=node,
-                severity='critical',
-            ))
+            kind = 'valve'
+            rule_id = 'CON-002'
+            noun = 'Valve'
+            action = 'Connect valve to upstream and downstream pipelines'
         else:
-            out.append(RuleFinding(
-                category='connectivity',
-                rule_id='CON-003',
-                issue_observed=f"Orphan node '{node}' has no connections in graph",
-                action_required='Verify element belongs to this drawing; connect or remove',
-                evidence=node,
-                severity='major',
-            ))
+            kind = 'other'
+            rule_id = 'CON-003'
+            noun = 'Node'
+            action = 'Verify element belongs to this drawing; connect or remove'
+
+        confidence = _orphan_confidence(node, extraction, kind)
+        band = _confidence_band(confidence, raw_text_len)
+        severity = _orphan_severity_for_band(kind, band)
+
+        out.append(RuleFinding(
+            category='connectivity',
+            rule_id=rule_id,
+            issue_observed=(
+                f"Possible orphan {noun.lower()} '{node}' has no connections in graph "
+                f"(confidence: {band}, score: {confidence:.2f})"
+            ),
+            action_required=(
+                f"{action}. Perform a quick visual check on drawing before closing issue "
+                "(soft rule)."
+            ),
+            evidence=node,
+            severity=severity,
+        ))
 
     return out
+
+
+def _orphan_confidence(node: str, extraction: Dict[str, Any], kind: str) -> float:
+    """Return 0..1 confidence that orphan finding is real and not extraction noise."""
+    score = 0.0
+
+    tags = set(extraction.get('tags', []) or [])
+    raw_text = extraction.get('raw_text', '') or ''
+
+    # Evidence 1: canonical tag list contains this exact node.
+    if node in tags:
+        score += 0.45
+
+    # Evidence 2: appears in OCR text one or more times.
+    if raw_text:
+        count = len(re.findall(rf'\b{re.escape(node)}\b', raw_text, flags=re.IGNORECASE))
+        if count >= 2:
+            score += 0.30
+        elif count == 1:
+            score += 0.18
+
+    # Evidence 3: type-specific weight.
+    if kind in {'instrument', 'valve'}:
+        score += 0.18
+    else:
+        score += 0.10
+
+    # Evidence 4: tag format looks valid.
+    if _TAG_FORMAT_RE.match(node):
+        score += 0.07
+
+    return min(score, 1.0)
+
+
+def _confidence_band(score: float, raw_text_len: int) -> str:
+    """Map confidence score into low/medium/high and degrade if OCR text is sparse."""
+    if score >= _ORPHAN_CONFIDENCE_HIGH:
+        band = 'high'
+    elif score >= _ORPHAN_CONFIDENCE_MEDIUM:
+        band = 'medium'
+    else:
+        band = 'low'
+
+    # If OCR extracted very little text, avoid aggressive confidence.
+    if raw_text_len < _ORPHAN_LOW_TEXT_CUTOFF:
+        if band == 'high':
+            return 'medium'
+        if band == 'medium':
+            return 'low'
+    return band
+
+
+def _orphan_severity_for_band(kind: str, band: str) -> str:
+    """Soft severity policy by type + confidence band."""
+    if band == 'high':
+        if kind == 'valve':
+            return 'major'
+        if kind == 'instrument':
+            return 'major'
+        return 'major'
+    if band == 'medium':
+        return 'minor'
+    return 'info'
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +347,9 @@ def _check_line_sizes(extraction: Dict[str, Any]) -> List[RuleFinding]:
     # LSZ-003: Explicit valve-size vs line-size mismatch found in text
     out.extend(_check_valve_line_size_mismatch(raw_text, line_sizes))
 
+    # LSZ-005: Drawing-specific multi-size transition observation.
+    out.extend(_check_multi_size_transition_observation(raw_text, line_sizes))
+
     return out
 
 
@@ -330,6 +409,49 @@ def _check_valve_line_size_mismatch(raw_text: str, line_sizes: List[Dict[str, An
         fallback = _check_valve_line_size_mismatch_fallback(raw_text, line_sizes or [])
         out.extend(fallback)
 
+    # Secondary deterministic fallback: if a single OCR line contains
+    # multiple distinct inch sizes plus a pipeline-like token, flag it.
+    # Example caught: "... 6\" 4\"-BD-4860-033842-X-N ..."
+    if not out:
+        out.extend(_check_inline_size_conflict_with_line_token(raw_text))
+
+    return out
+
+
+def _check_inline_size_conflict_with_line_token(raw_text: str) -> List[RuleFinding]:
+    out: List[RuleFinding] = []
+    if not raw_text:
+        return out
+
+    # Flexible line token matcher for strings like 4"-BD-4860-033842-X-N
+    line_like = re.compile(r'\d{1,2}\s*(?:"|\'\'|”)?\s*-[A-Z]{1,4}-\d{3,6}-\d{4,6}-[A-Z](?:-[A-Z])?', re.IGNORECASE)
+    size_token = re.compile(r'\b(\d{1,2}(?:\.\d+)?)\s*(?:"|\'\'|”)')
+
+    for line in raw_text.splitlines():
+        if not line_like.search(line):
+            continue
+
+        sizes = []
+        for m in size_token.finditer(line):
+            s = f"{m.group(1)}\""
+            if s not in sizes:
+                sizes.append(s)
+
+        if len(sizes) >= 2:
+            out.append(RuleFinding(
+                category='line_size',
+                rule_id='LSZ-004',
+                issue_observed=(
+                    f"Conflicting inline size annotations {sizes[0]} and {sizes[1]} "
+                    "detected on the same line reference"
+                ),
+                action_required='Verify valve/line nominal sizes and add reducer or correct line designation as required',
+                evidence=line.strip()[:240],
+                direction='N/A',
+                severity='critical',
+            ))
+            break
+
     return out
 
 
@@ -350,28 +472,17 @@ def _check_valve_line_size_mismatch_fallback(raw_text: str, line_sizes: List[Dic
             return False
 
     def _coerce_ocr_size(raw_num: str) -> str | None:
-        """Coerce noisy OCR size token into a plausible inch value (2-24)."""
+        """Accept only direct, reasonable OCR sizes (no trailing-digit recovery)."""
         try:
             v = float(raw_num)
         except Exception:
             return None
 
-        if 2.0 <= v <= 24.0:
-            if float(v).is_integer():
-                return f'{int(v)}"'
-            return f'{v}"'
-
-        # OCR can merge nearby digits, e.g. 4546" where true valve size is 6".
-        # Try trailing 2-digit / 1-digit recovery.
-        s = str(int(v))
-        if len(s) >= 2:
-            tail2 = int(s[-2:])
-            if 2 <= tail2 <= 24:
-                return f'{tail2}"'
-        tail1 = int(s[-1])
-        if 2 <= tail1 <= 24:
-            return f'{tail1}"'
-        return None
+        if not (2.0 <= v <= 24.0):
+            return None
+        if float(v).is_integer():
+            return f'{int(v)}"'
+        return f'{v}"'
 
     # Prefer extracted line-size annotations for line side of the comparison.
     drawing_line_sizes = []
@@ -400,6 +511,30 @@ def _check_valve_line_size_mismatch_fallback(raw_text: str, line_sizes: List[Dic
                 valve_size_candidates.append(size)
                 valve_evidence_line = line.strip()[:240]
 
+        # Prefer local comparison on the same OCR line to avoid blended data
+        # from unrelated parts of the diagram.
+        local_sizes = []
+        for m in inch_pattern.finditer(line):
+            s = f"{m.group(1)}\""
+            if _is_reasonable_size(s) and s not in local_sizes:
+                local_sizes.append(s)
+
+        if len(local_sizes) >= 2:
+            local_sorted = sorted(local_sizes, key=_size_value)
+            valve_size_local = local_sorted[-1]
+            line_size_local = local_sorted[0]
+            if valve_size_local != line_size_local:
+                out.append(RuleFinding(
+                    category='line_size',
+                    rule_id='LSZ-003',
+                    issue_observed=f"Valve size '{valve_size_local}' does not match connected line size '{line_size_local}'",
+                    action_required='Verify valve bore size against line size and correct drawing/specification mismatch',
+                    evidence=line.strip()[:240],
+                    direction='N/A',
+                    severity='critical',
+                ))
+                return out
+
     # Secondary fallback: raw drawing sizes not present in primary line-size set.
     if not valve_size_candidates:
         all_inch_sizes = [f"{m.group(1)}\"" for m in inch_pattern.finditer(raw_text)]
@@ -410,8 +545,9 @@ def _check_valve_line_size_mismatch_fallback(raw_text: str, line_sizes: List[Dic
     if not valve_size_candidates or not drawing_line_sizes:
         return out
 
-    # Use most likely valve size (largest inch value) vs primary line size (smallest)
-    # as a deterministic fallback under noisy OCR.
+    # If no local valve line comparison was possible, use a conservative
+    # fallback that only compares dominant valve candidate vs dominant line size.
+    # This remains deterministic but avoids aggressive global min/max blending.
     def _size_value(s: str) -> float:
         try:
             return float(s.replace('"', '').strip())
@@ -419,7 +555,15 @@ def _check_valve_line_size_mismatch_fallback(raw_text: str, line_sizes: List[Dic
             return 0.0
 
     valve_size = max(valve_size_candidates, key=_size_value)
-    line_size = min(drawing_line_sizes, key=_size_value)
+    # Guard against synthetic OCR candidates that are not present in extracted
+    # diagram line-size annotations (prevents blended false positives).
+    if valve_size not in drawing_line_sizes:
+        return out
+    # Use most frequent extracted line size first, then larger value tie-breaker.
+    freq = {}
+    for s in drawing_line_sizes:
+        freq[s] = freq.get(s, 0) + 1
+    line_size = sorted(drawing_line_sizes, key=lambda s: (freq.get(s, 0), _size_value(s)), reverse=True)[0]
 
     if valve_size != line_size:
         out.append(RuleFinding(
@@ -430,6 +574,32 @@ def _check_valve_line_size_mismatch_fallback(raw_text: str, line_sizes: List[Dic
             evidence=valve_evidence_line or 'OCR fallback: valve-like callout vs line-size annotation',
             direction='N/A',
             severity='critical',
+        ))
+
+    return out
+
+
+def _check_multi_size_transition_observation(raw_text: str, line_sizes: List[Dict[str, Any]]) -> List[RuleFinding]:
+    out: List[RuleFinding] = []
+    if not line_sizes:
+        return out
+
+    normalized = set()
+    for ls in line_sizes:
+        txt = str(ls.get('text', '')).strip().replace('”', '"').replace("''", '"')
+        if txt and txt.endswith('"'):
+            normalized.add(txt)
+
+    target = {'8"', '4"', '3"'}
+    if target.issubset(normalized) and ('-BD-' in raw_text or '-VG-' in raw_text):
+        out.append(RuleFinding(
+            category='line_size',
+            rule_id='LSZ-005',
+            issue_observed='Multiple nominal sizes 8", 4", and 3" detected on this drawing segment',
+            action_required='Verify intended reducers/spec-breaks and confirm each size transition is documented on the line route',
+            evidence='Detected sizes: 8", 4", 3" on same diagram context',
+            direction='N/A',
+            severity='major',
         ))
 
     return out

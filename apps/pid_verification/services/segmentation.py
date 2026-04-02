@@ -35,6 +35,19 @@ def segment_document(document_id: str, file_path: str) -> List[SegmentedDrawing]
 
     if ext == 'pdf':
         drawings = _segment_pdf(document_id, file_path)
+        if not drawings:
+            logger.warning(
+                '[PIDVerification] PDF segmentation produced 0 pages for %s; applying single-page fallback',
+                document_id,
+            )
+            drawings = [
+                SegmentedDrawing(
+                    drawing_id=f'{document_id}-DRAWING-1',
+                    page_index=0,
+                    title='',
+                    metadata={'source_format': 'pdf', 'fallback': 'empty_pdf_page_list'},
+                )
+            ]
     else:
         # Single-drawing documents
         drawings = [

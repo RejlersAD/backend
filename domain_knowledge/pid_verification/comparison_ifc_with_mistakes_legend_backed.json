@@ -1,0 +1,152 @@
+{
+  "timestamp_utc": "2026-04-02T04:27:22.540198+00:00",
+  "document": {
+    "document_id": "a194a0da-93ef-4850-86a1-21d1ab84c1f6",
+    "file_name": "P16093-16-01-08-1677-1_Rev 1-IFC_WITH MISTAKES.pdf",
+    "status": "completed",
+    "drawings": 1
+  },
+  "legend_knowledge": {
+    "sources": [
+      "/tmp/legends.pdf"
+    ],
+    "instrument_prefixes": [
+      "AI",
+      "AT",
+      "FI",
+      "FIC",
+      "FT",
+      "FY",
+      "LI",
+      "LIC",
+      "LT",
+      "LY",
+      "PI",
+      "PIC",
+      "PT",
+      "PY",
+      "TI",
+      "TIC",
+      "TT"
+    ],
+    "valve_prefixes": [
+      "BDV",
+      "CV",
+      "FV",
+      "HV",
+      "LV",
+      "PRV",
+      "PSV",
+      "PV",
+      "SDV",
+      "TV",
+      "XV"
+    ]
+  },
+  "before_defaults_only": {
+    "summary": {
+      "tags": 22,
+      "instruments": 1,
+      "valves": 0,
+      "equipment": 4,
+      "line_sizes": 7,
+      "notes": 10,
+      "holds": 3
+    },
+    "line_sizes_unique": [
+      "1\"",
+      "2\"",
+      "24\"",
+      "3\"",
+      "4\"",
+      "5\"",
+      "8\""
+    ],
+    "tags": [
+      "BD-4860",
+      "BD-4964",
+      "BD-4965",
+      "BD-4966",
+      "BD-4967",
+      "BD-4968",
+      "D-5690",
+      "D-5714",
+      "D-5748",
+      "D-5749",
+      "D-6003",
+      "D-6024",
+      "D-6154",
+      "D-6155",
+      "D-6158",
+      "LIC-3610",
+      "P-3610",
+      "ST-3610",
+      "T-3610",
+      "V-3115",
+      "V-3610",
+      "VG-8935"
+    ]
+  },
+  "after_legend_backed": {
+    "summary": {
+      "tags": 22,
+      "instruments": 3,
+      "valves": 0,
+      "equipment": 4,
+      "line_sizes": 7,
+      "notes": 10,
+      "holds": 3
+    },
+    "line_sizes_unique": [
+      "1\"",
+      "2\"",
+      "24\"",
+      "3\"",
+      "4\"",
+      "5\"",
+      "8\""
+    ],
+    "tags": [
+      "BD-4860",
+      "BD-4964",
+      "BD-4965",
+      "BD-4966",
+      "BD-4967",
+      "BD-4968",
+      "D-5690",
+      "D-5714",
+      "D-5748",
+      "D-5749",
+      "D-6003",
+      "D-6024",
+      "D-6154",
+      "D-6155",
+      "D-6158",
+      "LIC-3610",
+      "P-3610",
+      "ST-3610",
+      "T-3610",
+      "V-3115",
+      "V-3610",
+      "VG-8935"
+    ]
+  },
+  "delta_after_minus_before": {
+    "equipment": 0,
+    "holds": 0,
+    "instruments": 2,
+    "line_sizes": 0,
+    "notes": 0,
+    "tags": 0,
+    "valves": 0
+  },
+  "report_findings": {
+    "total_findings": 10,
+    "severity_counts": {
+      "critical": 1,
+      "major": 9,
+      "minor": 0,
+      "info": 0
+    }
+  }
+}

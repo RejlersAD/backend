@@ -77,6 +77,28 @@ def process_pid_document(self, document_id: str):
             # ── 4. Extract elements ───────────────────────────────────────
             extraction = extract_drawing(file_path, page_index=seg.page_index)
 
+            # Persist extraction diagnostics per drawing for frontend transparency.
+            raw_text = extraction.get('raw_text', '') or ''
+            extraction_summary = {
+                'tags': len(extraction.get('tags', [])),
+                'instruments': len(extraction.get('instruments', [])),
+                'valves': len(extraction.get('valves', [])),
+                'equipment': len(extraction.get('equipment', [])),
+                'line_sizes': len(extraction.get('line_sizes', [])),
+                'notes': len(extraction.get('notes', [])),
+                'holds': len(extraction.get('holds', [])),
+                'raw_text_length': len(raw_text),
+                'no_text_detected': len(raw_text.strip()) == 0,
+            }
+            metadata = drawing_obj.metadata or {}
+            metadata['extraction_summary'] = extraction_summary
+            # Real tag anchor coordinates for v2 smart overlay (soft-coded, additive).
+            tag_positions = extraction.get('tag_positions', {})
+            if tag_positions:
+                metadata['tag_positions'] = tag_positions
+            drawing_obj.metadata = metadata
+            drawing_obj.save(update_fields=['metadata'])
+
             # ── 5. Build graph ────────────────────────────────────────────
             graph = build_graph(extraction)
 
@@ -132,16 +154,31 @@ def process_pid_document(self, document_id: str):
 def _resolve_file_path(doc) -> str:
     """
     Return a local filesystem path for the document file.
-    For S3-backed files: download to a temp file and return its path.
-    For local files: return the absolute path directly.
-    """
-    if doc.original_file and hasattr(doc.original_file, 'path'):
-        try:
-            return doc.original_file.path
-        except NotImplementedError:
-            pass  # S3-backed storage – fall through to download
 
+    Resolution order (soft-coded to handle all storage backends):
+      1. Local FileField  →  .path  (e.g. FileSystemStorage / ResilientMediaStorage)
+      2. S3 FileField     →  .name  holds the S3 key → download to tmp file
+      3. Explicit s3_path →  download to tmp file
+    Raises ValueError when no source is available.
+    """
+    if doc.original_file:
+        # Try local path first (works for FileSystemStorage and ResilientMediaStorage)
+        try:
+            path = doc.original_file.path
+            if path:
+                return path
+        except NotImplementedError:
+            pass  # S3Boto3Storage raises NotImplementedError for .path
+
+        # For S3-backed FileField, .name is the S3 object key
+        s3_key = getattr(doc.original_file, 'name', None)
+        if s3_key:
+            logger.info('[PIDVTask] Downloading file from S3 key: %s', s3_key)
+            return _download_from_s3(s3_key)
+
+    # Explicit s3_path field (legacy / manually set)
     if doc.s3_path:
+        logger.info('[PIDVTask] Downloading file from explicit s3_path: %s', doc.s3_path)
         return _download_from_s3(doc.s3_path)
 
     raise ValueError(f'No file path available for document {doc.document_id}')
