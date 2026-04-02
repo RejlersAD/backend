@@ -1662,19 +1662,121 @@ Example 4: "10\"-PG-0003-033842-X-H"
     
     def _deduplicate_items(self, items: List[Dict]) -> List[Dict]:
         """
-        Remove duplicate line numbers
+        Remove duplicate line numbers with 2-layer OCR confusion handling
         
-        Note: O→0 normalization happens during extraction, so duplicates
-        caused by OCR confusion are automatically eliminated here.
+        Layer 1 (Hard): O → 0 (already done during extraction)
+        Layer 2 (Soft): Z/2, B/8, I/1 equivalence for comparison only
+        
+        Example duplicates caused by OCR:
+        - "D2AP08" vs "DZAP08" (Z confused with 2)
+        - "D8AP08" vs "DBAP08" (B confused with 8)
+        - "D1AP08" vs "DIAP08" (I confused with 1)
+        
+        Strategy:
+        1. Create comparison key with soft normalization (Z→2, B→8, I→1)
+        2. Detect duplicates using comparison key
+        3. Keep better version (fewer suspicious characters)
+        4. Preserve original values in output (no modification)
         """
-        seen = set()
-        unique = []
+        
+        def create_comparison_key(line_number: str) -> str:
+            """
+            Soft normalization for duplicate detection ONLY
+            Does NOT modify the actual value - only for comparison
+            """
+            if not line_number:
+                return ''
+            
+            key = line_number.upper()
+            # Soft equivalences for OCR confusion
+            key = key.replace('Z', '2')  # Z ↔ 2
+            key = key.replace('B', '8')  # B ↔ 8
+            key = key.replace('I', '1')  # I ↔ 1
+            
+            return key
+        
+        def calculate_quality_score(item: Dict) -> int:
+            """
+            Score quality of extraction - higher is better
+            Prefer versions with cleaner, more structured format
+            """
+            line_number = item.get('line_number', '')
+            score = 0
+            
+            # 1. Should start with digit (size field)
+            if re.search(r'^\d', line_number):
+                score += 2
+            
+            # 2. Penalize suspicious OCR characters
+            # O should never exist (already normalized to 0)
+            if 'O' in line_number:
+                score -= 10  # Critical penalty
+            
+            # 3. Slight penalty for potentially confused characters
+            # Prefer digits over letters in ambiguous positions
+            if re.search(r'[ZBI]', line_number):
+                score -= 1
+            
+            # 4. Prefer items with 4-digit sequence numbers
+            if re.search(r'\d{4}', line_number):
+                score += 3
+            
+            # 5. Prefer items with proper structure (multiple hyphens)
+            hyphen_count = line_number.count('-')
+            score += min(hyphen_count, 5)  # Cap at 5
+            
+            # 6. Prefer items with FROM-TO data (more complete)
+            if item.get('from_line') or item.get('to_line'):
+                score += 2
+            
+            return score
+        
+        # Use map with comparison keys to detect duplicates
+        unique_map = {}
+        duplicates_detected = []
         
         for item in items:
-            key = item.get('line_number', '')
-            if key and key not in seen:
-                seen.add(key)
-                unique.append(item)
+            original = item.get('line_number', '')
+            if not original:
+                continue
+            
+            # Create comparison key (soft normalization)
+            comparison_key = create_comparison_key(original)
+            
+            if comparison_key not in unique_map:
+                # First occurrence - store it
+                unique_map[comparison_key] = item
+            else:
+                # Duplicate detected! Choose the better version
+                existing_item = unique_map[comparison_key]
+                existing_score = calculate_quality_score(existing_item)
+                new_score = calculate_quality_score(item)
+                
+                # Log if they're actually different (OCR variation)
+                if existing_item['line_number'] != original:
+                    duplicates_detected.append({
+                        'version_a': existing_item['line_number'],
+                        'version_b': original,
+                        'comparison_key': comparison_key,
+                        'score_a': existing_score,
+                        'score_b': new_score
+                    })
+                
+                # Keep the higher-scoring version
+                if new_score > existing_score:
+                    unique_map[comparison_key] = item
+        
+        # Log OCR duplicate resolution summary
+        if duplicates_detected:
+            logger.info(f"  🔍 Detected {len(duplicates_detected)} OCR-confused duplicates:")
+            for dup in duplicates_detected[:5]:  # Show first 5
+                winner = unique_map[dup['comparison_key']]['line_number']
+                logger.info(f"     '{dup['version_a']}' vs '{dup['version_b']}' → kept '{winner}'")
+            if len(duplicates_detected) > 5:
+                logger.info(f"     ... and {len(duplicates_detected) - 5} more")
+        
+        # Convert map back to list
+        unique = list(unique_map.values())
         
         removed_count = len(items) - len(unique)
         if removed_count > 0:
