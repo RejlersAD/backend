@@ -255,13 +255,18 @@ def determine_from_to_with_openai_vision(
 4. FROM = line connecting to START/input of this line
 5. TO = line connecting to END/output of this line
 
-**📤 OUTPUT** (ONLY JSON, NO OTHER TEXT):
+**📤 OUTPUT FORMAT** (ONLY JSON, NO OTHER TEXT):
 {{
   "line_numbers": {{
-    "{ocr_line_numbers[0] if ocr_line_numbers else 'EXAMPLE'}": {{"from": "neighboring_line", "to": "neighboring_line"}},
-    "{ocr_line_numbers[1] if len(ocr_line_numbers) > 1 else 'EXAMPLE2'}": {{"from": "neighboring_line", "to": "neighboring_line"}}
+    "{ocr_line_numbers[0] if ocr_line_numbers else 'EXAMPLE'}": {{"from": "LINE_BEFORE_THIS", "to": "LINE_AFTER_THIS"}},
+    "{ocr_line_numbers[1] if len(ocr_line_numbers) > 1 else 'EXAMPLE2'}": {{"from": "UPSTREAM_LINE", "to": "DOWNSTREAM_LINE"}}
   }}
 }}
+
+**⚠️ CRITICAL**:
+- Use ACTUAL line numbers from the diagram (not generic placeholders)
+- If you cannot see a FROM or TO connection clearly, use empty string "" not placeholders
+- Example valid output: {{"from": "6\\"-CD-AC3N-8255", "to": "6\\"-CD-AC3N-8257"}}
 
 Return the JSON now:"""
         
@@ -335,13 +340,42 @@ Return the JSON now:"""
                 logger.warning(f"     Raw response: {content[:300]}")
                 return {}
             
+            # 🔥 FILTER OUT PLACEHOLDER VALUES from OpenAI response
+            # OpenAI sometimes returns literal "neighboring_line" from the example - remove these
+            filtered_data = {}
+            placeholder_keywords = ['neighboring', 'example', 'n/a', 'none', 'null', 'unknown']
+            
+            for line_num, connections in line_numbers_data.items():
+                from_val = connections.get("from", "")
+                to_val = connections.get("to", "")
+                
+                # Filter out placeholder/generic responses
+                if from_val and not any(keyword in from_val.lower() for keyword in placeholder_keywords):
+                    # Valid FROM value
+                    pass
+                else:
+                    from_val = ""  # Clear placeholder
+                
+                if to_val and not any(keyword in to_val.lower() for keyword in placeholder_keywords):
+                    # Valid TO value
+                    pass
+                else:
+                    to_val = ""  # Clear placeholder
+                
+                # Only include if at least one valid connection
+                if from_val or to_val:
+                    filtered_data[line_num] = {"from": from_val, "to": to_val}
+            
+            # Use filtered data
+            line_numbers_data = filtered_data
+            
             # Log detailed summary
             total_lines = len(line_numbers_data)
             with_from = sum(1 for v in line_numbers_data.values() if v.get("from"))
             with_to = sum(1 for v in line_numbers_data.values() if v.get("to"))
             with_both = sum(1 for v in line_numbers_data.values() if v.get("from") and v.get("to"))
             
-            logger.info(f"  ✅ OpenAI Vision FROM-TO RESULTS:")
+            logger.info(f"  ✅ OpenAI Vision FROM-TO RESULTS (after filtering placeholders):")
             logger.info(f"     📊 Total lines analyzed: {total_lines}")
             logger.info(f"     📊 Lines with FROM: {with_from} ({100*with_from//total_lines if total_lines else 0}%)")
             logger.info(f"     📊 Lines with TO: {with_to} ({100*with_to//total_lines if total_lines else 0}%)")
