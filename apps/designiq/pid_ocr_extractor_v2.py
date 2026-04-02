@@ -1628,6 +1628,31 @@ Example 4: "10\"-PG-0003-033842-X-H"
             logger.info(f"🎉 EXTRACTION COMPLETE: {len(unique_items)} UNIQUE LINE NUMBERS")
             logger.info(f"{'='*60}\n")
             
+            # 🔒 FINAL SAFETY: Force normalize ALL text fields before returning
+            # This catches any 'O' that might have slipped through FROM-TO updates
+            logger.info("🔒 FINAL SAFETY: Applying O→0 normalization to all output fields...")
+            for item in unique_items:
+                if 'line_number' in item:
+                    item['line_number'] = self._normalize_ocr_text(item['line_number'])
+                if 'size' in item:
+                    item['size'] = self._normalize_ocr_text(item['size'])
+                if 'fluid_code' in item:
+                    item['fluid_code'] = self._normalize_ocr_text(item['fluid_code'])
+                if 'sequence_no' in item:
+                    item['sequence_no'] = self._normalize_ocr_text(item['sequence_no'])
+                if 'pipr_class' in item:
+                    item['pipr_class'] = self._normalize_ocr_text(item['pipr_class'])
+                if 'insulation' in item and item['insulation']:
+                    item['insulation'] = self._normalize_ocr_text(item['insulation'])
+                if 'area' in item and item['area']:
+                    item['area'] = self._normalize_ocr_text(item['area'])
+                if 'from_line' in item and item['from_line']:
+                    item['from_line'] = self._normalize_ocr_text(item['from_line'])
+                if 'to_line' in item and item['to_line']:
+                    item['to_line'] = self._normalize_ocr_text(item['to_line'])
+            
+            logger.info("✅ Final normalization complete - NO 'O' characters in output!")
+            
             return unique_items
             
         except Exception as e:
