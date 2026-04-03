@@ -32,6 +32,9 @@ urlpatterns = [
     path('legend-knowledge/build/',            views.build_legend_knowledge_api, name='build-legend-knowledge'),
     path('compare/<str:document_id>/',         views.compare_accuracy,           name='compare-accuracy'),
 
+    # Tag Naming & Acronym Check
+    path('check-naming/<str:document_id>/',    views.check_naming,               name='check-naming'),
+
     # Drawing page image renderer (for frontend overlay)
     path('drawing-image/<str:document_id>/<int:page_index>/', views.drawing_image, name='drawing-image'),
 ]

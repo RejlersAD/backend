@@ -61,6 +61,8 @@ def extract_drawing(file_path: str, page_index: int = 0) -> Dict[str, Any]:
         'line_sizes':    _extract_line_sizes(raw_text),
         'raw_text':      raw_text,
         'tag_positions': tag_positions,  # {tag: {x_pct, y_pct}} real diagram coordinates
+        # Multi-angle pipeline designation extraction (soft-coded, additive).
+        'line_tags':     _extract_pipeline_tags_multi_angle(file_path, page_index),
     }
 
 
@@ -138,6 +140,26 @@ _NOTE_PATTERN      = re.compile(r'NOTE\s*\d+[:\s].{5,200}', re.IGNORECASE)
 _HOLD_PATTERN      = re.compile(r'HOLD[- ]\d+[:\s].{5,200}', re.IGNORECASE)
 _LINE_SIZE_PATTERN = re.compile(r'\b(\d+(?:\.\d+)?)\s*(?:"|”|\'\'|mm|DN)(?=\s|$|[^A-Za-z0-9_])', re.IGNORECASE)
 _EQUIPMENT_TYPES   = re.compile(r'\b(V|E|T|K|C|P|H|X|F|R)-\d{3,5}\b')
+
+# Pipeline line designation pattern.
+# Matches designations like: 2"-D-6152-033842-X-N  or  4"-D-5690-013842-X_N
+# Format: {NPS}[inch_mark]{sep}{fluid_code}{sep}{area_code}{sep}{seq_no}[{sep}{pipe_class}][{sep}{insulation}]
+# Separators may be -, _, or a space (OCR noise tolerance).
+_PIPELINE_DESIG_RE = re.compile(
+    r'(?<![A-Za-z0-9])'                               # not preceded by alphanumeric
+    r'(\d+(?:\.\d+)?)'                                 # group 1: NPS size (e.g. 2, 4, 6)
+    r'\s*["\u201c\u201d\u2019\u2018\'`]{1,2}'          # inch mark (straight or smart quotes)
+    r'[\s\-_]{0,3}'                                    # optional gap after inch mark
+    r'([A-Z]{1,4})'                                    # group 2: fluid/service code (D, BD, HO)
+    r'[\s\-_]+'                                        # separator
+    r'(\d{3,6})'                                       # group 3: area / service code (3-6 digits)
+    r'[\s\-_]+'                                        # separator
+    r'(\d{4,8})'                                       # group 4: sequence number (4-8 digits)
+    r'(?:[\s\-_]+([A-Z0-9]{1,8}))?'                   # group 5: pipe class (optional)
+    r'(?:[\s\-_]+([A-Z0-9]{1,4}))?'                   # group 6: insulation/spec (optional)
+    r'(?![A-Za-z0-9])',                                # not followed by alphanumeric
+    re.IGNORECASE,
+)
 
 _DEFAULT_VALVE_PREFIXES = {
     'HV', 'FV', 'XV', 'PV', 'SDV', 'BDV', 'PSV', 'PRV', 'CV', 'LV', 'TV'
@@ -468,3 +490,296 @@ def _extract_tag_positions(file_path, page_index):
         logger.debug('[PIDExtraction] tag_positions extraction skipped: %s', exc)
 
     return positions
+
+
+# ---------------------------------------------------------------------------
+# Pipeline line designation extractor (multi-angle)
+# ---------------------------------------------------------------------------
+
+def _normalize_pipeline_desig_key(size_num: str, fluid: str, area: str, seq: str,
+                                   pipe_class: str = '', insulation: str = '') -> str:
+    """Canonical dedup key: uppercase, no spaces."""
+    parts = [f'{size_num}"-{fluid.upper()}-{area}-{seq}']
+    if pipe_class:
+        parts[0] += f'-{pipe_class.upper()}'
+    if insulation:
+        parts[0] += f'-{insulation.upper()}'
+    return parts[0]
+
+
+def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int) -> list:
+    """
+    Detect pipeline line designations like ``2"-D-6152-033842-X-N`` from a single
+    drawing page in both **horizontal** and **vertical** orientations.
+
+    Strategy
+    --------
+    * **Vector PDF** (embedded text): PyMuPDF ``get_text('dict')`` exposes the
+      ``dir`` vector for each text line, allowing H vs V classification without
+      any image rotation.
+    * **Scanned / image PDF**: The page is rendered at 200 DPI then OCR'd three
+      times — original (0°), rotated 90° CW, and rotated 90° CCW — so that text
+      written vertically along pipe runs in either direction is captured.
+
+    Returns a deduplicated list of pipeline tag dicts, one entry per unique
+    canonical designation.  Each entry::
+
+        {
+          "text":        "2\\"-D-6152-033842-X-N",
+          "size":        "2\\"",
+          "fluid_code":  "D",
+          "area_code":   "6152",
+          "sequence_no": "033842",
+          "pipe_class":  "X",
+          "insulation":  "N",
+          "occurrences": [
+            {"direction": "H", "x_pct": 45.2, "y_pct": 30.1},
+            {"direction": "V", "x_pct": 45.5, "y_pct": 30.3},
+          ],
+          "count":       2,
+          "directions":  ["H", "V"],
+          "multi_angle": True,   # same tag confirmed in ≥2 orientations
+        }
+    """
+    accumulated = {}   # norm_key → entry dict (+_seen helper for dedup)
+
+    def _nps_valid(num_str: str) -> bool:
+        try:
+            return float(num_str) in _STANDARD_NPS_INCH
+        except (ValueError, TypeError):
+            return False
+
+    def _record(size_num, fluid, area, seq, pcls, insul, direction, x_pct, y_pct):
+        if not _nps_valid(size_num):
+            return
+        norm_key = _normalize_pipeline_desig_key(size_num, fluid, area, seq, pcls, insul)
+        if norm_key not in accumulated:
+            accumulated[norm_key] = {
+                'text':        norm_key,
+                'size':        f'{size_num}"',
+                'fluid_code':  fluid.upper(),
+                'area_code':   area,
+                'sequence_no': seq,
+                'pipe_class':  pcls.upper(),
+                'insulation':  insul.upper(),
+                'occurrences': [],
+                '_seen':       set(),
+            }
+        entry  = accumulated[norm_key]
+        occ_key = (direction, round(x_pct), round(y_pct))
+        if occ_key not in entry['_seen']:
+            entry['_seen'].add(occ_key)
+            entry['occurrences'].append({
+                'direction': direction,
+                'x_pct':     round(x_pct, 2),
+                'y_pct':     round(y_pct, 2),
+            })
+
+    def _scan_text(text, direction, x_pct, y_pct):
+        for m in _PIPELINE_DESIG_RE.finditer(text):
+            _record(
+                m.group(1),          # NPS size
+                m.group(2),          # fluid code
+                m.group(3),          # area code
+                m.group(4),          # sequence number
+                m.group(5) or '',    # pipe class
+                m.group(6) or '',    # insulation
+                direction, x_pct, y_pct,
+            )
+
+    try:
+        import fitz
+        if file_path.rsplit('.', 1)[-1].lower() != 'pdf':
+            return []
+
+        doc    = fitz.open(file_path)
+        if page_index >= len(doc):
+            doc.close()
+            return []
+
+        page   = doc[page_index]
+        page_w = page.rect.width  or 1
+        page_h = page.rect.height or 1
+
+        def _pct(v, dim):
+            return round(float(v) / float(dim) * 100.0, 2)
+
+        # ── Path A: vector PDF – span direction vectors ──────────────────
+        raw_words = [w for w in page.get_text('words') if w[4].strip()]
+        has_text  = len(raw_words) > 5
+
+        if has_text:
+            try:
+                for blk in page.get_text('dict', flags=0)['blocks']:
+                    for ln in blk.get('lines', []):
+                        dir_v     = ln.get('dir', (1, 0))
+                        direction = 'V' if abs(dir_v[0]) < 0.3 else 'H'
+                        spans_list = ln.get('spans', [])
+
+                        # Scan each span individually
+                        for sp in spans_list:
+                            txt = sp.get('text', '').strip()
+                            if not txt:
+                                continue
+                            b  = sp['bbox']
+                            xp = _pct((b[0] + b[2]) / 2.0, page_w)
+                            yp = _pct((b[1] + b[3]) / 2.0, page_h)
+                            _scan_text(txt, direction, xp, yp)
+
+                        # Also scan the full joined line text (catches tokens split across spans)
+                        if len(spans_list) > 1:
+                            line_txt = ' '.join(sp.get('text', '') for sp in spans_list)
+                            b0 = spans_list[0]['bbox']
+                            bN = spans_list[-1]['bbox']
+                            xp = _pct((b0[0] + bN[2]) / 2.0, page_w)
+                            yp = _pct((b0[1] + bN[3]) / 2.0, page_h)
+                            _scan_text(line_txt, direction, xp, yp)
+            except Exception as e:
+                logger.debug('[PIDLineTags] Vector path error: %s', e)
+
+        else:
+            # ── Path B: scanned / image PDF – multi-angle Tesseract ─────
+            try:
+                import pytesseract
+                from PIL import Image
+                import io
+
+                dpi = 200   # reduced for rotated passes: speed vs quality trade-off
+                mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY, alpha=False)
+                orig_img      = Image.open(io.BytesIO(pix.tobytes('png')))
+                orig_w, orig_h = orig_img.size
+                cfg = '--oem 1 --psm 11'
+
+                def _ocr_words(img):
+                    """Return list of (text, x_frac, y_frac) with conf >= 15."""
+                    try:
+                        data = pytesseract.image_to_data(
+                            img, config=cfg, output_type=pytesseract.Output.DICT)
+                    except Exception:
+                        return []
+                    out = []
+                    iw, ih = img.size
+                    for i in range(len(data.get('text', []))):
+                        txt = str(data['text'][i]).strip()
+                        if not txt:
+                            continue
+                        try:
+                            conf = int(data['conf'][i])
+                        except (ValueError, TypeError):
+                            conf = -1
+                        if conf < 15:
+                            continue
+                        lft = int(data['left'][i])
+                        top = int(data['top'][i])
+                        wid = int(data['width'][i])
+                        hgt = int(data['height'][i])
+                        out.append((txt,
+                                    (lft + wid / 2.0) / iw,
+                                    (top + hgt / 2.0) / ih))
+                    return out
+
+                def _full_page_text(img):
+                    try:
+                        return pytesseract.image_to_string(img, config='--oem 1 --psm 6')
+                    except Exception:
+                        return ''
+
+                # --- 0° (horizontal) ----------------------------------------
+                for txt, rx, ry in _ocr_words(orig_img):
+                    _scan_text(txt, 'H', rx * 100.0, ry * 100.0)
+                _scan_text(_full_page_text(orig_img), 'H', 50.0, 50.0)  # compound token recovery
+
+                # --- 90° CW (PIL ROTATE_270) — picks up bottom-to-top text --
+                try:
+                    img_cw = orig_img.transpose(Image.Transpose.ROTATE_270)
+                except AttributeError:
+                    img_cw = orig_img.transpose(4)  # ROTATE_270 = 4 (Pillow < 10 compat)
+                for txt, rx, ry in _ocr_words(img_cw):
+                    # Map back: CW90 inverse → orig_x ≈ ry, orig_y ≈ 1 - rx
+                    _scan_text(txt, 'V', ry * 100.0, (1.0 - rx) * 100.0)
+                _scan_text(_full_page_text(img_cw), 'V', 50.0, 50.0)
+
+                # --- 90° CCW (PIL ROTATE_90) — picks up top-to-bottom text --
+                try:
+                    img_ccw = orig_img.transpose(Image.Transpose.ROTATE_90)
+                except AttributeError:
+                    img_ccw = orig_img.transpose(2)  # ROTATE_90 = 2 (Pillow < 10 compat)
+                for txt, rx, ry in _ocr_words(img_ccw):
+                    # Map back: CCW90 inverse → orig_x ≈ 1 - ry, orig_y ≈ rx
+                    _scan_text(txt, 'V', (1.0 - ry) * 100.0, rx * 100.0)
+                _scan_text(_full_page_text(img_ccw), 'V', 50.0, 50.0)
+
+            except ImportError:
+                logger.warning('[PIDLineTags] pytesseract/PIL not available – rotated OCR skipped')
+            except Exception as exc:
+                logger.warning('[PIDLineTags] Scanned path error: %s', exc)
+
+        doc.close()
+
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.debug('[PIDLineTags] Extraction skipped: %s', exc)
+
+    # ── Cloud-truncation resolution pass ─────────────────────────────────
+    # When a revision cloud partially covers a line designation, OCR reads a
+    # truncated label with missing pipe_class / insulation suffix, producing
+    # a second key in `accumulated` that is the same physical line.
+    # Strategy: for any entry with NO pipe_class, look for a partner entry
+    # that has the same (size_num, fluid_code, area_code, sequence_no) AND
+    # a non-empty pipe_class.  If found, merge the orphan's occurrences into
+    # the full entry and flag `cloud_truncation_detected` so the rule engine
+    # can issue a targeted critical finding.
+    # Soft-coded: only resolves when pipe_class is entirely absent (the
+    # minimal cloud-cover case).  Two full entries with DIFFERENT pipe classes
+    # are NOT merged — those represent genuine specification-break lines.
+    _base_to_full: dict = {}   # (size, fluid, area, seq) → norm_key of best full entry
+    for _nk, _e in accumulated.items():
+        if _e['pipe_class']:
+            _base = (_e['size'].rstrip('"'), _e['fluid_code'], _e['area_code'], _e['sequence_no'])
+            _existing = _base_to_full.get(_base)
+            if _existing is None or len(accumulated[_existing]['pipe_class']) < len(_e['pipe_class']):
+                _base_to_full[_base] = _nk
+
+    _to_delete = []
+    for _nk, _e in accumulated.items():
+        if _e['pipe_class']:
+            continue   # already a full entry — skip
+        _base = (_e['size'].rstrip('"'), _e['fluid_code'], _e['area_code'], _e['sequence_no'])
+        _full_nk = _base_to_full.get(_base)
+        if _full_nk is None:
+            continue   # no full partner — keep truncated as-is
+        _full_e = accumulated[_full_nk]
+        # Merge orphan occurrences into the full entry
+        _full_seen = _full_e.setdefault('_seen', set())
+        for _occ in _e['occurrences']:
+            _occ_key = (_occ['direction'], round(_occ['x_pct']), round(_occ['y_pct']))
+            if _occ_key not in _full_seen:
+                _full_seen.add(_occ_key)
+                _full_e['occurrences'].append(_occ)
+        _full_e['cloud_truncation_detected'] = True   # flag for LSZ-009 rule
+        _to_delete.append(_nk)
+
+    for _k in _to_delete:
+        del accumulated[_k]
+
+    # ── Build final output (strip internal _seen helper) ─────────────────
+    result = []
+    for entry in accumulated.values():
+        entry.pop('_seen', None)
+        occs       = entry['occurrences']
+        directions = sorted({o['direction'] for o in occs})
+        entry['count']       = len(occs)
+        entry['directions']  = directions
+        entry['multi_angle'] = len(directions) > 1
+        result.append(entry)
+
+    # Sort: largest NPS first, then fluid → area → seq
+    result.sort(key=lambda e: (
+        -(float(e['size'].replace('"', '') or 0)),
+        e['fluid_code'],
+        e['area_code'],
+        e['sequence_no'],
+    ))
+    return result

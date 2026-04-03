@@ -19,6 +19,17 @@ Rule catalogue:
 
   LSZ-001  Missing line size text for known pipelines
   LSZ-002  Conflicting line sizes on the same line segment
+  LSZ-003  Valve bore size does not match connected line size
+  LSZ-004  Conflicting inline size annotations on the same OCR line reference
+           (multiple distinct NPS sizes on a line containing a line-designation token)
+  LSZ-005  3+ distinct nominal sizes on the drawing — possible undocumented spec-breaks
+  LSZ-006  Same pipeline base with conflicting NPS sizes
+  LSZ-007  Same pipeline designation 3+ times in one orientation
+  LSZ-008  Pipeline designation confirmed in both H and V orientations
+  LSZ-009  Cloud-truncated duplicate pipeline designation
+  LSZ-010  Shared sequence-number / pipe-class / insulation suffix across
+           different pipeline identities (area codes) on the same drawing
+           -- strong indicator of a copy-paste error in line numbering
 
   NTS-001  NOTES section present but no tag references found
   NTS-002  HOLD item detected – requires action
@@ -42,6 +53,42 @@ _INSTRUMENT_PREFIXES   = {'FT', 'FI', 'FIC', 'PT', 'PI', 'PIC', 'LT', 'LI', 'LIC
 _ORPHAN_CONFIDENCE_HIGH = 0.75
 _ORPHAN_CONFIDENCE_MEDIUM = 0.45
 _ORPHAN_LOW_TEXT_CUTOFF = 60
+
+# ── LSZ-004 soft-coded knobs ─────────────────────────────────────────────────
+# Regex to extract well-formed pipeline designation tokens from a noisy OCR line.
+# Matches patterns like  4"-D-5749-013842-X-N  or  2"-BD-6003-033842-X
+_LSZ004_LINE_TAG_RE = re.compile(
+    r'\d{1,3}(?:\.\d+)?["\u201c\u201d]\s*-[A-Z]{1,4}-\d{3,6}-\d{4,10}(?:-[A-Z0-9]+)*',
+    re.IGNORECASE,
+)
+# Maximum LSZ-004 findings emitted per drawing (avoids flooding the report).
+_LSZ004_MAX_FINDINGS = 5
+# Minimum distinct NPS sizes on a single OCR line to raise LSZ-004.
+_LSZ004_MIN_SIZES = 2
+
+# ── LSZ-005 soft-coded knobs ─────────────────────────────────────────────────
+# Minimum number of *distinct* nominal sizes on a drawing to trigger LSZ-005.
+# Increase to suppress; decrease to be more sensitive.
+_LSZ005_MIN_DISTINCT_SIZES = 3
+# Valid pipe-size range (inches) — filters out OCR artefacts.
+_LSZ005_SIZE_MIN_INCH = 0.5   # ½" is the smallest common instrument line
+_LSZ005_SIZE_MAX_INCH = 48.0  # 48" is the largest standard pipe
+# ── LSZ-010 soft-coded knobs ─────────────────────────────────────────────────
+# Fields from line_tag that form the "shared suffix" used for grouping.
+# Reorder or remove fields to tune sensitivity:
+#   ('sequence_no', 'pipe_class', 'insulation') catches  013842-X-N  matches
+#   ('sequence_no',)                             catches  013842      matches (wider net)
+_LSZ010_SUFFIX_FIELDS = ('sequence_no', 'pipe_class', 'insulation')
+# When True: only flag shared-suffix conflicts where fluid codes also match.
+# Recommended True -- different fluid systems legitimately reuse sequence numbers.
+_LSZ010_SAME_FLUID_ONLY = True
+# When True: only flag when NPS sizes also match (tighter, fewer false positives).
+_LSZ010_REQUIRE_SAME_SIZE = False
+# Maximum LSZ-010 findings per drawing (avoids flooding the report on dense sheets).
+_LSZ010_MAX_FINDINGS = 10
+# Minimum non-empty suffix fields required to consider an entry checkable.
+# Prevents empty-field entries from creating spurious cross-matches.
+_LSZ010_MIN_SUFFIX_PARTS = 1
 
 
 @dataclass
@@ -67,6 +114,8 @@ def run_rules(extraction: Dict[str, Any], graph) -> List[RuleFinding]:
     findings.extend(_check_valve_equipment(extraction))
     findings.extend(_check_line_sizes(extraction))
     findings.extend(_check_notes_holds(extraction))
+    findings.extend(_check_pipeline_tag_duplicates(extraction))
+    findings.extend(_check_shared_suffix_across_identities(extraction))
 
     # Sort deterministically: rule_id → issue_observed
     findings.sort(key=lambda f: (f.rule_id, f.issue_observed))
@@ -419,42 +468,81 @@ def _check_valve_line_size_mismatch(raw_text: str, line_sizes: List[Dict[str, An
 
 
 def _check_inline_size_conflict_with_line_token(raw_text: str) -> List[RuleFinding]:
+    """
+    LSZ-004  An OCR text-line contains a pipeline-designation token AND two or
+    more distinct NPS inch-sizes.  Classic symptom: a valve callout sitting next
+    to a line designation where the valve bore differs from the pipe nominal size,
+    or two different line designations with different sizes on the same text line.
+
+    Soft-coded via module-level constants:
+      _LSZ004_LINE_TAG_RE  -- pattern that recognises a line-designation token
+      _LSZ004_MAX_FINDINGS -- cap to avoid flooding the report with noise
+      _LSZ004_MIN_SIZES    -- minimum distinct sizes required to raise the finding
+    """
     out: List[RuleFinding] = []
     if not raw_text:
         return out
 
-    # Flexible line token matcher for strings like 4"-BD-4860-033842-X-N
-    line_like = re.compile(r'\d{1,2}\s*(?:"|\'\'|”)?\s*-[A-Z]{1,4}-\d{3,6}-\d{4,6}-[A-Z](?:-[A-Z])?', re.IGNORECASE)
-    size_token = re.compile(r'\b(\d{1,2}(?:\.\d+)?)\s*(?:"|\'\'|”)')
+    size_token_re = re.compile(r'\b(\d{1,2}(?:\.\d+)?)\s*(?:"|\'\')')
 
-    for line in raw_text.splitlines():
-        if not line_like.search(line):
+    # Track which size-conflict frozensets we have already reported so that
+    # repeated OCR lines do not generate identical duplicate findings.
+    seen_conflict_keys: set = set()
+
+    for ocr_line in raw_text.splitlines():
+        # Only examine lines that contain at least one line-designation token.
+        if not _LSZ004_LINE_TAG_RE.search(ocr_line):
             continue
 
-        sizes = []
-        for m in size_token.finditer(line):
-            s = f"{m.group(1)}\""
+        # Collect distinct NPS sizes found on this OCR line.
+        sizes: list = []
+        for m in size_token_re.finditer(ocr_line):
+            s = f'{m.group(1)}"'
             if s not in sizes:
                 sizes.append(s)
 
-        if len(sizes) >= 2:
-            out.append(RuleFinding(
-                category='line_size',
-                rule_id='LSZ-004',
-                issue_observed=(
-                    f"Conflicting inline size annotations {sizes[0]} and {sizes[1]} "
-                    "detected on the same line reference"
-                ),
-                action_required='Verify valve/line nominal sizes and add reducer or correct line designation as required',
-                evidence=line.strip()[:240],
-                direction='N/A',
-                severity='critical',
-            ))
+        if len(sizes) < _LSZ004_MIN_SIZES:
+            continue
+
+        conflict_key = frozenset(sizes)
+        if conflict_key in seen_conflict_keys:
+            continue
+        seen_conflict_keys.add(conflict_key)
+
+        # Build clean evidence: prefer extracted line-tag tokens over raw OCR.
+        tag_tokens = _LSZ004_LINE_TAG_RE.findall(ocr_line)
+        if tag_tokens:
+            sizes_str = ", ".join(sizes)
+            tags_str  = "  ·  ".join(list(dict.fromkeys(tag_tokens))[:4])
+            evidence  = f"Sizes [{sizes_str}] on: {tags_str}"
+        else:
+            evidence = re.sub(r'[^\w\s"./%-]', " ", ocr_line).strip()[:160]
+
+        if len(sizes) == 2:
+            sizes_label = f'{sizes[0]} and {sizes[1]}'
+        else:
+            sizes_label = ", ".join(sizes[:-1]) + f' and {sizes[-1]}'
+
+        out.append(RuleFinding(
+            category="line_size",
+            rule_id="LSZ-004",
+            issue_observed=(
+                f"Conflicting inline size annotations {sizes_label} "
+                "detected on the same line reference"
+            ),
+            action_required=(
+                "Verify valve/line nominal sizes and add a reducer or correct "
+                "the line designation as required."
+            ),
+            evidence=evidence,
+            direction="N/A",
+            severity="critical",
+        ))
+
+        if len(out) >= _LSZ004_MAX_FINDINGS:
             break
 
     return out
-
-
 def _check_valve_line_size_mismatch_fallback(raw_text: str, line_sizes: List[Dict[str, Any]]) -> List[RuleFinding]:
     out: List[RuleFinding] = []
     if not raw_text:
@@ -579,32 +667,82 @@ def _check_valve_line_size_mismatch_fallback(raw_text: str, line_sizes: List[Dic
     return out
 
 
-def _check_multi_size_transition_observation(raw_text: str, line_sizes: List[Dict[str, Any]]) -> List[RuleFinding]:
+def _check_multi_size_transition_observation(raw_text: str, line_sizes: List[dict]) -> List[RuleFinding]:
+    """
+    LSZ-005  Three or more *distinct* nominal pipe sizes are present on the drawing.
+
+    This observation flags drawings with many size transitions so the engineer
+    can confirm every spec-break / reducer is documented.  The exact set of
+    sizes detected is reported dynamically rather than hard-coding a specific triplet.
+
+    Soft-coded via module constants:
+      _LSZ005_MIN_DISTINCT_SIZES  -- number of distinct sizes required to fire
+      _LSZ005_SIZE_MIN_INCH       -- lower bound for a valid pipe size (inches)
+      _LSZ005_SIZE_MAX_INCH       -- upper bound for a valid pipe size (inches)
+    """
     out: List[RuleFinding] = []
     if not line_sizes:
         return out
 
-    normalized = set()
-    for ls in line_sizes:
-        txt = str(ls.get('text', '')).strip().replace('”', '"').replace("''", '"')
-        if txt and txt.endswith('"'):
-            normalized.add(txt)
+    def _inch_value(txt: str):
+        """Return float inch value from '4"'  '25mm', or None if unparseable."""
+        txt = txt.strip().replace("\u201c", "\"").replace("\u201d", "\"").replace("''", "\"")
+        if txt.endswith("\""):
+            try:
+                return float(txt.rstrip("\"").strip())
+            except ValueError:
+                return None
+        if txt.lower().endswith("mm"):
+            try:
+                return float(txt[:-2].strip()) / 25.4
+            except ValueError:
+                return None
+        return None
 
-    target = {'8"', '4"', '3"'}
-    if target.issubset(normalized) and ('-BD-' in raw_text or '-VG-' in raw_text):
-        out.append(RuleFinding(
-            category='line_size',
-            rule_id='LSZ-005',
-            issue_observed='Multiple nominal sizes 8", 4", and 3" detected on this drawing segment',
-            action_required='Verify intended reducers/spec-breaks and confirm each size transition is documented on the line route',
-            evidence='Detected sizes: 8", 4", 3" on same diagram context',
-            direction='N/A',
-            severity='major',
-        ))
+    # Collect distinct validated sizes from the extraction line_sizes list.
+    valid_sizes: dict = {}   # canonical_text -> inch_value
+    for ls in line_sizes:
+        raw = str(ls.get("text", "")).strip()
+        # Normalise curly / smart quotes to straight double-quote.
+        canonical = raw.replace("\u201c", "\"").replace("\u201d", "\"").replace("''", "\"")
+        if not canonical.endswith("\""):
+            continue
+        val = _inch_value(canonical)
+        if val is None:
+            continue
+        if _LSZ005_SIZE_MIN_INCH <= val <= _LSZ005_SIZE_MAX_INCH:
+            if canonical not in valid_sizes:
+                valid_sizes[canonical] = val
+
+    if len(valid_sizes) < _LSZ005_MIN_DISTINCT_SIZES:
+        return out
+
+    # Sort sizes smallest to largest for a readable display.
+    sorted_sizes = sorted(valid_sizes.keys(), key=lambda s: valid_sizes[s])
+
+    # Human-friendly label: '2", 4", and 8"'
+    if len(sorted_sizes) == _LSZ005_MIN_DISTINCT_SIZES:
+        sizes_label = f'{sorted_sizes[0]}, {sorted_sizes[1]}, and {sorted_sizes[2]}'
+    else:
+        sizes_label = ", ".join(sorted_sizes[:-1]) + f', and {sorted_sizes[-1]}'
+
+    out.append(RuleFinding(
+        category="line_size",
+        rule_id="LSZ-005",
+        issue_observed=(
+            f"Multiple nominal sizes {sizes_label} detected on this drawing segment"
+        ),
+        action_required=(
+            "Verify intended reducers / spec-breaks and confirm each size "
+            "transition is documented on the line route with a reducer symbol "
+            "and updated line designations."
+        ),
+        evidence=f"Detected sizes: {sizes_label} on same diagram context",
+        direction="N/A",
+        severity="major",
+    ))
 
     return out
-
-
 # ---------------------------------------------------------------------------
 # NOTES & HOLDs RULES
 # ---------------------------------------------------------------------------
@@ -639,5 +777,280 @@ def _check_notes_holds(extraction: Dict[str, Any]) -> List[RuleFinding]:
             evidence=hold[:200],
             severity='major',
         ))
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# PIPELINE LINE DESIGNATION RULES  (LSZ-006, LSZ-007)
+# ---------------------------------------------------------------------------
+
+def _check_pipeline_tag_duplicates(extraction: Dict[str, Any]) -> List[RuleFinding]:
+    """
+    LSZ-006  Same pipeline base (fluid + area + seq + class + insulation) detected
+             with conflicting NPS sizes → likely labelling error or missing reducer.
+    LSZ-007  Same designation detected 3+ times in a single orientation → possible
+             label-copy error (warning only; legitimate on multi-sheet drawings).
+    """
+    out: List[RuleFinding] = []
+    line_tags = extraction.get('line_tags', [])
+    if not line_tags:
+        return out
+
+    # LSZ-006 ────────────────────────────────────────────────────────────
+    # Group by base (everything except NPS size)
+    base_groups: dict = {}
+    for lt in line_tags:
+        base_key = '-'.join([
+            lt.get('fluid_code', ''),
+            lt.get('area_code',   ''),
+            lt.get('sequence_no', ''),
+            lt.get('pipe_class',  ''),
+            lt.get('insulation',  ''),
+        ]).upper().strip('-')
+        if not base_key:
+            continue
+        base_groups.setdefault(base_key, []).append(lt)
+
+    for base_key, entries in base_groups.items():
+        sizes = list({e.get('size', '') for e in entries if e.get('size')})
+        if len(sizes) > 1:
+            texts = [e.get('text', '') for e in entries]
+            out.append(RuleFinding(
+                category='line_size',
+                rule_id='LSZ-006',
+                issue_observed=(
+                    f"Pipeline base '{base_key}' found with conflicting NPS sizes: "
+                    f"{', '.join(sorted(sizes))} — possible reducer or labelling error"
+                ),
+                action_required=(
+                    'Confirm whether a size transition (reducer) is intended. '
+                    'If so, add a reducer symbol and update line designations. '
+                    'Otherwise correct the mislabelled tag.'
+                ),
+                evidence='; '.join(texts[:3]),
+                severity='major',
+            ))
+
+    # LSZ-007 ────────────────────────────────────────────────────────────
+    # Same full designation appearing ≥3 times in the same orientation
+    for lt in line_tags:
+        for direction in ('H', 'V'):
+            same_dir = [o for o in lt.get('occurrences', []) if o['direction'] == direction]
+            if len(same_dir) >= 3:
+                dir_label = 'horizontal' if direction == 'H' else 'vertical'
+                coords = '; '.join(
+                    f"({o['x_pct']:.1f}%, {o['y_pct']:.1f}%)" for o in same_dir[:3]
+                )
+                out.append(RuleFinding(
+                    category='line_size',
+                    rule_id='LSZ-007',
+                    issue_observed=(
+                        f"Pipeline tag '{lt.get('text', '')}' appears {len(same_dir)} times "
+                        f"in {dir_label} orientation — possible label-copy error"
+                    ),
+                    action_required=(
+                        'Verify intended multiplicity. Remove duplicate labels if the line '
+                        'does not re-enter this drawing area. Multiple occurrences are '
+                        'normal on multi-sheet or continuation drawings.'
+                    ),
+                    evidence=f"{lt.get('text','')} @ {coords}",
+                    severity='minor',
+                ))
+
+    # LSZ-008 ────────────────────────────────────────────────────────────
+    # Same designation confirmed in BOTH H and V orientations (multi-angle duplicate)
+    # This is the most common duplicate type: the label runs along the pipe in one
+    # direction and also appears as a cross-reference note in the perpendicular axis.
+    for lt in line_tags:
+        if not lt.get('multi_angle'):
+            continue
+        occs = lt.get('occurrences', [])
+        h_occs = [o for o in occs if o['direction'] == 'H' and o.get('x_pct') is not None]
+        v_occs = [o for o in occs if o['direction'] == 'V' and o.get('x_pct') is not None]
+        if not h_occs or not v_occs:
+            continue
+        h_coord = f"({h_occs[0]['x_pct']:.1f}%, {h_occs[0]['y_pct']:.1f}%)"
+        v_coord = f"({v_occs[0]['x_pct']:.1f}%, {v_occs[0]['y_pct']:.1f}%)"
+        tag_text = lt.get('text', '')
+        # Soft-coded: evidence STARTS with the full tag text so that the frontend
+        # overlay can extract the NPS size prefix (e.g. '4"') and map it to a
+        # diagram-anchored position via tag_positions.  The coordinate detail
+        # follows for audit traceability.
+        out.append(RuleFinding(
+            category='line_size',
+            rule_id='LSZ-008',
+            issue_observed=(
+                f"Pipeline tag '{tag_text}' detected in both horizontal "
+                f"and vertical orientations — confirmed duplicate label on this drawing"
+            ),
+            action_required=(
+                'Verify the line physically re-enters this drawing area in a different '
+                'direction. If the label is a continuation reference, ensure arrows and '
+                'sheet cross-references are present per engineering drafting standard.'
+            ),
+            evidence=f"{tag_text}  H @ {h_coord}  ·  V @ {v_coord}",
+            severity='minor',
+        ))
+
+    # LSZ-009 ────────────────────────────────────────────────────────────
+    # Cloud-truncated duplicate pipeline designation.
+    # Fired when extraction finds the same line identity (size + fluid + area +
+    # sequence) twice: once with a full pipe_class/insulation suffix and once
+    # without — the truncated form is almost certainly the same physical label
+    # partially covered by a revision cloud.
+    # The full entry's occurrences include both the original and the merged
+    # truncated occurrence (set by the cloud-truncation resolution pass in
+    # extraction.py), so the exact drawing positions are already available.
+    for lt in line_tags:
+        if not lt.get('cloud_truncation_detected'):
+            continue
+        tag_text = lt.get('text', '')
+        occ_count = len(lt.get('occurrences', []))
+        out.append(RuleFinding(
+            category='line_size',
+            rule_id='LSZ-009',
+            issue_observed=(
+                f"Cloud-truncated duplicate detected: pipeline tag '{tag_text}' (full designation) "
+                f"appears alongside a second truncated occurrence missing the pipe-class / "
+                f"insulation suffix. A revision cloud is likely obscuring the trailing suffix "
+                f"on one label. Tag found at {occ_count} location(s) on this drawing."
+            ),
+            action_required=(
+                'Visually inspect all occurrences of this line tag on the drawing. '
+                'Confirm whether the truncated label is the same physical line with its '
+                'suffix obscured by a revision cloud, or a genuinely separate line. '
+                'If it is the same line, update the truncated label to show the complete '
+                'designation including the full pipe-class and insulation/tracing suffix.'
+            ),
+            evidence=tag_text,
+            severity='critical',
+        ))
+
+    return out
+
+# ---------------------------------------------------------------------------
+# LSZ-010  Shared sequence-number / suffix across different pipeline identities
+# ---------------------------------------------------------------------------
+
+def _check_shared_suffix_across_identities(extraction: dict) -> list:
+    """
+    LSZ-010  Two or more pipeline tags on the same drawing share an identical
+    trailing suffix (sequence_no + pipe_class + insulation, configurable via
+    _LSZ010_SUFFIX_FIELDS) but belong to DIFFERENT pipeline identities
+    (different area codes, and optionally different fluid codes).
+
+    This pattern is the most common copy-paste error in P&ID line numbering:
+    an engineer copies a line designation, updates the fluid/area segment, but
+    forgets to change the sequence number and pipe-class suffix.
+
+    Example (the case that motivated this rule):
+      4\"-D-5749-013842-X-N   area 5749
+      4\"-D-5690-013842-X-N   area 5690
+      Shared suffix: 013842-X-N  |  Different areas: 5749 vs 5690
+
+    Soft-coded via module-level constants:
+      _LSZ010_SUFFIX_FIELDS       -- tuple of line_tag keys forming the "shared suffix"
+      _LSZ010_SAME_FLUID_ONLY     -- only flag when fluid codes also match
+      _LSZ010_REQUIRE_SAME_SIZE   -- only flag when NPS sizes also match
+      _LSZ010_MAX_FINDINGS        -- cap on findings per drawing
+      _LSZ010_MIN_SUFFIX_PARTS    -- minimum populated suffix parts to consider
+    """
+    out: list = []
+    line_tags = extraction.get("line_tags", [])
+    if not line_tags:
+        return out
+
+    # ── Build suffix_key -> list[line_tag] map ────────────────────────────
+    suffix_groups: dict = {}
+    for lt in line_tags:
+        parts = [
+            str(lt.get(f) or "").upper().strip()
+            for f in _LSZ010_SUFFIX_FIELDS
+        ]
+        # Skip entries where too few suffix fields are populated.
+        populated = sum(1 for p in parts if p)
+        if populated < _LSZ010_MIN_SUFFIX_PARTS:
+            continue
+        # Use only populated parts in the key so partial entries don't dilute.
+        suffix_key = "-".join(p for p in parts if p)
+        suffix_groups.setdefault(suffix_key, []).append(lt)
+
+    seen_groups: set = set()
+
+    for suffix_key, entries in suffix_groups.items():
+        if len(entries) < 2:
+            continue
+
+        # ── Build distinct (fluid_code, area_code) identity pairs ─────────
+        identities = []
+        for e in entries:
+            idn = (
+                str(e.get("fluid_code") or "").upper().strip(),
+                str(e.get("area_code")  or "").upper().strip(),
+            )
+            if idn not in identities:
+                identities.append(idn)
+
+        # Must have at least two DIFFERENT identities to be a conflict.
+        if len(identities) < 2:
+            continue
+
+        # ── Apply optional filters ─────────────────────────────────────────
+        if _LSZ010_SAME_FLUID_ONLY:
+            # Only flag when all conflicting tags share the same fluid code.
+            fluids = {i[0] for i in identities if i[0]}
+            if len(fluids) > 1:
+                # Different fluid systems legitimately share sequence numbers.
+                continue
+
+        if _LSZ010_REQUIRE_SAME_SIZE:
+            sizes = {str(e.get("size") or "").upper().strip() for e in entries if e.get("size")}
+            if len(sizes) > 1:
+                continue
+
+        # ── Deduplication: same set of identities ─────────────────────────
+        group_key = frozenset(f"{i[0]}-{i[1]}" for i in identities)
+        if group_key in seen_groups:
+            continue
+        seen_groups.add(group_key)
+
+        # ── Build human-readable display strings ──────────────────────────
+        # Collect unique texts in insertion order, capped at 4 for readability.
+        texts = list(dict.fromkeys(e.get("text", "") for e in entries if e.get("text")))
+
+        areas_display  = ", ".join(sorted({i[1] for i in identities if i[1]}))
+        fluids_display = ", ".join(sorted({i[0] for i in identities if i[0]}))
+
+        # Build the human-readable suffix from the first entry's actual values.
+        suffix_display = "-".join(
+            str(entries[0].get(f) or "").strip()
+            for f in _LSZ010_SUFFIX_FIELDS
+            if entries[0].get(f)
+        )
+
+        evidence = "  ·  ".join(texts[:4])
+
+        out.append(RuleFinding(
+            category="line_size",
+            rule_id="LSZ-010",
+            issue_observed=(
+                f"Pipeline suffix '{suffix_display}' shared across different area codes "
+                f"({areas_display}) on the same drawing -- "
+                "possible copy-paste error in line numbering"
+            ),
+            action_required=(
+                "Verify that each pipeline has a unique sequence number within its "
+                "area / fluid combination. If these are separate physical lines, "
+                "assign distinct sequence numbers per the project line-numbering "
+                "convention. If intentional (e.g. shared-service line), add a note "
+                "or cross-reference to justify the identical suffix."
+            ),
+            evidence=evidence,
+            severity="major",
+        ))
+
+        if len(out) >= _LSZ010_MAX_FINDINGS:
+            break
 
     return out

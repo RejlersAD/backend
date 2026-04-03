@@ -275,6 +275,11 @@ def upload_pid(request):
                     tag_positions = extraction.get('tag_positions', {})
                     if tag_positions:
                         metadata['tag_positions'] = tag_positions
+                    # Pipeline line designations with orientation info (H/V multi-angle).
+                    # Soft-coded: mirrors tasks.py to keep both pipelines consistent.
+                    line_tags = extraction.get('line_tags', [])
+                    if line_tags:
+                        metadata['line_tags'] = line_tags
                     drawing_obj.metadata = metadata
                     drawing_obj.save(update_fields=['metadata'])
 
@@ -448,6 +453,79 @@ def get_results(request, document_id):
                         drawing.save(update_fields=['metadata'])
         except Exception as _bp_exc:
             logger.debug('[PIDVResults] tag_positions backfill skipped: %s', _bp_exc)
+
+    # ── line_tags backfill (soft-coded, additive) ─────────────────────────
+    # Documents processed before the cloud-truncation resolution pass was added
+    # will have stale line_tags without cloud_truncation_detected flags and will
+    # be missing any LSZ-009 findings.  This block re-extracts pipeline designations
+    # and creates the missing findings transparently — no user action required.
+    # Trigger condition: a drawing has no LSZ-009 finding yet AND either has no
+    # line_tags metadata or none have cloud_truncation_detected set.
+    # Soft-coded: set PIDV_LINE_TAGS_BACKFILL=false in settings to disable.
+    _backfill_enabled = getattr(settings, 'PIDV_LINE_TAGS_BACKFILL', True)
+    if _backfill_enabled and doc.status == PIDVDocument.Status.COMPLETED and doc.original_file:
+        try:
+            from .services.extraction import _extract_pipeline_tags_multi_angle
+            from .services.rule_engine import _check_pipeline_tag_duplicates
+            from .models import PIDVFinding as _PIDVFinding
+
+            _file_path = doc.original_file.path
+            for _drawing in doc.drawings.all():
+                # Skip drawing if LSZ-009 finding already exists (already backfilled)
+                _has_lsz009 = _PIDVFinding.objects.filter(
+                    drawing=_drawing, rule_id='LSZ-009'
+                ).exists()
+                _meta = _drawing.metadata or {}
+                _existing_ltags = _meta.get('line_tags', [])
+                _has_cloud_flag = any(
+                    lt.get('cloud_truncation_detected') for lt in _existing_ltags
+                )
+
+                if _has_lsz009 and _has_cloud_flag:
+                    continue  # already up-to-date
+
+                # Re-extract pipeline tags with the cloud-truncation resolution pass
+                _fresh_line_tags = _extract_pipeline_tags_multi_angle(
+                    _file_path, _drawing.page_index
+                )
+                if not _fresh_line_tags:
+                    continue
+
+                # Save updated line_tags to metadata
+                _meta['line_tags'] = _fresh_line_tags
+                _drawing.metadata = _meta
+                _drawing.save(update_fields=['metadata'])
+
+                # Generate missing duplicate findings from the fresh line_tags data
+                if not _has_lsz009:
+                    _new_rfs = _check_pipeline_tag_duplicates({'line_tags': _fresh_line_tags})
+                    _new_rfs = [rf for rf in _new_rfs if rf.rule_id in ('LSZ-006', 'LSZ-007', 'LSZ-008', 'LSZ-009')]
+                    if _new_rfs:
+                        # Determine next serial number
+                        _next_sl = (_PIDVFinding.objects.filter(drawing=_drawing)
+                                    .order_by('-sl_no').values_list('sl_no', flat=True).first() or 0) + 1
+                        _bulk = [
+                            _PIDVFinding(
+                                drawing         = _drawing,
+                                sl_no           = _next_sl + _i,
+                                category        = rf.category,
+                                rule_id         = rf.rule_id,
+                                issue_observed  = rf.issue_observed,
+                                action_required = rf.action_required,
+                                evidence        = rf.evidence,
+                                direction       = rf.direction,
+                                severity        = rf.severity,
+                                status          = 'open',
+                            )
+                            for _i, rf in enumerate(_new_rfs)
+                        ]
+                        _PIDVFinding.objects.bulk_create(_bulk)
+                        logger.info(
+                            '[PIDVResults] line_tags backfill: drawing=%s added %d finding(s)',
+                            _drawing.drawing_id, len(_bulk)
+                        )
+        except Exception as _lt_exc:
+            logger.debug('[PIDVResults] line_tags backfill skipped: %s', _lt_exc)
 
     return Response(PIDVDocumentSerializer(doc).data)
 
@@ -741,6 +819,88 @@ def compare_accuracy(request, document_id):
         "comparison_file": str(comparison_path),
         "records_file": str(records_path),
     }, status=status.HTTP_200_OK)
+
+
+# ===========================================================================
+# Tag Naming & Acronym Check
+# ===========================================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def check_naming(request, document_id):
+    """
+    POST /api/v1/pid-verification/check-naming/<document_id>/
+
+    Run the Tag Naming & Acronym Check on the first (or requested) page of a
+    previously-uploaded P&ID document.
+
+    Optional JSON body:
+      { "page_index": 0,  "run_ai": true }
+
+    - page_index  defaults to 0 (first page / drawing).
+    - run_ai      defaults to true.  Pass false to run deterministic checks only
+                  (instant, no API cost) — useful for quick previews.
+
+    Returns:
+      {
+        "naming_issues": [ { rule_id, tag_found, issue_type, description,
+                              suggested_fix, severity, location_hint, source }, ... ],
+        "total":        int,
+        "by_severity":  { "major": N, "minor": N, ... },
+        "ai_used":      bool,
+        "document_id":  str,
+        "file_name":    str,
+      }
+    """
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if not doc.original_file:
+        return Response(
+            {"error": "Original file not stored — re-upload the document"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Parse optional request body
+    body       = request.data if isinstance(request.data, dict) else {}
+    page_index = int(body.get("page_index", 0))
+    run_ai     = bool(body.get("run_ai", True))
+
+    try:
+        file_path = doc.original_file.path
+    except Exception:
+        return Response(
+            {"error": "File path unavailable — storage may be remote"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Re-use already-extracted OCR data from the rule engine if available;
+    # otherwise run a fresh lightweight OCR pass.
+    try:
+        from .services import extraction as ex
+        extraction_result = ex.extract_drawing(file_path, page_index)
+        tags     = extraction_result.get("tags", [])
+        raw_text = extraction_result.get("raw_text", "")
+    except Exception as exc:
+        logger.warning("[NamingCheck] OCR extraction failed (%s) — proceeding with empty text", exc)
+        tags     = []
+        raw_text = ""
+
+    from .services.naming_check import check_naming_conventions
+    result = check_naming_conventions(
+        file_path=file_path,
+        page_index=page_index,
+        tags=tags,
+        raw_text=raw_text,
+        run_ai=run_ai,
+    )
+
+    result["document_id"] = str(doc.document_id)
+    result["file_name"]   = doc.file_name
+    result["page_index"]  = page_index
+
+    return Response(result, status=status.HTTP_200_OK)
 
 
 # ===========================================================================

@@ -89,6 +89,11 @@ def process_pid_document(self, document_id: str):
                 'holds': len(extraction.get('holds', [])),
                 'raw_text_length': len(raw_text),
                 'no_text_detected': len(raw_text.strip()) == 0,
+                # Multi-angle pipeline designations (H + V combined, deduplicated)
+                'line_tags': len(extraction.get('line_tags', [])),
+                'line_tags_multi_angle': sum(
+                    1 for lt in extraction.get('line_tags', []) if lt.get('multi_angle')
+                ),
             }
             metadata = drawing_obj.metadata or {}
             metadata['extraction_summary'] = extraction_summary
@@ -96,6 +101,10 @@ def process_pid_document(self, document_id: str):
             tag_positions = extraction.get('tag_positions', {})
             if tag_positions:
                 metadata['tag_positions'] = tag_positions
+            # Pipeline line designations with orientation info (H/V multi-angle).
+            line_tags = extraction.get('line_tags', [])
+            if line_tags:
+                metadata['line_tags'] = line_tags
             drawing_obj.metadata = metadata
             drawing_obj.save(update_fields=['metadata'])
 

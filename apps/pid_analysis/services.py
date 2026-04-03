@@ -2976,16 +2976,27 @@ Focus especially on:
             _re.IGNORECASE,
         )
 
+        # Soft-coded: separator used to split pipe-class from trailing insulation/tracing code.
+        # e.g. "013842-X-N" → pipe_class="013842", insulation="X-N"
+        # e.g. "CS150"      → pipe_class="CS150",   insulation=""
+        # This allows duplicate comparison on pipe_class only, so a line whose insulation
+        # suffix is partially obscured by a revision cloud is still matched correctly.
+        _SPEC_SEP = '-'
+
         parsed: List[Dict] = []
         for raw in sorted(self.line_numbers or []):
             m = line_num_pattern.match(raw.strip())
             if m:
+                _sfx = m.group(4).upper().lstrip('-–')
+                _sfx_parts = _sfx.split(_SPEC_SEP) if _sfx else []
                 parsed.append({
                     'raw': raw,
                     'size': m.group(1),
                     'fluid': m.group(2).upper(),
                     'sequence': m.group(3),
-                    'suffix': m.group(4).upper().lstrip('-–'),
+                    'suffix': _sfx,                                                    # full spec+insulation
+                    'pipe_class': _sfx_parts[0] if _sfx_parts else '',                # e.g. "013842" — used for duplicate comparison
+                    'insulation': _SPEC_SEP.join(_sfx_parts[1:]) if len(_sfx_parts) > 1 else '',  # e.g. "X-N"
                 })
 
         issues: List[Dict] = []
@@ -2997,10 +3008,15 @@ Focus especially on:
                 if pair_key in seen_pairs:
                     continue
 
-                # Only compare lines with same size, fluid code, AND spec suffix
+                # Soft-coded: compare on size + fluid + PIPE CLASS only.
+                # Insulation/tracing suffix (e.g. -X-N, -N, -H, -HH) is intentionally
+                # excluded from the comparison because revision clouds on the drawing can
+                # obscure the trailing suffix, causing OCR to read a truncated label.
+                # pipe_class guard ensures we skip entries where the spec was not parsed.
                 if (a['size'] == b['size'] and
                         a['fluid'] == b['fluid'] and
-                        a['suffix'] == b['suffix']):
+                        a['pipe_class'] == b['pipe_class'] and
+                        a['pipe_class']):
                     try:
                         seq_a = int(a['sequence'])
                         seq_b = int(b['sequence'])
@@ -3008,9 +3024,18 @@ Focus especially on:
 
                         if diff == 0:
                             severity = 'critical'
+                            # Soft-coded: note when insulation suffix differs (possible cloud truncation)
+                            _insul_note = ''
+                            if a['insulation'] != b['insulation']:
+                                _insul_note = (
+                                    f" Insulation/tracing suffix differs "
+                                    f"('{a['insulation'] or 'none'}' vs '{b['insulation'] or 'none'}') "
+                                    f"— one label may be partially obscured by a revision cloud; "
+                                    f"visually confirm the complete label on the drawing."
+                                )
                             obs = (
                                 f"Exact duplicate line number detected: '{a['raw']}' and '{b['raw']}' share "
-                                f"identical size, fluid code, sequence AND specification. "
+                                f"identical size, fluid code, sequence AND pipe specification.{_insul_note} "
                                 f"Duplicate line numbers violate piping data-integrity requirements and will "
                                 f"cause errors in isometric numbering, MTO, and valve tagging."
                             )
@@ -3021,10 +3046,18 @@ Focus especially on:
                             )
                         elif diff <= NEAR_DUP_THRESHOLD:
                             severity = 'major'
+                            # Soft-coded: note when insulation suffix differs (possible cloud truncation)
+                            _insul_note = ''
+                            if a['insulation'] != b['insulation']:
+                                _insul_note = (
+                                    f" Insulation/tracing suffix differs "
+                                    f"('{a['insulation'] or 'none'}' vs '{b['insulation'] or 'none'}') "
+                                    f"— one label may be partially obscured by a revision cloud."
+                                )
                             obs = (
                                 f"Near-duplicate line numbers detected: '{a['raw']}' and '{b['raw']}' share "
-                                f"the same fluid code ({a['fluid']}), pipe specification, and nominal size ({a['size']}\"), "
-                                f"with only a {diff}-digit sequence difference. "
+                                f"the same fluid code ({a['fluid']}), pipe class ({a['pipe_class']}), and nominal size ({a['size']}\"), "
+                                f"with only a {diff}-digit sequence difference.{_insul_note} "
                                 f"These are easily confused in construction documents, isometrics, MTO, and valve/instrument tagging."
                             )
                             action = (
@@ -3115,23 +3148,60 @@ Focus especially on:
                 _pair_key = tuple(sorted(e['raw'] for e in _entries))
                 if _pair_key not in seen_pairs:
                     seen_pairs.add(_pair_key)
-                    issues.append({
-                        'pid_reference': _raws,
-                        'issue_observed': (
+                    # Soft-coded: detect cloud-truncation pattern —
+                    # when the only difference between specs is that one is a prefix of the other
+                    # (e.g. "013842" vs "013842-X-N"), it is very likely a revision cloud is obscuring
+                    # the insulation suffix on one occurrence rather than a genuine spec change.
+                    _pipe_classes = sorted(set(e['pipe_class'] for e in _entries))
+                    _insulations  = sorted(set(e['insulation'] for e in _entries))
+                    _is_cloud_truncation = (
+                        len(_pipe_classes) == 1 and          # same pipe class
+                        len(_insulations)  > 1 and           # but different insulation suffixes
+                        any(ins == '' for ins in _insulations)  # at least one has no insulation (truncated)
+                    )
+                    if _is_cloud_truncation:
+                        _full_label  = next((e['raw'] for e in _entries if e['insulation']), _raws)
+                        _trunc_label = next((e['raw'] for e in _entries if not e['insulation']), _raws)
+                        _obs = (
+                            f"Possible cloud-truncated line number: '{_trunc_label}' appears to be a "
+                            f"partially obscured version of '{_full_label}'. "
+                            f"The line identity {_fluid}-{_seq} with pipe class {_pipe_classes[0]} occurs "
+                            f"twice — once with the insulation/tracing suffix "
+                            f"({', '.join(i for i in _insulations if i)}) and once without. "
+                            f"A revision cloud on the drawing is likely covering the trailing suffix on one label, "
+                            f"creating an apparent duplicate entry."
+                        )
+                        _action = (
+                            f"Visually inspect all occurrences of line {_fluid}-{_seq} on the drawing. "
+                            f"Confirm whether the truncated label '{_trunc_label}' is the same physical line as "
+                            f"'{_full_label}' with its suffix obscured by a revision cloud, or a genuinely "
+                            f"separate line. If it is the same line, update the label to show the complete "
+                            f"designation including the insulation/tracing suffix."
+                        )
+                        _severity = 'critical'
+                        _category = 'line_duplicate'
+                    else:
+                        _obs = (
                             f"Line identity {_fluid}-{_seq} appears on this drawing with CONFLICTING PIPE SPECIFICATIONS: "
                             f"{', '.join(_unique_specs)}. "
                             f"Same fluid code and sequence number must carry a single consistent pipe class. "
                             f"This indicates a spec/class change in a recent revision that was not consistently "
                             f"applied to all line-number labels, or an unmarked spec break."
-                        ),
-                        'action_required': (
+                        )
+                        _action = (
                             f"Verify the correct pipe class for line {_fluid}-{_seq} against the line list and "
                             f"piping class definition document. "
                             f"Correct all inconsistent spec annotations on the drawing. "
                             f"If a spec-break is intentional, add the required spec-break flange symbol and annotation."
-                        ),
-                        'severity': 'major',
-                        'category': 'spec_break',
+                        )
+                        _severity = 'major'
+                        _category = 'spec_break'
+                    issues.append({
+                        'pid_reference': _raws,
+                        'issue_observed': _obs,
+                        'action_required': _action,
+                        'severity': _severity,
+                        'category': _category,
                         'location_on_drawing': {
                             'zone': 'Multiple',
                             'drawing_section': 'Piping / Line Number Labels',
@@ -3320,11 +3390,23 @@ Rule: each process line MUST have a completely unique line number.
 
 □ Are there any two lines with IDENTICAL line numbers on this drawing?
   → IDENTICAL = CRITICAL  (category: line_duplicate)
-□ Near-duplicate line numbers (same fluid code, same spec suffix, sequence differs by 1–2)?
+□ Near-duplicate line numbers (same fluid code, same pipe-class spec, sequence differs by 1–2)?
   → NEAR-DUP = MAJOR  (category: line_duplicate)
 □ For any near-duplicate pair in the programmatic list above: visually confirm both labels
   exist on the drawing AND each has a distinct routing/from-to.
   → UNCONFIRMED DISTINCT ROUTING = MAJOR  (category: line_duplicate)
+
+IMPORTANT — REVISION CLOUD TRUNCATION OF LINE NUMBER SUFFIX:
+  Line number labels that sit inside or near a REVISION CLOUD may have their trailing
+  insulation/tracing suffix (e.g. -X-N, -N, -H, -HH, -TW) partially or fully hidden by
+  the cloud boundary or by clouded-out hatching.
+  When comparing line numbers, treat the BASE IDENTITY (size-fluid-sequence-pipeclass) as
+  the unique key — even if the suffix is NOT visible on one occurrence:
+  □ Two labels with the SAME size-fluid-sequence-pipeclass but DIFFERENT or ABSENT trailing
+    suffix → may be the SAME physical line with the cloud obscuring the suffix.
+    → CLOUD-TRUNCATED DUPLICATE = CRITICAL  (category: line_duplicate)
+    Report the full label and the truncated label.  Visually describe where the cloud sits
+    relative to the line number text.
 
 Industry context: Near-duplicate line numbers (e.g. 2"-D-6150-033842-X-N vs 2"-D-6152-033842-X-N)
 cause downstream errors in isometric numbering, MTO, valve tagging, and construction packages.

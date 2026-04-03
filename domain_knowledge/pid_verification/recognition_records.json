@@ -84,5 +84,79 @@
       "minor": 0,
       "info": 0
     }
+  },
+  {
+    "timestamp_utc": "2026-04-03T11:47:18.653467+00:00",
+    "document_id": "c3b74594-0036-4bad-a654-9931a2773610",
+    "file_name": "P16093-16-01-08-1677-1_Rev 1-IFC_WITH MISTAKES.pdf",
+    "legend_sources": [
+      "/tmp/legends.pdf"
+    ],
+    "summary_after_legend": {
+      "tags": 47,
+      "instruments": 14,
+      "valves": 0,
+      "equipment": 5,
+      "line_sizes": 11,
+      "notes": 38,
+      "holds": 10
+    },
+    "line_sizes_unique_after_legend": [
+      "1\"",
+      "12\"",
+      "14\"",
+      "2\"",
+      "24\"",
+      "3\"",
+      "4\"",
+      "5\"",
+      "6\"",
+      "8\"",
+      "9610dn"
+    ],
+    "findings_total": 46,
+    "findings_severity": {
+      "critical": 6,
+      "major": 40,
+      "minor": 0,
+      "info": 0
+    }
+  },
+  {
+    "timestamp_utc": "2026-04-03T11:52:34.867939+00:00",
+    "document_id": "c3b74594-0036-4bad-a654-9931a2773610",
+    "file_name": "P16093-16-01-08-1677-1_Rev 1-IFC_WITH MISTAKES.pdf",
+    "legend_sources": [
+      "/tmp/legends.pdf"
+    ],
+    "summary_after_legend": {
+      "tags": 47,
+      "instruments": 14,
+      "valves": 0,
+      "equipment": 5,
+      "line_sizes": 11,
+      "notes": 38,
+      "holds": 10
+    },
+    "line_sizes_unique_after_legend": [
+      "1\"",
+      "12\"",
+      "14\"",
+      "2\"",
+      "24\"",
+      "3\"",
+      "4\"",
+      "5\"",
+      "6\"",
+      "8\"",
+      "9610dn"
+    ],
+    "findings_total": 46,
+    "findings_severity": {
+      "critical": 6,
+      "major": 40,
+      "minor": 0,
+      "info": 0
+    }
   }
 ]
