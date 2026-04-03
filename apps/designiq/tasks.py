@@ -306,12 +306,18 @@ def process_pid_upload_async(
                 logger.info(f"   📄 PMS text: {len(pms_text) if pms_text else 0} chars")
                 logger.info(f"   📄 NACE text: {len(nace_text) if nace_text else 0} chars")
                 
+                # Get current date for enrichment
+                from datetime import datetime
+                upload_date = datetime.now().strftime('%Y-%m-%d')
+                
                 # Enrich with 26 additional columns
                 enriched_data = enrichment_service.enrich_lines(
                     base_lines=table_data,  # LOCKED base 9 columns
                     hmb_text=hmb_text,
                     pms_text=pms_text,
-                    nace_text=nace_text
+                    nace_text=nace_text,
+                    pid_filename=filename,  # P&ID filename for pid_no column
+                    upload_date=upload_date  # Current date for date column
                 )
                 
                 logger.info("=" * 80)

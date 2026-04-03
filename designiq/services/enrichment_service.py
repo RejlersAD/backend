@@ -45,7 +45,9 @@ class EnrichmentService:
         hmb_text: Optional[str] = None,
         pms_text: Optional[str] = None,
         nace_text: Optional[str] = None,
-        pid_text: Optional[str] = None
+        pid_text: Optional[str] = None,
+        pid_filename: Optional[str] = None,
+        upload_date: Optional[str] = None
     ) -> List[Dict]:
         """
         Enriches base extraction with additional columns from documents
@@ -123,6 +125,12 @@ class EnrichmentService:
                 for key in empty_enrichment:
                     if key not in enrichment_data:
                         enrichment_data[key] = ""
+                
+                # Set P&ID No. and Date from upload metadata
+                if pid_filename:
+                    enrichment_data['pid_no'] = pid_filename
+                if upload_date:
+                    enrichment_data['date'] = upload_date
                 
                 filled_count = len([v for v in enrichment_data.values() if v and v.strip()])
                 logger.info(f"   Line {idx+1} enriched: {filled_count}/26 columns filled by AI")
