@@ -357,7 +357,7 @@ class ProcessedPIDOutput(TimeStampedModel):
     processing_time_seconds = models.FloatField(default=0)
     
     # Additional metadata
-    format_type = models.CharField(max_length=50, default='general')  # onshore, offshore, general
+    format_type = models.CharField(max_length=50, default='general')  # onshore, offshore, general, adnoc
     include_area = models.BooleanField(default=False)
     enrichment_enabled = models.BooleanField(default=False)
     

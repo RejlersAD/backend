@@ -50,7 +50,6 @@ class PIDLineExtractorV2:
         self.openai_client = None
         self.geometric_detector = None
         self.pytesseract_available = PYTESSERACT_AVAILABLE
-        self._load_extraction_config()
         self._init_engines()
         self._init_geometric_detector()
         
@@ -70,44 +69,7 @@ class PIDLineExtractorV2:
         else:
             logger.warning("⚠️ P&ID Extractor V2 initialized with NO OCR engines - extraction quality will be limited")
         self._init_geometric_detector()
-
-    def _load_extraction_config(self):
-        """
-        Load extraction validation parameters from
-        apps/designiq/config/module_config.json → extraction_settings.
-
-        Every value has a hard-coded fallback so the extractor works
-        correctly even if the config file is missing or incomplete.
-        All tolerances are intentionally more permissive than the original
-        hard-coded values to maximise line-number recall.
-        """
-        settings = {}
-        try:
-            import os, json as _json
-            _cfg_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                'config', 'module_config.json'
-            )
-            with open(_cfg_path, 'r') as _fh:
-                settings = _json.load(_fh).get('extraction_settings', {})
-            logger.info(f"[PIDExtractor] extraction_settings loaded: {settings}")
-        except Exception as _e:
-            logger.warning(f"[PIDExtractor] Could not load extraction_settings: {_e} — using defaults")
-
-        # OCR rendering DPI scale (higher = better quality, slower)
-        self.ocr_resolution_scale = float(settings.get('ocr_resolution_scale', 3.0))
-        # Onshore without-area: sequence digit length tolerance
-        self.onshore_seq_len_min = int(settings.get('onshore_seq_len_min', 3))
-        self.onshore_seq_len_max = int(settings.get('onshore_seq_len_max', 6))
-        # Onshore without-area: pipe-class length tolerance
-        self.onshore_pipr_class_len_min = int(settings.get('onshore_pipr_class_len_min', 4))
-        self.onshore_pipr_class_len_max = int(settings.get('onshore_pipr_class_len_max', 8))
-        # Allow alphanumeric pipe classes (e.g. "A1BA1V") in onshore format
-        self.onshore_pipr_class_alphanumeric = bool(settings.get('onshore_pipr_class_alphanumeric', True))
-        # Max fluid code length per format
-        self.fluid_code_max_len_onshore  = int(settings.get('fluid_code_max_len_onshore', 3))
-        self.fluid_code_max_len_offshore = int(settings.get('fluid_code_max_len_offshore', 3))
-
+    
     def _init_geometric_detector(self):
         """Initialize Geometric Line-based FROM-TO detector"""
         if GEOMETRIC_DETECTOR_AVAILABLE:
@@ -125,6 +87,46 @@ class PIDLineExtractorV2:
         else:
             self.geometric_detector = None
             logger.info("ℹ️ Geometric detector not available (missing dependencies)")
+    
+    def _normalize_ocr_text(self, text: str) -> str:
+        """
+        🔧 STRICT OCR NORMALIZATION - Force O → 0 conversion
+        
+        Domain Rule: Line numbers NEVER contain letter 'O', only digit '0'
+        
+        Problem: OCR confuses:
+        - 'O' (letter O) ↔ '0' (digit zero)
+        
+        Solution: Force replace ALL 'O' with '0' everywhere
+        - In line numbers
+        - In fluid codes
+        - In pipe classes
+        - In ALL extracted fields
+        
+        Example:
+        - "AS5NLO-2014" → "AS5NL0-2014"
+        - "604-RO-4-AN1NLO-0011" → "604-R0-4-AN1NL0-0011"
+        
+        This eliminates duplicates automatically:
+        - Before: ["AS5NLO-2014", "AS5NL0-2014"] (2 entries)
+        - After: ["AS5NL0-2014"] (1 entry)
+        
+        Args:
+            text: Raw OCR text that may contain letter 'O'
+            
+        Returns:
+            Normalized text with all 'O' → '0'
+        """
+        if not text:
+            return text
+        
+        # Convert to uppercase first for consistency
+        normalized = text.upper()
+        
+        # Force replace ALL 'O' (letter) with '0' (digit)
+        normalized = normalized.replace('O', '0')
+        
+        return normalized
 
     
     def _init_engines(self):
@@ -504,28 +506,25 @@ class PIDLineExtractorV2:
                 r'(?:^|\s)(\d{1,2})"?\s*-\s*(\d{2,3})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{4,5})\s*-\s*([A-Za-z0-9]{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
             ]
         else:
-            # WITHOUT AREA PATTERNS — tolerances driven by module_config.json → extraction_settings
-            # Sequence: \d{3,6}  (was \d{4}, now allows 3-6 digits)
-            # Pipe class: \d{4,8} (was \d{5,6}, now allows 4-8 chars)
-            # Fluid code: {1,3}   (was {1,2}, now allows 3-letter codes e.g. LNG, SWR)
+            # WITHOUT AREA PATTERNS (ORIGINAL): SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
             patterns = [
                 # Pattern 1: Standard with word boundaries (most reliable)
-                r'\b(\d{1,2})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{3,6})\s*-\s*([A-Z0-9]{4,8})(?:\s*-\s*([A-Z]{1,2}))?\b',
-
+                r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
+            
                 # Pattern 2: With optional quote after size
-                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,3})\s*-\s*(\d{3,6})\s*-\s*([A-Z0-9]{4,8})(?:\s*-\s*([A-Z]{1,2}))?\b',
-
+                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
+            
                 # Pattern 3: More lenient spacing
-                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,3})\s*-+\s*(\d{3,6})\s*-+\s*([A-Z0-9]{4,8})(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
-
+                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
+            
                 # Pattern 4: Compact (no spaces at all)
-                r'\b(\d{1,2})-([A-Z]{1,3})-(\d{3,6})-([A-Z0-9]{4,8})(?:-([A-Z]{1,2}))?\b',
-
+                r'\b(\d{1,2})-([A-Z]{1,2})-(\d{4})-(\d{5,6})(?:-([A-Z]{1,2}))?\b',
+            
                 # Pattern 5: With flexible separators (space or hyphen)
-                r'\b(\d{1,2})[\s-]+([A-Z]{1,3})[\s-]+(\d{3,6})[\s-]+([A-Z0-9]{4,8})(?:[\s-]+([A-Z]{1,2}))?\b',
-
+                r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z]{1,2}))?\b',
+            
                 # Pattern 6: Case insensitive with word boundaries
-                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{3,6})\s*-\s*([A-Za-z0-9]{4,8})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
             ]
         
         found_lines = []
@@ -570,12 +569,73 @@ class PIDLineExtractorV2:
                     pipr_class = match.group(4).strip()
                     insulation = match.group(5).strip().upper() if match.lastindex >= 5 and match.group(5) else ''
                 
+                # 🔧 CRITICAL: Normalize all fields - Force O → 0 conversion BEFORE any processing
+                # This eliminates OCR confusion between letter O and digit 0
+                size = self._normalize_ocr_text(size)
+                fluid = self._normalize_ocr_text(fluid)
+                seq = self._normalize_ocr_text(seq)
+                pipr_class = self._normalize_ocr_text(pipr_class)
+                insulation = self._normalize_ocr_text(insulation) if insulation else ''
+                area = self._normalize_ocr_text(area) if area else ''
+                
                 # Smart cleaning: remove any non-alphanumeric from edges
                 size = re.sub(r'[^0-9]', '', size)
-                fluid = re.sub(r'[^A-Z]', '', fluid)
+                fluid = re.sub(r'[^A-Z0-9]', '', fluid)  # Keep digits for normalized 0
                 seq = re.sub(r'[^0-9]', '', seq)
                 if insulation:
-                    insulation = re.sub(r'[^A-Z]', '', insulation)
+                    insulation = re.sub(r'[^A-Z0-9]', '', insulation)
+                
+                # ADNOC FORMAT VALIDATION (separate rules)
+                if format_type == 'adnoc':
+                    # 1. SIZE: Must be 1-2 digits
+                    if not size or not size.isdigit() or len(size) > 2:
+                        rejected.append(f"Invalid ADNOC size: {size}")
+                        continue
+                    
+                    # 2. FLUID: Must be 2-3 uppercase letters/digits (after O→0 normalization)
+                    if not fluid or len(fluid) < 2 or len(fluid) > 3:
+                        rejected.append(f"Invalid ADNOC fluid: {fluid}")
+                        continue
+                    if not re.match(r'^[A-Z0-9]+$', fluid):
+                        rejected.append(f"Invalid ADNOC fluid characters: {fluid}")
+                        continue
+                    
+                    # 3. SEQUENCE: Must be exactly 4 digits
+                    if not seq or not seq.isdigit() or len(seq) != 4:
+                        rejected.append(f"Invalid ADNOC sequence: {seq}")
+                        continue
+                    
+                    # 4. PIPE CLASS: Alphanumeric, flexible length (3-6 chars typical)
+                    if not pipr_class or not pipr_class.isalnum() or len(pipr_class) < 3:
+                        rejected.append(f"Invalid ADNOC pipe class: {pipr_class}")
+                        continue
+                    
+                    # Build ADNOC line number: SIZE"-FLUID-PIPECLASS-SEQUENCE
+                    line_number = f"{size}\"-{fluid}-{pipr_class}-{seq}"
+                    
+                    # Deduplicate
+                    if line_number in seen_lines:
+                        continue
+                    seen_lines.add(line_number)
+                    
+                    # Create line entry for ADNOC
+                    line_entry = {
+                        'line_number': line_number,
+                        'size': f'{size}"',
+                        'fluid_code': fluid,
+                        'sequence_no': seq,
+                        'pipr_class': pipr_class,
+                        'insulation': '',
+                        'area': '',
+                        'page': page_num,
+                        'from_equipment': '',
+                        'to_equipment': '',
+                        'extraction_method': 'regex_adnoc',
+                        'original_detection': match.group(0).strip()
+                    }
+                    
+                    found_lines.append(line_entry)
+                    continue  # Skip standard validation below
                 
                 # ADNOC FORMAT VALIDATION (separate rules)
                 if format_type == 'adnoc':
@@ -640,25 +700,24 @@ class PIDLineExtractorV2:
                 else:
                     area = ''  # Ensure area is empty for without-area format
                 
-                # 3. FLUID: Max length from module_config.json → fluid_code_max_len_onshore / _offshore
-                max_fluid_len = (
-                    self.fluid_code_max_len_offshore
-                    if (include_area or format_type == 'offshore')
-                    else self.fluid_code_max_len_onshore
-                )
-                if not fluid or not fluid.isalpha() or len(fluid) > max_fluid_len:
+                # 3. FLUID: Must be 1-3 uppercase letters/digits (after O→0 normalization)
+                max_fluid_len = 3 if (include_area or format_type == 'offshore') else 2
+                if not fluid or len(fluid) > max_fluid_len:
                     rejected.append(f"Invalid fluid: {fluid}")
                     continue
+                # Fluid should be mostly alphabetic (allow digits from normalization)
+                if not re.match(r'^[A-Z0-9]+$', fluid):
+                    rejected.append(f"Invalid fluid characters: {fluid}")
+                    continue
                 
-                # 4. SEQUENCE: soft-coded length tolerances from module_config.json
+                # 4. SEQUENCE: Must be 3-5 digits for offshore/area formats (ADNOC uses 3-4 digits like 0007, 0011), 4 for standard
                 if format_type == 'offshore' or include_area:
                     if not seq or not seq.isdigit() or len(seq) < 3 or len(seq) > 5:
                         rejected.append(f"Invalid sequence: {seq}")
                         continue
                 else:
-                    # onshore_seq_len_min / max from extraction_settings (default 3-6)
-                    if not seq or not seq.isdigit() or len(seq) < self.onshore_seq_len_min or len(seq) > self.onshore_seq_len_max:
-                        rejected.append(f"Invalid sequence (len {len(seq)} not in [{self.onshore_seq_len_min},{self.onshore_seq_len_max}]): {seq}")
+                    if not seq or not seq.isdigit() or len(seq) != 4:
+                        rejected.append(f"Invalid sequence: {seq}")
                         continue
                 
                 # 5. PIPE CLASS: Flexible validation for offshore/area formats (ADNOC uses variable length like AN1NLO, ASSNLO, BC2CA0)
@@ -671,32 +730,29 @@ class PIDLineExtractorV2:
                         rejected.append(f"Invalid pipe class (not alphanumeric): {pipr_class}")
                         continue
                 else:
-                    # Without area: tolerances from module_config.json → extraction_settings
-                    if not pipr_class or len(pipr_class) < self.onshore_pipr_class_len_min or len(pipr_class) > self.onshore_pipr_class_len_max:
-                        rejected.append(f"Invalid pipe class length ({len(pipr_class)} not in [{self.onshore_pipr_class_len_min},{self.onshore_pipr_class_len_max}]): {pipr_class}")
+                    # Without area: 5-6 digits only
+                    if not pipr_class or len(pipr_class) not in [5, 6]:
+                        rejected.append(f"Invalid pipe class: {pipr_class}")
                         continue
-                    if self.onshore_pipr_class_alphanumeric:
-                        # Accept alphanumeric pipe classes (e.g. A1BA1V, BC2CA0)
-                        if not pipr_class.isalnum():
-                            rejected.append(f"Invalid pipe class (not alphanumeric): {pipr_class}")
-                            continue
-                    else:
-                        # Legacy mode: numeric digits only
-                        pipr_class = re.sub(r'[^0-9]', '', pipr_class)
-                        if not pipr_class.isdigit():
-                            rejected.append(f"Invalid pipe class (not numeric): {pipr_class}")
-                            continue
+                    pipr_class = re.sub(r'[^0-9]', '', pipr_class)
+                    if not pipr_class.isdigit():
+                        rejected.append(f"Invalid pipe class (not numeric): {pipr_class}")
+                        continue
                 
-                # 6. INSULATION: Optional, must be 1-2 letters if present
-                if insulation and (not insulation.isalpha() or len(insulation) > 2):
-                    rejected.append(f"Invalid insulation: {insulation}")
+                # 6. INSULATION: Optional, must be 1-2 letters/digits if present (after O→0 normalization)
+                if insulation and len(insulation) > 2:
+                    rejected.append(f"Invalid insulation length: {insulation}")
+                    continue
+                if insulation and not re.match(r'^[A-Z0-9]+$', insulation):
+                    rejected.append(f"Invalid insulation characters: {insulation}")
                     continue
                 
                 # Build line number string (dynamic based on segments - supports 5 or 6 segments)
+                # All components are already normalized (O → 0) above
                 if format_type == 'offshore':
                     # Offshore format: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
-                    # 5 segments: 604-AG-3-ASSNLO-0007
-                    # 6 segments: 604-HO-8-BC2CA0-1071-H
+                    # 5 segments: 604-AG-3-ASSNL0-0007 (normalized)
+                    # 6 segments: 604-H0-8-BC2CA0-1071-H (normalized)
                     if insulation:
                         line_number = f"{area}-{fluid}-{size}-{pipr_class}-{seq}-{insulation}"
                     else:
@@ -714,20 +770,24 @@ class PIDLineExtractorV2:
                     else:
                         line_number = f"{size}-{fluid}-{seq}-{pipr_class}"
                 
+                # 🔧 FINAL NORMALIZATION: Ensure complete O→0 conversion in final line number
+                line_number = self._normalize_ocr_text(line_number)
+                
                 # Deduplicate
                 if line_number in seen_lines:
                     continue
                 seen_lines.add(line_number)
                 
-                # Create line entry
+                # 🔧 TRIPLE-SAFE: Normalize ALL output fields to guarantee NO 'O' in any field
+                # Create line entry with normalized fields
                 line_entry = {
-                    'line_number': line_number,
-                    'size': f'{size}"',
-                    'fluid_code': fluid,
-                    'sequence_no': seq,
-                    'pipr_class': pipr_class,
-                    'insulation': insulation,
-                    'area': area if (format_type == 'offshore' or include_area) else '',
+                    'line_number': self._normalize_ocr_text(line_number),
+                    'size': self._normalize_ocr_text(f'{size}"'),
+                    'fluid_code': self._normalize_ocr_text(fluid),
+                    'sequence_no': self._normalize_ocr_text(seq),
+                    'pipr_class': self._normalize_ocr_text(pipr_class),
+                    'insulation': self._normalize_ocr_text(insulation) if insulation else '',
+                    'area': self._normalize_ocr_text(area) if (format_type == 'offshore' or include_area) and area else '',
                     'page': page_num,
                     'from_equipment': '',
                     'to_equipment': '',
@@ -1376,9 +1436,8 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 logger.info(f"📄 PAGE {page_num + 1}/{len(doc)}")
                 logger.info(f"{'='*60}")
                 
-                # High-resolution rendering — scale from module_config.json → ocr_resolution_scale
-                # (default 3.0x; was 2.5x, bumped to catch small text on large P&IDs)
-                pix = page.get_pixmap(matrix=fitz.Matrix(self.ocr_resolution_scale, self.ocr_resolution_scale))
+                # High-resolution rendering (2.5x for crisp text)
+                pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 img = img.convert('L')  # Grayscale for better OCR
                 
@@ -1618,6 +1677,17 @@ Example 4: "10\"-PG-0003-033842-X-H"
             logger.info(f"🎉 EXTRACTION COMPLETE: {len(unique_items)} UNIQUE LINE NUMBERS")
             logger.info(f"{'='*60}\n")
             
+            # 🔒 NUCLEAR OPTION: Replace ALL 'O' with '0' in EVERY string field, no exceptions!
+            logger.info("🔒 NUCLEAR SAFETY: Replacing ALL 'O' → '0' in every string field...")
+            for item in unique_items:
+                # Loop through ALL keys and replace O→0 in ANY string value
+                for key, value in item.items():
+                    if isinstance(value, str) and value:
+                        # FORCE replace ALL 'O' (uppercase) with '0' (digit)
+                        item[key] = value.upper().replace('O', '0')
+            
+            logger.info("✅ NUCLEAR NORMALIZATION COMPLETE - EVERY 'O' → '0' IN ALL FIELDS!")
+            
             return unique_items
             
         except Exception as e:
@@ -1625,15 +1695,126 @@ Example 4: "10\"-PG-0003-033842-X-H"
             return []
     
     def _deduplicate_items(self, items: List[Dict]) -> List[Dict]:
-        """Remove duplicate line numbers"""
-        seen = set()
-        unique = []
+        """
+        Remove duplicate line numbers with 2-layer OCR confusion handling
+        
+        Layer 1 (Hard): O → 0 (already done during extraction)
+        Layer 2 (Soft): Z/2, B/8, I/1 equivalence for comparison only
+        
+        Example duplicates caused by OCR:
+        - "D2AP08" vs "DZAP08" (Z confused with 2)
+        - "D8AP08" vs "DBAP08" (B confused with 8)
+        - "D1AP08" vs "DIAP08" (I confused with 1)
+        
+        Strategy:
+        1. Create comparison key with soft normalization (Z→2, B→8, I→1)
+        2. Detect duplicates using comparison key
+        3. Keep better version (fewer suspicious characters)
+        4. Preserve original values in output (no modification)
+        """
+        
+        def create_comparison_key(line_number: str) -> str:
+            """
+            Soft normalization for duplicate detection ONLY
+            Does NOT modify the actual value - only for comparison
+            """
+            if not line_number:
+                return ''
+            
+            key = line_number.upper()
+            # Soft equivalences for OCR confusion
+            key = key.replace('Z', '2')  # Z ↔ 2
+            key = key.replace('B', '8')  # B ↔ 8
+            key = key.replace('I', '1')  # I ↔ 1
+            
+            return key
+        
+        def calculate_quality_score(item: Dict) -> int:
+            """
+            Score quality of extraction - higher is better
+            Prefer versions with cleaner, more structured format
+            """
+            line_number = item.get('line_number', '')
+            score = 0
+            
+            # 1. Should start with digit (size field)
+            if re.search(r'^\d', line_number):
+                score += 2
+            
+            # 2. Penalize suspicious OCR characters
+            # O should never exist (already normalized to 0)
+            if 'O' in line_number:
+                score -= 10  # Critical penalty
+            
+            # 3. Slight penalty for potentially confused characters
+            # Prefer digits over letters in ambiguous positions
+            if re.search(r'[ZBI]', line_number):
+                score -= 1
+            
+            # 4. Prefer items with 4-digit sequence numbers
+            if re.search(r'\d{4}', line_number):
+                score += 3
+            
+            # 5. Prefer items with proper structure (multiple hyphens)
+            hyphen_count = line_number.count('-')
+            score += min(hyphen_count, 5)  # Cap at 5
+            
+            # 6. Prefer items with FROM-TO data (more complete)
+            if item.get('from_line') or item.get('to_line'):
+                score += 2
+            
+            return score
+        
+        # Use map with comparison keys to detect duplicates
+        unique_map = {}
+        duplicates_detected = []
         
         for item in items:
-            key = item.get('line_number', '')
-            if key and key not in seen:
-                seen.add(key)
-                unique.append(item)
+            original = item.get('line_number', '')
+            if not original:
+                continue
+            
+            # Create comparison key (soft normalization)
+            comparison_key = create_comparison_key(original)
+            
+            if comparison_key not in unique_map:
+                # First occurrence - store it
+                unique_map[comparison_key] = item
+            else:
+                # Duplicate detected! Choose the better version
+                existing_item = unique_map[comparison_key]
+                existing_score = calculate_quality_score(existing_item)
+                new_score = calculate_quality_score(item)
+                
+                # Log if they're actually different (OCR variation)
+                if existing_item['line_number'] != original:
+                    duplicates_detected.append({
+                        'version_a': existing_item['line_number'],
+                        'version_b': original,
+                        'comparison_key': comparison_key,
+                        'score_a': existing_score,
+                        'score_b': new_score
+                    })
+                
+                # Keep the higher-scoring version
+                if new_score > existing_score:
+                    unique_map[comparison_key] = item
+        
+        # Log OCR duplicate resolution summary
+        if duplicates_detected:
+            logger.info(f"  🔍 Detected {len(duplicates_detected)} OCR-confused duplicates:")
+            for dup in duplicates_detected[:5]:  # Show first 5
+                winner = unique_map[dup['comparison_key']]['line_number']
+                logger.info(f"     '{dup['version_a']}' vs '{dup['version_b']}' → kept '{winner}'")
+            if len(duplicates_detected) > 5:
+                logger.info(f"     ... and {len(duplicates_detected) - 5} more")
+        
+        # Convert map back to list
+        unique = list(unique_map.values())
+        
+        removed_count = len(items) - len(unique)
+        if removed_count > 0:
+            logger.info(f"  ✅ Deduplication: {len(items)} → {len(unique)} items (removed {removed_count} duplicates)")
         
         return unique
     

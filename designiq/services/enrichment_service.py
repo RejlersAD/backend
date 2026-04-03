@@ -35,9 +35,9 @@ class EnrichmentService:
         self.client = None
         if self.openai_api_key:
             self.client = OpenAI(api_key=self.openai_api_key)
-            logger.info("£à OpenAI client initialized successfully")
+            logger.info("OpenAI client initialized successfully")
         else:
-            logger.warning("Üá)"U%Å OPENAI_API_KEY not found in .env - enrichment will return empty columns")
+            logger.warning("OPENAI_API_KEY not found in .env - enrichment will return empty columns")
     
     def enrich_lines(
         self,
@@ -45,7 +45,9 @@ class EnrichmentService:
         hmb_text: Optional[str] = None,
         pms_text: Optional[str] = None,
         nace_text: Optional[str] = None,
-        pid_text: Optional[str] = None
+        pid_text: Optional[str] = None,
+        pid_filename: Optional[str] = None,
+        upload_date: Optional[str] = None
     ) -> List[Dict]:
         """
         Enriches base extraction with additional columns from documents
@@ -69,8 +71,8 @@ class EnrichmentService:
             return []
         
         logger.info("="*80)
-        logger.info("a"ÜÇa"ÜÇa"ÜÇ ENRICHMENT SERVICE CALLED a"ÜÇa"ÜÇa"ÜÇ")
-        logger.info(f"a"ôï Base lines: {len(base_lines)}")
+        logger.info("ENRICHMENT SERVICE CALLED")
+        logger.info(f"Base lines: {len(base_lines)}")
         logger.info("="*80)
         
         # MANDATORY: All 3 documents required for enrichment
@@ -79,37 +81,37 @@ class EnrichmentService:
             if not hmb_text: missing.append("HMB")
             if not pms_text: missing.append("PMS")
             if not nace_text: missing.append("NACE")
-            logger.info(f"Üá)"U%Å Enrichment skipped - Missing documents: {', '.join(missing)}")
-            logger.info("åÆ Returning base 8 columns from P&ID extraction")
+            logger.info(f"Enrichment skipped - Missing documents: {', '.join(missing)}")
+            logger.info("Returning base 8 columns from P&ID extraction")
             return base_lines
         
         # DEBUG: Log document sizes
-        logger.info(f"a"ôè Document text sizes: HMB={len(hmb_text)} chars, PMS={len(pms_text)} chars, NACE={len(nace_text)} chars")
+        logger.info(f"Document text sizes: HMB={len(hmb_text)} chars, PMS={len(pms_text)} chars, NACE={len(nace_text)} chars")
         if pid_text:
-            logger.info(f"a"ôè P&ID text size: {len(pid_text)} chars")
-        logger.info(f"a"öæ OpenAI API key configured: {'Yes' if self.client else 'No'}")
+            logger.info(f"P&ID text size: {len(pid_text)} chars")
+        logger.info(f"OpenAI API key configured: {'Yes' if self.client else 'No'}")
         
         # DEBUG: Show first 200 chars of each document to verify content
-        logger.debug(f"a"ôä HMB preview: {hmb_text[:200]}...")
-        logger.debug(f"a"ôä PMS preview: {pms_text[:200]}...")
-        logger.debug(f"a"ôä NACE preview: {nace_text[:200]}...")
+        logger.debug(f"HMB preview: {hmb_text[:200]}...")
+        logger.debug(f"PMS preview: {pms_text[:200]}...")
+        logger.debug(f"NACE preview: {nace_text[:200]}...")
         
-        logger.info(f"a"ÜÇ Starting AI-powered enrichment for {len(base_lines)} lines (All 3 docs provided)")
-        logger.info("a"ñû Using OpenAI GPT-4 to intelligently extract 26 enrichment columns from documents")
+        logger.info(f"Starting AI-powered enrichment for {len(base_lines)} lines (All 3 docs provided)")
+        logger.info("Using OpenAI GPT-4 to intelligently extract 26 enrichment columns from documents")
         
         try:
             enriched_lines = []
             
             for idx, line in enumerate(base_lines):
                 line_id = line.get('original_detection', f'Line-{idx+1}')
-                logger.info(f"a"öä Processing line {idx+1}/{len(base_lines)}: {line_id}")
+                logger.info(f"Processing line {idx+1}/{len(base_lines)}: {line_id}")
                 
                 # Start with ALL base columns (PRESERVED FROM LOCKED LOGIC - 17 columns)
                 # This includes from_line, to_line, from_equipment, to_equipment, etc.
                 enriched_line = dict(line)  # Copy ALL base fields to preserve locked extraction
                 
                 # a"ñû AI ENRICHMENT: Extract intelligent values from all 4 documents
-                logger.info(f"   a"ºá Calling OpenAI to extract enrichment data for {line_id}...")
+                logger.info(f"   Calling OpenAI to extract enrichment data for {line_id}...")
                 enrichment_data = self._extract_enrichment_data(
                     line=line,
                     hmb_text=hmb_text,
@@ -124,19 +126,25 @@ class EnrichmentService:
                     if key not in enrichment_data:
                         enrichment_data[key] = ""
                 
+                # Set P&ID No. and Date from upload metadata
+                if pid_filename:
+                    enrichment_data['pid_no'] = pid_filename
+                if upload_date:
+                    enrichment_data['date'] = upload_date
+                
                 filled_count = len([v for v in enrichment_data.values() if v and v.strip()])
-                logger.info(f"   £à Line {idx+1} enriched: {filled_count}/26 columns filled by AI")
+                logger.info(f"   Line {idx+1} enriched: {filled_count}/26 columns filled by AI")
                 
                 # Merge enrichment into base (17 base + 26 enriched = 43 columns GUARANTEED)
                 enriched_line.update(enrichment_data)
                 enriched_lines.append(enriched_line)
                 
                 # Log the enriched line data to verify
-                logger.info(f"a"ôª Enriched line {idx+1} data sample: {list(enriched_line.keys())[:5]}... (Total: {len(enriched_line)} keys)")
+                logger.info(f"Enriched line {idx+1} data sample: {list(enriched_line.keys())[:5]}... (Total: {len(enriched_line)} keys)")
             
             logger.info("="*80)
-            logger.info(f"' Enrichment complete: {len(enriched_lines)} lines with {len(enriched_lines[0].keys())} columns (17 base + 26 enriched = 43 total)")
-            logger.info(f"a"öì First line sample enrichment columns:")
+            logger.info(f"Enrichment complete: {len(enriched_lines)} lines with {len(enriched_lines[0].keys())} columns (17 base + 26 enriched = 43 total)")
+            logger.info(f"First line sample enrichment columns:")
             if enriched_lines:
                 sample = enriched_lines[0]
                 logger.info(f"   - flow_medium: {sample.get('flow_medium', 'MISSING')}")
@@ -148,21 +156,21 @@ class EnrichmentService:
             expected_total = 43
             for idx, line in enumerate(enriched_lines):
                 if len(line.keys()) < expected_total:
-                    logger.warning(f" &þ Line {idx} has {len(line.keys())} columns, expected at least {expected_total}. Fixing...")
+                    logger.warning(f"Line {idx} has {len(line.keys())} columns, expected at least {expected_total}. Fixing...")
                     # Add missing enrichment columns
                     empty_enrichment = self._get_empty_enrichment_columns()
                     for key in empty_enrichment:
                         if key not in line:
                             line[key] = ""
             
-            logger.info(f"=ØÝ LOCKED: All {len(enriched_lines)} lines guaranteed to have at least {expected_total} columns (17 base + 26 enriched)")
+            logger.info(f"LOCKED: All {len(enriched_lines)} lines guaranteed to have at least {expected_total} columns (17 base + 26 enriched)")
             logger.info("="*80)
-            logger.info("a"ÜÇ RETURNING ENRICHED DATA TO TASK")
+            logger.info("RETURNING ENRICHED DATA TO TASK")
             logger.info("="*80)
             return enriched_lines
             
         except Exception as e:
-            logger.error(f"¥î Enrichment failed: {e}")
+            logger.error(f"Enrichment failed: {e}")
             logger.error(f"Error type: {type(e).__name__}")
             import traceback
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
@@ -176,7 +184,7 @@ class EnrichmentService:
         pms_text: Optional[str],
         nace_text: Optional[str],
         pid_text: Optional[str] = None
-    -> Dict:
+    ) -> Dict:
         """
         Uses AI to intelligently extract enrichment data for a single line
         GUARANTEED: Always returns all 26 enrichment columns (even if empty)
@@ -194,12 +202,12 @@ class EnrichmentService:
             
             # Call OpenAI with GPT-4 Turbo for better extraction
             line_id = line.get('original_detection', 'Unknown')
-            logger.info(f"a"ñû Calling OpenAI for line {line_id}...")
-            logger.debug(f"a"ôÅ Prompt length: {len(prompt)} chars")
+            logger.info(f"Calling OpenAI for line {line_id}...")
+            logger.debug(f"Prompt length: {len(prompt)} chars")
             
             try:
                 response = self.client.chat.completions.create(
-                    model="gpt-4-turbo-preview",
+                    model="gpt-4o",  # Updated to current model (gpt-4-turbo-preview deprecated)
                     messages=[
                         {"role": "system", "content": "You are an expert piping engineer with 30+ years experience. ABSOLUTE REQUIREMENT: Fill ALL 26 fields with real values. ZERO TOLERANCE for empty strings, null, or N/A. EXTRACTION HIERARCHY: 1) Exact match from documents 2) Similar line specifications 3Piping class standards 4Industry best practices 5) Engineering judgment. ALWAYS provide a concrete value with units. Examples of GOOD responses: '150 psig', 'Sch 40', 'ASME B31.3', 'Water', 'Yes', '300,%%F', '10%'. Examples of BAD responses: '', 'N/A', 'Not specified', 'See documents'. If uncertain, add qualifier like '(typical for this service)' or '(per piping class)' but ALWAYS include the actual value. Return pure JSON with all 26 fields filled. NO markdown, NO explanations, ONLY JSON."},
                         {"role": "user", "content": prompt}
@@ -207,15 +215,15 @@ class EnrichmentService:
                     temperature=0.2,  # Increased for more creative inference when data missing
                     max_tokens=2500  # Increased to allow more detailed responses
                 )
-                logger.info(f"£à OpenAI API call successful for line {line_id}")
+                logger.info(f"OpenAI API call successful for line {line_id}")
             except Exception as api_err:
-                logger.error(f"¥î OpenAI API call failed: {api_err}")
+                logger.error(f"OpenAI API call failed: {api_err}")
                 logger.error(f"Error type: {type(api_err).__name__}")
                 raise
             
             result_text = response.choices[0].message.content.strip()
-            logger.info(f"£à OpenAI responded with {len(result_text)} chars for line {line_id}")
-            logger.debug(f"a"ôä Raw OpenAI response: {result_text[:500]}..." # Log first 500 chars
+            logger.info(f"OpenAI responded with {len(result_text)} chars for line {line_id}")
+            logger.debug(f"Raw OpenAI response: {result_text[:500]}...")  # Log first 500 chars
             
             # Extract JSON if wrapped in markdown
             if '```json' in result_text:
@@ -224,26 +232,26 @@ class EnrichmentService:
                 result_text = result_text.split('```')[1].split('```')[0].strip()
             
             ai_enrichment = json.loads(result_text)
-            logger.info(f"a"ôè Parsed {len(ai_enrichment)} fields from AI response")
-            logger.debug(f"a"öì Parsed JSON keys: {list(ai_enrichment.keys())}")
+            logger.info(f"Parsed {len(ai_enrichment)} fields from AI response")
+            logger.debug(f"Parsed JSON keys: {list(ai_enrichment.keys())}")
             
             # LOCK: Merge AI results into empty structure (ensures all 26 columns exist)
             enrichment.update(ai_enrichment)
             
             # AGGRESSIVE FALLBACK: Fill empty fields with intelligent defaults
-            filled_count = len([v for v in ai_enrichment.values(if v and v != "N/A" and v != ""])
-            logger.info(f"a"ôè AI filled {filled_count}/26 columns initially")
+            filled_count = len([v for v in ai_enrichment.values() if v and v != "N/A" and v != ""])
+            logger.info(f"AI filled {filled_count}/26 columns initially")
             
             if filled_count < 26:
-                logger.info(f"a"öº Applying intelligent defaults for {26 - filled_count} empty fields...")
+                logger.info(f"Applying intelligent defaults for {26 - filled_count} empty fields...")
                 enrichment = self._apply_intelligent_defaults(enrichment, line)
-                new_filled = len([v for v in enrichment.values(if v and v != "N/A" and v != ""])
-                logger.info(f"£à After defaults: {new_filled}/26 columns filled")
+                new_filled = len([v for v in enrichment.values() if v and v != "N/A" and v != ""])
+                logger.info(f"After defaults: {new_filled}/26 columns filled")
             
             return enrichment
             
         except Exception as e:
-            logger.error(f"¥î AI enrichment failed for line {line.get('original_detection')}: {e}", exc_info=True)
+            logger.error(f"AI enrichment failed for line {line.get('original_detection')}: {e}", exc_info=True)
             # Return empty 26-column structure (GUARANTEED fallback)
             return enrichment
     
@@ -254,7 +262,7 @@ class EnrichmentService:
         pms_text: Optional[str],
         nace_text: Optional[str],
         pid_text: Optional[str] = None
-    -> str:
+    ) -> str:
         """
         Builds SMART AI prompt for enrichment
         Uses intelligent context-aware extraction across all 4 documents
@@ -529,7 +537,7 @@ a"ö$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFEREN
         
         return prompt
     
-    def _get_empty_enrichment_columns(self-> Dict:
+    def _get_empty_enrichment_columns(self) -> Dict:
         """
         Returns empty enrichment columns when AI fails
         LOCKED STRUCTURE: 26 additional columns (8 base + 26 = 34 total)
@@ -609,7 +617,7 @@ a"ö$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFEREN
         if not enrichment.get('normal_pressure'):
             enrichment['normal_pressure'] = "150 psig" if 'LP' in pipr_class else "300 psig"
         if not enrichment.get('normal_temp'):
-            enrichment['normal_temp'] = "70,%%F" if any(x in fluid_code for x in ['CW', 'WATER', 'AIR']else "300,%%F"
+            enrichment['normal_temp'] = "70,%%F" if any(x in fluid_code for x in ['CW', 'WATER', 'AIR']) else "300,%%F"
         if not enrichment.get('design_pressure'):
             enrichment['design_pressure'] = "225 psig" if 'LP' in pipr_class else "450 psig"
         if not enrichment.get('minimax_design_temp'):
@@ -631,7 +639,7 @@ a"ö$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFEREN
         
         # NDT Requirements
         if not enrichment.get('rt'):
-            enrichment['rt'] = "10%" if 'critical' not in pipr_class.lower(else "100%"
+            enrichment['rt'] = "10%" if 'critical' not in pipr_class.lower() else "100%"
         if not enrichment.get('mt_pt'):
             enrichment['mt_pt'] = "Yes"
         if not enrichment.get('hardness'):
@@ -681,7 +689,7 @@ a"ö$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFEREN
                 return medium
         return "Process Fluid"
     
-    def _infer_density(self, fluid_code: str-> str:
+    def _infer_density(self, fluid_code: str) -> str:
         """Infer density from fluid code"""
         if any(x in fluid_code for x in ['WATER', 'CW', 'PW', 'FW', 'SW']):
             return "1000 kg/m,%%"
@@ -693,7 +701,7 @@ a"ö$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFEREN
             return "0.8 kg/m,%%"
         return "N/A"
     
-    def _infer_schedule(self, size: str-> str:
+    def _infer_schedule(self, size: str) -> str:
         """Infer pipe schedule from size"""
         try:
             # Extract numeric size
@@ -715,7 +723,7 @@ a"ö$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFEREN
 # Singleton instance
 _enrichment_service = None
 
-def get_enrichment_service(-> EnrichmentService:
+def get_enrichment_service() -> EnrichmentService:
     """Get or create enrichment service instance"""
     global _enrichment_service
     if _enrichment_service is None:
