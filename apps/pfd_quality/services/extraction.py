@@ -57,6 +57,7 @@ def extract_drawing(file_path: str, page_index: int = 0) -> Dict[str, Any]:
     holds           = _unique(_RE_HOLD.findall(raw_text))
     notes           = _unique([m.group(1) for m in _RE_NOTE.finditer(raw_text)])
     vessels_hx      = _unique(_RE_VESSEL_HX.findall(raw_text))
+    tag_positions   = _extract_tag_positions(file_path, page_index)
 
     return {
         'equipment_tags':  equipment_tags,
@@ -69,6 +70,7 @@ def extract_drawing(file_path: str, page_index: int = 0) -> Dict[str, Any]:
         'notes':           notes,
         'vessels_hx':      vessels_hx,
         'raw_text':        raw_text,
+        'tag_positions':   tag_positions,
     }
 
 
@@ -122,6 +124,59 @@ def _extract_title_block(text: str) -> dict:
         'revision':       revision,
         'project_name':   '',
     }
+
+
+# ---------------------------------------------------------------------------
+# Coordinate extraction — word-level bounding boxes via PyMuPDF
+# ---------------------------------------------------------------------------
+
+# Soft-coded: patterns whose matches get spatial positions stored in tag_positions.
+# Extend this list to add new tag classes without changing the pipeline.
+_POSITIONAL_PATTERNS = [
+    _RE_EQUIP_TAG,
+    _RE_RELIEF,
+    _RE_CTRL_VALVE,
+    _RE_VESSEL_HX,
+]
+
+
+def _extract_tag_positions(file_path: str, page_index: int) -> dict:
+    """
+    Return {tag_text: {'x_pct': float, 'y_pct': float}} using PyMuPDF word
+    bounding boxes so the frontend can place overlay markers at exact coordinates.
+    Stores only the first (most prominent) occurrence of each tag.
+    Falls back to empty dict on any error or missing dependency.
+    """
+    positions: Dict[str, Any] = {}
+    try:
+        import fitz
+        pdf  = fitz.open(file_path)
+        page = pdf[page_index] if page_index < len(pdf) else pdf[0]
+        pw   = page.rect.width
+        ph   = page.rect.height
+        if pw <= 0 or ph <= 0:
+            pdf.close()
+            return positions
+
+        # get_text('words') → [(x0, y0, x1, y1, word_text, block_no, line_no, word_no), ...]
+        for w in page.get_text('words'):
+            x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
+            clean = text.strip()
+            for pat in _POSITIONAL_PATTERNS:
+                m = pat.search(clean)
+                if m:
+                    tag = m.group(1) if m.lastindex else m.group(0)
+                    if tag and tag not in positions:
+                        positions[tag] = {
+                            'x_pct': round((x0 + x1) / 2 / pw * 100, 2),
+                            'y_pct': round((y0 + y1) / 2 / ph * 100, 2),
+                        }
+        pdf.close()
+    except ImportError:
+        logger.debug('[PFDQ] PyMuPDF unavailable — tag_positions will be empty')
+    except Exception as exc:
+        logger.warning('[PFDQ] Tag position extraction failed: %s', exc)
+    return positions
 
 
 def _unique(items) -> list:

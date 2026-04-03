@@ -20,6 +20,7 @@ Engineer Review:
   PATCH  /api/v1/pfd-quality/findings/<finding_id>/ → override severity/status
 """
 import logging
+from pathlib import Path
 
 from django.http import HttpResponse
 from rest_framework import status
@@ -378,6 +379,77 @@ def update_finding(request, finding_id):
 # ===========================================================================
 # Helpers
 # ===========================================================================
+
+# ===========================================================================
+# DRAWING IMAGE — rasterise a PDF page for the frontend overlay panel
+# ===========================================================================
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def drawing_image(request, document_id, page_index):
+    """
+    Render the specified page of an uploaded PFD as a PNG image.
+    For PDFs  → PyMuPDF rasterises at 2× zoom (~150 dpi).
+    For images → served directly (PIL converts to PNG).
+    URL: GET /api/v1/pfd-quality/drawing-image/<document_id>/<page_index>/
+    """
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if not doc.original_file:
+        return Response({"error": "Original file not stored"}, status=status.HTTP_404_NOT_FOUND)
+
+    try:
+        file_path = doc.original_file.path
+    except Exception:
+        return Response({"error": "File path unavailable"}, status=status.HTTP_404_NOT_FOUND)
+
+    ext = Path(file_path).suffix.lower().lstrip(".")
+    png_data = None
+
+    if ext == "pdf":
+        try:
+            import fitz
+            pdf_doc = fitz.open(file_path)
+            if page_index >= len(pdf_doc):
+                pdf_doc.close()
+                return Response({"error": "Page index out of range"}, status=status.HTTP_400_BAD_REQUEST)
+            page = pdf_doc[page_index]
+            mat  = fitz.Matrix(2.0, 2.0)  # 2× zoom ≈ 150 dpi for A1 drawings
+            pix  = page.get_pixmap(matrix=mat, alpha=False)
+            png_data = pix.tobytes("png")
+            pdf_doc.close()
+        except ImportError:
+            return Response({"error": "PyMuPDF not available"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        except Exception as exc:
+            logger.warning("[PFDQDrawingImage] PDF render failed: %s", exc)
+            return Response({"error": "Failed to render PDF page"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    elif ext in {"png", "jpg", "jpeg", "tiff", "tif"}:
+        try:
+            with open(file_path, "rb") as f:
+                raw = f.read()
+            if ext == "png":
+                png_data = raw
+            else:
+                from PIL import Image
+                import io
+                img = Image.open(io.BytesIO(raw)).convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                png_data = buf.getvalue()
+        except Exception as exc:
+            logger.warning("[PFDQDrawingImage] Image read failed: %s", exc)
+            return Response({"error": "Failed to read image"},  status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    else:
+        return Response({"error": f"Unsupported file type: {ext}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    response = HttpResponse(png_data, content_type="image/png")
+    response["Cache-Control"] = "private, max-age=3600"
+    response["Content-Length"] = len(png_data)
+    return response
+
 
 def _get_doc_or_404(document_id: str, user):
     try:

@@ -21,6 +21,9 @@ urlpatterns = [
     path('export/excel/<str:document_id>/',    views.export_excel,    name='export-excel'),
     path('export/pdf/<str:document_id>/',      views.export_pdf,      name='export-pdf'),
 
+    # Drawing image — rasterised page for frontend overlay panel
+    path('drawing-image/<str:document_id>/<int:page_index>/', views.drawing_image, name='drawing-image'),
+
     # Management
     path('list/',                              views.list_documents,  name='list'),
     path('delete/<str:document_id>/',          views.delete_document, name='delete'),
