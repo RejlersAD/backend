@@ -192,9 +192,11 @@ MIDDLEWARE = [
     # Must be first: normalise RFC-invalid Docker hostnames (underscores) before
     # CommonMiddleware's host-header validation runs. No-op in production (DEBUG=False).
     'apps.core.middleware.NormaliseDockerHostMiddleware',
+    # CORS MUST be before SecurityMiddleware so CORS headers are added even when
+    # SecurityMiddleware short-circuits the request (e.g. HTTPS enforcer redirects).
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
-    'corsheaders.middleware.CorsMiddleware',  # MUST be before CommonMiddleware
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
