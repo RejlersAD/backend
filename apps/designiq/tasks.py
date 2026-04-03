@@ -278,8 +278,16 @@ def process_pid_upload_async(
                 logger.info("=" * 80)
                 
                 # Import enrichment service (from commit 8f82346)
+                import sys
+                import os
+                # Add the project root to Python path to import from designiq folder
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                if project_root not in sys.path:
+                    sys.path.insert(0, project_root)
+                
                 from designiq.services.enrichment_service import EnrichmentService
                 enrichment_service = EnrichmentService()
+                logger.info("✅ EnrichmentService imported successfully")
                 
                 # Extract text from enrichment documents and clean null bytes
                 hmb_text = extract_text_from_file(hmb_file) if hmb_file else None
