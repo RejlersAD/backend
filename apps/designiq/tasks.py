@@ -87,6 +87,116 @@ def extract_section_7(document_text):
     return document_text[:2000]
 
 
+def determine_stress_criticality_table_7_1(size_str, design_temp_str):
+    """
+    Determine stress criticality based on Table 7.1 (Criteria for Flexibility Analysis of Piping)
+    
+    Args:
+        size_str: Pipe size string (e.g., "2", "3", "6", "2\"", etc.)
+        design_temp_str: Design temperature string (e.g., "150°C", "300 F", "120", etc.)
+    
+    Returns:
+        str: Criticality level "1" (L1), "2" (L2), or "3" (L3)
+    
+    Table 7.1 Logic:
+    - Based on NPS (pipe size) and Design Temperature
+    - L1 = Comprehensive computer stress analysis required → "1"
+    - L2 = Simplified or approximate analysis method → "2"
+    - L3 = Visual inspection only (non-critical) → "3"
+    """
+    import re
+    
+    # Extract numeric pipe size (NPS)
+    try:
+        size_match = re.search(r'(\d+)', str(size_str))
+        if size_match:
+            nps = int(size_match.group(1))
+        else:
+            nps = 0  # Default to 0 if cannot parse
+    except:
+        nps = 0
+    
+    # Extract numeric temperature (in Celsius)
+    try:
+        # Find all numeric values (including negative)
+        temp_matches = re.findall(r'(-?\d+)', str(design_temp_str))
+        if temp_matches:
+            # Convert all to integers
+            temps = [int(t) for t in temp_matches]
+            # Use the maximum value (conservative approach for stress criticality)
+            temp = max(temps)
+            # If Fahrenheit detected, convert to Celsius
+            if 'F' in str(design_temp_str).upper():
+                temp = int((temp - 32) * 5/9)
+        else:
+            temp = None
+    except:
+        temp = None
+    
+    # If no valid temperature, default to L1 (conservative)
+    if temp is None:
+        return "1"
+    
+    # Table 7.1 Logic - Based on NPS and Design Temperature (°C)
+    # Temperature ranges: <-30, 30, 50, 65, 85, 120, 150, 170, 205, 230, 260, 290, 315, 345
+    
+    if nps == 1:
+        if temp < 30: return "1"
+        elif temp < 120: return "3"
+        elif temp < 170: return "2"
+        else: return "1"
+    
+    elif nps == 2:
+        if temp < 30: return "1"
+        elif temp < 120: return "3"
+        elif temp < 150: return "2"
+        else: return "1"
+    
+    elif nps == 3:
+        if temp < 30: return "1"
+        elif temp < 85: return "3"
+        elif temp < 120: return "2"
+        else: return "1"
+    
+    elif nps == 4:
+        if temp < 30: return "1"
+        elif temp < 85: return "3"
+        elif temp < 120: return "2"
+        else: return "1"
+    
+    elif nps == 6:
+        if temp < 30: return "1"
+        elif temp < 120: return "2"
+        else: return "1"
+    
+    elif nps == 8:
+        if temp < 30: return "1"
+        elif temp < 120: return "2"
+        else: return "1"
+    
+    elif nps in [10, 12, 14]:
+        if temp < 30: return "1"
+        elif temp < 85: return "2"
+        else: return "1"
+    
+    elif nps in [16, 18]:
+        if temp < 30: return "1"
+        elif temp < 65: return "2"
+        else: return "1"
+    
+    elif nps == 20:
+        if temp < 30: return "1"
+        elif temp < 50: return "1"
+        else: return "1"  # All L1
+    
+    elif nps >= 24:
+        return "1"  # All L1
+    
+    else:
+        # For sizes not in table, default to L1 (conservative)
+        return "1"
+
+
 def build_stress_criticality_prompt(lines_context, section_7_text):
     """
     Build intelligent prompt for OpenAI to determine stress criticality codes
@@ -278,8 +388,16 @@ def process_pid_upload_async(
                 logger.info("=" * 80)
                 
                 # Import enrichment service (from commit 8f82346)
+                import sys
+                import os
+                # Add the project root to Python path to import from designiq folder
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                if project_root not in sys.path:
+                    sys.path.insert(0, project_root)
+                
                 from designiq.services.enrichment_service import EnrichmentService
                 enrichment_service = EnrichmentService()
+                logger.info("✅ EnrichmentService imported successfully")
                 
                 # Extract text from enrichment documents and clean null bytes
                 hmb_text = extract_text_from_file(hmb_file) if hmb_file else None
@@ -298,12 +416,18 @@ def process_pid_upload_async(
                 logger.info(f"   📄 PMS text: {len(pms_text) if pms_text else 0} chars")
                 logger.info(f"   📄 NACE text: {len(nace_text) if nace_text else 0} chars")
                 
+                # Get current date for enrichment
+                from datetime import datetime
+                upload_date = datetime.now().strftime('%Y-%m-%d')
+                
                 # Enrich with 26 additional columns
                 enriched_data = enrichment_service.enrich_lines(
                     base_lines=table_data,  # LOCKED base 9 columns
                     hmb_text=hmb_text,
                     pms_text=pms_text,
-                    nace_text=nace_text
+                    nace_text=nace_text,
+                    pid_filename=filename,  # P&ID filename for pid_no column
+                    upload_date=upload_date  # Current date for date column
                 )
                 
                 logger.info("=" * 80)
@@ -319,132 +443,52 @@ def process_pid_upload_async(
                 logger.info("→ Continuing with base 17 columns only")
                 enriched_data = table_data
         
-        # 🚀 STEP 3: STRESS CRITICALITY PROCESSING (AI-powered using temperature + Section 7)
-        # This adds intelligent stress criticality data using OpenAI to analyze:
-        # 1. Temperature column from enriched table data
-        # 2. Section 7 from the stress criticality document
-        if stress_criticality_file:
+        # 🚀 STEP 3: STRESS CRITICALITY PROCESSING (Table 7.1 Deterministic Logic)
+        # Apply Table 7.1 criteria based on pipe size and design temperature
+        # L1 → "1" (Comprehensive Analysis), L2 → "2" (Simplified Analysis), L3 → "3" (Visual Inspection)
+        if stress_criticality_file or True:  # Always apply, even if no document
             try:
                 logger.info("=" * 80)
-                logger.info("⚡ STEP 3: AI-Powered Stress Criticality Selection")
-                logger.info("   Strategy: Apply Section 7 criteria using Temperature column")
-                logger.info("   Output: Criticality codes (1, 2, 3, etc.) per Section 7 logic")
+                logger.info("⚡ STEP 3: Stress Criticality Selection (Table 7.1)")
+                logger.info("   Strategy: Deterministic lookup based on Size + Temperature")
+                logger.info("   Output: Criticality codes 1, 2, 3 (L1, L2, L3)")
                 logger.info("=" * 80)
                 
-                # Extract text from stress criticality document
-                stress_text = extract_text_from_file(stress_criticality_file)
+                # Apply Table 7.1 logic to each line
+                lines_processed = 0
+                for line_item in enriched_data:
+                    # Get pipe size from base columns
+                    pipe_size = line_item.get('size', '')
+                    
+                    # Get temperature from enriched columns (prefer minimax_design_temp, fallback to normal_temp)
+                    minimax_temp = line_item.get('minimax_design_temp', '')
+                    normal_temp = line_item.get('normal_temp', '')
+                    design_temp = minimax_temp or normal_temp or ''
+                    
+                    # Apply Table 7.1 deterministic logic
+                    criticality = determine_stress_criticality_table_7_1(pipe_size, design_temp)
+                    line_item['criticality_stress'] = criticality
+                    
+                    lines_processed += 1
                 
-                # Clean null bytes
-                if stress_text:
-                    stress_text = stress_text.replace('\x00', '')
-                    logger.info(f"   📄 Stress Criticality document: {len(stress_text)} chars")
+                logger.info(f"   ✅ Stress criticality applied to {lines_processed} lines using Table 7.1")
+                logger.info("   📊 Criticality levels: 1=L1 (Comprehensive), 2=L2 (Simplified), 3=L3 (Visual)")
+                
+                logger.info("=" * 80)
+                logger.info("✅ STEP 3 COMPLETE: Table 7.1 Stress Criticality Added")
+                logger.info(f"   Total lines: {len(enriched_data)}")
+                logger.info(f"   Total columns: {len(enriched_data[0].keys()) if enriched_data else 0}")
+                if enriched_data:
+                    logger.info(f"   Column names: {list(enriched_data[0].keys())}")
+                    logger.info(f"   Sample criticality_stress values: {[item.get('criticality_stress') for item in enriched_data[:3]]}")
+                logger.info("=" * 80)
                     
-                    # 🔍 EXTRACT SECTION 7 from the document
-                    logger.info("   🔍 Extracting Section 7 from stress criticality document...")
-                    section_7_text = extract_section_7(stress_text)
-                    logger.info(f"   ✅ Section 7 extracted: {len(section_7_text)} chars")
-                    
-                    # 🤖 USE OPENAI TO INTELLIGENTLY FILL STRESS CRITICALITY
-                    # Process in batches to optimize API calls
-                    from openai import OpenAI
-                    openai_key = getattr(settings, 'OPENAI_API_KEY', None)
-                    
-                    if openai_key and section_7_text:
-                        client = OpenAI(api_key=openai_key)
-                        logger.info("   🤖 Using OpenAI GPT-4o to analyze stress criticality...")
-                        
-                        # Process lines in batches of 10 for efficiency
-                        batch_size = 10
-                        for i in range(0, len(enriched_data), batch_size):
-                            batch = enriched_data[i:i+batch_size]
-                            
-                            # Build context for AI with temperature data
-                            lines_context = []
-                            for idx, line_item in enumerate(batch):
-                                line_number = line_item.get('line_number', 'Unknown')
-                                # Get temperature from enriched columns (normal_temp or minimax_design_temp)
-                                normal_temp = line_item.get('normal_temp', '')
-                                minimax_temp = line_item.get('minimax_design_temp', '')
-                                # Use whichever temperature is available
-                                temperature = normal_temp or minimax_temp or 'N/A'
-                                fluid_code = line_item.get('fluid_code', 'Unknown')
-                                pipr_class = line_item.get('pipr_class', 'Unknown')
-                                design_pressure = line_item.get('design_pressure', 'N/A')
-                                
-                                lines_context.append({
-                                    'index': i + idx,
-                                    'line_number': line_number,
-                                    'temperature': temperature,
-                                    'normal_temp': normal_temp or 'N/A',
-                                    'minimax_temp': minimax_temp or 'N/A',
-                                    'fluid_code': fluid_code,
-                                    'pipr_class': pipr_class,
-                                    'design_pressure': design_pressure
-                                })
-                            
-                            # Call OpenAI with section 7 + temperature data
-                            prompt = build_stress_criticality_prompt(lines_context, section_7_text)
-                            
-                            try:
-                                response = client.chat.completions.create(
-                                    model="gpt-4o",
-                                    messages=[
-                                        {"role": "system", "content": "You are an expert piping engineer analyzing stress criticality for pipeline systems."},
-                                        {"role": "user", "content": prompt}
-                                    ],
-                                    temperature=0.2,
-                                    max_tokens=2000
-                                )
-                                
-                                result_text = response.choices[0].message.content.strip()
-                                logger.info(f"   ✅ OpenAI analyzed batch {i//batch_size + 1}/{(len(enriched_data) + batch_size - 1)//batch_size}")
-                                
-                                # Parse OpenAI response (expects JSON array)
-                                import json
-                                try:
-                                    stress_results = json.loads(result_text)
-                                    
-                                    # Apply stress criticality to batch
-                                    for idx, stress_data in enumerate(stress_results):
-                                        if idx < len(batch):
-                                            batch[idx]['criticality_stress'] = stress_data.get('criticality_stress', 'N/A')
-                                            
-                                except json.JSONDecodeError:
-                                    # Fallback: parse line by line
-                                    logger.warning(f"   ⚠️ Could not parse JSON, using fallback...")
-                                    for line_item in batch:
-                                        line_item['criticality_stress'] = 'N/A'
-                                        
-                            except Exception as api_err:
-                                logger.error(f"   ❌ OpenAI API error for batch: {api_err}")
-                                # Fallback to N/A
-                                for line_item in batch:
-                                    line_item['criticality_stress'] = 'N/A'
-                        
-                        logger.info("=" * 80)
-                        logger.info("✅ STEP 3 COMPLETE: AI-Powered Stress Criticality Added")
-                        logger.info(f"   Total lines: {len(enriched_data)}")
-                        logger.info(f"   Total columns: {len(enriched_data[0].keys()) if enriched_data else 0}")
-                        if enriched_data:
-                            logger.info(f"   Column names: {list(enriched_data[0].keys())}")
-                            logger.info(f"   Sample criticality_stress values: {[item.get('criticality_stress') for item in enriched_data[:3]]}")
-                        logger.info("=" * 80)
-                        
-                    else:
-                        logger.warning("⚠️ OpenAI not configured or Section 7 not found - filling with N/A")
-                        for line_item in enriched_data:
-                            line_item['criticality_stress'] = 'N/A'
-                else:
-                    logger.warning("⚠️ Stress criticality document is empty")
-                    for line_item in enriched_data:
-                        line_item['criticality_stress'] = 'N/A'
-                    
-            except Exception as stress_err:
-                logger.error(f"❌ Stress criticality processing failed: {stress_err}")
-                logger.error(f"Error type: {type(stress_err).__name__}")
+            except Exception as criticality_err:
+                logger.error(f"❌ Stress criticality processing failed: {criticality_err}")
+                logger.error(f"Error type: {type(criticality_err).__name__}")
                 import traceback
                 logger.error(f"Traceback:\n{traceback.format_exc()}")
-                logger.info("→ Continuing without stress criticality data")
+                logger.info("→ Continuing without stress criticality data (filling with N/A)")
                 for line_item in enriched_data:
                     line_item['criticality_stress'] = 'N/A'
         else:
