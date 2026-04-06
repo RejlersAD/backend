@@ -20,6 +20,7 @@ Engineer Review:
   PATCH  /api/v1/pfd-quality/findings/<finding_id>/ → override severity/status
 """
 import logging
+import os
 from pathlib import Path
 
 from django.http import HttpResponse
