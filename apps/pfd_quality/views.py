@@ -149,34 +149,76 @@ def upload_pfd(request):
         logger.warning(f"[PFDQUpload] Using synchronous fallback for doc_id={doc_id}")
         try:
             # Import locally to avoid circular import
+            from apps.pfd_quality.models import PFDQDrawing, PFDQFinding
             from apps.pfd_quality.services.segmentation import segment_document
             from apps.pfd_quality.services.extraction import extract_drawing
             from apps.pfd_quality.services.rule_engine import run_rules
-            
+
             doc = PFDQDocument.objects.get(document_id=doc_id)
             file_path = doc.original_file.path if doc.original_file else None
-            
+
             if not file_path:
                 raise ValueError(f"Document {doc_id} has no original file")
-            
+
             doc.status = PFDQDocument.Status.PROCESSING
             doc.save(update_fields=["status", "updated_at"])
-            
-            # Run synchronous pipeline
-            segment_document(str(doc.document_id), file_path)
-            extract_drawing(doc)
-            run_rules(doc)
-            
+
+            # Segment into drawings (one per PDF page)
+            segments = segment_document(str(doc.document_id), file_path)
+
+            for seg in segments:
+                drawing_obj, _ = PFDQDrawing.objects.get_or_create(
+                    document=doc,
+                    drawing_id=seg.drawing_id,
+                    defaults={
+                        'title':      seg.title,
+                        'page_index': seg.page_index,
+                        'metadata':   seg.metadata,
+                    }
+                )
+                drawing_obj.findings.all().delete()
+
+                # extract_drawing takes (file_path, page_index) → returns dict
+                extraction = extract_drawing(file_path, page_index=seg.page_index)
+
+                # Persist tag_positions into drawing metadata
+                tag_positions = extraction.get('tag_positions', {})
+                if tag_positions:
+                    meta = dict(drawing_obj.metadata or {})
+                    meta['tag_positions'] = tag_positions
+                    drawing_obj.metadata = meta
+                    drawing_obj.save(update_fields=['metadata'])
+
+                # run_rules takes the extraction dict → returns list of RuleFinding
+                rule_findings = run_rules(extraction)
+
+                bulk = []
+                for sl, rf in enumerate(rule_findings, start=1):
+                    bulk.append(PFDQFinding(
+                        drawing         = drawing_obj,
+                        sl_no           = sl,
+                        category        = rf.category,
+                        rule_id         = rf.rule_id,
+                        issue_observed  = rf.issue_observed,
+                        action_required = rf.action_required,
+                        evidence        = rf.evidence,
+                        direction       = rf.direction,
+                        severity        = rf.severity,
+                        status          = 'open',
+                    ))
+                PFDQFinding.objects.bulk_create(bulk)
+
             doc.status = PFDQDocument.Status.COMPLETED
             doc.save(update_fields=["status", "updated_at"])
             logger.info(f"[PFDQUpload] Sync fallback completed for doc_id={doc_id}")
         except Exception as e:
             logger.error(f"[PFDQUpload] Sync fallback failed: {e}", exc_info=True)
             try:
+                doc = PFDQDocument.objects.get(document_id=doc_id)
                 doc.status = PFDQDocument.Status.FAILED
                 doc.error_message = f"Sync processing failed: {e}"
                 doc.save(update_fields=["status", "error_message", "updated_at"])
-            except:
+            except Exception:
                 pass
     
     # Use robust queue service with fallback
