@@ -1,0 +1,71 @@
+{
+  "_comment": "Soft-coded config for Equipment List extraction. Tune labels, patterns and Excel layout here — no Python changes needed.",
+
+  "extraction": {
+    "tag_pattern": "\\b([A-Z]{1,2})-([0-9]{3,5}[A-Z]?)\\b",
+    "context_window_chars": 160,
+    "description_max_words": 6,
+    "max_file_size_mb": 50,
+    "allowed_extensions": ["pdf", "png", "jpg", "jpeg", "tiff", "tif"],
+    "_comment_ocr": "ocr_rotation_angles: try each angle (degrees) during OCR fallback — covers vertical text on P&IDs",
+    "ocr_rotation_angles": [0, 90, 180, 270],
+    "_comment_area": "area_pattern: captures AREA/UNIT/TRAIN/TRAIN-X labels near equipment tags",
+    "area_pattern": "(?:AREA|UNIT|TRAIN|BAY|SECTION|BATTERY)\\s*[:\\-]?\\s*([A-Z0-9]{1,8})",
+    "_comment_nozzle": "nozzle_pattern: matches nozzle tags N1/N2/N1A inline with equipment",
+    "nozzle_pattern": "\\bN[0-9]{1,2}[A-Z]?\\b",
+    "_comment_material": "material_class_pattern: piping spec class codes visible on P&ID title blocks and line labels",
+    "material_class_pattern": "\\b(A1[A-Z]|B1[A-Z]|C1[A-Z]|D1[A-Z]|[A-D]2[A-Z]|CS|SS|DSS|SDSS|GRE|PVC|HDPE|CPVC)\\b",
+    "_comment_notes": "note_pattern: NOTE / SEE NOTE references adjacent to equipment tags",
+    "note_pattern": "\\b(?:SEE\\s+)?NOTE\\s*[0-9]+\\b"
+  },
+
+  "type_labels": {
+    "V":  "Vessel",
+    "P":  "Pump",
+    "E":  "Heat Exchanger",
+    "T":  "Tank",
+    "K":  "Compressor",
+    "C":  "Column / Tower",
+    "H":  "Heater / Cooler",
+    "X":  "Miscellaneous",
+    "F":  "Furnace",
+    "R":  "Reactor",
+    "D":  "Drum / Separator",
+    "S":  "Separator",
+    "TK": "Storage Tank",
+    "PK": "Package Unit",
+    "AG": "Air Cooler",
+    "G":  "Generator",
+    "FL": "Filter",
+    "EJ": "Ejector",
+    "SC": "Scrubber",
+    "AB": "Absorber",
+    "ST": "Strainer",
+    "MX": "Mixer",
+    "BL": "Blower",
+    "CY": "Cyclone",
+    "AN": "Analyser",
+    "DR": "Dryer"
+  },
+
+  "fluid_keywords": [
+    "crude", "gas", "oil", "water", "steam", "nitrogen", "diesel", "naphtha",
+    "condensate", "glycol", "amine", "acid", "caustic", "hydrogen", "methane",
+    "ethane", "propane", "butane", "lpg", "lng", "fuel", "flare", "slop",
+    "brine", "seawater", "produced water", "wash water", "drain", "injection"
+  ],
+
+  "excel_columns": [
+    { "key": "sl_no",               "label": "S. No",               "width": 6  },
+    { "key": "tag",                 "label": "Tag Number",           "width": 14 },
+    { "key": "type_label",          "label": "Equipment Type",       "width": 22 },
+    { "key": "description",         "label": "Description",          "width": 30 },
+    { "key": "area",                "label": "Area / Unit",          "width": 15 },
+    { "key": "drawing_ref",         "label": "Drawing Reference",    "width": 22 },
+    { "key": "line_connections",    "label": "Line Connections",     "width": 30 },
+    { "key": "nozzle_connections",  "label": "Nozzle Connections",   "width": 18 },
+    { "key": "service_fluid",       "label": "Service / Fluid",      "width": 20 },
+    { "key": "material_class",      "label": "Material / Spec Class","width": 18 },
+    { "key": "process_notes",       "label": "Notes / Refs",         "width": 20 }
+  ]
+}

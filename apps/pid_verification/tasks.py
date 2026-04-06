@@ -105,6 +105,10 @@ def process_pid_document(self, document_id: str):
             line_tags = extraction.get('line_tags', [])
             if line_tags:
                 metadata['line_tags'] = line_tags
+            # Red-colored annotations (revision marks, HOLDs, scope-cloud items).
+            red_annotations = extraction.get('red_annotations', [])
+            if red_annotations:
+                metadata['red_annotations'] = red_annotations
             drawing_obj.metadata = metadata
             drawing_obj.save(update_fields=['metadata'])
 

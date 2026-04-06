@@ -1,4 +1,4 @@
-﻿"""
+"""
 Extraction Service
 ==================
 AI-assisted OCR/text extraction for a single drawing.
@@ -51,18 +51,23 @@ def extract_drawing(file_path: str, page_index: int = 0) -> Dict[str, Any]:
     raw_text = _run_ocr(file_path, page_index)
     tag_positions = _extract_tag_positions(file_path, page_index)
     return {
-        'tags':          _extract_tags(raw_text),
-        'instruments':   _extract_instruments(raw_text),
-        'valves':        _extract_valves(raw_text),
-        'equipment':     _extract_equipment(raw_text),
-        'pipelines':     [],   # Requires CV pipeline (deferred to graph builder)
-        'notes':         _extract_notes(raw_text),
-        'holds':         _extract_holds(raw_text),
-        'line_sizes':    _extract_line_sizes(raw_text),
-        'raw_text':      raw_text,
-        'tag_positions': tag_positions,  # {tag: {x_pct, y_pct}} real diagram coordinates
+        'tags':                _extract_tags(raw_text),
+        'instruments':         _extract_instruments(raw_text),
+        'valves':              _extract_valves(raw_text),
+        'equipment':           _extract_equipment(raw_text),
+        'pipelines':           [],   # Requires CV pipeline (deferred to graph builder)
+        'notes':               _extract_notes(raw_text),
+        'holds':               _extract_holds(raw_text),
+        'line_sizes':          _extract_line_sizes(raw_text),
+        'raw_text':            raw_text,
+        'tag_positions':       tag_positions,   # {tag: {x_pct, y_pct}} real diagram coords
         # Multi-angle pipeline designation extraction (soft-coded, additive).
-        'line_tags':     _extract_pipeline_tags_multi_angle(file_path, page_index),
+        'line_tags':           _extract_pipeline_tags_multi_angle(file_path, page_index),
+        # Revision / scope-change signals (soft-coded, vector PDFs only).
+        'red_annotations':     _extract_red_annotations(file_path, page_index),
+        # Reducer notations e.g. 6"x2" and valve-type size contexts.
+        'reducers':            _extract_reducers(raw_text),
+        'valve_size_contexts': _extract_valve_size_contexts(raw_text),
     }
 
 
@@ -162,11 +167,19 @@ _PIPELINE_DESIG_RE = re.compile(
 )
 
 _DEFAULT_VALVE_PREFIXES = {
-    'HV', 'FV', 'XV', 'PV', 'SDV', 'BDV', 'PSV', 'PRV', 'CV', 'LV', 'TV'
+    'HV', 'FV', 'XV', 'PV', 'SDV', 'BDV', 'PSV', 'PRV', 'CV', 'LV', 'TV',
+    # Mubarraz project additions (PJ6-EXD-GEN-BQDA-0002)
+    'SSV', 'MSV', 'MOV', 'SOV', 'DBB', 'RD', 'RO', 'SV',
 }
 _DEFAULT_INSTRUMENT_PREFIXES = {
     'FT', 'FI', 'FIC', 'PT', 'PI', 'PIC', 'LT', 'LI', 'LIC',
-    'TT', 'TI', 'TIC', 'AT', 'AI', 'FY', 'PY', 'LY'
+    'TT', 'TI', 'TIC', 'AT', 'AI', 'FY', 'PY', 'LY',
+    # Mubarraz project additions (PJ6-EXD-GEN-BQDA-0002)
+    'ZT', 'ZSH', 'ZSL', 'ZSHH', 'ZSLL', 'ZI',
+    'ST', 'SI', 'IT', 'II', 'VT', 'VI', 'VSH', 'VSHH',
+    'DT', 'DI', 'DPT', 'DPI',
+    'WT', 'WI', 'JT', 'JI', 'OT', 'OI', 'UT', 'UI', 'RT',
+    'NOC', 'GWR', 'WC', 'GVF',
 }
 
 
@@ -634,8 +647,57 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int) -> list:
                             xp = _pct((b0[0] + bN[2]) / 2.0, page_w)
                             yp = _pct((b0[1] + bN[3]) / 2.0, page_h)
                             _scan_text(line_txt, direction, xp, yp)
+
+                    # Block-level scan: join spans from ALL lines in this block.
+                    # Catches pipeline designations whose NPS/fluid/area/seq tokens
+                    # fall in separate PyMuPDF "lines" within the same text block
+                    # (common in engineering PDFs with mixed font sizes for the
+                    # inch-mark character vs the rest of the designation).
+                    _blk_all_spans = [
+                        sp for _bln in blk.get('lines', [])
+                        for sp in _bln.get('spans', [])
+                        if sp.get('text', '').strip()
+                    ]
+                    if len(_blk_all_spans) > 2:
+                        _blk_joined = ' '.join(sp['text'] for sp in _blk_all_spans)
+                        if _PIPELINE_DESIG_RE.search(_blk_joined):
+                            _b0 = _blk_all_spans[0]['bbox']
+                            _bN = _blk_all_spans[-1]['bbox']
+                            _bx = _pct((_b0[0] + _bN[2]) / 2.0, page_w)
+                            _by = _pct((_b0[1] + _bN[3]) / 2.0, page_h)
+                            _blk_lines = blk.get('lines', [])
+                            _blk_dir = 'V' if _blk_lines and abs(_blk_lines[0].get('dir', (1, 0))[0]) < 0.3 else 'H'
+                            _scan_text(_blk_joined, _blk_dir, _bx, _by)
             except Exception as e:
                 logger.debug('[PIDLineTags] Vector path error: %s', e)
+
+            # ── Word-level pass: scan every word token individually ─────────
+            # get_text('words') can return tokens as full "4\"-D-6024-123456-A-N"
+            # even when the dict-based span view splits them across font runs.
+            # Dedup in _record() prevents double-counting.
+            # Also run a 2-word sliding window (no-space concatenation) to catch
+            # designations split at the inch-mark: "4\"" adjacent to "-D-6024-...".
+            # Soft-coded proximity threshold: words within 20pt are on the same line.
+            _WIN_PROX_PT = 20
+            try:
+                for _wi, _w in enumerate(raw_words):
+                    _wx = _pct((_w[0] + _w[2]) / 2.0, page_w)
+                    _wy = _pct((_w[1] + _w[3]) / 2.0, page_h)
+                    _scan_text(_w[4], 'H', _wx, _wy)
+
+                    # 2-word window: concatenate with the immediately following token
+                    if _wi + 1 < len(raw_words):
+                        _w2 = raw_words[_wi + 1]
+                        _mid_y1 = (_w[1]  + _w[3])  / 2.0
+                        _mid_y2 = (_w2[1] + _w2[3]) / 2.0
+                        if abs(_mid_y1 - _mid_y2) < _WIN_PROX_PT:
+                            _comb = _w[4] + _w2[4]
+                            if len(_comb) > 10 and _PIPELINE_DESIG_RE.search(_comb):
+                                _cwx = _pct((_w[0] + _w2[2]) / 2.0, page_w)
+                                _cwy = _pct((_w[1] + _w2[3]) / 2.0, page_h)
+                                _scan_text(_comb, 'H', _cwx, _cwy)
+            except Exception as _e:
+                logger.debug('[PIDLineTags] Word-window pass error: %s', _e)
 
         else:
             # ── Path B: scanned / image PDF – multi-angle Tesseract ─────
@@ -783,3 +845,213 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int) -> list:
         e['sequence_no'],
     ))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Red annotation extraction (vector PDFs via PyMuPDF span color)
+# ---------------------------------------------------------------------------
+
+# Soft-coded RGB thresholds for "red" text detection.
+# Red-colored text in P&IDs indicates revision marks, HOLD items, and scope changes.
+# Tune these if the project uses a different shade of red (e.g. darker crimson).
+_RED_R_MIN = 150   # Minimum red channel (0–255)
+_RED_G_MAX = 100   # Maximum green channel — keeps yellow/orange out
+_RED_B_MAX = 100   # Maximum blue channel — keeps magenta/pink out
+
+def _extract_red_annotations(file_path: str, page_index: int) -> list:
+    """
+    Return all text spans from the PDF page whose font color is red (or red-adjacent).
+
+    This is a vector-PDF only feature: PyMuPDF exposes the integer RGB color value
+    for each text span in 'dict' mode.  Scanned / image PDFs return an empty list
+    because the page is a raster image with no per-character color metadata.
+
+    Each returned item::
+
+        {
+          "text":  "H @ 65 bar",
+          "x_pct": 45.2,   # horizontal centre as % of page width
+          "y_pct": 30.1,   # vertical centre as % of page height
+          "rgb":   (218, 0, 0),  # original R, G, B values
+        }
+    """
+    items: list = []
+    try:
+        import fitz
+        if file_path.rsplit('.', 1)[-1].lower() != 'pdf':
+            return items
+
+        doc = fitz.open(file_path)
+        if page_index >= len(doc):
+            doc.close()
+            return items
+
+        page   = doc[page_index]
+        page_w = page.rect.width  or 1
+        page_h = page.rect.height or 1
+
+        seen_texts: set = set()
+        for blk in page.get_text('dict', flags=0).get('blocks', []):
+            for ln in blk.get('lines', []):
+                for sp in ln.get('spans', []):
+                    color = sp.get('color', 0)
+                    # Unpack integer RGB (PyMuPDF stores as 0xRRGGBB integer)
+                    r = (color >> 16) & 0xFF
+                    g = (color >> 8)  & 0xFF
+                    b =  color        & 0xFF
+                    if r < _RED_R_MIN or g > _RED_G_MAX or b > _RED_B_MAX:
+                        continue
+                    text = sp.get('text', '').strip()
+                    if not text or len(text) < 2:
+                        continue
+                    # Deduplicate identical text at very close positions
+                    key = text.upper()
+                    if key in seen_texts:
+                        continue
+                    seen_texts.add(key)
+                    bbox = sp['bbox']
+                    x_pct = round((bbox[0] + bbox[2]) / 2.0 / page_w * 100, 2)
+                    y_pct = round((bbox[1] + bbox[3]) / 2.0 / page_h * 100, 2)
+                    items.append({
+                        'text':  text,
+                        'x_pct': x_pct,
+                        'y_pct': y_pct,
+                        'rgb':   (r, g, b),
+                    })
+
+        doc.close()
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.debug('[PIDExtraction] Red annotation extraction skipped: %s', exc)
+
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Reducer notation extractor  (e.g. 6"x2", 6X2, 6"×2")
+# ---------------------------------------------------------------------------
+
+# Matches NxM size reduction notations, tolerating optional inch marks and spacing.
+# Captures group 1 = larger dimension, group 2 = smaller dimension.
+_REDUCER_RE = re.compile(
+    r'\b(\d{1,2}(?:\.\d+)?)\s*(?:"|\'\')?'
+    r'\s*[xX×]\s*'
+    r'(\d{1,2}(?:\.\d+)?)\s*(?:"|\'\')?',
+)
+
+def _extract_reducers(raw_text: str) -> list:
+    """
+    Detect reducer / size-change annotations on the drawing.
+
+    Typical P&ID notation::
+
+        6"x2"   NPS-6 × NPS-2   6X2   6x2"
+
+    Returns a list of dicts::
+
+        {
+          "text":        "6\"x2\"",
+          "larger_inch": 6.0,
+          "smaller_inch": 2.0,
+          "ratio":       3.0,    # larger / smaller
+        }
+
+    Soft-coded: edit _REDUCER_RE or the plausibility bounds (0.5–24") to tune.
+    """
+    items: list = []
+    seen: set   = set()
+    for m in _REDUCER_RE.finditer(raw_text):
+        try:
+            a = float(m.group(1))
+            b = float(m.group(2))
+        except ValueError:
+            continue
+        if a <= 0 or b <= 0:
+            continue
+        # Normalise: larger first
+        larger, smaller = (a, b) if a >= b else (b, a)
+        # Plausibility filter — 0.5" to 24" covers all standard NPS sizes
+        if larger > 24 or smaller < 0.5:
+            continue
+        # Avoid matching year-like numbers (e.g. 2026x18 in a title block)
+        if larger > 24 or smaller > 24:
+            continue
+        key = (larger, smaller)
+        if key in seen:
+            continue
+        seen.add(key)
+        ratio = round(larger / smaller, 2)
+        items.append({
+            'text':         f'{int(larger) if larger == int(larger) else larger}"'
+                            f'x{int(smaller) if smaller == int(smaller) else smaller}"',
+            'larger_inch':  larger,
+            'smaller_inch': smaller,
+            'ratio':        ratio,
+        })
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Valve / equipment type + size context extractor
+# ---------------------------------------------------------------------------
+
+# Equipment / valve type keywords paired with an adjacent NPS size annotation.
+# Add new equipment types here to extend coverage without touching rule logic.
+# Group 1 = size (digits), Group 2 = equipment type keyword.
+_VALVE_SIZE_CTX_RE = re.compile(
+    r'(\d{1,2}(?:\.\d+)?)\s*(?:"|\'\')\s*'
+    r'(?:in\s+)?'
+    r'(GLOBE\s+VALVE|GLOBE'
+    r'|GATE\s+VALVE|GATE'
+    r'|CHECK\s+VALVE|CHECK'
+    r'|BUTTERFLY\s+VALVE|BUTTERFLY'
+    r'|BALL\s+VALVE|BALL'
+    r'|CONTROL\s+VALVE|DISTRIBUTED\s+CONTROL\s+VALVE'
+    r'|VORTEX\s+BREAKER'
+    r'|SAFETY\s+VALVE|RELIEF\s+VALVE|PSV|PRV'
+    r'|STRAINER|FILTER'
+    r')',
+    re.IGNORECASE,
+)
+
+def _extract_valve_size_contexts(raw_text: str) -> list:
+    """
+    Detect valve / equipment type annotations that include an adjacent NPS size.
+
+    Example matches::
+
+        30" GLOBE VALVE         → size 30, type GLOBE VALVE
+        20" in VORTEX BREAKER   → size 20, type VORTEX BREAKER
+        16 in Distributed Control Valve → size 16, type DISTRIBUTED CONTROL VALVE
+
+    Returns list of dicts::
+
+        {
+          "text":           "30\" GLOBE VALVE",
+          "size_inch":      30.0,
+          "equipment_type": "GLOBE VALVE",
+        }
+
+    Soft-coded: extend _VALVE_SIZE_CTX_RE with new equipment keywords.
+    """
+    items: list = []
+    seen: set   = set()
+    for m in _VALVE_SIZE_CTX_RE.finditer(raw_text):
+        try:
+            size_val = float(m.group(1))
+        except ValueError:
+            continue
+        if size_val <= 0 or size_val > 60:
+            continue
+        equip_type = ' '.join(m.group(2).upper().split())   # normalise whitespace
+        key = (round(size_val, 1), equip_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({
+            'text':           m.group(0).strip()[:120],
+            'size_inch':      size_val,
+            'equipment_type': equip_type,
+        })
+    return items

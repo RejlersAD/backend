@@ -15,7 +15,11 @@ Rule catalogue:
   CON-003  Orphan node        (no connections at all in graph)
 
   VLV-001  Valve without a tag
+  VLV-002  Globe valve bore exceeds maximum recommended NPS (default 16")
+  VLV-003  Control valve bore exceeds maximum recommended NPS (default 16")
+
   EQP-001  Equipment tag present but not in master list pattern
+  EQP-002  Equipment item code not in project equipment catalogue
 
   LSZ-001  Missing line size text for known pipelines
   LSZ-002  Conflicting line sizes on the same line segment
@@ -30,9 +34,22 @@ Rule catalogue:
   LSZ-010  Shared sequence-number / pipe-class / insulation suffix across
            different pipeline identities (area codes) on the same drawing
            -- strong indicator of a copy-paste error in line numbering
+  LSZ-011  Extreme reducer annotation — size reduction ratio exceeds soft-coded maximum
+           (default 2.5:1, e.g. 6"x2" = 3:1 flags)
+  LSZ-012  Equipment size annotation does not match any line designation NPS on drawing
+           (e.g. "20\" in VORTEX BREAKER" with no 20" line tag)
 
   NTS-001  NOTES section present but no tag references found
   NTS-002  HOLD item detected – requires action
+
+  LN-001   Invalid service/fluid code in line designation
+  LN-002   Invalid insulation-class suffix in line designation
+
+  RED-001  Red-colored annotation detected (revision mark / HOLD / scope-change indicator)
+           Vector PDFs only — scanned drawings return no color metadata.
+
+  ANN-001  Pressure annotation exceeds soft-coded threshold (default 50 bar)
+           Pattern: "{class} @ {N} bar" — validate piping class handles stated pressure.
 """
 import re
 import logging
@@ -41,12 +58,72 @@ from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
+# ── Pipeline line-designation pattern (mirrors extraction.py — kept local so
+#    rule_engine remains self-contained and importable without extraction).
+#    Matches e.g.  2"-D-6156-033842-X-N  /  4"-BD-4860-013842-X
+_PIPELINE_DESIG_RE = re.compile(
+    r'(?<![A-Za-z0-9])'
+    r'(\d+(?:\.\d+)?)'
+    r'\s*["\u201c\u201d\u2019\u2018\'`]{1,2}'
+    r'[\s\-_]{0,3}'
+    r'([A-Z]{1,4})'
+    r'[\s\-_]+'
+    r'(\d{3,6})'
+    r'[\s\-_]+'
+    r'(\d{4,8})'
+    r'(?:[\s\-_]+([A-Z0-9]{1,8}))?'
+    r'(?:[\s\-_]+([A-Z0-9]{1,4}))?'
+    r'(?![A-Za-z0-9])',
+    re.IGNORECASE,
+)
+
+# ── Reducer notation pattern (mirrors extraction.py — kept local for same reason).
+#    Matches e.g.  6"x2"  /  6X2  /  6"×2"
+_REDUCER_RE = re.compile(
+    r'\b(\d{1,2}(?:\.\d+)?)\s*(?:"|\'\')?'
+    r'\s*[xX×]\s*'
+    r'(\d{1,2}(?:\.\d+)?)\s*(?:"|\'\')?',
+)
+
 # ── Expected tag format:  PREFIX-NUMBER(optional letter)
 _TAG_FORMAT_RE = re.compile(r'^[A-Z]{1,4}-[0-9]{3,5}[A-Z]?$')
 # Prefixes that MUST have a tag
-_TAGGED_VALVE_PREFIXES = {'HV', 'FV', 'XV', 'PV', 'SDV', 'BDV', 'CV', 'LV', 'TV'}
-_INSTRUMENT_PREFIXES   = {'FT', 'FI', 'FIC', 'PT', 'PI', 'PIC', 'LT', 'LI', 'LIC',
-                          'TT', 'TI', 'TIC', 'AT', 'AI', 'FY', 'PY', 'LY'}
+_TAGGED_VALVE_PREFIXES = {
+    'HV', 'FV', 'XV', 'PV', 'SDV', 'BDV', 'CV', 'LV', 'TV',
+    # Mubarraz project additions (PJ6-EXD-GEN-BQDA-0002)
+    'SSV', 'MSV', 'MOV', 'SOV', 'DBB',
+}
+_INSTRUMENT_PREFIXES = {
+    'FT', 'FI', 'FIC', 'PT', 'PI', 'PIC', 'LT', 'LI', 'LIC',
+    'TT', 'TI', 'TIC', 'AT', 'AI', 'FY', 'PY', 'LY',
+    # Mubarraz project additions (PJ6-EXD-GEN-BQDA-0002)
+    'ZT', 'ZSH', 'ZSL', 'ZSHH', 'ZSLL', 'ZI',
+    'ST', 'SI', 'IT', 'II', 'VT', 'VI', 'VSH', 'VSHH',
+    'DT', 'DI', 'DPT', 'DPI',
+    'WT', 'WI', 'JT', 'JI', 'OT', 'OI', 'UT', 'UI', 'RT',
+    'NOC', 'GWR', 'WC', 'GVF',
+}
+
+# ---------------------------------------------------------------------------
+# Soft-coded project-specific legend knobs (LN-001, LN-002, EQP-002)
+# Source: PJ6-EXD-GEN-BQDA-0002 Rev 1 — all edits here, no code deploy needed.
+# ---------------------------------------------------------------------------
+_VALID_SERVICE_CODES = {
+    'AM', 'BD', 'CH', 'CL', 'CR', 'D', 'DC', 'DF', 'DL', 'DO', 'DR', 'DW',
+    'FG', 'FL', 'FW', 'G', 'GL', 'HC', 'HO', 'HL', 'IA', 'IW', 'ME', 'N',
+    'O', 'P', 'RW', 'SG', 'SW', 'TW', 'UA', 'UW', 'VG', 'W', 'XN',
+    'AC', 'CA', 'SA',  # miscellaneous chemical services
+}
+# N = No insulation / Normal — standard Mubarraz project suffix for uninsulated lines.
+# Every normal line designation on this project ends in -N (e.g. 4"-BD-4860-033842-X-N).
+_VALID_INSULATION_CLASSES = {'C', 'H', 'P', 'T', 'N'}  # Cold / Heat / Personnel / Tracing / None
+
+# Equipment item-code catalogue from legend Sheet 001
+_VALID_EQUIPMENT_ITEM_CODES = {
+    'P', 'V', 'E', 'K', 'T', 'C', 'J', 'G', 'M', 'F', 'R', 'D', 'B', 'H',
+    'W', 'S', 'N',
+    'OF', 'OP', 'MG', 'MX', 'PY', 'SG', 'TR', 'WM', 'FL', 'FV',
+}
 
 # Soft-coding policy for orphan connectivity findings.
 # Instead of hard yes/no only, we score confidence and map to severity.
@@ -55,6 +132,9 @@ _ORPHAN_CONFIDENCE_MEDIUM = 0.45
 _ORPHAN_LOW_TEXT_CUTOFF = 60
 
 # ── LSZ-004 soft-coded knobs ─────────────────────────────────────────────────
+# Maximum NPS size (inches) to accept in a line-size token.
+# Anything above this is treated as OCR noise (e.g. drawing sheet dimensions).
+_LSZ004_MAX_NPS_INCH = 24.0
 # Regex to extract well-formed pipeline designation tokens from a noisy OCR line.
 # Matches patterns like  4"-D-5749-013842-X-N  or  2"-BD-6003-033842-X
 _LSZ004_LINE_TAG_RE = re.compile(
@@ -72,7 +152,7 @@ _LSZ004_MIN_SIZES = 2
 _LSZ005_MIN_DISTINCT_SIZES = 3
 # Valid pipe-size range (inches) — filters out OCR artefacts.
 _LSZ005_SIZE_MIN_INCH = 0.5   # ½" is the smallest common instrument line
-_LSZ005_SIZE_MAX_INCH = 48.0  # 48" is the largest standard pipe
+_LSZ005_SIZE_MAX_INCH = 24.0  # 24" is the largest standard process-plant pipe (NPS)
 # ── LSZ-010 soft-coded knobs ─────────────────────────────────────────────────
 # Fields from line_tag that form the "shared suffix" used for grouping.
 # Reorder or remove fields to tune sensitivity:
@@ -89,6 +169,61 @@ _LSZ010_MAX_FINDINGS = 10
 # Minimum non-empty suffix fields required to consider an entry checkable.
 # Prevents empty-field entries from creating spurious cross-matches.
 _LSZ010_MIN_SUFFIX_PARTS = 1
+
+# ── LSZ-011 soft-coded knobs ─────────────────────────────────────────────────
+# Maximum size-reduction ratio for a single reducer transition.
+# Example: 6"x2" = 3.0 (flags), 6"x4" = 1.5 (OK), 6"x3" = 2.0 (OK at threshold 2.5).
+# Increase to be more permissive; decrease to catch smaller reductions.
+_LSZ011_MAX_REDUCTION_RATIO = 2.5
+
+# ── VLV-002 / VLV-003 soft-coded knobs ──────────────────────────────────────
+# Maximum NPS bore (inches) for a globe valve before flagging as oversized.
+# Globe valves have high pressure drop and body-cavity weight issues above NPS 16".
+# References: ASME B16.10, vendor catalogues (Crane, Cameron, Flowserve).
+_VLV_GLOBE_MAX_INCH = 16.0
+# Maximum NPS bore for a control valve before flagging for verification.
+# Large control valves (>16") require individual hydraulic sizing review.
+_VLV_CONTROL_MAX_INCH = 16.0
+# Valve-type keywords tied to VLV-002 / VLV-003 checks.
+# Add new type strings here (matched case-insensitively) to extend coverage.
+_VLV_GLOBE_KEYWORDS    = {'GLOBE VALVE', 'GLOBE'}
+_VLV_CONTROL_KEYWORDS  = {
+    'CONTROL VALVE', 'DISTRIBUTED CONTROL VALVE',
+    'MODULATING VALVE', 'THROTTLE VALVE',
+}
+
+# ── ANN-001 soft-coded knobs ─────────────────────────────────────────────────
+# Pressure annotation pattern: matches "{letter} @ {N} bar" or standalone "{N} bar"
+# near a valve / line context.  Adjust regex or threshold as needed.
+_ANN_PRESSURE_MAX_BAR  = 50.0   # Pressures above this trigger a critical finding
+_ANN_PRESSURE_RE = re.compile(
+    r'(?:[A-Z]\s*@\s*)?(\d+(?:\.\d+)?)\s*(?:bar[ga]?|BARG?|BAR)',
+    re.IGNORECASE,
+)
+
+# ── RED-001 soft-coded knobs ─────────────────────────────────────────────────
+# Maximum number of RED-001 findings per drawing (cap to avoid flooding report
+# when the entire drawing uses red as a default annotation color).
+_RED001_MAX_FINDINGS = 15
+# Minimum text length (characters) for a red annotation to be reported.
+# Filters out single-character or empty stray marks.
+_RED001_MIN_TEXT_LEN = 2
+
+# ── RED-001 fragment-suppression patterns ────────────────────────────────────
+# Vector PDF text rendering splits a full line designation like
+# '2"-BD-6156-033842-X-N' into multiple colour spans.  Fragments such as
+# '013842-X', 'BD', 'X-N' are meaningless on their own and must be suppressed.
+# Patterns are fullmatch (anchored) and case-insensitive.
+# Extend this list for future P&ID projects without touching rule logic.
+_RED001_FRAGMENT_PATTERNS = [
+    re.compile(r'^\d{3,8}$'),                           # pure digit seq/area code  e.g. 013842, 4860
+    re.compile(r'^\d{4,8}(?:-[A-Z0-9]{1,8})+$', re.I), # seq+class suffix  e.g. 013842-X, 013842-X-N
+    re.compile(r'^[A-Z]{1,3}$'),                        # short abbreviation alone  e.g. N, BD, VG
+    re.compile(r'^[A-Z]{1,4}-[A-Z0-9]{1,4}$', re.I),   # two-part code  e.g. X-N, BD-X
+    re.compile(r'^-[A-Z0-9](?:-[A-Z0-9]+)*$', re.I),   # dash-prefix fragment  e.g. -N, -X-N
+    re.compile(r'^[\s\-_./:;,]+$'),                     # separators / punctuation only
+    re.compile(r'^\d+(?:\.\d+)?$'),                    # bare decimal number, no unit
+]
 
 
 @dataclass
@@ -116,6 +251,14 @@ def run_rules(extraction: Dict[str, Any], graph) -> List[RuleFinding]:
     findings.extend(_check_notes_holds(extraction))
     findings.extend(_check_pipeline_tag_duplicates(extraction))
     findings.extend(_check_shared_suffix_across_identities(extraction))
+    findings.extend(_check_line_designation_semantics(extraction))
+    findings.extend(_check_equipment_item_codes(extraction))
+    # New rules: visual / annotation patterns discovered from red-marked drawings.
+    findings.extend(_check_red_annotations(extraction))
+    findings.extend(_check_valve_type_size(extraction))
+    findings.extend(_check_reducers(extraction))
+    findings.extend(_check_pressure_annotations(extraction))
+    findings.extend(_check_equipment_size_annotations(extraction))
 
     # Sort deterministically: rule_id → issue_observed
     findings.sort(key=lambda f: (f.rule_id, f.issue_observed))
@@ -495,8 +638,15 @@ def _check_inline_size_conflict_with_line_token(raw_text: str) -> List[RuleFindi
             continue
 
         # Collect distinct NPS sizes found on this OCR line.
+        # Sizes above _LSZ004_MAX_NPS_INCH are discarded as OCR noise
+        # (e.g. drawing sheet border dimensions like "48\"").
         sizes: list = []
         for m in size_token_re.finditer(ocr_line):
+            try:
+                if float(m.group(1)) > _LSZ004_MAX_NPS_INCH:
+                    continue
+            except ValueError:
+                continue
             s = f'{m.group(1)}"'
             if s not in sizes:
                 sizes.append(s)
@@ -1052,5 +1202,604 @@ def _check_shared_suffix_across_identities(extraction: dict) -> list:
 
         if len(out) >= _LSZ010_MAX_FINDINGS:
             break
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# LN-001 / LN-002  LINE DESIGNATION SEMANTIC RULES
+# Source: PJ6-EXD-GEN-BQDA-0002 Rev 1 Sheet 001 Line Numbering System
+# Soft-coded via _VALID_SERVICE_CODES and _VALID_INSULATION_CLASSES above.
+# ---------------------------------------------------------------------------
+
+def _check_line_designation_semantics(extraction: Dict[str, Any]) -> List[RuleFinding]:
+    """
+    LN-001  Pipeline designation contains a fluid/service code that is not in
+            the project service code registry (_VALID_SERVICE_CODES).
+    LN-002  Pipeline designation has an insulation-class suffix that is not a
+            valid project insulation code (must be one of C, H, P, T).
+
+    Both rules use only the already-parsed line_tags list produced by extraction.py
+    so there is no additional OCR / AI cost.
+    """
+    out: List[RuleFinding] = []
+    line_tags = extraction.get('line_tags', [])
+    if not line_tags:
+        return out
+
+    seen_ln001: set = set()
+    seen_ln002: set = set()
+
+    for lt in line_tags:
+        text       = lt.get('text', '')
+        fluid_code = str(lt.get('fluid_code') or '').strip().upper()
+        insulation = str(lt.get('insulation') or '').strip().upper()
+
+        # LN-001: Unknown fluid/service code
+        if fluid_code and fluid_code not in _VALID_SERVICE_CODES:
+            key = fluid_code
+            if key not in seen_ln001:
+                seen_ln001.add(key)
+                out.append(RuleFinding(
+                    category='line_designation',
+                    rule_id='LN-001',
+                    issue_observed=(
+                        f"Line designation '{text}' uses service code '{fluid_code}' "
+                        "which is not listed in the project service code registry "
+                        "(PJ6-EXD-GEN-BQDA-0002 Sheet 001)"
+                    ),
+                    action_required=(
+                        f"Verify service code '{fluid_code}' against the project legends "
+                        "sheet (PJ6-EXD-GEN-BQDA-0002). Correct or register the code."
+                    ),
+                    evidence=text,
+                    severity='major',
+                ))
+
+        # LN-002: Invalid insulation class
+        if insulation and insulation not in _VALID_INSULATION_CLASSES:
+            key = insulation
+            if key not in seen_ln002:
+                seen_ln002.add(key)
+                out.append(RuleFinding(
+                    category='line_designation',
+                    rule_id='LN-002',
+                    issue_observed=(
+                        f"Line designation '{text}' has insulation-class suffix '{insulation}' "
+                        "which is not a valid project insulation code. "
+                        "Valid codes: C (Cold), H (Heat), P (Personnel), T (Tracing)"
+                    ),
+                    action_required=(
+                        f"Replace suffix '{insulation}' with the correct insulation class "
+                        "(C, H, P, or T) or remove the suffix if no insulation applies."
+                    ),
+                    evidence=text,
+                    severity='minor',
+                ))
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# EQP-002  EQUIPMENT ITEM CODE VALIDATION
+# Source: PJ6-EXD-GEN-BQDA-0002 Rev 1 Sheet 001 Equipment Numbering System
+# Soft-coded via _VALID_EQUIPMENT_ITEM_CODES above.
+# ---------------------------------------------------------------------------
+
+def _check_equipment_item_codes(extraction: Dict[str, Any]) -> List[RuleFinding]:
+    """
+    EQP-002  Equipment tag prefix does not match any known equipment item code
+             in the project equipment catalogue.
+
+    Only fires when the prefix is 1-2 letters (typical equipment code length);
+    longer prefixes are likely instrument acronyms handled by naming_check.
+    """
+    out: List[RuleFinding] = []
+    seen: set = set()
+
+    for item in extraction.get('equipment', []):
+        tag = str(item.get('tag') or '').strip()
+        if not tag or '-' not in tag:
+            continue
+        prefix = tag.split('-')[0].upper()
+        if len(prefix) > 2:
+            # Longer than 2 letters are instrument-like and handled elsewhere
+            continue
+        if prefix in _INSTRUMENT_PREFIXES or prefix in _TAGGED_VALVE_PREFIXES:
+            # Already checked by instruments/valves rules
+            continue
+        if prefix not in _VALID_EQUIPMENT_ITEM_CODES:
+            if prefix not in seen:
+                seen.add(prefix)
+                out.append(RuleFinding(
+                    category='equipment',
+                    rule_id='EQP-002',
+                    issue_observed=(
+                        f"Equipment tag '{tag}' uses item code '{prefix}' "
+                        "which is not in the project equipment catalogue "
+                        "(PJ6-EXD-GEN-BQDA-0002 Sheet 001)"
+                    ),
+                    action_required=(
+                        f"Verify equipment item code '{prefix}' against the project legends "
+                        "sheet. Use the correct code from the catalogue or register a new one."
+                    ),
+                    evidence=tag,
+                    severity='minor',
+                ))
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# RED-001  RED-COLORED ANNOTATION DETECTION
+# Applies to vector PDFs only (PyMuPDF span color metadata).
+# Soft-coded via _RED001_* constants above.
+# ---------------------------------------------------------------------------
+
+def _is_red_fragment(text: str) -> bool:
+    """
+    Return True when *text* is a sub-token of a larger pipeline annotation
+    that was split into separate color spans by the PDF renderer.
+
+    Examples that are suppressed: '013842-X', 'BD', 'X-N', '4860', '-N'
+    Examples that are kept:       '2"-BD-6156-033842-X-N', 'H @ 65 bar',
+                                  '18"', '6"x2"', 'HOLD 3'
+
+    Soft-coded via _RED001_FRAGMENT_PATTERNS — extend the list for new projects.
+    """
+    t = text.strip()
+    for pat in _RED001_FRAGMENT_PATTERNS:
+        if pat.fullmatch(t):
+            return True
+    return False
+
+
+def _classify_red_annotation(text: str) -> tuple:
+    """
+    Return (issue_observed, action_required, severity) for a meaningful red annotation.
+
+    Classification priority (first match wins):
+      1. Full pipeline line designation  → revised/new line
+      2. Pressure annotation             → PMC check
+      3. Reducer notation                → verify reducer
+      4. HOLD keyword                    → resolve HOLD
+      5. Revision keyword                → check change register
+      6. Bare NPS size (e.g. 18")        → revised pipe size
+      7. Fallback                        → general annotation
+
+    Soft-coded: all patterns reuse existing module-level constants so they
+    automatically stay in sync as those constants are tuned.
+    """
+    t = text.strip()
+
+    # 1. Full pipeline line designation
+    if _PIPELINE_DESIG_RE.search(t):
+        return (
+            f"Revised/new pipeline designation '{t}' in red "
+            "— added or changed in this revision's scope cloud.",
+            "Confirm this line designation appears in the revision change register. "
+            "Ensure the line list, MTO, and associated isometrics are updated.",
+            'major',
+        )
+
+    # 2. Pressure annotation
+    pm = _ANN_PRESSURE_RE.search(t)
+    if pm:
+        try:
+            bar_val = float(pm.group(1))
+        except (ValueError, TypeError):
+            bar_val = 0.0
+        psi = round(bar_val * 14.504)
+        sev = 'critical' if bar_val > _ANN_PRESSURE_MAX_BAR else 'info'
+        return (
+            f"Pressure annotation '{t}' in red "
+            f"({bar_val} bar / {psi} psi) — verify piping class is rated for this pressure.",
+            "Cross-check the piping material class (PMC) design pressure. "
+            "Confirm all valves, instruments, and flanges on this line or nozzle are rated accordingly.",
+            sev,
+        )
+
+    # 3. Reducer notation
+    rm = _REDUCER_RE.search(t)
+    if rm:
+        try:
+            a, b = float(rm.group(1)), float(rm.group(2))
+            larger, smaller = (a, b) if a >= b else (b, a)
+            ratio = larger / smaller if smaller > 0 else 0
+            return (
+                f"Reducer annotation '{t}' in red "
+                f"({larger:.4g}\"\u00d7{smaller:.4g}\", ratio {ratio:.2f}:1) "
+                "— verify the reducer is specified and sized correctly.",
+                "Confirm the reducer is included in the piping line specification and stress model. "
+                "Check velocity and pressure drop across the transition.",
+                'major',
+            )
+        except (ValueError, TypeError):
+            pass
+
+    # 4. HOLD item
+    if re.search(r'\bHOLD\b', t, re.I):
+        return (
+            f"HOLD annotation in red: '{t}' — action item requires resolution before IFC.",
+            "Resolve the HOLD and update the drawing revision. "
+            "Document the resolution in the project HOLD register.",
+            'critical',
+        )
+
+    # 5. Revision / change keyword
+    if re.search(r'\b(?:REV|REVISION|ISSUED|ADDED|DELETED|MODIFIED|CHANGED|NEW)\b', t, re.I):
+        return (
+            f"Revision marker in red: '{t}' — verify this change is in the revision record.",
+            "Confirm this annotation is documented in the drawing revision register. "
+            "Ensure affected systems (MTO, datasheets, isometrics) are updated.",
+            'major',
+        )
+
+    # 6. Bare NPS pipe size  e.g. '18"', '6"'
+    if re.fullmatch(r'\d{1,2}(?:\.\d+)?\s*(?:"|\'\')', t):
+        return (
+            f"Revised pipe-size annotation '{t}' in red inside scope cloud "
+            "— verify line designations on the affected segment match this size.",
+            "Check all line designations on the affected pipe segment agree with this annotated size. "
+            "Confirm reducers and spec-breaks are documented.",
+            'major',
+        )
+
+    # 7. Fallback — general meaningful annotation
+    return (
+        f"Red-colored annotation: '{t}' — review against the revision change record.",
+        "Verify this annotation is intentional and covered by the current revision record. "
+        "If it is a scope-change item, confirm alignment with the revision cloud on the drawing.",
+        'major',
+    )
+
+
+def _check_red_annotations(extraction: Dict[str, Any]) -> List[RuleFinding]:
+    """
+    RED-001  A meaningful red-colored text span was detected on the drawing.
+
+    Fragment spans produced by the PDF renderer splitting a single annotation
+    across multiple color runs are automatically suppressed via
+    _is_red_fragment().  Only self-contained annotations are reported.
+
+    Each finding carries a specific issue message and action derived from the
+    annotation type (line tag, pressure, reducer, HOLD, revision marker, etc.)
+    so the engineer can act immediately without manual interpretation.
+
+    Soft-coded via _RED001_MAX_FINDINGS, _RED001_MIN_TEXT_LEN, and
+    _RED001_FRAGMENT_PATTERNS — all adjustable per project.
+    """
+    out: List[RuleFinding] = []
+    red_anns = extraction.get('red_annotations', [])
+    if not red_anns:
+        return out
+
+    for ann in red_anns:
+        text = str(ann.get('text', '')).strip()
+        if len(text) < _RED001_MIN_TEXT_LEN:
+            continue
+        # Suppress sub-token fragments (e.g. '013842-X', 'BD', 'X-N')
+        if _is_red_fragment(text):
+            continue
+        issue, action, sev = _classify_red_annotation(text)
+        out.append(RuleFinding(
+            category='line_designation',
+            rule_id='RED-001',
+            issue_observed=issue,
+            action_required=action,
+            evidence=text,
+            severity=sev,
+        ))
+        if len(out) >= _RED001_MAX_FINDINGS:
+            break
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# VLV-002 / VLV-003  VALVE TYPE SIZE LIMITS
+# Soft-coded via _VLV_GLOBE_MAX_INCH, _VLV_CONTROL_MAX_INCH above.
+# ---------------------------------------------------------------------------
+
+def _check_valve_type_size(extraction: Dict[str, Any]) -> List[RuleFinding]:
+    """
+    VLV-002  Globe valve bore exceeds the recommended maximum NPS.
+             Globe valves have high pressure drop and significant weight above NPS 16".
+             A 30" globe valve is practically never specified in process plants —
+             investigate for drawing annotation error or wrong valve type.
+
+    VLV-003  Control valve bore exceeds the recommended maximum NPS for vendor
+             shop-drawing review.  Large control valves require individual hydraulic
+             sizing confirmation and extended-body vendor approval.
+
+    Both thresholds are soft-coded and independent.  Edit the module-level constants
+    _VLV_GLOBE_MAX_INCH and _VLV_CONTROL_MAX_INCH to tune without redeploying.
+    """
+    out: List[RuleFinding] = []
+    valve_size_contexts = extraction.get('valve_size_contexts', [])
+    if not valve_size_contexts:
+        return out
+
+    seen_globe:   set = set()
+    seen_control: set = set()
+
+    for ctx in valve_size_contexts:
+        equip_type = ctx.get('equipment_type', '').upper().strip()
+        size_val   = float(ctx.get('size_inch', 0) or 0)
+        evidence   = ctx.get('text', '')[:120]
+
+        # VLV-002: Globe valve limit
+        if equip_type in _VLV_GLOBE_KEYWORDS and size_val > _VLV_GLOBE_MAX_INCH:
+            key = round(size_val)
+            if key not in seen_globe:
+                seen_globe.add(key)
+                out.append(RuleFinding(
+                    category='valve',
+                    rule_id='VLV-002',
+                    issue_observed=(
+                        f"Globe valve annotated at {size_val:.4g}\" NPS — exceeds the "
+                        f"soft-coded maximum of {_VLV_GLOBE_MAX_INCH:.4g}\" for globe valves. "
+                        "Globe valves above NPS 16\" are rarely specified due to pressure "
+                        "drop, body weight, and vendor availability constraints. "
+                        "Likely drawing annotation error (wrong valve type or wrong size)."
+                    ),
+                    action_required=(
+                        "Verify the valve type: should this be a gate, butterfly, or ball "
+                        "valve at this bore? If globe valve is intentional, obtain a specific "
+                        "vendor quotation and update the piping stress analysis."
+                    ),
+                    evidence=evidence,
+                    severity='critical',
+                ))
+
+        # VLV-003: Control valve limit
+        if equip_type in _VLV_CONTROL_KEYWORDS and size_val > _VLV_CONTROL_MAX_INCH:
+            key = round(size_val)
+            if key not in seen_control:
+                seen_control.add(key)
+                out.append(RuleFinding(
+                    category='valve',
+                    rule_id='VLV-003',
+                    issue_observed=(
+                        f"Control valve annotated at {size_val:.4g}\" NPS — exceeds the "
+                        f"soft-coded maximum of {_VLV_CONTROL_MAX_INCH:.4g}\" for automatic "
+                        "sizing review. Large control valves require hydraulic model "
+                        "confirmation and individual vendor shop drawing approval."
+                    ),
+                    action_required=(
+                        "Provide control valve sizing calculation to vendor. Confirm the "
+                        "selected Cv / Kv at design flow and verify the body size against "
+                        "the line sizing engineer's data sheet."
+                    ),
+                    evidence=evidence,
+                    severity='major',
+                ))
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# LSZ-011  EXTREME REDUCER RATIO
+# Soft-coded via _LSZ011_MAX_REDUCTION_RATIO above.
+# ---------------------------------------------------------------------------
+
+def _check_reducers(extraction: Dict[str, Any]) -> List[RuleFinding]:
+    """
+    LSZ-011  A reducer annotation on this drawing has a larger:smaller NPS ratio
+             that exceeds the soft-coded maximum (default 2.5:1).
+
+    Example:  6"x2"  = 3.0 : 1  →  flags (extreme reduction)
+              6"x4"  = 1.5 : 1  →  OK
+              8"x3"  = 2.67: 1  →  flags
+
+    An extreme reduction can indicate:
+      • Copy-paste drawing error (wrong smaller bore entered)
+      • Missing intermediate spec-break pipe segment
+      • A pump suction/discharge transition documented as a single reducer
+        when two reducers in series are required by stress analysis
+
+    Soft-coded via _LSZ011_MAX_REDUCTION_RATIO.
+    """
+    out: List[RuleFinding] = []
+    seen: set = set()
+
+    for red in extraction.get('reducers', []):
+        ratio  = float(red.get('ratio', 0) or 0)
+        if ratio < _LSZ011_MAX_REDUCTION_RATIO:
+            continue
+        larger  = red.get('larger_inch', 0)
+        smaller = red.get('smaller_inch', 0)
+        key = (round(larger, 1), round(smaller, 1))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(RuleFinding(
+            category='line_size',
+            rule_id='LSZ-011',
+            issue_observed=(
+                f"Extreme reducer annotation {red.get('text', '')} detected — "
+                f"size ratio {ratio:.2f}:1 exceeds the soft-coded maximum of "
+                f"{_LSZ011_MAX_REDUCTION_RATIO}:1 for a single reducer. "
+                "Standard practice limits single-step reducers to 2:1 or 2.5:1 "
+                "to avoid cavitation and high local velocities."
+            ),
+            action_required=(
+                "Verify the reducer ratio is correct. If intentional, confirm with the "
+                "piping stress engineer and hydraulic designer. Consider splitting into "
+                "two reducers in series if the ratio exceeds project specification limits."
+            ),
+            evidence=red.get('text', ''),
+            severity='major',
+        ))
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# ANN-001  PRESSURE ANNOTATION CHECK
+# Soft-coded via _ANN_PRESSURE_MAX_BAR and _ANN_PRESSURE_RE above.
+# ---------------------------------------------------------------------------
+
+def _check_pressure_annotations(extraction: Dict[str, Any]) -> List[RuleFinding]:
+    """
+    ANN-001  A pressure annotation on the drawing (format: ``{class} @ {N} bar``)
+             was detected.
+
+    Patterns caught::
+        H @ 65 bar   (heat-insulated line at 65 barg — check PMC covers 65 bar)
+        P @ 120 bar  (personnel protection insulation at 120 barg — critical)
+        @ 65 bar     (standalone pressure callout near a valve or nozzle)
+
+    Annotations ≤ _ANN_PRESSURE_MAX_BAR are reported as 'info' (informational).
+    Annotations > _ANN_PRESSURE_MAX_BAR are reported as 'critical' and require
+    the engineer to confirm the piping material class (PMC) is rated accordingly.
+
+    Soft-coded via _ANN_PRESSURE_MAX_BAR (default 50 bar) and _ANN_PRESSURE_RE.
+    """
+    out: List[RuleFinding] = []
+    raw_text = extraction.get('raw_text', '')
+    if not raw_text:
+        return out
+
+    seen: set = set()
+    for line in raw_text.splitlines():
+        for m in _ANN_PRESSURE_RE.finditer(line):
+            try:
+                pressure = float(m.group(1))
+            except (ValueError, TypeError):
+                continue
+            if pressure <= 0 or pressure > 999:
+                continue
+            key = round(pressure, 1)
+            if key in seen:
+                continue
+            seen.add(key)
+            evidence_text = line.strip()[:120]
+
+            if pressure > _ANN_PRESSURE_MAX_BAR:
+                out.append(RuleFinding(
+                    category='line_designation',
+                    rule_id='ANN-001',
+                    issue_observed=(
+                        f"High-pressure annotation detected: {pressure} bar "
+                        f"({pressure * 14.504:.0f} psi). "
+                        f"Exceeds the soft threshold of {_ANN_PRESSURE_MAX_BAR} bar. "
+                        "Verify the piping material class (PMC) and all inline components "
+                        "(valves, instruments, nozzles) are rated for this pressure."
+                    ),
+                    action_required=(
+                        "Cross-check the stated pressure against the project Piping Class "
+                        "index. Confirm all valves, instruments, and flanges on this line "
+                        "are rated to the stated design pressure. Add a pressure basis note "
+                        "if this deviates from the standard class."
+                    ),
+                    evidence=evidence_text,
+                    severity='critical',
+                ))
+            else:
+                out.append(RuleFinding(
+                    category='line_designation',
+                    rule_id='ANN-001',
+                    issue_observed=(
+                        f"Pressure annotation detected: {pressure} bar. "
+                        "Verify this matches the line's design pressure in the piping class."
+                    ),
+                    action_required=(
+                        "Confirm the annotated pressure matches the piping material class "
+                        "design pressure for this service. No action needed if pressure matches."
+                    ),
+                    evidence=evidence_text,
+                    severity='info',
+                ))
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# LSZ-012  EQUIPMENT SIZE ANNOTATION MISMATCH
+# Soft-coded via _EQUIPMENT_SIZE_CTX_RE below.
+# ---------------------------------------------------------------------------
+
+# Equipment names that can carry a size annotation directly adjacent.
+# Add new names here to detect more equipment-type size annotation patterns.
+_EQUIPMENT_SIZE_CTX_RE = re.compile(
+    r'(\d{1,2}(?:\.\d+)?)\s*(?:"|\'\')\s*(?:in\s+)?'
+    r'(VORTEX\s+BREAKER'
+    r'|IMPINGEMENT\s+PLATE'
+    r'|VORTEX\s+PLATE'
+    r'|DISTRIBUTION\s+TRAY'
+    r'|ANNULAR\s+DISTRIBUTOR'
+    r'|RISER\s+PIPE'
+    r'|DOWNCOMER'
+    r'|SUCTION\s+NOZZLE'
+    r'|DISCHARGE\s+NOZZLE'
+    r')',
+    re.IGNORECASE,
+)
+
+def _check_equipment_size_annotations(extraction: Dict[str, Any]) -> List[RuleFinding]:
+    """
+    LSZ-012  A size annotation appears directly adjacent to an equipment-type
+             keyword (e.g. "20\\" in VORTEX BREAKER") but the stated size does
+             not match any line designation NPS currently extracted from this drawing.
+
+    This pattern catches common transcription errors where the equipment size
+    annotation was copied from another drawing or vessel nozzle schedule without
+    updating to the actual connected pipe size.
+
+    Soft-coded via _EQUIPMENT_SIZE_CTX_RE — add new equipment names without
+    touching rule logic.
+    """
+    out: List[RuleFinding] = []
+    raw_text = extraction.get('raw_text', '')
+    if not raw_text:
+        return out
+
+    # Build the set of NPS sizes confirmed by pipeline line designations.
+    line_tag_sizes: set = set()
+    for lt in extraction.get('line_tags', []):
+        sz = str(lt.get('size') or '').strip()
+        if sz:
+            try:
+                line_tag_sizes.add(float(sz.rstrip('"')))
+            except ValueError:
+                pass
+
+    seen: set = set()
+    for m in _EQUIPMENT_SIZE_CTX_RE.finditer(raw_text):
+        try:
+            size_val = float(m.group(1))
+        except ValueError:
+            continue
+        if size_val <= 0 or size_val > 60:
+            continue
+        equip_name = ' '.join(m.group(2).upper().split())
+        key = (round(size_val, 1), equip_name)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # Only flag if we have extracted line tags and the size is absent from them.
+        if line_tag_sizes and size_val not in line_tag_sizes:
+            sorted_known = sorted(
+                f'{int(s)}"' if s == int(s) else f'{s}"' for s in line_tag_sizes
+            )
+            out.append(RuleFinding(
+                category='equipment',
+                rule_id='LSZ-012',
+                issue_observed=(
+                    f"Equipment size annotation '{size_val:.4g}\" {equip_name}' "
+                    "does not match any pipeline line designation NPS on this drawing. "
+                    f"Known NPS sizes from line tags: {', '.join(sorted_known[:6])}."
+                ),
+                action_required=(
+                    "Verify the equipment size annotation matches the nozzle or pipe "
+                    "it connects to. If the connected line designation was not extracted, "
+                    "re-run OCR at higher DPI or check for non-standard label format. "
+                    "Correct the equipment annotation or add the missing line designation."
+                ),
+                evidence=m.group(0).strip()[:120],
+                severity='major',
+            ))
 
     return out
