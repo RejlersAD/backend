@@ -24,6 +24,9 @@ urlpatterns = [
     # Drawing image — rasterised page for frontend overlay panel
     path('drawing-image/<str:document_id>/<int:page_index>/', views.drawing_image, name='drawing-image'),
 
+    # Re-extract tag positions — refresh overlay markers for an existing document
+    path('reextract/<str:document_id>/',       views.reextract_positions, name='reextract'),
+
     # Management
     path('list/',                              views.list_documents,  name='list'),
     path('delete/<str:document_id>/',          views.delete_document, name='delete'),

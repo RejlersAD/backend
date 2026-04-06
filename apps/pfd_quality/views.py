@@ -458,6 +458,52 @@ def drawing_image(request, document_id, page_index):
     return response
 
 
+# ===========================================================================
+# RE-EXTRACT POSITIONS — refresh tag_positions for an existing document
+# POST /api/v1/pfd-quality/reextract/<document_id>/
+# ===========================================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def reextract_positions(request, document_id):
+    """
+    Re-run tag position extraction on an already-processed document.
+    Useful when the backend extraction has been improved (e.g. OCR added)
+    and the user wants updated overlay markers without full re-upload.
+    Synchronous — fast enough for a single drawing page.
+    """
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if not os.path.exists(doc.original_file.path):
+        return Response(
+            {"error": "Original file not available — please re-upload."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    from .services.extraction import _extract_tag_positions
+
+    updated = 0
+    for drawing in doc.drawings.all():
+        try:
+            tag_positions = _extract_tag_positions(doc.original_file.path, drawing.page_index)
+            meta = dict(drawing.metadata or {})
+            meta['tag_positions'] = tag_positions
+            drawing.metadata = meta
+            drawing.save(update_fields=['metadata'])
+            updated += 1
+            logger.info('[PFDQReextract] drawing=%s extracted %d tag positions',
+                        drawing.drawing_id, len(tag_positions))
+        except Exception as exc:
+            logger.warning('[PFDQReextract] Failed for drawing=%s: %s', drawing.drawing_id, exc)
+
+    return Response({
+        "message": f"Tag positions refreshed for {updated} drawing(s).",
+        "document_id": str(document_id),
+    })
+
+
 def _get_doc_or_404(document_id: str, user):
     try:
         doc = PFDQDocument.objects.get(document_id=document_id)

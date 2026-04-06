@@ -127,7 +127,7 @@ def _extract_title_block(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Coordinate extraction — word-level bounding boxes via PyMuPDF
+# Coordinate extraction — word-level bounding boxes via PyMuPDF + OCR fallback
 # ---------------------------------------------------------------------------
 
 # Soft-coded: patterns whose matches get spatial positions stored in tag_positions.
@@ -137,14 +137,108 @@ _POSITIONAL_PATTERNS = [
     _RE_RELIEF,
     _RE_CTRL_VALVE,
     _RE_VESSEL_HX,
+    _RE_HOLD,
 ]
+
+# Soft-coded OCR constants — tune without touching logic
+_OCR_DPI            = 150   # render DPI for OCR (higher = slower but more accurate)
+_OCR_CONF_THRESHOLD = 40    # minimum pytesseract word confidence (0-100) to accept
+_OCR_LANG           = 'eng' # tesseract language
+
+
+def _match_all_patterns(clean: str) -> list:
+    """Return list of tag strings that match any positional pattern in a single word."""
+    tags = []
+    for pat in _POSITIONAL_PATTERNS:
+        m = pat.search(clean)
+        if m:
+            tag = m.group(1) if m.lastindex else m.group(0)
+            if tag:
+                tags.append(tag)
+    # Standalone stream numbers (1–4 digit labels common on PFDs)
+    if re.match(r'^\d{1,4}$', clean):
+        n = int(clean)
+        if 1 <= n <= 9000:
+            tags.append(clean)
+    return list(set(tags))
+
+
+def _push_position(positions: dict, tag: str, cx: float, cy: float) -> None:
+    """Append an occurrence for tag; create entry on first encounter."""
+    occ = {'x_pct': cx, 'y_pct': cy}
+    if tag not in positions:
+        positions[tag] = {'x_pct': cx, 'y_pct': cy, 'all': [occ]}
+    else:
+        positions[tag]['all'].append(occ)
+
+
+def _apply_words_to_positions(words: list, pw: float, ph: float, positions: dict) -> None:
+    """Populate positions from PyMuPDF word list."""
+    for w in words:
+        x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
+        clean = text.strip()
+        if not clean:
+            continue
+        cx = round((x0 + x1) / 2 / pw * 100, 2)
+        cy = round((y0 + y1) / 2 / ph * 100, 2)
+        for tag in _match_all_patterns(clean):
+            _push_position(positions, tag, cx, cy)
+
+
+def _apply_ocr_to_positions(page, pw: float, ph: float, positions: dict) -> None:
+    """
+    OCR fallback: render the page to a raster image and extract tag positions
+    via pytesseract.  Used when the PDF has no embedded text layer (vector/scanned).
+    """
+    try:
+        import fitz
+        import io
+        import pytesseract
+        from PIL import Image
+
+        mat = fitz.Matrix(_OCR_DPI / 72, _OCR_DPI / 72)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img = Image.open(io.BytesIO(pix.tobytes('png')))
+        img_w, img_h = img.width, img.height
+
+        data = pytesseract.image_to_data(
+            img, lang=_OCR_LANG,
+            output_type=pytesseract.Output.DICT,
+        )
+        found = 0
+        for i, word in enumerate(data['text']):
+            conf = int(data['conf'][i])
+            if conf < _OCR_CONF_THRESHOLD:
+                continue
+            clean = word.strip()
+            if not clean:
+                continue
+            x = data['left'][i]
+            y = data['top'][i]
+            w = data['width'][i]
+            h = data['height'][i]
+            cx = round((x + w / 2) / img_w * 100, 2)
+            cy = round((y + h / 2) / img_h * 100, 2)
+            for tag in _match_all_patterns(clean):
+                _push_position(positions, tag, cx, cy)
+                found += 1
+        logger.info('[PFDQ] OCR extracted %d tag position(s)', found)
+    except ImportError:
+        logger.debug('[PFDQ] pytesseract/PIL unavailable — skipping OCR fallback')
+    except Exception as exc:
+        logger.warning('[PFDQ] OCR extraction failed: %s', exc)
 
 
 def _extract_tag_positions(file_path: str, page_index: int) -> dict:
     """
-    Return {tag_text: {'x_pct': float, 'y_pct': float}} using PyMuPDF word
-    bounding boxes so the frontend can place overlay markers at exact coordinates.
-    Stores only the first (most prominent) occurrence of each tag.
+    Return {tag: {'x_pct': float, 'y_pct': float, 'all': [{'x_pct', 'y_pct'}, ...]}}
+
+    Strategy:
+      1. PyMuPDF word-level extraction  (instant, accurate for text-layer PDFs)
+      2. pytesseract OCR fallback       (slower, handles vector/scanned PDFs)
+
+    The 'all' array stores EVERY occurrence so the frontend can pick the one
+    nearest the drawing content centroid, filtering out title-block hits.
     Falls back to empty dict on any error or missing dependency.
     """
     positions: Dict[str, Any] = {}
@@ -158,19 +252,15 @@ def _extract_tag_positions(file_path: str, page_index: int) -> dict:
             pdf.close()
             return positions
 
-        # get_text('words') → [(x0, y0, x1, y1, word_text, block_no, line_no, word_no), ...]
-        for w in page.get_text('words'):
-            x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
-            clean = text.strip()
-            for pat in _POSITIONAL_PATTERNS:
-                m = pat.search(clean)
-                if m:
-                    tag = m.group(1) if m.lastindex else m.group(0)
-                    if tag and tag not in positions:
-                        positions[tag] = {
-                            'x_pct': round((x0 + x1) / 2 / pw * 100, 2),
-                            'y_pct': round((y0 + y1) / 2 / ph * 100, 2),
-                        }
+        # Stage 1: text layer extraction
+        words = page.get_text('words')
+        _apply_words_to_positions(words, pw, ph, positions)
+
+        # Stage 2: OCR fallback when drawing has no text layer
+        if not positions:
+            logger.debug('[PFDQ] No text layer — attempting OCR fallback')
+            _apply_ocr_to_positions(page, pw, ph, positions)
+
         pdf.close()
     except ImportError:
         logger.debug('[PFDQ] PyMuPDF unavailable — tag_positions will be empty')
