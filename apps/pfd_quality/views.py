@@ -405,6 +405,12 @@ def drawing_image(request, document_id, page_index):
     except Exception:
         return Response({"error": "File path unavailable"}, status=status.HTTP_404_NOT_FOUND)
 
+    if not os.path.exists(file_path):
+        return Response(
+            {"error": "Original file no longer available on this server. Please re-upload the PFD drawing."},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
     ext = Path(file_path).suffix.lower().lstrip(".")
     png_data = None
 
