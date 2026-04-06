@@ -487,15 +487,30 @@ def _extract_tag_positions(file_path, page_index):
         doc.close()
 
         # --- Finalise line-size positions ---
+        # Soft-coded: drawing content centroid used to pick the most representative
+        # NPS occurrence.  The arithmetic average of many "4\"" tokens scattered
+        # across a large drawing often lands between actual text elements (i.e. on a
+        # pipe line or blank space) rather than on a readable label.
+        # Using the occurrence closest to this centroid gives a pinpoint anchor.
+        # Adjust _CONTENT_CX_PCT / _CONTENT_CY_PCT if your drawing type has a
+        # non-standard content layout (e.g. portrait sheets, left-anchored title block).
+        _CONTENT_CX_PCT = 50.0   # typical P&ID main-area horizontal centre
+        _CONTENT_CY_PCT = 40.0   # biased slightly above mid — instruments cluster here
         for key, pts in _ls_all.items():
             if key in positions:
                 continue
             body = [p for p in pts
                     if p['y_pct'] / 100.0 < _TB_Y_FRAC and p['x_pct'] / 100.0 < _TB_X_FRAC]
-            use   = body if body else pts
-            avg_x = round(sum(p['x_pct'] for p in use) / len(use), 2)
-            avg_y = round(sum(p['y_pct'] for p in use) / len(use), 2)
-            positions[key] = {'x_pct': avg_x, 'y_pct': avg_y, 'all': use}
+            use  = body if body else pts
+            # Pick the single occurrence nearest the content centroid rather than the
+            # arithmetic average (which can be a phantom midpoint between occurrences).
+            best = min(use, key=lambda p: (p['x_pct'] - _CONTENT_CX_PCT) ** 2
+                                         + (p['y_pct'] - _CONTENT_CY_PCT) ** 2)
+            positions[key] = {
+                'x_pct': round(best['x_pct'], 2),
+                'y_pct': round(best['y_pct'], 2),
+                'all':   use,
+            }
 
     except ImportError:
         pass
