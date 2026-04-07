@@ -78,6 +78,11 @@ def _extract_text_from_pdf(file_obj, config=None) -> str:
     ext_cfg     = cfg.get('extraction', {})
     # Soft-coded — change via equipment_type_config.json, no Python edit needed
     ocr_angles  = ext_cfg.get('ocr_rotation_angles', [0, 90, 180, 270])
+    # Multiple PSM modes per rotation: 6=uniform block (title blocks/tables),
+    # 11=sparse text (scattered equipment tags). Unique results are merged.
+    ocr_psm_modes  = ext_cfg.get('ocr_psm_modes', [6, 11])
+    # Higher scale → sharper characters → better regex hit-rate on small P&ID text
+    ocr_scale      = float(ext_cfg.get('ocr_render_scale', 3.0))
 
     text_parts = []
     try:
@@ -106,7 +111,7 @@ def _extract_text_from_pdf(file_obj, config=None) -> str:
         try:
             import fitz
             import pytesseract
-            from PIL import Image
+            from PIL import Image, ImageEnhance, ImageFilter
             import io
 
             file_obj.seek(0)
@@ -114,14 +119,32 @@ def _extract_text_from_pdf(file_obj, config=None) -> str:
             doc = fitz.open(stream=file_bytes, filetype='pdf')
             ocr_parts = []
             for page in doc:
-                mat = fitz.Matrix(2.0, 2.0)
+                mat = fitz.Matrix(ocr_scale, ocr_scale)
                 pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
                 base_img = Image.open(io.BytesIO(pix.tobytes('png')))
+
+                # Preprocessing: boost contrast and sharpen so small tag text
+                # is crisper for Tesseract on both scanned and low-res pages.
+                # These transforms are lossless for well-printed drawings and
+                # help significantly on faded / photocopied P&IDs.
+                base_img = ImageEnhance.Contrast(base_img).enhance(2.0)
+                base_img = base_img.filter(ImageFilter.SHARPEN)
+
+                seen_snippets: set = set()
                 for angle in ocr_angles:
                     rotated = base_img.rotate(-angle, expand=True) if angle != 0 else base_img
-                    ocr_text = pytesseract.image_to_string(rotated, config='--oem 1 --psm 11')
-                    if ocr_text.strip():
-                        ocr_parts.append(ocr_text)
+                    for psm in ocr_psm_modes:
+                        ocr_text = pytesseract.image_to_string(
+                            rotated, config=f'--oem 1 --psm {psm}'
+                        )
+                        if not ocr_text.strip():
+                            continue
+                        # Deduplicate: use normalised first-200-char fingerprint
+                        # so the same text extracted by two PSM modes isn't doubled.
+                        fingerprint = ' '.join(ocr_text.split())[:200]
+                        if fingerprint not in seen_snippets:
+                            seen_snippets.add(fingerprint)
+                            ocr_parts.append(ocr_text)
             doc.close()
             full_text = '\n'.join(ocr_parts)
         except Exception as exc:
@@ -146,28 +169,65 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
     ext_cfg     = config.get('extraction', {})
     type_labels = config.get('type_labels', {})
     fluid_kws   = [kw for kw in config.get('fluid_keywords', []) if not kw.startswith('_')]
-    ctx_win     = int(ext_cfg.get('context_window_chars', 160))
-    desc_words  = int(ext_cfg.get('description_max_words', 6))
+    ctx_win                 = int(ext_cfg.get('context_window_chars', 160))
+    desc_words              = int(ext_cfg.get('description_max_words', 6))
+    desc_ctx_chars          = int(ext_cfg.get('description_context_chars', 400))
+    desc_min_len            = int(ext_cfg.get('description_min_word_length', 3))
+    area_ctx_chars          = int(ext_cfg.get('area_context_chars', 600))
+    area_from_tag_heuristic = bool(ext_cfg.get('area_from_tag_heuristic', True))
+    nozzle_ctx_chars        = int(ext_cfg.get('nozzle_context_chars', 400))
+    mat_ctx_chars           = int(ext_cfg.get('material_context_chars', 400))
+    service_ctx_chars       = int(ext_cfg.get('service_context_chars', 400))
+    note_ctx_chars          = int(ext_cfg.get('note_context_chars', 400))
+    # Standards refs, conjunctions and short noise tokens to exclude from description
+    _desc_stop_words        = {
+        'API','ASME','ANSI','ISO','DIN','NACE','NOTE','REF','SEE','PER',
+        'AND','FOR','THE','OR','TO','OF','IN','AT','BY','NO','AS','IS','ON',
+    }
 
     tag_re = re.compile(r'\b([A-Z]{1,2})-([0-9]{3,5}[A-Z]?)\b')
 
     # --- Soft-coded helper patterns (read once per call) ------------------
+    # Used by description strategy 1: identify bare tag lines and pure-noise tokens
+    _tag_like_re  = re.compile(r'^[A-Z]{1,2}-\d{3,5}[A-Z]?$')
+    _noise_tok_re = re.compile(r'^[\d\.\+\-\/\%\(\)\[\]]{1,6}$')
     area_re    = re.compile(
         ext_cfg.get('area_pattern',
-                    r'(?:AREA|UNIT|TRAIN|BAY|SECTION|BATTERY)\s*[:\-]?\s*([A-Z0-9]{1,8})'),
+                    r'(?:AREA|UNIT|TRAIN|BAY|SECTION|BATTERY|MODULE|MOD|ZONE|BLOCK|SKID|PLANT|FIELD|STREAM)\s*[:\-]?\s*([A-Z0-9]{1,8})'),
         re.IGNORECASE,
     )
-    nozzle_re  = re.compile(
-        ext_cfg.get('nozzle_pattern', r'\bN[0-9]{1,2}[A-Z]?\b')
+    nozzle_re         = re.compile(
+        ext_cfg.get('nozzle_pattern', r'\bN[-]?[0-9]{1,2}[A-Z]?\b')
     )
-    mat_re     = re.compile(
+    mat_re            = re.compile(
         ext_cfg.get('material_class_pattern',
-                    r'\b(A1[A-Z]|B1[A-Z]|C1[A-Z]|D1[A-Z]|[A-D]2[A-Z]'
-                    r'|CS|SS|DSS|SDSS|GRE|PVC|HDPE|CPVC)\b'),
+                    r'\b(A1[A-Z]R?|B1[A-Z]|C1[A-Z]|D1[A-Z]|[A-D]2[A-Z]'
+                    r'|CS|SS|316L?|304L?|317L|321|347|2205|254SMO'
+                    r'|DSS|SDSS|DUPLEX|INCONEL|HASTELLOY|MONEL'
+                    r'|GRE|FRP|HDPE|CPVC|PVC|PVDF|A516|A240|A312|A106)\b'),
         re.IGNORECASE,
     )
-    note_re    = re.compile(
-        ext_cfg.get('note_pattern', r'\b(?:SEE\s+)?NOTE\s*[0-9]+\b'),
+    material_label_re = re.compile(
+        ext_cfg.get('material_label_pattern',
+                    r'(?:MATERIAL|MTL|SHELL|BODY|CASING|LINER'
+                    r'|WETTED\s*PARTS?|INTERNALS?)'
+                    r'\s*[:\-/]\s*([A-Z0-9][A-Z0-9/\-\s\.]{1,28})'),
+        re.IGNORECASE,
+    )
+    service_label_re  = re.compile(
+        ext_cfg.get('service_label_pattern',
+                    r'(?:SERVICE|FLUID|MEDIUM|PROCESS\s*FLUID'
+                    r'|CONTENTS|PRODUCT|DUTY)'
+                    r'\s*[:\.\.\-]\s*([A-Za-z][A-Za-z0-9\s/\-]{1,30})'),
+        re.IGNORECASE,
+    )
+    note_re           = re.compile(
+        ext_cfg.get('note_pattern',
+                    r'(?:(?:SEE\s+)?NOTE\s*[-\s\(]?[0-9]+[\)\.]*'
+                    r'|\bHOLD\b(?:\s*[-]?\s*[0-9]+)?'
+                    r'|\bTBD\b|\bTBC\b'
+                    r'|\bREF[.\s]+DWG[.\s]+[A-Z0-9/\-]+'
+                    r'|SEE\s+(?:DWG|SPEC|DOC)[.]*\s*[A-Z0-9/\-]+)'),
         re.IGNORECASE,
     )
     # -----------------------------------------------------------------------
@@ -200,14 +260,48 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
 
         type_label = type_labels.get(prefix, 'Equipment')
 
-        # ── Description (capitalised words immediately after tag) ──────────
-        after = text[m.end():m.end() + ctx_win]
-        cap_words = re.findall(r'\b[A-Z][A-Z0-9/\-]{1,20}\b', after)
-        desc_words_filtered = [
-            w for w in cap_words
-            if not re.match(r'^[A-Z]{1,2}-[0-9]', w) and len(w) > 1
-        ][:desc_words]
-        description = ' '.join(desc_words_filtered) if desc_words_filtered else ''
+        # ── Description — multi-strategy extraction ───────────────────────
+        after       = text[m.end(): m.end() + desc_ctx_chars]
+        description = ''
+
+        # Strategy 1: newline-segmented lines right after the tag.
+        # Each line is checked for "description-likeness":
+        # skip bare tag IDs, pipe designations and pure digit/symbol noise.
+        desc_lines = []
+        for _ln in (ln.strip() for ln in after.split('\n') if ln.strip()):
+            if _tag_like_re.match(_ln):
+                continue
+            _toks = [t.strip('.,;:/()"\'[]') for t in _ln.split()]
+            _valid = [
+                t for t in _toks
+                if len(t) >= desc_min_len
+                and not t.isdigit()
+                and not _tag_like_re.match(t)
+                and not _noise_tok_re.match(t)
+                and t.upper() not in _desc_stop_words
+            ]
+            if _valid:
+                desc_lines.append(' '.join(_valid[:5]))
+            if len(desc_lines) >= 2:
+                break
+        if desc_lines:
+            description = ' '.join(desc_lines).title()
+
+        # Strategy 2: ALL-CAPS word scan in narrower ctx_win (improved filter)
+        if not description:
+            _cap_words = re.findall(r'\b[A-Z][A-Z]{2,19}\b', after[:ctx_win])
+            _filtered_caps = [
+                w for w in _cap_words
+                if not re.match(r'^[A-Z]{1,2}-\d', w)
+                and w not in _desc_stop_words
+                and len(w) >= desc_min_len
+            ][:desc_words]
+            if _filtered_caps:
+                description = ' '.join(w.capitalize() for w in _filtered_caps[:3])
+
+        # Strategy 3: fall back to the equipment TypeLabel
+        if not description:
+            description = type_label
 
         # ── Line connections (piping designation tokens) ───────────────────
         lc_tokens = []
@@ -216,25 +310,66 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             if token and token not in lc_tokens:
                 lc_tokens.append(token)
 
-        # ── Service / fluid ───────────────────────────────────────────────
-        ctx_lower = ctx.lower()
-        found_fluids = [kw for kw in fluid_kws if kw in ctx_lower]
-        service_fluid = ', '.join(found_fluids[:2]) if found_fluids else ''
+        # ── Service / fluid — multi-strategy extraction ───────────────────
+        _svc_start    = max(0, m.start() - service_ctx_chars)
+        _svc_end      = min(len(text), m.end() + service_ctx_chars)
+        _svc_ctx      = text[_svc_start:_svc_end]
+        service_fluid = ''
+        # Strategy 1: label-based — SERVICE: CRUDE OIL, FLUID: NITROGEN, MEDIUM: GAS
+        _svc_lm = service_label_re.search(_svc_ctx)
+        if _svc_lm:
+            _raw_svc = _svc_lm.group(1).split('\n')[0].strip().rstrip('.,;')
+            if len(_raw_svc) >= 2:
+                service_fluid = _raw_svc[:35].title()
+        # Strategy 2: keyword scan in wider context
+        if not service_fluid:
+            _svc_lower = _svc_ctx.lower()
+            found_fluids = [kw for kw in fluid_kws if kw in _svc_lower]
+            service_fluid = ', '.join(found_fluids[:2]).title() if found_fluids else ''
 
-        # ── Area / Unit (soft-coded area_pattern) ─────────────────────────
-        area_m = area_re.search(ctx)
-        area   = area_m.group(0).strip() if area_m else ''
+        # ── Area / Unit — multi-strategy extraction ───────────────────────
+        # Strategy 1: search a wider context (soft-coded area_context_chars).
+        # Uses capture group(1) — returns just the code, not the whole keyword match.
+        _a_start = max(0, m.start() - area_ctx_chars)
+        _a_end   = min(len(text), m.end() + area_ctx_chars)
+        area_m   = area_re.search(text[_a_start:_a_end])
+        area     = area_m.group(1).strip() if area_m else ''
 
-        # ── Nozzle connections (soft-coded nozzle_pattern) ────────────────
-        nozzle_tokens = list(dict.fromkeys(nozzle_re.findall(ctx)))[:6]
+        # Strategy 2: derive from serial number digits (O&G tag-number convention).
+        # V-101 → "100", P-2201 → "2200", E-10001 → "10000"
+        if not area and area_from_tag_heuristic:
+            _digits = re.sub(r'[^0-9]', '', m.group(2))
+            if len(_digits) >= 3:
+                area = _digits[0] + '0' * (len(_digits) - 1)
 
-        # ── Material / piping spec class (soft-coded material_class_pattern)
-        mat_matches    = mat_re.findall(ctx)
-        material_class = mat_matches[0] if mat_matches else ''
+        # ── Nozzle connections — wider context scan ───────────────────────
+        _nzl_start    = max(0, m.start() - nozzle_ctx_chars)
+        _nzl_end      = min(len(text), m.end() + nozzle_ctx_chars)
+        _nzl_ctx      = text[_nzl_start:_nzl_end]
+        nozzle_tokens = list(dict.fromkeys(nozzle_re.findall(_nzl_ctx)))[:6]
 
-        # ── Process note references (soft-coded note_pattern) ─────────────
+        # ── Material / piping spec — multi-strategy extraction ────────────
+        _mat_start     = max(0, m.start() - mat_ctx_chars)
+        _mat_end       = min(len(text), m.end() + mat_ctx_chars)
+        _mat_ctx       = text[_mat_start:_mat_end]
+        material_class = ''
+        # Strategy 1: label-based — MATERIAL: CS/SS316, SHELL: DSS, MTL: INCONEL
+        _mat_lm = material_label_re.search(_mat_ctx)
+        if _mat_lm:
+            _raw_mat = _mat_lm.group(1).split('\n')[0].strip().rstrip('.,;/ ')
+            if len(_raw_mat) >= 2:
+                material_class = _raw_mat[:25].upper()
+        # Strategy 2: pattern scan in wider context
+        if not material_class:
+            mat_matches    = mat_re.findall(_mat_ctx)
+            material_class = mat_matches[0].upper() if mat_matches else ''
+
+        # ── Process note references — wider context scan ──────────────────
+        _nt_start     = max(0, m.start() - note_ctx_chars)
+        _nt_end       = min(len(text), m.end() + note_ctx_chars)
+        _nt_ctx       = text[_nt_start:_nt_end]
         note_matches  = list(dict.fromkeys(
-            n.strip() for n in note_re.findall(ctx)
+            n.strip() for n in note_re.findall(_nt_ctx)
         ))[:3]
         process_notes = ', '.join(note_matches) if note_matches else ''
 
