@@ -48,6 +48,15 @@ class PIDVProject(models.Model):
         related_name='pid_v_projects',
     )
 
+    # Per-project legend sheet knowledge (overrides the global legend for this project).
+    # Stores the structured output of build_legend_knowledge(): instrument_prefixes,
+    # valve_prefixes, note_keywords, hold_keywords, sources.
+    legend_knowledge_data = models.JSONField(
+        null=True, blank=True,
+        help_text='Extracted legend prefixes specific to this project.'
+    )
+    legend_built_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

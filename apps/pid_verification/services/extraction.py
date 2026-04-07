@@ -43,17 +43,25 @@ TESSERACT_CONFIGS = [
 ]
 
 
-def extract_drawing(file_path: str, page_index: int = 0) -> Dict[str, Any]:
+def extract_drawing(file_path: str, page_index: int = 0, legend_data: dict | None = None) -> Dict[str, Any]:
     """
     Extract all P&ID elements from a single page/drawing.
     Returns ExtractionResult dict (see module docstring).
+    legend_data: optional per-project legend (overrides global if provided).
     """
     raw_text = _run_ocr(file_path, page_index)
     tag_positions = _extract_tag_positions(file_path, page_index)
+
+    # Resolve prefix sets: use per-project legend if available, else global.
+    if legend_data:
+        instr_pfix, valve_pfix = _legend_prefixes_from(legend_data)
+    else:
+        instr_pfix, valve_pfix = None, None
+
     return {
         'tags':                _extract_tags(raw_text),
-        'instruments':         _extract_instruments(raw_text),
-        'valves':              _extract_valves(raw_text),
+        'instruments':         _extract_instruments(raw_text, instr_pfix),
+        'valves':              _extract_valves(raw_text, valve_pfix),
         'equipment':           _extract_equipment(raw_text),
         'pipelines':           [],   # Requires CV pipeline (deferred to graph builder)
         'notes':               _extract_notes(raw_text),
@@ -200,12 +208,25 @@ def _legend_prefixes() -> tuple[set[str], set[str]]:
     return instrument, valves
 
 
+def _legend_prefixes_from(legend_data: dict) -> tuple[set[str], set[str]]:
+    """Compute prefix sets from per-project legend data (no caching)."""
+    instrument = set(_DEFAULT_INSTRUMENT_PREFIXES)
+    valves = set(_DEFAULT_VALVE_PREFIXES)
+    for p in legend_data.get('instrument_prefixes', []):
+        if isinstance(p, str):
+            instrument.add(p.upper().strip())
+    for p in legend_data.get('valve_prefixes', []):
+        if isinstance(p, str):
+            valves.add(p.upper().strip())
+    return instrument, valves
+
+
 def _extract_tags(text: str):
     return sorted(set(_TAG_PATTERN.findall(text)))
 
 
-def _extract_instruments(text: str):
-    instrument_prefixes, _ = _legend_prefixes()
+def _extract_instruments(text: str, override_prefixes: set | None = None):
+    instrument_prefixes, _ = _legend_prefixes() if override_prefixes is None else (override_prefixes, None)
     items = []
     for m in _TAG_PATTERN.finditer(text):
         tag = m.group(1)
@@ -215,8 +236,8 @@ def _extract_instruments(text: str):
     return items
 
 
-def _extract_valves(text: str):
-    _, valve_prefixes = _legend_prefixes()
+def _extract_valves(text: str, override_prefixes: set | None = None):
+    _, valve_prefixes = _legend_prefixes() if override_prefixes is None else (None, override_prefixes)
     items = []
     for m in _TAG_PATTERN.finditer(text):
         tag = m.group(1)

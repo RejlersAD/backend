@@ -673,6 +673,99 @@ def build_legend_knowledge_api(request):
                 pass
 
 
+# ---------------------------------------------------------------------------
+# Per-project legend endpoints
+# ---------------------------------------------------------------------------
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def project_legend(request, project_id):
+    """
+    Return legend knowledge for a specific project.
+    Falls back to the global legend if no per-project legend has been built.
+    """
+    try:
+        project = PIDVProject.objects.get(project_id=project_id)
+    except PIDVProject.DoesNotExist:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if project.legend_knowledge_data:
+        return Response({
+            "legend_knowledge": project.legend_knowledge_data,
+            "scope": "project",
+            "legend_built_at": project.legend_built_at,
+        })
+
+    # Fall back to global legend
+    global_data = load_legend_knowledge()
+    return Response({
+        "legend_knowledge": global_data,
+        "scope": "global",
+        "legend_built_at": None,
+    })
+
+
+@api_view(["POST", "DELETE"])
+@permission_classes([IsAuthenticated, HasDisciplineAccess])
+@parser_classes([MultiPartParser, FormParser])
+def project_legend_build(request, project_id):
+    """
+    POST: Build/update per-project legend knowledge from an uploaded legend sheet.
+          Supports any format that PyMuPDF can open (PDF, PNG, JPEG, TIFF, BMP, etc.).
+    DELETE: Clear the per-project legend (revert to global legend).
+    """
+    project_legend_build.module_required = 'pid_verification'
+
+    try:
+        project = PIDVProject.objects.get(project_id=project_id)
+    except PIDVProject.DoesNotExist:
+        return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "DELETE":
+        project.legend_knowledge_data = None
+        project.legend_built_at = None
+        project.save(update_fields=['legend_knowledge_data', 'legend_built_at', 'updated_at'])
+        return Response({"message": "Project legend cleared. Will use global legend."})
+
+    # POST — build legend from uploaded file
+    uploaded = []
+    if request.FILES.get("file"):
+        uploaded.append(request.FILES["file"])
+    uploaded.extend(request.FILES.getlist("files"))
+
+    if not uploaded:
+        return Response({"error": "No legend file uploaded"}, status=status.HTTP_400_BAD_REQUEST)
+
+    temp_paths = []
+    try:
+        for f in uploaded:
+            suffix = Path(f.name).suffix or ".pdf"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                for chunk in f.chunks():
+                    tmp.write(chunk)
+                temp_paths.append(tmp.name)
+
+        knowledge = build_legend_knowledge(temp_paths)
+        knowledge["sources"] = [f.name for f in uploaded]
+
+        from django.utils import timezone
+        project.legend_knowledge_data = knowledge
+        project.legend_built_at = timezone.now()
+        project.save(update_fields=['legend_knowledge_data', 'legend_built_at', 'updated_at'])
+
+        return Response({
+            "message": "Project legend knowledge updated",
+            "legend_knowledge": knowledge,
+            "legend_built_at": project.legend_built_at,
+        }, status=status.HTTP_200_OK)
+    finally:
+        for p in temp_paths:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def compare_accuracy(request, document_id):

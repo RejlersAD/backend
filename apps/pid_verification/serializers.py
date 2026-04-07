@@ -10,17 +10,23 @@ from .models import PIDVProject, PIDVDocument, PIDVDrawing, PIDVFinding
 # ---------------------------------------------------------------------------
 
 class PIDVProjectSerializer(serializers.ModelSerializer):
-    document_count = serializers.SerializerMethodField()
+    document_count      = serializers.SerializerMethodField()
+    has_project_legend  = serializers.SerializerMethodField()
 
     class Meta:
         model  = PIDVProject
         fields = [
             'id', 'project_id', 'project_name', 'description',
-            'document_count', 'created_at', 'updated_at',
+            'document_count', 'has_project_legend',
+            'legend_knowledge_data', 'legend_built_at',
+            'created_at', 'updated_at',
         ]
 
     def get_document_count(self, obj):
         return obj.documents.count()
+
+    def get_has_project_legend(self, obj):
+        return obj.legend_knowledge_data is not None
 
 
 class PIDVProjectCreateSerializer(serializers.ModelSerializer):

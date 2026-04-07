@@ -58,6 +58,12 @@ def process_pid_document(self, document_id: str):
         segments = segment_document(str(doc.document_id), file_path)
         logger.info('[PIDVTask] %d drawing(s) segmented', len(segments))
 
+        # ── 3b. Resolve per-project legend (project legend → global fallback) ──
+        project_legend = None
+        if doc.project_id and doc.project and doc.project.legend_knowledge_data:
+            project_legend = doc.project.legend_knowledge_data
+            logger.info('[PIDVTask] Using per-project legend for project=%s', doc.project.project_id)
+
         all_findings_count = 0
 
         for seg in segments:
@@ -75,7 +81,7 @@ def process_pid_document(self, document_id: str):
             drawing_obj.findings.all().delete()
 
             # ── 4. Extract elements ───────────────────────────────────────
-            extraction = extract_drawing(file_path, page_index=seg.page_index)
+            extraction = extract_drawing(file_path, page_index=seg.page_index, legend_data=project_legend)
 
             # Persist extraction diagnostics per drawing for frontend transparency.
             raw_text = extraction.get('raw_text', '') or ''

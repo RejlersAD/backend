@@ -32,6 +32,10 @@ urlpatterns = [
     path('legend-knowledge/build/',            views.build_legend_knowledge_api, name='build-legend-knowledge'),
     path('compare/<str:document_id>/',         views.compare_accuracy,           name='compare-accuracy'),
 
+    # Per-project legend management
+    path('projects/<str:project_id>/legend/',        views.project_legend,       name='project-legend'),
+    path('projects/<str:project_id>/legend/build/',  views.project_legend_build, name='project-legend-build'),
+
     # Tag Naming & Acronym Check
     path('check-naming/<str:document_id>/',    views.check_naming,               name='check-naming'),
 
