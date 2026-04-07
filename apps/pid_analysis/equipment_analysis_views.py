@@ -326,6 +326,20 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             _svc_lower = _svc_ctx.lower()
             found_fluids = [kw for kw in fluid_kws if kw in _svc_lower]
             service_fluid = ', '.join(found_fluids[:2]).title() if found_fluids else ''
+        # Strategy 3: derive from fluid code embedded in already-found line connection tags.
+        # e.g. "4"-HO-5665-033842-X" → fluid code "HO" → "Hydrocarbon Oil".
+        # Guaranteed to find something whenever line connections were extracted.
+        if not service_fluid and lc_tokens:
+            _lf_map = {k: v for k, v in config.get('line_fluid_code_map', {}).items()
+                       if not str(k).startswith('_')}
+            for _lc in lc_tokens:
+                _fc_m = re.match(r'^[\d½¾¼]+\s*["\'?]\s*[-_]\s*([A-Z]{1,4})\s*[-_]', _lc)
+                if _fc_m:
+                    _fc = _fc_m.group(1).upper()
+                    _mapped = _lf_map.get(_fc)
+                    if _mapped:
+                        service_fluid = _mapped
+                        break
 
         # ── Area / Unit — multi-strategy extraction ───────────────────────
         # Strategy 1: search a wider context (soft-coded area_context_chars).
@@ -342,11 +356,31 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             if len(_digits) >= 3:
                 area = _digits[0] + '0' * (len(_digits) - 1)
 
-        # ── Nozzle connections — wider context scan ───────────────────────
+        # ── Nozzle connections — multi-strategy extraction ────────────────
         _nzl_start    = max(0, m.start() - nozzle_ctx_chars)
         _nzl_end      = min(len(text), m.end() + nozzle_ctx_chars)
         _nzl_ctx      = text[_nzl_start:_nzl_end]
-        nozzle_tokens = list(dict.fromkeys(nozzle_re.findall(_nzl_ctx)))[:6]
+        # Strategy 1: N1 / N-1 / N2A nozzle tag pattern
+        nozzle_tokens = list(dict.fromkeys(nozzle_re.findall(_nzl_ctx)))
+        # Strategy 2: size-prefixed nozzle labels  e.g. 4"-N1, 6"-N2A
+        for _snm in re.finditer(
+            r'\b\d{1,3}\s*["\']\s*-?\s*(N[-]?[0-9]{1,2}[A-Z]?)\b',
+            _nzl_ctx, re.IGNORECASE
+        ):
+            _tok = _snm.group(1).upper()
+            if _tok not in nozzle_tokens:
+                nozzle_tokens.append(_tok)
+        # Strategy 3: functional orientation labels as fallback when no N-tags found
+        # e.g. INLET, OUTLET, SUCTION, DISCHARGE on equipment bubbles
+        if not nozzle_tokens:
+            _orient_hits = re.findall(
+                r'\b(INLET|OUTLET|SUCT(?:ION)?|DISCH(?:ARGE)?|VENT|DRAIN|BYPASS'
+                r'|OVERFLOW|RECYCLE|RETURN|FEED|PRODUCT|OVERHEAD|BOTTOM(?:S)?)\b',
+                _nzl_ctx, re.IGNORECASE,
+            )
+            for _ow in dict.fromkeys(w.capitalize() for w in _orient_hits):
+                nozzle_tokens.append(_ow)
+        nozzle_tokens = nozzle_tokens[:8]
 
         # ── Material / piping spec — multi-strategy extraction ────────────
         _mat_start     = max(0, m.start() - mat_ctx_chars)
@@ -363,6 +397,22 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         if not material_class:
             mat_matches    = mat_re.findall(_mat_ctx)
             material_class = mat_matches[0].upper() if mat_matches else ''
+        # Strategy 3: derive material hint from pipe-class prefix in line connection tags.
+        # Line tag format: SIZE"-FLUID-SEQ-PIPECLASS[-SUFFIX]
+        # First 2 digits of the pipe-class code encode material in most spec books
+        # (soft-coded in pipe_class_prefix_map — add project-specific mappings there).
+        if not material_class and lc_tokens:
+            _pc_prefix_map = {k: v for k, v in config.get('pipe_class_prefix_map', {}).items()
+                              if not str(k).startswith('_')}
+            for _lc in lc_tokens:
+                # Pipe class is typically 5-8 digits separated by '-' or '_'
+                _pc_m = re.search(r'[\-_](\d{4,8})(?:[\-_][A-Z0-9]{0,5})?(?:\s|$)', _lc)
+                if _pc_m:
+                    _prefix = _pc_m.group(1)[:2]
+                    _mat = _pc_prefix_map.get(_prefix)
+                    if _mat:
+                        material_class = _mat
+                        break
 
         # ── Process note references — wider context scan ──────────────────
         _nt_start     = max(0, m.start() - note_ctx_chars)
