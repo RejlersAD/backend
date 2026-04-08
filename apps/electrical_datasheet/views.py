@@ -895,6 +895,130 @@ Please provide your response as JSON with this exact structure:
                 'error': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=False, methods=['post'], url_path='generate-switchgear-datasheet')
+    def generate_switchgear_datasheet(self, request):
+        """
+        Generate 11KV Switchgear Datasheet from SLD PDF
+        
+        POST /api/v1/electrical-datasheet/datasheets/generate-switchgear-datasheet/
+        
+        FormData:
+        - sld_file: PDF file (SLD for 11KV Switchgear)
+        - project_name: Project name (optional)
+        - drawing_number: Drawing number (optional)
+        - area: Area/location (optional)
+        
+        Returns:
+        {
+            "success": true,
+            "datasheet_rows": [...],
+            "summary": {
+                "total_rows": 75,
+                "equipment_count": 65,
+                "completed_fields": 40,
+                "missing_fields": 25
+            }
+        }
+        """
+        from .switchgear_datasheet_generator import SwitchgearDatasheetGenerator
+        from django.http import HttpResponse
+        
+        try:
+            if 'sld_file' not in request.FILES:
+                return Response({
+                    'success': False,
+                    'error': 'SLD file is required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            sld_file = request.FILES['sld_file']
+            
+            # Validate file type
+            if not sld_file.name.lower().endswith('.pdf'):
+                return Response({
+                    'success': False,
+                    'error': 'Only PDF files are supported'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Extract project information
+            project_info = {
+                'project_name': request.data.get('project_name', ''),
+                'drawing_number': request.data.get('drawing_number', ''),
+                'area': request.data.get('area', ''),
+                'voltage_level': '11KV'
+            }
+            
+            logger.info(f"[SwitchgearDatasheet] Generating from SLD: {sld_file.name}")
+            
+            # Generate datasheet
+            generator = SwitchgearDatasheetGenerator()
+            result = generator.generate_datasheet_from_sld(sld_file, project_info)
+            
+            if not result['success']:
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
+            
+            return Response(result, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"[SwitchgearDatasheet] Error: {e}", exc_info=True)
+            return Response({
+                'success': False,
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @action(detail=False, methods=['post'], url_path='export-switchgear-datasheet')
+    def export_switchgear_datasheet(self, request):
+        """
+        Export 11KV Switchgear Datasheet to Excel
+        
+        POST /api/v1/electrical-datasheet/datasheets/export-switchgear-datasheet/
+        
+        Body (JSON):
+        - datasheet_rows: Array of datasheet rows
+        - project_info: Project metadata
+        
+        Returns: Excel file download
+        """
+        from .switchgear_datasheet_generator import SwitchgearDatasheetGenerator
+        from django.http import HttpResponse
+        from datetime import datetime
+        
+        try:
+            datasheet_rows = request.data.get('datasheet_rows', [])
+            project_info = request.data.get('project_info', {})
+            
+            if not datasheet_rows:
+                return Response({
+                    'success': False,
+                    'error': 'No datasheet rows provided'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            logger.info(f"[SwitchgearDatasheet] Exporting {len(datasheet_rows)} rows to Excel")
+            
+            # Generate Excel
+            generator = SwitchgearDatasheetGenerator()
+            excel_buffer = generator.export_to_excel(datasheet_rows, project_info)
+            
+            # Create response with Excel file
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"11KV_Switchgear_Datasheet_{timestamp}.xlsx"
+            
+            response = HttpResponse(
+                excel_buffer.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            response['Access-Control-Expose-Headers'] = 'Content-Disposition'
+            
+            logger.info(f"[SwitchgearDatasheet] ✅ Excel exported: {filename}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"[SwitchgearDatasheet] Export error: {e}", exc_info=True)
+            return Response({
+                'success': False,
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     @action(detail=False, methods=['post'], url_path='generate-smart')
     def generate_smart_datasheet(self, request):
         """

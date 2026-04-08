@@ -109,28 +109,10 @@ EQUIPMENT_TYPES_CONFIG = [
         ],
         'supported_documents': [
             {
-                'type': 'mv_trafo_calculation',
-                'label': 'MV Trafo Calculation',
-                'description': 'Medium Voltage Transformer Calculation Document',
-                'required': False
-            },
-            {
-                'type': 'criteria',
-                'label': 'Criteria',
-                'description': 'Transformer Selection Criteria Document',
-                'required': False
-            },
-            {
-                'type': 'formula',
-                'label': 'Formula',
-                'description': 'Transformer Design Formula Document',
-                'required': False
-            },
-            {
-                'type': 'lv_trafo_calculation',
-                'label': 'LV Trafo Calculation',
-                'description': 'Low Voltage Transformer Calculation Document',
-                'required': False
+                'type': 'transformer_sizing_calculation',
+                'label': 'Transformer Sizing Calculation (Power and Distribution)',
+                'description': 'Comprehensive transformer sizing calculation document including MV/LV calculations, criteria, and formulas',
+                'required': True
             }
         ],
         'sections': [
@@ -179,16 +161,10 @@ EQUIPMENT_TYPES_CONFIG = [
         ],
         'supported_documents': [
             {
-                'type': 'switchgear_sld',
-                'label': 'Switchgear SLD',
-                'description': '11kV Switchgear Single Line Diagram',
-                'required': False
-            },
-            {
-                'type': 'switchgear_schedule',
-                'label': 'Switchgear Schedule',
-                'description': '11kV Switchgear Equipment Schedule',
-                'required': False
+                'type': 'sld_11kv_switchgear',
+                'label': 'SLD for 11KV Switchgear',
+                'description': 'Comprehensive Single Line Diagram for 11KV switchgear including equipment schedule and protection settings',
+                'required': True
             }
         ],
         'sections': [
@@ -468,16 +444,10 @@ EQUIPMENT_TYPES_CONFIG = [
         ],
         'supported_documents': [
             {
-                'type': 'edg_load_list',
-                'label': 'EDG Load List',
-                'description': 'Emergency Diesel Generator Load List Document',
-                'required': False
-            },
-            {
-                'type': 'dg_calculation',
-                'label': 'DG Calculation',
-                'description': 'Diesel Generator Sizing Calculation Document',
-                'required': False
+                'type': 'edg_sizing_calculation',
+                'label': 'Emergency Diesel Generator (EDG) Sizing Calculation',
+                'description': 'Comprehensive EDG sizing calculation document including load list and power requirements',
+                'required': True
             }
         ],
         'sections': [

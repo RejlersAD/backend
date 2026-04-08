@@ -322,9 +322,11 @@ a"Ä» MANDATORY EXTRACTION (Fill ALL 9 fields using smart inference):
       If not found: Answer "No" for single-phase services (water, air), "Yes" for steam/condensate
    
    3. surge_flow: Peak/surge flow rate. Search: flow columns, max flow, surge conditions.
+      CRITICAL: Always provide value in m/s (meters per second) unit.
       If not found: Look for "Max Flow" or calculate from normal flow + 20% margin
    
    4. flow_max: Maximum flow rate. Search: flow rate columns, maximum capacity.
+      CRITICAL: Always provide value in m/s (meters per second) unit.
       If not found: Use surge flow or normal flow if available
    
    5. density: Fluid density. Search: density columns, fluid properties.
@@ -339,8 +341,14 @@ a"Ä» MANDATORY EXTRACTION (Fill ALL 9 fields using smart inference):
    8. design_pressure: Maximum design pressure. Search: design columns, pressure ratings.
       If not found: Look for piping class pressure rating or use 1.25x normal pressure
    
-   9. minimax_design_temp: Design temperature range. Search: min/max temp columns.
-      If not found: Use typical ranges (e.g., "-20,%%F to 300,%%F" for general service)
+   9. min_design_temp: Minimum design temperature in \u00b0C. Search: min temp, cold temp columns.
+      CRITICAL: Return value in \u00b0C ONLY (no Fahrenheit). Example: "-29\u00b0C", "-20\u00b0C", "0\u00b0C"
+      If not found: Use "-29\u00b0C" for general hydrocarbon service
+   
+   10. max_design_temp: Maximum design temperature in \u00b0C. Search: max temp, design temp columns.
+      CRITICAL: Return value in \u00b0C ONLY (no Fahrenheit). Example: "150\u00b0C", "230\u00b0C", "65\u00b0C"
+      This value is used directly for Table 7.1 Stress Criticality determination.
+      If not found: Use "150\u00b0C" for general service, infer from fluid/service type
 
 a"öÄ SEARCH LOCATIONS:
    - Line lists (Line No, Fluid, Flow, Pressure, Temp, Density columns)
@@ -492,7 +500,8 @@ a"Ü¿ ALL 26 FIELDS ARE MANDATORY. FILL EVERY FIELD.
 EXAMPLES OF GOOD VALUES:
 - flow_medium: "Cooling Water", "Steam", "Crude Oil", "Natural Gas"
 - two_phase: "Yes" or "No" (not empty)
-- surge_flow: "150 GPM", "45 m,%%/h" (with units)
+- surge_flow: "150 m/s", "45 m/s" (MUST use m/s unit)
+- flow_max: "120 m/s", "38 m/s" (MUST use m/s unit)
 - design_pressure: "150 psig", "10 bara" (with units)
 - design_code: "ASME B31.3", "ASME B31.1" (standard codes)
 - schedule_wall_thk: "Sch 40", "Sch 80", "STD", "5.5mm"
@@ -512,7 +521,8 @@ EXAMPLES OF GOOD VALUES:
   "normal_pressure": "MUST FILL with units",
   "normal_temp": "MUST FILL with units",
   "design_pressure": "MUST FILL with units",
-  "minimax_design_temp": "MUST FILL range",
+  "min_design_temp": "MUST FILL in \u00b0C (e.g. -29\u00b0C)",
+  "max_design_temp": "MUST FILL in \u00b0C (e.g. 150\u00b0C)",
   "design_code": "MUST FILL",
   "category_m_fluid": "MUST FILL Yes/No",
   "schedule_wall_thk": "MUST FILL",
@@ -540,15 +550,16 @@ a"ö$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFEREN
     def _get_empty_enrichment_columns(self) -> Dict:
         """
         Returns empty enrichment columns when AI fails
-        LOCKED STRUCTURE: 26 additional columns (8 base + 26 = 34 total)
+        LOCKED STRUCTURE: 27 additional columns (8 base + 27 = 35 total)
         
         CORRECT COLUMNS as per user requirements:
         1. Flow Medium, 2. Two Phase, 3. Surge Flow, 4. Flow Max, 5. Density,
-        6. Normal Pressure, 7. Normal Temp, 8. Design Pressure, 9. Minimax Design Temp,
-        10. Design Code, 11. Category-M Fluid, 12. Schedule / Wall THK, 13. Stress Relief,
-        14. PWHT, 15. RT, 16. MT/PT, 17. Hardness, 18. Visual, 19. NACE-MR-0175,
-        20. Piping Rated Pressure at Ambient Condition, 21. Test Pressure, 22. Test Medium,
-        23. P&ID No., 24. P&ID Rev, 25. Date, 26. Criticality Code
+        6. Normal Pressure, 7. Normal Temp, 8. Design Pressure,
+        9. Min Design Temp (°C), 10. Max Design Temp (°C),
+        11. Design Code, 12. Category-M Fluid, 13. Schedule / Wall THK, 14. Stress Relief,
+        15. PWHT, 16. RT, 17. MT/PT, 18. Hardness, 19. Visual, 20. NACE-MR-0175,
+        21. Piping Rated Pressure, 22. Test Pressure, 23. Test Medium,
+        24. P&ID No., 25. P&ID Rev, 26. Date, 27. Criticality Code
         """
         return {
             # Flow & Process Data (5 columns)
@@ -562,7 +573,8 @@ a"ö$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFEREN
             "normal_pressure": "",
             "normal_temp": "",
             "design_pressure": "",
-            "minimax_design_temp": "",
+            "min_design_temp": "",
+            "max_design_temp": "",
             
             # Design & Material Specs (3 columns)
             "design_code": "",
@@ -620,8 +632,10 @@ a"ö$% DO NOT RETURN EMPTY STRINGS. FILL ALL FIELDS USING DOCUMENTS + INFEREN
             enrichment['normal_temp'] = "70,%%F" if any(x in fluid_code for x in ['CW', 'WATER', 'AIR']) else "300,%%F"
         if not enrichment.get('design_pressure'):
             enrichment['design_pressure'] = "225 psig" if 'LP' in pipr_class else "450 psig"
-        if not enrichment.get('minimax_design_temp'):
-            enrichment['minimax_design_temp'] = "-20,%%F to 300,%%F"
+        if not enrichment.get('min_design_temp'):
+            enrichment['min_design_temp'] = "-29\u00b0C"
+        if not enrichment.get('max_design_temp'):
+            enrichment['max_design_temp'] = "150\u00b0C"
         
         # Design & Material Specs
         if not enrichment.get('design_code'):

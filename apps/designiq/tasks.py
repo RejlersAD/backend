@@ -87,113 +87,105 @@ def extract_section_7(document_text):
     return document_text[:2000]
 
 
-def determine_stress_criticality_table_7_1(size_str, design_temp_str):
+def determine_stress_criticality_table_7_1(size_str, max_design_temp_str):
     """
-    Determine stress criticality based on Table 7.1 (Criteria for Flexibility Analysis of Piping)
-    
+    Determine stress criticality per Table 7.1 (Section 7.6.1 - Piping Criticality Diagram)
+    "Criteria for Flexibility Analysis of Piping"
+
+    Column headers = "Design Temperature (°C) Less than or equal to":
+    NPS  | ≤-30 | ≤30 | ≤50 | ≤65 | ≤85 | ≤120 | ≤150 | >150
+     1"  |  L1  |  L3 |  L3 |  L3 |  L3 |  L2  |  L2  |  L1
+     2"  |  L1  |  L3 |  L3 |  L3 |  L3 |  L2  |  L1  |  L1
+     3"  |  L1  |  L3 |  L3 |  L3 |  L2 |  L2  |  L1  |  L1
+     4"  |  L1  |  L3 |  L3 |  L3 |  L2 |  L1  |  L1  |  L1
+     6"  |  L1  |  L2 |  L2 |  L2 |  L2 |  L1  |  L1  |  L1
+     8"  |  L1  |  L2 |  L2 |  L2 |  L2 |  L1  |  L1  |  L1
+    10"  |  L1  |  L2 |  L2 |  L2 |  L1 |  L1  |  L1  |  L1
+    12"  |  L1  |  L2 |  L2 |  L2 |  L1 |  L1  |  L1  |  L1
+    14"  |  L1  |  L2 |  L2 |  L2 |  L1 |  L1  |  L1  |  L1
+    16"  |  L1  |  L2 |  L2 |  L1 |  L1 |  L1  |  L1  |  L1
+    18"  |  L1  |  L2 |  L2 |  L1 |  L1 |  L1  |  L1  |  L1
+    20"  |  L1  |  L1 |  L1 |  L1 |  L1 |  L1  |  L1  |  L1
+    ≥24" |  L1  |  L1 |  L1 |  L1 |  L1 |  L1  |  L1  |  L1
+
     Args:
-        size_str: Pipe size string (e.g., "2", "3", "6", "2\"", etc.)
-        design_temp_str: Design temperature string (e.g., "150°C", "300 F", "120", etc.)
-    
+        size_str: Pipe size string (e.g., "2", "6", "12")
+        max_design_temp_str: MAX design temperature in °C (e.g., "150°C", "230", "-29")
+
     Returns:
-        str: Criticality level "1" (L1), "2" (L2), or "3" (L3)
-    
-    Table 7.1 Logic:
-    - Based on NPS (pipe size) and Design Temperature
-    - L1 = Comprehensive computer stress analysis required → "1"
-    - L2 = Simplified or approximate analysis method → "2"
-    - L3 = Visual inspection only (non-critical) → "3"
+        str: "1" (L1-Comprehensive), "2" (L2-Simplified), or "3" (L3-Visual)
     """
     import re
-    
-    # Extract numeric pipe size (NPS)
+
+    # Parse NPS (pipe size)
     try:
         size_match = re.search(r'(\d+)', str(size_str))
-        if size_match:
-            nps = int(size_match.group(1))
-        else:
-            nps = 0  # Default to 0 if cannot parse
+        nps = int(size_match.group(1)) if size_match else 0
     except:
         nps = 0
-    
-    # Extract numeric temperature (in Celsius)
+
+    # Parse MAX design temperature in °C
+    # Input should already be Celsius (enrichment service returns °C only)
     try:
-        # Find all numeric values (including negative)
-        temp_matches = re.findall(r'(-?\d+)', str(design_temp_str))
+        temp_matches = re.findall(r'(-?\d+(?:\.\d+)?)', str(max_design_temp_str))
         if temp_matches:
-            # Convert all to integers
-            temps = [int(t) for t in temp_matches]
-            # Use the maximum value (conservative approach for stress criticality)
-            temp = max(temps)
-            # If Fahrenheit detected, convert to Celsius
-            if 'F' in str(design_temp_str).upper():
-                temp = int((temp - 32) * 5/9)
+            temps = [float(t) for t in temp_matches]
+            temp = max(temps)  # Use maximum (most conservative for stress analysis)
         else:
             temp = None
     except:
         temp = None
-    
-    # If no valid temperature, default to L1 (conservative)
+
+    # No valid temperature → conservative default L1
     if temp is None:
         return "1"
-    
-    # Table 7.1 Logic - Based on NPS and Design Temperature (°C)
-    # Temperature ranges: <-30, 30, 50, 65, 85, 120, 150, 170, 205, 230, 260, 290, 315, 345
-    
+
+    # Rule: temp ≤ -30°C → L1 for ALL pipe sizes (column "-30 and below")
+    if temp <= -30:
+        return "1"
+
+    # Table 7.1 lookup by NPS ("less than or equal to" column boundaries)
     if nps == 1:
-        if temp < 30: return "1"
-        elif temp < 120: return "3"
-        elif temp < 170: return "2"
-        else: return "1"
-    
+        # L3: ≤85 | L2: 85<temp≤150 | L1: >150
+        if temp <= 85:    return "3"
+        elif temp <= 150: return "2"
+        else:             return "1"
+
     elif nps == 2:
-        if temp < 30: return "1"
-        elif temp < 120: return "3"
-        elif temp < 150: return "2"
-        else: return "1"
-    
+        # L3: ≤85 | L2: 85<temp≤120 | L1: >120
+        if temp <= 85:    return "3"
+        elif temp <= 120: return "2"
+        else:             return "1"
+
     elif nps == 3:
-        if temp < 30: return "1"
-        elif temp < 85: return "3"
-        elif temp < 120: return "2"
-        else: return "1"
-    
+        # L3: ≤65 | L2: 65<temp≤120 | L1: >120
+        if temp <= 65:    return "3"
+        elif temp <= 120: return "2"
+        else:             return "1"
+
     elif nps == 4:
-        if temp < 30: return "1"
-        elif temp < 85: return "3"
-        elif temp < 120: return "2"
-        else: return "1"
-    
-    elif nps == 6:
-        if temp < 30: return "1"
-        elif temp < 120: return "2"
-        else: return "1"
-    
-    elif nps == 8:
-        if temp < 30: return "1"
-        elif temp < 120: return "2"
-        else: return "1"
-    
+        # L3: ≤65 | L2: 65<temp≤85 | L1: >85
+        if temp <= 65:    return "3"
+        elif temp <= 85:  return "2"
+        else:             return "1"
+
+    elif nps in [6, 8]:
+        # L2: ≤85 | L1: >85
+        if temp <= 85:    return "2"
+        else:             return "1"
+
     elif nps in [10, 12, 14]:
-        if temp < 30: return "1"
-        elif temp < 85: return "2"
-        else: return "1"
-    
+        # L2: ≤65 | L1: >65
+        if temp <= 65:    return "2"
+        else:             return "1"
+
     elif nps in [16, 18]:
-        if temp < 30: return "1"
-        elif temp < 65: return "2"
-        else: return "1"
-    
-    elif nps == 20:
-        if temp < 30: return "1"
-        elif temp < 50: return "1"
-        else: return "1"  # All L1
-    
-    elif nps >= 24:
-        return "1"  # All L1
-    
+        # L2: ≤50 | L1: >50
+        if temp <= 50:    return "2"
+        else:             return "1"
+
     else:
-        # For sizes not in table, default to L1 (conservative)
+        # NPS 20, ≥24, or any unrecognised size → All L1 (most conservative)
         return "1"
 
 
@@ -223,11 +215,14 @@ PIPELINE LINES TO ANALYZE:
     
     for line in lines_context:
         prompt += f"\n- Line {line['line_number']}:"
-        prompt += f"\n  * Normal Temp: {line.get('normal_temp', 'N/A')}"
-        prompt += f"\n  * Min/Max Design Temp: {line.get('minimax_temp', 'N/A')}"
+        prompt += f"\n  * Normal Temp (°C): {line.get('normal_temp', 'N/A')}"
+        prompt += f"\n  * Min Design Temp (°C): {line.get('min_design_temp', 'N/A')}"
+        prompt += f"\n  * Max Design Temp (°C): {line.get('max_design_temp', 'N/A')}"
         prompt += f"\n  * Fluid: {line['fluid_code']}"
         prompt += f"\n  * Pipe Class: {line['pipr_class']}"
         prompt += f"\n  * Design Pressure: {line.get('design_pressure', 'N/A')}"
+        prompt += f"\n  * Category-M Fluid: {line.get('category_m_fluid', 'N/A')}"
+        prompt += f"\n  * Size (NPS): {line.get('size', 'N/A')}"
     
     prompt += """
 
@@ -252,6 +247,102 @@ RULES:
 Analyze each line intelligently and return the JSON array with stress criticality codes in order."""
     
     return prompt
+
+
+def call_openai_stress_criticality_batch(lines_data, section_7_text):
+    """
+    Call OpenAI GPT-4o to determine stress criticality for ALL lines in one batch.
+    Uses the Section 7 spec text to supplement Table 7.1 with special L1 override criteria.
+
+    Special L1 override criteria from AGES-SP-09-004 include:
+    - Category M fluids (toxic/lethal service)
+    - High-pressure / High-temperature beyond standard thresholds
+    - Rotating equipment connections
+    - Lines connected to pressure vessels
+    - Buried/underground piping
+    - Steam tracing / jacketed piping
+    - Any other special criteria listed in Section 7
+
+    Args:
+        lines_data: List of line dicts (must have line_number, size, fluid_code,
+                    pipr_class, min_design_temp, max_design_temp, etc.)
+        section_7_text: Full Section 7 text extracted from the stress criticality spec document
+
+    Returns:
+        dict mapping line_number → int (1, 2, or 3) — 1=L1 (most critical)
+        On failure, returns empty dict (Table 7.1 result will be used as-is)
+    """
+    import json
+    try:
+        from decouple import config
+        from openai import OpenAI
+
+        api_key = config('OPENAI_API_KEY', default=None)
+        if not api_key:
+            logger.warning("⚠️ OPENAI_API_KEY not set – skipping doc-based stress criticality supplement")
+            return {}
+
+        client = OpenAI(api_key=api_key)
+
+        # Build the context for each line (compact)
+        lines_context = []
+        for line in lines_data:
+            lines_context.append({
+                'line_number': line.get('line_number', line.get('item_tag', f'Line_{len(lines_context)+1}')),
+                'size': line.get('size', ''),
+                'fluid_code': line.get('fluid_code', ''),
+                'pipr_class': line.get('pipr_class', ''),
+                'normal_temp': line.get('normal_temp', ''),
+                'min_design_temp': line.get('min_design_temp', ''),
+                'max_design_temp': line.get('max_design_temp', ''),
+                'design_pressure': line.get('design_pressure', ''),
+                'category_m_fluid': line.get('category_m_fluid', ''),
+            })
+
+        prompt = build_stress_criticality_prompt(lines_context, section_7_text)
+
+        logger.info(f"   🤖 Calling OpenAI for batch stress criticality on {len(lines_context)} lines...")
+
+        response = client.chat.completions.create(
+            model='gpt-4o',
+            messages=[{'role': 'user', 'content': prompt}],
+            temperature=0.1,
+            max_tokens=3000
+        )
+
+        result_text = response.choices[0].message.content.strip()
+        logger.info(f"   ✅ OpenAI responded with {len(result_text)} chars")
+
+        # Parse JSON array response
+        # Strip markdown code fences if present
+        if '```' in result_text:
+            result_text = result_text.split('```')[1]
+            if result_text.startswith('json'):
+                result_text = result_text[4:]
+
+        result_list = json.loads(result_text)
+
+        # Build mapping: line_number → criticality int
+        criticality_map = {}
+        for i, item in enumerate(result_list):
+            if i < len(lines_context):
+                line_id = lines_context[i]['line_number']
+                raw_code = str(item.get('criticality_stress', '1')).strip()
+                # Normalise: "L1" → 1, "1" → 1, "SC1" → 1, etc.
+                import re
+                num_match = re.search(r'(\d)', raw_code)
+                code_int = int(num_match.group(1)) if num_match else 1
+                # Clamp to valid range 1-3
+                code_int = max(1, min(3, code_int))
+                criticality_map[line_id] = code_int
+
+        logger.info(f"   ✅ Parsed criticality map for {len(criticality_map)} lines from document")
+        return criticality_map
+
+    except Exception as e:
+        logger.error(f"   ❌ call_openai_stress_criticality_batch failed: {e}")
+        logger.error(f"   → Falling back to Table 7.1 only")
+        return {}
 
 
 @shared_task(bind=True, time_limit=1200, soft_time_limit=1140)  # 20 minutes max
@@ -443,63 +534,89 @@ def process_pid_upload_async(
                 logger.info("→ Continuing with base 17 columns only")
                 enriched_data = table_data
         
-        # 🚀 STEP 3: STRESS CRITICALITY PROCESSING (Table 7.1 Deterministic Logic)
-        # Apply Table 7.1 criteria based on pipe size and design temperature
-        # L1 → "1" (Comprehensive Analysis), L2 → "2" (Simplified Analysis), L3 → "3" (Visual Inspection)
-        if stress_criticality_file or True:  # Always apply, even if no document
-            try:
-                logger.info("=" * 80)
-                logger.info("⚡ STEP 3: Stress Criticality Selection (Table 7.1)")
-                logger.info("   Strategy: Deterministic lookup based on Size + Temperature")
-                logger.info("   Output: Criticality codes 1, 2, 3 (L1, L2, L3)")
-                logger.info("=" * 80)
-                
-                # Apply Table 7.1 logic to each line
-                lines_processed = 0
-                for line_item in enriched_data:
-                    # Get pipe size from base columns
-                    pipe_size = line_item.get('size', '')
-                    
-                    # Get temperature from enriched columns (prefer minimax_design_temp, fallback to normal_temp)
-                    minimax_temp = line_item.get('minimax_design_temp', '')
-                    normal_temp = line_item.get('normal_temp', '')
-                    design_temp = minimax_temp or normal_temp or ''
-                    
-                    # Apply Table 7.1 deterministic logic
-                    criticality = determine_stress_criticality_table_7_1(pipe_size, design_temp)
-                    line_item['criticality_stress'] = criticality
-                    
-                    lines_processed += 1
-                
-                logger.info(f"   ✅ Stress criticality applied to {lines_processed} lines using Table 7.1")
-                logger.info("   📊 Criticality levels: 1=L1 (Comprehensive), 2=L2 (Simplified), 3=L3 (Visual)")
-                
-                logger.info("=" * 80)
-                logger.info("✅ STEP 3 COMPLETE: Table 7.1 Stress Criticality Added")
-                logger.info(f"   Total lines: {len(enriched_data)}")
-                logger.info(f"   Total columns: {len(enriched_data[0].keys()) if enriched_data else 0}")
-                if enriched_data:
-                    logger.info(f"   Column names: {list(enriched_data[0].keys())}")
-                    logger.info(f"   Sample criticality_stress values: {[item.get('criticality_stress') for item in enriched_data[:3]]}")
-                logger.info("=" * 80)
-                    
-            except Exception as criticality_err:
-                logger.error(f"❌ Stress criticality processing failed: {criticality_err}")
-                logger.error(f"Error type: {type(criticality_err).__name__}")
-                import traceback
-                logger.error(f"Traceback:\n{traceback.format_exc()}")
-                logger.info("→ Continuing without stress criticality data (filling with N/A)")
-                for line_item in enriched_data:
-                    line_item['criticality_stress'] = 'N/A'
-        else:
-            # No stress criticality file uploaded, add empty column
+        # 🚀 STEP 3: STRESS CRITICALITY PROCESSING
+        # Strategy: DUAL-SOURCE — Table 7.1 (deterministic) PLUS optional 5th-document AI supplement
+        # Both sources run independently; the MOST CONSERVATIVE (lowest L number) wins per line.
+        # L1 = most critical (Comprehensive Analysis)
+        # L2 = Simplified Analysis
+        # L3 = Visual Inspection (least critical)
+        try:
             logger.info("=" * 80)
-            logger.info("⚠️ No stress criticality file provided - adding N/A column")
+            logger.info("⚡ STEP 3: Dual-Source Stress Criticality Selection")
+            logger.info("   Source A: Table 7.1 deterministic lookup (Size × Max Design Temp)")
+            logger.info("   Source B: 5th document AI supplement (Section 7 special L1 criteria)")
+            logger.info("   Merge rule: most conservative (min L-number) wins per line")
             logger.info("=" * 80)
+
+            # ── SOURCE A: Table 7.1 deterministic lookup ──────────────────────────────
+            table71_levels = {}  # line_number → int (1/2/3)
+            for line_item in enriched_data:
+                pipe_size = line_item.get('size', '')
+                max_design_temp = line_item.get('max_design_temp', '')
+                normal_temp = line_item.get('normal_temp', '')
+                design_temp = max_design_temp or normal_temp or ''
+                criticality_str = determine_stress_criticality_table_7_1(pipe_size, design_temp)
+                table71_levels[line_item.get('line_number', '')] = int(criticality_str) if criticality_str else 1
+
+            logger.info(f"   ✅ Table 7.1 complete: {len(table71_levels)} lines scored")
+
+            # ── SOURCE B: 5th document AI supplement (only if file uploaded) ──────────
+            doc_levels = {}  # line_number → int (1/2/3)  — empty if no doc
+            if stress_criticality_file:
+                try:
+                    logger.info("   📄 5th document provided — extracting Section 7 for AI supplement...")
+                    sc_text = extract_text_from_file(stress_criticality_file)
+                    if sc_text:
+                        sc_text = sc_text.replace('\x00', '')  # clean null bytes
+                    section_7_text = extract_section_7(sc_text) if sc_text else ''
+                    logger.info(f"   📄 Section 7 extracted: {len(section_7_text)} chars")
+
+                    if section_7_text and len(section_7_text) > 50:
+                        doc_levels = call_openai_stress_criticality_batch(
+                            lines_data=enriched_data,
+                            section_7_text=section_7_text
+                        )
+                        logger.info(f"   ✅ Doc AI supplement returned {len(doc_levels)} codes")
+                    else:
+                        logger.warning("   ⚠️ Section 7 text too short — skipping AI supplement")
+                except Exception as doc_err:
+                    logger.error(f"   ❌ 5th document AI supplement failed: {doc_err}")
+                    logger.info("   → Using Table 7.1 result only for all lines")
+                    doc_levels = {}
+            else:
+                logger.info("   ⚠️ No 5th document uploaded — using Table 7.1 result only")
+
+            # ── MERGE: most conservative (lower L number = more critical) wins ────────
+            for line_item in enriched_data:
+                line_id = line_item.get('line_number', '')
+                t71 = table71_levels.get(line_id, 1)
+                doc = doc_levels.get(line_id, None)  # None means doc didn't score this line
+
+                if doc is not None:
+                    # Take most conservative (L1 < L2 < L3, so take minimum number)
+                    final_level = min(t71, doc)
+                    if final_level != t71:
+                        logger.info(f"   🔺 {line_id}: Table7.1=L{t71} → Doc override=L{doc} → Final=L{final_level}")
+                else:
+                    final_level = t71
+
+                line_item['criticality_stress'] = f"L{final_level}"
+
+            logger.info("=" * 80)
+            logger.info("✅ STEP 3 COMPLETE: Dual-Source Stress Criticality Applied")
+            logger.info(f"   Total lines: {len(enriched_data)}")
+            logger.info(f"   Doc overrides applied: {sum(1 for lid, dv in doc_levels.items() if dv < table71_levels.get(lid, 3))}")
+            if enriched_data:
+                logger.info(f"   Sample criticality_stress values: {[item.get('criticality_stress') for item in enriched_data[:5]]}")
+            logger.info("=" * 80)
+
+        except Exception as criticality_err:
+            logger.error(f"❌ Stress criticality processing failed: {criticality_err}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
+            logger.info("→ Filling all lines with N/A")
             for line_item in enriched_data:
                 line_item['criticality_stress'] = 'N/A'
-            logger.info(f"✅ Added criticality_stress='N/A' to {len(enriched_data)} lines")
-            logger.info(f"   Total columns now: {len(enriched_data[0].keys()) if enriched_data else 0}")
         
         # Use enriched data for database saving
         table_data = enriched_data
@@ -556,10 +673,11 @@ def process_pid_upload_async(
                 # CRITICAL: Always initialize ALL columns to ensure 35 total (8 base + 27 enrichment)
                 enrichment_keys = [
                     'flow_medium', 'two_phase', 'surge_flow', 'flow_max', 'density',
-                    'normal_pressure', 'normal_temp', 'design_pressure', 'minimax_design_temp',
+                    'normal_pressure', 'normal_temp', 'design_pressure',
+                    'min_design_temp', 'max_design_temp',  # Split from minimax_design_temp
                     'design_code', 'category_m_fluid', 'schedule_wall_thk', 'stress_relief',
                     'pwht', 'rt', 'mt_pt', 'hardness', 'visual', 'nace_mr_0175',
-                    'piping_rated_pressure_ambient', 'test_pressure', 'test_medium',
+                    'piping_rated_pressure', 'test_pressure', 'test_medium',
                     'pid_no', 'pid_rev', 'date', 'criticality_code', 'criticality_stress'
                 ]
                 # Initialize ALL enrichment columns (even if empty) to guarantee 35-column structure
