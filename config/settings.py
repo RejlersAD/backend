@@ -919,6 +919,11 @@ if USE_S3:
         # Security: Use AWS Signature Version 4 (required for some regions)
         AWS_S3_SIGNATURE_VERSION = 's3v4'
         
+        # Force region-specific endpoint — presigned URLs for opt-in regions
+        # (e.g. me-central-1 / UAE) break if boto3 uses the global s3.amazonaws.com
+        # endpoint because S3 redirects invalidate the Signature=host header.
+        AWS_S3_ENDPOINT_URL = f'https://s3.{AWS_S3_REGION_NAME}.amazonaws.com'
+        
         # Security: Enable encryption at rest
         AWS_S3_ENCRYPTION = True
         

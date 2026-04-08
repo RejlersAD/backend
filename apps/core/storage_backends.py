@@ -195,6 +195,13 @@ if USE_S3:
         custom_domain = False
         querystring_expire = 86400  # 24 hours
         
+        # Use region-specific endpoint so presigned URLs don't break on S3 redirect
+        # (required for opt-in regions like me-central-1 / UAE Central)
+        @property
+        def endpoint_url(self):
+            region = getattr(settings, 'AWS_S3_REGION_NAME', 'us-east-1')
+            return getattr(settings, 'AWS_S3_ENDPOINT_URL', f'https://s3.{region}.amazonaws.com')
+        
         object_parameters = {
             'CacheControl': 'max-age=3600',  # 1 hour (avatars can change)
             'Metadata': {
