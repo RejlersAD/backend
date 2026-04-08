@@ -44,6 +44,8 @@ urlpatterns = [
     path('dashboard/activity/', user_activity_timeline, name='user-activity-timeline'),
     # Password management
     path('users/change-password/', change_password, name='rbac-change-password'),
+    # User Export — explicit path to guarantee registration regardless of @action router
+    path('users/export/', UserProfileViewSet.as_view({'get': 'export_users'}), name='user-export-users'),
     # Subscription Management (7.3)
     path('subscriptions/', include('apps.rbac.subscription_urls')),
 ]
