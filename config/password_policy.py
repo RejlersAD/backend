@@ -9,17 +9,20 @@ from datetime import timedelta
 # ========================================================================
 
 # Number of days before password expires
-PASSWORD_EXPIRY_DAYS = 30
+# 180 days (6 months) — NIST SP 800-63B / enterprise O&G tool standard.
+# Avoids constant expiry friction on an internal engineering platform.
+PASSWORD_EXPIRY_DAYS = 180
 
 # Warning period before expiry (in days)
-# UX requirement: remind users only in the final 3 days.
-PASSWORD_EXPIRY_WARNING_DAYS = 3
+# 14 days gives users two full working weeks to act — avoids surprise lockouts.
+PASSWORD_EXPIRY_WARNING_DAYS = 14
 
 # Grace period after expiry (in days) before forcing logout
-PASSWORD_EXPIRY_GRACE_DAYS = 3
+# 14 days allows users returning from leave/travel to still access the system.
+PASSWORD_EXPIRY_GRACE_DAYS = 14
 
 # Exempt superusers from password expiry
-EXEMPT_SUPERUSERS_FROM_EXPIRY = False
+EXEMPT_SUPERUSERS_FROM_EXPIRY = True
 
 # Exempt staff from password expiry
 EXEMPT_STAFF_FROM_EXPIRY = False
@@ -81,13 +84,13 @@ PASSWORD_RESET_MAX_ATTEMPTS_PER_DAY = 5
 SEND_EXPIRY_NOTIFICATION = True
 
 # Days before expiry to send first notification
-FIRST_NOTIFICATION_DAYS = 14
+FIRST_NOTIFICATION_DAYS = 30
 
 # Days before expiry to send second notification
-SECOND_NOTIFICATION_DAYS = 7
+SECOND_NOTIFICATION_DAYS = 14
 
 # Days before expiry to send final notification
-FINAL_NOTIFICATION_DAYS = 3
+FINAL_NOTIFICATION_DAYS = 7
 
 
 # ========================================================================

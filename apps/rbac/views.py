@@ -346,7 +346,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         - 'me' and 'change_password' actions only require authentication
         - Other actions require user management permissions
         """
-        if self.action in ['me', 'change_password']:
+        if self.action in ['me', 'change_password', 'engineers']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), CanManageUsers()]
     
@@ -1104,7 +1104,35 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             if 'profile_photo' in request.FILES:
                 profile.profile_photo = request.FILES['profile_photo']
                 changes['profile_photo'] = 'uploaded'
-            
+
+            # Handle engineer_profile JSON — persisted to rbac_engineer_profiles table
+            # Accepts both JSON body (dict) and FormData (JSON string)
+            ep_raw = request.data.get('engineer_profile')
+            if ep_raw is not None:
+                import json as _json
+                if isinstance(ep_raw, str):
+                    try:
+                        ep_raw = _json.loads(ep_raw)
+                    except Exception:
+                        ep_raw = None
+                if isinstance(ep_raw, dict):
+                    from apps.rbac.models import EngineerProfile
+                    ep_obj, _ = EngineerProfile.objects.get_or_create(user_profile=profile)
+                    ep_obj.expertise_level          = ep_raw.get('expertise_level', ep_obj.expertise_level)
+                    ep_obj.years_experience         = int(ep_raw.get('years_experience') or ep_obj.years_experience or 0)
+                    ep_obj.engineering_disciplines  = ep_raw.get('engineering_disciplines', ep_obj.engineering_disciplines)
+                    ep_obj.technical_skills         = ep_raw.get('technical_skills', ep_obj.technical_skills)
+                    ep_obj.languages                = ep_raw.get('languages', ep_obj.languages)
+                    ep_obj.certifications           = ep_raw.get('certifications', ep_obj.certifications)
+                    ep_obj.availability_status      = ep_raw.get('availability_status', ep_obj.availability_status)
+                    ep_obj.availability_percentage  = int(ep_raw.get('availability_percentage') or ep_obj.availability_percentage or 100)
+                    ep_obj.next_available_date      = ep_raw.get('next_available_date') or None
+                    ep_obj.max_concurrent_projects  = int(ep_raw.get('max_concurrent_projects') or ep_obj.max_concurrent_projects or 2)
+                    ep_obj.preferred_project_types  = ep_raw.get('preferred_project_types', ep_obj.preferred_project_types)
+                    ep_obj.current_projects         = ep_raw.get('current_projects', ep_obj.current_projects)
+                    ep_obj.save()
+                    changes['engineer_profile'] = 'updated'
+
             profile.save()
             
             # Create audit log (only with serializable data)
@@ -1159,7 +1187,98 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             'features': list(features.values()),
             'accessible_count': sum(1 for f in features.values() if f['accessible'])
         })
-    
+
+    @action(detail=False, methods=['get'])
+    def engineers(self, request):
+        """
+        List engineers in the same organisation with their competency profiles.
+        Used for project team building and assignment matching.
+
+        Query params (all optional):
+          discipline     — filter by engineering discipline (case-insensitive contains)
+          expertise_level — filter by level code e.g. senior, lead
+          available_only  — 'true' to show only available / partial engineers
+          skill           — filter by technical skill name (contains)
+        """
+        try:
+            profile = request.user.rbac_profile
+        except UserProfile.DoesNotExist:
+            return Response({'engineers': [], 'count': 0})
+
+        queryset = UserProfile.objects.select_related(
+            'user', 'engineer_profile'
+        ).filter(
+            is_deleted=False,
+            status='active',
+            organization=profile.organization,
+        )
+
+        # ── Query-param filters ────────────────────────────────────────────
+        discipline     = (request.query_params.get('discipline') or '').strip().lower()
+        expertise_lvl  = (request.query_params.get('expertise_level') or '').strip().lower()
+        available_only = request.query_params.get('available_only', '').lower() == 'true'
+        skill_filter   = (request.query_params.get('skill') or '').strip().lower()
+
+        engineers_out = []
+        for up in queryset:
+            try:
+                ep_obj = up.engineer_profile
+                ep = ep_obj.to_dict()
+            except Exception:
+                ep = {}
+
+            # Availability filter
+            if available_only and ep.get('availability_status', 'available') not in ('available', 'partial'):
+                continue
+
+            # Expertise level filter
+            if expertise_lvl and ep.get('expertise_level', '').lower() != expertise_lvl:
+                continue
+
+            # Discipline filter (any discipline contains the search string)
+            if discipline:
+                disciplines_lower = [d.lower() for d in ep.get('engineering_disciplines', [])]
+                if not any(discipline in d for d in disciplines_lower):
+                    continue
+
+            # Skill filter
+            if skill_filter:
+                skills_lower = [s.get('name', '').lower() for s in ep.get('technical_skills', [])]
+                if not any(skill_filter in s for s in skills_lower):
+                    continue
+
+            # Build profile photo URL
+            photo_url = None
+            if up.profile_photo:
+                try:
+                    url = up.profile_photo.url
+                    if not url.startswith('http'):
+                        url = request.build_absolute_uri(url)
+                    photo_url = url
+                except Exception:
+                    pass
+
+            engineers_out.append({
+                'id':                    str(up.id),
+                'name':                  f"{up.user.first_name} {up.user.last_name}".strip() or up.user.email,
+                'email':                 up.user.email,
+                'job_title':             up.job_title,
+                'department':            up.department,
+                'location':              up.location,
+                'profile_photo':         photo_url,
+                'expertise_level':       ep.get('expertise_level', ''),
+                'years_experience':      ep.get('years_experience', ''),
+                'engineering_disciplines': ep.get('engineering_disciplines', []),
+                'technical_skills':      ep.get('technical_skills', []),
+                'certifications':        ep.get('certifications', []),
+                'availability_status':   ep.get('availability_status', 'available'),
+                'availability_percentage': ep.get('availability_percentage', 100),
+                'preferred_project_types': ep.get('preferred_project_types', []),
+                'languages':             ep.get('languages', []),
+            })
+
+        return Response({'engineers': engineers_out, 'count': len(engineers_out)})
+
     @action(detail=True, methods=['post'], url_path='assign-modules')
     def assign_modules(self, request, pk=None):
         """
@@ -1168,13 +1287,13 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         """
         profile = self.get_object()
         module_codes = request.data.get('module_codes', [])
-        
+
         if not module_codes:
             return Response(
                 {'error': 'module_codes is required (array of module codes)'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         # Get modules
         modules = Module.objects.filter(code__in=module_codes, is_active=True)
         if modules.count() != len(module_codes):
@@ -1184,33 +1303,31 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 {'error': f'Some modules not found: {list(missing_codes)}'},
                 status=status.HTTP_404_NOT_FOUND
             )
-        
+
         # Get user's primary role (or create custom role)
         user_roles = UserRole.objects.filter(user_profile=profile, is_primary=True)
-        
+
         if not user_roles.exists():
-            # No primary role - find any role
             user_roles = UserRole.objects.filter(user_profile=profile)
-        
+
         if not user_roles.exists():
             return Response(
                 {'error': 'User has no roles assigned. Please assign a role first.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # Assign modules to all user's roles
+
         assigned_count = 0
         for user_role in user_roles:
             role = user_role.role
             for module in modules:
-                role_module, created = RoleModule.objects.get_or_create(
+                _, created = RoleModule.objects.get_or_create(
                     role=role,
                     module=module,
                     defaults={'granted_by': request.user}
                 )
                 if created:
                     assigned_count += 1
-        
+
         create_audit_log(
             user=request.user,
             action='modules_assign',
@@ -1221,14 +1338,14 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             ip_address=request.META.get('REMOTE_ADDR'),
             user_agent=request.META.get('HTTP_USER_AGENT', '')
         )
-        
+
         return Response({
             'status': 'modules assigned',
             'user': profile.user.email,
             'modules': [m.name for m in modules],
             'assigned_count': assigned_count
         })
-    
+
     @action(detail=False, methods=['post'], url_path='bulk-assign-modules')
     def bulk_assign_modules(self, request):
         """
