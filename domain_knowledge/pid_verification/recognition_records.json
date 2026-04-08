@@ -158,5 +158,49 @@
       "minor": 0,
       "info": 0
     }
+  },
+  {
+    "timestamp_utc": "2026-04-08T05:28:00.853931+00:00",
+    "document_id": "ef6cb449-7cac-440d-9007-3bead2b186b5",
+    "file_name": "P16093-16-01-08-1689_P&ID1.pdf",
+    "legend_sources": [
+      "/tmp/legends.pdf"
+    ],
+    "summary_after_legend": {
+      "tags": 60,
+      "instruments": 0,
+      "valves": 16,
+      "equipment": 4,
+      "line_sizes": 18,
+      "notes": 368,
+      "holds": 21
+    },
+    "line_sizes_unique_after_legend": [
+      "00mm",
+      "08.1732mm",
+      "0MM",
+      "1\"",
+      "10\"",
+      "12\"",
+      "16\"",
+      "18\"",
+      "2\"",
+      "3\"",
+      "3901MM",
+      "3DN",
+      "4\"",
+      "5\"",
+      "6\"",
+      "600MM",
+      "600mm",
+      "8\""
+    ],
+    "findings_total": 88,
+    "findings_severity": {
+      "critical": 18,
+      "major": 40,
+      "minor": 14,
+      "info": 16
+    }
   }
 ]
