@@ -1019,6 +1019,240 @@ Please provide your response as JSON with this exact structure:
                 'error': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # TRANSFORMER DATASHEET ENDPOINTS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @action(detail=False, methods=['post'], url_path='generate-transformer-datasheet')
+    def generate_transformer_datasheet(self, request):
+        """
+        Generate Power/Distribution Transformer Datasheet from a Sizing Calculation PDF.
+
+        POST /api/v1/electrical-datasheet/datasheets/generate-transformer-datasheet/
+
+        FormData:
+        - sizing_calc_file : PDF of the Transformer Sizing Calculation document
+        - project_name     : (optional)
+        - drawing_number   : (optional)
+        - area             : (optional)
+
+        Returns:
+        {
+            "success": true,
+            "datasheet_rows": [...],   # sr_no, description, unit, required_data, vendor_data, rev
+            "summary": { ... }
+        }
+        """
+        from .transformer_datasheet_generator import TransformerDatasheetGenerator
+
+        try:
+            if 'sizing_calc_file' not in request.FILES:
+                return Response(
+                    {'success': False, 'error': 'Transformer sizing calculation file is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            sizing_file = request.FILES['sizing_calc_file']
+
+            if not sizing_file.name.lower().endswith('.pdf'):
+                return Response(
+                    {'success': False, 'error': 'Only PDF files are supported'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            project_info = {
+                'project_name':   request.data.get('project_name', ''),
+                'drawing_number': request.data.get('drawing_number', ''),
+                'area':           request.data.get('area', ''),
+                'equipment_type': 'Power / Distribution Transformer',
+            }
+
+            logger.info(f"[TransformerDatasheet] Generating from: {sizing_file.name}")
+
+            generator = TransformerDatasheetGenerator()
+            result = generator.generate_datasheet_from_sizing_calc(sizing_file, project_info)
+
+            if not result['success']:
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response(result, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"[TransformerDatasheet] Error: {e}", exc_info=True)
+            return Response(
+                {'success': False, 'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['post'], url_path='export-transformer-datasheet')
+    def export_transformer_datasheet(self, request):
+        """
+        Export Transformer Datasheet rows to a formatted Excel file.
+
+        POST /api/v1/electrical-datasheet/datasheets/export-transformer-datasheet/
+
+        Body (JSON):
+        - datasheet_rows : array of row objects
+        - project_info   : project metadata dict
+
+        Returns: Excel file (.xlsx) download
+        """
+        from .transformer_datasheet_generator import TransformerDatasheetGenerator
+        from django.http import HttpResponse
+        from datetime import datetime
+
+        try:
+            datasheet_rows = request.data.get('datasheet_rows', [])
+            project_info   = request.data.get('project_info', {})
+
+            if not datasheet_rows:
+                return Response(
+                    {'success': False, 'error': 'No datasheet rows provided'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            logger.info(f"[TransformerDatasheet] Exporting {len(datasheet_rows)} rows to Excel")
+
+            generator = TransformerDatasheetGenerator()
+            excel_buffer = generator.export_to_excel(datasheet_rows, project_info)
+
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename  = f"Transformer_Datasheet_{timestamp}.xlsx"
+
+            response = HttpResponse(
+                excel_buffer.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            response['Access-Control-Expose-Headers'] = 'Content-Disposition'
+
+            logger.info(f"[TransformerDatasheet] ✅ Excel exported: {filename}")
+            return response
+
+        except Exception as e:
+            logger.error(f"[TransformerDatasheet] Export error: {e}", exc_info=True)
+            return Response(
+                {'success': False, 'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # DG SET DATASHEET ENDPOINTS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @action(detail=False, methods=['post'], url_path='generate-dg-datasheet')
+    def generate_dg_datasheet(self, request):
+        """
+        Generate Emergency Diesel Generator (EDG) Set Datasheet from a Sizing Calculation PDF.
+
+        POST /api/v1/electrical-datasheet/datasheets/generate-dg-datasheet/
+
+        FormData:
+        - edg_sizing_file : PDF of the EDG Sizing Calculation document
+        - project_name    : (optional)
+        - drawing_number  : (optional)
+        - area            : (optional)
+
+        Returns:
+        {
+            "success": true,
+            "datasheet_rows": [...],   # sr_no, description, unit, required_data, vendor_data, rev
+            "summary": { ... }
+        }
+        """
+        from .dg_set_datasheet_generator import DGSetDatasheetGenerator
+
+        try:
+            if 'edg_sizing_file' not in request.FILES:
+                return Response(
+                    {'success': False, 'error': 'EDG sizing calculation file is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            edg_file = request.FILES['edg_sizing_file']
+
+            if not edg_file.name.lower().endswith('.pdf'):
+                return Response(
+                    {'success': False, 'error': 'Only PDF files are supported'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            project_info = {
+                'project_name':   request.data.get('project_name', ''),
+                'drawing_number': request.data.get('drawing_number', ''),
+                'area':           request.data.get('area', ''),
+                'equipment_type': 'Emergency Diesel Generator Set',
+            }
+
+            logger.info(f"[DGSetDatasheet] Generating from: {edg_file.name}")
+
+            generator = DGSetDatasheetGenerator()
+            result = generator.generate_datasheet_from_sizing_calc(edg_file, project_info)
+
+            if not result['success']:
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response(result, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"[DGSetDatasheet] Error: {e}", exc_info=True)
+            return Response(
+                {'success': False, 'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['post'], url_path='export-dg-datasheet')
+    def export_dg_datasheet(self, request):
+        """
+        Export DG Set Datasheet rows to a formatted Excel file.
+
+        POST /api/v1/electrical-datasheet/datasheets/export-dg-datasheet/
+
+        Body (JSON):
+        - datasheet_rows : array of row objects
+        - project_info   : project metadata dict
+
+        Returns: Excel file (.xlsx) download
+        """
+        from .dg_set_datasheet_generator import DGSetDatasheetGenerator
+        from django.http import HttpResponse
+        from datetime import datetime
+
+        try:
+            datasheet_rows = request.data.get('datasheet_rows', [])
+            project_info   = request.data.get('project_info', {})
+
+            if not datasheet_rows:
+                return Response(
+                    {'success': False, 'error': 'No datasheet rows provided'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            logger.info(f"[DGSetDatasheet] Exporting {len(datasheet_rows)} rows to Excel")
+
+            generator = DGSetDatasheetGenerator()
+            excel_buffer = generator.export_to_excel(datasheet_rows, project_info)
+
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename  = f"DGSet_Datasheet_{timestamp}.xlsx"
+
+            response = HttpResponse(
+                excel_buffer.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            response['Access-Control-Expose-Headers'] = 'Content-Disposition'
+
+            logger.info(f"[DGSetDatasheet] ✅ Excel exported: {filename}")
+            return response
+
+        except Exception as e:
+            logger.error(f"[DGSetDatasheet] Export error: {e}", exc_info=True)
+            return Response(
+                {'success': False, 'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     @action(detail=False, methods=['post'], url_path='generate-smart')
     def generate_smart_datasheet(self, request):
         """
@@ -1060,10 +1294,10 @@ Please provide your response as JSON with this exact structure:
             equipment_mapping = {
                 'transformer': 'transformer',
                 'dg_set': 'edg',
-                'mv_switchgear': 'switchgear_11kv',
-                'lv_switchgear': 'lv_switchgear',
-                'ac_ups': 'ac_ups',
-                'dc_ups': 'dc_ups'
+                'mv_switchgear': 'switchgear',
+                'lv_switchgear': 'lv_equipment',
+                'ac_ups': 'ups',
+                'dc_ups': 'ups',
             }
             
             internal_type = equipment_mapping.get(equipment_type)
@@ -1118,7 +1352,41 @@ Please provide your response as JSON with this exact structure:
                 
                 # Create datasheet record
                 from .models import ElectricalDatasheet, ElectricalEquipmentType
-                equipment_obj = ElectricalEquipmentType.objects.get(id=internal_type)
+                from .equipment_types_config import EQUIPMENT_TYPES_CONFIG
+
+                # Auto-seed the equipment type if it doesn't exist yet
+                equipment_obj = ElectricalEquipmentType.objects.filter(id=internal_type).first()
+                if not equipment_obj:
+                    # Find config entry and create it
+                    cfg = next((c for c in EQUIPMENT_TYPES_CONFIG if c['id'] == internal_type), None)
+                    if cfg:
+                        equipment_obj, _ = ElectricalEquipmentType.objects.get_or_create(
+                            id=internal_type,
+                            defaults={
+                                'name': cfg.get('name', internal_type),
+                                'code': cfg.get('code', internal_type.upper()[:5]),
+                                'description': cfg.get('description', ''),
+                                'icon': cfg.get('icon', ''),
+                                'category': cfg.get('category', 'Electrical Equipment'),
+                                'standards': cfg.get('standards', []),
+                                'sections': cfg.get('sections', []),
+                                'is_active': True,
+                            }
+                        )
+                        logger.info(f"[SmartDatasheet] Auto-seeded ElectricalEquipmentType: {internal_type}")
+                    else:
+                        # Fallback: create minimal record
+                        equipment_obj, _ = ElectricalEquipmentType.objects.get_or_create(
+                            id=internal_type,
+                            defaults={
+                                'name': internal_type.replace('_', ' ').title(),
+                                'code': internal_type.upper()[:5],
+                                'description': f'Auto-created for {internal_type}',
+                                'category': 'Electrical Equipment',
+                                'is_active': True,
+                            }
+                        )
+                        logger.warning(f"[SmartDatasheet] No config found for {internal_type}, created minimal record")
                 
                 datasheet = ElectricalDatasheet.objects.create(
                     equipment_type=equipment_obj,

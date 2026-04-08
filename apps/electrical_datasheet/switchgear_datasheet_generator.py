@@ -123,60 +123,50 @@ PROJECT INFORMATION:
 SLD DOCUMENT CONTENT:
 {sld_text[:6000]}
 
-TASK: Extract and structure ALL equipment data into a comprehensive datasheet format following this structure:
+TASK: Extract and structure ALL equipment data into a comprehensive datasheet format with EXACTLY 6 fields per row.
 
-For each equipment item in the SLD, extract:
-1. GENERAL - Basic identification and reference
-2. EQUIPMENT DATA - Technical specifications
-3. REFERENCE - Standards and specifications
-4. REFERENCE SPECIFICATION - Document references
-5. SITE DATA - Installation location details
-6. GENERAL CHARACTERISTICS - Key features
-7. MANUFACTURER DATA - Vendor information
-8. MANUFACTURER'S OFFERING - Available options
-9. RATINGS AND SHORT CIRCUIT DATA - Electrical ratings
-10. CONSTRUCTION & DIMENSIONS - Physical specs
-11. CONSTRUCTION - Building details
-12. BUSBAR - Busbar configuration
-13. CIRCUIT BREAKER DATA - Breaker specifications
-14. CURRENT TRANSFORMER - CT details
-15. EARTHING - Grounding system
-16. NAMEPLATE - Equipment labeling
-17. TYPE TESTS - Required testing
-18. ROUTINE TESTS - Standard tests
-19. SITE ACCEPTANCE TESTS - On-site testing
-20. INSTRUMENTS - Measuring devices
-21. WEIGHTS - Mass specifications
-22. DIMENSIONS OF SHIPPING SECTION - Transport details
-23. DIMENSIONS OF SWITCHGEAR - Overall dimensions
-24. FOUNDATION - Base requirements
-25. SPARE PARTS - Replacement components
-26. SPECIAL TOOLS - Required tooling
-27. TOOLS - General tools
-28. DRAWINGS & SPECIFICATIONS - Document list
-29. TESTING & METERING - Test equipment
-30. MANUFACTURER - Company details
-31. CONSTRUCTION - Assembly details
+The datasheet MUST follow this exact column structure (same as the physical MV switchgear datasheet form):
+- SR_NO: Sequential item number (e.g. 1.0, 1.1, 2, 2.1 ...) — blank for section header rows
+- DESCRIPTION: Parameter name or section header
+- UNIT: Engineering unit for the parameter (e.g. kV, A, kA, Hz, ℃, mm, kg, %) — blank if not applicable
+- REQUIRED_DATA: Specification/standard requirement value filled by the engineer
+- VENDOR_DATA: Actual value extracted from the uploaded SLD/document — blank string if not found
+- REV: Revision marker — leave as empty string unless a specific revision is noted in the document
 
-Return your response as a JSON array where each object has this structure:
+Cover ALL the following sections:
+1. GENERAL — Equipment tag, service description
+2. REFERENCE — Applicable international standards (IEC 60298, IEC 60694, IEC 60255, IEC 60529), ADNOC specs
+3. SITE DATA — Location, area classification, climate, altitude, min/max ambient temperature, humidity
+4. GENERAL CHARACTERISTICS — Type of switchgear, circuit breaker type, standards, system voltage, frequency, phases, earthing
+5. RATINGS AND SHORT CIRCUIT DATA — Rated insulation voltage, rated voltage, rated normal current, SC breaking current, peak withstand current, short time withstand current, power frequency withstand voltage, impulse withstand voltage
+6. CONSTRUCTION — Type, IP rating, colour, arc fault classification
+7. BUSBAR — Material, shape, busbar rating
+8. CIRCUIT BREAKER — Type, operating mechanism, auxiliary supply voltage, number of operating cycles
+9. CURRENT TRANSFORMER — Type, number of CT cores, CT ratio, CT class
+10. VOLTAGE TRANSFORMER — Type, VT ratio, VT class
+11. EARTHING — Main earthing bar, earth fault relay
+12. PROTECTION & CONTROL — Protection relay type, protection functions, metering
+13. AUXILIARY EQUIPMENT — Anti-condensation heater, space heater rating, lighting
+14. MANUFACTURER — Name, model/type, country of origin
+
+Return your response as a JSON array where each object has EXACTLY this structure:
 {{
-    "sr_no": "<sequential number>",
-    "description": "<parameter description>",
-    "required_data": "<specification or standard requirement>",
-    "vendor_data": "<extracted value from SLD or empty string if not found>",
-    "remarks": "<any additional notes>"
+    "sr_no": "<sequential number or empty string for section headers>",
+    "description": "<parameter name or section header>",
+    "unit": "<engineering unit or empty string>",
+    "required_data": "<specification requirement value>",
+    "vendor_data": "<value extracted from SLD/document, or empty string>",
+    "rev": ""
 }}
 
 IMPORTANT GUIDELINES:
-- Extract ALL relevant parameters, even if values are not found (leave vendor_data empty)
-- For missing data, set vendor_data to empty string ""
-- Include section headers (e.g., "GENERAL", "EQUIPMENT DATA") as rows with description only
-- Be comprehensive - include all standard 11KV switchgear parameters
-- Extract actual values from the SLD when available
-- Maintain the exact parameter sequence shown above
-- For equipment ratings, extract: voltage, current, breaking capacity, frequency
-- For construction, extract: IP rating, enclosure type, busbar material
-- For dimensions, extract: height, width, depth, weight
+- ALWAYS include the "unit" field — use the correct SI/engineering unit for every measured quantity
+- Common units: voltage → kV, current → A, breaking current → kA, frequency → Hz, temperature → ℃, dimensions → mm, weight → kg, percentage → %
+- Section header rows have blank sr_no, blank unit, blank required_data, blank vendor_data, blank rev
+- Extract ACTUAL values from the SLD document for vendor_data where available
+- Leave vendor_data as empty string "" when value not found in document
+- Leave rev as empty string "" unless document contains a specific revision reference
+- Be comprehensive — include ALL standard 11KV switchgear parameters
 
 Return ONLY the JSON array, no additional text."""
 
@@ -210,12 +200,16 @@ Return ONLY the JSON array, no additional text."""
                         row['sr_no'] = str(i + 1)
                     if 'description' not in row:
                         row['description'] = ''
+                    if 'unit' not in row:
+                        row['unit'] = ''
                     if 'required_data' not in row:
                         row['required_data'] = ''
                     if 'vendor_data' not in row:
                         row['vendor_data'] = ''
-                    if 'remarks' not in row:
-                        row['remarks'] = ''
+                    if 'rev' not in row:
+                        row['rev'] = ''
+                    # Remove legacy 'remarks' key if present (replaced by 'rev')
+                    row.pop('remarks', None)
                 
                 return datasheet_rows
             else:
@@ -231,77 +225,77 @@ Return ONLY the JSON array, no additional text."""
             return self._get_default_datasheet_template()
     
     def _get_default_datasheet_template(self) -> List[Dict]:
-        """Return default 11KV switchgear datasheet template"""
+        """Return default 11KV switchgear datasheet template with 6 columns: sr_no, description, unit, required_data, vendor_data, rev"""
         return [
-            {"sr_no": "", "description": "GENERAL", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "1.0", "description": "EQUIPMENT TAG NO.", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "1.1", "description": "SERVICE", "required_data": "11 KV SWITCHGEAR", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "REFERENCE", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "1.2", "description": "APPLICABLE INTERNATIONAL STANDARDS", "required_data": "IEC 60298, IEC 60694, IEC 60255, IEC 60529", "vendor_data": "", "remarks": ""},
-            {"sr_no": "1.3", "description": "APPLICABLE SPEC./ADNOC-AGES", "required_data": "ADNOC-AGES-SP-1031", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "SITE DATA", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "1.4", "description": "SITE LOCATION", "required_data": "ABU DHABI", "vendor_data": "", "remarks": ""},
-            {"sr_no": "1.5", "description": "AREA CLASSIFICATION", "required_data": "SAFE AREA", "vendor_data": "", "remarks": ""},
-            {"sr_no": "1.6", "description": "CLIMATE CONDITIONS", "required_data": "TROPICAL", "vendor_data": "", "remarks": ""},
-            {"sr_no": "1.7", "description": "SITE ALTITUDE (M ABOVE SEA LEVEL)", "required_data": "< 100", "vendor_data": "", "remarks": ""},
-            {"sr_no": "1.8", "description": "MINIMUM AMBIENT TEMPERATURE", "required_data": "-5 ℃", "vendor_data": "", "remarks": ""},
-            {"sr_no": "1.9", "description": "MAXIMUM AMBIENT TEMPERATURE", "required_data": "50 ℃", "vendor_data": "", "remarks": ""},
-            {"sr_no": "1.10", "description": "MAXIMUM RELATIVE HUMIDITY AT 40 ℃", "required_data": "100%", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "GENERAL CHARACTERISTICS", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "2", "description": "TYPE OF SWITCHGEAR", "required_data": "METAL ENCLOSED", "vendor_data": "", "remarks": ""},
-            {"sr_no": "2.1", "description": "TYPE OF CIRCUIT BREAKER", "required_data": "VACUUM / SF6", "vendor_data": "", "remarks": ""},
-            {"sr_no": "2.2", "description": "STANDARDS", "required_data": "IEC", "vendor_data": "", "remarks": ""},
-            {"sr_no": "2.3", "description": "SYSTEM VOLTAGE (kV)", "required_data": "11", "vendor_data": "", "remarks": ""},
-            {"sr_no": "2.4", "description": "SYSTEM FREQUENCY (Hz)", "required_data": "50", "vendor_data": "", "remarks": ""},
-            {"sr_no": "2.5", "description": "NUMBER OF PHASES", "required_data": "3", "vendor_data": "", "remarks": ""},
-            {"sr_no": "2.6", "description": "SYSTEM EARTHING", "required_data": "RESISTANCE EARTHED", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "RATINGS AND SHORT CIRCUIT DATA", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "3.1", "description": "RATED INSULATION VOLTAGE (kV)", "required_data": "12", "vendor_data": "", "remarks": ""},
-            {"sr_no": "3.2", "description": "RATED VOLTAGE (kV)", "required_data": "11", "vendor_data": "", "remarks": ""},
-            {"sr_no": "3.3", "description": "RATED NORMAL CURRENT (A)", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "3.4", "description": "RATED SHORT CIRCUIT BREAKING CURRENT (kA RMS)", "required_data": "25", "vendor_data": "", "remarks": ""},
-            {"sr_no": "3.5", "description": "RATED PEAK WITHSTAND CURRENT (kA PEAK)", "required_data": "65 (2.5 × BREAKING CURRENT)", "vendor_data": "", "remarks": ""},
-            {"sr_no": "3.6", "description": "RATED SHORT TIME WITHSTAND CURRENT (kA, 3 SEC)", "required_data": "25", "vendor_data": "", "remarks": ""},
-            {"sr_no": "3.7", "description": "RATED POWER FREQUENCY WITHSTAND VOLTAGE", "required_data": "28 kV, 1 MINUTE (DRY)", "vendor_data": "", "remarks": ""},
-            {"sr_no": "3.8", "description": "RATED IMPULSE WITHSTAND VOLTAGE (1.2/50 μs)", "required_data": "75 kV", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "CONSTRUCTION", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "4.1", "description": "TYPE", "required_data": "METAL CLAD / METAL ENCLOSED", "vendor_data": "", "remarks": ""},
-            {"sr_no": "4.2", "description": "IP RATING", "required_data": "IP 54 MIN", "vendor_data": "", "remarks": ""},
-            {"sr_no": "4.3", "description": "COLOUR", "required_data": "RAL 7035 (LIGHT GREY)", "vendor_data": "", "remarks": ""},
-            {"sr_no": "4.4", "description": "ARC FAULT CLASSIFICATION", "required_data": "IAC AFL 25 kA 1 SEC", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "BUSBAR", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "5.1", "description": "MATERIAL", "required_data": "COPPER / ALUMINIUM", "vendor_data": "", "remarks": ""},
-            {"sr_no": "5.2", "description": "SHAPE", "required_data": "RECTANGULAR", "vendor_data": "", "remarks": ""},
-            {"sr_no": "5.3", "description": "BUSBAR RATING (A)", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "CIRCUIT BREAKER", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "6.1", "description": "TYPE", "required_data": "VACUUM / SF6", "vendor_data": "", "remarks": ""},
-            {"sr_no": "6.2", "description": "OPERATING MECHANISM", "required_data": "SPRING CHARGED / STORED ENERGY", "vendor_data": "", "remarks": ""},
-            {"sr_no": "6.3", "description": "AUXILIARY SUPPLY VOLTAGE", "required_data": "110 VDC / 220 VDC", "vendor_data": "", "remarks": ""},
-            {"sr_no": "6.4", "description": "NUMBER OF OPERATING CYCLES", "required_data": "AS PER IEC 60056", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "CURRENT TRANSFORMER", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "7.1", "description": "TYPE", "required_data": "RESIN CAST", "vendor_data": "", "remarks": ""},
-            {"sr_no": "7.2", "description": "NUMBER OF CT CORES", "required_data": "AS PER SCHEDULE", "vendor_data": "", "remarks": ""},
-            {"sr_no": "7.3", "description": "CT RATIO", "required_data": "AS PER SCHEDULE", "vendor_data": "", "remarks": ""},
-            {"sr_no": "7.4", "description": "CT CLASS", "required_data": "5P20, 0.5S", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "VOLTAGE TRANSFORMER", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "8.1", "description": "TYPE", "required_data": "RESIN CAST", "vendor_data": "", "remarks": ""},
-            {"sr_no": "8.2", "description": "VT RATIO", "required_data": "11000/√3 : 110/√3", "vendor_data": "", "remarks": ""},
-            {"sr_no": "8.3", "description": "VT CLASS", "required_data": "3P, 0.5", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "EARTHING", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "9.1", "description": "MAIN EARTHING BAR", "required_data": "COPPER", "vendor_data": "", "remarks": ""},
-            {"sr_no": "9.2", "description": "EARTH FAULT RELAY", "required_data": "NUMERICAL / MULTIFUNCTION", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "PROTECTION & CONTROL", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "10.1", "description": "PROTECTION RELAY TYPE", "required_data": "NUMERICAL / MULTIFUNCTION", "vendor_data": "", "remarks": ""},
-            {"sr_no": "10.2", "description": "PROTECTION FUNCTIONS", "required_data": "OVERCURRENT, EARTH FAULT, DIFFERENTIAL", "vendor_data": "", "remarks": ""},
-            {"sr_no": "10.3", "description": "METERING", "required_data": "DIGITAL MULTIFUNCTION METER", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "AUXILIARY EQUIPMENT", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "11.1", "description": "ANTI-CONDENSATION HEATER", "required_data": "REQUIRED", "vendor_data": "", "remarks": ""},
-            {"sr_no": "11.2", "description": "SPACE HEATER RATING", "required_data": "230 VAC", "vendor_data": "", "remarks": ""},
-            {"sr_no": "11.3", "description": "LIGHTING", "required_data": "LED, 230 VAC", "vendor_data": "", "remarks": ""},
-            {"sr_no": "", "description": "MANUFACTURER", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "12.1", "description": "NAME", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "12.2", "description": "MODEL/TYPE", "required_data": "", "vendor_data": "", "remarks": ""},
-            {"sr_no": "12.3", "description": "COUNTRY OF ORIGIN", "required_data": "", "vendor_data": "", "remarks": ""},
+            {"sr_no": "",     "description": "GENERAL",                                        "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "1.0",  "description": "EQUIPMENT TAG NO.",                             "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "1.1",  "description": "SERVICE",                                       "unit": "",    "required_data": "11 KV SWITCHGEAR",                          "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "REFERENCE",                                     "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "1.2",  "description": "APPLICABLE INTERNATIONAL STANDARDS",            "unit": "",    "required_data": "IEC 60298, IEC 60694, IEC 60255, IEC 60529", "vendor_data": "", "rev": ""},
+            {"sr_no": "1.3",  "description": "APPLICABLE SPEC./ADNOC-AGES",                   "unit": "",    "required_data": "ADNOC-AGES-SP-1031",                       "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "SITE DATA",                                     "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "1.4",  "description": "SITE LOCATION",                                 "unit": "",    "required_data": "ABU DHABI",                                "vendor_data": "", "rev": ""},
+            {"sr_no": "1.5",  "description": "AREA CLASSIFICATION",                           "unit": "",    "required_data": "SAFE AREA",                                "vendor_data": "", "rev": ""},
+            {"sr_no": "1.6",  "description": "CLIMATE CONDITIONS",                            "unit": "",    "required_data": "TROPICAL",                                 "vendor_data": "", "rev": ""},
+            {"sr_no": "1.7",  "description": "SITE ALTITUDE",                                 "unit": "m",   "required_data": "< 100",                                    "vendor_data": "", "rev": ""},
+            {"sr_no": "1.8",  "description": "MINIMUM AMBIENT TEMPERATURE",                   "unit": "℃",   "required_data": "-5",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "1.9",  "description": "MAXIMUM AMBIENT TEMPERATURE",                   "unit": "℃",   "required_data": "50",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "1.10", "description": "MAXIMUM RELATIVE HUMIDITY AT 40 ℃",             "unit": "%",   "required_data": "100",                                      "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "GENERAL CHARACTERISTICS",                       "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "2",    "description": "TYPE OF SWITCHGEAR",                             "unit": "",    "required_data": "METAL ENCLOSED",                            "vendor_data": "", "rev": ""},
+            {"sr_no": "2.1",  "description": "TYPE OF CIRCUIT BREAKER",                       "unit": "",    "required_data": "VACUUM / SF6",                             "vendor_data": "", "rev": ""},
+            {"sr_no": "2.2",  "description": "STANDARDS",                                     "unit": "",    "required_data": "IEC",                                      "vendor_data": "", "rev": ""},
+            {"sr_no": "2.3",  "description": "SYSTEM VOLTAGE",                                "unit": "kV",  "required_data": "11",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "2.4",  "description": "SYSTEM FREQUENCY",                              "unit": "Hz",  "required_data": "50",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "2.5",  "description": "NUMBER OF PHASES",                              "unit": "",    "required_data": "3",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "2.6",  "description": "SYSTEM EARTHING",                               "unit": "",    "required_data": "RESISTANCE EARTHED",                       "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "RATINGS AND SHORT CIRCUIT DATA",                "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "3.1",  "description": "RATED INSULATION VOLTAGE",                      "unit": "kV",  "required_data": "12",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "3.2",  "description": "RATED VOLTAGE",                                 "unit": "kV",  "required_data": "11",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "3.3",  "description": "RATED NORMAL CURRENT",                          "unit": "A",   "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "3.4",  "description": "RATED SHORT CIRCUIT BREAKING CURRENT",          "unit": "kA",  "required_data": "25",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "3.5",  "description": "RATED PEAK WITHSTAND CURRENT",                  "unit": "kA",  "required_data": "65",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "3.6",  "description": "RATED SHORT TIME WITHSTAND CURRENT (3 SEC)",    "unit": "kA",  "required_data": "25",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "3.7",  "description": "RATED POWER FREQUENCY WITHSTAND VOLTAGE",       "unit": "kV",  "required_data": "28",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "3.8",  "description": "RATED IMPULSE WITHSTAND VOLTAGE (1.2/50 μs)",  "unit": "kV",  "required_data": "75",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "CONSTRUCTION",                                  "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "4.1",  "description": "TYPE",                                          "unit": "",    "required_data": "METAL CLAD / METAL ENCLOSED",             "vendor_data": "", "rev": ""},
+            {"sr_no": "4.2",  "description": "IP RATING",                                     "unit": "",    "required_data": "IP 54 MIN",                               "vendor_data": "", "rev": ""},
+            {"sr_no": "4.3",  "description": "COLOUR",                                        "unit": "",    "required_data": "RAL 7035 (LIGHT GREY)",                    "vendor_data": "", "rev": ""},
+            {"sr_no": "4.4",  "description": "ARC FAULT CLASSIFICATION",                      "unit": "",    "required_data": "IAC AFL 25 kA 1 SEC",                    "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "BUSBAR",                                        "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "5.1",  "description": "MATERIAL",                                      "unit": "",    "required_data": "COPPER / ALUMINIUM",                        "vendor_data": "", "rev": ""},
+            {"sr_no": "5.2",  "description": "SHAPE",                                         "unit": "",    "required_data": "RECTANGULAR",                              "vendor_data": "", "rev": ""},
+            {"sr_no": "5.3",  "description": "BUSBAR RATING",                                 "unit": "A",   "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "CIRCUIT BREAKER",                               "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "6.1",  "description": "TYPE",                                          "unit": "",    "required_data": "VACUUM / SF6",                             "vendor_data": "", "rev": ""},
+            {"sr_no": "6.2",  "description": "OPERATING MECHANISM",                           "unit": "",    "required_data": "SPRING CHARGED / STORED ENERGY",          "vendor_data": "", "rev": ""},
+            {"sr_no": "6.3",  "description": "AUXILIARY SUPPLY VOLTAGE",                      "unit": "VDC", "required_data": "110 / 220",                               "vendor_data": "", "rev": ""},
+            {"sr_no": "6.4",  "description": "NUMBER OF OPERATING CYCLES",                    "unit": "",    "required_data": "AS PER IEC 60056",                       "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "CURRENT TRANSFORMER",                           "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "7.1",  "description": "TYPE",                                          "unit": "",    "required_data": "RESIN CAST",                               "vendor_data": "", "rev": ""},
+            {"sr_no": "7.2",  "description": "NUMBER OF CT CORES",                            "unit": "",    "required_data": "AS PER SCHEDULE",                          "vendor_data": "", "rev": ""},
+            {"sr_no": "7.3",  "description": "CT RATIO",                                      "unit": "",    "required_data": "AS PER SCHEDULE",                          "vendor_data": "", "rev": ""},
+            {"sr_no": "7.4",  "description": "CT CLASS",                                      "unit": "",    "required_data": "5P20, 0.5S",                              "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "VOLTAGE TRANSFORMER",                           "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "8.1",  "description": "TYPE",                                          "unit": "",    "required_data": "RESIN CAST",                               "vendor_data": "", "rev": ""},
+            {"sr_no": "8.2",  "description": "VT RATIO",                                      "unit": "",    "required_data": "11000/√3 : 110/√3",                      "vendor_data": "", "rev": ""},
+            {"sr_no": "8.3",  "description": "VT CLASS",                                      "unit": "",    "required_data": "3P, 0.5",                                 "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "EARTHING",                                      "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "9.1",  "description": "MAIN EARTHING BAR",                             "unit": "",    "required_data": "COPPER",                                   "vendor_data": "", "rev": ""},
+            {"sr_no": "9.2",  "description": "EARTH FAULT RELAY",                             "unit": "",    "required_data": "NUMERICAL / MULTIFUNCTION",                "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "PROTECTION & CONTROL",                          "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "10.1", "description": "PROTECTION RELAY TYPE",                         "unit": "",    "required_data": "NUMERICAL / MULTIFUNCTION",                "vendor_data": "", "rev": ""},
+            {"sr_no": "10.2", "description": "PROTECTION FUNCTIONS",                          "unit": "",    "required_data": "OVERCURRENT, EARTH FAULT, DIFFERENTIAL",   "vendor_data": "", "rev": ""},
+            {"sr_no": "10.3", "description": "METERING",                                      "unit": "",    "required_data": "DIGITAL MULTIFUNCTION METER",               "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "AUXILIARY EQUIPMENT",                           "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "11.1", "description": "ANTI-CONDENSATION HEATER",                      "unit": "",    "required_data": "REQUIRED",                                "vendor_data": "", "rev": ""},
+            {"sr_no": "11.2", "description": "SPACE HEATER RATING",                           "unit": "VAC", "required_data": "230",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "11.3", "description": "LIGHTING",                                      "unit": "VAC", "required_data": "230",                                       "vendor_data": "", "rev": ""},
+            {"sr_no": "",     "description": "MANUFACTURER",                                  "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "12.1", "description": "NAME",                                          "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "12.2", "description": "MODEL/TYPE",                                    "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
+            {"sr_no": "12.3", "description": "COUNTRY OF ORIGIN",                             "unit": "",    "required_data": "",                                        "vendor_data": "", "rev": ""},
         ]
     
     def export_to_excel(self, datasheet_rows: List[Dict], project_info: Dict = None):
@@ -344,8 +338,8 @@ Return ONLY the JSON array, no additional text."""
         else:
             row_idx = 1
         
-        # Add column headers
-        headers = ['SR NO', 'DESCRIPTION', 'REQUIREMENTS AND CONDITIONS (REQUIRED DATA)', 'VENDOR DATA', 'Rem']
+        # Add column headers — 6 columns: SR NO, DESCRIPTION, UNIT, REQUIRED DATA, VENDOR DATA, Rev
+        headers = ['SR NO', 'DESCRIPTION', 'UNIT', 'REQUIRED DATA', 'VENDOR DATA', 'Rev']
         for col_idx, header in enumerate(headers, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=header)
             cell.fill = header_fill
@@ -356,19 +350,21 @@ Return ONLY the JSON array, no additional text."""
         # Set column widths
         ws.column_dimensions['A'].width = 8
         ws.column_dimensions['B'].width = 50
-        ws.column_dimensions['C'].width = 40
-        ws.column_dimensions['D'].width = 30
-        ws.column_dimensions['E'].width = 15
+        ws.column_dimensions['C'].width = 10
+        ws.column_dimensions['D'].width = 35
+        ws.column_dimensions['E'].width = 30
+        ws.column_dimensions['F'].width = 8
         
         row_idx += 1
         
-        # Add data rows
+        # Add data rows — 6 columns: sr_no, description, unit, required_data, vendor_data, rev
         for row_data in datasheet_rows:
             sr_no = row_data.get('sr_no', '')
             description = row_data.get('description', '')
+            unit = row_data.get('unit', '')
             required_data = row_data.get('required_data', '')
             vendor_data = row_data.get('vendor_data', '')
-            remarks = row_data.get('remarks', '')
+            rev = row_data.get('rev', row_data.get('remarks', ''))  # fallback to remarks for legacy data
             
             # Check if this is a section header
             is_section = (sr_no == '' or sr_no is None) and description and not required_data and not vendor_data
@@ -379,19 +375,23 @@ Return ONLY the JSON array, no additional text."""
             cell_desc.border = border
             cell_desc.alignment = Alignment(wrap_text=True, vertical='top')
             
-            cell_req = ws.cell(row=row_idx, column=3, value=required_data)
+            cell_unit = ws.cell(row=row_idx, column=3, value=unit)
+            cell_unit.border = border
+            cell_unit.alignment = Alignment(horizontal='center', vertical='top')
+            
+            cell_req = ws.cell(row=row_idx, column=4, value=required_data)
             cell_req.border = border
             cell_req.alignment = Alignment(wrap_text=True, vertical='top')
             
-            cell_vendor = ws.cell(row=row_idx, column=4, value=vendor_data)
+            cell_vendor = ws.cell(row=row_idx, column=5, value=vendor_data)
             cell_vendor.border = border
             cell_vendor.alignment = Alignment(wrap_text=True, vertical='top')
             
-            ws.cell(row=row_idx, column=5, value=remarks).border = border
+            ws.cell(row=row_idx, column=6, value=rev).border = border
             
             # Apply section styling
             if is_section:
-                for col in range(1, 6):
+                for col in range(1, 7):
                     cell = ws.cell(row=row_idx, column=col)
                     cell.fill = section_fill
                     cell.font = section_font
