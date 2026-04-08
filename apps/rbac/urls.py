@@ -38,6 +38,8 @@ router.register(r'analytics/error-logs', ErrorLogAnalyticsViewSet, basename='err
 router.register(r'analytics/health-checks', SystemHealthCheckViewSet, basename='health-checks')
 
 urlpatterns = [
+    # User Export — must come BEFORE router.urls to prevent users/{pk}/ swallowing 'export' as a pk
+    path('users/export/', UserExportView.as_view(), name='user-export-users'),
     path('', include(router.urls)),
     # User Dashboard endpoints
     path('dashboard/stats/', user_dashboard_stats, name='user-dashboard-stats'),
@@ -45,8 +47,6 @@ urlpatterns = [
     path('dashboard/activity/', user_activity_timeline, name='user-activity-timeline'),
     # Password management
     path('users/change-password/', change_password, name='rbac-change-password'),
-    # User Export — standalone APIView, no ViewSet router dependency
-    path('users/export/', UserExportView.as_view(), name='user-export-users'),
     # Subscription Management (7.3)
     path('subscriptions/', include('apps.rbac.subscription_urls')),
 ]
