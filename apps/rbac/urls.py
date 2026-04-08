@@ -9,7 +9,8 @@ from .views import (
     # Analytics ViewSets
     AnalyticsDashboardViewSet, SystemMetricsViewSet, UserActivityAnalyticsViewSet,
     SecurityAlertViewSet, PredictiveInsightViewSet, FeatureUsageAnalyticsViewSet,
-    ErrorLogAnalyticsViewSet, SystemHealthCheckViewSet
+    ErrorLogAnalyticsViewSet, SystemHealthCheckViewSet,
+    UserExportView,
 )
 from .dashboard_views import (
     user_dashboard_stats, user_files_list, user_activity_timeline
@@ -44,8 +45,8 @@ urlpatterns = [
     path('dashboard/activity/', user_activity_timeline, name='user-activity-timeline'),
     # Password management
     path('users/change-password/', change_password, name='rbac-change-password'),
-    # User Export — explicit path to guarantee registration regardless of @action router
-    path('users/export/', UserProfileViewSet.as_view({'get': 'export_users'}), name='user-export-users'),
+    # User Export — standalone APIView, no ViewSet router dependency
+    path('users/export/', UserExportView.as_view(), name='user-export-users'),
     # Subscription Management (7.3)
     path('subscriptions/', include('apps.rbac.subscription_urls')),
 ]
