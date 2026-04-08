@@ -322,9 +322,11 @@ a"Ä» MANDATORY EXTRACTION (Fill ALL 9 fields using smart inference):
       If not found: Answer "No" for single-phase services (water, air), "Yes" for steam/condensate
    
    3. surge_flow: Peak/surge flow rate. Search: flow columns, max flow, surge conditions.
+      CRITICAL: Always provide value in m/s (meters per second) unit.
       If not found: Look for "Max Flow" or calculate from normal flow + 20% margin
    
    4. flow_max: Maximum flow rate. Search: flow rate columns, maximum capacity.
+      CRITICAL: Always provide value in m/s (meters per second) unit.
       If not found: Use surge flow or normal flow if available
    
    5. density: Fluid density. Search: density columns, fluid properties.
@@ -492,7 +494,8 @@ a"Ü¿ ALL 26 FIELDS ARE MANDATORY. FILL EVERY FIELD.
 EXAMPLES OF GOOD VALUES:
 - flow_medium: "Cooling Water", "Steam", "Crude Oil", "Natural Gas"
 - two_phase: "Yes" or "No" (not empty)
-- surge_flow: "150 GPM", "45 m,%%/h" (with units)
+- surge_flow: "150 m/s", "45 m/s" (MUST use m/s unit)
+- flow_max: "120 m/s", "38 m/s" (MUST use m/s unit)
 - design_pressure: "150 psig", "10 bara" (with units)
 - design_code: "ASME B31.3", "ASME B31.1" (standard codes)
 - schedule_wall_thk: "Sch 40", "Sch 80", "STD", "5.5mm"

@@ -467,7 +467,8 @@ def process_pid_upload_async(
                     
                     # Apply Table 7.1 deterministic logic
                     criticality = determine_stress_criticality_table_7_1(pipe_size, design_temp)
-                    line_item['criticality_stress'] = criticality
+                    # Add "L" prefix to criticality number (1→L1, 2→L2, 3→L3)
+                    line_item['criticality_stress'] = f"L{criticality}" if criticality else 'N/A'
                     
                     lines_processed += 1
                 
@@ -559,7 +560,7 @@ def process_pid_upload_async(
                     'normal_pressure', 'normal_temp', 'design_pressure', 'minimax_design_temp',
                     'design_code', 'category_m_fluid', 'schedule_wall_thk', 'stress_relief',
                     'pwht', 'rt', 'mt_pt', 'hardness', 'visual', 'nace_mr_0175',
-                    'piping_rated_pressure_ambient', 'test_pressure', 'test_medium',
+                    'piping_rated_pressure', 'test_pressure', 'test_medium',
                     'pid_no', 'pid_rev', 'date', 'criticality_code', 'criticality_stress'
                 ]
                 # Initialize ALL enrichment columns (even if empty) to guarantee 35-column structure

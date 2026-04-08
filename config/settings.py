@@ -159,6 +159,7 @@ INSTALLED_APPS = [
     'apps.usage_tracking',  # Usage Tracking & Metering - Internal Analytics Dashboard
     'apps.wrench_integration',  # Wrench Project Platform Integration
     'apps.pid_verification',   # P&ID Quality Checker — deterministic rule engine
+    'apps.sld_verification',   # SLD Quality Checker — electrical single line diagram verification
     'apps.pfd_quality',          # PFD Quality Checker — deterministic rule engine
     'apps.cross_recommendation', # Cross PID/PFD recommendation bridge
 ]

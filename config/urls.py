@@ -149,7 +149,7 @@ urlpatterns = [
     path('api/v1/finance/', include('apps.finance.urls')),  # Finance Invoice Automation
     path('api/v1/designiq/', include('apps.designiq.urls')),  # DesignIQ - AI Design Intelligence
     path('api/v1/process-datasheet/', include('apps.process_datasheet.urls')),  # Process Datasheet
-    path('api/v1/electrical/', include('apps.electrical_datasheet.urls')),  # Electrical Datasheet with Transformer Verification
+    path('api/v1/electrical-datasheet/', include('apps.electrical_datasheet.urls')),  # Electrical Datasheet with Transformer & Switchgear
     path('api/v1/usage/', include('apps.usage_tracking.urls')),  # Usage Tracking & Internal Analytics
     path('api/v1/projects/', include('apps.core.project_urls')),
 ]
@@ -183,6 +183,11 @@ if is_app_installed('apps.wrench_integration'):
 if is_app_installed('apps.pid_verification'):
     urlpatterns.append(path('api/v1/pid-verification/', include('apps.pid_verification.urls')))
     print("[URL] ✅ P&ID Verification URLs registered")
+
+# SLD Verification — electrical single line diagram quality checker
+if is_app_installed('apps.sld_verification'):
+    urlpatterns.append(path('api/v1/sld-verification/', include('apps.sld_verification.urls')))
+    print("[URL] ✅ SLD Verification URLs registered")
 
 # PFD Quality Checker — deterministic rule engine
 if is_app_installed('apps.pfd_quality'):

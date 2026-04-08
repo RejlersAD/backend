@@ -1450,6 +1450,16 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     "error": f"No line items found for document ID: {document_id}"
                 }, status=status.HTTP_404_NOT_FOUND)
             
+            # Log sample data to debug
+            first_item = items.first()
+            logger.info(f"📋 Sample item data keys: {list(first_item.data.keys())}")
+            logger.info(f"📋 Has criticality_stress? {'criticality_stress' in first_item.data}")
+            if 'criticality_stress' in first_item.data:
+                logger.info(f"📋 Sample criticality_stress value: {first_item.data['criticality_stress']}")
+            else:
+                logger.warning(f"⚠️ criticality_stress NOT FOUND in database! Old data needs re-upload.")
+                logger.info(f"📋 All available keys: {list(first_item.data.keys())}")
+            
             # Create workbook
             wb = Workbook()
             ws = wb.active
@@ -1459,11 +1469,24 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
             header_font = Font(color="FFFFFF", bold=True, size=11)
             
-            # Define headers
+            # Define headers - Include ALL enriched columns (17 base + 26 enriched + criticality_stress)
             headers = [
+                # Base columns (17)
                 'Line Number', 'Size', 'Fluid Code', 'Fluid Description',
                 'Sequence No', 'Pipe Class', 'Insulation', 'Area',
-                'FROM', 'TO', 'Criticality Stress', 'Status', 'Validated'
+                'FROM', 'TO', 'Flow Detection Method', 'Flow Confidence',
+                'Page', 'Confidence', 'Document ID', 'Filename', 'Upload Date',
+                # Enriched columns (26)
+                'Flow Medium', 'Two Phase', 'Surge Flow', 'Flow Max', 'Density',
+                'Normal Pressure', 'Normal Temp', 'Design Pressure', 'Minimax Design Temp',
+                'Design Code', 'Category M Fluid', 'Schedule / Wall THK', 'Stress Relief',
+                'PWHT', 'RT', 'MT/PT', 'Hardness', 'Visual', 'NACE MR 0175',
+                'Piping Rated Pressure', 'Test Pressure', 'Test Medium',
+                'PID No', 'PID Rev', 'Date', 'Criticality Code',
+                # Stress criticality column (1)
+                'Criticality Stress',
+                # Status columns (2)
+                'Status', 'Validated'
             ]
             
             ws.append(headers)
@@ -1478,6 +1501,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             # Add data rows
             for item in items:
                 ws.append([
+                    # Base columns (17)
                     item.item_tag,
                     item.data.get('size', ''),
                     item.data.get('fluid_code', ''),
@@ -1488,7 +1512,43 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                     item.data.get('area', ''),
                     item.data.get('from_line', ''),
                     item.data.get('to_line', ''),
+                    item.data.get('flow_detection_method', ''),
+                    item.data.get('flow_confidence', ''),
+                    item.data.get('page', ''),
+                    item.data.get('confidence', ''),
+                    item.data.get('document_id', ''),
+                    item.data.get('filename', ''),
+                    item.data.get('upload_date', ''),
+                    # Enriched columns (26)
+                    item.data.get('flow_medium', ''),
+                    item.data.get('two_phase', ''),
+                    item.data.get('surge_flow', ''),
+                    item.data.get('flow_max', ''),
+                    item.data.get('density', ''),
+                    item.data.get('normal_pressure', ''),
+                    item.data.get('normal_temp', ''),
+                    item.data.get('design_pressure', ''),
+                    item.data.get('minimax_design_temp', ''),
+                    item.data.get('design_code', ''),
+                    item.data.get('category_m_fluid', ''),
+                    item.data.get('schedule_wall_thk', ''),
+                    item.data.get('stress_relief', ''),
+                    item.data.get('pwht', ''),
+                    item.data.get('rt', ''),
+                    item.data.get('mt_pt', ''),
+                    item.data.get('hardness', ''),
+                    item.data.get('visual', ''),
+                    item.data.get('nace_mr_0175', ''),
+                    item.data.get('piping_rated_pressure', ''),
+                    item.data.get('test_pressure', ''),
+                    item.data.get('test_medium', ''),
+                    item.data.get('pid_no', ''),
+                    item.data.get('pid_rev', ''),
+                    item.data.get('date', ''),
+                    item.data.get('criticality_code', ''),
+                    # Stress criticality column (1)
                     item.data.get('criticality_stress', 'N/A'),
+                    # Status columns (2)
                     item.status,
                     'Yes' if item.is_validated else 'No'
                 ])
