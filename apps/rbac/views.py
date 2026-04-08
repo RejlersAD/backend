@@ -978,7 +978,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         
         return response
 
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get'], url_path='export')
     def export_users(self, request):
         """
         Export all users as CSV or Excel.
