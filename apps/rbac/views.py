@@ -977,6 +977,95 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         ])
         
         return response
+
+    @action(detail=False, methods=['get'])
+    def export_users(self, request):
+        """
+        Export all users as CSV or Excel.
+        GET /api/v1/rbac/users/export/?format=csv  (default)
+        GET /api/v1/rbac/users/export/?format=xlsx
+        """
+        import csv
+        import datetime
+        from io import BytesIO
+        from django.http import HttpResponse
+
+        export_format = request.query_params.get('format', 'csv').lower()
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        headers = [
+            'First Name', 'Last Name', 'Email', 'Username',
+            'Department', 'Job Title', 'Phone', 'Employee ID',
+            'Location', 'Status', 'Roles', 'Organization',
+            'Created At', 'Last Login',
+        ]
+
+        queryset = self.get_queryset().order_by('created_at')
+
+        def build_row(profile):
+            usr = profile.user
+            roles = ', '.join(sorted(set(r.name for r in profile.roles.all())))
+            created = profile.created_at.strftime('%Y-%m-%d %H:%M') if profile.created_at else ''
+            last_login = profile.last_login_at.strftime('%Y-%m-%d %H:%M') if profile.last_login_at else ''
+            return [
+                usr.first_name or '',
+                usr.last_name or '',
+                usr.email or '',
+                usr.username or '',
+                profile.department or '',
+                profile.job_title or '',
+                profile.phone or '',
+                profile.employee_id or '',
+                profile.location or '',
+                profile.status or '',
+                roles,
+                profile.organization.name if profile.organization else '',
+                created,
+                last_login,
+            ]
+
+        if export_format == 'xlsx':
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = 'Users'
+
+            # Header row with styling
+            header_fill = PatternFill(start_color='1E40AF', end_color='1E40AF', fill_type='solid')
+            header_font = Font(bold=True, color='FFFFFF')
+            ws.append(headers)
+            for cell in ws[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal='center')
+
+            for profile in queryset:
+                ws.append(build_row(profile))
+
+            # Auto-fit column widths
+            for col in ws.columns:
+                max_len = max((len(str(cell.value or '')) for cell in col), default=10)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 40)
+
+            output = BytesIO()
+            wb.save(output)
+            output.seek(0)
+            response = HttpResponse(
+                output.read(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="users_export_{timestamp}.xlsx"'
+        else:
+            response = HttpResponse(content_type='text/csv')
+            response['Content-Disposition'] = f'attachment; filename="users_export_{timestamp}.csv"'
+            writer = csv.writer(response)
+            writer.writerow(headers)
+            for profile in queryset:
+                writer.writerow(build_row(profile))
+
+        return response
     
     @action(detail=False, methods=['get', 'patch'], url_path='me')
     def me(self, request):
