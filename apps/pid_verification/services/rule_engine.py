@@ -722,6 +722,12 @@ def _check_valve_line_size_mismatch_fallback(raw_text: str, line_sizes: List[Dic
             return f'{int(v)}"'
         return f'{v}"'
 
+    def _size_value(s: str) -> float:
+        try:
+            return float(s.replace('"', '').strip())
+        except Exception:
+            return 0.0
+
     # Prefer extracted line-size annotations for line side of the comparison.
     drawing_line_sizes = []
     for ls in line_sizes:
@@ -786,12 +792,6 @@ def _check_valve_line_size_mismatch_fallback(raw_text: str, line_sizes: List[Dic
     # If no local valve line comparison was possible, use a conservative
     # fallback that only compares dominant valve candidate vs dominant line size.
     # This remains deterministic but avoids aggressive global min/max blending.
-    def _size_value(s: str) -> float:
-        try:
-            return float(s.replace('"', '').strip())
-        except Exception:
-            return 0.0
-
     valve_size = max(valve_size_candidates, key=_size_value)
     # Guard against synthetic OCR candidates that are not present in extracted
     # diagram line-size annotations (prevents blended false positives).
