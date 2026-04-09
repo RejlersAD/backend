@@ -2249,8 +2249,11 @@ class SystemHealthCheckViewSet(viewsets.ReadOnlyModelViewSet):
 
 # ===========================================================================
 # STANDALONE: User Export View — no ViewSet inheritance, no router dependency
-# GET /api/v1/rbac/users/export/?format=csv   → CSV download
-# GET /api/v1/rbac/users/export/?format=xlsx  → Excel download
+# GET /api/v1/rbac/users/export/?file_format=csv   → CSV download
+# GET /api/v1/rbac/users/export/?file_format=xlsx  → Excel download
+# NOTE: param is 'file_format' (not 'format') to avoid DRF content-negotiation
+#       interception — DRF treats ?format=xxx as a renderer override and raises
+#       Http404 when no renderer matches (e.g. 'csv' is not a registered renderer).
 # ===========================================================================
 class UserExportView(APIView):
     permission_classes = [IsAuthenticated, CanManageUsers]
@@ -2271,7 +2274,10 @@ class UserExportView(APIView):
         from io import BytesIO
         from django.http import HttpResponse
 
-        export_format = request.query_params.get('format', 'csv').lower()
+        # 'file_format' param — intentionally NOT 'format' to avoid DRF content-negotiation
+        # interception: DRF treats ?format=xxx as a renderer format override and raises
+        # Http404 when no renderer with that format exists (e.g. 'csv' has no renderer).
+        export_format = request.query_params.get('file_format', 'csv').lower()
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 
         # Build queryset scoped to the requester's organization (super_admin sees all)
