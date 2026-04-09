@@ -160,14 +160,13 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
             log_and_print(f"[MOV {job_id[:8]}] HMB Vision failed ({e}), using mock data")
             from apps.process_datasheet.mock_extractors import MockHMBExtractor
             hmb_data = MockHMBExtractor().extract_from_pdf(hmb_file_path)
-        
+
         # STEP 2.5: Extract Line List data if provided (optional)
         line_list_data = None
         if linelist_file_path:
             cache.set(f'mov_task_{job_id}_stage', 'Extracting Line List data...', timeout=3600)
             log_and_print(f"📋 [MOV {job_id[:8]}] STEP 2.5: Extracting Line List...")
             try:
-                # Use same Vision extractor for Line List
                 vision_extractor = HMBVisionExtractor()
                 line_list_data = vision_extractor.extract_from_pdf(linelist_file_path)
                 log_and_print(f"✅ [MOV {job_id[:8]}] Line List extracted")
