@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Timeouts
 _TIMEOUT_FAST = 15       # login / health
-_TIMEOUT_SEARCH = 30     # document search (can return large payloads)
+_TIMEOUT_SEARCH = 90     # document/transmittal search (Wrench returns full dataset)
 # Token freshness window – re-login if token older than this
 _TOKEN_MAX_AGE_MINUTES = 55
 
@@ -256,6 +256,12 @@ def search_documents(
     url = f"{search_base}/DocumentSearch/SearchObject"
     logger.info('[Wrench] Searching documents: POST %s (page=%d, size=%d)', url, page, page_size)
     resp = requests.post(url, json=payload, timeout=_TIMEOUT_SEARCH)
+    if resp.status_code == 404:
+        raise RuntimeError(
+            'The Wrench DocumentSearch service was not found at the configured URL '
+            f'({url}). Please configure the "Document Search Service URL" (SVC URL) field '
+            'in the Wrench integration settings with the correct host for your Wrench server.'
+        )
     resp.raise_for_status()
     data = resp.json()
 
@@ -282,6 +288,77 @@ def search_documents(
     }
 
 
+def get_transmittals(
+    cfg: WrenchConfig,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict:
+    """
+    Fetch transmittals via the Wrench SmartProject REST WebAPI.
+    POST <<base_url>>/api/Transmittal/GetTransmittalList
+
+    Note: this Wrench instance returns all records regardless of ROW_COUNT/PAGE_NUMBER,
+    so pagination is applied in-service after receiving the full result set.
+
+    Returns:
+      - 'total': int          – total available records from Wrench
+      - 'transmittals': list  – the requested page slice
+      - 'page': int, 'page_size': int
+      - 'operation_status': int
+    """
+    token = _ensure_token(cfg)
+    url = _api_url(cfg, '/api/Transmittal/GetTransmittalList')
+    # Wrench REST API: flat ALL_CAPS fields, no wrapper object
+    payload = {
+        'TOKEN': token,
+        'SERVER_ID': cfg.server_id,
+        'LOGIN_NAME': cfg.login_name,
+        'ROW_COUNT': page_size,
+        'PAGE_NUMBER': page,
+    }
+    logger.info('[Wrench] Fetching transmittals: POST %s (page=%d, size=%d)', url, page, page_size)
+    resp = requests.post(url, json=payload, timeout=_TIMEOUT_SEARCH)
+    resp.raise_for_status()
+    data = resp.json()
+
+    _refresh_token_from_response(cfg, data)
+
+    # Flatten DataList.TRANSMITTAL_LIST — list-of-lists, each inner list is FieldName/Value pairs
+    raw_list = data.get('DataList', {}).get('TRANSMITTAL_LIST', [])
+    transmittals = []
+    for row in raw_list:
+        item = {}
+        for field in row:
+            name = field.get('FieldName', '')
+            value = field.get('Value')
+            if name:
+                item[name] = value
+        if item:
+            transmittals.append(item)
+
+    total_available = len(transmittals)
+
+    # Apply in-service pagination (API ignores ROW_COUNT on this instance)
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_slice = transmittals[start:end]
+
+    op_status = -1
+    process_details = data.get('ProcessDetails', [{}])
+    if process_details:
+        op_status = process_details[0].get('ProcessStatus', -1)
+
+    return {
+        'total': total_available,
+        'transmittals': page_slice,
+        'page': page,
+        'page_size': page_size,
+        'operation_status': op_status,
+        'error_msg': data.get('ErrorMsg'),
+    }
+
+
 def run_sync(direction: str, entity_type: str, triggered_by, filters: dict = None) -> WrenchSyncLog:
     """
     Perform a data sync between RADAI and Wrench.
@@ -299,7 +376,7 @@ def run_sync(direction: str, entity_type: str, triggered_by, filters: dict = Non
 
     try:
         if direction == 'wrench_to_radai':
-            if entity_type in ('document', 'all', 'doc_search'):
+            if entity_type in ('document', 'doc_search'):
                 result = search_documents(cfg, **(filters or {}))
                 log.records_requested = result['total']
                 log.records_synced = len(result['documents'])
@@ -310,9 +387,30 @@ def run_sync(direction: str, entity_type: str, triggered_by, filters: dict = Non
                     'sample_doc_nos': [d.get('DOC_NO', '') for d in result['documents'][:5]],
                     'operation_status': result.get('operation_status'),
                 }
+            elif entity_type == 'transmittal':
+                result = get_transmittals(cfg, **(filters or {}))
+                log.records_requested = result['total']
+                log.records_synced = len(result['transmittals'])
+                log.records_failed = 0
+                log.sync_details = {
+                    'total_fetched': result['total'],
+                    'sample_transmittals': result['transmittals'][:3],
+                    'operation_status': result.get('operation_status'),
+                }
+            elif entity_type == 'all':
+                # Try transmittals (REST endpoint); documents require SVC URL configuration
+                result = get_transmittals(cfg)
+                log.records_requested = result['total']
+                log.records_synced = len(result['transmittals'])
+                log.records_failed = 0
+                log.sync_details = {
+                    'entity_types_attempted': ['transmittal'],
+                    'transmittals_fetched': result['total'],
+                    'operation_status': result.get('operation_status'),
+                }
             else:
-                # Placeholder for project / transmittal / user sync
-                token = _ensure_token(cfg)
+                # project / user – placeholder
+                _ensure_token(cfg)  # validate connection is alive
                 log.records_requested = 0
                 log.records_synced = 0
                 log.sync_details = {'note': f'Sync for entity_type={entity_type} – implement specific endpoint.'}
