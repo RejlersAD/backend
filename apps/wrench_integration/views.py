@@ -191,14 +191,15 @@ class WrenchSyncViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], url_path='search-documents')
     def search_documents(self, request):
         """
-        Search Wrench documents via the SmartProject SearchObject API.
+        Search Wrench documents.
+        Strategy: try REST GetDocumentList first (same host as transmittals, no SVC URL needed),
+                  fall back to DocumentSearch/SearchObject (requires SVC URL).
 
         Request body (all optional):
           discipline  – filter by discipline code
-          doc_type    – filter by document type
           doc_no      – exact match on DOC_NO
-          date_from   – APPROVED_ON >= this date ('YYYY/MM/DD HH:MM')
-          date_to     – APPROVED_ON <= this date ('YYYY/MM/DD HH:MM')
+          date_from   – APPROVED_ON >= this date ('YYYY/MM/DD HH:MM')  [DocumentSearch only]
+          date_to     – APPROVED_ON <= this date ('YYYY/MM/DD HH:MM')  [DocumentSearch only]
           page        – page number (default 1)
           page_size   – results per page (default 50, max 200)
         """
@@ -209,40 +210,110 @@ class WrenchSyncViewSet(viewsets.ViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        page = int(request.data.get('page', 1))
-        page_size = min(int(request.data.get('page_size', 50)), 200)  # hard cap
+        page      = int(request.data.get('page', 1))
+        page_size = min(int(request.data.get('page_size', 50)), 200)
+        discipline = request.data.get('discipline') or None
+        doc_no     = request.data.get('doc_no') or None
+        date_from  = request.data.get('date_from') or None
+        date_to    = request.data.get('date_to') or None
 
+        # ── Strategy 1: REST GetDocumentList (no SVC URL required) ──────────
+        try:
+            result = wrench_service.get_document_list(
+                cfg,
+                page=page,
+                page_size=page_size,
+                discipline=discipline,
+                doc_no=doc_no,
+            )
+            result['source'] = 'rest'
+            return Response(result, status=status.HTTP_200_OK)
+        except Exception as rest_exc:
+            logger.info('[Wrench] REST document list failed (%s), trying DocumentSearch', rest_exc)
+
+        # ── Strategy 2: DocumentSearch/SearchObject (requires SVC URL) ──────
         try:
             result = wrench_service.search_documents(
                 cfg,
                 page=page,
                 page_size=page_size,
-                discipline=request.data.get('discipline') or None,
-                doc_type=request.data.get('doc_type') or None,
-                date_from=request.data.get('date_from') or None,
-                date_to=request.data.get('date_to') or None,
-                doc_no=request.data.get('doc_no') or None,
+                discipline=discipline,
+                date_from=date_from,
+                date_to=date_to,
+                doc_no=doc_no,
             )
+            result['source'] = 'document_search'
+            return Response(result, status=status.HTTP_200_OK)
         except RuntimeError as exc:
             return Response({'detail': str(exc)}, status=status.HTTP_424_FAILED_DEPENDENCY)
         except http_lib.exceptions.ConnectionError:
-            return Response(
-                {'detail': 'Unable to reach the Wrench server.'},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+            return Response({'detail': 'Unable to reach the Wrench server.'}, status=status.HTTP_502_BAD_GATEWAY)
         except http_lib.exceptions.HTTPError as exc:
-            return Response(
-                {'detail': f'Wrench returned HTTP {exc.response.status_code}.'},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+            return Response({'detail': f'Wrench returned HTTP {exc.response.status_code}.'}, status=status.HTTP_502_BAD_GATEWAY)
         except Exception as exc:
             logger.error('[Wrench] Document search failed: %s', exc, exc_info=True)
+            return Response({'detail': 'Document search failed. Check server logs.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'], url_path='document-choices')
+    def document_choices(self, request):
+        """
+        Return unique discipline codes and document numbers drawn from a sample search.
+        Used to populate dropdowns in the Document Search UI.
+
+        GET /api/v1/wrench/sync/document-choices/
+        Response: { disciplines: [...], doc_numbers: [...] }
+        """
+        # Soft-coded sample size — large enough to cover most project disciplines
+        _CHOICES_SAMPLE_SIZE = 200
+
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        if not cfg:
             return Response(
-                {'detail': 'Document search failed. Check server logs.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                {'detail': 'No active Wrench configuration.'},
+                status=status.HTTP_404_NOT_FOUND,
             )
 
-        return Response(result, status=status.HTTP_200_OK)
+        # Strategy 1: Try the REST GetDocumentList endpoint (same host as transmittals).
+        # Strategy 2: Fall back to DocumentSearch/SearchObject (needs SVC URL).
+        # Whichever succeeds, extract unique disciplines + doc numbers.
+        result = None
+        svc_url_required = False
+
+        try:
+            result = wrench_service.get_document_list(cfg, page=1, page_size=_CHOICES_SAMPLE_SIZE)
+            logger.info('[Wrench] document-choices: loaded %d docs via REST', result['total'])
+        except Exception as rest_exc:
+            logger.warning('[Wrench] document-choices REST failed (%s), trying DocumentSearch', rest_exc)
+            try:
+                result = wrench_service.search_documents(cfg, page=1, page_size=_CHOICES_SAMPLE_SIZE)
+            except RuntimeError as exc:
+                err_msg = str(exc)
+                svc_url_required = 'DocumentSearch endpoint not found' in err_msg
+                logger.warning('[Wrench] document-choices DocumentSearch also failed: %s', err_msg)
+            except Exception as exc:
+                logger.warning('[Wrench] document-choices unexpected error: %s', exc)
+
+        if result is None:
+            return Response(
+                {'disciplines': [], 'doc_numbers': [], 'svc_url_required': svc_url_required},
+                status=status.HTTP_200_OK,
+            )
+
+        disciplines = sorted({
+            doc.get('DISCIPLINE', '').strip()
+            for doc in result.get('documents', [])
+            if doc.get('DISCIPLINE', '').strip()
+        })
+        doc_numbers = sorted({
+            doc.get('DOC_NO', '').strip()
+            for doc in result.get('documents', [])
+            if doc.get('DOC_NO', '').strip()
+        })
+
+        return Response(
+            {'disciplines': disciplines, 'doc_numbers': doc_numbers, 'svc_url_required': False},
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=False, methods=['get'], url_path='list-transmittals')
     def list_transmittals(self, request):
@@ -282,6 +353,64 @@ class WrenchSyncViewSet(viewsets.ViewSet):
             )
 
         return Response(result, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='trans-documents')
+    def trans_documents(self, request):
+        """
+        Return documents linked to a specific transmittal.
+
+        Strategy (transparent to frontend — first success wins):
+          1. Transmittal-specific REST endpoints  (no SVC URL required)
+          2. Generic Document REST GetDocumentList (no SVC URL required)
+          3. DocumentSearch/SearchObject fallback  (uses SVC URL if configured)
+
+        GET /api/v1/wrench/sync/trans-documents/?order_no=<ORDER_NO>&trans_id=<TRANS_ID>
+        Response: { total, documents: [{DOC_NO, DOC_DESCRIPTION, ...}], source }
+        """
+        # Soft-coded default page size for per-transmittal document fetch
+        _TRANS_DOC_DEFAULT_PAGE_SIZE = 200
+
+        order_no = request.query_params.get('order_no', '').strip()
+        trans_id = request.query_params.get('trans_id', '').strip() or None
+
+        if not order_no:
+            return Response(
+                {'detail': 'order_no query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        if not cfg:
+            return Response(
+                {'detail': 'No active Wrench configuration.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        page      = int(request.query_params.get('page', 1))
+        page_size = min(int(request.query_params.get('page_size', _TRANS_DOC_DEFAULT_PAGE_SIZE)), 500)
+
+        try:
+            result = wrench_service.get_transmittal_documents(
+                cfg,
+                order_no=order_no,
+                trans_id=trans_id,
+                page=page,
+                page_size=page_size,
+            )
+            result['svc_url_required'] = False
+            return Response(result, status=status.HTTP_200_OK)
+        except RuntimeError as exc:
+            logger.warning('[Wrench] trans_documents: all strategies failed for order_no=%s: %s', order_no, exc)
+            return Response(
+                {'detail': str(exc)},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        except Exception as exc:
+            logger.error('[Wrench] trans_documents unexpected error for order_no=%s: %s', order_no, exc, exc_info=True)
+            return Response(
+                {'detail': 'Could not load documents for this transmittal. Check server logs.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class WrenchS3SyncViewSet(viewsets.ViewSet):
