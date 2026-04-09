@@ -74,12 +74,15 @@ class DGSetDatasheetGenerator:
                     )
                 }
 
-            logger.info("[DGSetDatasheet] Analysing with AI…")
-            datasheet_rows = self._extract_datasheet_with_ai(doc_text, project_info)
+            # ── Template-first strategy ────────────────────────────────────────
+            # Always start with the full template (unit + required_data always correct)
+            datasheet_rows = self._get_default_datasheet_template()
 
-            if not datasheet_rows:
-                logger.warning("[DGSetDatasheet] AI returned no data – falling back to template")
-                datasheet_rows = self._get_default_datasheet_template()
+            logger.info("[DGSetDatasheet] Running AI vendor data extraction…")
+            vendor_map = self._extract_vendor_data_with_ai(doc_text, project_info)
+            if vendor_map:
+                merged = self._merge_vendor_data(datasheet_rows, vendor_map)
+                logger.info(f"[DGSetDatasheet] Merged {merged} vendor values into template")
 
             summary = {
                 'total_rows': len(datasheet_rows),
@@ -88,7 +91,7 @@ class DGSetDatasheetGenerator:
                 'missing_fields': sum(1 for r in datasheet_rows if not r.get('vendor_data', '').strip()),
             }
 
-            logger.info(f"[DGSetDatasheet] ✅ Generated {summary['total_rows']} rows")
+            logger.info(f"[DGSetDatasheet] ✅ {summary['total_rows']} rows | {summary['completed_fields']} vendor values filled")
             return {
                 'success': True,
                 'datasheet_rows': datasheet_rows,
@@ -104,10 +107,106 @@ class DGSetDatasheetGenerator:
             return {'success': False, 'error': str(e)}
 
     # ──────────────────────────────────────────────────────────────────────────
-    # AI extraction
+    # AI vendor data extraction + merge helpers
     # ──────────────────────────────────────────────────────────────────────────
-    def _extract_datasheet_with_ai(self, doc_text: str, project_info: Dict = None) -> List[Dict]:
-        """Use GPT-4o to extract DG set datasheet data from a sizing calculation document."""
+
+    def _extract_vendor_data_with_ai(self, doc_text: str, project_info: Dict = None) -> Dict:
+        """
+        Use GPT-4o to extract parameter values from the uploaded document.
+        Returns a dict mapping NORMALIZED_DESCRIPTION_UPPER → extracted_value.
+        """
+        prompt = f"""You are a senior electrical engineer specialising in Emergency Diesel Generator (EDG) sets. Read the following technical document and extract every parameter value you can find.
+
+DOCUMENT:
+{doc_text[:8000]}
+
+TASK:
+Return a JSON object where:
+- Keys   = parameter/field names in UPPERCASE (e.g. "RATED POWER", "ENGINE MANUFACTURER", "RATED VOLTAGE")
+- Values = the extracted value as a string
+
+Focus on: equipment tags, kW/kVA ratings, voltages, currents, speeds (RPM), frequencies, fuel types, cooling types, manufacturers, engine model, alternator model, dimensions, weights, temperatures, quantities.
+
+Rules:
+- Include ONLY fields actually present in the document.
+- Do NOT invent or assume values.
+- Return ONLY a valid JSON object — no explanation, no markdown.
+
+Example:
+{{"RATED POWER": "500", "ENGINE MANUFACTURER": "CUMMINS", "RATED VOLTAGE": "415", "RATED FREQUENCY": "50", "POWER FACTOR": "0.8"}}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are an expert electrical engineer. Extract parameter values from EDG/DG set documents. Return only valid JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+            )
+            ai_response = response.choices[0].message.content.strip()
+            if "```json" in ai_response:
+                ai_response = ai_response.split("```json")[1].split("```")[0]
+            elif "```" in ai_response:
+                ai_response = ai_response.split("```")[1].split("```")[0]
+            vendor_map = json.loads(ai_response.strip())
+            if isinstance(vendor_map, dict):
+                normalized = {k.strip().upper(): str(v).strip() for k, v in vendor_map.items() if v and str(v).strip()}
+                logger.info(f"[DGSetDatasheet] AI extracted {len(normalized)} vendor key-value pairs")
+                return normalized
+            return {}
+        except json.JSONDecodeError as e:
+            logger.error(f"[DGSetDatasheet] Vendor JSON decode error: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"[DGSetDatasheet] Vendor AI extraction error: {e}")
+            return {}
+
+    def _merge_vendor_data(self, template_rows: List[Dict], vendor_map: Dict) -> int:
+        """
+        Merge vendor_map values into template_rows by description matching.
+        Returns count of rows filled.
+        """
+        merged = 0
+        stop_words = {'AND', 'OR', 'OF', 'THE', 'WITH', 'FOR', 'AT', 'IN', 'TO', 'A', 'AN', 'BY', 'ON'}
+        for row in template_rows:
+            if row.get('vendor_data'):
+                continue
+            desc = row.get('description', '').strip().upper()
+            if not desc:
+                continue
+            # 1. Exact match
+            if desc in vendor_map:
+                row['vendor_data'] = vendor_map[desc]
+                merged += 1
+                continue
+            # 2. Containment match
+            matched = False
+            for ai_key, ai_val in vendor_map.items():
+                if not ai_key or not ai_val:
+                    continue
+                if ai_key in desc or desc in ai_key:
+                    row['vendor_data'] = ai_val
+                    merged += 1
+                    matched = True
+                    break
+            if matched:
+                continue
+            # 3. Word-overlap match (≥2 meaningful common words)
+            desc_words = set(desc.split()) - stop_words
+            for ai_key, ai_val in vendor_map.items():
+                if not ai_key or not ai_val:
+                    continue
+                ai_words = set(ai_key.split()) - stop_words
+                if len(desc_words & ai_words) >= 2:
+                    row['vendor_data'] = ai_val
+                    merged += 1
+                    break
+        return merged
+
+    def _LEGACY_extract_datasheet_with_ai(self, doc_text: str, project_info: Dict = None) -> List[Dict]:
+        """LEGACY — kept for reference only. Use _extract_vendor_data_with_ai instead."""
 
         prompt = f"""You are a senior electrical engineer specialising in Emergency Diesel Generator (EDG) sets.
 Analyse the provided EDG Sizing Calculation document and extract comprehensive datasheet information.

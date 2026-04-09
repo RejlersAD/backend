@@ -60,26 +60,23 @@ class TransformerDatasheetGenerator:
             }
         """
         try:
+            # ── Step 1: Always start with the full template ──────────────────────
+            datasheet_rows = self._get_default_datasheet_template()
+
+            # ── Step 2: Extract text from PDF ────────────────────────────────────
             logger.info("[TransformerDatasheet] Extracting text from sizing calculation PDF…")
             doc_text = self.extract_text_from_pdf(pdf_file)
 
-            if not doc_text or len(doc_text) < 20:
-                logger.error(f"[TransformerDatasheet] Insufficient text: {len(doc_text) if doc_text else 0} chars")
-                return {
-                    'success': False,
-                    'error': (
-                        'Could not extract text from the PDF. '
-                        'The file may be image-based or empty. '
-                        'Please provide a text-based transformer sizing calculation document.'
-                    )
-                }
-
-            logger.info("[TransformerDatasheet] Analysing with AI…")
-            datasheet_rows = self._extract_datasheet_with_ai(doc_text, project_info)
-
-            if not datasheet_rows:
-                logger.warning("[TransformerDatasheet] AI returned no data – falling back to template")
-                datasheet_rows = self._get_default_datasheet_template()
+            # ── Step 3: AI vendor data extraction + merge ─────────────────────────
+            if doc_text and len(doc_text) >= 20:
+                logger.info(f"[TransformerDatasheet] {len(doc_text)} chars extracted — running AI vendor extraction…")
+                vendor_map = self._extract_vendor_data_with_ai(doc_text, project_info)
+                if vendor_map:
+                    merged = self._merge_vendor_data(datasheet_rows, vendor_map)
+                    logger.info(f"[TransformerDatasheet] Merged {merged} vendor values into template")
+            else:
+                logger.warning("[TransformerDatasheet] No/insufficient text from PDF — showing template with empty vendor data")
+                doc_text = ""
 
             summary = {
                 'total_rows': len(datasheet_rows),
@@ -88,7 +85,7 @@ class TransformerDatasheetGenerator:
                 'missing_fields': sum(1 for r in datasheet_rows if not r.get('vendor_data', '').strip()),
             }
 
-            logger.info(f"[TransformerDatasheet] ✅ Generated {summary['total_rows']} rows")
+            logger.info(f"[TransformerDatasheet] ✅ {summary['total_rows']} rows | {summary['completed_fields']} vendor values filled")
             return {
                 'success': True,
                 'datasheet_rows': datasheet_rows,
@@ -104,10 +101,107 @@ class TransformerDatasheetGenerator:
             return {'success': False, 'error': str(e)}
 
     # ──────────────────────────────────────────────────────────────────────────
-    # AI extraction
+    # AI vendor data extraction + merge helpers
     # ──────────────────────────────────────────────────────────────────────────
-    def _extract_datasheet_with_ai(self, doc_text: str, project_info: Dict = None) -> List[Dict]:
-        """Use GPT-4o to extract transformer datasheet data from a sizing calculation document."""
+
+    def _extract_vendor_data_with_ai(self, doc_text: str, project_info: Dict = None) -> Dict:
+        """
+        Use GPT-4o to extract parameter values from the uploaded document.
+        Returns a dict mapping NORMALIZED_DESCRIPTION_UPPER → extracted_value.
+        """
+        prompt = f"""You are a senior electrical engineer specialising in power transformers. Read the following technical document and extract every parameter value you can find.
+
+DOCUMENT:
+{doc_text[:8000]}
+
+TASK:
+Return a JSON object where:
+- Keys   = parameter/field names in UPPERCASE (e.g. "TAG NO.", "RATED POWER", "VECTOR GROUP")
+- Values = the extracted value as a string
+
+Focus on: equipment tags, kVA/MVA ratings, voltages, currents, impedances, vector groups, frequencies, cooling types, manufacturers, weights, dimensions, temperatures, efficiency values.
+
+Rules:
+- Include ONLY fields actually present in the document.
+- Do NOT invent or assume values.
+- Return ONLY a valid JSON object — no explanation, no markdown.
+
+Example:
+{{"TAG NO.": "13-BF-0113M", "RATED POWER": "1250", "VECTOR GROUP": "Dy11", "RATED PRIMARY VOLTAGE": "11", "MANUFACTURER": "ABB"}}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are an expert electrical engineer. Extract parameter values from transformer documents. Return only valid JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+            )
+            ai_response = response.choices[0].message.content.strip()
+            if "```json" in ai_response:
+                ai_response = ai_response.split("```json")[1].split("```")[0]
+            elif "```" in ai_response:
+                ai_response = ai_response.split("```")[1].split("```")[0]
+            vendor_map = json.loads(ai_response.strip())
+            if isinstance(vendor_map, dict):
+                normalized = {k.strip().upper(): str(v).strip() for k, v in vendor_map.items() if v and str(v).strip()}
+                logger.info(f"[TransformerDatasheet] AI extracted {len(normalized)} vendor key-value pairs")
+                return normalized
+            return {}
+        except json.JSONDecodeError as e:
+            logger.error(f"[TransformerDatasheet] Vendor JSON decode error: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"[TransformerDatasheet] Vendor AI extraction error: {e}")
+            return {}
+
+    def _merge_vendor_data(self, template_rows: List[Dict], vendor_map: Dict) -> int:
+        """
+        Merge vendor_map values into template_rows by description matching.
+        Returns count of rows filled.
+        """
+        merged = 0
+        stop_words = {'AND', 'OR', 'OF', 'THE', 'WITH', 'FOR', 'AT', 'IN', 'TO', 'A', 'AN', 'BY', 'ON'}
+        for row in template_rows:
+            if row.get('vendor_data'):
+                continue
+            desc = row.get('description', '').strip().upper()
+            if not desc:
+                continue
+            # 1. Exact match
+            if desc in vendor_map:
+                row['vendor_data'] = vendor_map[desc]
+                merged += 1
+                continue
+            # 2. Containment match
+            matched = False
+            for ai_key, ai_val in vendor_map.items():
+                if not ai_key or not ai_val:
+                    continue
+                if ai_key in desc or desc in ai_key:
+                    row['vendor_data'] = ai_val
+                    merged += 1
+                    matched = True
+                    break
+            if matched:
+                continue
+            # 3. Word-overlap match (≥2 meaningful common words)
+            desc_words = set(desc.split()) - stop_words
+            for ai_key, ai_val in vendor_map.items():
+                if not ai_key or not ai_val:
+                    continue
+                ai_words = set(ai_key.split()) - stop_words
+                if len(desc_words & ai_words) >= 2:
+                    row['vendor_data'] = ai_val
+                    merged += 1
+                    break
+        return merged
+
+    def _LEGACY_extract_datasheet_with_ai(self, doc_text: str, project_info: Dict = None) -> List[Dict]:
+        """LEGACY — kept for reference only. Use _extract_vendor_data_with_ai instead."""
+        # (original AI prompt method — not called)
 
         prompt = f"""You are a senior electrical engineer specialising in power and distribution transformers.
 Analyse the provided Transformer Sizing Calculation document and extract comprehensive datasheet information.

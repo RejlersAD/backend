@@ -61,55 +61,46 @@ class SwitchgearDatasheetGenerator:
             }
         """
         try:
-            # Extract text from PDF
+            # ── Step 1: Always start with the full template ──────────────────────
+            # This guarantees unit and required_data are ALWAYS populated.
+            datasheet_rows = self._get_default_datasheet_template()
+
+            # ── Step 2: Extract text from the uploaded PDF ───────────────────────
             logger.info("[SwitchgearDatasheet] Extracting text from SLD PDF...")
-            sld_text = self.extract_text_from_pdf(pdf_file)
-            
-            # More lenient text extraction check - if we have ANY text, try to process it
-            if not sld_text or len(sld_text) < 20:
-                logger.error(f"[SwitchgearDatasheet] Insufficient text: {len(sld_text) if sld_text else 0} chars")
-                return {
-                    'success': False,
-                    'error': 'Could not extract text from PDF. The PDF might be image-based or empty. Please provide a text-based SLD document.'
-                }
-            
-            logger.info(f"[SwitchgearDatasheet] Extracted {len(sld_text)} characters from PDF")
-            
-            # Use AI to extract structured datasheet information
-            logger.info("[SwitchgearDatasheet] Analyzing SLD with AI...")
-            datasheet_rows = self._extract_datasheet_with_ai(sld_text, project_info)
-            
-            if not datasheet_rows:
-                logger.warning("[SwitchgearDatasheet] AI extraction returned no data, using template")
-                # Fall back to template with extracted text hints
-                datasheet_rows = self._get_default_datasheet_template()
-            
-            # Calculate summary statistics
+            doc_text = self.extract_text_from_pdf(pdf_file)
+
+            # ── Step 3: If text available, use AI to extract vendor values ────────
+            if doc_text and len(doc_text) >= 20:
+                logger.info(f"[SwitchgearDatasheet] {len(doc_text)} chars extracted — running AI vendor extraction...")
+                vendor_map = self._extract_vendor_data_with_ai(doc_text, project_info)
+                if vendor_map:
+                    merged = self._merge_vendor_data(datasheet_rows, vendor_map)
+                    logger.info(f"[SwitchgearDatasheet] Merged {merged} vendor values into template")
+            else:
+                logger.warning("[SwitchgearDatasheet] No/insufficient text from PDF — showing template with empty vendor data")
+                doc_text = ""
+
             summary = {
                 'total_rows': len(datasheet_rows),
-                'equipment_count': sum(1 for row in datasheet_rows if row.get('description', '').strip()),
-                'completed_fields': sum(1 for row in datasheet_rows if row.get('vendor_data', '').strip()),
-                'missing_fields': sum(1 for row in datasheet_rows if not row.get('vendor_data', '').strip())
+                'equipment_count': sum(1 for r in datasheet_rows if r.get('description', '').strip()),
+                'completed_fields': sum(1 for r in datasheet_rows if r.get('vendor_data', '').strip()),
+                'missing_fields': sum(1 for r in datasheet_rows if not r.get('vendor_data', '').strip()),
             }
-            
-            logger.info(f"[SwitchgearDatasheet] ✅ Generated {summary['total_rows']} datasheet rows")
-            
+
+            logger.info(f"[SwitchgearDatasheet] ✅ {summary['total_rows']} rows | {summary['completed_fields']} vendor values filled")
             return {
                 'success': True,
                 'datasheet_rows': datasheet_rows,
                 'summary': summary,
                 'extraction_metadata': {
-                    'document_length': len(sld_text),
+                    'document_length': len(doc_text),
                     'project_info': project_info or {}
                 }
             }
-            
+
         except Exception as e:
             logger.error(f"[SwitchgearDatasheet] Error: {e}", exc_info=True)
-            return {
-                'success': False,
-                'error': str(e)
-            }
+            return {'success': False, 'error': str(e)}
     
     def _extract_datasheet_with_ai(self, sld_text: str, project_info: Dict = None) -> List[Dict]:
         """Use AI to extract structured datasheet data from SLD text"""
@@ -172,7 +163,7 @@ Return ONLY the JSON array, no additional text."""
 
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4-turbo-preview",
+                model="gpt-4o",
                 messages=[
                     {"role": "system", "content": "You are an expert electrical engineer specializing in switchgear datasheets. Extract comprehensive equipment data and return only valid JSON."},
                     {"role": "user", "content": extraction_prompt}
@@ -224,6 +215,101 @@ Return ONLY the JSON array, no additional text."""
             logger.error(f"[SwitchgearDatasheet] AI extraction error: {e}")
             return self._get_default_datasheet_template()
     
+    def _extract_vendor_data_with_ai(self, doc_text: str, project_info: Dict = None) -> Dict:
+        """
+        Use GPT-4o to extract parameter values from the uploaded document.
+        Returns a dict mapping NORMALIZED_DESCRIPTION_UPPER → extracted_value.
+        """
+        prompt = f"""You are a senior electrical engineer specialising in MV 11kV Switchgear. Read the following technical document and extract every parameter value you can find.
+
+DOCUMENT:
+{doc_text[:8000]}
+
+TASK:
+Return a JSON object where:
+- Keys   = parameter/field names in UPPERCASE (e.g. "RATED VOLTAGE", "RATED CURRENT", "MANUFACTURER")
+- Values = the extracted value as a string
+
+Focus on: equipment tags, voltages (kV), currents (A), short circuit ratings (kA), frequency (Hz), IP rating, dimensions, weights, temperatures, manufacturer names, circuit breaker type, CT/VT ratios, protection relay type.
+
+Rules:
+- Include ONLY fields actually present in the document.
+- Do NOT invent or assume values.
+- Return ONLY a valid JSON object — no explanation, no markdown.
+
+Example:
+{{"RATED VOLTAGE": "11", "RATED CURRENT": "1000", "MANUFACTURER": "SCHNEIDER", "FREQUENCY": "50", "SHORT CIRCUIT CURRENT": "25"}}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are an expert electrical engineer. Extract parameter values from MV switchgear documents. Return only valid JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+            )
+            ai_response = response.choices[0].message.content.strip()
+            if "```json" in ai_response:
+                ai_response = ai_response.split("```json")[1].split("```")[0]
+            elif "```" in ai_response:
+                ai_response = ai_response.split("```")[1].split("```")[0]
+            vendor_map = json.loads(ai_response.strip())
+            if isinstance(vendor_map, dict):
+                normalized = {k.strip().upper(): str(v).strip() for k, v in vendor_map.items() if v and str(v).strip()}
+                logger.info(f"[SwitchgearDatasheet] AI extracted {len(normalized)} vendor key-value pairs")
+                return normalized
+            return {}
+        except json.JSONDecodeError as e:
+            logger.error(f"[SwitchgearDatasheet] Vendor JSON decode error: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"[SwitchgearDatasheet] AI extraction error: {e}")
+            return {}
+
+    def _merge_vendor_data(self, template_rows: List[Dict], vendor_map: Dict) -> int:
+        """
+        Merge vendor_map values into template_rows by description matching.
+        Returns count of rows filled.
+        """
+        merged = 0
+        stop_words = {'AND', 'OR', 'OF', 'THE', 'WITH', 'FOR', 'AT', 'IN', 'TO', 'A', 'AN', 'BY', 'ON'}
+        for row in template_rows:
+            if row.get('vendor_data'):
+                continue
+            desc = row.get('description', '').strip().upper()
+            if not desc:
+                continue
+            # 1. Exact match
+            if desc in vendor_map:
+                row['vendor_data'] = vendor_map[desc]
+                merged += 1
+                continue
+            # 2. Containment match
+            matched = False
+            for ai_key, ai_val in vendor_map.items():
+                if not ai_key or not ai_val:
+                    continue
+                if ai_key in desc or desc in ai_key:
+                    row['vendor_data'] = ai_val
+                    merged += 1
+                    matched = True
+                    break
+            if matched:
+                continue
+            # 3. Word-overlap match (≥2 meaningful common words)
+            desc_words = set(desc.split()) - stop_words
+            for ai_key, ai_val in vendor_map.items():
+                if not ai_key or not ai_val:
+                    continue
+                ai_words = set(ai_key.upper().split()) - stop_words
+                if len(desc_words & ai_words) >= 2:
+                    row['vendor_data'] = ai_val
+                    merged += 1
+                    break
+        return merged
+
     def _get_default_datasheet_template(self) -> List[Dict]:
         """Return full ADNOC MV 11kV Switchgear datasheet template (6-column)."""
         R = lambda sr, desc, unit="", req="": {
