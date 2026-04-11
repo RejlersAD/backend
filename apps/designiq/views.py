@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Progress is written to /tmp/base_extraction_{task_id}.json so every
 # Gunicorn worker on the same container can read it during polling.
 # ---------------------------------------------------------------------------
-def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, format_type):
+def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, format_type, legend_file_path=None):
     """Spawn a daemon thread that runs P&ID OCR and writes progress to /tmp/."""
     progress_file = f'/tmp/base_extraction_{task_id}.json'
 
@@ -59,6 +59,32 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
             from apps.designiq.pid_ocr_extractor_v2 import PIDLineExtractorV2
             _write('PROGRESS', 5, 'Initializing OCR engine…')
             extractor = PIDLineExtractorV2()
+
+            # Load legend knowledge if a legend file was uploaded
+            service_codes = {}
+            insulation_codes = {}
+            if legend_file_path and os.path.exists(legend_file_path):
+                try:
+                    from apps.pid_verification.services.legend_knowledge import (
+                        extract_text_from_pdf, parse_legend_knowledge,
+                    )
+                    _write('PROGRESS', 10, 'Parsing legend sheet…')
+                    legend_text = extract_text_from_pdf(legend_file_path)
+                    legend_data = parse_legend_knowledge(legend_text)
+                    service_codes = legend_data.get('service_codes', {})
+                    insulation_codes = legend_data.get('insulation_codes', {})
+                    logger.info(
+                        f'[base_extract_thread] legend: {len(service_codes)} service codes, '
+                        f'{len(insulation_codes)} insulation codes'
+                    )
+                except Exception as le:
+                    logger.warning(f'[base_extract_thread] legend parse failed: {le}')
+                finally:
+                    try:
+                        os.unlink(legend_file_path)
+                    except Exception:
+                        pass
+
             _write('PROGRESS', 15, f'Running extraction on {filename}…')
             extracted_lines = extractor.extract_from_pdf(
                 file_path,
@@ -66,22 +92,29 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                 format_type=format_type,
             )
             _write('PROGRESS', 85, f'OCR complete: {len(extracted_lines)} lines found. Formatting…')
-            # Build 8-column output structure with EXPLICIT field mapping
-            # Column order: Original Detection, Fluid Code, Size, Sequence No, PIPR Class, Insulation, From, To
-            # Note: For offshore format, area is parsed internally but NOT exported as a separate column
+            # Build 10-column output structure with EXPLICIT field mapping
+            # Columns: Original Detection, Size, Fluid Code, Fluid Description,
+            #          Sequence No, Piping Spec, Piping Spec Desc, Dept Deviation,
+            #          Insulation, Insulation Description, From, To
             base_data = []
             for line in extracted_lines:
+                fluid = line.get('fluid_code', '')
+                insul = line.get('insulation', '')
+                piping_spec = line.get('piping_spec', line.get('pipr_class', ''))
                 base_data.append({
-                    'original_detection': line.get('original_detection', line.get('line_number', '')),
-                    'fluid_code':         line.get('fluid_code', ''),
-                    'size':               line.get('size', ''),
-                    'sequence_no':        line.get('sequence_no', ''),
-                    'pipr_class':         line.get('pipr_class', ''),
-                    'insulation':         line.get('insulation', ''),
-                    'from':               line.get('from_line', line.get('from_equipment', '')),
-                    'to':                 line.get('to_line',   line.get('to_equipment', '')),
+                    'original_detection':  line.get('original_detection', line.get('line_number', '')),
+                    'size':                line.get('size', ''),
+                    'fluid_code':          fluid,
+                    'fluid_description':   service_codes.get(fluid.upper(), ''),
+                    'sequence_no':         line.get('sequence_no', ''),
+                    'piping_spec':         piping_spec,
+                    'dept_deviation':      line.get('dept_deviation', ''),
+                    'insulation':          insul,
+                    'insulation_desc':     insulation_codes.get(insul.upper(), ''),
+                    'from':                line.get('from_line', line.get('from_equipment', '')),
+                    'to':                  line.get('to_line',   line.get('to_equipment', '')),
                 })
-            logger.info(f'[base_extract_thread] Formatted {len(base_data)} rows with 8 columns (area excluded from export)')
+            logger.info(f'[base_extract_thread] Formatted {len(base_data)} rows with 11 columns')
             if os.path.exists(file_path):
                 try:
                     os.unlink(file_path)
@@ -91,7 +124,7 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                 'success': True,
                 'total_lines': len(base_data),
                 'data': base_data,
-                'columns': 8,
+                'columns': 11,
                 'message': f'Successfully extracted {len(base_data)} lines from {filename}',
             }
             _write('SUCCESS', 100, 'Extraction complete!', result=result)
@@ -1769,13 +1802,25 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             logger.info(f"📍 Format: {format_type}, Include Area: {include_area}")
 
             # ------------------------------------------------------------------
-            # 2. Save to a temporary file (Celery worker needs a path on disk)
+            # 2. Save P&ID to a temporary file (Celery worker needs a path on disk)
             # ------------------------------------------------------------------
             import tempfile
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                 for chunk in pid_file.chunks():
                     tmp_file.write(chunk)
                 tmp_path = tmp_file.name
+
+            # Save legend file if provided
+            legend_tmp_path = None
+            legend_file = request.FILES.get('legend_file')
+            if legend_file:
+                if not legend_file.name.lower().endswith('.pdf'):
+                    return Response({'error': 'Legend file must be a PDF'}, status=status.HTTP_400_BAD_REQUEST)
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as leg_tmp:
+                    for chunk in legend_file.chunks():
+                        leg_tmp.write(chunk)
+                    legend_tmp_path = leg_tmp.name
+                logger.info(f"📋 Legend file: {legend_file.name}")
 
             logger.info(f"💾 Saved to temp file: {tmp_path}")
 
@@ -1857,7 +1902,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 _mode        = 'thread'
                 _run_base_extraction_in_thread(
                     _task_id_str, tmp_path, pid_file.name,
-                    include_area, format_type,
+                    include_area, format_type, legend_tmp_path,
                 )
 
             # ------------------------------------------------------------------

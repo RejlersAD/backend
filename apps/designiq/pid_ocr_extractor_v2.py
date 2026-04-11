@@ -506,25 +506,28 @@ class PIDLineExtractorV2:
                 r'(?:^|\s)(\d{1,2})"?\s*-\s*(\d{2,3})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{4,5})\s*-\s*([A-Za-z0-9]{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
             ]
         else:
-            # WITHOUT AREA PATTERNS (ORIGINAL): SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+            # WITHOUT AREA PATTERNS: SIZE-FLUID-SEQUENCE-PIPING_SPEC(-DEPT_DEV(-INSULATION)?)?
+            # Example: 2"-D-6152-033842-X-N
+            #   group1=size, group2=fluid, group3=sequence(4digits),
+            #   group4=piping_spec(5-6digits), group5=dept_deviation(opt), group6=insulation(opt)
             patterns = [
                 # Pattern 1: Standard with word boundaries (most reliable)
-                r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z0-9]{1,4})(?:\s*-\s*([A-Z0-9]{1,2}))?)?\b',
+
                 # Pattern 2: With optional quote after size
-                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z0-9]{1,4})(?:\s*-\s*([A-Z0-9]{1,2}))?)?\b',
+
                 # Pattern 3: More lenient spacing
-                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
-            
+                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z0-9]{1,4})(?:\s*-+\s*([A-Z0-9]{1,2}))?)?(?:\s|$|[-,.])',
+
                 # Pattern 4: Compact (no spaces at all)
-                r'\b(\d{1,2})-([A-Z]{1,2})-(\d{4})-(\d{5,6})(?:-([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})-([A-Z]{1,2})-(\d{4})-(\d{5,6})(?:-([A-Z0-9]{1,4})(?:-([A-Z0-9]{1,2}))?)?\b',
+
                 # Pattern 5: With flexible separators (space or hyphen)
-                r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z0-9]{1,4})(?:[\s-]+([A-Z0-9]{1,2}))?)?\b',
+
                 # Pattern 6: Case insensitive with word boundaries
-                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z0-9]{1,4})(?:\s*-\s*([A-Za-z0-9]{1,2}))?)?(?=\s|$|-)',
             ]
         
         found_lines = []
@@ -544,6 +547,7 @@ class PIDLineExtractorV2:
                     seq = match.group(4).strip()
                     area = ''
                     insulation = ''
+                    dept_deviation = ''
                 elif format_type == 'offshore':
                     # Offshore: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
                     area = match.group(1).strip()
@@ -552,6 +556,7 @@ class PIDLineExtractorV2:
                     pipr_class = match.group(4).strip()
                     seq = match.group(5).strip()
                     insulation = match.group(6).strip().upper() if match.lastindex >= 6 and match.group(6) else ''
+                    dept_deviation = ''
                 elif include_area:
                     # With area: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
                     size = match.group(1).strip()
@@ -560,14 +565,17 @@ class PIDLineExtractorV2:
                     seq = match.group(4).strip()
                     pipr_class = match.group(5).strip()
                     insulation = match.group(6).strip().upper() if match.lastindex >= 6 and match.group(6) else ''
+                    dept_deviation = ''
                 else:
-                    # Without area: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+                    # Without area: SIZE-FLUID-SEQUENCE-PIPING_SPEC(-DEPT_DEV(-INSULATION)?)?
+                    # Example: 2"-D-6152-033842-X-N
                     size = match.group(1).strip()
                     area = ''
                     fluid = match.group(2).strip().upper()
                     seq = match.group(3).strip()
-                    pipr_class = match.group(4).strip()
-                    insulation = match.group(5).strip().upper() if match.lastindex >= 5 and match.group(5) else ''
+                    pipr_class = match.group(4).strip()  # piping_spec (e.g. 033842)
+                    dept_deviation = match.group(5).strip().upper() if match.lastindex >= 5 and match.group(5) else ''
+                    insulation = match.group(6).strip().upper() if match.lastindex >= 6 and match.group(6) else ''
                 
                 # 🔧 CRITICAL: Normalize all fields - Force O → 0 conversion BEFORE any processing
                 # This eliminates OCR confusion between letter O and digit 0
@@ -625,6 +633,8 @@ class PIDLineExtractorV2:
                         'fluid_code': fluid,
                         'sequence_no': seq,
                         'pipr_class': pipr_class,
+                        'piping_spec': pipr_class,
+                        'dept_deviation': '',
                         'insulation': '',
                         'area': '',
                         'page': page_num,
@@ -674,6 +684,8 @@ class PIDLineExtractorV2:
                         'fluid_code': fluid,
                         'sequence_no': seq,
                         'pipr_class': pipr_class,
+                        'piping_spec': pipr_class,
+                        'dept_deviation': '',
                         'insulation': '',
                         'area': '',
                         'page': page_num,
@@ -764,28 +776,34 @@ class PIDLineExtractorV2:
                     else:
                         line_number = f"{size}\"-{area}-{fluid}-{seq}-{pipr_class}"
                 else:
-                    # Without area format: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+                    # Without area format: SIZE-FLUID-SEQUENCE-PIPING_SPEC(-DEPT_DEV(-INSULATION)?)?
+                    # Example: 2"-D-6152-033842-X-N
+                    parts = [f"{size}-{fluid}-{seq}-{pipr_class}"]
+                    if dept_deviation:
+                        parts.append(dept_deviation)
                     if insulation:
-                        line_number = f"{size}-{fluid}-{seq}-{pipr_class}-{insulation}"
-                    else:
-                        line_number = f"{size}-{fluid}-{seq}-{pipr_class}"
-                
+                        parts.append(insulation)
+                    line_number = '-'.join(parts)
+
                 # 🔧 FINAL NORMALIZATION: Ensure complete O→0 conversion in final line number
                 line_number = self._normalize_ocr_text(line_number)
-                
+
                 # Deduplicate
                 if line_number in seen_lines:
                     continue
                 seen_lines.add(line_number)
-                
+
                 # 🔧 TRIPLE-SAFE: Normalize ALL output fields to guarantee NO 'O' in any field
                 # Create line entry with normalized fields
+                _dept_dev_norm = self._normalize_ocr_text(dept_deviation) if dept_deviation else ''
                 line_entry = {
                     'line_number': self._normalize_ocr_text(line_number),
                     'size': self._normalize_ocr_text(f'{size}"'),
                     'fluid_code': self._normalize_ocr_text(fluid),
                     'sequence_no': self._normalize_ocr_text(seq),
                     'pipr_class': self._normalize_ocr_text(pipr_class),
+                    'piping_spec': self._normalize_ocr_text(pipr_class),  # alias: piping_spec = pipr_class
+                    'dept_deviation': _dept_dev_norm,
                     'insulation': self._normalize_ocr_text(insulation) if insulation else '',
                     'area': self._normalize_ocr_text(area) if (format_type == 'offshore' or include_area) and area else '',
                     'page': page_num,

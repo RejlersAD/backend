@@ -34,6 +34,14 @@ _STANDARD_NPS_INCH = {
     18.0, 20.0, 24.0,
 }
 
+# Soft-coded: occurrence deduplication grid size (% of drawing width / height).
+# OCR reads of the *same physical annotation* within this radius are merged into
+# a single occurrence.  Multi-pass scanning and word-window concatenation often
+# produce 2-3 readings of the same label differing by 1-2 % — using a 3 % grid
+# collapses those into one entry, preventing inflated occurrence counts.
+# Increase to merge more aggressively; decrease for finer spatial precision.
+_OCC_DEDUP_GRID_PCT = 3.0
+
 # Fixed OCR config for deterministic output
 TESSERACT_CONFIGS = [
     '--oem 1 --psm 11',  # Sparse text mode
@@ -615,7 +623,12 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int) -> list:
                 '_seen':       set(),
             }
         entry  = accumulated[norm_key]
-        occ_key = (direction, round(x_pct), round(y_pct))
+        # Use a grid-based dedup key so that OCR reads of the same physical
+        # label within _OCC_DEDUP_GRID_PCT radius are collapsed into one
+        # occurrence.  The stored x_pct/y_pct keep full 2-decimal precision.
+        occ_key = (direction,
+                   round(x_pct / _OCC_DEDUP_GRID_PCT),
+                   round(y_pct / _OCC_DEDUP_GRID_PCT))
         if occ_key not in entry['_seen']:
             entry['_seen'].add(occ_key)
             entry['occurrences'].append({

@@ -52,6 +52,7 @@ Rule catalogue:
            Pattern: "{class} @ {N} bar" — validate piping class handles stated pressure.
 """
 import re
+import math
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
@@ -169,6 +170,29 @@ _LSZ010_MAX_FINDINGS = 10
 # Minimum non-empty suffix fields required to consider an entry checkable.
 # Prevents empty-field entries from creating spurious cross-matches.
 _LSZ010_MIN_SUFFIX_PARTS = 1
+
+# ── LSZ-007 soft-coded knob ──────────────────────────────────────────────────
+# Minimum occurrences of the same designation in a SINGLE orientation before
+# LSZ-007 fires.  Raised from 2 → 3: two occurrences is normal on any pipe that
+# is annotated at both its source and destination connection points on the sheet.
+# Three in the same direction is the first reliable indicator of a copy-paste error.
+_LSZ007_MIN_SAME_DIR_OCCURRENCES = 3
+
+# ── LSZ-007 / LSZ-008 spatial-accuracy guards ────────────────────────────────
+# LSZ-007: minimum spatial spread (any axis, % of drawing) between same-direction
+# occurrences for the finding to be raised.  Below this threshold all occurrences
+# sit within a tight cluster → OCR noise from one physical label read multiple
+# times, NOT a copy-paste error across different pipe sections.
+# Raise to reduce sensitivity; lower to catch smaller gaps.
+_LSZ007_MIN_SPATIAL_SPREAD_PCT = 12.0
+
+# LSZ-008: minimum Euclidean distance (% of drawing) between the nearest H and
+# nearest V occurrence.  Below this distance the tag sits at a single pipe bend
+# (normal P&ID routing where one label straddles the horizontal and vertical
+# segments of the same pipe).  Only flag when the H and V labels are in genuinely
+# different regions of the drawing, suggesting a copy-paste duplication rather
+# than normal pipe routing.
+_LSZ008_MIN_HV_DISTANCE_PCT = 18.0
 
 # ── LSZ-011 soft-coded knobs ─────────────────────────────────────────────────
 # Maximum size-reduction ratio for a single reducer transition.
@@ -983,11 +1007,20 @@ def _check_pipeline_tag_duplicates(extraction: Dict[str, Any]) -> List[RuleFindi
             ))
 
     # LSZ-007 ────────────────────────────────────────────────────────────
-    # Same full designation appearing ≥3 times in the same orientation
+    # Same full designation appearing ≥_LSZ007_MIN_SAME_DIR_OCCURRENCES times
+    # in a single orientation (soft-coded via module-level constant).
     for lt in line_tags:
         for direction in ('H', 'V'):
             same_dir = [o for o in lt.get('occurrences', []) if o['direction'] == direction]
-            if len(same_dir) >= 3:
+            if len(same_dir) >= _LSZ007_MIN_SAME_DIR_OCCURRENCES:
+                # Spatial spread guard: if all same-direction occurrences form a
+                # tight cluster they are OCR noise from the same physical label
+                # read multiple times — not a genuine copy-paste across the sheet.
+                positions = [(o['x_pct'], o['y_pct']) for o in same_dir]
+                x_spread  = max(p[0] for p in positions) - min(p[0] for p in positions)
+                y_spread  = max(p[1] for p in positions) - min(p[1] for p in positions)
+                if max(x_spread, y_spread) < _LSZ007_MIN_SPATIAL_SPREAD_PCT:
+                    continue  # tight cluster → noise, skip
                 dir_label = 'horizontal' if direction == 'H' else 'vertical'
                 coords = '; '.join(
                     f"({o['x_pct']:.1f}%, {o['y_pct']:.1f}%)" for o in same_dir[:3]
@@ -1020,6 +1053,15 @@ def _check_pipeline_tag_duplicates(extraction: Dict[str, Any]) -> List[RuleFindi
         v_occs = [o for o in occs if o['direction'] == 'V' and o.get('x_pct') is not None]
         if not h_occs or not v_occs:
             continue
+        # Distance guard: H+V labels in close proximity indicate a pipe bend
+        # (one label straddles a corner) — completely normal P&ID routing.
+        # Only raise the finding when the H and V occurrences are genuinely far
+        # apart, suggesting the label was placed on a different, unrelated pipe.
+        h_x, h_y = h_occs[0]['x_pct'], h_occs[0]['y_pct']
+        v_x, v_y = v_occs[0]['x_pct'], v_occs[0]['y_pct']
+        hv_dist = math.sqrt((h_x - v_x) ** 2 + (h_y - v_y) ** 2)
+        if hv_dist < _LSZ008_MIN_HV_DISTANCE_PCT:
+            continue  # close H+V → normal pipe bend, not a copy-paste error
         h_coord = f"({h_occs[0]['x_pct']:.1f}%, {h_occs[0]['y_pct']:.1f}%)"
         v_coord = f"({v_occs[0]['x_pct']:.1f}%, {v_occs[0]['y_pct']:.1f}%)"
         tag_text = lt.get('text', '')

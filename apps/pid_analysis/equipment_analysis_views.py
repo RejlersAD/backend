@@ -630,20 +630,20 @@ def _pid_item_to_register_schema(pid_item: dict) -> dict:
         'revision':            '',
         'tag':                 pid_item.get('tag', ''),
         'description':         pid_item.get('description', ''),
-        'design_flowrate':     '',
-        'oper_pressure':       '',
-        'oper_temperature':    '',
-        'design_pressure_min': '',
-        'design_pressure_max': '',
-        'design_temp_min':     '',
-        'design_temp_max':     '',
+        'design_flowrate':     pid_item.get('design_flowrate', ''),
+        'oper_pressure':       pid_item.get('oper_pressure', ''),
+        'oper_temperature':    pid_item.get('oper_temperature', ''),
+        'design_pressure_min': pid_item.get('design_pressure_min', ''),
+        'design_pressure_max': pid_item.get('design_pressure_max', ''),
+        'design_temp_min':     pid_item.get('design_temp_min', ''),
+        'design_temp_max':     pid_item.get('design_temp_max', ''),
         'moc':                 pid_item.get('material_class', ''),
-        'insulation':          '',
-        'dimension_length':    '',
-        'dimension_diameter':  '',
-        'motor_rating':        '',
+        'insulation':          pid_item.get('insulation', ''),
+        'dimension_length':    pid_item.get('dimension_length', ''),
+        'dimension_diameter':  pid_item.get('dimension_diameter', ''),
+        'motor_rating':        pid_item.get('motor_rating', ''),
         'pid_no':              pid_item.get('drawing_ref', ''),
-        'quality_required':    '',
+        'quality_required':    pid_item.get('quality_required', ''),
         'phase':               pid_item.get('service_fluid', ''),
         'remarks':             pid_item.get('process_notes', ''),
         # Backward-compat fields kept for status/results endpoints
@@ -1148,17 +1148,200 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         ))[:3]
         process_notes = ', '.join(note_matches) if note_matches else ''
 
+        # ── Process parameter extraction (P&ID data-bubble / annotation) ──
+        # Uses a narrower context window so values are specific to this tag.
+        _pp_ctx_chars  = int(ext_cfg.get('process_param_context_chars', 300))
+        _pp_start      = max(0, m.start() - _pp_ctx_chars)
+        _pp_end        = min(len(text), m.end() + _pp_ctx_chars)
+        _pp_ctx        = text[_pp_start:_pp_end].upper()
+
+        # Soft-coded regex patterns (all read from config)
+        _press_val_pat  = ext_cfg.get('pressure_value_pattern',
+                           r'(-?\d+(?:\.\d+)?)\s*(PSIG|PSIA|PSI|barg|bara|kPag|MPa|bar)\b')
+        _temp_val_pat   = ext_cfg.get('temperature_value_pattern',
+                           r'(-?\d+(?:\.\d+)?)\s*(?:°\s*[FC]|DEG\.?\s*[FC]|DEGF|DEGC)')
+        _flow_lbl_pat   = ext_cfg.get('flowrate_label_pattern',
+                           r'(?:Q\s*[:=]|FLOW\s*RATE|FLOWRATE|CAPACITY|DESIGN\s*FLOW|DUTY)\s*[:=/(]?')
+        _flow_val_pat   = ext_cfg.get('flowrate_value_pattern',
+                           r'(\d+(?:[,.]\d+)?)\s*(M3/H|M3/HR|NM3/H|NM3/HR|SM3/D|MMSCFD|BBL/D|BBL/H|BPD|GPM|T/H|KG/H|KG/HR|MW|KW|MMBTU/H)')
+        _flow_bare_pat  = ext_cfg.get('flowrate_bare_value_pattern',
+                           r'(\d+(?:[,.]\d+)?)\s*(M3/H|M3/HR|NM3/H|NM3/HR|SM3/D|MMSCFD|BBL/D|GPM|T/H|KG/H|MW|KW|MMBTU/H)')
+        _flow_ctx_chars = int(ext_cfg.get('flowrate_context_chars', 500))
+        _op_press_lbl   = ext_cfg.get('oper_pressure_label_pattern',
+                           r'(?:OPER(?:ATING)?|OP\.?)\s*PRESS(?:URE)?\s*[:=/(]')
+        _des_press_lbl  = ext_cfg.get('design_pressure_label_pattern',
+                           r'(?:DES(?:IGN)?|SET)\s*PRESS(?:URE)?\s*[:=/(]')
+        _op_temp_lbl    = ext_cfg.get('oper_temp_label_pattern',
+                           r'(?:OPER(?:ATING)?|OP\.?)\s*TEMP(?:ERATURE)?\s*[:=/(]')
+        _des_temp_lbl   = ext_cfg.get('design_temp_label_pattern',
+                           r'DES(?:IGN)?\s*TEMP(?:ERATURE)?\s*[:=/(]')
+        _ins_codes      = [c.upper() for c in ext_cfg.get('insulation_codes',
+                           ['HOT', 'COLD', 'PERS', 'HT', 'CT', 'TRACED', 'EHT', 'BARE', 'ACOUSTIC'])]
+        _dim_len_lbl    = ext_cfg.get('dimension_length_label_pattern',
+                           r'(?:LENGTH|HEIGHT|TL[-/]TL|TAN[-/]TAN|LONG|T/T)\s*[:=]?')
+        _dim_dia_lbl    = ext_cfg.get('dimension_diameter_label_pattern',
+                           r'(?:DIA(?:METER)?|O\.?D\.?|BORE|I\.?D\.?|NB|DN)\s*[:=]?')
+        _dim_val_pat    = ext_cfg.get('dimension_value_pattern', r'(\d+(?:\.\d+)?)\s*(mm|M)?')
+        _mtr_pat        = ext_cfg.get('motor_rating_pattern',
+                           r'(?:MOTOR|DRIVER|RATED\s*POWER|INSTALLED\s*POWER)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(kW|KW|HP|BHP|KVA)\b')
+        _mtr_bare_pat   = ext_cfg.get('motor_rating_bare_pattern', r'(\d+(?:\.\d+)?)\s*(kW|KW)\b')
+        _qual_pat       = ext_cfg.get('quality_required_pattern',
+                           r'(?:QUALITY|QC|NDE|NDT|INSPECT(?:ION)?)\s*[:=]?\s*([A-D](?:\s+LEVEL)?|LEVEL\s*[A-D]|(?:100%\s*)?(?:RT|MT|UT|PT|VT)(?:[+&,/\s]+(?:RT|MT|UT|PT|VT))*)')
+
+        # ── Oper. Pressure ────────────────────────────────────────────────
+        oper_pressure = ''
+        _op_lbl_m = re.search(_op_press_lbl, _pp_ctx, re.IGNORECASE)
+        if _op_lbl_m:
+            _after_lbl = _pp_ctx[_op_lbl_m.end():]
+            _pv = re.search(_press_val_pat, _after_lbl[:60], re.IGNORECASE)
+            if _pv:
+                oper_pressure = f'{_pv.group(1)} {_pv.group(2)}'
+
+        # ── Design Pressure min / max ─────────────────────────────────────
+        design_pressure_min = ''
+        design_pressure_max = ''
+        _dp_lbl_ms = list(re.finditer(_des_press_lbl, _pp_ctx, re.IGNORECASE))
+        _dp_vals   = []
+        for _dlm in _dp_lbl_ms:
+            _pv = re.search(_press_val_pat, _pp_ctx[_dlm.end():_dlm.end() + 80], re.IGNORECASE)
+            if _pv:
+                _dp_vals.append(float(_pv.group(1)))
+        if _dp_vals:
+            design_pressure_min = str(min(_dp_vals))
+            design_pressure_max = str(max(_dp_vals))
+        elif not oper_pressure:
+            # Fallback: any bare pressure value in narrow context
+            _bare_pv = re.search(_press_val_pat, _pp_ctx, re.IGNORECASE)
+            if _bare_pv:
+                design_pressure_max = f'{_bare_pv.group(1)} {_bare_pv.group(2)}'
+
+        # ── Oper. Temperature ─────────────────────────────────────────────
+        oper_temperature = ''
+        _ot_lbl_m = re.search(_op_temp_lbl, _pp_ctx, re.IGNORECASE)
+        if _ot_lbl_m:
+            _tv = re.search(_temp_val_pat, _pp_ctx[_ot_lbl_m.end():_ot_lbl_m.end() + 60], re.IGNORECASE)
+            if _tv:
+                oper_temperature = f'{_tv.group(1)} °F'
+
+        # ── Design Temp min / max ─────────────────────────────────────────
+        design_temp_min = ''
+        design_temp_max = ''
+        _dt_lbl_ms = list(re.finditer(_des_temp_lbl, _pp_ctx, re.IGNORECASE))
+        _dt_vals   = []
+        for _dtlm in _dt_lbl_ms:
+            _tv = re.search(_temp_val_pat, _pp_ctx[_dtlm.end():_dtlm.end() + 80], re.IGNORECASE)
+            if _tv:
+                _dt_vals.append(float(_tv.group(1)))
+        if _dt_vals:
+            design_temp_min = str(min(_dt_vals))
+            design_temp_max = str(max(_dt_vals))
+
+        # ── Design Flowrate ───────────────────────────────────────────────
+        # Use a wider context window than the general _pp_ctx (soft-coded via
+        # flowrate_context_chars) since flow annotations on P&IDs often sit in
+        # connected line labels some distance from the equipment symbol.
+        _fl_start  = max(0, m.start() - _flow_ctx_chars)
+        _fl_end    = min(len(text), m.end() + _flow_ctx_chars)
+        _fl_ctx    = text[_fl_start:_fl_end].upper()
+        design_flowrate = ''
+
+        # Strategy 1: label-based (Q= / FLOW RATE: / CAPACITY: / DUTY: …)
+        _fl_lbl_m = re.search(_flow_lbl_pat, _fl_ctx, re.IGNORECASE)
+        if _fl_lbl_m:
+            _fv = re.search(_flow_val_pat, _fl_ctx[_fl_lbl_m.end():_fl_lbl_m.end() + 80], re.IGNORECASE)
+            if _fv:
+                _val = _fv.group(1).replace(',', '.')
+                design_flowrate = f'{_val} {_fv.group(2).upper()}'
+
+        # Strategy 2: bare unit scan — number immediately followed by a
+        # recognised flow/duty unit, no label required.  Avoids picking up
+        # tag serial numbers by requiring the number > 0 and the unit token
+        # is word-bounded (e.g. '100 M3/H' but not '308-TF').
+        if not design_flowrate:
+            for _bm in re.finditer(_flow_bare_pat, _fl_ctx, re.IGNORECASE):
+                _bval = float(_bm.group(1).replace(',', '.'))
+                if _bval > 0:
+                    design_flowrate = f'{_bm.group(1).replace(",", ".")} {_bm.group(2).upper()}'
+                    break
+
+        # Strategy 3: for heaters / heat-exchangers derive duty from any
+        # kW or MW annotation.  Only applies when no flow-unit was found.
+        if not design_flowrate and prefix in {'E', 'H', 'HT', 'AG', 'CL', 'VR'}:
+            _duty_m = re.search(r'(\d+(?:[,.]\d+)?)\s*(MW|KW)\b', _fl_ctx, re.IGNORECASE)
+            if _duty_m:
+                _dval = float(_duty_m.group(1).replace(',', '.'))
+                if _dval > 0:
+                    design_flowrate = f'{_dval} {_duty_m.group(2).upper()} (Duty)'
+
+        # ── Insulation ────────────────────────────────────────────────────
+        insulation = ''
+        _ins_lbl_m = re.search(
+            r'(?:INSUL(?:ATION)?|INS|TRACE)\s*[:=/]?\s*([A-Z]{2,10})', _pp_ctx, re.IGNORECASE
+        )
+        if _ins_lbl_m and _ins_lbl_m.group(1).upper() in _ins_codes:
+            insulation = _ins_lbl_m.group(1).upper()
+        elif not insulation:
+            for _ic in _ins_codes:
+                if re.search(r'\b' + _ic + r'\b', _pp_ctx):
+                    insulation = _ic
+                    break
+
+        # ── Dimensions ────────────────────────────────────────────────────
+        dimension_length   = ''
+        dimension_diameter = ''
+        _len_lbl_m = re.search(_dim_len_lbl, _pp_ctx, re.IGNORECASE)
+        if _len_lbl_m:
+            _dv = re.search(_dim_val_pat, _pp_ctx[_len_lbl_m.end():_len_lbl_m.end() + 30], re.IGNORECASE)
+            if _dv and float(_dv.group(1)) > 0:
+                _unit = (_dv.group(2) or 'mm').upper()
+                dimension_length = f'{_dv.group(1)} {_unit}'
+        _dia_lbl_m = re.search(_dim_dia_lbl, _pp_ctx, re.IGNORECASE)
+        if _dia_lbl_m:
+            _dv = re.search(_dim_val_pat, _pp_ctx[_dia_lbl_m.end():_dia_lbl_m.end() + 30], re.IGNORECASE)
+            if _dv and float(_dv.group(1)) > 0:
+                _unit = (_dv.group(2) or 'mm').upper()
+                dimension_diameter = f'{_dv.group(1)} {_unit}'
+
+        # ── Motor Rating ──────────────────────────────────────────────────
+        motor_rating = ''
+        _mr_m = re.search(_mtr_pat, _pp_ctx, re.IGNORECASE)
+        if _mr_m:
+            motor_rating = f'{_mr_m.group(1)} {_mr_m.group(2).upper()}'
+        elif not motor_rating:
+            _mr_bare_m = re.search(_mtr_bare_pat, _pp_ctx, re.IGNORECASE)
+            if _mr_bare_m:
+                motor_rating = f'{_mr_bare_m.group(1)} kW'
+
+        # ── Quality Required ─────────────────────────────────────────────
+        quality_required = ''
+        _qr_m = re.search(_qual_pat, _pp_ctx, re.IGNORECASE)
+        if _qr_m:
+            quality_required = _qr_m.group(1).strip().upper()
+
         results.append({
-            'tag':               tag,
-            'type_label':        type_label,
-            'description':       description,
-            'area':              area,
-            'drawing_ref':       drawing_ref,
-            'line_connections':  lc_tokens,
-            'nozzle_connections': nozzle_tokens,
-            'service_fluid':     service_fluid,
-            'material_class':    material_class,
-            'process_notes':     process_notes,
+            'tag':                 tag,
+            'type_label':          type_label,
+            'description':         description,
+            'area':                area,
+            'drawing_ref':         drawing_ref,
+            'line_connections':    lc_tokens,
+            'nozzle_connections':  nozzle_tokens,
+            'service_fluid':       service_fluid,
+            'material_class':      material_class,
+            'process_notes':       process_notes,
+            # Process parameters extracted from data-bubble context
+            'design_flowrate':     design_flowrate,
+            'oper_pressure':       oper_pressure,
+            'oper_temperature':    oper_temperature,
+            'design_pressure_min': design_pressure_min,
+            'design_pressure_max': design_pressure_max,
+            'design_temp_min':     design_temp_min,
+            'design_temp_max':     design_temp_max,
+            'insulation':          insulation,
+            'dimension_length':    dimension_length,
+            'dimension_diameter':  dimension_diameter,
+            'motor_rating':        motor_rating,
+            'quality_required':    quality_required,
         })
 
     results.sort(key=lambda x: x['tag'])
@@ -1236,6 +1419,10 @@ def analyze_pid_equipment(request):
             })
             print(f'[EQ-DIAG] P&ID mode: text_len={len(text)}  raw_items={len(raw_items)}  after_dedup={len(equipment)}', flush=True)
             print(f'[EQ-DIAG] Tags found: {[i["tag"] for i in raw_items]}', flush=True)
+            # Log flowrate extraction results per tag for diagnosis
+            for _ri in raw_items:
+                _fl = _ri.get('design_flowrate', '')
+                print(f'[EQ-DIAG] {_ri["tag"]}  flowrate={repr(_fl)}', flush=True)
             # Log full OCR text search for potential tags to diagnose missing ones
             import re as _re
             _all_candidates = _re.findall(r'\b[A-Z]{1,2}-[0-9]{3,5}[A-Z]?(?:-[A-Z0-9]{1,4})?\b', text)

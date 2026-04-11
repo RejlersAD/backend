@@ -62,7 +62,47 @@
     "_comment_notes": "note_pattern: NOTE/SEE NOTE/HOLD/TBD/TBC/REF.DWG references adjacent to equipment",
     "note_pattern": "(?:(?:SEE\\s+)?NOTE\\s*[-\\s\\(]?[0-9]+[\\)\\.]*|\\bHOLD\\b(?:\\s*[-]?\\s*[0-9]+)?|\\bTBD\\b|\\bTBC\\b|\\bREF[.\\s]+DWG[.\\s]+[A-Z0-9/\\-]+|SEE\\s+(?:DWG|SPEC|DOC)[.]*\\s*[A-Z0-9/\\-]+)",
     "_comment_note_ctx": "note_context_chars: scanner radius for notes/holds",
-    "note_context_chars": 400
+    "note_context_chars": 400,
+
+    "_comment_process_params": "Soft-coded patterns for process parameter extraction from P&ID data bubbles / annotation callouts near each equipment tag. A narrow process_param_context_chars (300 chars) keeps results specific to the tag; widen if parameters appear further away.",
+    "process_param_context_chars": 300,
+
+    "_comment_press": "Pressure value pattern: capture group 1 = numeric value, group 2 = unit. Covers PSIG/PSIA/PSI, barg/bara, kPag, MPa.",
+    "pressure_value_pattern": "(-?\\d+(?:\\.\\d+)?)\\s*(PSIG|PSIA|PSI|barg|bara|kPag|MPag|MPa|bar)\\b",
+    "_comment_press_label": "Label patterns that precede an operating or design pressure value in a data box.",
+    "oper_pressure_label_pattern": "(?:OPER(?:ATING)?|OP\\.?)\\s*PRESS(?:URE)?\\s*[:=/(]",
+    "design_pressure_label_pattern": "(?:DES(?:IGN)?|SET)\\s*(?:/\\s*SET\\s*)?\\s*PRESS(?:URE)?\\s*[:=/(]",
+
+    "_comment_temp": "Temperature value pattern: capture group 1 = numeric value. Matches °F / °C / DEG F / DEG C / DEGF / DEGC. A trailing negative-lookahead on [A-Z] prevents 'FAR', 'CARBON', etc.",
+    "temperature_value_pattern": "(-?\\d+(?:\\.\\d+)?)\\s*(?:°\\s*[FC]|DEG\\.?\\s*[FC]|DEGF|DEGC)",
+    "_comment_temp_label": "Label patterns that precede an operating or design temperature value.",
+    "oper_temp_label_pattern": "(?:OPER(?:ATING)?|OP\\.?)\\s*TEMP(?:ERATURE)?\\s*[:=/(]",
+    "design_temp_label_pattern": "DES(?:IGN)?\\s*TEMP(?:ERATURE)?\\s*[:=/(]",
+
+    "_comment_flow": "Flowrate label + value. Group 1 = number, group 2 = unit. The label pattern also matches Q= and RATED Q= shorthand common on P&IDs.",
+    "flowrate_label_pattern": "(?:Q\\s*(?:RATED|DESIGN|NORMAL|MAX|MIN|NOM)?\\s*[:=]|FLOW\\s*RATE|FLOWRATE|VOL(?:UMETRIC)?\\s*FLOW|CAPACITY|DESIGN\\s*FLOW|RATED\\s*FLOW|NORMAL\\s*FLOW|THROUGHPUT|DESIGN\\s*DUTY|HEAT\\s*DUTY|THERMAL\\s*DUTY|DUTY)\\s*[:=/(]?",
+    "_comment_flow_val": "Flowrate value pattern. Covers volumetric (m3/h, BBL/D, GPM), mass (KG/H, T/H), gas (MMSCFD, NM3/H, MSm3/d) and heat duty (kW, MW, MMBTU/H, MMkcal/H) units.",
+    "flowrate_value_pattern": "(\\d+(?:[,.]\\d+)?)\\s*(M3/H|M3/HR|M\\^3/H|NM3/H|NM3/HR|SM3/H|SM3/D|MSM3/D|MMSCFD|MMSM3/D|MMSCM/D|STD\\s*M3/H|BBL/D|BBL/H|BPD|BOPD|BWPD|GPM|USGPM|IGPM|L/S|L/H|L/MIN|T/H|TONNE/H|MT/H|MTPH|KG/H|KG/HR|TPHR|MW|KW|MMBTU/H|MMKCAL/H|KCAL/H|BTU/H|GJ/H)",
+    "_comment_flow_bare": "flowrate_bare_value_pattern: unit-only scan (no label) — fallback when the label is absent. Captures standalone values with recognised flow units in the equipment context window.",
+    "flowrate_bare_value_pattern": "(\\d+(?:[,.]\\d+)?)\\s*(M3/H|M3/HR|NM3/H|NM3/HR|SM3/D|MMSCFD|BBL/D|BBL/H|BPD|GPM|USGPM|T/H|KG/H|MW|KW|MMBTU/H)",
+    "_comment_flow_ctx": "flowrate_context_chars: wider scan window for flowrate vs the general 300-char process param window, since flow annotations on P&IDs may sit in connected line labels further from the symbol.",
+    "flowrate_context_chars": 500,
+
+    "_comment_insulation": "Insulation code lookup in narrow context. Covers oil-field standard codes. Add project-specific codes to the list.",
+    "insulation_codes": ["HOT", "COLD", "PERS", "PER", "HT", "CT", "PTHW", "PTCW", "TRACED", "EHT", "ELEC", "BARE", "CWP", "PIN", "ACOUSTIC", "CUI", "INS", "INSUL", "FIRE", "FROSTPROOF"],
+
+    "_comment_dimension": "Length/Height and Diameter/Width patterns for equipment sizing from data boxes. Group 1 = value (mm assumed unless unit captured).",
+    "dimension_length_label_pattern": "(?:LENGTH|HEIGHT|LG|L\\.?T\\.?-?L\\.?|TL[-/]TL|TAN[-/]TAN|TL\\s*TO\\s*TL|SEAM[-/]SEAM|S/S|LONG|T/T|SHELL\\s*(?:LENGTH|LG))\\s*[:=]?",
+    "dimension_diameter_label_pattern": "(?:(?:NOMINAL\\s*)?(?:OUTER\\s*)?DIA(?:METER)?|O\\.?D\\.?|BORE|I\\.?D\\.?|SHELL\\s*DIA|VESSEL\\s*DIA|NOMINAL\\s*BORE|NB|DN)\\s*[:=]?",
+    "dimension_value_pattern": "(\\d+(?:\\.\\d+)?)\\s*(mm|M|NB|DN)?",
+
+    "_comment_motor": "Motor rating extraction. Group 1 = kW value. Covers kW, KW, HP converted context, KVA.",
+    "motor_rating_pattern": "(?:MOTOR\\s*(?:RATING|POWER|OUTPUT|INSTALLED)?|DRIVER\\s*(?:RATING|POWER)?|RATED\\s*POWER|INSTALLED\\s*POWER|M\\.?R\\.?|SHAFT\\s*POWER|BRAKE\\s*POWER)\\s*[:=]?\\s*(\\d+(?:\\.\\d+)?)\\s*(kW|KW|HP|BHP|KVA|kVA)\\b",
+    "_comment_motor_bare": "Bare motor-rating scan (no label): captures lone kW/HP values in narrow context when the label is absent (common in minimally annotated P&IDs).",
+    "motor_rating_bare_pattern": "(\\d+(?:\\.\\d+)?)\\s*(kW|KW)\\b",
+
+    "_comment_quality": "Quality / inspection level codes near equipment tag. Group 1 is the quality designation.",
+    "quality_required_pattern": "(?:QUALITY(?:\\s*(?:REQUIRED|REQD|CLASS|LEVEL))?|QC(?:\\s*(?:REQ|REQD|LEVEL|CLASS))?|NDT|NDE(?:\\s*(?:LEVEL|CLASS|REQ))?|INSPECT(?:ION)?(?:\\s*(?:LEVEL|CLASS|REQT))?)\\s*[:=]?\\s*([A-D](?:\\s+LEVEL)?|LEVEL\\s*[A-D]|(?:100%\\s*)?(?:RT|MT|UT|PT|VT|TOFD)(?:[+&,/\\s]+(?:RT|MT|UT|PT|VT|TOFD))*|S[0-4]|P[1-4]|Q[1-4]|DEGREE\\s*[A-D])"
   },
 
   "type_labels": {

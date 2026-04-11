@@ -471,6 +471,29 @@ def get_results(request, document_id):
 
             _file_path = doc.original_file.path
             for _drawing in doc.drawings.all():
+                # Soft-coded: deduplicate any LSZ-007/008 findings that were added
+                # multiple times by previous runs of this backfill block (bug fix).
+                # Runs before the guard checks so it cleans up existing data first.
+                for _dup_rid in ('LSZ-006', 'LSZ-007', 'LSZ-008'):
+                    _all_fids = list(
+                        _PIDVFinding.objects.filter(drawing=_drawing, rule_id=_dup_rid)
+                        .order_by('id').values_list('id', 'evidence')
+                    )
+                    _seen_ev: dict = {}
+                    _stale_ids: list = []
+                    for _fid, _fev in _all_fids:
+                        _k = (_fev or '').strip()
+                        if _k in _seen_ev:
+                            _stale_ids.append(_fid)
+                        else:
+                            _seen_ev[_k] = _fid
+                    if _stale_ids:
+                        _PIDVFinding.objects.filter(id__in=_stale_ids).delete()
+                        logger.info(
+                            '[PIDVResults] backfill dedup: drawing=%s removed %d duplicate %s finding(s)',
+                            _drawing.drawing_id, len(_stale_ids), _dup_rid,
+                        )
+
                 # Skip drawing if LSZ-009 finding already exists (already backfilled)
                 _has_lsz009 = _PIDVFinding.objects.filter(
                     drawing=_drawing, rule_id='LSZ-009'
@@ -482,7 +505,17 @@ def get_results(request, document_id):
                 )
 
                 if _has_lsz009 and _has_cloud_flag:
-                    continue  # already up-to-date
+                    continue  # cloud-truncation backfill already done
+
+                # Soft-coded: skip backfill when duplicate-rule findings already exist
+                # from the main processing pipeline.  Prevents re-adding LSZ-007/008
+                # on every results fetch — which was causing count inflation.
+                _has_dup_findings = _PIDVFinding.objects.filter(
+                    drawing=_drawing,
+                    rule_id__in=['LSZ-006', 'LSZ-007', 'LSZ-008', 'LSZ-009'],
+                ).exists()
+                if _has_dup_findings:
+                    continue  # main pipeline already generated these; skip to avoid duplication
 
                 # Re-extract pipeline tags with the cloud-truncation resolution pass
                 _fresh_line_tags = _extract_pipeline_tags_multi_angle(
