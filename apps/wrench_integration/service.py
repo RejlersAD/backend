@@ -663,6 +663,124 @@ def get_transmittals(
     }
 
 
+# ─── Soft-coded: max transmittals to expand when no direct document endpoint exists ──
+# Increase to search more transmittals (slower); decrease for faster but narrower results.
+_MAX_TRANS_FOR_DOC_EXPANSION  = 15
+# Per-transmittal HTTP timeout (seconds). Short because these fire in parallel.
+_TRANS_EXPAND_CALL_TIMEOUT    = 10
+# Parallel worker cap — avoids overwhelming the Wrench server.
+_TRANS_EXPAND_MAX_WORKERS     = 5
+# Overall parallel-fetch timeout (seconds). Must leave headroom for AI ranking.
+_TRANS_EXPAND_OVERALL_TIMEOUT = 30
+
+
+def get_documents_from_transmittals(
+    cfg: WrenchConfig,
+    *,
+    max_transmittals: int = _MAX_TRANS_FOR_DOC_EXPANSION,
+) -> dict:
+    """
+    Fallback document source for installations where GetDocumentList and
+    DocumentSearch/SearchObject are not exposed.
+
+    Strategy:
+      1. Call GetTransmittalList (1 request, known to work).
+      2. Snapshot the rolling token to avoid database calls from worker threads.
+      3. Parallel-fetch per-transmittal document lists via the Transmittal-scoped
+         REST paths (_TRANS_DOC_REST_PATHS), using the pre-obtained token.
+      4. Deduplicate by DOC_NO and return a flat document list.
+
+    Thread safety: worker threads do NOT touch the database — they read cfg attributes
+    directly and skip token-refresh to stay DB-free.
+
+    Returns { total, documents, source }.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Step 1: fetch transmittals (token is refreshed here — DB call is safe in the main thread)
+    tx_result     = get_transmittals(cfg, page=1, page_size=max_transmittals)
+    transmittals  = tx_result.get('transmittals', [])
+    if not transmittals:
+        return {'total': 0, 'documents': [], 'source': 'transmittals_expanded'}
+
+    order_nos = [t.get('ORDER_NO') for t in transmittals if t.get('ORDER_NO')]
+    if not order_nos:
+        return {'total': 0, 'documents': [], 'source': 'transmittals_expanded'}
+
+    # Step 2: snapshot token for thread use (no DB calls in workers)
+    current_token = cfg.session_token
+    base_url      = cfg.base_url.rstrip('/')
+    server_id     = cfg.server_id
+    login_name    = cfg.login_name
+
+    def _fetch_docs(order_no: str) -> list:
+        """
+        Fetch documents for a single transmittal using the pre-obtained token.
+        Returns a (possibly empty) list of flat document dicts.
+        Does NOT touch the database.
+        """
+        payload = {
+            'TOKEN':       current_token,
+            'SERVER_ID':   server_id,
+            'LOGIN_NAME':  login_name,
+            'ORDER_NO':    order_no,
+            'ROW_COUNT':   200,
+            'PAGE_NUMBER': 1,
+        }
+        for path in _TRANS_DOC_REST_PATHS:
+            url = f"{base_url}/{path.lstrip('/')}"
+            try:
+                resp = requests.post(url, json=payload, timeout=_TRANS_EXPAND_CALL_TIMEOUT)
+                if resp.status_code == 404:
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+
+                raw_list = []
+                for key in _TRANS_DOC_DATA_KEYS:
+                    raw_list = data.get('DataList', {}).get(key, [])
+                    if raw_list:
+                        break
+                if not raw_list:
+                    raw_list = data.get('DocumentList', data.get('ObjectSearchResults', []))
+
+                docs = _flatten_doc_rows(raw_list)
+                if docs is not None:     # accept empty list as valid success
+                    return docs
+            except Exception:
+                continue
+        return []
+
+    # Step 3: fetch in parallel — worker threads are DB-free
+    seen_doc_nos = set()
+    all_docs: list = []
+
+    with ThreadPoolExecutor(max_workers=min(_TRANS_EXPAND_MAX_WORKERS, len(order_nos))) as pool:
+        futures = {pool.submit(_fetch_docs, ono): ono for ono in order_nos}
+        try:
+            for future in as_completed(futures, timeout=_TRANS_EXPAND_OVERALL_TIMEOUT):
+                try:
+                    for doc in future.result():
+                        doc_no = doc.get('DOC_NO', '')
+                        if doc_no and doc_no not in seen_doc_nos:
+                            seen_doc_nos.add(doc_no)
+                            all_docs.append(doc)
+                except Exception:
+                    pass
+        except Exception:
+            pass   # TimeoutError → return whatever we have so far
+
+    logger.info(
+        '[Wrench] get_documents_from_transmittals: expanded %d transmittals → %d unique docs',
+        len(order_nos), len(all_docs),
+    )
+    return {
+        'total':     len(all_docs),
+        'documents': all_docs,
+        'source':    'transmittals_expanded',
+    }
+
+
 def run_sync(direction: str, entity_type: str, triggered_by, filters: dict = None) -> WrenchSyncLog:
     """
     Perform a data sync between RADAI and Wrench.
@@ -736,3 +854,255 @@ def run_sync(direction: str, entity_type: str, triggered_by, filters: dict = Non
 
     return log
 
+
+# ─── P&ID Cross-Reference Search ─────────────────────────────────────────────
+# Soft-coded discipline token → Wrench DISCIPLINE code mapping.
+# Covers common EPC discipline prefixes found in drawing file names.
+_DISCIPLINE_TOKEN_MAP = {
+    'pid':          'PROCESS',
+    'p&id':         'PROCESS',
+    'process':      'PROCESS',
+    'pfd':          'PROCESS',
+    'pfs':          'PROCESS',
+    'pip':          'PIPING',
+    'piping':       'PIPING',
+    'iso':          'PIPING',
+    'ins':          'INSTRUMENT',
+    'instr':        'INSTRUMENT',
+    'instrument':   'INSTRUMENT',
+    'mec':          'MECHANICAL',
+    'mech':         'MECHANICAL',
+    'mechanical':   'MECHANICAL',
+    'elec':         'ELECTRICAL',
+    'ele':          'ELECTRICAL',
+    'electrical':   'ELECTRICAL',
+    'civ':          'CIVIL',
+    'civil':        'CIVIL',
+    'str':          'STRUCTURAL',
+    'structural':   'STRUCTURAL',
+    'hvac':         'HVAC',
+    'fire':         'FIRE',
+    'safety':       'SAFETY',
+}
+
+# Soft-coded: regex patterns to extract an area/system code from a drawing file name.
+# Example: "3500-PL-PID-001-Rev3.pdf" → area="3500", "PID-001" → doc_no hint "001"
+# Tried in order; first match wins.
+_DRAWING_AREA_PATTERNS = [
+    r'^(\d{3,5})',                    # leading digit block: 3500-...
+    r'[-_](\d{3,5})[-_]',            # digit block between separators: ...-001-...
+    r'[A-Z]{1,6}[-_](\d{3,5})',      # prefix-number: PID-001
+]
+
+
+def build_pid_search_query(
+    drawing_name: str = '',
+    tags: list = None,
+    issues: list = None,
+    discipline: str = None,
+    free_text: str = None,
+) -> dict:
+    """
+    Derive a smart Wrench search query from P&ID drawing context signals.
+
+    Extracts:
+    - discipline code from the drawing name tokens or explicit override
+    - doc_no hint from the drawing file name (area code / document number fragment)
+    - term_hints list for filter-strip display in the frontend
+
+    Returns:
+        { discipline, doc_no, area_code, term_hints }
+    """
+    import re as _re
+    tags   = tags   or []
+    issues = issues or []
+
+    # ── Discipline inference from drawing file name ────────────────────────────
+    inferred_discipline = discipline
+    if not inferred_discipline:
+        name_lower = drawing_name.lower()
+        for token, disc in _DISCIPLINE_TOKEN_MAP.items():
+            if token in name_lower:
+                inferred_discipline = disc
+                break
+
+    # ── Doc-no hint extraction from drawing file name ─────────────────────────
+    doc_no_hint = None
+    if free_text:
+        doc_no_hint = free_text
+    else:
+        base = drawing_name.rsplit('.', 1)[0]   # strip file extension
+        for pat in _DRAWING_AREA_PATTERNS:
+            m = _re.search(pat, base, _re.IGNORECASE)
+            if m:
+                doc_no_hint = m.group(1)
+                break
+
+    # ── Issue category summary (top 5 by frequency) ───────────────────────────
+    cat_counts: dict = {}
+    for iss in issues:
+        c = iss.get('category', 'general')
+        cat_counts[c] = cat_counts.get(c, 0) + 1
+    top_categories = sorted(cat_counts.items(), key=lambda x: -x[1])[:5]
+
+    return {
+        'discipline':     inferred_discipline,
+        'doc_no':         doc_no_hint,
+        'area_code':      doc_no_hint,
+        'term_hints':     [t for t in (tags or [])[:5]],
+        'top_categories': [c for c, _ in top_categories],
+    }
+
+
+def ai_rank_pid_documents(
+    documents: list,
+    drawing_name: str = '',
+    tags: list = None,
+    issues: list = None,
+    discipline: str = None,
+) -> tuple:
+    """
+    Rank Wrench documents by relevance to the P&ID drawing context.
+
+    Stage 1 (always executed): heuristic keyword scoring
+      - Discipline match:   +40 pts
+      - Process/instr disc: +25 pts
+      - Per matching tag:   +10 pts each (first 10 tags)
+      - Drawing-name token: +5 pts each token ≥ 3 chars
+
+    Stage 2 (requires OPENAI_API_KEY): GPT-4o-mini semantic scoring
+      - Sends compact doc list (≤30 docs) in a single prompt
+      - Returns score (0-100), plain-English reason, match_type per document
+      - Falls back to Stage 1 scores if OpenAI call fails
+
+    Returns:
+        (ranked_documents, ai_powered_bool)
+    Each document dict gains: relevance_score, relevance_reason, match_type
+    """
+    import re as _re
+    tags   = tags   or []
+    issues = issues or []
+
+    if not documents:
+        return documents, False
+
+    # ── Stage 1: heuristic scoring ────────────────────────────────────────────
+    name_tokens = set(
+        t.lower() for t in _re.split(r'[-_.\s]', drawing_name.rsplit('.', 1)[0])
+        if len(t) >= 3
+    )
+    disc_lower = (discipline or '').lower()
+
+    def _heuristic(doc):
+        text = ' '.join([
+            (doc.get('DOC_NO') or ''),
+            (doc.get('DOC_DESCRIPTION') or ''),
+            (doc.get('GENEALOGY_STRING') or ''),
+            (doc.get('WF_TEAM_NAME') or ''),
+        ]).lower()
+        score = 0
+        doc_disc = (doc.get('DISCIPLINE') or '').lower()
+        # Discipline match
+        if disc_lower and disc_lower in doc_disc:
+            score += 40
+        elif any(k in doc_disc for k in ('process', 'instrument', 'piping')):
+            score += 20
+        # Tag overlap
+        for tag in tags[:10]:
+            if tag.lower() in text:
+                score += 10
+        # Drawing name token overlap
+        for tok in name_tokens:
+            if tok in text:
+                score += 5
+        return min(score, 99)
+
+    for doc in documents:
+        doc['relevance_score']  = _heuristic(doc)
+        doc['relevance_reason'] = 'Matched on discipline / document-number keywords'
+        doc['match_type']       = 'keyword'
+
+    # ── Stage 2: OpenAI semantic ranking ──────────────────────────────────────
+    try:
+        from openai import OpenAI
+        import os
+        import json as _json
+
+        api_key = os.environ.get('OPENAI_API_KEY')
+        if not api_key:
+            raise RuntimeError('OPENAI_API_KEY not set — skipping AI ranking')
+
+        client = OpenAI(api_key=api_key)
+
+        # Cap to 30 documents to keep prompt within token limits
+        docs_for_ai = documents[:30]
+        doc_rows = [
+            {
+                'idx':  i,
+                'no':   d.get('DOC_NO', ''),
+                'desc': (d.get('DOC_DESCRIPTION') or '')[:100],
+                'disc': d.get('DISCIPLINE', ''),
+            }
+            for i, d in enumerate(docs_for_ai)
+        ]
+
+        # Build issue category summary
+        cat_counts: dict = {}
+        for iss in issues:
+            c = iss.get('category', 'general')
+            cat_counts[c] = cat_counts.get(c, 0) + 1
+        issue_summary = ', '.join(
+            f"{k}({v})" for k, v in sorted(cat_counts.items(), key=lambda x: -x[1])[:5]
+        ) or 'general'
+
+        system_prompt = (
+            "You are an EPC document classification specialist. "
+            "You assess Wrench DMS document relevance for P&ID cross-reference QC. "
+            "Be precise and concise in your reasons (≤12 words)."
+        )
+        user_prompt = (
+            f"P&ID drawing being verified:\n"
+            f"  File name:   {drawing_name}\n"
+            f"  Discipline:  {discipline or 'PROCESS'}\n"
+            f"  Key tags:    {', '.join(tags[:12])}\n"
+            f"  Finding categories: {issue_summary}\n\n"
+            f"Wrench DMS documents (JSON):\n{_json.dumps(doc_rows)}\n\n"
+            "For EVERY document return a JSON array of objects:\n"
+            '  {"idx":N,"score":0-100,"reason":"≤12 words","type":"pid|datasheet|spec|sld|iso|procedure|vendor|other"}\n'
+            "score 0=irrelevant, 100=directly referenced by this P&ID. "
+            "Return ONLY the JSON array, no markdown."
+        )
+
+        resp = client.chat.completions.create(
+            model='gpt-4o-mini',
+            messages=[
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user',   'content': user_prompt},
+            ],
+            temperature=0,
+            max_tokens=900,
+        )
+        raw = resp.choices[0].message.content.strip()
+        # Strip optional markdown fences
+        if raw.startswith('```'):
+            raw = raw.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
+        rankings = _json.loads(raw)
+
+        for rank in rankings:
+            idx = int(rank.get('idx', -1))
+            if 0 <= idx < len(docs_for_ai):
+                docs_for_ai[idx]['relevance_score']  = max(0, min(100, int(rank.get('score', 0))))
+                docs_for_ai[idx]['relevance_reason']  = rank.get('reason', '')
+                docs_for_ai[idx]['match_type']        = rank.get('type', 'other')
+
+        # Merge AI-scored docs back + sort descending by score
+        remaining = documents[30:]
+        for doc in remaining:
+            doc['match_type'] = 'keyword'   # not AI-ranked
+        combined = sorted(docs_for_ai, key=lambda d: -d.get('relevance_score', 0)) + remaining
+        return combined, True
+
+    except Exception as exc:
+        logger.warning('[Wrench/PID] AI ranking skipped: %s', exc)
+        documents.sort(key=lambda d: -d.get('relevance_score', 0))
+        return documents, False

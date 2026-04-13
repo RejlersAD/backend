@@ -412,6 +412,147 @@ class WrenchSyncViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    @action(detail=False, methods=['post'], url_path='pid-cross-search',
+            permission_classes=[IsAuthenticated])
+    def pid_cross_search(self, request):
+        """
+        AI-powered Wrench DMS search scoped to a P&ID drawing context.
+
+        Uses the drawing name, extracted tags, and finding categories to
+        automatically build smart Wrench queries, then ranks results with
+        GPT-4o-mini (falls back to heuristic scoring when OpenAI unavailable).
+
+        POST /api/v1/wrench/sync/pid-cross-search/
+        Body (all optional):
+          drawing_name  – raw file name of the P&ID  (e.g. "3500-PL-PID-001-Rev3.pdf")
+          tags          – list of tag strings found on the drawing
+          issues        – list of {category, severity} finding summaries
+          discipline    – explicit discipline override (e.g. "PROCESS")
+          free_text     – optional user-typed search query
+          page          – page number (default 1)
+          page_size     – results per page (default 30, max 100)
+
+        Response:
+          { documents, total, ai_powered, query_used }
+        """
+        # Soft-coded: max docs sent to AI for ranking (keeps prompt within token budget)
+        _MAX_AI_RANK_DOCS = 40
+        # Soft-coded: default/max page sizes for this endpoint
+        _DEFAULT_PAGE_SIZE = 30
+        _MAX_PAGE_SIZE     = 100
+
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        if not cfg:
+            return Response(
+                {'detail': 'No active Wrench configuration. Ask an admin to configure the Wrench integration.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        drawing_name = (request.data.get('drawing_name') or '').strip()
+        tags         = request.data.get('tags') or []
+        issues       = request.data.get('issues') or []
+        discipline   = (request.data.get('discipline') or '').strip() or None
+        free_text    = (request.data.get('free_text') or '').strip() or None
+        page         = int(request.data.get('page', 1))
+        page_size    = min(int(request.data.get('page_size', _DEFAULT_PAGE_SIZE)), _MAX_PAGE_SIZE)
+
+        # ── Build smart query context from P&ID signals ────────────────────────
+        query_used = wrench_service.build_pid_search_query(
+            drawing_name=drawing_name,
+            tags=tags,
+            issues=issues,
+            discipline=discipline,
+            free_text=free_text,
+        )
+
+        # ── Fetch documents from Wrench (REST first, SearchObject fallback) ────
+        raw_docs = []
+        total    = 0
+        try:
+            result   = wrench_service.get_document_list(
+                cfg,
+                page=page,
+                page_size=_MAX_AI_RANK_DOCS,   # fetch more so AI can rank effectively
+                discipline=query_used.get('discipline'),
+                doc_no=query_used.get('doc_no'),
+            )
+            raw_docs = result.get('documents', [])
+            total    = result.get('total', len(raw_docs))
+        except Exception as rest_exc:
+            logger.info('[Wrench/PID] REST list failed (%s), trying SearchObject', rest_exc)
+            try:
+                result = wrench_service.search_documents(
+                    cfg,
+                    page=page,
+                    page_size=_MAX_AI_RANK_DOCS,
+                    discipline=query_used.get('discipline'),
+                    doc_no=query_used.get('doc_no'),
+                )
+                raw_docs = result.get('documents', [])
+                total    = result.get('total', len(raw_docs))
+            except (RuntimeError, Exception) as search_exc:
+                # ── Fallback: expand transmittals to collect linked documents ──────────
+                # Triggered when both GetDocumentList (REST) and DocumentSearch/SearchObject
+                # return 404 — common on Wrench installations that expose only the
+                # Transmittal and AccessControl namespaces.
+                logger.info(
+                    '[Wrench/PID] SearchObject unavailable (%s). '
+                    'Attempting transmittal-expansion fallback.', search_exc,
+                )
+                try:
+                    expand_result = wrench_service.get_documents_from_transmittals(cfg)
+                    raw_docs = expand_result.get('documents', [])
+                    total    = expand_result.get('total', len(raw_docs))
+                    logger.info(
+                        '[Wrench/PID] Transmittal expansion yielded %d unique documents.', total,
+                    )
+                except http_lib.exceptions.ConnectionError:
+                    return Response(
+                        {'detail': 'Unable to reach Wrench server.'},
+                        status=status.HTTP_502_BAD_GATEWAY,
+                    )
+                except Exception as expand_exc:
+                    logger.warning('[Wrench/PID] All document sources failed: %s', expand_exc)
+                    # Return a graceful empty result — panel loads without error banner
+                    return Response(
+                        {
+                            'documents':   [],
+                            'total':       0,
+                            'ai_powered':  False,
+                            'query_used':  query_used,
+                            'warning':     (
+                                'No document list endpoint is available on this Wrench '
+                                'installation. Configure a Document Search Service URL in '
+                                'Admin → Wrench → Configuration, or contact your Wrench admin.'
+                            ),
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
+        # ── AI-rank the results by relevance to this P&ID context ─────────────
+        ai_powered = False
+        try:
+            raw_docs, ai_powered = wrench_service.ai_rank_pid_documents(
+                documents=raw_docs[:_MAX_AI_RANK_DOCS],
+                drawing_name=drawing_name,
+                tags=tags[:20],
+                issues=issues[:15],
+                discipline=discipline,
+            )
+        except Exception as ai_exc:
+            logger.warning('[Wrench/PID] AI ranking failed, using heuristic: %s', ai_exc)
+
+        # Apply final page slice after ranking
+        start      = (page - 1) * page_size
+        page_slice = raw_docs[start: start + page_size]
+
+        return Response({
+            'documents':  page_slice,
+            'total':      total,
+            'ai_powered': ai_powered,
+            'query_used': query_used,
+        }, status=status.HTTP_200_OK)
+
 
 class WrenchS3SyncViewSet(viewsets.ViewSet):
     """
