@@ -23,6 +23,7 @@ urlpatterns = [
     # Management
     path('list/',                              views.list_documents,  name='list'),
     path('delete/<str:document_id>/',          views.delete_document, name='delete'),
+    path('reprocess/<str:document_id>/',       views.reprocess_document, name='reprocess'),
 
     # Engineer review — finding overrides
     path('findings/<int:finding_id>/',         views.update_finding,  name='update-finding'),

@@ -397,6 +397,85 @@ def upload_pid(request):
 
 
 # ===========================================================================
+# REPROCESS  (re-run the full quality-check pipeline on an existing document)
+# ===========================================================================
+
+# REPROCESS_ALLOWED_STATUSES: only documents in these states can be re-checked.
+# Prevents accidentally re-queuing a currently-processing document.
+REPROCESS_ALLOWED_STATUSES = {'completed', 'failed', 'legend_pending'}
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def reprocess_document(request, document_id):
+    """
+    POST /api/v1/pid-verification/reprocess/<document_id>/
+
+    Re-enqueues the full P&ID quality-check pipeline for an already-uploaded
+    document — no file upload required.  The original file (local or S3) is
+    reused exactly as-is.
+
+    Returns the same shape as upload_pid so the frontend can reuse its
+    existing status-polling loop.
+    """
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if doc.status not in REPROCESS_ALLOWED_STATUSES:
+        return Response(
+            {"error": f"Document is currently '{doc.status}' — wait for it to finish before re-checking."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    # Reset state so the task pipeline treats this as a fresh run
+    doc.status        = 'uploaded'
+    doc.error_message = ''
+    doc.save(update_fields=['status', 'error_message', 'updated_at'])
+
+    # Enqueue Celery task (with sync-thread fallback if workers unavailable)
+    try:
+        from .tasks import process_pid_document
+        from apps.config.queue_service import RobustQueueService
+
+        def _sync_fallback(doc_id):
+            import threading
+            t = threading.Thread(
+                target=process_pid_document,
+                args=(doc_id,),
+                daemon=True,
+            )
+            t.start()
+
+        RobustQueueService.enqueue(
+            process_pid_document.delay,
+            str(doc.document_id),
+            sync_fallback=_sync_fallback,
+        )
+    except Exception:
+        # Last-resort: fire task directly in a daemon thread
+        import threading
+        from .tasks import process_pid_document
+        t = threading.Thread(
+            target=process_pid_document,
+            args=(str(doc.document_id),),
+            daemon=True,
+        )
+        t.start()
+
+    logger.info("[PIDVReprocess] Queued recheck for document_id=%s user=%s", document_id, request.user)
+
+    return Response(
+        {
+            "document_id": str(doc.document_id),
+            "status":      doc.status,
+            "message":     "Re-check queued — the original file will be re-analysed without re-uploading.",
+            "file_name":   doc.file_name,
+        },
+        status=status.HTTP_202_ACCEPTED,
+    )
+
+
+# ===========================================================================
 # STATUS / RESULTS / EXPORTS / LIST / DELETE
 # ===========================================================================
 
