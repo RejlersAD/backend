@@ -30,6 +30,14 @@ def _report_path(instance, filename):
     return f'pid_verification/projects/{project_slug}/reports/{doc_id}/{filename}'
 
 
+def _legend_upload_path(instance, filename):
+    """Storage path for legend sheet files — scoped to project or 'global'."""
+    project_slug = (
+        str(instance.project.project_id) if instance.project_id else 'global'
+    )
+    return f'pid_verification/projects/{project_slug}/legends/{instance.legend_id}/{filename}'
+
+
 # ---------------------------------------------------------------------------
 # Project  (top-level grouping)
 # ---------------------------------------------------------------------------
@@ -81,10 +89,11 @@ class PIDVDocument(models.Model):
     """Represents a single uploaded file (PDF / image / DWG)."""
 
     class Status(models.TextChoices):
-        UPLOADED   = 'uploaded',   'Uploaded'
-        PROCESSING = 'processing', 'Processing'
-        COMPLETED  = 'completed',  'Completed'
-        FAILED     = 'failed',     'Failed'
+        UPLOADED        = 'uploaded',        'Uploaded'
+        PROCESSING      = 'processing',      'Processing'
+        COMPLETED       = 'completed',       'Completed'
+        FAILED          = 'failed',          'Failed'
+        LEGEND_PENDING  = 'legend_pending',  'Waiting for Legend'
 
     # Primary key
     document_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
@@ -222,3 +231,173 @@ class PIDVFinding(models.Model):
 
     def __str__(self):
         return f'[{self.sl_no}] {self.category}: {self.issue_observed[:60]}'
+
+
+# ---------------------------------------------------------------------------
+# PIDVLegendSheet  (legend sheets uploaded alongside P&IDs)
+# ---------------------------------------------------------------------------
+
+class PIDVLegendSheet(models.Model):
+    """
+    Stores a single legend sheet file and its AI-extracted structured data.
+
+    Extracted sections (all stored in `extracted_data` JSONField):
+      - line_representation     : [{ key, description, line_style }]
+      - line_numbering_piping   : { format, fields: [{ pos, name, example, desc }] }
+      - line_numbering_pipeline : { format, fields: [...] }
+      - abbreviations_process   : [{ abbr, full_name, category }]
+      - inline_equipment        : [{ symbol, description, type }]
+      - service_codes           : { code: description, ... }
+      - insulation_codes        : { code: description, ... }
+      - piping_specs            : { spec_code: description, ... }
+      - instrument_prefixes     : [...]
+      - valve_prefixes          : [...]
+      - raw_sections            : { heading: [rows] }  ← full OCR/AI output
+    """
+
+    class Status(models.TextChoices):
+        PENDING    = 'pending',    'Pending'
+        PROCESSING = 'processing', 'Processing'
+        COMPLETED  = 'completed',  'Completed'
+        FAILED     = 'failed',     'Failed'
+
+    legend_id     = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+
+    # Owning project — nullable so global/unassigned legend sheets are allowed
+    project = models.ForeignKey(
+        PIDVProject,
+        on_delete=models.CASCADE,
+        null=True, blank=True,
+        related_name='legend_sheets',
+    )
+
+    file_name     = models.CharField(max_length=512)
+    original_file = models.FileField(
+        upload_to=_legend_upload_path,
+        max_length=500,
+        null=True, blank=True,
+    )
+    # S3 key or presigned URL — populated after upload
+    s3_path       = models.CharField(max_length=1024, blank=True)
+
+    status        = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    error_message = models.TextField(blank=True)
+
+    # Full structured extraction output from AI pipeline
+    extracted_data = models.JSONField(
+        null=True, blank=True,
+        help_text='Structured legend data extracted by AI (see docstring for schema)',
+    )
+
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='pid_legend_sheets',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pidv_legend_sheets'
+        ordering = ['-created_at']
+        indexes  = [
+            models.Index(fields=['legend_id']),
+            models.Index(fields=['project', 'status']),
+        ]
+
+    def __str__(self):
+        return f'Legend: {self.file_name} [{self.status}]'
+
+
+# ---------------------------------------------------------------------------
+# PIDVInstrumentSymbol  (individual symbols extracted from legend sheets)
+# ---------------------------------------------------------------------------
+
+def _instrument_symbol_upload_path(instance, filename):
+    project_slug = str(instance.project.project_id) if instance.project_id else 'global'
+    return f'pid_verification/projects/{project_slug}/instrument_symbols/{instance.symbol_id}/{filename}'
+
+
+class PIDVInstrumentSymbol(models.Model):
+    """
+    Stores one instrument / valve / equipment symbol extracted from a legend sheet.
+
+    Six standard categories (user-defined in the legend):
+      CONTROL_VALVE      — pneumatic, hydraulic, electric, solenoid actuated valves
+      MANUAL_VALVE       — ball, gate, globe, butterfly, plug, needle, check
+      INSTRUMENT         — ISA 5.1 measurement bubbles / transmitters / indicators
+      INSTRUMENT_TAGGING — tag number format, loop ID scheme
+      EQUIPMENT_NUMBERING— equipment tag format and numbering convention
+      INLINE_EQUIPMENT   — strainers, restrictions, rupture disks, silencers, etc.
+
+    Designed to be fully queryable per-project for cross-checking P&ID drawings.
+    All flexible attributes go in `attributes` JSONField.
+
+    Schema of `attributes` (examples per category):
+      control_valve:      { actuator_type, fail_action, body_type, size_range, cv_material }
+      manual_valve:       { body_type, connection_type, end_connection, size_range, material }
+      instrument:         { variable, function_code, isa_prefix, measurement_range, signal_type }
+      instrument_tagging: { format, example, fields: [{pos, name, description}], numbering_basis }
+      equipment_numbering:{ format, example, fields: [...], sequence_reset_basis }
+      inline_equipment:   { type, connection_type, size, material, rating }
+    """
+
+    # Soft-coded category choices — extend freely, value is stored in DB
+    class Category(models.TextChoices):
+        CONTROL_VALVE       = 'control_valve',       'Control Valves'
+        MANUAL_VALVE        = 'manual_valve',         'Manual Valves'
+        INSTRUMENT          = 'instrument',           'Instruments'
+        INSTRUMENT_TAGGING  = 'instrument_tagging',   'Instrument Tagging'
+        EQUIPMENT_NUMBERING = 'equipment_numbering',  'Equipment Numbering'
+        INLINE_EQUIPMENT    = 'inline_equipment',     'In-Line Equipment'
+
+    class Source(models.TextChoices):
+        AI_EXTRACTION = 'ai_extraction', 'AI Extraction'
+        TEXT_PARSE    = 'text_parse',    'Text Parse'
+        MANUAL        = 'manual',        'Manual Entry'
+
+    symbol_id    = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+
+    project = models.ForeignKey(
+        PIDVProject,
+        on_delete=models.CASCADE,
+        related_name='instrument_symbols',
+    )
+    legend_sheet = models.ForeignKey(
+        PIDVLegendSheet,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='instrument_symbols',
+    )
+
+    symbol_code      = models.CharField(max_length=100, db_index=True, help_text='e.g. HV, FIC, E-100, ZV')
+    description      = models.TextField(help_text='Human-readable description from legend sheet')
+    category         = models.CharField(max_length=30, choices=Category.choices, db_index=True)
+    symbol_type      = models.CharField(max_length=100, blank=True, help_text='e.g. ball_valve, diff_pressure_transmitter')
+    drawing_standard = models.CharField(max_length=100, blank=True, default='ISA 5.1', help_text='e.g. ISA 5.1, IEC 62424')
+
+    # Flexible per-category attributes
+    attributes = models.JSONField(
+        default=dict, blank=True,
+        help_text='Flexible per-category attributes (see docstring for schema)',
+    )
+
+    source = models.CharField(max_length=20, choices=Source.choices, default=Source.AI_EXTRACTION)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pidv_instrument_symbols'
+        ordering = ['category', 'symbol_code']
+        indexes  = [
+            models.Index(fields=['project', 'category']),
+            models.Index(fields=['symbol_id']),
+            models.Index(fields=['symbol_code']),
+        ]
+        unique_together = [('project', 'symbol_code', 'category')]
+
+    def __str__(self):
+        return f'[{self.get_category_display()}] {self.symbol_code} — {self.description[:60]}'

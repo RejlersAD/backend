@@ -25,6 +25,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.core.cache import cache
+from django.db import models
 from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes, parser_classes
@@ -35,7 +36,7 @@ from rest_framework.response import Response
 from apps.rbac.permissions import HasDisciplineAccess
 from apps.core.queue_service import RobustQueueService, QueueUnavailableException
 
-from .models import PIDVProject, PIDVDocument, PIDVFinding
+from .models import PIDVProject, PIDVDocument, PIDVFinding, PIDVLegendSheet
 from .serializers import (
     PIDVProjectSerializer,
     PIDVProjectCreateSerializer,
@@ -799,13 +800,219 @@ def project_legend_build(request, project_id):
                 pass
 
 
+# ===========================================================================
+# LEGEND SHEET API  — upload / list / detail
+# ===========================================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, HasDisciplineAccess])
+@parser_classes([MultiPartParser, FormParser])
+def upload_legend_sheet(request, project_id):
+    """
+    POST /api/v1/pid-verification/projects/<project_id>/legend-sheets/upload/
+
+    Upload one or more legend sheet files (PDF / PNG / JPEG / TIFF).
+    Each file is saved to the configured media/S3 storage and queued for
+    AI extraction via extract_legend_sheet_task.
+
+    Form fields:
+      file  / files — multipart file upload(s)
+    """
+    upload_legend_sheet.module_required = 'pid_verification'
+
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({'error': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    uploaded_files = []
+    if request.FILES.get('file'):
+        uploaded_files.append(request.FILES['file'])
+    uploaded_files.extend(request.FILES.getlist('files'))
+
+    if not uploaded_files:
+        return Response({'error': 'No file uploaded'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Soft-coded: allowed legend file extensions
+    ALLOWED_EXTS = {'.pdf', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp'}
+
+    created_sheets = []
+    for f in uploaded_files:
+        ext = Path(f.name).suffix.lower()
+        if ext not in ALLOWED_EXTS:
+            return Response(
+                {'error': f'Unsupported file type: {ext}. Allowed: {", ".join(ALLOWED_EXTS)}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        sheet = PIDVLegendSheet.objects.create(
+            project      = project,
+            file_name    = f.name,
+            original_file= f,
+            status       = PIDVLegendSheet.Status.PENDING,
+            uploaded_by  = request.user,
+        )
+        created_sheets.append(sheet)
+
+    # Queue extraction tasks — each sheet processed independently
+    from .tasks import extract_legend_sheet_task
+    for sheet in created_sheets:
+        try:
+            extract_legend_sheet_task.delay(str(sheet.legend_id))
+            logger.info('[LegendUpload] Queued extraction for legend_id=%s', sheet.legend_id)
+        except Exception as exc:
+            # Worker unavailable — run synchronously in bg thread
+            import threading
+            threading.Thread(
+                target=extract_legend_sheet_task,
+                args=(str(sheet.legend_id),),
+                daemon=True,
+            ).start()
+            logger.warning('[LegendUpload] Queue unavailable (%s) — running sync thread', exc)
+
+    result = [
+        {
+            'legend_id':  str(s.legend_id),
+            'file_name':  s.file_name,
+            'status':     s.status,
+            'created_at': s.created_at,
+        }
+        for s in created_sheets
+    ]
+    return Response({'uploaded': result}, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def project_legend_sheets(request, project_id):
+    """
+    GET /api/v1/pid-verification/projects/<project_id>/legend-sheets/
+
+    List all legend sheets for a project with their current extraction status
+    and summary of extracted categories.
+    """
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({'error': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    sheets = PIDVLegendSheet.objects.filter(project=project).order_by('-created_at')
+    data = []
+    for s in sheets:
+        # Build category summary so front-end can show badges without the full blob
+        category_counts = {}
+        if s.extracted_data:
+            for cat in (
+                'line_representation', 'line_numbering_piping', 'line_numbering_pipeline',
+                'abbreviations_process', 'inline_equipment', 'service_codes',
+                'insulation_codes', 'piping_specs', 'instrument_prefixes', 'valve_prefixes',
+            ):
+                val = s.extracted_data.get(cat)
+                if isinstance(val, list):
+                    category_counts[cat] = len(val)
+                elif isinstance(val, dict):
+                    category_counts[cat] = len(val)
+                else:
+                    category_counts[cat] = 0
+
+            # pid_symbols is the catch-all field for all P&ID visual symbols
+            pid_sym_val = s.extracted_data.get('pid_symbols')
+            category_counts['pid_symbols'] = len(pid_sym_val) if isinstance(pid_sym_val, list) else 0
+
+        # Count AI-registered instrument symbols (stored in PIDVInstrumentSymbol table)
+        from apps.pid_verification.models import PIDVInstrumentSymbol
+        instrument_symbols_count = PIDVInstrumentSymbol.objects.filter(legend_sheet=s).count()
+
+        total_symbols = sum(category_counts.values()) + instrument_symbols_count
+
+        data.append({
+            'legend_id':              str(s.legend_id),
+            'file_name':              s.file_name,
+            'status':                 s.status,
+            'error_message':          s.error_message or None,
+            'extraction_method':      (s.extracted_data or {}).get('extraction_method'),
+            'category_counts':        category_counts,
+            'instrument_symbols_count': instrument_symbols_count,
+            'total_symbols':          total_symbols,
+            'uploaded_by':            getattr(s.uploaded_by, 'email', None),
+            'created_at':             s.created_at,
+            'updated_at':             s.updated_at,
+        })
+
+    return Response({'legend_sheets': data, 'total': len(data)})
+
+
+@api_view(["GET", "DELETE"])
+@permission_classes([IsAuthenticated])
+def legend_sheet_detail(request, legend_id):
+    """
+    GET    /api/v1/pid-verification/legend-sheets/<legend_id>/
+      — Returns full extracted_data for this sheet.
+
+    DELETE /api/v1/pid-verification/legend-sheets/<legend_id>/
+      — Removes the sheet record.  Does NOT update project legend_knowledge_data
+        since other sheets may still have contributed to it.
+    """
+    try:
+        sheet = PIDVLegendSheet.objects.get(legend_id=legend_id)
+    except PIDVLegendSheet.DoesNotExist:
+        return Response({'error': 'Legend sheet not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    # Ownership: either the uploader or staff
+    user_obj = getattr(request.user, 'user', request.user)
+    if sheet.uploaded_by != request.user and not getattr(user_obj, 'is_staff', False):
+        return Response({'error': 'Not authorised'}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'DELETE':
+        sheet.delete()
+        return Response({'message': 'Legend sheet deleted'})
+
+    # GET — full detail
+    return Response({
+        'legend_id':         str(sheet.legend_id),
+        'file_name':         sheet.file_name,
+        'status':            sheet.status,
+        'error_message':     sheet.error_message or None,
+        'extracted_data':    sheet.extracted_data,
+        'uploaded_by':       getattr(sheet.uploaded_by, 'email', None),
+        'created_at':        sheet.created_at,
+        'updated_at':        sheet.updated_at,
+    })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def retry_legend_extraction(request, legend_id):
+    """
+    POST /api/v1/pid-verification/legend-sheets/<legend_id>/retry/
+
+    Re-queue extraction for a failed or completed sheet.
+    """
+    try:
+        sheet = PIDVLegendSheet.objects.get(legend_id=legend_id)
+    except PIDVLegendSheet.DoesNotExist:
+        return Response({'error': 'Legend sheet not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    user_obj = getattr(request.user, 'user', request.user)
+    if sheet.uploaded_by != request.user and not getattr(user_obj, 'is_staff', False):
+        return Response({'error': 'Not authorised'}, status=status.HTTP_403_FORBIDDEN)
+
+    sheet.status        = PIDVLegendSheet.Status.PENDING
+    sheet.error_message = ''
+    sheet.save(update_fields=['status', 'error_message', 'updated_at'])
+
+    from .tasks import extract_legend_sheet_task
+    try:
+        extract_legend_sheet_task.delay(str(sheet.legend_id))
+    except Exception as exc:
+        import threading
+        threading.Thread(target=extract_legend_sheet_task, args=(str(sheet.legend_id),), daemon=True).start()
+        logger.warning('[LegendRetry] Queue unavailable (%s) — running sync thread', exc)
+
+    return Response({'message': 'Extraction re-queued', 'legend_id': str(sheet.legend_id)})
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def compare_accuracy(request, document_id):
-    """
-    Run defaults-only vs legend-backed extraction comparison on one document,
-    persist comparison JSON and append summary to recognition records.
-    """
     doc = _get_doc_or_404(document_id, request.user)
     if doc is None:
         return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -1143,6 +1350,281 @@ def drawing_image(request, document_id, page_index):
 
 # ===========================================================================
 # Helpers
+# ===========================================================================
+
+# ===========================================================================
+# Instrument Symbol Registry Views
+# ===========================================================================
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def project_instrument_symbols(request, project_id):
+    """
+    GET /api/v1/pid-verification/projects/<project_id>/instrument-symbols/
+
+    Query params:
+      category — filter by one of: control_valve, manual_valve, instrument,
+                  instrument_tagging, equipment_numbering, inline_equipment
+      search   — substring match on symbol_code or description (case-insensitive)
+
+    Returns:
+      { symbols: [...], total: int, category_counts: { cat: count, ... } }
+    """
+    from apps.pid_verification.models import PIDVInstrumentSymbol
+    from apps.pid_verification.services.instrument_registry import get_category_counts
+
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({'error': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    qs = PIDVInstrumentSymbol.objects.filter(project=project)
+
+    category = request.query_params.get('category', '').strip()
+    if category:
+        qs = qs.filter(category=category)
+
+    search = request.query_params.get('search', '').strip()
+    if search:
+        from django.db.models import Q
+        qs = qs.filter(Q(symbol_code__icontains=search) | Q(description__icontains=search))
+
+    symbols = []
+    for sym in qs.select_related('legend_sheet'):
+        symbols.append({
+            'symbol_id':        str(sym.symbol_id),
+            'symbol_code':      sym.symbol_code,
+            'description':      sym.description,
+            'category':         sym.category,
+            'symbol_type':      sym.symbol_type,
+            'drawing_standard': sym.drawing_standard,
+            'attributes':       sym.attributes,
+            'source':           sym.source,
+            'legend_sheet_id':  str(sym.legend_sheet.legend_id) if sym.legend_sheet else None,
+            'created_at':       sym.created_at,
+            'updated_at':       sym.updated_at,
+        })
+
+    return Response({
+        'symbols':         symbols,
+        'total':           len(symbols),
+        'category_counts': get_category_counts(project),
+    })
+
+
+@api_view(["GET", "DELETE"])
+@permission_classes([IsAuthenticated])
+def instrument_symbol_detail(request, symbol_id):
+    """
+    GET    /api/v1/pid-verification/instrument-symbols/<symbol_id>/
+      — Full detail of a single symbol.
+
+    DELETE /api/v1/pid-verification/instrument-symbols/<symbol_id>/
+      — Remove a single symbol record.
+    """
+    from apps.pid_verification.models import PIDVInstrumentSymbol
+
+    try:
+        sym = PIDVInstrumentSymbol.objects.select_related('project', 'legend_sheet').get(symbol_id=symbol_id)
+    except PIDVInstrumentSymbol.DoesNotExist:
+        return Response({'error': 'Symbol not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    # Ownership check: project owner or staff
+    project   = sym.project
+    user      = request.user
+    user_obj  = getattr(user, 'user', user)
+    if project.created_by != user and not getattr(user_obj, 'is_staff', False):
+        return Response({'error': 'Not authorised'}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'DELETE':
+        sym.delete()
+        return Response({'message': 'Symbol deleted'})
+
+    return Response({
+        'symbol_id':        str(sym.symbol_id),
+        'symbol_code':      sym.symbol_code,
+        'description':      sym.description,
+        'category':         sym.category,
+        'symbol_type':      sym.symbol_type,
+        'drawing_standard': sym.drawing_standard,
+        'attributes':       sym.attributes,
+        'source':           sym.source,
+        'project_id':       str(sym.project.project_id),
+        'legend_sheet_id':  str(sym.legend_sheet.legend_id) if sym.legend_sheet else None,
+        'created_at':       sym.created_at,
+        'updated_at':       sym.updated_at,
+    })
+
+
+# ===========================================================================
+# DCS / Instrument Symbol Compliance Analysis
+# ===========================================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def analyze_dcs(request, document_id):
+    """
+    POST /api/v1/pid-verification/analyze-dcs/<document_id>/
+
+    Two-stage AI analysis (Gemini + OpenAI):
+      Stage 1 — Extract 48 instrument symbols from optional legend PDF.
+      Stage 2 — Analyze P&ID drawing against extracted symbols, generate findings.
+
+    Multipart form fields:
+      legend_file  (optional) : PDF legend/instrument-symbols sheet
+      drawing_index (optional): 0-based drawing index to analyze (default: 0)
+      replace_existing (optional): "true" to remove previous DCS findings first
+
+    Returns:
+      {
+        "findings_created": <n>,
+        "symbols_extracted": <n>,
+        "legend_source": "uploaded | default_isa",
+        "findings": [ { category, severity, tag, issue_observed, ... } ]
+      }
+    """
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({'error': 'Document not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if doc.status != PIDVDocument.Status.COMPLETED:
+        return Response(
+            {'error': f'Document not yet processed (status={doc.status}). Run analysis first.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Resolve which drawing to analyze
+    drawing_index  = int(request.data.get('drawing_index', 0))
+    replace_flag   = str(request.data.get('replace_existing', 'false')).lower() == 'true'
+    legend_file    = request.FILES.get('legend_file')
+
+    drawings = list(doc.drawings.order_by('page_index'))
+    if not drawings:
+        return Response({'error': 'No drawings found for this document'}, status=status.HTTP_404_NOT_FOUND)
+
+    if drawing_index >= len(drawings):
+        drawing_index = 0
+    drawing_obj = drawings[drawing_index]
+
+    # Optional: remove previous DCS findings for this drawing only
+    if replace_flag:
+        drawing_obj.findings.filter(rule_id__startswith='DCS-').delete()
+        drawing_obj.findings.filter(rule_id__startswith='BUBBLE-').delete()
+        drawing_obj.findings.filter(rule_id__startswith='ISA-').delete()
+        drawing_obj.findings.filter(rule_id__startswith='LOOP-').delete()
+        drawing_obj.findings.filter(rule_id__startswith='MISSING-').delete()
+        # Also remove source=dcs_analysis (used in evidence field as a flag)
+        drawing_obj.findings.filter(evidence__startswith='[DCS]').delete()
+
+    # Persist legend file to a temp location if uploaded
+    legend_file_path = None
+    if legend_file:
+        try:
+            import tempfile
+            suffix = Path(legend_file.name).suffix.lower() or '.pdf'
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            for chunk in legend_file.chunks():
+                tmp.write(chunk)
+            tmp.close()
+            legend_file_path = tmp.name
+        except Exception as exc:
+            logger.warning('[DCSAnalyze] Failed to save legend tmp file: %s', exc)
+
+    legend_source = 'uploaded' if legend_file_path else 'default_isa'
+
+    # ── Run the two-stage AI analysis ─────────────────────────────────────────
+    try:
+        from .services.dcs_symbol_analyzer import run_dcs_analysis
+        raw_findings = run_dcs_analysis(drawing_obj, legend_file_path=legend_file_path)
+    except Exception as exc:
+        logger.error('[DCSAnalyze] Analysis failed: %s', exc, exc_info=True)
+        return Response({'error': f'Analysis failed: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        # Clean up temp legend file
+        if legend_file_path:
+            try:
+                Path(legend_file_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    if not raw_findings:
+        return Response({
+            'findings_created': 0,
+            'symbols_extracted': 0,
+            'legend_source': legend_source,
+            'findings': [],
+            'message': 'No DCS/instrument findings detected by AI analysis.',
+        })
+
+    # ── Determine next sl_no ──────────────────────────────────────────────────
+    max_sl = drawing_obj.findings.aggregate(m=models.Max('sl_no'))['m'] or 0
+
+    # ── Bulk create findings ──────────────────────────────────────────────────
+    dcs_cat_remap = {
+        'dcs':                 PIDVFinding.Category.TAG,
+        'bubble_symbol':       PIDVFinding.Category.TAG,
+        'isa_function_letter': PIDVFinding.Category.TAG,
+        'loop_consistency':    PIDVFinding.Category.CONNECTIVITY,
+        'missing_instrument':  PIDVFinding.Category.TAG,
+        'tag':                 PIDVFinding.Category.TAG,
+        'connectivity':        PIDVFinding.Category.CONNECTIVITY,
+        'valve':               PIDVFinding.Category.VALVE,
+        'line_size':           PIDVFinding.Category.LINE_SIZE,
+        'notes':               PIDVFinding.Category.NOTES,
+    }
+    sev_remap = {
+        'critical': PIDVFinding.Severity.CRITICAL,
+        'major':    PIDVFinding.Severity.MAJOR,
+        'minor':    PIDVFinding.Severity.MINOR,
+        'info':     PIDVFinding.Severity.INFO,
+    }
+
+    bulk = []
+    for i, f in enumerate(raw_findings, start=1):
+        cat = dcs_cat_remap.get(f.get('category', 'tag'), PIDVFinding.Category.TAG)
+        sev = sev_remap.get(f.get('severity', 'major'), PIDVFinding.Severity.MAJOR)
+        # Mark evidence with [DCS] prefix so we can later filter these findings
+        evidence = f'[DCS] {f.get("evidence", "")}'.strip()[:500]
+        bulk.append(PIDVFinding(
+            drawing=drawing_obj,
+            sl_no=max_sl + i,
+            category=cat,
+            rule_id=f.get('rule_id', 'DCS-000')[:50],
+            issue_observed=f.get('issue_observed', '')[:500],
+            action_required=f.get('action_required', 'Review and update drawing')[:500],
+            evidence=evidence,
+            direction=f.get('direction', 'N/A')[:100],
+            severity=sev,
+            status=PIDVFinding.FindingStatus.OPEN,
+        ))
+
+    PIDVFinding.objects.bulk_create(bulk)
+    logger.info('[DCSAnalyze] Created %d DCS findings for drawing=%s', len(bulk), drawing_obj.drawing_id)
+
+    return Response({
+        'findings_created': len(bulk),
+        'symbols_extracted': len(_ISA_DEFAULT_SYMBOLS_COUNT),
+        'legend_source': legend_source,
+        'findings': [
+            {
+                'sl_no':            max_sl + i + 1,
+                'category':         f.get('category'),
+                'severity':         f.get('severity'),
+                'tag':              f.get('tag'),
+                'issue_observed':   f.get('issue_observed'),
+                'action_required':  f.get('action_required'),
+                'evidence':         f.get('evidence'),
+                'rule_id':          f.get('rule_id'),
+            }
+            for i, f in enumerate(raw_findings)
+        ],
+    })
+
+
+# Soft-coded: count of the built-in ISA default symbol table for reporting
+_ISA_DEFAULT_SYMBOLS_COUNT = list(range(44))   # 44 entries in _ISA_DEFAULT_SYMBOLS
+
+
 # ===========================================================================
 
 def _get_doc_or_404(document_id: str, user):

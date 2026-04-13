@@ -36,9 +36,22 @@ urlpatterns = [
     path('projects/<str:project_id>/legend/',        views.project_legend,       name='project-legend'),
     path('projects/<str:project_id>/legend/build/',  views.project_legend_build, name='project-legend-build'),
 
+    # Legend Sheets — AI-powered upload & extraction
+    path('projects/<str:project_id>/legend-sheets/',          views.project_legend_sheets, name='project-legend-sheets'),
+    path('projects/<str:project_id>/legend-sheets/upload/',   views.upload_legend_sheet,   name='upload-legend-sheet'),
+    path('legend-sheets/<str:legend_id>/',                    views.legend_sheet_detail,   name='legend-sheet-detail'),
+    path('legend-sheets/<str:legend_id>/retry/',              views.retry_legend_extraction, name='retry-legend-extraction'),
+
+    # Instrument Symbol Registry
+    path('projects/<str:project_id>/instrument-symbols/',     views.project_instrument_symbols, name='project-instrument-symbols'),
+    path('instrument-symbols/<str:symbol_id>/',               views.instrument_symbol_detail,   name='instrument-symbol-detail'),
+
     # Tag Naming & Acronym Check
     path('check-naming/<str:document_id>/',    views.check_naming,               name='check-naming'),
 
     # Drawing page image renderer (for frontend overlay)
     path('drawing-image/<str:document_id>/<int:page_index>/', views.drawing_image, name='drawing-image'),
+
+    # DCS / Instrument Symbol Compliance Analysis (AI — Gemini + OpenAI dual-chain)
+    path('analyze-dcs/<str:document_id>/',                    views.analyze_dcs,   name='analyze-dcs'),
 ]
