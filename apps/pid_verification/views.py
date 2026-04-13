@@ -111,16 +111,20 @@ def projects(request):
     return Response(PIDVProjectSerializer(project).data, status=status.HTTP_201_CREATED)
 
 
-@api_view(["PUT", "DELETE"])
+@api_view(["GET", "PUT", "DELETE"])
 @permission_classes([IsAuthenticated])
 def project_detail(request, project_id):
     """
+    GET    -> retrieve a single project by ID.
     PUT    -> update project name / description.
     DELETE -> delete project (documents become project-less, not deleted).
     """
     project = _get_project_or_404(project_id, request.user)
     if project is None:
         return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "GET":
+        return Response(PIDVProjectSerializer(project).data)
 
     if request.method == "PUT":
         serializer = PIDVProjectCreateSerializer(project, data=request.data, partial=True)
