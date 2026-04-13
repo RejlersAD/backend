@@ -225,6 +225,57 @@ _ANN_PRESSURE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── CMP-001…CMP-008 soft-coded knobs ────────────────────────────────────────
+# Keyword sets used by _check_compressor_equipment() to detect compressor tags,
+# intercooler/aftercooler tokens, isolation-valve tokens, check-valve tokens,
+# anti-surge / recycle / hot-gas bypass tokens, relief / blowdown tokens,
+# ESD tokens, temperature measurement tokens, and driver keywords.
+# Extend each set here — no logic changes needed.
+_CMP_EQUIP_CODES = {'K', 'C', 'CM', 'CP', 'CMP'}           # ISA equipment prefix letters for compressors
+_CMP_KEYWORDS    = {                                          # text patterns that identify a compressor block
+    'COMPRESSOR', 'COMP ', 'CENTRIFUGAL COMPRESSOR',
+    'RECIPROCATING COMPRESSOR', 'SCREW COMPRESSOR',
+    'COMPRESSION UNIT', 'GAS COMPRESSOR',
+}
+_CMP_TYPE_KEYWORDS = {                                        # CMP-001: compressor-type tokens
+    'CENTRIFUGAL', 'RECIPROCATING', 'SCREW', 'ROTARY',
+    'AXIAL', 'DIAPHRAGM', 'TURBO', 'PISTON',
+}
+_CMP_COOLER_KEYWORDS = {                                      # CMP-002: intercooler / aftercooler
+    'INTERCOOLER', 'INTER-COOLER', 'AFTERCOOLER', 'AFTER-COOLER',
+    'LUBE OIL COOLER', 'SEAL GAS COOLER',
+}
+_CMP_ISOLATION_KEYWORDS = {'ISOLATION VALVE', 'BLOCK VALVE', 'ISOL', 'BLOCK'}  # CMP-002: isolation valves
+_CMP_TEMP_KEYWORDS      = {'TI', 'TT', 'TE', 'TIC', 'TAH', 'TAL', 'TAHH', 'TALL',
+                            'TEMPERATURE INDICATOR', 'TEMPERATURE TRANSMITTER'}  # CMP-002: temp instruments
+_CMP_STRAINER_KEYWORDS  = {                                   # CMP-003: temporary strainers
+    'TEMPORARY STRAINER', 'TEMP STRAINER', 'START-UP STRAINER',
+    'COMMISSIONING STRAINER', 'CONE STRAINER', 'BASKET STRAINER',
+}
+_CMP_CHECK_VALVE_KEYWORDS = {                                 # CMP-004: check valves
+    'CHECK VALVE', 'CHECK V', 'NRV', 'NON-RETURN VALVE',
+    'NON RETURN VALVE', 'SWING CHECK', 'LIFT CHECK',
+    'DUAL-PLATE CHECK', 'TILTING DISC CHECK',
+}
+_CMP_ANTISURGE_KEYWORDS = {                                   # CMP-005: anti-surge / recycle / hot-gas bypass
+    'ANTI-SURGE', 'ANTISURGE', 'SURGE CONTROL',
+    'RECYCLE', 'RECIRCULATION', 'HOT GAS BYPASS', 'HOT-GAS BYPASS',
+}
+_CMP_RELIEF_KEYWORDS = {                                      # CMP-006: relief and blowdown
+    'RELIEF VALVE', 'PSV', 'PRV', 'PRESSURE SAFETY VALVE',
+    'BLOWDOWN', 'BLOW-DOWN', 'BDV', 'BLOW DOWN VALVE',
+    'RELIEF', 'PRESSURE RELIEF',
+}
+_CMP_ESD_KEYWORDS = {                                         # CMP-007: ESD / shutdown valves
+    'ESD', 'ESDV', 'EMERGENCY SHUTDOWN', 'SHUTDOWN VALVE',
+    'SDV', 'EMERGENCY STOP', 'TRIP VALVE',
+}
+_CMP_DRIVER_KEYWORDS = {                                      # CMP-008: driver identification
+    'GAS TURBINE', 'GT', 'MOTOR', 'ELECTRIC MOTOR',
+    'STEAM TURBINE', 'ENGINE', 'DIESEL ENGINE',
+    'MECHANICAL DRIVE', 'TURBINE DRIVER',
+}
+
 # ── RED-001 soft-coded knobs ─────────────────────────────────────────────────
 # Maximum number of RED-001 findings per drawing (cap to avoid flooding report
 # when the entire drawing uses red as a default annotation color).
@@ -283,6 +334,7 @@ def run_rules(extraction: Dict[str, Any], graph) -> List[RuleFinding]:
     findings.extend(_check_reducers(extraction))
     findings.extend(_check_pressure_annotations(extraction))
     findings.extend(_check_equipment_size_annotations(extraction))
+    findings.extend(_check_compressor_equipment(extraction))
 
     # Sort deterministically: rule_id → issue_observed
     findings.sort(key=lambda f: (f.rule_id, f.issue_observed))
@@ -1843,5 +1895,212 @@ def _check_equipment_size_annotations(extraction: Dict[str, Any]) -> List[RuleFi
                 evidence=m.group(0).strip()[:120],
                 severity='major',
             ))
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# COMPRESSOR EQUIPMENT RULES  (CMP-001 … CMP-008)
+# ---------------------------------------------------------------------------
+
+def _check_compressor_equipment(extraction: Dict[str, Any]) -> List[RuleFinding]:
+    """
+    CMP-001  Verify the type of compressor is shown correctly on the P&ID.
+    CMP-002  Check intercooler/aftercooler connections include isolation valves
+             and temperature measurements.
+    CMP-003  Confirm temporary strainers are provided for start-up and commissioning.
+    CMP-004  Identify check valve(s) installed downstream of the compressor,
+             including their type.
+    CMP-005  Verify anti-surge / recycle / hot-gas bypass arrangements are shown.
+    CMP-006  Identify relief and blowdown requirements.
+    CMP-007  Identify ESD valves on compressor suction and discharge.
+    CMP-008  Verify correct driver is identified (e.g. GT, Motor, Steam Turbine).
+
+    All keyword sets are soft-coded at module level (_CMP_* constants).
+    Add entries to those sets to extend detection without changing this function.
+    """
+    out: List[RuleFinding] = []
+    raw_text = (extraction.get('raw_text', '') or '').upper()
+    tag_positions = extraction.get('tag_positions', {})
+
+    # ── Detect whether this drawing contains compressor equipment ──────────────
+    # Match either a tag-position entry whose prefix is in _CMP_EQUIP_CODES OR
+    # a raw-text keyword match so we also catch drawings without tag extraction.
+    has_compressor = any(
+        any(tag.upper().startswith(code) for code in _CMP_EQUIP_CODES)
+        for tag in tag_positions
+    ) or any(kw in raw_text for kw in _CMP_KEYWORDS)
+
+    if not has_compressor:
+        return out   # No compressor on this drawing — nothing to check
+
+    def _any(keyword_set: set) -> bool:
+        return any(kw in raw_text for kw in keyword_set)
+
+    # ── CMP-001: Compressor type clearly shown ─────────────────────────────────
+    if not _any(_CMP_TYPE_KEYWORDS):
+        out.append(RuleFinding(
+            category='equipment',
+            rule_id='CMP-001',
+            issue_observed=(
+                'A compressor is present on this drawing but no compressor type '
+                '(e.g. Centrifugal, Reciprocating, Screw, Axial) was detected in '
+                'the P&ID annotations or text. The type of compressor must be '
+                'identified on the drawing per project standards.'
+            ),
+            action_required=(
+                'Add the compressor type designation to the equipment tag label or '
+                'adjacent drawing note (e.g. "CENTRIFUGAL COMPRESSOR", '
+                '"RECIPROCATING COMPRESSOR"). Update the equipment list accordingly.'
+            ),
+            severity='major',
+        ))
+
+    # ── CMP-002: Intercooler/Aftercooler with isolation valves + temp measurement ─
+    if _any(_CMP_COOLER_KEYWORDS):
+        missing = []
+        if not _any(_CMP_ISOLATION_KEYWORDS):
+            missing.append('isolation valves')
+        if not _any(_CMP_TEMP_KEYWORDS):
+            missing.append('temperature measurement instruments (TI/TT/TE)')
+        if missing:
+            out.append(RuleFinding(
+                category='equipment',
+                rule_id='CMP-002',
+                issue_observed=(
+                    f'Intercooler/Aftercooler detected but the following items appear '
+                    f'to be missing: {", ".join(missing)}. '
+                    'Intercooler/aftercooler piping must include isolation valves to '
+                    'allow maintenance isolation and temperature instruments to confirm '
+                    'cooling duty is being achieved.'
+                ),
+                action_required=(
+                    'Add isolation (block) valves on the inlet and outlet nozzles of '
+                    'the intercooler/aftercooler. Add temperature indicators or '
+                    'transmitters (TI/TT) on the process outlet to verify cooling '
+                    'performance. Update the instrument index.'
+                ),
+                severity='major',
+            ))
+
+    # ── CMP-003: Temporary strainers for start-up / commissioning ─────────────
+    if not _any(_CMP_STRAINER_KEYWORDS):
+        out.append(RuleFinding(
+            category='equipment',
+            rule_id='CMP-003',
+            issue_observed=(
+                'No temporary strainer provision detected on the compressor suction '
+                'piping. Temporary strainers are required during start-up and '
+                'commissioning to protect compressor internals from construction '
+                'debris and pipework contamination.'
+            ),
+            action_required=(
+                'Add a temporary strainer (cone or basket type) to the compressor '
+                'suction line upstream of the compressor package boundary. Note the '
+                'strainer as "TEMPORARY — REMOVE AFTER COMMISSIONING" with a tie-in '
+                'point or spool provision shown on the P&ID.'
+            ),
+            severity='major',
+        ))
+
+    # ── CMP-004: Check valve(s) downstream of compressor ───────────────────────
+    if not _any(_CMP_CHECK_VALVE_KEYWORDS):
+        out.append(RuleFinding(
+            category='equipment',
+            rule_id='CMP-004',
+            issue_observed=(
+                'No check valve (NRV / non-return valve) was detected on the '
+                'compressor discharge. Check valves are mandatory on compressor '
+                'discharge lines to prevent reverse flow and protect the compressor '
+                'from backpressure during shutdown or trip conditions.'
+            ),
+            action_required=(
+                'Add a check valve (specify type: swing, dual-plate, or lift-check) '
+                'on the compressor discharge line downstream of the discharge '
+                'isolation valve. Confirm the check-valve type with the mechanical '
+                'datasheet and update the line list.'
+            ),
+            severity='critical',
+        ))
+
+    # ── CMP-005: Anti-surge / recycle / hot-gas bypass ────────────────────────
+    if not _any(_CMP_ANTISURGE_KEYWORDS):
+        out.append(RuleFinding(
+            category='equipment',
+            rule_id='CMP-005',
+            issue_observed=(
+                'No anti-surge, recycle, or hot-gas bypass arrangement was detected '
+                'for the compressor. These systems are required to protect the '
+                'compressor from surge conditions during start-up, shutdown, and '
+                'process upsets.'
+            ),
+            action_required=(
+                'Show the anti-surge or recycle line with its control valve (FCV/PCV) '
+                'and the hot-gas bypass arrangement (if applicable) on the P&ID. '
+                'The surge control strategy must be agreed with the process licensor '
+                'and compressor vendor before P&ID issue.'
+            ),
+            severity='major',
+        ))
+
+    # ── CMP-006: Relief and blowdown requirements ──────────────────────────────
+    if not _any(_CMP_RELIEF_KEYWORDS):
+        out.append(RuleFinding(
+            category='equipment',
+            rule_id='CMP-006',
+            issue_observed=(
+                'No relief valve or blowdown provision detected for the compressor. '
+                'Pressure relief protection and blowdown facilities are mandatory '
+                'for compressor packages to comply with pressure safety regulations '
+                '(PED, ASME VIII, local codes).'
+            ),
+            action_required=(
+                'Add relief valve (PSV/PRV) sizing note and blowdown valve (BDV) to '
+                'the compressor discharge piping. Verify the relief valve set pressure '
+                'against the MAWP of the downstream piping and confirm routing to '
+                'the flare / blowdown header.'
+            ),
+            severity='critical',
+        ))
+
+    # ── CMP-007: ESD on suction and discharge ─────────────────────────────────
+    if not _any(_CMP_ESD_KEYWORDS):
+        out.append(RuleFinding(
+            category='equipment',
+            rule_id='CMP-007',
+            issue_observed=(
+                'No Emergency Shutdown Device (ESD/ESDV) or shutdown valve (SDV) '
+                'detected on compressor suction or discharge. ESD valves are required '
+                'subject to compressor configuration to enable emergency isolation '
+                'during process upset or fire/gas detection events.'
+            ),
+            action_required=(
+                'Confirm the ESD philosophy with the safety case / HAZOP action list. '
+                'If ESD valves are required, add SDV/ESDV tags to suction and '
+                'discharge piping and link them to the compressor trip logic in the '
+                'cause-and-effect matrix.'
+            ),
+            severity='major',
+        ))
+
+    # ── CMP-008: Driver identification (GT, Motor, Steam Turbine, etc.) ────────
+    if not _any(_CMP_DRIVER_KEYWORDS):
+        out.append(RuleFinding(
+            category='equipment',
+            rule_id='CMP-008',
+            issue_observed=(
+                'The driver type for the compressor could not be identified in the '
+                'P&ID text. The driver (Gas Turbine, Electric Motor, Steam Turbine, '
+                'etc.) must be clearly labelled on the drawing to define the utility '
+                'requirements and hook-up connections.'
+            ),
+            action_required=(
+                'Add the driver type and tag to the compressor block symbol on the '
+                'P&ID. Where a motor drive is used, show the MCC reference tag. '
+                'Where a gas turbine is used, show the GT tag and associated '
+                'auxiliary connections (fuel gas, lube oil, air intake).'
+            ),
+            severity='major',
+        ))
 
     return out
