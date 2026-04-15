@@ -1,6 +1,7 @@
 """
 P&ID OCR Extractor V2 - Multi-Engine + AI Intelligence
 Uses Tesseract, EasyOCR, PaddleOCR + OpenAI for accurate line detection
+Supports: Onshore, Offshore, ADNOC, Industrial/Project line-number formats
 """
 
 import re
@@ -14,6 +15,34 @@ import numpy as np
 from openai import OpenAI
 from django.conf import settings
 import base64
+
+# ---------------------------------------------------------------------------
+# Soft-coded: minimum embedded-text characters before falling back to OCR.
+# For vector/searchable PDFs this is instant; for scanned images it will be 0.
+# Raise this value in environments.json if you see OCR running on clear PDFs.
+# ---------------------------------------------------------------------------
+EMBEDDED_TEXT_MIN_CHARS = 80
+
+# ---------------------------------------------------------------------------
+# Soft-coded industrial format — all configurable without touching regex code.
+# SIZE"-UNIT_NO-SERVICE_CODE-SEQUENCE-PIPING_CLASS(-END_DESIGNATOR)?
+# Examples:
+#   2"-2600-FL-352-32070R-E     (standard)
+#   3/4"-2600-HD-430-32070R-E  (fractional size)
+#   8"-2600-P-381-31051XR-E    (single-letter service)
+#   1"-2600-FCWR-975-31210MR-V (multi-letter service, no end-desig common too)
+# ---------------------------------------------------------------------------
+INDUSTRIAL_FORMAT = {
+    # Maximum "unit number" length (digits only, e.g. 2600)
+    'unit_no_max_digits': 4,
+    # Maximum letters in service/fluid code (e.g. FCWR = 4, FCWS = 4)
+    'service_code_max_len': 6,
+    # Piping-class structure: exactly 5 digits followed by 1-2 uppercase letters
+    'piping_class_pattern': r'\d{5}[A-Z]{1,2}',
+    # Sequence number: 3-5 digits (some short, some with leading zeros)
+    'seq_digits_min': 3,
+    'seq_digits_max': 5,
+}
 
 # Conditional import for pytesseract (graceful fallback if not installed)
 try:
@@ -88,6 +117,33 @@ class PIDLineExtractorV2:
             self.geometric_detector = None
             logger.info("ℹ️ Geometric detector not available (missing dependencies)")
     
+    def _extract_pdf_embedded_text(self, page) -> str:
+        """
+        Extract text directly from a PDF page without OCR (fast, handles rotated text).
+
+        For searchable / vector PDFs the text objects are embedded in the file at
+        their correct positions regardless of rotation.  PyMuPDF returns them all
+        via get_text("words"), giving us perfect accuracy for free.
+
+        Falls back gracefully if the page has no embedded text (scanned image PDF).
+
+        SOFT-CODED threshold: EMBEDDED_TEXT_MIN_CHARS (default 80) controls whether
+        the result is considered "sufficient".  Return value is the raw combined
+        string; the caller checks length against the threshold.
+        """
+        try:
+            # "words" mode returns [(x0,y0,x1,y1,word,block_no,line_no,word_no), ...]
+            # Sorting by y0 then x0 preserves natural reading order across rotations.
+            words = page.get_text("words")
+            if words:
+                sorted_words = sorted(words, key=lambda w: (round(w[1] / 10), w[0]))
+                return ' '.join(w[4] for w in sorted_words if str(w[4]).strip())
+            # Fallback: plain text block extraction
+            return page.get_text("text")
+        except Exception as exc:
+            logger.warning(f"[embedded_text] page text extraction failed: {exc}")
+            return ""
+
     def _normalize_ocr_text(self, text: str) -> str:
         """
         🔧 STRICT OCR NORMALIZATION - Force O → 0 conversion
@@ -386,19 +442,131 @@ class PIDLineExtractorV2:
         - Faster processing
         - Consistent results
         """
-        # 🔧 GENERAL FORMAT FIX: Auto-detect area by trying both patterns
+        # ------------------------------------------------------------------
+        # Normalize separators up-front — all format branches need this.
+        # OCR often replaces actual hyphens with: = ~ — – ― ─ | / etc.
+        # We normalise once here so every downstream branch sees clean text.
+        # ------------------------------------------------------------------
+        normalized_text = extracted_text
+        for _ch in ['=', '~', '—', '–', '―', '─', '|', '/', '°', '″', "'", '"']:
+            normalized_text = normalized_text.replace(_ch, '-')
+        normalized_text = re.sub(r'-{2,}', '-', normalized_text)
+        normalized_text = re.sub(r'\s+-\s+', '-', normalized_text)
+
+        # -----------------------------------------------------------------------
+        # INDUSTRIAL/PROJECT FORMAT — must be checked BEFORE onshore because
+        # the unit-number segment (e.g. 2600) would otherwise be misidentified
+        # as an "area" code in the onshore-with-area branch.
+        #
+        # FORMAT: SIZE"-UNIT_NO-SERVICE_CODE-SEQ-PIPING_CLASS(-END_DESIG)?
+        # Examples:
+        #   2"-2600-FL-352-32070R-E   (process flush line)
+        #   8"-2600-P-381-31051XR-E   (process pipe, 7-char piping class)
+        #   3/4"-2600-HD-430-32070R-E (fractional size, header drain)
+        #   1"-2600-FCWR-975-31210MR-V (4-letter service code)
+        # -----------------------------------------------------------------------
+        if format_type == 'industrial':
+            logger.info("  🔍 Using REGEX pattern matching — INDUSTRIAL/PROJECT format")
+            logger.info("  📋 Examples: 2\"-2600-FL-352-32070R-E, 8\"-2600-P-381-31051XR-E")
+            # The piping-class ALWAYS ends with 1-2 uppercase letters (e.g. 32070R, 31051XR).
+            # The end-designator (E/V/I) is optional but always present in these drawings.
+            _ic = INDUSTRIAL_FORMAT
+            _seq_min = _ic['seq_digits_min']
+            _seq_max = _ic['seq_digits_max']
+            _svc_max = _ic['service_code_max_len']
+            patterns = [
+                # Pattern 1: Standard (integer size, all segments present)
+                rf'(\d{{1,2}})"?\s*-\s*(\d{{3,{_ic["unit_no_max_digits"]}}})\s*-\s*([A-Z]{{1,{_svc_max}}})\s*-\s*(\d{{{_seq_min},{_seq_max}}})\s*-\s*(\d{{5}}[A-Z]{{1,2}})(?:\s*-\s*([A-Z]))?',
+
+                # Pattern 2: Fractional size (e.g. 3/4")
+                rf'(\d+/\d+)"?\s*-\s*(\d{{3,{_ic["unit_no_max_digits"]}}})\s*-\s*([A-Z]{{1,{_svc_max}}})\s*-\s*(\d{{{_seq_min},{_seq_max}}})\s*-\s*(\d{{5}}[A-Z]{{1,2}})(?:\s*-\s*([A-Z]))?',
+
+                # Pattern 3: OCR may drop the inch-mark — match without it
+                rf'\b(\d{{1,2}})\s*-\s*(\d{{3,{_ic["unit_no_max_digits"]}}})\s*-\s*([A-Z]{{1,{_svc_max}}})\s*-\s*(\d{{{_seq_min},{_seq_max}}})\s*-\s*(\d{{5}}[A-Z]{{1,2}})(?:\s*-\s*([A-Z]))?\b',
+
+                # Pattern 4: Loose spacing/OCR noise around separators
+                rf'(\d{{1,2}}(?:/\d+)?)"?\s*-+\s*(\d{{3,{_ic["unit_no_max_digits"]}}})\s*-+\s*([A-Z]{{1,{_svc_max}}})\s*-+\s*(\d{{{_seq_min},{_seq_max}}})\s*-+\s*(\d{{5}}[A-Z]{{1,2}})(?:\s*-+\s*([A-Z]))?',
+
+                # Pattern 5: OCR replaces hyphens with spaces
+                rf'(\d{{1,2}}(?:/\d+)?)"?\s+(\d{{3,{_ic["unit_no_max_digits"]}}})\s+([A-Z]{{1,{_svc_max}}})\s+(\d{{{_seq_min},{_seq_max}}})\s+(\d{{5}}[A-Z]{{1,2}})(?:\s+([A-Z]))?',
+            ]
+
+            found_lines = []
+            seen_lines = set()
+
+            for pat_idx, pattern in enumerate(patterns, 1):
+                for match in re.finditer(pattern, normalized_text, re.IGNORECASE):
+                    # --- fractional size patterns return group(1)=e.g. "3/4" ---
+                    size_raw  = match.group(1).strip()
+                    unit_no   = match.group(2).strip()
+                    service   = match.group(3).strip().upper()
+                    seq       = match.group(4).strip()
+                    pip_class = match.group(5).strip().upper()
+                    end_desig = (match.group(6) or '').strip().upper()
+
+                    # --- Validation ---
+                    # unit_no: digits only, 3-4 chars
+                    if not unit_no.isdigit():
+                        continue
+                    # service: letters only after normalisation
+                    if not re.match(r'^[A-Z]{1,' + str(_svc_max) + r'}$', service):
+                        continue
+                    # sequence: digits only, correct length
+                    if not seq.isdigit() or not (_seq_min <= len(seq) <= _seq_max):
+                        continue
+                    # piping class: 5 digits + 1-2 uppercase letters
+                    if not re.match(r'^\d{5}[A-Z]{1,2}$', pip_class):
+                        continue
+                    # end designator: single letter if present
+                    if end_desig and not re.match(r'^[A-Z]$', end_desig):
+                        end_desig = ''
+
+                    # Build canonical line designation
+                    parts = [f'{size_raw}"-{unit_no}-{service}-{seq}-{pip_class}']
+                    if end_desig:
+                        parts.append(end_desig)
+                    line_designation = '-'.join(parts)
+
+                    if line_designation in seen_lines:
+                        continue
+                    seen_lines.add(line_designation)
+
+                    found_lines.append({
+                        'line_number':        line_designation,
+                        'original_detection': match.group(0).strip(),
+                        'size':               f'{size_raw}"',
+                        'fluid_code':         service,        # service / fluid code
+                        'sequence_no':        seq,
+                        'piping_spec':        pip_class,      # piping class
+                        'pipr_class':         pip_class,
+                        'dept_deviation':     unit_no,        # unit/area number
+                        'insulation':         end_desig,      # end designator (E/V/I)
+                        'area':               unit_no,
+                        'page':               page_num,
+                        'from_equipment':     '',
+                        'to_equipment':       '',
+                        'extraction_method':  'regex_industrial',
+                    })
+
+            logger.info(f"  🎯 INDUSTRIAL regex found {len(found_lines)} unique lines from {len(patterns)} patterns")
+            return found_lines
+
+        # 🔧 GENERAL FORMAT: Auto-detect — try ALL known formats, keep the winner
         if format_type == 'general':
-            # Try WITH AREA first (more specific pattern), then WITHOUT AREA
-            logger.info(f"  🔍 Using REGEX pattern matching on OCR text (GENERAL - auto-detect area)")
-            results_with_area = self.parse_with_regex(extracted_text, page_num, include_area=True, format_type='onshore')
-            results_without_area = self.parse_with_regex(extracted_text, page_num, include_area=False, format_type='onshore')
-            # Return whichever found more lines (prioritize with-area if equal)
-            if len(results_with_area) >= len(results_without_area):
-                logger.info(f"  ✅ GENERAL format detected WITH AREA: {len(results_with_area)} lines")
-                return results_with_area
-            else:
-                logger.info(f"  ✅ GENERAL format detected WITHOUT AREA: {len(results_without_area)} lines")
-                return results_without_area
+            logger.info("  🔍 GENERAL format — auto-detecting best match from all known formats")
+            _candidates = {}
+            for _fmt in ('industrial', 'onshore', 'offshore', 'adnoc'):
+                _res = self.parse_with_regex(extracted_text, page_num, include_area=False, format_type=_fmt)
+                _candidates[_fmt] = _res
+            # Also try onshore WITH area code
+            _res_area = self.parse_with_regex(extracted_text, page_num, include_area=True, format_type='onshore')
+            _candidates['onshore_area'] = _res_area
+
+            best_fmt = max(_candidates, key=lambda f: len(_candidates[f]))
+            best_count = len(_candidates[best_fmt])
+            logger.info(f"  ✅ GENERAL best format: '{best_fmt}' with {best_count} lines "
+                        f"({', '.join(f'{f}:{len(v)}' for f, v in _candidates.items())})")
+            return _candidates[best_fmt]
         
         format_label = 'ADNOC' if format_type == 'adnoc' else ('OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA'))
         logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({format_label})")
@@ -409,19 +577,7 @@ class PIDLineExtractorV2:
             logger.info(f"  📋 Offshore format: AREA-FLUIDCODE-SIZE-PIPECLASS-SEQUENCE-INSULATION")
             logger.info(f"  📋 ADNOC examples: 604-RO-4-AN1NLO-0011-P, 604-HO-8-BC2CA0-1071-H, 604-AG-3-ASSNLO-0007")
         
-        # First, normalize the text - replace all dash-like characters with standard hyphen
-        # OCR often sees: = ~ — – ― ─ | / as separators
-        normalized_text = extracted_text
-        for char in ['=', '~', '—', '–', '―', '─', '|', '/', '°', '″', '\'', '"']:
-            normalized_text = normalized_text.replace(char, '-')
-        
-        # Remove multiple consecutive hyphens (replace with single hyphen)
-        normalized_text = re.sub(r'-{2,}', '-', normalized_text)
-        
-        # Remove extra spaces around hyphens
-        normalized_text = re.sub(r'\s+-\s+', '-', normalized_text)
-        
-        # Add spaces around hyphens for better word boundary detection
+        # (text already normalised at top of method)
         normalized_text_spaced = normalized_text.replace('-', ' - ')
         
         logger.info(f"  📝 Normalized text sample (first 500 chars): {normalized_text[:500]}")
@@ -1440,6 +1596,8 @@ Example 4: "10\"-PG-0003-033842-X-H"
             logger.info(f"🧠 Strategy: OCR ALL TEXT → AI INTELLIGENCE → STRICT VALIDATION")
             if format_type == 'adnoc':
                 format_msg = 'ADNOC Abu Dhabi Oil Co. Ltd (SIZE"-FLUID-PIPECLASS-SEQUENCE)'
+            elif format_type == 'industrial':
+                format_msg = 'INDUSTRIAL/PROJECT (SIZE"-UNIT-SERVICE-SEQ-PIPINGCLASS-ENDDESIG)'
             elif format_type == 'offshore':
                 format_msg = 'OFFSHORE (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)'
             elif include_area:
@@ -1453,30 +1611,59 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 logger.info(f"\n{'='*60}")
                 logger.info(f"📄 PAGE {page_num + 1}/{len(doc)}")
                 logger.info(f"{'='*60}")
+
+                # ------------------------------------------------------------------
+                # PHASE 1 (fast path): Extract embedded text directly from PDF.
+                # Vector/searchable PDFs have all text as proper text objects —
+                # no OCR needed.  This is instantaneous and handles rotated labels.
+                # SOFT-CODED threshold: EMBEDDED_TEXT_MIN_CHARS
+                # ------------------------------------------------------------------
+                logger.info("🔍 PHASE 1: Embedded PDF text extraction (fast path)")
+                embedded_text = self._extract_pdf_embedded_text(page)
+                use_ocr = len(embedded_text.strip()) < EMBEDDED_TEXT_MIN_CHARS
+
+                if not use_ocr:
+                    logger.info(
+                        f"  ✅ {len(embedded_text)} chars of embedded text found — "
+                        f"skipping OCR for this page"
+                    )
+                    combined_text = embedded_text
+                else:
+                    # ------------------------------------------------------------------
+                    # PHASE 1b (slow path): Scanned/image PDF — fall back to OCR.
+                    # High-resolution rendering (2.5x for crisp text)
+                    # ------------------------------------------------------------------
+                    logger.info(
+                        f"  📷 Only {len(embedded_text.strip())} embedded chars "
+                        f"(threshold {EMBEDDED_TEXT_MIN_CHARS}) — using OCR pipeline"
+                    )
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+                    img = Image.open(io.BytesIO(pix.tobytes("png")))
+                    img = img.convert('L')  # Grayscale for better OCR
+
+                    logger.info("🔍 PHASE 1b: Multi-Engine OCR Extraction")
+                    ocr_results = self.extract_all_text_from_image(img)
+
+                    if not ocr_results:
+                        logger.warning("  ⚠️ No text extracted from any OCR engine")
+                        continue
+
+                    combined_text = self.combine_and_deduplicate_text(ocr_results)
+
+                    if not combined_text or len(combined_text) < 10:
+                        logger.warning("  ⚠️ Combined OCR text too short, skipping page")
+                        continue
+
+                    # Make PIL image available for geometric FROM-TO below
+                    # (only needed when we actually ran OCR)
                 
-                # High-resolution rendering (2.5x for crisp text)
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
-                img = Image.open(io.BytesIO(pix.tobytes("png")))
-                img = img.convert('L')  # Grayscale for better OCR
-                
-                # PHASE 1: Extract ALL text with 3 OCR engines
-                logger.info("🔍 PHASE 1: Multi-Engine Text Extraction")
-                ocr_results = self.extract_all_text_from_image(img)
-                
-                if not ocr_results:
-                    logger.warning("  ⚠️ No text extracted from any OCR engine")
-                    continue
-                
-                # Combine text from all engines
-                combined_text = self.combine_and_deduplicate_text(ocr_results)
-                
-                if not combined_text or len(combined_text) < 10:
-                    logger.warning("  ⚠️ Combined text too short, skipping page")
+                if not combined_text or len(combined_text.strip()) < 10:
+                    logger.warning("  ⚠️ No usable text on this page — skipping")
                     continue
                 
                 # PHASE 2: REGEX Pattern Matching (Reliable & Fast)
                 logger.info("🔍 PHASE 2: REGEX Pattern Recognition")
-                logger.info(f"  📝 OCR Text Sample (first 500 chars): {combined_text[:500]}")
+                logger.info(f"  📝 Text sample (first 500 chars): {combined_text[:500]}")
                 line_items = self.parse_with_regex(combined_text, page_num + 1, include_area=include_area, format_type=format_type)
                 
                 if not line_items:
@@ -1486,7 +1673,24 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 # SUCCESS: Add basic line items first
                 all_line_items.extend(line_items)
                 logger.info(f"✅ PAGE {page_num + 1} BASIC EXTRACTION: {len(line_items)} line numbers extracted")
-                
+
+                # PHASE 3A/3B/3C only make sense when we have actual image data.
+                # If we used the fast embedded-text path, we don't have an img object.
+                if use_ocr:
+                    pass  # img is already defined from OCR path above
+                else:
+                    # Render image lazily for spatial/geometric FROM-TO (low resolution is fine)
+                    try:
+                        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert('L')
+                    except Exception as _img_err:
+                        logger.warning(f"  ⚠️ Could not render page for FROM-TO detection: {_img_err}")
+                        img = None
+
+                if img is None:
+                    # Skip FROM-TO phases for this page
+                    continue
+
                 # PHASE 3A: Spatial Matching FROM-TO Detection (PRIMARY METHOD - from research paper)
                 spatial_from_to_success = False
                 try:
@@ -1695,16 +1899,21 @@ Example 4: "10\"-PG-0003-033842-X-H"
             logger.info(f"🎉 EXTRACTION COMPLETE: {len(unique_items)} UNIQUE LINE NUMBERS")
             logger.info(f"{'='*60}\n")
             
-            # 🔒 NUCLEAR OPTION: Replace ALL 'O' with '0' in EVERY string field, no exceptions!
-            logger.info("🔒 NUCLEAR SAFETY: Replacing ALL 'O' → '0' in every string field...")
+            # 🔒 NUCLEAR OPTION: Replace ALL 'O' with '0' in EVERY string field.
+            # EXCEPTION: Industrial format codes are already correct (piping classes like
+            # 32070R, service codes FL/HD/FCWR have no O to convert).  We skip this pass
+            # for industrial items to avoid corrupting equipment tag strings like MOV.
+            logger.info("🔒 NUCLEAR SAFETY: Replacing ALL 'O' → '0' in every string field (non-industrial)...")
             for item in unique_items:
+                if item.get('extraction_method', '') == 'regex_industrial':
+                    continue  # Industrial codes are already clean — skip
                 # Loop through ALL keys and replace O→0 in ANY string value
                 for key, value in item.items():
                     if isinstance(value, str) and value:
                         # FORCE replace ALL 'O' (uppercase) with '0' (digit)
                         item[key] = value.upper().replace('O', '0')
             
-            logger.info("✅ NUCLEAR NORMALIZATION COMPLETE - EVERY 'O' → '0' IN ALL FIELDS!")
+            logger.info("✅ NUCLEAR NORMALIZATION COMPLETE - EVERY 'O' → '0' IN NON-INDUSTRIAL FIELDS!")
             
             return unique_items
             
