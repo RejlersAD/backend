@@ -2310,6 +2310,170 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
 
 _result_store: dict = {}
 
+# ── Soft-coded AI gap-fill constants ─────────────────────────────────────────
+# Default list of fields the AI gap-fill pass will attempt.
+# Controlled per-deploy via equipment_type_config.json extraction.ai_gap_fill_fields.
+# Fields already populated by the regex pass are NEVER overwritten.
+_AI_GAP_FILL_DEFAULT_FIELDS = [
+    'oper_pressure',
+    'oper_temperature',
+    'design_pressure_min',
+    'design_pressure_max',
+    'design_temp_min',
+    'design_temp_max',
+    'design_flowrate',
+    'moc',
+    'insulation',
+    'description',
+]
+
+# JSON response validation: AI must return keys matching these field names.
+# Values must be strings (or null). Any other structure is rejected.
+_AI_FILL_FIELD_SET = set(_AI_GAP_FILL_DEFAULT_FIELDS)
+
+
+def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
+    """
+    Multi-model AI gap-fill pass for P&ID drawing mode.
+
+    For each equipment item with one or more empty target fields, re-extracts
+    a wider text context window around the tag and sends it to:
+      1. OpenAI GPT-4o (primary)  — with automatic Gemini fallback inside
+         MultiModelAIService if the OpenAI quota is exceeded.
+      2. Gemini Flash             — as an independent second-opinion when
+         ai_gap_fill_provider == 'both', to fill any fields GPT-4o left null.
+
+    The AI is prompted to return ONLY a flat JSON object.  Values are merged
+    into the item ONLY when the field is still empty after regex extraction.
+
+    Soft-coded via equipment_type_config.json extraction section:
+      ai_gap_fill_enabled       : true/false  (default true)
+      ai_gap_fill_provider      : "both" | "openai" | "gemini"
+      ai_gap_fill_fields        : list of field keys to attempt
+      ai_gap_fill_context_chars : chars each side of the tag (default 800)
+      ai_gap_fill_max_tokens    : max tokens for AI response (default 350)
+      ai_gap_fill_temperature   : sampling temperature (default 0)
+      ai_gap_fill_min_empty_fields : minimum empty fields before AI is called
+    """
+    import json as _json
+
+    ext_cfg     = config.get('extraction', {})
+    enabled     = bool(ext_cfg.get('ai_gap_fill_enabled', True))
+    if not enabled:
+        return items
+
+    fill_fields = list(ext_cfg.get('ai_gap_fill_fields', _AI_GAP_FILL_DEFAULT_FIELDS))
+    ctx_chars   = int(ext_cfg.get('ai_gap_fill_context_chars', 800))
+    max_tokens  = int(ext_cfg.get('ai_gap_fill_max_tokens', 350))
+    temperature = float(ext_cfg.get('ai_gap_fill_temperature', 0))
+    min_empty   = int(ext_cfg.get('ai_gap_fill_min_empty_fields', 1))
+    provider    = str(ext_cfg.get('ai_gap_fill_provider', 'both')).lower()
+
+    # Lazy-import to avoid circular imports and keep startup fast
+    try:
+        from apps.pid_analysis.multi_model_service import MultiModelAIService
+        ai = MultiModelAIService()
+    except Exception as _e:
+        print(f'[EQ-DIAG][AI-FILL] Service init failed: {_e}', flush=True)
+        return items
+
+    text_upper = text.upper()
+
+    # ── Shared prompt builder ────────────────────────────────────────────────
+    _FIELD_HINTS = {
+        'oper_pressure':      'Operating pressure with unit (e.g. "155 PSIG" or "10 barg")',
+        'oper_temperature':   'Operating temperature with unit (e.g. "105 °F" or "40 °C")',
+        'design_pressure_min': 'Minimum design/set pressure with unit (e.g. "-13.2 PSIG")',
+        'design_pressure_max': 'Maximum design/set pressure with unit (e.g. "195 PSIG")',
+        'design_temp_min':    'Minimum design temperature with unit (e.g. "-13 °F")',
+        'design_temp_max':    'Maximum design temperature with unit (e.g. "185 °F")',
+        'design_flowrate':    'Design flowrate or capacity with unit (e.g. "327 M3" or "100 M3/H")',
+        'moc':                'Material of construction abbreviation (e.g. "CS", "SS316L", "DUPLEX")',
+        'insulation':         'Insulation type code (e.g. "PERS", "HOT", "BARE", "TRACED")',
+        'description':        'Equipment description (2-6 words, e.g. "OIL SLUG CATCHER")',
+    }
+
+    def _build_prompt(tag: str, empty: list, ctx: str) -> str:
+        field_list = '\n'.join(
+            f'  "{f}": {_FIELD_HINTS.get(f, f)}'
+            for f in empty
+        )
+        return (
+            f'You are an Oil & Gas P&ID data extraction assistant.\n'
+            f'Extract the following fields for equipment tag {tag} from the text excerpt below.\n'
+            f'Return ONLY a valid JSON object with these exact keys. '
+            f'Set the value to null if the field cannot be found.\n'
+            f'Do NOT include markdown fences, explanations, or keys not listed.\n\n'
+            f'Fields to extract:\n{field_list}\n\n'
+            f'TEXT EXCERPT:\n{ctx}'
+        )
+
+    def _call_ai(prompt: str, model_hint: str) -> dict:
+        """Call the AI and return parsed dict, or {} on failure."""
+        try:
+            raw = ai.chat_completion(
+                messages=[{'role': 'user', 'content': prompt}],
+                model=model_hint,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            # Strip markdown code fences if present
+            cleaned = re.sub(r'^```[a-z]*\s*', '', raw.strip(), flags=re.IGNORECASE)
+            cleaned = re.sub(r'\s*```$', '', cleaned.strip())
+            parsed  = _json.loads(cleaned)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as _e:
+            print(f'[EQ-DIAG][AI-FILL] parse/call error ({model_hint}): {_e}', flush=True)
+        return {}
+
+    # ── Per-item gap fill ────────────────────────────────────────────────────
+    for item in items:
+        tag = item.get('tag', '')
+        if not tag:
+            continue
+
+        empty_fields = [f for f in fill_fields if not item.get(f)]
+        if len(empty_fields) < min_empty:
+            continue
+
+        # Re-locate tag in text for context window
+        idx = text_upper.find(tag.upper())
+        if idx == -1:
+            continue
+        ctx_start = max(0, idx - ctx_chars // 2)
+        ctx_end   = min(len(text), idx + ctx_chars // 2)
+        ctx       = text[ctx_start:ctx_end]
+
+        prompt = _build_prompt(tag, empty_fields, ctx)
+
+        # ── Pass 1: primary provider (GPT-4o, with auto Gemini fallback) ──
+        gpt_result = {}
+        if provider in ('openai', 'both'):
+            gpt_result = _call_ai(prompt, 'openai')
+
+        # ── Pass 2: Gemini second-opinion (fills any fields GPT-4o left null) ──
+        gem_result = {}
+        if provider in ('gemini', 'both'):
+            still_empty = [f for f in empty_fields if not gpt_result.get(f)]
+            if still_empty:
+                gem_result = _call_ai(_build_prompt(tag, still_empty, ctx), 'gemini')
+
+        # ── Merge: OpenAI wins over Gemini; neither overwrites regex values ──
+        filled = []
+        for f in empty_fields:
+            if item.get(f):
+                continue                       # already filled by regex — skip
+            val = gpt_result.get(f) or gem_result.get(f)
+            if val and str(val).strip().lower() not in ('null', 'none', ''):
+                item[f] = str(val).strip()
+                filled.append(f)
+
+        if filled:
+            print(f'[EQ-DIAG][AI-FILL] {tag}: AI filled {filled}', flush=True)
+
+    return items
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -2392,6 +2556,12 @@ def analyze_pid_equipment(request):
             })
             print(f'[EQ-DIAG] P&ID mode: text_len={len(text)}  raw_items={len(raw_items)}  after_dedup={len(equipment)}', flush=True)
             print(f'[EQ-DIAG] Tags found: {[i["tag"] for i in raw_items]}', flush=True)
+
+            # ── AI gap-fill: use GPT-4o + Gemini to fill any fields still empty ──
+            # Runs AFTER regex extraction; never overwrites populated values.
+            # Controlled by ai_gap_fill_enabled in equipment_type_config.json.
+            if equipment and text:
+                equipment = _ai_gap_fill_pid_items(equipment, text, config)
 
             # ── P&ID mode: document-level revision from title block ───────────
             # P&ID drawings carry ONE document revision (in the title block),

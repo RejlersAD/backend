@@ -110,7 +110,27 @@
     "motor_rating_bare_pattern": "(\\d+(?:\\.\\d+)?)\\s*(kW|KW)\\b",
 
     "_comment_quality": "Quality / inspection level codes near equipment tag. Group 1 is the quality designation.",
-    "quality_required_pattern": "(?:QUALITY(?:\\s*(?:REQUIRED|REQD|CLASS|LEVEL))?|QC(?:\\s*(?:REQ|REQD|LEVEL|CLASS))?|NDT|NDE(?:\\s*(?:LEVEL|CLASS|REQ))?|INSPECT(?:ION)?(?:\\s*(?:LEVEL|CLASS|REQT))?)\\s*[:=]?\\s*([A-D](?:\\s+LEVEL)?|LEVEL\\s*[A-D]|(?:100%\\s*)?(?:RT|MT|UT|PT|VT|TOFD)(?:[+&,/\\s]+(?:RT|MT|UT|PT|VT|TOFD))*|S[0-4]|P[1-4]|Q[1-4]|DEGREE\\s*[A-D])"
+    "quality_required_pattern": "(?:QUALITY(?:\\s*(?:REQUIRED|REQD|CLASS|LEVEL))?|QC(?:\\s*(?:REQ|REQD|LEVEL|CLASS))?|NDT|NDE(?:\\s*(?:LEVEL|CLASS|REQ))?|INSPECT(?:ION)?(?:\\s*(?:LEVEL|CLASS|REQT))?)\\s*[:=]?\\s*([A-D](?:\\s+LEVEL)?|LEVEL\\s*[A-D]|(?:100%\\s*)?(?:RT|MT|UT|PT|VT|TOFD)(?:[+&,/\\s]+(?:RT|MT|UT|PT|VT|TOFD))*|S[0-4]|P[1-4]|Q[1-4]|DEGREE\\s*[A-D])",
+
+    "_comment_ai_gap_fill": "AI gap-fill pass: uses OpenAI GPT-4o (primary) + Gemini Flash (fallback) to extract fields still empty after regex pass. Both providers are tried using MultiModelAIService. Set ai_gap_fill_enabled to false to disable. ai_gap_fill_fields controls which fields are attempted. ai_gap_fill_context_chars is the text window (chars each side of the tag) sent to the model.",
+    "ai_gap_fill_enabled": true,
+    "ai_gap_fill_provider": "both",
+    "ai_gap_fill_context_chars": 800,
+    "ai_gap_fill_max_tokens": 350,
+    "ai_gap_fill_temperature": 0,
+    "ai_gap_fill_min_empty_fields": 1,
+    "ai_gap_fill_fields": [
+      "oper_pressure",
+      "oper_temperature",
+      "design_pressure_min",
+      "design_pressure_max",
+      "design_temp_min",
+      "design_temp_max",
+      "design_flowrate",
+      "moc",
+      "insulation",
+      "description"
+    ]
   },
 
   "type_labels": {
