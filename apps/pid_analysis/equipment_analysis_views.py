@@ -584,6 +584,46 @@ _TITLEBLOCK_DWG_LABEL_RE   = re.compile(
     re.IGNORECASE,
 )
 
+# ── Soft-coded operating temperature range normalisation ─────────────────────
+# Equipment registers sometimes store two operating temperatures in a single
+# cell (e.g. shell/tube, inlet/outlet, or min/max condition) separated by "/".
+# e.g. "105/60 °F" → "60 – 105 °F"  (ascending range, engineering convention)
+_TEMP_RANGE_SEPARATOR = ' \u2013 '   # en-dash with spaces  (matches frontend constant)
+_TEMP_SLASH_RE        = re.compile(
+    r'^(-?\d+(?:\.\d+)?)\s*/\s*(-?\d+(?:\.\d+)?)\s*(°[FC]|DEG\s*[FC]|[FC])?$',
+    re.IGNORECASE,
+)
+
+
+def _normalize_oper_temp(raw: str) -> str:
+    """
+    Normalise an operating temperature string that contains two values
+    separated by "/" into a clean ascending range.
+
+    Examples:
+        "105/60 °F"  ->  "60 – 105 °F"
+        "60 / 105"   ->  "60 – 105 °F"   (°F assumed)
+        "175 °F"     ->  "175 °F"         (unchanged)
+        ""           ->  ""               (unchanged)
+    """
+    if not raw or '/' not in raw:
+        return raw
+    m = _TEMP_SLASH_RE.match(raw.strip())
+    if not m:
+        return raw
+    v1, v2 = float(m.group(1)), float(m.group(2))
+    raw_unit = (m.group(3) or '').strip().upper()
+    # Normalise unit display
+    if raw_unit in ('F', 'DEGF') or raw_unit.endswith('F'):
+        unit = '°F'
+    elif raw_unit in ('C', 'DEGC') or raw_unit.endswith('C'):
+        unit = '°C'
+    else:
+        unit = '°F'   # default for process equipment
+    lo, hi = sorted([v1, v2])
+    fmt = lambda v: str(int(v)) if v == int(v) else str(v)   # strip ".0" suffix
+    return f'{fmt(lo)}{_TEMP_RANGE_SEPARATOR}{fmt(hi)} {unit}'
+
 
 def _extract_titleblock_dwg_no(text: str) -> str:
     """
@@ -1170,7 +1210,7 @@ def _extract_equipment_register_rows(file_obj, config: dict):
             'description':         values.get('description', ''),
             'design_flowrate':     values.get('design_flowrate', ''),
             'oper_pressure':       values.get('oper_pressure', ''),
-            'oper_temperature':    values.get('oper_temperature', ''),
+            'oper_temperature':    _normalize_oper_temp(values.get('oper_temperature', '')),
             'design_pressure_min': values.get('design_pressure_min', ''),
             'design_pressure_max': values.get('design_pressure_max', ''),
             'design_temp_min':     values.get('design_temp_min', ''),
@@ -1893,13 +1933,19 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                            r'(\d+(?:[,.]\d+)?)\s*(M3/H|M3/HR|NM3/H|NM3/HR|SM3/D|MMSCFD|BBL/D|GPM|T/H|KG/H|MW|KW|MMBTU/H)')
         _flow_ctx_chars = int(ext_cfg.get('flowrate_context_chars', 500))
         _op_press_lbl   = ext_cfg.get('oper_pressure_label_pattern',
-                           r'(?:OPER(?:ATING)?|OP\.?)\s*PRESS(?:URE)?\s*[:=/(]')
+                           r'(?:OPER(?:ATING)?|OP\.?)\s*PRESS(?:URE)?\.?\s*[-:=/(]')
         _des_press_lbl  = ext_cfg.get('design_pressure_label_pattern',
-                           r'(?:DES(?:IGN)?|SET)\s*PRESS(?:URE)?\s*[:=/(]')
+                           r'(?:DES(?:IGN)?\.?(?:\s*/\s*SET)?|SET)\s*PRESS(?:URE)?\.?\s*[-:=/(]')
         _op_temp_lbl    = ext_cfg.get('oper_temp_label_pattern',
-                           r'(?:OPER(?:ATING)?|OP\.?)\s*TEMP(?:ERATURE)?\s*[:=/(]')
+                           r'(?:OPER(?:ATING)?|OP\.?)\s*TEMP(?:ERATURE)?\.?\s*[-:=/(]')
         _des_temp_lbl   = ext_cfg.get('design_temp_label_pattern',
-                           r'DES(?:IGN)?\s*TEMP(?:ERATURE)?\s*[:=/(]')
+                           r'DES(?:IGN)?\.?\s*TEMP(?:ERATURE)?\.?\s*[-:=/(]')
+        # Soft-coded: slash-pair dual-value patterns for "LABEL (MIN/MAX) : V1/V2 UNIT"
+        # format common on O&G P&ID data boxes (single cell stores both min + max).
+        _dual_temp_pat  = ext_cfg.get('dual_value_temp_pattern',
+                           r'(-?\d+(?:\.\d+)?)\s*/\s*(-?\d+(?:\.\d+)?)\s*(°\s*[FC]|DEG\.?\s*[FC]|DEGF|DEGC)?')
+        _dual_press_pat = ext_cfg.get('dual_value_press_pattern',
+                           r'(-?\d+(?:\.\d+)?)\s*/\s*(-?\d+(?:\.\d+)?)\s*(PSIG|PSIA|PSI|barg|bara|kPag|MPa|bar)\b')
         _ins_codes      = [c.upper() for c in ext_cfg.get('insulation_codes',
                            ['HOT', 'COLD', 'PERS', 'HT', 'CT', 'TRACED', 'EHT', 'BARE', 'ACOUSTIC'])]
         _dim_len_lbl    = ext_cfg.get('dimension_length_label_pattern',
@@ -1918,9 +1964,17 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         _op_lbl_m = re.search(_op_press_lbl, _pp_ctx, re.IGNORECASE)
         if _op_lbl_m:
             _after_lbl = _pp_ctx[_op_lbl_m.end():]
-            _pv = re.search(_press_val_pat, _after_lbl[:60], re.IGNORECASE)
+            _pv = re.search(_press_val_pat, _after_lbl[:80], re.IGNORECASE)
             if _pv:
                 oper_pressure = f'{_pv.group(1)} {_pv.group(2)}'
+            elif not _pv:
+                # Fallback: label matched at "(MIN/MAX)" qualifier  →  after = "MIN/MAX) : 155 psig".
+                # Skip over the qualifier and grab the first pressure value after ":".
+                _after_colon = re.search(r'\)\s*[:,=]\s*(.{1,60})', _after_lbl[:80], re.IGNORECASE)
+                if _after_colon:
+                    _pv2 = re.search(_press_val_pat, _after_colon.group(1), re.IGNORECASE)
+                    if _pv2:
+                        oper_pressure = f'{_pv2.group(1)} {_pv2.group(2)}'
 
         # ── Design Pressure min / max ─────────────────────────────────────
         design_pressure_min = ''
@@ -1928,13 +1982,20 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         _dp_lbl_ms = list(re.finditer(_des_press_lbl, _pp_ctx, re.IGNORECASE))
         _dp_vals   = []   # list of (numeric_value, unit_string)
         for _dlm in _dp_lbl_ms:
-            # Use finditer to capture BOTH values in "195 psig / FV" or
-            # "195 / -1" style min/max-in-one-field data-box entries.
             _win80 = _pp_ctx[_dlm.end():_dlm.end() + 80]
-            for _pv in re.finditer(_press_val_pat, _win80, re.IGNORECASE):
-                _dp_vals.append((float(_pv.group(1)), _pv.group(2)))
+            # Strategy A: slash-pair with unit at end e.g. "195 / -13.2 psig"
+            # (label matched at "(MIN/MAX)" qualifier → after = "MIN/MAX) : 195 / -13.2 psig")
+            _dp_slash = re.search(_dual_press_pat, _win80, re.IGNORECASE)
+            if _dp_slash:
+                _pu = _dp_slash.group(3).upper()
+                _dp_vals.append((float(_dp_slash.group(1)), _pu))
+                _dp_vals.append((float(_dp_slash.group(2)), _pu))
+            else:
+                # Strategy B: standard "VALUE UNIT" or "VALUE UNIT / VALUE UNIT"
+                for _pv in re.finditer(_press_val_pat, _win80, re.IGNORECASE):
+                    _dp_vals.append((float(_pv.group(1)), _pv.group(2)))
             if not _dp_vals:
-                # Fallback: unit is embedded in label parens, e.g. "DES./SET PRESS (PSIG) : 195 / FV".
+                # Strategy C: unit embedded in label parens e.g. "DES./SET PRESS (PSIG) : 195 / FV".
                 # Locate (UNIT) just after the label match, collect numeric values that follow;
                 # non-numeric tokens like FV (Full Vacuum) are silently skipped.
                 _pu_m = re.search(
@@ -1955,8 +2016,12 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         if _dp_vals:
             _dp_nums  = [v for v, _u in _dp_vals]
             _dp_units = _dp_vals[0][1]  # use unit from first match
-            design_pressure_min = f'{min(_dp_nums)} {_dp_units}'
-            design_pressure_max = f'{max(_dp_nums)} {_dp_units}'
+            if len(_dp_nums) == 1:
+                # Single value = maximum design pressure; MIN is unspecified
+                design_pressure_max = f'{_dp_nums[0]} {_dp_units}'
+            else:
+                design_pressure_min = f'{min(_dp_nums)} {_dp_units}'
+                design_pressure_max = f'{max(_dp_nums)} {_dp_units}'
         elif not oper_pressure:
             # Fallback: any bare pressure value in narrow context
             _bare_pv = re.search(_press_val_pat, _pp_ctx, re.IGNORECASE)
@@ -1968,21 +2033,32 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         _ot_lbl_m = re.search(_op_temp_lbl, _pp_ctx, re.IGNORECASE)
         if _ot_lbl_m:
             _ot_after = _pp_ctx[_ot_lbl_m.end():_ot_lbl_m.end() + 80]
+            # Strategy 1: standard single value e.g. "175 °F"
             _tv = re.search(_temp_val_pat, _ot_after, re.IGNORECASE)
             if _tv:
                 oper_temperature = f'{_tv.group(1)} °F'
             else:
-                # Fallback: unit is embedded in label parens, e.g. "OPER TEMP (°F) : 175".
-                # The label pattern matches at "(", leaving "°F) : 175" in the window.
-                # Detect °C vs °F from label context, then grab the first bare number.
-                _ot_unit = 'C' if re.search(
-                    r'\(°?\s*C\)', _pp_ctx[_ot_lbl_m.start():_ot_lbl_m.end() + 8], re.IGNORECASE
-                ) else 'F'
-                _bare_t = re.search(
-                    r'[°FC)\s]+[:,=\s]+(-?\d+(?:\.\d+)?)', _ot_after, re.IGNORECASE
-                )
-                if _bare_t:
-                    oper_temperature = f'{_bare_t.group(1)} °{_ot_unit}'
+                # Strategy 2: slash-pair dual value e.g. "105/60 °F" or "105 / 60 °F"
+                # Matches "LABEL (MIN/MAX) : 105/60 °F" where unit is only at end.
+                # The normalizer converts "105/60 °F" → "60 – 105 °F" (ascending range).
+                _ot_dual = re.search(_dual_temp_pat, _ot_after, re.IGNORECASE)
+                if _ot_dual and _ot_dual.group(1) != _ot_dual.group(2):
+                    _raw_unit = (_ot_dual.group(3) or '°F').strip()
+                    oper_temperature = f'{_ot_dual.group(1)}/{_ot_dual.group(2)} {_raw_unit}'
+                else:
+                    # Strategy 3: unit embedded in label parens e.g. "OPER TEMP (°F) : 175".
+                    # The label matches at "(", leaving "°F) : 175" in the window.
+                    # Detect °C vs °F from label context, then grab first bare number.
+                    _ot_unit = 'C' if re.search(
+                        r'\(°?\s*C\)', _pp_ctx[_ot_lbl_m.start():_ot_lbl_m.end() + 8], re.IGNORECASE
+                    ) else 'F'
+                    _bare_t = re.search(
+                        r'[°FC)\s]+[:,=\s]+(-?\d+(?:\.\d+)?)', _ot_after, re.IGNORECASE
+                    )
+                    if _bare_t:
+                        oper_temperature = f'{_bare_t.group(1)} °{_ot_unit}'
+        # Normalise dual-temperature values e.g. "105/60 °F" → "60 – 105 °F"
+        oper_temperature = _normalize_oper_temp(oper_temperature)
 
         # ── Design Temp min / max ─────────────────────────────────────────
         design_temp_min = ''
@@ -1990,13 +2066,24 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         _dt_lbl_ms = list(re.finditer(_des_temp_lbl, _pp_ctx, re.IGNORECASE))
         _dt_vals   = []  # list of numeric values (°F)
         for _dtlm in _dt_lbl_ms:
-            # Use finditer so that "185 / -13.2 °F" produces BOTH 185 and -13.2.
             _win80 = _pp_ctx[_dtlm.end():_dtlm.end() + 80]
-            for _tv in re.finditer(_temp_val_pat, _win80, re.IGNORECASE):
-                _dt_vals.append(float(_tv.group(1)))
+            # Strategy A: slash-pair with unit at end e.g. "185 / -13.2 °F"
+            # (label matches at "(MIN/MAX)" qualifier → after = "MIN/MAX) : 185 / -13.2 °F").
+            # _dual_temp_pat captures the two numbers (group 3 = optional unit).
+            _dt_dual = re.search(_dual_temp_pat, _win80, re.IGNORECASE)
+            if _dt_dual and _dt_dual.group(1) != _dt_dual.group(2):
+                _dt_vals.extend([float(_dt_dual.group(1)), float(_dt_dual.group(2))])
+            else:
+                # Strategy B: standard "VALUE °F" or two "VALUE °F" entries
+                for _tv in re.finditer(_temp_val_pat, _win80, re.IGNORECASE):
+                    _dt_vals.append(float(_tv.group(1)))
         if _dt_vals:
-            design_temp_min = f'{min(_dt_vals)} °F'
-            design_temp_max = f'{max(_dt_vals)} °F'
+            if len(_dt_vals) == 1:
+                # Single design temperature = maximum; MIN is unspecified
+                design_temp_max = f'{_dt_vals[0]} °F'
+            else:
+                design_temp_min = f'{min(_dt_vals)} °F'
+                design_temp_max = f'{max(_dt_vals)} °F'
 
         # ── Design Flowrate ───────────────────────────────────────────────
         # Use a wider context window than the general _pp_ctx (soft-coded via
