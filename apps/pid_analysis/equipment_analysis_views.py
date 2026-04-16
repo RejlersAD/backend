@@ -2194,18 +2194,18 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             if _mr_bare_m:
                 motor_rating = f'{_mr_bare_m.group(1)} kW'
 
-        # Soft-coded: non-rotating equipment has no motor.  Set 'N/A' so the
-        # column is never empty rather than blank.  Prefixes are configurable
-        # via 'motor_na_prefixes' in equipment_type_config.json extraction
-        # section.  Rotating prefixes (P, K, C, G, BL, PK, KX, AG, VR, HT, CL)
-        # are left to the extraction above.
+        # Soft-coded: non-rotating equipment has no motor.  Prefixes are
+        # configurable via 'motor_na_prefixes' in equipment_type_config.json.
+        # The display value ('No', '', 'N/A' …) is controlled by
+        # 'motor_na_display_value' (default 'No') — change in config only.
         _motor_na_pfxs = {p.upper() for p in ext_cfg.get('motor_na_prefixes', [
             'V', 'T', 'D', 'F', 'R', 'E', 'S', 'TK', 'SC', 'AB', 'ST', 'FL',
             'CY', 'DR', 'FG', 'MS', 'SK', 'HX', 'SX', 'FX', 'VX', 'GX',
             'PF', 'DP', 'AN', 'EJ', 'MX',
         ])}
+        _motor_na_val = str(ext_cfg.get('motor_na_display_value', 'No'))
         if not motor_rating and prefix.upper() in _motor_na_pfxs:
-            motor_rating = 'N/A'
+            motor_rating = _motor_na_val
 
         # ── Quality Required ─────────────────────────────────────────────
         quality_required = ''

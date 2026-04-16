@@ -112,6 +112,8 @@
     "motor_rating_pattern": "(?:MOTOR\\s*(?:RATING|POWER|OUTPUT|INSTALLED)?|DRIVER\\s*(?:RATING|POWER)?|RATED\\s*POWER|INSTALLED\\s*POWER|M\\.?R\\.?|SHAFT\\s*POWER|BRAKE\\s*POWER)\\s*[:=]?\\s*(\\d+(?:\\.\\d+)?)\\s*(kW|KW|HP|BHP|KVA|kVA)\\b",
     "_comment_motor_bare": "Bare motor-rating scan (no label): captures lone kW/HP values in narrow context when the label is absent (common in minimally annotated P&IDs).",
     "motor_rating_bare_pattern": "(\\d+(?:\\.\\d+)?)\\s*(kW|KW)\\b",
+    "_comment_motor_na": "motor_na_display_value: value written into motor_rating for non-rotating equipment (vessels, tanks, drums, etc.) when no kW value is found in context. Change to empty string to leave blank, or 'N/A' to revert to old behaviour.",
+    "motor_na_display_value": "No",
 
     "_comment_quality": "Quality / inspection level codes near equipment tag. Group 1 is the quality designation.",
     "quality_required_pattern": "(?:QUALITY(?:\\s*(?:REQUIRED|REQD|CLASS|LEVEL))?|QC(?:\\s*(?:REQ|REQD|LEVEL|CLASS))?|NDT|NDE(?:\\s*(?:LEVEL|CLASS|REQ))?|INSPECT(?:ION)?(?:\\s*(?:LEVEL|CLASS|REQT))?)\\s*[:=]?\\s*([A-D](?:\\s+LEVEL)?|LEVEL\\s*[A-D]|(?:100%\\s*)?(?:RT|MT|UT|PT|VT|TOFD)(?:[+&,/\\s]+(?:RT|MT|UT|PT|VT|TOFD))*|S[0-4]|P[1-4]|Q[1-4]|DEGREE\\s*[A-D])",
