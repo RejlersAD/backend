@@ -1933,6 +1933,25 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             _win80 = _pp_ctx[_dlm.end():_dlm.end() + 80]
             for _pv in re.finditer(_press_val_pat, _win80, re.IGNORECASE):
                 _dp_vals.append((float(_pv.group(1)), _pv.group(2)))
+            if not _dp_vals:
+                # Fallback: unit is embedded in label parens, e.g. "DES./SET PRESS (PSIG) : 195 / FV".
+                # Locate (UNIT) just after the label match, collect numeric values that follow;
+                # non-numeric tokens like FV (Full Vacuum) are silently skipped.
+                _pu_m = re.search(
+                    r'\(([A-Za-z]{2,5})\)\s*[:,=\s]+(-?\d+(?:\.\d+)?)', _win80, re.IGNORECASE
+                )
+                if _pu_m:
+                    _pu = _pu_m.group(1).upper()
+                    if _pu in ('PSIG', 'PSIA', 'PSI', 'BARG', 'BARA', 'BAR', 'KPAG', 'MPA'):
+                        _dp_vals.append((float(_pu_m.group(2)), _pu))
+                        # Also grab second value (MIN or MAX partner), ignoring non-numerics
+                        _rest = _win80[_pu_m.end():]
+                        _v2 = re.search(r'[/,\s]+(-?\d+(?:\.\d+)?)', _rest[:30])
+                        if _v2:
+                            try:
+                                _dp_vals.append((float(_v2.group(1)), _pu))
+                            except ValueError:
+                                pass
         if _dp_vals:
             _dp_nums  = [v for v, _u in _dp_vals]
             _dp_units = _dp_vals[0][1]  # use unit from first match
@@ -1948,9 +1967,22 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         oper_temperature = ''
         _ot_lbl_m = re.search(_op_temp_lbl, _pp_ctx, re.IGNORECASE)
         if _ot_lbl_m:
-            _tv = re.search(_temp_val_pat, _pp_ctx[_ot_lbl_m.end():_ot_lbl_m.end() + 60], re.IGNORECASE)
+            _ot_after = _pp_ctx[_ot_lbl_m.end():_ot_lbl_m.end() + 80]
+            _tv = re.search(_temp_val_pat, _ot_after, re.IGNORECASE)
             if _tv:
                 oper_temperature = f'{_tv.group(1)} °F'
+            else:
+                # Fallback: unit is embedded in label parens, e.g. "OPER TEMP (°F) : 175".
+                # The label pattern matches at "(", leaving "°F) : 175" in the window.
+                # Detect °C vs °F from label context, then grab the first bare number.
+                _ot_unit = 'C' if re.search(
+                    r'\(°?\s*C\)', _pp_ctx[_ot_lbl_m.start():_ot_lbl_m.end() + 8], re.IGNORECASE
+                ) else 'F'
+                _bare_t = re.search(
+                    r'[°FC)\s]+[:,=\s]+(-?\d+(?:\.\d+)?)', _ot_after, re.IGNORECASE
+                )
+                if _bare_t:
+                    oper_temperature = f'{_bare_t.group(1)} °{_ot_unit}'
 
         # ── Design Temp min / max ─────────────────────────────────────────
         design_temp_min = ''

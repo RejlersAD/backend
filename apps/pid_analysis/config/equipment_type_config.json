@@ -76,7 +76,7 @@
     "pressure_value_pattern": "(-?\\d+(?:\\.\\d+)?)\\s*(PSIG|PSIA|PSI|barg|bara|kPag|MPag|MPa|bar)\\b",
     "_comment_press_label": "Label patterns that precede an operating or design pressure value in a data box.",
     "oper_pressure_label_pattern": "(?:OPER(?:ATING)?|OP\\.?)\\s*PRESS(?:URE)?\\s*[:=/(]",
-    "design_pressure_label_pattern": "(?:DES(?:IGN)?|SET)\\s*(?:/\\s*SET\\s*)?\\s*PRESS(?:URE)?\\s*[:=/(]",
+    "design_pressure_label_pattern": "(?:DES(?:IGN)?\\.?(?:\\s*/\\s*SET)?|SET)\\s*PRESS(?:URE)?\\s*[-:=/(]",
 
     "_comment_temp": "Temperature value pattern: capture group 1 = numeric value. Matches °F / °C / DEG F / DEG C / DEGF / DEGC. A trailing negative-lookahead on [A-Z] prevents 'FAR', 'CARBON', etc.",
     "temperature_value_pattern": "(-?\\d+(?:\\.\\d+)?)\\s*(?:°\\s*[FC]|DEG\\.?\\s*[FC]|DEGF|DEGC)",
@@ -288,6 +288,10 @@
   "_comment_databox": "databox_label_map: maps equipment data-box label variants (as they appear in CAD P&ID data boxes) to field keys. A list value [field_a, field_b] splits the raw value on '/' — first part→field_a, second→field_b — for MIN/MAX pairs. Put more-specific variants (with MIN/MAX qualifier) BEFORE shorter variants so first-match-wins applies correctly. databox_scan_window_chars: chars to look back from the label match to find the nearest equipment tag.",
   "databox_scan_window_chars": 1500,
   "databox_label_map": {
+    "des./set press (min/max)":         ["design_pressure_max", "design_pressure_min"],
+    "des./set pressure (min/max)":     ["design_pressure_max", "design_pressure_min"],
+    "des./set press":                  ["design_pressure_max", "design_pressure_min"],
+    "des./set pressure":               ["design_pressure_max", "design_pressure_min"],
     "design press (min/max)":          ["design_pressure_max", "design_pressure_min"],
     "design pressure (min/max)":       ["design_pressure_max", "design_pressure_min"],
     "des press (min/max)":             ["design_pressure_max", "design_pressure_min"],
