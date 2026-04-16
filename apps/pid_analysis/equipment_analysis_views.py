@@ -2169,17 +2169,27 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                 insulation = 'BARE'
 
         # ── Dimensions ────────────────────────────────────────────────────
+        # Uses a wider context window than _pp_ctx because dimension data
+        # boxes on P&IDs are often in a separate table whose OCR text can be
+        # far from the equipment tag text.  Both values are soft-coded via
+        # dimension_length_context_chars (default 600) and
+        # dimension_value_window (default 60 chars after label end).
+        _dim_ctx_chars = int(ext_cfg.get('dimension_length_context_chars', 600))
+        _dim_val_win   = int(ext_cfg.get('dimension_value_window', 60))
+        _dim_start     = max(0, m.start() - _dim_ctx_chars)
+        _dim_end       = min(len(text), m.end() + _dim_ctx_chars)
+        _dim_ctx       = text[_dim_start:_dim_end].upper()
         dimension_length   = ''
         dimension_diameter = ''
-        _len_lbl_m = re.search(_dim_len_lbl, _pp_ctx, re.IGNORECASE)
+        _len_lbl_m = re.search(_dim_len_lbl, _dim_ctx, re.IGNORECASE)
         if _len_lbl_m:
-            _dv = re.search(_dim_val_pat, _pp_ctx[_len_lbl_m.end():_len_lbl_m.end() + 30], re.IGNORECASE)
+            _dv = re.search(_dim_val_pat, _dim_ctx[_len_lbl_m.end():_len_lbl_m.end() + _dim_val_win], re.IGNORECASE)
             if _dv and float(_dv.group(1)) > 0:
                 _unit = (_dv.group(2) or 'mm').upper()
                 dimension_length = f'{_dv.group(1)} {_unit}'
-        _dia_lbl_m = re.search(_dim_dia_lbl, _pp_ctx, re.IGNORECASE)
+        _dia_lbl_m = re.search(_dim_dia_lbl, _dim_ctx, re.IGNORECASE)
         if _dia_lbl_m:
-            _dv = re.search(_dim_val_pat, _pp_ctx[_dia_lbl_m.end():_dia_lbl_m.end() + 30], re.IGNORECASE)
+            _dv = re.search(_dim_val_pat, _dim_ctx[_dia_lbl_m.end():_dia_lbl_m.end() + _dim_val_win], re.IGNORECASE)
             if _dv and float(_dv.group(1)) > 0:
                 _unit = (_dv.group(2) or 'mm').upper()
                 dimension_diameter = f'{_dv.group(1)} {_unit}'

@@ -103,10 +103,12 @@
     "_comment_insulation": "Insulation code lookup in narrow context. Covers oil-field standard codes. Add project-specific codes to the list.",
     "insulation_codes": ["HOT", "COLD", "PERS", "PER", "HT", "CT", "PTHW", "PTCW", "TRACED", "EHT", "ELEC", "BARE", "CWP", "PIN", "ACOUSTIC", "CUI", "INS", "INSUL", "FIRE", "FROSTPROOF"],
 
-    "_comment_dimension": "Length/Height and Diameter/Width patterns for equipment sizing from data boxes. Group 1 = value (mm assumed unless unit captured).",
-    "dimension_length_label_pattern": "(?:LENGTH|HEIGHT|LG|L\\.?T\\.?-?L\\.?|TL[-/]TL|TAN[-/]TAN|TL\\s*TO\\s*TL|SEAM[-/]SEAM|S/S|LONG|T/T|SHELL\\s*(?:LENGTH|LG))\\s*[:=]?",
-    "dimension_diameter_label_pattern": "(?:(?:NOMINAL\\s*)?(?:OUTER\\s*)?DIA(?:METER)?|O\\.?D\\.?|BORE|I\\.?D\\.?|SHELL\\s*DIA|VESSEL\\s*DIA|NOMINAL\\s*BORE|NB|DN)\\s*[:=]?",
+    "_comment_dimension": "Length/Height and Diameter/Width patterns for equipment sizing from data boxes. Group 1 = value (mm assumed unless unit captured). dimension_length_context_chars: scan radius each side of the tag; wider than the general 300-char process-param window because dimension data boxes on P&IDs are often in a separate table some distance from the equipment tag in OCR text order. dimension_value_window: maximum chars scanned after the label match to find the numeric value — 60 chars handles multi-word labels with colon spacing.",
+    "dimension_length_label_pattern": "(?:OVERALL\\s*(?:LENGTH|HT|HEIGHT|LG|L)?|OA\\s*(?:LENGTH|LG|L\\.?)|O/?A\\s+(?:LENGTH|LG)|OAL|OVL|VESSEL\\s*(?:HEIGHT|HT|LENGTH|LG)|TOTAL\\s*(?:HEIGHT|HT|LENGTH|LG)|T\\.?T\\.?\\s*(?:LENGTH)?|HEAD(?:\\s*TO\\s*|-)HEAD|T(?:AN)?(?:\\s*TO\\s*|-)T(?:AN)?|TL(?:\\s*TO\\s*|[-/])TL|TAN(?:\\s*TO\\s*|[-/])TAN|L\\.?T\\.?-?L\\.?|BOS[-/]BOS|SEAM[-/]SEAM|S/?S|STRAIGHT\\s*(?:LENGTH|LG)|SHELL\\s*(?:LENGTH|LG|HT|HEIGHT)|TANGENT\\s*(?:LENGTH|LG)|LONG|LENGTH|HEIGHT|HT|LG|T/T|L/L)\\s*[:=]?",
+    "dimension_diameter_label_pattern": "(?:(?:NOMINAL\\s*)?(?:OUTER\\s*)?DIA(?:METER)?|O\\.?D\\.?|BORE|I\\.?D\\.?|SHELL\\s*DIA|VESSEL\\s*DIA|NOMINAL\\s*BORE|INTERNAL\\s*DIA|NPS|NB|DN)\\s*[:=]?",
     "dimension_value_pattern": "(\\d+(?:\\.\\d+)?)\\s*(mm|M|NB|DN)?",
+    "dimension_length_context_chars": 600,
+    "dimension_value_window": 60,
 
     "_comment_motor": "Motor rating extraction. Group 1 = kW value. Covers kW, KW, HP, BHP, KVA and also shorthand MR / M.R. common on O&G P&IDs. Includes ELEC MOTOR, ELECTRIC MOTOR and NAMEPLATE variants seen on Rejlers drawings.",
     "motor_rating_pattern": "(?:ELEC(?:TRIC)?\\s*MOTOR\\s*(?:RATING|POWER|OUTPUT)?|MOTOR\\s*(?:RATING|POWER|OUTPUT|INSTALLED|NAMEPLATE)?|DRIVER\\s*(?:RATING|POWER)?|RATED\\s*POWER|INSTALLED\\s*POWER|M\\.?R\\.?|MR|SHAFT\\s*POWER|BRAKE\\s*POWER|NAMEPLATE\\s*POWER)\\s*[:=/(]?\\s*(\\d+(?:\\.\\d+)?)\\s*(kW|KW|HP|BHP|KVA|kVA)\\b",
@@ -137,7 +139,9 @@
       "design_flowrate",
       "moc",
       "insulation",
-      "description"
+      "description",
+      "dimension_length",
+      "dimension_diameter"
     ]
   },
 
