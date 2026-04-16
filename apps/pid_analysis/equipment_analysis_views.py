@@ -1,4 +1,4 @@
-﻿"""
+"""
 Equipment Analysis Views - P&ID Equipment List Extraction
 """
 
@@ -505,6 +505,226 @@ _REGISTER_REPEATED_HDR_MARGIN = 3
 _REV_PRE_TAG_WIN_CHARS = 80
 _REV_PRE_TAG_TOKENS    = 3
 
+# _REVISION_USE_TOPMOST      — when True, the first non-empty revision value
+#                              found in the register (topmost row) is applied to
+#                              ALL extracted rows.  Equipment registers typically
+#                              carry one document revision; individual rows should
+#                              all reflect the current (topmost) revision mark.
+#                              Set to False to keep per-row revision values.
+_REVISION_USE_TOPMOST = True
+
+# _HEADER_MAX_SPAN_ROWS      — maximum number of consecutive rows that can form
+#                              a table column header.  CAD equipment registers
+#                              commonly split long column labels across 3 lines
+#                              (e.g. "Des./Set" / "Press." / "Min (PSIG)").
+#                              Raising this from 2 → 3 ensures the qualifier
+#                              row ("Min"/"Max") is included when building the
+#                              column-x map, fixing extraction of
+#                              design_pressure_min and design_pressure_max.
+_HEADER_MAX_SPAN_ROWS = 3
+
+# ── Soft-coded title-block revision extraction patterns ───────────────────────
+# Used in P&ID drawing mode to extract the DOCUMENT revision from the title
+# block, which applies uniformly to all equipment on the drawing.
+#
+# _TITLEBLOCK_REV_LABEL_RE   — explicit "REV" / "REVISION" label in title block,
+#                              followed by the revision mark.  Capture group 1
+#                              is the revision value.
+# _TITLEBLOCK_DRAWN_CTX_RE   — title-block revision-history row pattern:
+#                              a single revision mark that appears in a line
+#                              containing DR(AWN)/CH(ECKED)/AP(PROVED) keywords
+#                              (e.g. "A  IFR  12/04/2025  MAK  AKR  HJS").
+#                              The revision mark is always the first short token.
+# _TITLEBLOCK_ISOLATED_RE    — last-resort: single isolated letter/digit on its
+#                              own line that appears within a few lines of the
+#                              drawing number pattern (project doc-no format).
+_TITLEBLOCK_REV_LABEL_RE   = re.compile(
+    r'(?:^|\n)\s*REV(?:ISION)?\.?\s*[:\-]\s*([A-Z0-9]{1,3})\s*(?:\n|$)',
+    re.IGNORECASE | re.MULTILINE,
+)
+# _TITLEBLOCK_REVTABLE_ROW_RE — matches a revision-history table row in the
+# O&G title block convention:
+#   REV_MARK  DD/MM/YYYY  ISSUED FOR .../APPROVED FOR .../RE-APPROVED FOR ...
+# Captures groups: (1) REV mark, (2) day, (3) month, (4) year.
+# Strategy 0 in _extract_titleblock_revision finds ALL matches and returns
+# the mark whose date is the LATEST — correct regardless of OCR read order
+# (rows may appear oldest→newest or newest→oldest depending on tile/scale).
+# Handles both numeric (0, 1, 2) and alpha (A, B, C, IFC) revision marks.
+_TITLEBLOCK_REVTABLE_ROW_RE = re.compile(
+    r'(?:^|\s)([0-9]{1,2}[A-Z]?|[A-Z]{1,3})\s+'
+    r'(\d{2})[/\-](\d{2})[/\-](\d{4})\s+'
+    r'(?:ISSUED|APPROVED|RE[\s\-]?APPROVED|RETURNED|INCORPORATED)',
+    re.IGNORECASE,
+)
+_TITLEBLOCK_DRAWN_CTX_RE   = re.compile(
+    r'(?:DR[\'.]?N|DRW|DRAWN|CH[\'.]?D|CHK|CHECKED|APP?[\'.]?D|APPROVED)',
+    re.IGNORECASE,
+)
+# Matches document numbers such as PJ6-EXD-MRI-BQDA-0023 (4–5 hyphen segments,
+# last segment is 4–6 digits, each segment is 2–6 alphanumeric chars).
+# The first segment may contain digits (e.g. PJ6) so [A-Z0-9]+ is used.
+# Anchored with word boundary; minimum total length 10 to avoid short tags.
+_TITLEBLOCK_DWG_NO_RE      = re.compile(
+    r'\b([A-Z0-9]{2,6}(?:-[A-Z0-9]{2,6}){3,4})\b',
+    re.IGNORECASE,
+)
+# Label that precedes the drawing number in the title block
+_TITLEBLOCK_DWG_LABEL_RE   = re.compile(
+    r'(?:DWG\.?\s*NO\.?|DRAWING\s*NO\.?|DOCUMENT\s*NO\.?|DOC\.?\s*NO\.?)',
+    re.IGNORECASE,
+)
+
+
+def _extract_titleblock_dwg_no(text: str) -> str:
+    """
+    Extract the drawing / document number from a P&ID title block.
+
+    Strategy 1: look for the label 'DWG. NO.' / 'DRAWING NO.' followed by
+        a document-number pattern within 120 chars.
+    Strategy 2: find the most frequent multi-segment document number
+        (4–5 segments, ends in 4-digit sequence) anywhere in the text.
+        Filters out equipment tags (≤3 chars prefix + ≤5 digits) and
+        change-request numbers.
+
+    Returns the extracted drawing number string, or '' if not found.
+    """
+    # Strategy 1: label-adjacent.
+    # Skip "FEED DRAWING NO." — that is a reference-document label, not the
+    # main title-block drawing number.  A negative lookback of 25 chars
+    # handles both "FEED DRAWING NO." and "FROM FEED DRAWING NO." forms.
+    for lbl_m in _TITLEBLOCK_DWG_LABEL_RE.finditer(text):
+        pre_ctx = text[max(0, lbl_m.start() - 25):lbl_m.start()]
+        if re.search(r'\bFEED\b', pre_ctx, re.IGNORECASE):
+            continue
+        window = text[lbl_m.end():lbl_m.end() + 120]
+        m = _TITLEBLOCK_DWG_NO_RE.search(window)
+        if m:
+            candidate = m.group(1).upper()
+            # Must end with digits — excludes equipment tags like V-308-TF
+            if re.search(r'-[0-9]{4,6}$', candidate):
+                print(f'[EQ-DIAG][DwgNo] Found via label strategy: {candidate!r}', flush=True)
+                return candidate
+
+    # Strategy 2: most common 4–5 segment number ending in 4 digits
+    from collections import Counter
+    candidates: list = []
+    for m in _TITLEBLOCK_DWG_NO_RE.finditer(text):
+        cand = m.group(1).upper()
+        if re.search(r'-[0-9]{4,6}$', cand) and len(cand) >= 10:
+            candidates.append(cand)
+    if candidates:
+        most_common = Counter(candidates).most_common(1)[0][0]
+        print(f'[EQ-DIAG][DwgNo] Found via frequency strategy: {most_common!r}', flush=True)
+        return most_common
+
+    return ''
+
+
+def _extract_titleblock_revision(text: str) -> str:
+    """
+    Extract the DOCUMENT revision mark from a P&ID title block.
+
+    Uses three progressive strategies (all soft-coded via module constants):
+
+    Strategy 1 — Explicit label: looks for "REV[.] A" / "REVISION: B" patterns
+        anywhere in the extracted text.  Returns the LAST such match because
+        the topmost OCR text is often the legend/cover sheet; the title block
+        with the current revision appears later.
+
+    Strategy 2 — Drawn/Checked/Approved context: scans each line that contains
+        DR'N / CH'D / AP'D keywords (the revision-history table in the title
+        block) and extracts the first short token on that line as the revision.
+        Takes the LAST such match (= the most recent / lowest-numbered row in
+        the revision table, which in O&G conventions is the CURRENT revision).
+
+    Strategy 3 — Isolated token near drawing number: looks for a standalone
+        1-3 char alphanumeric token on lines adjacent to a project document
+        number (pattern: two-letter-code–section–discipline–doc-no).
+
+    All candidate values are validated by _clean_revision before return.
+    Returns '' if no valid revision found.
+    """
+    if not text:
+        return ''
+
+    # Strategy 0: revision table row (most reliable — O&G title block convention)
+    # Pattern: REV_MARK  DD/MM/YYYY  ISSUED/APPROVED FOR ...
+    # Finds ALL matching rows, parses the date from each, and returns the mark
+    # whose date is LATEST.  This is correct regardless of OCR read order —
+    # some drawings OCR oldest→newest, others newest→oldest depending on how
+    # tiles/spatial passes are merged.
+    rev_row_matches = list(_TITLEBLOCK_REVTABLE_ROW_RE.finditer(text))
+    if rev_row_matches:
+        best_mark = ''
+        best_date = (0, 0, 0)   # (year, month, day)
+        for rm in rev_row_matches:
+            cleaned = _clean_revision(rm.group(1))
+            if not cleaned:
+                continue
+            try:
+                day   = int(rm.group(2))
+                month = int(rm.group(3))
+                year  = int(rm.group(4))
+                rev_date = (year, month, day)
+            except (IndexError, ValueError):
+                # Date parse failed — accept as fallback only
+                if not best_mark:
+                    best_mark = cleaned
+                continue
+            if rev_date > best_date:
+                best_date = rev_date
+                best_mark = cleaned
+        if best_mark:
+            print(
+                f'[EQ-DIAG][TitleBlock] Rev found via table-row strategy: {best_mark!r} '
+                f'(date {best_date[2]:02d}/{best_date[1]:02d}/{best_date[0]})',
+                flush=True,
+            )
+            return best_mark
+
+    # Strategy 1: explicit "REV: value" label (strict colon required)
+    matches = _TITLEBLOCK_REV_LABEL_RE.findall(text)
+    if matches:
+        # Validate each match; take the last valid one
+        for raw in reversed(matches):
+            cleaned = _clean_revision(raw)
+            if cleaned:
+                print(f'[EQ-DIAG][TitleBlock] Rev found via label strategy: {cleaned!r}', flush=True)
+                return cleaned
+
+    # Strategy 2: drawn/checked/approved context rows
+    lines = text.split('\n')
+    last_rev_from_ctx = ''
+    for line in lines:
+        if _TITLEBLOCK_DRAWN_CTX_RE.search(line):
+            tokens = [t.strip() for t in line.split() if t.strip()]
+            for tok in tokens:
+                cleaned = _clean_revision(tok)
+                if cleaned:
+                    last_rev_from_ctx = cleaned
+                    break
+    if last_rev_from_ctx:
+        print(f'[EQ-DIAG][TitleBlock] Rev found via DR/CH/AP context: {last_rev_from_ctx!r}', flush=True)
+        return last_rev_from_ctx
+
+    # Strategy 3: isolated short token near project document number
+    dwg_matches = list(_TITLEBLOCK_DWG_NO_RE.finditer(text))
+    for dwg_m in dwg_matches:
+        # Look at a ±300 char window around the drawing number
+        win_start = max(0, dwg_m.start() - 300)
+        win_end   = min(len(text), dwg_m.end() + 300)
+        window    = text[win_start:win_end]
+        for ln in window.split('\n'):
+            stripped = ln.strip()
+            if re.match(r'^[A-Z0-9]{1,3}$', stripped, re.IGNORECASE):
+                cleaned = _clean_revision(stripped)
+                if cleaned:
+                    print(f'[EQ-DIAG][TitleBlock] Rev found via DWG-no proximity: {cleaned!r}', flush=True)
+                    return cleaned
+
+    print('[EQ-DIAG][TitleBlock] No document revision found in title block', flush=True)
+    return ''
+
 
 def _clean_revision(raw: str) -> str:
     """Normalise an extracted revision cell value to a short clean mark.
@@ -566,7 +786,7 @@ def _find_header_range(rows: list, field_variants: dict, min_cols: int) -> tuple
     }
 
     for start in range(scan_limit):
-        for span in (1, 2):
+        for span in range(1, _HEADER_MAX_SPAN_ROWS + 1):
             end = min(start + span, len(rows))
             combined_norm = _norm_header(
                 ' '.join(t for row in rows[start:end] for (t, x, y) in row)
@@ -1017,6 +1237,21 @@ def _extract_equipment_register_rows(file_obj, config: dict):
                     len(equipment), well_populated)
         return None
 
+    # ── Topmost revision override ─────────────────────────────────────────────
+    # Apply the topmost (first) non-empty revision value to ALL rows.
+    # Equipment registers carry one document revision; individual row cells
+    # often read wrongly due to column-coordinate drift or adjacent date bleed.
+    # Controlled by _REVISION_USE_TOPMOST constant (True by default).
+    if _REVISION_USE_TOPMOST and equipment:
+        topmost_rev = next(
+            (item['revision'] for item in equipment if item.get('revision')),
+            ''
+        )
+        if topmost_rev:
+            for item in equipment:
+                item['revision'] = topmost_rev
+            print(f'[EQ-DIAG][Register] Topmost-revision applied: "{topmost_rev}" → all {len(equipment)} rows', flush=True)
+
     logger.info('[EquipRegister] Extracted %d register rows (OCR=%s)', len(equipment), used_ocr)
     return equipment
 
@@ -1024,10 +1259,240 @@ def _extract_equipment_register_rows(file_obj, config: dict):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Data-box index — global scanner for equipment data boxes in P&ID drawings
+# ---------------------------------------------------------------------------
+
+# Soft-coded: chars to look BACK from the label to find the associated tag.
+_DATABOX_TAG_LOOKBACK_CHARS = 1500
+
+
+def _norm_databox_label(label: str) -> str:
+    """Lowercase + collapse punctuation/whitespace for map key comparison."""
+    s = label.lower()
+    s = re.sub(r'[./()_\-]', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+# Soft-coded: stop patterns for data-box value cleaning.
+# When OCR merges a data-box value with adjacent text (e.g. NOTES on the same
+# visual row), these patterns mark where the useful value ends.
+# Order matters: more-specific patterns first.
+# Soft-coded value-stop patterns for _clean_databox_value.
+# Each branch marks where the useful numeric/unit value ends and junk begins.
+_DATABOX_VALUE_STOPS = re.compile(
+    r'(?:'
+    r'\s+\d+\.\s+[A-Z]{3,}'            # note number: "  2. CORROSION..."
+    r'|\bSLOPE\b'                      # slope annotation (SLOPE 1:200)
+    r'|\bSOUR\s+GAS\b'                 # flow routing annotation
+    r'|\bIN\s+SCOPE\b'                 # scope note
+    r'|\bWILL\s+BE\b'                  # notes prose
+    r'|\bSHALL\b'                      # notes prose
+    r'|\bSCOPE\b'                      # scope note
+    r'|\bHEADER\b'                     # pipe destination
+    r'|[;|]'                           # column separator / pipe char
+    r'|//'                             # // separating dual-condition values
+    r'|\s{3,}'                         # 3+ spaces = OCR column gap
+    r'|[\"\u201c\u201d][A-Z]{2,4}-'   # pipe tag starting with inch mark
+    r')',
+    re.IGNORECASE,
+)
+
+# Known data-box label starts — if the value contains one of these after the
+# first word, truncate there (OCR ran two rows together).
+_DATABOX_LABEL_STARTS_RE = re.compile(
+    r'\b(?:NOMINAL|OPERATING|DESIGN|LENGTH|DIAMETER|MATERIAL|MOTOR|HEAT|DUTY'
+    r'|CAPACITY|VOLUME|RATED|TRIM|INSULATION|WEIGHT|SHELL|INTERNALS?)\b',
+    re.IGNORECASE,
+)
+
+
+def _clean_databox_value(raw: str) -> str:
+    """
+    Truncate a raw data-box extracted value at the first noise/stop pattern.
+
+    Data-box values on large P&IDs are often followed on the same OCR line by:
+    - NOTES text (e.g. "327 M3  2. CORROSION COUPON AND PROBE WILL BE...")
+    - A second data-box label (OCR merged two rows)
+    - Column separators (spaces, pipes, semicolons)
+
+    Soft-coded via _DATABOX_VALUE_STOPS and _DATABOX_LABEL_STARTS_RE.
+    Returns the cleaned, stripped value or '' if nothing useful remains.
+    """
+    if not raw:
+        return ''
+
+    # Truncate at first stop pattern
+    stop_m = _DATABOX_VALUE_STOPS.search(raw)
+    if stop_m:
+        raw = raw[:stop_m.start()]
+
+    # Truncate at the SECOND occurrence of a known label keyword
+    # (first occurrence may be part of the value itself e.g. "SHELL DIAMETER")
+    label_hits = list(_DATABOX_LABEL_STARTS_RE.finditer(raw))
+    if len(label_hits) >= 2:
+        raw = raw[:label_hits[1].start()]
+
+    raw = raw.strip(' .,;:()')
+    # Reject values that are pure punctuation or very short after cleaning
+    if len(raw) < 1:
+        return ''
+
+    # ── OCR unit correction ──────────────────────────────────────────────
+    # Tesseract commonly misreads 'M3' as 'MS', 'M²' as 'M2', 'm³' as 'm3'.
+    # Soft-coded replacements applied ONLY to the unit portion (after a digit).
+    _ocr_unit_fixes = [
+        (re.compile(r'(\d+\.?\d*)\s*MS\b', re.IGNORECASE), r'\1 M3'),  # 327 MS → 327 M3
+        (re.compile(r'\bM\s+3\b'),                              'M3'),   # M 3 → M3
+        (re.compile(r'\bM3/[Hh]\b'),                            'M3/H'), # normalise
+        (re.compile(r'"Fo\b'),                                   '°F'),   # "Fo → °F
+        (re.compile(r'\'F\b'),                                   '°F'),   # 'F  → °F
+        (re.compile(r'┬░'),                                      '°'),    # mojibake °
+    ]
+    for pat, repl in _ocr_unit_fixes:
+        raw = pat.sub(repl, raw)
+
+    # Remove stray OCR mojibake sequences
+    raw = re.sub(r'\xc2\xb0|\u00c2\u00b0|ΓÇ[\x00-\xff]', '', raw)
+    raw = raw.strip()
+
+    # ── Dimension value normaliser ────────────────────────────────────────
+    # When OCR merges a dimension value with the next label/annotation the
+    # result is e.g. "5.0 M iN" or "15.0 M LONG".  Strip trailing alphabetic
+    # junk that is not a recognised pressure/temperature/flow unit.
+    # Triggered only when the value starts with a digit (not e.g. "CS + LINING").
+    if raw and raw[0].isdigit():
+        _dim_m = re.match(
+            r'^(-?\d+(?:\.\d+)?)\s*(mm|M|NB|DN)\b',
+            raw, re.IGNORECASE,
+        )
+        if _dim_m:
+            _remainder = raw[_dim_m.end():].strip()
+            # Keep remainder only if it looks like a valid unit/modifier (psig, °F, etc.)
+            _is_valid_suffix = bool(re.match(
+                r'^(?:psig|psia|psi|barg|bara|kpag|mpa|°[fc]|/[hH]|m3|kw|hp|mw)',
+                _remainder, re.IGNORECASE,
+            ))
+            if _remainder and not _is_valid_suffix:
+                raw = f'{_dim_m.group(1)} {_dim_m.group(2).upper()}'.strip()
+
+    # ── MOC trailing noise cleanup ─────────────────────────────────────────
+    # Strip OCR junk that follows a known material spec, e.g.
+    # "CS + LINING ix 3.K" → "CS + LINING".
+    _moc_m = re.match(
+        r'^((?:CS|SS|316L?|304L?|317L|DSS|SDSS|DUPLEX|A516|INCONEL|MONEL|'
+        r'HASTELLOY|GRE|FRP|HDPE|PVC|CARBON\s*STEEL|STAINLESS|ALLOY\s*STEEL)'
+        r'(?:\s*[+/&]\s*(?:LINING|CLAD(?:DING)?|LINED?\b[^,;\n]{0,20}?|'
+        r'RUBBER|EPOXY|FRP|GRE|HDPE|NEOPRENE))?)',
+        raw, re.IGNORECASE,
+    )
+    if _moc_m and len(_moc_m.group(1)) < len(raw):
+        _after_moc = raw[_moc_m.end():].strip()
+        # Only truncate if the remainder doesn't look like a meaningful continuation
+        if not re.match(r'^(?:ASTM|AISI|ISO|EN|NACE|\+|-)', _after_moc, re.IGNORECASE):
+            raw = _moc_m.group(1).strip()
+
+    return raw
+
+
+def _build_databox_index(text: str, config: dict) -> dict:
+    """
+    Global equipment data-box scanner for P&ID drawings.
+
+    Scans the full OCR text for known engineering labels
+    (e.g. "OPERATING PRESS.", "NOMINAL CAPACITY :") and associates each
+    extracted value with the nearest equipment tag found within
+    _DATABOX_TAG_LOOKBACK_CHARS before the label position.
+
+    Returns {TAG: {field_key: value_string}} merged later into per-tag
+    results so narrow context-window extraction does not miss data-box
+    values that appear far from the tag in OCR order.
+
+    Label to field mappings are soft-coded in equipment_type_config.json
+    under 'databox_label_map'.  Scan window is 'databox_scan_window_chars'
+    in the 'extraction' section.  A list value in the map indicates a
+    MIN/MAX split: the raw value is split on '/' and assigned to
+    [0]=first field, [1]=second field.
+    """
+    ext_cfg   = config.get('extraction', {})
+    db_window = int(ext_cfg.get('databox_scan_window_chars', _DATABOX_TAG_LOOKBACK_CHARS))
+    label_map = config.get('databox_label_map', {})
+    if not label_map:
+        return {}
+
+    _DB_TAG_RE = re.compile(
+        r'\b([A-Z]{1,3}-[0-9]{2,5}[A-Za-z]?(?:-[A-Z0-9]{1,4})?)\b',
+        re.IGNORECASE,
+    )
+
+    index: dict = {}
+
+    # Sort longest label first so specific variants (e.g. "design press (min/max)")
+    # are matched before shorter ones ("design press") — first-match-wins.
+    sorted_variants = sorted(label_map.items(), key=lambda kv: -len(kv[0]))
+
+    for label_variant, field_or_pair in sorted_variants:
+        words = label_variant.strip().upper().split()
+        if not words:
+            continue
+        # Allow 0-5 punctuation/space chars between words
+        pat_str = r'[\s./()\-]{0,5}'.join(re.escape(w) for w in words)
+        # Capture up to 80 chars after the colon (reduced from 120 to limit
+        # runaway captures); stop at newline or semicolon.
+        # _clean_databox_value() further truncates at noise patterns.
+        pat_str = pat_str + r'[^:\n]{0,35}:\s*([^;\n]{1,80})'
+        try:
+            pat = re.compile(pat_str, re.IGNORECASE)
+        except re.error:
+            continue
+
+        for m in pat.finditer(text):
+            raw_value = _clean_databox_value(m.group(1))
+            if not raw_value:
+                continue
+
+            win_start   = max(0, m.start() - db_window)
+            pre_text    = text[win_start:m.start()]
+            tag_matches = list(_DB_TAG_RE.finditer(pre_text))
+            if not tag_matches:
+                # Wider post-window: 400 chars covers data-box inline formats
+                post_text   = text[m.end():min(len(text), m.end() + 400)]
+                tag_matches = list(_DB_TAG_RE.finditer(post_text))
+            if not tag_matches:
+                continue
+
+            tag = tag_matches[-1].group(1).upper()
+            if tag not in index:
+                index[tag] = {}
+
+            if isinstance(field_or_pair, list) and len(field_or_pair) == 2:
+                parts = re.split(r'\s*/\s*', raw_value, maxsplit=1)
+                if len(parts) == 2:
+                    v0 = _clean_databox_value(parts[0])
+                    v1 = _clean_databox_value(parts[1])
+                    if v0 and field_or_pair[0] not in index[tag]:
+                        index[tag][field_or_pair[0]] = v0
+                    if v1 and field_or_pair[1] not in index[tag]:
+                        index[tag][field_or_pair[1]] = v1
+                else:
+                    if field_or_pair[0] not in index[tag]:
+                        index[tag][field_or_pair[0]] = raw_value
+            else:
+                if field_or_pair not in index[tag]:
+                    index[tag][field_or_pair] = raw_value
+
+    if index:
+        print(
+            f'[EQ-DIAG][DataBox] Indexed {len(index)} equipment: '
+            + str({k: list(v.keys()) for k, v in index.items()}),
+            flush=True,
+        )
+    return index
+
+
 def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
     """
-    Parse extracted PDF text and build a list of equipment dicts.
-
     All field extraction patterns are soft-coded in equipment_type_config.json.
     Add / adjust patterns there without touching this function.
 
@@ -1054,6 +1519,18 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
     _desc_stop_words        = {
         'API','ASME','ANSI','ISO','DIN','NACE','NOTE','REF','SEE','PER',
         'AND','FOR','THE','OR','TO','OF','IN','AT','BY','NO','AS','IS','ON',
+        # Drawing / title block words that appear near tags on P&IDs
+        'LOCATION','MUBARRAZ','ISLAND','SCALE','NTS','DATE','DESCRIPTION',
+        'REFERENCE','DOCUMENTS','DRAWINGS','DOCUMENT','DRAWING','TITLE',
+        'COMPANY','PROJECT','SHEET','SIZE','ENGINEERING','CONSULTANT',
+        # Company names (may appear in nearby company block)
+        'REJLERS','DORSCH','HOLDING','GMBH','ABU','DHABI','UAE','HAMDAN',
+        # Revision table words (near tags in OCR order)
+        'ISSUED','APPROVED','REVIEW','HAZOP','CONSTRUCTION','INCORPORATED',
+        'RETURNED','REAPPROVED','INFORMATION','COMMENTS',
+        # P&ID noise
+        'ALARM','TRIP','OPEN','HALF','SLOPE','SOUR','FLARE','HEADER',
+        'WELL','FLUID','PHASE','LINE','TYPE','NOTE','NOTES','SCOPE',
     }
 
     # Soft-coded via tag_pattern in equipment_type_config.json.
@@ -1070,6 +1547,28 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
     # not misidentified as description text.
     _tag_like_re  = re.compile(r'^[A-Z]{1,2}-\d{3,5}[A-Z]?(?:-[A-Z0-9]{1,4})?$')
     _noise_tok_re = re.compile(r'^[\d\.\+\-\/\%\(\)\[\]]{1,6}$')
+
+    # Soft-coded reject patterns for description lines — lines matching any of
+    # these are skipped entirely rather than partially filtered.
+    # Covers: pipe designations (20"-PL-...), document/drawing numbers
+    # (PJ6-EXD-...-0023), instrument/valve tags (FT-1234), fraction-inch
+    # size tokens (3/4"), grid refs (A1-H8), and OCR fragments (|[, =£).
+    _desc_line_reject_re = re.compile(
+        r'(?:'
+        r'\d+["\']-[A-Z]{2,4}-'          # pipe designation: 20"-PL-...
+        r'|[A-Z]{2,4}-[A-Z]{2,4}-[A-Z]{2,4}-[A-Z]{2,4}-\d{4}'  # doc number
+        r'|PJ\d[-_][A-Z]'                # project document prefix PJ6-...
+        r'|\b[A-Z]{2,3}-\d{4,6}\b'       # instrument/valve tags FT-1234
+        r'|\d+\s*/\s*\d+'                # fractions 3/4
+        r'|[|=\[\]£$@#]'                 # OCR junk characters
+        r'|^\d{1,3}["\']?\s*[-]\s*[A-Z]{2,4}'  # starts with size then tag type
+        r'|\bFROM\s+[A-Z]|\bTO\s+[A-Z]|\bVIA\s+[A-Z]'  # flow routing text
+        r'|\bLINE\s*\d|\bNOTE\s*\d|\bSHEET\s*\d'  # line/note/sheet refs
+        r'|\bSLOPE\s*1?\s*[:.]'          # SLOPE 1:100 annotations
+        r'|\bNTS\b|\bSCALE\b'            # scale annotations
+        r')',
+        re.IGNORECASE,
+    )
     area_re    = re.compile(
         ext_cfg.get('area_pattern',
                     r'(?:AREA|UNIT|TRAIN|BAY|SECTION|BATTERY|MODULE|MOD|ZONE|BLOCK|SKID|PLANT|FIELD|STREAM)\s*[:\-]?\s*([A-Z0-9]{1,8})'),
@@ -1126,6 +1625,12 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
     seen = set()
     results = []
 
+    # ── Global data-box index (built once, merged per-tag below) ─────────
+    # Scans the full OCR text for LABEL : VALUE pairs in equipment data boxes
+    # so narrow context-window extraction doesn't miss values that are spatially
+    # far from the tag in OCR text order (common on large-format P&IDs).
+    _databox_idx = _build_databox_index(text, config)
+
     # ── Slash-variant tag expansion ────────────────────────────────────────
     # OCR on P&IDs sometimes reads multi-unit tags like "P-851A/B/C-TF" as a
     # single token. Expand these into individual variants (P-851A-TF,
@@ -1170,28 +1675,57 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         after       = text[m.end(): m.end() + desc_ctx_chars]
         description = ''
 
+        # Strategy 0: data-box title — on P&IDs the equipment data box has the
+        # format: TAG_LINE\nDESCRIPTION_LINE (e.g. "V-803-TF\nMRD OIL SLUG CATCHER").
+        # Look for 2-6 consecutive ALL-CAPS words on the first non-blank line
+        # after the tag that is NOT a pipe/tag/doc reference.
+        # Soft-coded: description_databox_min_words, description_databox_max_words
+        _db_min_w = int(ext_cfg.get('description_databox_min_words', 2))
+        _db_max_w = int(ext_cfg.get('description_databox_max_words', 6))
+        for _dln in (ln.strip() for ln in after.split('\n') if ln.strip()):
+            if _tag_like_re.match(_dln) or _desc_line_reject_re.search(_dln):
+                continue
+            _dln_toks = _dln.split()
+            # Require at least _db_min_w tokens, all purely alphabetic (or
+            # common hyphenated words like "THREE-PHASE"), no digits
+            _alpha_toks = [
+                t.strip('.,;:/()"\'[]')
+                for t in _dln_toks
+                if re.match(r'^[A-Za-z][A-Za-z\-]{1,}$', t.strip('.,;:/()"\'[]'))
+                and len(t) >= desc_min_len
+                and t.upper() not in _desc_stop_words
+            ]
+            if len(_alpha_toks) >= _db_min_w:
+                description = ' '.join(_alpha_toks[:_db_max_w]).title()
+                break
+
         # Strategy 1: newline-segmented lines right after the tag.
         # Each line is checked for "description-likeness":
         # skip bare tag IDs, pipe designations and pure digit/symbol noise.
-        desc_lines = []
-        for _ln in (ln.strip() for ln in after.split('\n') if ln.strip()):
-            if _tag_like_re.match(_ln):
-                continue
-            _toks = [t.strip('.,;:/()"\'[]') for t in _ln.split()]
-            _valid = [
-                t for t in _toks
-                if len(t) >= desc_min_len
-                and not t.isdigit()
-                and not _tag_like_re.match(t)
-                and not _noise_tok_re.match(t)
-                and t.upper() not in _desc_stop_words
-            ]
-            if _valid:
-                desc_lines.append(' '.join(_valid[:5]))
-            if len(desc_lines) >= 2:
-                break
-        if desc_lines:
-            description = ' '.join(desc_lines).title()
+        if not description:
+            desc_lines = []
+            for _ln in (ln.strip() for ln in after.split('\n') if ln.strip()):
+                if _tag_like_re.match(_ln):
+                    continue
+                if _desc_line_reject_re.search(_ln):
+                    continue
+                _toks = [t.strip('.,;:/()"\'[]') for t in _ln.split()]
+                _valid = [
+                    t for t in _toks
+                    if len(t) >= desc_min_len
+                    and not t.isdigit()
+                    and not _tag_like_re.match(t)
+                    and not _noise_tok_re.match(t)
+                    and t.upper() not in _desc_stop_words
+                    and not re.search(r'\d{2,}', t)       # skip tokens with 2+ digits
+                    and not re.match(r'^[A-Z]{1,3}-\d', t)  # skip tag-like tokens
+                ]
+                if _valid:
+                    desc_lines.append(' '.join(_valid[:5]))
+                if len(desc_lines) >= 1:
+                    break
+            if desc_lines:
+                description = ' '.join(desc_lines).title()
 
         # Strategy 2: ALL-CAPS word scan in narrower ctx_win (improved filter)
         if not description:
@@ -1382,14 +1916,18 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         design_pressure_min = ''
         design_pressure_max = ''
         _dp_lbl_ms = list(re.finditer(_des_press_lbl, _pp_ctx, re.IGNORECASE))
-        _dp_vals   = []
+        _dp_vals   = []   # list of (numeric_value, unit_string)
         for _dlm in _dp_lbl_ms:
-            _pv = re.search(_press_val_pat, _pp_ctx[_dlm.end():_dlm.end() + 80], re.IGNORECASE)
-            if _pv:
-                _dp_vals.append(float(_pv.group(1)))
+            # Use finditer to capture BOTH values in "195 psig / FV" or
+            # "195 / -1" style min/max-in-one-field data-box entries.
+            _win80 = _pp_ctx[_dlm.end():_dlm.end() + 80]
+            for _pv in re.finditer(_press_val_pat, _win80, re.IGNORECASE):
+                _dp_vals.append((float(_pv.group(1)), _pv.group(2)))
         if _dp_vals:
-            design_pressure_min = str(min(_dp_vals))
-            design_pressure_max = str(max(_dp_vals))
+            _dp_nums  = [v for v, _u in _dp_vals]
+            _dp_units = _dp_vals[0][1]  # use unit from first match
+            design_pressure_min = f'{min(_dp_nums)} {_dp_units}'
+            design_pressure_max = f'{max(_dp_nums)} {_dp_units}'
         elif not oper_pressure:
             # Fallback: any bare pressure value in narrow context
             _bare_pv = re.search(_press_val_pat, _pp_ctx, re.IGNORECASE)
@@ -1408,14 +1946,15 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         design_temp_min = ''
         design_temp_max = ''
         _dt_lbl_ms = list(re.finditer(_des_temp_lbl, _pp_ctx, re.IGNORECASE))
-        _dt_vals   = []
+        _dt_vals   = []  # list of numeric values (°F)
         for _dtlm in _dt_lbl_ms:
-            _tv = re.search(_temp_val_pat, _pp_ctx[_dtlm.end():_dtlm.end() + 80], re.IGNORECASE)
-            if _tv:
+            # Use finditer so that "185 / -13.2 °F" produces BOTH 185 and -13.2.
+            _win80 = _pp_ctx[_dtlm.end():_dtlm.end() + 80]
+            for _tv in re.finditer(_temp_val_pat, _win80, re.IGNORECASE):
                 _dt_vals.append(float(_tv.group(1)))
         if _dt_vals:
-            design_temp_min = str(min(_dt_vals))
-            design_temp_max = str(max(_dt_vals))
+            design_temp_min = f'{min(_dt_vals)} °F'
+            design_temp_max = f'{max(_dt_vals)} °F'
 
         # ── Design Flowrate ───────────────────────────────────────────────
         # Use a wider context window than the general _pp_ctx (soft-coded via
@@ -1467,6 +2006,18 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                     insulation = _ic
                     break
 
+        # Strategy 2: infer BARE for static equipment with no insulation label.
+        # Vessels, drums, separators, tanks, columns etc. on O&G P&IDs are
+        # typically BARE unless specifically annotated.  Soft-coded via
+        # 'insulation_bare_default_prefixes' in equipment_type_config.json.
+        if not insulation:
+            _bare_pfxs = {p.upper() for p in ext_cfg.get('insulation_bare_default_prefixes', [
+                'V', 'T', 'D', 'S', 'TK', 'F', 'R', 'SC', 'AB', 'CY',
+                'FX', 'SK', 'SX', 'VX', 'PF',
+            ])}
+            if prefix.upper() in _bare_pfxs:
+                insulation = 'BARE'
+
         # ── Dimensions ────────────────────────────────────────────────────
         dimension_length   = ''
         dimension_diameter = ''
@@ -1493,11 +2044,52 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             if _mr_bare_m:
                 motor_rating = f'{_mr_bare_m.group(1)} kW'
 
+        # Soft-coded: non-rotating equipment has no motor.  Set 'N/A' so the
+        # column is never empty rather than blank.  Prefixes are configurable
+        # via 'motor_na_prefixes' in equipment_type_config.json extraction
+        # section.  Rotating prefixes (P, K, C, G, BL, PK, KX, AG, VR, HT, CL)
+        # are left to the extraction above.
+        _motor_na_pfxs = {p.upper() for p in ext_cfg.get('motor_na_prefixes', [
+            'V', 'T', 'D', 'F', 'R', 'E', 'S', 'TK', 'SC', 'AB', 'ST', 'FL',
+            'CY', 'DR', 'FG', 'MS', 'SK', 'HX', 'SX', 'FX', 'VX', 'GX',
+            'PF', 'DP', 'AN', 'EJ', 'MX',
+        ])}
+        if not motor_rating and prefix.upper() in _motor_na_pfxs:
+            motor_rating = 'N/A'
+
         # ── Quality Required ─────────────────────────────────────────────
         quality_required = ''
         _qr_m = re.search(_qual_pat, _pp_ctx, re.IGNORECASE)
         if _qr_m:
             quality_required = _qr_m.group(1).strip().upper()
+
+        # Strategy 2: scan wider context for explicit NACE reference.
+        # P&IDs for sour-service equipment (H2S/SOUR GAS) should comply with
+        # NACE MR0175 / ISO 15156.  When the drawing has NACE in the notes or
+        # title block, apply it.  Threshold is soft-coded via
+        # 'quality_nace_context_chars' (default 1500).
+        if not quality_required:
+            _qual_ctx_chars = int(ext_cfg.get('quality_nace_context_chars', 1500))
+            _qual_ctx_start = max(0, m.start() - _qual_ctx_chars)
+            _qual_ctx_end   = min(len(text), m.end() + _qual_ctx_chars)
+            _qual_wide_ctx  = text[_qual_ctx_start:_qual_ctx_end]
+            if re.search(r'\bNACE\s*MR\s*0175\b', _qual_wide_ctx, re.IGNORECASE):
+                quality_required = 'NACE MR0175'
+            elif re.search(r'\bNACE\b', _qual_wide_ctx, re.IGNORECASE):
+                quality_required = 'NACE'
+
+        # Strategy 3: infer from sour-service context.  If sour gas / H2S /
+        # HIC is detected anywhere in the drawing, all vessels must comply
+        # with NACE MR0175.  Soft-coded disable via
+        # 'quality_infer_from_sour_service' = false.
+        _infer_sour = bool(ext_cfg.get('quality_infer_from_sour_service', True))
+        if not quality_required and _infer_sour:
+            _sour_ctx = text[:min(len(text), 6000)]  # check first 6 k chars
+            if re.search(r'\bSOUR\s+GAS\b|\bH2S\b|\bHIC\b|\bSSC\b',
+                         _sour_ctx, re.IGNORECASE):
+                quality_required = 'NACE MR0175'
+            elif service_fluid and re.search(r'\bsour\b', service_fluid, re.IGNORECASE):
+                quality_required = 'NACE MR0175'
 
         # ── Revision & SL No — pre-tag token scan ─────────────────────────
         # Tabular PDF text writes table cells as newline-separated tokens in
@@ -1548,6 +2140,22 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             'motor_rating':        motor_rating,
             'quality_required':    quality_required,
         })
+
+        # ── Merge data-box index values (fill empty fields only) ──────────
+        # Values extracted by _build_databox_index from the full text are
+        # merged in here.  Only fills columns that the narrow context-window
+        # extraction above left empty — never overwrites a found value.
+        _db_vals = _databox_idx.get(tag.upper(), {})
+        if _db_vals:
+            _last = results[-1]
+            for _fk, _fv in _db_vals.items():
+                if _fk in _last and not _last[_fk]:
+                    _last[_fk] = _fv
+            print(
+                f'[EQ-DIAG][DataBox] Merged into {tag}: '
+                + str({k: v for k, v in _db_vals.items() if _last.get(k)}),
+                flush=True,
+            )
 
     results.sort(key=lambda x: x['tag'])
 
@@ -1613,6 +2221,37 @@ def analyze_pid_equipment(request):
             print('[EQ-DIAG] Register mode returned None -> falling back to P&ID mode', flush=True)
             pid_file.seek(0)
             text      = _extract_text_from_pdf(pid_file, config)
+
+            # Override drawing_ref with the actual DWG NO from the title block.
+            # Strategy: try the VECTOR-ONLY text first (higher fidelity than OCR),
+            # then fall back to the full OCR-merged text.
+            # Vector text is extracted inline here to avoid re-opening the PDF.
+            _vector_dwg_no = ''
+            try:
+                import fitz as _fitz_dwg
+                pid_file.seek(0)
+                _dwg_doc = _fitz_dwg.open(stream=pid_file.read(), filetype='pdf')
+                _vec_parts: list = []
+                for _pg in _dwg_doc:
+                    _vec_parts.append(_pg.get_text('text') or '')
+                    _words = _pg.get_text('words')
+                    if _words:
+                        _vec_parts.append(' '.join(w[4] for w in sorted(
+                            _words, key=lambda w: (round(w[1] / 15) * 15, w[0])
+                        )))
+                _dwg_doc.close()
+                _vector_only_text = '\n'.join(_vec_parts)
+                _vector_dwg_no = _extract_titleblock_dwg_no(_vector_only_text)
+                if _vector_dwg_no:
+                    print(f'[EQ-DIAG][DwgNo] Vector-text strategy: {_vector_dwg_no!r}', flush=True)
+            except Exception as _e:
+                logger.debug('[EquipmentList] Vector DWG NO extraction failed: %s', _e)
+
+            _tb_dwg_no = _vector_dwg_no or _extract_titleblock_dwg_no(text)
+            if _tb_dwg_no:
+                drawing_ref = _tb_dwg_no
+                print(f'[EQ-DIAG] Drawing ref overridden to title-block DWG NO: {drawing_ref!r}', flush=True)
+
             raw_items = _extract_equipment_items(text, drawing_ref, config)
             equipment = [_pid_item_to_register_schema(item) for item in raw_items]
             extraction_mode = 'pid_drawing'
@@ -1624,6 +2263,21 @@ def analyze_pid_equipment(request):
             })
             print(f'[EQ-DIAG] P&ID mode: text_len={len(text)}  raw_items={len(raw_items)}  after_dedup={len(equipment)}', flush=True)
             print(f'[EQ-DIAG] Tags found: {[i["tag"] for i in raw_items]}', flush=True)
+
+            # ── P&ID mode: document-level revision from title block ───────────
+            # P&ID drawings carry ONE document revision (in the title block),
+            # which applies to ALL equipment on the sheet.  Per-tag pre-text
+            # proximity is unreliable on large-format drawings where OCR text
+            # order does not match spatial table structure.
+            # Controlled by _REVISION_USE_TOPMOST constant (True by default)
+            # and soft-coded config key "titleblock_revision_enabled".
+            _tb_rev_enabled = bool(config.get('extraction', {}).get('titleblock_revision_enabled', True))
+            if _REVISION_USE_TOPMOST and _tb_rev_enabled:
+                _doc_rev = _extract_titleblock_revision(text)
+                if _doc_rev:
+                    for _item in equipment:
+                        _item['revision'] = _doc_rev
+                    print(f'[EQ-DIAG] Document revision "{_doc_rev}" applied to all {len(equipment)} items', flush=True)
             # Log flowrate extraction results per tag for diagnosis
             for _ri in raw_items:
                 _fl = _ri.get('design_flowrate', '')
@@ -1853,6 +2507,11 @@ def analyze_pid_equipment_batch(request):
             if equipment is None:
                 pid_file.seek(0)
                 text      = _extract_text_from_pdf(pid_file, config)
+                # Override drawing_ref with actual DWG NO from title block
+                _tb_dwg_no = _extract_titleblock_dwg_no(text)
+                if _tb_dwg_no:
+                    drawing_ref          = _tb_dwg_no
+                    drawing_refs[-1]     = _tb_dwg_no   # update the list entry too
                 raw_items = _extract_equipment_items(text, drawing_ref, config)
                 equipment = [_pid_item_to_register_schema(item) for item in raw_items]
             for idx, item in enumerate(equipment, 1):
