@@ -3,7 +3,11 @@
 
   "extraction": {
     "_comment_tag": "tag_pattern: captures PREFIX-NNN[-SUFFIX] where SUFFIX is an optional 1-4 char train/unit code (e.g. -TF, -1F, -2A). Without the suffix group, equipment sharing the same base number but different train codes (V-805-TF vs V-805-1F) are incorrectly collapsed into one row.",
-    "tag_pattern": "\\b([A-Z]{1,2})-([0-9]{3,5}[A-Z]?(?:-[A-Z0-9]{1,4})?)\\b",
+    "tag_pattern": "\\b([A-Za-z]{1,2})-([0-9]{3,5}[A-Za-z]?(?:-[A-Za-z0-9]{1,4})?)\\b",
+    "_comment_tag_ignorecase": "tag_pattern_ignorecase: compile tag_pattern with re.IGNORECASE so tags like C-010c-TF (OCR lowercase letter suffix) are still matched. The captured tag is always uppercased before use.",
+    "tag_pattern_ignorecase": true,
+    "_comment_slash_ocr": "slash_ocr_substitutions: character pairs where the left char (OCR artefact) is replaced by the right char before slash-variant expansion runs. Common: OCR reads '/' as '?' in multi-unit pump tags like P-851A?B/C-TF.",
+    "slash_ocr_substitutions": [["?", "/"]],
     "_comment_spatial": "spatial_word_y_bucket_pts: vertical band (points) used to group words onto the same line in the spatially-sorted word pass. Increase for drawings with densely packed rows; decrease to separate rows that sit close together.",
     "spatial_word_y_bucket_pts": 15,
     "_comment_bond": "span_bond_gap_pts: max horizontal gap (PDF points) between two adjacent span fragments to bond them into one token. CAD tools like SmartPlant/AVEVA split 'V-308-TF' into spans; bonding reconstructs the full tag. Increase if still split; decrease if unrelated tokens are being joined.",

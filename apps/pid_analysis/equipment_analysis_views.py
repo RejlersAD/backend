@@ -1584,18 +1584,24 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
     }
 
     # Soft-coded via tag_pattern in equipment_type_config.json.
-    # The optional (?:-[A-Z0-9]{1,4})? captures project train/unit suffixes such
+    # The optional (?:-[A-Za-z0-9]{1,4})? captures project train/unit suffixes such
     # as -TF, -1F, -2A that are common in O&G tag numbering (e.g. V-308-TF,
     # V-805-1F).  Without this suffix, duplicate-deduplication collapses
     # equipment with the same base number but different trains into one row.
-    _tag_pat_default = r'\b([A-Z]{1,2})-([0-9]{3,5}[A-Z]?(?:-[A-Z0-9]{1,4})?)\b'
-    tag_re = re.compile(ext_cfg.get('tag_pattern', _tag_pat_default))
+    # tag_pattern_ignorecase (default True): compile with IGNORECASE so OCR
+    # lowercase variants like C-010c-TF are found; tag is always uppercased.
+    _tag_pat_default = r'\b([A-Za-z]{1,2})-([0-9]{3,5}[A-Za-z]?(?:-[A-Za-z0-9]{1,4})?)\b'
+    _tag_ic = bool(ext_cfg.get('tag_pattern_ignorecase', True))
+    tag_re = re.compile(
+        ext_cfg.get('tag_pattern', _tag_pat_default),
+        re.IGNORECASE if _tag_ic else 0,
+    )
 
     # --- Soft-coded helper patterns (read once per call) ------------------
     # Used by description strategy 1: identify bare tag lines and pure-noise tokens.
     # Must also match the extended suffix form so lines like "V-308-TF" are
-    # not misidentified as description text.
-    _tag_like_re  = re.compile(r'^[A-Z]{1,2}-\d{3,5}[A-Z]?(?:-[A-Z0-9]{1,4})?$')
+    # not misidentified as description text.  IGNORECASE covers OCR lowercase.
+    _tag_like_re  = re.compile(r'^[A-Za-z]{1,2}-\d{3,5}[A-Za-z]?(?:-[A-Za-z0-9]{1,4})?$', re.IGNORECASE)
     _noise_tok_re = re.compile(r'^[\d\.\+\-\/\%\(\)\[\]]{1,6}$')
 
     # Soft-coded reject patterns for description lines — lines matching any of
@@ -1686,14 +1692,29 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
     # single token. Expand these into individual variants (P-851A-TF,
     # P-851B-TF, P-851C-TF) and append them to the text so the main loop
     # finds each unit independently.
-    _slash_re      = re.compile(
-        r'\b([A-Z]{1,2}-\d{3,5})([A-Z])/([A-Z])(?:/([A-Z]))?(?:-([A-Z0-9]{1,4}))?\b'
+    #
+    # Soft-coded: slash_ocr_substitutions — OCR chars that should be treated
+    # as '/' in this context (e.g. '?' → '/' when OCR misreads the slash in
+    # P-851A/B/C-TF as P-851A?B/C-TF). Applied locally to a copy of the text
+    # so the substitution only affects slash-expansion; the main text is left
+    # intact to avoid corrupting description or parameter extraction.
+    _slash_ocr_subs = ext_cfg.get('slash_ocr_substitutions', [['?', '/']])
+    _slash_text = text
+    for _bad, _good in _slash_ocr_subs:
+        # Only substitute inside plausible tag tokens: letter-digit?letter pattern
+        _slash_text = re.sub(
+            r'(?<=[A-Za-z])' + re.escape(_bad) + r'(?=[A-Za-z])',
+            _good, _slash_text
+        )
+    _slash_re = re.compile(
+        r'\b([A-Za-z]{1,2}-\d{3,5})([A-Za-z])/([A-Za-z])(?:/([A-Za-z]))?(?:-([A-Za-z0-9]{1,4}))?\b',
+        re.IGNORECASE,
     )
     _slash_expanded: list[str] = []
-    for _sm in _slash_re.finditer(text):
-        _base = _sm.group(1)
-        _sfx  = _sm.group(5) or ''
-        for _v in [_sm.group(2), _sm.group(3)] + ([_sm.group(4)] if _sm.group(4) else []):
+    for _sm in _slash_re.finditer(_slash_text):
+        _base = _sm.group(1).upper()
+        _sfx  = _sm.group(5).upper() if _sm.group(5) else ''
+        for _v in [_sm.group(2).upper(), _sm.group(3).upper()] + ([_sm.group(4).upper()] if _sm.group(4) else []):
             _slash_expanded.append(f'{_base}{_v}' + (f'-{_sfx}' if _sfx else ''))
     if _slash_expanded:
         text = text + '\n' + '\n'.join(_slash_expanded)
@@ -1701,7 +1722,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
 
     for m in tag_re.finditer(text):
         prefix = m.group(1).upper()
-        tag    = m.group(0)
+        tag    = m.group(0).upper()   # always uppercase — OCR may emit lowercase letters
 
         if prefix in instr_valve_prefixes:
             continue
