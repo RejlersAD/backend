@@ -252,7 +252,7 @@
   "_comment_register_note": "Header variants are normalised (uppercase, & . - / stripped to spaces) before matching. You only need to cover the stripped form once — e.g. 'p id no' covers both 'P&ID No.' and 'P & ID No.' after normalisation.",
   "equip_register_fields": {
     "sl_no":               ["sl no", "s no", "no", "sr no", "sno", "s n", "item no", "sl", "ser no", "seq", "seq no", "serial no", "srl no", "item", "sr"],
-    "revision":            ["rev", "revision", "rev no", "revno", "rev.", "revision no"],
+    "revision":            ["rev", "revision", "rev no", "revno", "rev.", "revision no", "rev mark", "rev code", "rev letter", "rev num", "rev number", "rev.", "doc rev", "document rev", "current rev", "latest rev", "change rev", "r"],
     "tag":                 ["tag no", "tag number", "equip tag", "equip tag no", "equipment tag no", "equipment tag", "equipment no", "equip no", "tag", "tag id", "equip id", "equipment id", "equip number"],
     "description":         ["description", "equip description", "equipment description", "desc", "equip desc", "name", "equipment name", "equip name", "service", "service description"],
     "design_flowrate":     ["design flowrate", "design flow rate", "design duty", "volume", "capacity", "flow rate", "flowrate", "duty flow", "design capacity", "rated capacity", "rated flow", "volumetric flow", "mass flow", "duty"],

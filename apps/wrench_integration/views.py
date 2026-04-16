@@ -117,6 +117,52 @@ class WrenchConfigViewSet(viewsets.ViewSet):
         http_status = status.HTTP_200_OK if result['success'] else status.HTTP_502_BAD_GATEWAY
         return Response(result, status=http_status)
 
+    @action(detail=False, methods=['post'], url_path='inject-token')
+    def inject_token(self, request):
+        """
+        Save a pre-shared Wrench session token directly — bypasses username/password login.
+        POST /api/v1/wrench/config/inject-token/
+        Body: { "token": "<TOKEN_STRING>" }
+
+        Once saved, the backend uses this token for all Wrench API calls.
+        Wrench’s rolling-token mechanism keeps it refreshed automatically.
+        """
+        token = request.data.get('token', '').strip()
+        if not token:
+            return Response({'detail': 'token field is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Minimum sanity check — Wrench tokens are long base-64 strings
+        _MIN_TOKEN_LENGTH = 32
+        if len(token) < _MIN_TOKEN_LENGTH:
+            return Response(
+                {'detail': f'Token appears too short (minimum {_MIN_TOKEN_LENGTH} characters). Check the value and try again.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        if not cfg:
+            return Response({'detail': 'No active Wrench configuration found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        cfg.pre_shared_token = token
+        cfg.session_token = token          # keep both in sync
+        cfg.token_obtained_at = timezone.now()
+        cfg.save(update_fields=['pre_shared_token', 'session_token', 'token_obtained_at'])
+
+        create_audit_log(
+            user=request.user,
+            action='update',
+            resource_type='WrenchConfig',
+            resource_id=None,
+            resource_repr='Pre-shared token injection',
+            metadata={'config_id': cfg.id, 'token_length': len(token)},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+        )
+        return Response(
+            {'message': 'Token saved. All Wrench API calls will now use this token directly (login bypassed).'},
+            status=status.HTTP_200_OK,
+        )
+
 
 class WrenchSyncViewSet(viewsets.ViewSet):
     """
@@ -288,7 +334,8 @@ class WrenchSyncViewSet(viewsets.ViewSet):
                 result = wrench_service.search_documents(cfg, page=1, page_size=_CHOICES_SAMPLE_SIZE)
             except RuntimeError as exc:
                 err_msg = str(exc)
-                svc_url_required = 'DocumentSearch endpoint not found' in err_msg
+                # svc_url_required is set when auto-discovery exhausted all candidates
+                svc_url_required = 'Could not find the DocumentSearch endpoint' in err_msg or 'DocumentSearch endpoint not found' in err_msg
                 logger.warning('[Wrench] document-choices DocumentSearch also failed: %s', err_msg)
             except Exception as exc:
                 logger.warning('[Wrench] document-choices unexpected error: %s', exc)
@@ -411,6 +458,56 @@ class WrenchSyncViewSet(viewsets.ViewSet):
                 {'detail': 'Could not load documents for this transmittal. Check server logs.'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    @action(detail=False, methods=['get'], url_path='document-download')
+    def document_download(self, request):
+        """
+        Proxy a Wrench document file download through the backend (auth handled server-side).
+        GET /api/v1/wrench/sync/document-download/?idoc_id=<IDOC_ID>&doc_no=<DOC_NO>
+
+        Returns:
+          - Streamed binary file (application/octet-stream or PDF) with Content-Disposition, OR
+          - JSON { download_url } when Wrench returns a redirect URL instead of file bytes.
+        """
+        from django.http import HttpResponse
+
+        idoc_id = request.query_params.get('idoc_id', '').strip()
+        doc_no  = request.query_params.get('doc_no', '').strip() or None
+
+        if not idoc_id:
+            return Response(
+                {'detail': 'idoc_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        if not cfg:
+            return Response({'detail': 'No active Wrench configuration.'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            result = wrench_service.download_document(cfg, idoc_id=idoc_id, doc_no=doc_no)
+        except RuntimeError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_424_FAILED_DEPENDENCY)
+        except Exception as exc:
+            logger.error('[Wrench] document_download failed (idoc_id=%s): %s', idoc_id, exc, exc_info=True)
+            return Response(
+                {'detail': 'Document download failed. Check server logs.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        # When Wrench returns a redirect URL, pass it to the client
+        if result.get('url'):
+            return Response({'download_url': result['url']}, status=status.HTTP_200_OK)
+
+        # Stream binary content back to the browser
+        content      = result.get('content', b'')
+        filename     = result.get('filename', f'{idoc_id}.bin')
+        content_type = result.get('content_type', 'application/octet-stream')
+
+        http_resp = HttpResponse(content, content_type=content_type)
+        http_resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+        http_resp['Content-Length']      = str(len(content))
+        return http_resp
 
     @action(detail=False, methods=['post'], url_path='pid-cross-search',
             permission_classes=[IsAuthenticated])

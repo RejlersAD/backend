@@ -8,6 +8,7 @@ Implements the real SmartProject API authentication flow:
 API Reference: SmartProject API - Rejlers R0.pdf
 """
 import logging
+from urllib.parse import urlparse
 import requests
 from datetime import timedelta
 from django.utils import timezone as dj_timezone
@@ -105,7 +106,15 @@ def _login(cfg: WrenchConfig) -> str:
 
 
 def _ensure_token(cfg: WrenchConfig) -> str:
-    """Return a valid session token, logging in fresh if necessary."""
+    """
+    Return a valid session token.
+    Priority:
+      1. pre_shared_token – used as-is, no expiry check (Wrench rolling refresh keeps it current).
+      2. session_token    – used when still fresh (< _TOKEN_MAX_AGE_MINUTES).
+      3. Fresh login      – called when no valid token is available.
+    """
+    if cfg.pre_shared_token:
+        return cfg.pre_shared_token
     if _is_token_fresh(cfg):
         return cfg.session_token
     return _login(cfg)
@@ -113,11 +122,17 @@ def _ensure_token(cfg: WrenchConfig) -> str:
 
 def _refresh_token_from_response(cfg: WrenchConfig, data: dict) -> None:
     """
-    Wrench returns a refreshed token in every response.
-    Persist it so the next call uses the latest token.
+    Wrench returns a refreshed token in every response (rolling token).
+    - When pre_shared_token mode is active: update that field so future calls stay authenticated.
+    - Otherwise: update the standard session_token.
     """
     new_token = data.get('Token') or data.get('token')
-    if new_token and new_token != cfg.session_token:
+    if not new_token:
+        return
+    if cfg.pre_shared_token and new_token != cfg.pre_shared_token:
+        cfg.pre_shared_token = new_token
+        cfg.save(update_fields=['pre_shared_token'])
+    elif not cfg.pre_shared_token and new_token != cfg.session_token:
         _save_token(cfg, new_token)
 
 
@@ -260,49 +275,211 @@ def search_documents(
         'ServerId': cfg.server_id,
     }
 
-    # Use dedicated SVC URL if configured, else fall back to the main base URL.
-    # Many Wrench installations expose DocumentSearch on the same host as the WebAPI.
-    using_fallback = not cfg.svc_url
-    search_base = (cfg.svc_url or cfg.base_url).rstrip('/')
-    url = f"{search_base}/DocumentSearch/SearchObject"
-    logger.info('[Wrench] Searching documents: POST %s (page=%d, size=%d, fallback=%s)',
-                url, page, page_size, using_fallback)
-    resp = requests.post(url, json=payload, timeout=_TIMEOUT_SEARCH)
-    if resp.status_code == 404:
-        if using_fallback:
-            raise RuntimeError(
-                f'DocumentSearch endpoint not found at the main WebAPI host ({url}). '
-                'Your Wrench admin may have the DocumentSearch service on a separate host. '
-                'Add its URL in Configuration → "Document Search Service URL".'
-            )
+    # ── Build candidate base URLs to try in order ─────────────────────────────
+    # API ref (SmartProject API - Rejlers R0.pdf):
+    #   SearchObject lives at  <<SVC URL>>/DocumentSearch/SearchObject
+    #   – SVC URL is the DocumentSearch service host, which is DIFFERENT from the
+    #     WebAPI Server URL that contains an application path (e.g. /WrenchWebAPI_Rejlers_Live).
+    #
+    # When no svc_url is configured we derive candidates from base_url intelligently:
+    #  1. scheme+host only  → e.g. https://rejlers.wrenchsp.com
+    #     (DocumentSearch usually lives at the root, not under the WebAPI sub-path)
+    #  2. full base_url     → e.g. https://rejlers.wrenchsp.com/WrenchWebAPI_Rejlers_Live
+    #     (fallback for single-server installs where both services share the same path)
+    # When svc_url IS configured, only that URL is used (admin override takes priority).
+    _SEARCH_OBJECT_SUFFIX = '/DocumentSearch/SearchObject'
+
+    if cfg.svc_url:
+        url_candidates = [cfg.svc_url.rstrip('/')]
+    else:
+        parsed      = urlparse(cfg.base_url)
+        host_root   = f"{parsed.scheme}://{parsed.netloc}"
+        full_base   = cfg.base_url.rstrip('/')
+        # Deduplicate (single-server where base_url has no path produces duplicates)
+        seen = set()
+        url_candidates = []
+        for c in [host_root, full_base]:
+            if c not in seen:
+                seen.add(c)
+                url_candidates.append(c)
+
+    last_404_url = None
+    for search_base in url_candidates:
+        url = f"{search_base}{_SEARCH_OBJECT_SUFFIX}"
+        logger.info(
+            '[Wrench] Searching documents: POST %s (page=%d, size=%d)', url, page, page_size
+        )
+        try:
+            resp = requests.post(url, json=payload, timeout=_TIMEOUT_SEARCH)
+        except requests.exceptions.ConnectionError as conn_exc:
+            logger.debug('[Wrench] Connection error on %s: %s', url, conn_exc)
+            continue
+
+        if resp.status_code == 404:
+            logger.debug('[Wrench] %s → 404, trying next candidate', url)
+            last_404_url = url
+            continue
+
+        resp.raise_for_status()
+
+        data = resp.json()
+        # Refresh rolling token
+        _refresh_token_from_response(cfg, data)
+
+        # Flatten ObjectSearchResults (list of lists of {PropertyName, PropertyValue})
+        raw_results = data.get('ObjectSearchResults', [])
+        documents = []
+        for row in raw_results:
+            doc = {}
+            for prop in row:
+                name = prop.get('PropertyName') or prop.get('FieldName', '')
+                value = prop.get('PropertyValue') or prop.get('Value', '')
+                doc[name] = value
+            if doc:
+                documents.append(doc)
+
+        return {
+            'total': data.get('TotalSearchResultCount', len(documents)),
+            'documents': documents,
+            'operation_status': data.get('OperationStatus', -1),
+            'error_msg': data.get('ErrorMsg'),
+        }
+
+    # All candidates exhausted — raise a helpful error
+    if cfg.svc_url:
         raise RuntimeError(
-            f'DocumentSearch endpoint not found at the configured SVC URL ({url}). '
+            f'DocumentSearch endpoint not found at the configured SVC URL '
+            f'({cfg.svc_url.rstrip("/")}{_SEARCH_OBJECT_SUFFIX}). '
             'Verify the URL in Configuration → "Document Search Service URL" is correct.'
         )
-    resp.raise_for_status()
-    data = resp.json()
+    # No svc_url – guide the user: auto-discovery failed, manual entry needed
+    tried = ', '.join(f'{c}{_SEARCH_OBJECT_SUFFIX}' for c in url_candidates)
+    raise RuntimeError(
+        f'Could not find the DocumentSearch endpoint. Tried: {tried}. '
+        'The DocumentSearch service may run on a dedicated host separate from the WebAPI. '
+        'Ask your Wrench admin for the "SVC URL" and add it in '
+        'Configuration → "Document Search Service URL".'
+    )
 
-    # Refresh rolling token
-    _refresh_token_from_response(cfg, data)
 
-    # Flatten ObjectSearchResults (list of lists of {PropertyName, PropertyValue})
-    raw_results = data.get('ObjectSearchResults', [])
-    documents = []
-    for row in raw_results:
-        doc = {}
-        for prop in row:
-            name = prop.get('PropertyName') or prop.get('FieldName', '')
-            value = prop.get('PropertyValue') or prop.get('Value', '')
-            doc[name] = value
-        if doc:
-            documents.append(doc)
+# ─── Soft-coded constants for document file download ─────────────────────────
+# Wrench REST endpoints tried in order; first non-404, non-error success wins.
+# Covers both SmartProject SOAP-style and newer REST installations.
+_DOC_DOWNLOAD_PATHS = [
+    '/api/Document/GetDocumentLatestRevisionFile',
+    '/api/Document/GetDocumentFile',
+    '/api/DocumentRevision/GetDocumentFile',
+    '/api/Document/DownloadDocument',
+    '/api/Document/GetFile',
+    '/api/Idoc/GetFile',
+]
+# Response JSON fields that may contain a redirect URL to the actual binary
+_DOC_FILE_URL_FIELDS = ['FILE_PATH', 'FILE_URL', 'DOWNLOAD_URL', 'URL', 'FilePath', 'DownloadUrl']
+# Response JSON fields that may contain inline base-64 file content
+_DOC_FILE_CONTENT_FIELDS = ['FILE_CONTENT', 'FileContents', 'Content', 'FileData', 'Base64Content']
 
-    return {
-        'total': data.get('TotalSearchResultCount', len(documents)),
-        'documents': documents,
-        'operation_status': data.get('OperationStatus', -1),
-        'error_msg': data.get('ErrorMsg'),
+
+def download_document(
+    cfg: WrenchConfig,
+    *,
+    idoc_id: str,
+    doc_no: str = None,
+) -> dict:
+    """
+    Retrieve a downloadable file reference for a Wrench document.
+    Tries _DOC_DOWNLOAD_PATHS in order; first success returns:
+      { 'url': str (optional), 'content': bytes (optional), 'filename': str,
+        'content_type': str, 'source': str }
+    Raises RuntimeError if all strategies fail.
+    """
+    import base64 as _b64
+
+    token = _ensure_token(cfg)
+    base_payload = {
+        'TOKEN':      token,
+        'SERVER_ID':  cfg.server_id,
+        'LOGIN_NAME': cfg.login_name,
+        'IDOC_ID':    idoc_id,
     }
+    if doc_no:
+        base_payload['DOC_NO'] = doc_no
+
+    for path in _DOC_DOWNLOAD_PATHS:
+        url = _api_url(cfg, path)
+        logger.info('[Wrench] download_document: trying %s (idoc_id=%s)', url, idoc_id)
+        try:
+            resp = requests.post(url, json=base_payload, timeout=_TIMEOUT_SEARCH)
+            if resp.status_code == 404:
+                logger.debug('[Wrench] %s → 404, trying next', url)
+                continue
+            resp.raise_for_status()
+
+            content_type = resp.headers.get('Content-Type', '')
+            fallback_name = f'{doc_no or idoc_id}.pdf'
+
+            if 'application/json' in content_type:
+                data = resp.json()
+                _refresh_token_from_response(cfg, data)
+
+                # Look for a redirect URL
+                file_url = None
+                for field in _DOC_FILE_URL_FIELDS:
+                    candidate = data.get(field)
+                    if not candidate and isinstance(data.get('DataList'), dict):
+                        candidate = data['DataList'].get(field)
+                    if candidate:
+                        file_url = candidate
+                        break
+
+                # Look for inline base-64 content
+                file_content = None
+                for field in _DOC_FILE_CONTENT_FIELDS:
+                    raw = data.get(field)
+                    if raw:
+                        try:
+                            file_content = _b64.b64decode(raw)
+                        except Exception:
+                            file_content = raw.encode() if isinstance(raw, str) else bytes(raw)
+                        break
+
+                if file_url:
+                    return {
+                        'url': file_url, 'filename': fallback_name,
+                        'content_type': 'application/octet-stream', 'source': path,
+                    }
+                if file_content:
+                    return {
+                        'content': file_content, 'filename': fallback_name,
+                        'content_type': 'application/pdf', 'source': path,
+                    }
+                logger.debug('[Wrench] %s → JSON but no file URL/content found', url)
+                continue
+
+            else:
+                # Binary stream — return directly
+                filename = fallback_name
+                cd = resp.headers.get('Content-Disposition', '')
+                if 'filename=' in cd:
+                    filename = cd.split('filename=')[-1].strip('"\'') or filename
+                return {
+                    'content': resp.content,
+                    'filename': filename,
+                    'content_type': content_type or 'application/octet-stream',
+                    'source': path,
+                }
+
+        except requests.exceptions.HTTPError as exc:
+            logger.debug('[Wrench] HTTP error on %s: %s', url, exc)
+            continue
+        except Exception as exc:
+            logger.debug('[Wrench] Unexpected error on %s: %s', url, exc)
+            continue
+
+    raise RuntimeError(
+        f'Could not retrieve document file for IDOC_ID={idoc_id}. '
+        f'Tried: {_DOC_DOWNLOAD_PATHS}. '
+        'The Wrench instance may not expose a document download endpoint, or the IDOC_ID may be invalid.'
+    )
 
 
 # ─── Soft-coded constants for the REST document-list endpoint ─────────────────

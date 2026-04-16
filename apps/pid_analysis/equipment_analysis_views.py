@@ -437,13 +437,126 @@ def _norm_header(text: str) -> str:
     return s
 
 
+# ── Soft-coded revision normalisation constants ──────────────────────────────
+# Adjust these to cover new drawing conventions without touching logic.
+#
+# _REVISION_STRIP_PREFIX_RE  — removes leading "Rev"/"Revision"/"Rev." prefix
+#                               common in registers that repeat the column label
+#                               inside the cell (e.g. "Rev A" → "A").
+# _REVISION_VALID_RE         — first match is the cleaned revision mark.
+#                               Covers: single letter (A-Z), digit (0-9),
+#                               letter+digit (A1, P0, R1), digit+letter (0A),
+#                               3-letter IFC codes (IFC, IFD, IFA, IFR, AFD).
+# _REVISION_MAX_RAW_LEN      — raw cell text longer than this is unlikely to be
+#                               a revision mark; skip to avoid capturing dates or
+#                               description bleed-over.
+_REVISION_STRIP_PREFIX_RE = re.compile(
+    r'^(?:rev(?:ision)?\s*(?:no\.?\s*|mark\s*|code\s*|\.\s*)?)',
+    re.IGNORECASE,
+)
+_REVISION_VALID_RE = re.compile(
+    r'\b(IF[CDABR]|AF[CD]|[A-Z]{1,2}[0-9]?|[0-9]{1,2}[A-Z]?)\b'
+)
+# Rejects date-like strings (e.g. 24/03/2025) that bleed from adjacent date columns.
+_REVISION_DATE_RE = re.compile(r'\d[/\-.:]\d')
+_REVISION_MAX_RAW_LEN = 20
+
+# ── Soft-coded register extraction constants ──────────────────────────────────
+# _REGISTER_HEADER_SCAN_ROWS — number of coordinate-sorted rows to scan when
+#                              searching for the equipment register header.
+#                              Set high (2000) so multi-page CRS/cover sheets
+#                              before the equipment table are always skipped in
+#                              favour of the real register header, which scores
+#                              much higher (10+ columns vs 2-3 CRS columns).
+_REGISTER_HEADER_SCAN_ROWS = 2000
+
+# _REGISTER_HEADER_MIN_SCORE — minimum number of recognised fields the best
+#                              header row must match before register mode is
+#                              accepted.  Raised above min_cols (4) so that a
+#                              CRS table whose header shares only "Rev" and
+#                              "Description" with the equipment register schema
+#                              is rejected and causes a fall-back to P&ID mode.
+#                              Typical equipment register headers match 8-14
+#                              fields; CRS headers match 2-4.
+_REGISTER_HEADER_MIN_SCORE = 6
+
+# _REGISTER_TAG_FILTER_RE    — after rows are extracted, any row whose 'tag'
+#                              value does NOT contain this pattern is discarded
+#                              as a footnote, note, or separator row.
+#                              Equipment tags always look like "X-NNN" or
+#                              "XX-NNNx" (1-2 cap letters + hyphen + 2-5 digits).
+#                              This removes garbage like "units are in mm unless",
+#                              "Pacakge document for" (note rows), ITEM-001
+#                              fallback placeholders, and duplicate-text OCR noise.
+#                              Set to None to disable filtering.
+_REGISTER_TAG_FILTER_RE = re.compile(r'\b[A-Z]{1,2}-[0-9]{2,5}')
+
+# _REGISTER_REPEATED_HDR_MARGIN — how much the header-match score must exceed
+#   min_cols before a data row is treated as a repeated column-header and skipped.
+#   Short variants like "R" (revision) and "NO" (sl_no) cause substring false-
+#   positives against description text, so data rows routinely score 3-4.
+#   Real repeated headers (same words as the header row) score 10+.
+_REGISTER_REPEATED_HDR_MARGIN = 3
+
+# _REV_PRE_TAG_WIN_CHARS     — characters to read BEFORE the matched tag in the
+#                              raw OCR/vector text, used to find the revision cell
+#                              in tabular PDFs where columns are newline-separated.
+# _REV_PRE_TAG_TOKENS        — maximum number of newline-split tokens to inspect.
+_REV_PRE_TAG_WIN_CHARS = 80
+_REV_PRE_TAG_TOKENS    = 3
+
+
+def _clean_revision(raw: str) -> str:
+    """Normalise an extracted revision cell value to a short clean mark.
+
+    Steps
+    -----
+    1. Strip whitespace; bail out if cell is too long to be a revision mark.
+    2. Strip leading 'Rev'/'Revision' prefix (some registers duplicate the
+       column label inside every cell, e.g. 'Rev A' → 'A').
+    3. If the remaining text is already 1-3 chars and alphanumeric, return it.
+    4. Otherwise scan for the first token matching _REVISION_VALID_RE.
+    5. Return the match in uppercase, or '' if nothing valid found.
+
+    Soft-coded via module-level constants:
+      _REVISION_STRIP_PREFIX_RE, _REVISION_DATE_RE, _REVISION_VALID_RE, _REVISION_MAX_RAW_LEN
+    """
+    if not raw:
+        return ''
+    s = raw.strip()
+    if len(s) > _REVISION_MAX_RAW_LEN:
+        # Cell is too long to be a valid revision mark — likely a bleed-over
+        # from an adjacent wide column (description, remarks).
+        return ''
+    # Reject date-like values (e.g. 24/03/2025) that bleed from adjacent columns
+    if _REVISION_DATE_RE.search(s):
+        return ''
+    # Reject "Note N" or "(Note N)" bleed from description/remarks columns
+    if re.search(r'\bnote\b', s, re.IGNORECASE):
+        return ''
+    # Strip 'Rev' / 'Revision' prefix
+    s = _REVISION_STRIP_PREFIX_RE.sub('', s).strip()
+    if not s:
+        return ''
+    # If already short and clean, return immediately (fast path)
+    if re.match(r'^[A-Za-z0-9]{1,3}$', s):
+        return s.upper()
+    # Scan for first valid revision token in the (possibly noisy) remainder
+    m = _REVISION_VALID_RE.search(s.upper())
+    return m.group(1) if m else ''
+
+
 def _find_header_range(rows: list, field_variants: dict, min_cols: int) -> tuple:
     """
-    Scan first 50 rows for the table header row(s).
+    Scan first _REGISTER_HEADER_SCAN_ROWS rows for the table header row(s).
     Supports single-row and double-row headers (common in CAD documents).
     Returns (start_idx, end_idx_exclusive) or None if not found.
+
+    Uses _REGISTER_HEADER_MIN_SCORE (≥ min_cols) so that low-scoring CRS/cover
+    headers that share only "Rev" and "Description" with the equipment schema are
+    rejected rather than used as a fallback.
     """
-    scan_limit = min(50, len(rows))
+    scan_limit = min(_REGISTER_HEADER_SCAN_ROWS, len(rows))
     best_score = 0
     best_range: tuple = (0, 1)
 
@@ -466,7 +579,12 @@ def _find_header_range(rows: list, field_variants: dict, min_cols: int) -> tuple
                 best_score = score
                 best_range = (start, end)
 
-    if best_score < min_cols:
+    # Use the stricter _REGISTER_HEADER_MIN_SCORE threshold so that a CRS table
+    # whose header only matches "Rev" + "Description" (score ≤ 3) is rejected.
+    required_score = max(min_cols, _REGISTER_HEADER_MIN_SCORE)
+    print(f'[EQ-DIAG][Register] header scan: total_rows={len(rows)} scan_limit={scan_limit}'
+          f'  best_score={best_score}  best_range={best_range}  required={required_score}', flush=True)
+    if best_score < required_score:
         return None
     return best_range
 
@@ -627,7 +745,7 @@ def _pid_item_to_register_schema(pid_item: dict) -> dict:
     """Map a P&ID-extraction item to the 18-field register schema."""
     return {
         'sl_no':               str(pid_item.get('sl_no', '')),
-        'revision':            '',
+        'revision':            _clean_revision(str(pid_item.get('revision', ''))),
         'tag':                 pid_item.get('tag', ''),
         'description':         pid_item.get('description', ''),
         'design_flowrate':     pid_item.get('design_flowrate', ''),
@@ -752,12 +870,59 @@ def _extract_equipment_register_rows(file_obj, config: dict):
             1 for v_list in all_variants_norm.values()
             if any(v in combined_norm for v in v_list)
         )
-        if hdr_score >= min_cols:
+        if hdr_score >= min_cols + _REGISTER_REPEATED_HDR_MARGIN:
             continue
 
         values = _assign_row_to_cols(row, col_map)
         tag_val = values.get('tag', '').strip()
         sl_val  = values.get('sl_no', '').strip()
+
+        # ── Tag clean + rescue ────────────────────────────────────────────────
+        # Full equipment tag pattern: 1-3 cap letters, hyphen, 2-5 digits,
+        # optional alpha suffix (A, B, A/B/C), optional project suffix (-TF, -1F).
+        # Soft-coded via _REGISTER_TAG_FULL_RE.  Applied in order:
+        #  1. Strip trailing noise from column-assigned tag (e.g. "PX-851-TF MRD …")
+        #  2. If no valid tag in the column value, check whether neighbouring words
+        #     in the same row land a valid tag (handles x-coordinate drift that
+        #     places the tag token in the revision column instead of the tag column).
+        if tag_val:
+            _tm = re.search(
+                r'\b([A-Z]{1,3}-[0-9]{2,5}[A-Za-z]?(?:[/\-][A-Z0-9]{1,4})*)\b',
+                tag_val
+            )
+            tag_val = _tm.group(1) if _tm else tag_val
+
+        # Check unconditionally whether the revision column contains an equipment
+        # tag that landed there due to x-coordinate drift.  When that happens the
+        # real tag is in the rev cell and description text bleeds into the tag cell.
+        # We accept the swap only when what remains after removing the tag from rev
+        # is a plausible revision mark of 0-2 characters (e.g. "1", "A", "1A", "").
+        _TAG_FULL_RE = re.compile(
+            r'\b([A-Z]{1,3}-[0-9]{2,5}[A-Za-z]?(?:[/\-][A-Z0-9]{1,4})*)\b'
+        )
+        _rev_raw = values.get('revision', '')
+        if _rev_raw:
+            _rv_tag = _TAG_FULL_RE.search(_rev_raw)
+            if _rv_tag:
+                _cleaned_rev = _rev_raw.replace(_rv_tag.group(1), '').strip()
+                if re.match(r'^[0-9A-Za-z]{0,2}$', _cleaned_rev):
+                    tag_val = _rv_tag.group(1)
+                    values['revision'] = _cleaned_rev
+                    print(f'[EQ-DIAG][Register] rev-rescue: extracted tag {tag_val!r} '
+                          f'from rev col; rev cleaned to {values["revision"]!r}', flush=True)
+
+        if not _REGISTER_TAG_FILTER_RE.search(tag_val):
+            # Tag column didn't yield a valid tag — scan the full row text (all
+            # words ordered by x-position) and take the leftmost matching token.
+            _row_plain = ' '.join(t for (t, x, y) in sorted(row, key=lambda w: w[1]))
+            _rescue = re.search(
+                r'\b([A-Z]{1,3}-[0-9]{2,5}[A-Za-z]?(?:[/\-][A-Z0-9]{1,4})*)\b',
+                _row_plain
+            )
+            if _rescue:
+                tag_val = _rescue.group(1)
+                print(f'[EQ-DIAG][Register] tag-rescue: row "{_row_plain[:50]}" → {tag_val}', flush=True)
+        # ── End tag clean + rescue ────────────────────────────────────────────
 
         # Count non-empty fields; skip blank/near-blank rows regardless of tag presence.
         # A row that has ≥ 2 mapped fields is kept even if neither tag nor sl_no are
@@ -770,7 +935,7 @@ def _extract_equipment_register_rows(file_obj, config: dict):
         row_counter += 1
         item: dict = {
             'sl_no':               sl_val or str(row_counter),
-            'revision':            values.get('revision', ''),
+            'revision':            _clean_revision(values.get('revision', '')),
             'tag':                 tag_val or f'ITEM-{row_counter:03d}',
             'description':         values.get('description', ''),
             'design_flowrate':     values.get('design_flowrate', ''),
@@ -819,6 +984,22 @@ def _extract_equipment_register_rows(file_obj, config: dict):
             else:
                 merged_equip.append(item)
         equipment = merged_equip
+
+    # ── Tag-pattern filter ────────────────────────────────────────────────────
+    # Remove footnote/separator rows whose 'tag' cell doesn't contain a real
+    # equipment tag (e.g. "Note 1: units are in mm", "Water Treatment Package",
+    # ITEM-NNN placeholders, duplicated OCR noise lines).
+    # Controlled by _REGISTER_TAG_FILTER_RE; set to None to disable.
+    if _REGISTER_TAG_FILTER_RE is not None:
+        before_filter = len(equipment)
+        equipment = [
+            _item for _item in equipment
+            if _REGISTER_TAG_FILTER_RE.search(_item.get('tag', ''))
+        ]
+        removed = before_filter - len(equipment)
+        if removed:
+            print(f'[EQ-DIAG][Register] Tag-filter removed {removed} non-equipment rows '
+                  f'(footnotes/notes/separators), {len(equipment)} rows kept', flush=True)
 
     # Confirm enough populated rows to treat this as a real register
     well_populated = sum(
@@ -1318,10 +1499,34 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         if _qr_m:
             quality_required = _qr_m.group(1).strip().upper()
 
+        # ── Revision & SL No — pre-tag token scan ─────────────────────────
+        # Tabular PDF text writes table cells as newline-separated tokens in
+        # reading order.  The pattern is: ...\n[sl_no]\n[revision]\n[TAG]\n...
+        # We scan _REV_PRE_TAG_TOKENS tokens immediately before the tag match.
+        # Soft-coded via _REV_PRE_TAG_WIN_CHARS, _REV_PRE_TAG_TOKENS,
+        # _clean_revision(), and the SL-no regex below.
+        _pre_text = text[max(0, m.start() - _REV_PRE_TAG_WIN_CHARS):m.start()]
+        _pre_toks = [t.strip() for t in _pre_text.split('\n') if t.strip()]
+        revision  = ''
+        sl_no     = ''
+        if _pre_toks:
+            # Closest token before the tag is most likely the revision cell
+            _rev_candidate = _clean_revision(_pre_toks[-1])
+            if _rev_candidate:
+                revision = _rev_candidate
+                # Token before the revision cell is likely the SL No
+                if len(_pre_toks) >= 2 and re.match(r'^\d{1,3}$', _pre_toks[-2]):
+                    sl_no = _pre_toks[-2]
+            elif re.match(r'^\d{1,3}$', _pre_toks[-1]):
+                # Last token is a number; could be sl_no with no revision column
+                sl_no = _pre_toks[-1]
+
         results.append({
             'tag':                 tag,
             'type_label':          type_label,
             'description':         description,
+            'revision':            revision,
+            'sl_no':               sl_no,
             'area':                area,
             'drawing_ref':         drawing_ref,
             'line_connections':    lc_tokens,
@@ -1451,6 +1656,13 @@ def analyze_pid_equipment(request):
         _debug_info['extraction_mode'] = extraction_mode
         _debug_info['total'] = len(equipment)
         print(f'[EQ-DIAG] Done: {len(equipment)} items  mode={extraction_mode}', flush=True)
+        # Per-item diagnostic — shows tag + revision + how many fields are populated
+        for _item in equipment:
+            _pop = sum(1 for k, v in _item.items()
+                       if k not in ('sl_no','tag','type_label','area','drawing_ref',
+                                    'line_connections','nozzle_connections')
+                       and (v if not isinstance(v, list) else v))
+            print(f'[EQ-DIAG]   rev={_item.get("revision","")}  tag={_item.get("tag","")}  desc={repr(_item.get("description",""))[:40]}  pop={_pop}', flush=True)
 
         resp_body: dict = {
             'success':         True,

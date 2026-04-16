@@ -54,6 +54,18 @@ class WrenchConfig(models.Model):
     )
     token_obtained_at = models.DateTimeField(null=True, blank=True)
 
+    # Pre-shared token – when set, used directly for every API call (no login required).
+    # Wrench's rolling-token mechanism still applies: each response token overwrites this field.
+    # Set via the "Inject Token" action; cleared by saving new credentials.
+    pre_shared_token = models.TextField(
+        blank=True, default='',
+        help_text=(
+            'Pre-shared Wrench session token (obtained externally from the Wrench team). '
+            'When non-empty, this token is used directly — bypassing the username/password '
+            'login flow. The rolling refresh from each API response keeps it current.'
+        )
+    )
+
     organization_name = models.CharField(max_length=255, blank=True, default='')
     client_id = models.CharField(max_length=255, blank=True, default='')
 
