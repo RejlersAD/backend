@@ -2184,15 +2184,24 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                 _unit = (_dv.group(2) or 'mm').upper()
                 dimension_diameter = f'{_dv.group(1)} {_unit}'
 
-        # ── Motor Rating ──────────────────────────────────────────────────
+        # ── Motor Rating ─────────────────────────────────────────────────
+        # Uses a WIDER context window than _pp_ctx so motor callouts attached
+        # via lead lines (far from the tag in OCR text order) are still found.
+        # Soft-coded via motor_rating_context_chars (default 800 chars each
+        # side).  OCR at 0°/90°/180°/270° (ocr_rotation_angles) means vertical
+        # and downward-oriented motor annotations are already in the text pool.
+        _mtr_ctx_chars = int(ext_cfg.get('motor_rating_context_chars', 800))
+        _mtr_start     = max(0, m.start() - _mtr_ctx_chars)
+        _mtr_end       = min(len(text), m.end() + _mtr_ctx_chars)
+        _mtr_ctx       = text[_mtr_start:_mtr_end].upper()
         motor_rating = ''
-        _mr_m = re.search(_mtr_pat, _pp_ctx, re.IGNORECASE)
+        _mr_m = re.search(_mtr_pat, _mtr_ctx, re.IGNORECASE)
         if _mr_m:
             motor_rating = f'{_mr_m.group(1)} {_mr_m.group(2).upper()}'
         elif not motor_rating:
-            _mr_bare_m = re.search(_mtr_bare_pat, _pp_ctx, re.IGNORECASE)
+            _mr_bare_m = re.search(_mtr_bare_pat, _mtr_ctx, re.IGNORECASE)
             if _mr_bare_m:
-                motor_rating = f'{_mr_bare_m.group(1)} kW'
+                motor_rating = f'{_mr_bare_m.group(1)} {_mr_bare_m.group(2).upper()}'
 
         # Soft-coded: non-rotating equipment has no motor.  Prefixes are
         # configurable via 'motor_na_prefixes' in equipment_type_config.json.
