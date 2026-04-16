@@ -356,3 +356,108 @@ class PIDIssue(models.Model):
     
     def __str__(self):
         return f"Issue #{self.serial_number} - {self.pid_reference}"
+
+
+# ── Equipment Type Classification (seeded from equipment_type_config.json) ──
+
+class PIDEquipmentType(models.Model):
+    """
+    Engineering equipment type catalogue — seeded from designation_codes in
+    equipment_type_config.json.  Acts as a reference / lookup table so the
+    frontend can show consistent type names and icons without touching Python.
+    """
+
+    CATEGORY_CHOICES = [
+        ('VESSEL',         'Vessel / Drum'),
+        ('HEAT_EXCHANGER', 'Heat Exchanger'),
+        ('HEATER_COOLER',  'Heater / Cooler'),
+        ('ROTATING',       'Rotating Equipment'),
+        ('REACTOR',        'Reactor'),
+        ('PACKAGE',        'Package Equipment'),
+        ('MISC',           'Miscellaneous'),
+    ]
+
+    code        = models.CharField(max_length=10, primary_key=True,
+                                   help_text='Designation code, e.g. PC, HE, VV')
+    name        = models.CharField(max_length=120,
+                                   help_text='Human-readable type name')
+    category    = models.CharField(max_length=20, choices=CATEGORY_CHOICES,
+                                   default='MISC')
+    is_rotating = models.BooleanField(default=False)
+    is_active   = models.BooleanField(default=True)
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table            = 'pid_equipment_types'
+        ordering            = ['category', 'code']
+        verbose_name        = 'PID Equipment Type'
+        verbose_name_plural = 'PID Equipment Types'
+
+    def __str__(self):
+        return f'{self.code} – {self.name}'
+
+
+# ── Extracted Equipment Items (persisted from analysis) ───────────────────────
+
+class PIDEquipmentItem(models.Model):
+    """
+    One extracted equipment row from a P&ID analysis run.
+    All process parameters are stored in the JSONField `data` for maximum
+    flexibility.  The frequently-queried scalars (tag, drawing_ref, rev) have
+    dedicated columns for indexing.
+    """
+
+    id              = models.UUIDField(primary_key=True, default=uuid.uuid4,
+                                       editable=False)
+    upload_id       = models.CharField(max_length=40, db_index=True,
+                                       help_text='upload_id from the analysis session')
+    drawing_ref     = models.CharField(max_length=120, blank=True, db_index=True,
+                                       help_text='Drawing / DWG NO extracted from title block')
+    tag             = models.CharField(max_length=60, db_index=True,
+                                       help_text='Equipment tag number e.g. V-803-TF')
+    equipment_type  = models.ForeignKey(
+        PIDEquipmentType,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='items',
+        help_text='Classified equipment type (FK to designation code table)',
+    )
+    revision        = models.CharField(max_length=10, blank=True)
+    description     = models.TextField(blank=True)
+    extraction_mode = models.CharField(max_length=30, blank=True,
+                                       help_text='pid_drawing | equipment_register')
+
+    # All extracted process parameters in one flexible JSON column.
+    # Keys match equipment_type_config.json → equip_register_fields keys.
+    data = models.JSONField(
+        default=dict, blank=True,
+        help_text=(
+            'Extracted process parameters: oper_pressure, oper_temperature, '
+            'design_pressure_max, design_temp_max, moc, insulation, '
+            'dimension_length, dimension_diameter, motor_rating, etc.'
+        ),
+    )
+
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='pid_equipment_items',
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table            = 'pid_equipment_items'
+        ordering            = ['drawing_ref', 'tag']
+        unique_together     = [('upload_id', 'tag')]
+        verbose_name        = 'PID Equipment Item'
+        verbose_name_plural = 'PID Equipment Items'
+        indexes             = [
+            models.Index(fields=['drawing_ref', 'tag']),
+            models.Index(fields=['upload_id']),
+        ]
+
+    def __str__(self):
+        return f'{self.tag} ({self.drawing_ref or "no drawing"})'

@@ -15,6 +15,16 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+# Lazy import — avoids circular import at module load; models resolved at request time.
+def _get_equipment_models():
+    from apps.pid_analysis.models import PIDEquipmentType, PIDEquipmentItem  # noqa
+    return PIDEquipmentType, PIDEquipmentItem
+
+# Lazy import — avoids circular import at module load; models resolved at request time.
+def _get_equipment_models():
+    from apps.pid_analysis.models import PIDEquipmentType, PIDEquipmentItem  # noqa
+    return PIDEquipmentType, PIDEquipmentItem
+
 logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = os.path.join(
@@ -2298,6 +2308,71 @@ def analyze_pid_equipment(request):
             if not item.get('sl_no'):
                 item['sl_no'] = str(idx)
             item['drawing_ref'] = drawing_ref
+
+        # ── Equipment type classification (soft-coded via config) ──────────
+        _desg_codes   = config.get('designation_codes', {})
+        _prefix_map   = config.get('tag_prefix_type_map', {})
+        # Sort prefix keys longest-first so 'ST' matches before 'S'
+        _pfx_keys     = sorted(_prefix_map.keys(), key=len, reverse=True)
+        _type_re      = re.compile(r'^([A-Z]{1,4})')
+        for _item in equipment:
+            _tag_pfx = _type_re.match(_item.get('tag', ''))
+            if _tag_pfx:
+                _pfx = _tag_pfx.group(1)
+                _desig = None
+                for _pk in _pfx_keys:
+                    if _pfx.startswith(_pk):
+                        _desig = _prefix_map[_pk]
+                        break
+                if _desig and _desig in _desg_codes:
+                    _item['equipment_type']      = _desig
+                    _item['equipment_type_name'] = _desg_codes[_desig]['name']
+                    _item['equipment_category']  = _desg_codes[_desig]['category']
+                else:
+                    _item.setdefault('equipment_type', '')
+                    _item.setdefault('equipment_type_name', '')
+                    _item.setdefault('equipment_category', '')
+
+        # ── Persist extracted items to DB (upsert by upload_id + tag) ──────
+        try:
+            PIDEquipmentType, PIDEquipmentItem = _get_equipment_models()
+            _db_user = getattr(request, 'user', None)
+            _scalar_keys = {
+                'revision', 'description', 'extraction_mode',
+                'sl_no', 'tag', 'drawing_ref',
+                'equipment_type', 'equipment_type_name', 'equipment_category',
+            }
+            for _item in equipment:
+                _etag  = _item.get('tag', '')
+                _edata = {k: v for k, v in _item.items() if k not in _scalar_keys}
+                _etype_code = _item.get('equipment_type') or None
+                _etype_obj  = None
+                if _etype_code:
+                    _etype_obj, _ = PIDEquipmentType.objects.get_or_create(
+                        code=_etype_code,
+                        defaults={
+                            'name':        _desg_codes.get(_etype_code, {}).get('name', _etype_code),
+                            'category':    _desg_codes.get(_etype_code, {}).get('category', 'MISC'),
+                            'is_rotating': bool(_desg_codes.get(_etype_code, {}).get('rotating', False)),
+                        },
+                    )
+                PIDEquipmentItem.objects.update_or_create(
+                    upload_id=upload_id,
+                    tag=_etag,
+                    defaults={
+                        'drawing_ref':     drawing_ref,
+                        'revision':        _item.get('revision', ''),
+                        'description':     _item.get('description', ''),
+                        'extraction_mode': extraction_mode,
+                        'equipment_type':  _etype_obj,
+                        'data':            _edata,
+                        'uploaded_by':     _db_user if _db_user and _db_user.is_authenticated else None,
+                    },
+                )
+            print(f'[EQ-DIAG] Saved {len(equipment)} items to DB (upload_id={upload_id})', flush=True)
+        except Exception as _db_exc:
+            # DB save failure must NOT break the API response
+            print(f'[EQ-DIAG] DB save WARNING: {_db_exc}', flush=True)
 
         _result_store[upload_id] = {
             'status':          'completed',
