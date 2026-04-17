@@ -156,6 +156,8 @@
 
     "_comment_primary_filter": "Gate 2 — data-box presence check. After the main extraction loop, any tag whose every process-parameter field is empty AND whose global databox index has no entry is discarded. This catches cross-sheet referenced equipment that escaped Gate 1 (e.g. references without an explicit drawing number on the same connector label). param_fields_for_primary_check lists the fields considered 'data-box indicators'. Disable by setting require_at_least_one_param to false.",
     "require_at_least_one_param": true,
+    "_comment_prefer_databox_index_filter": "prefer_databox_index_filter: when true (default), Gate 2 uses the _databox_idx (proximity-based label:value scan) as the SOLE authoritative filter whenever it contains any entries. This is more reliable than the context-window param check because the databox scanner associates each value with the NEAREST preceding tag, making it immune to context-window bleed between closely-spaced equipment tags. Set to false to fall back to the older context-window param check in all cases.",
+    "prefer_databox_index_filter": true,
     "param_fields_for_primary_check": [
       "oper_pressure",
       "oper_temperature",

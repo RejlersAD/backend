@@ -2437,18 +2437,29 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
     results.sort(key=lambda x: x['tag'])
 
     # ── Gate 2: data-box presence post-filter ────────────────────────────
-    # Soft-coded via 'require_at_least_one_param' in equipment_type_config.json
-    # extraction section.
-    # After the main extraction loop, any tag whose every process-parameter
-    # field is empty AND whose global databox index has no entry is removed.
-    # This catches cross-sheet referenced equipment that escaped Gate 1
-    # (e.g. continuation arrows without an explicit drawing number, or
-    # OCR layouts where the drawing number appeared before the tag so Gate 1's
-    # lookahead window did not see it).
-    # Primary equipment on this drawing will always have at least one of:
-    # oper_pressure, oper_temperature, design_pressure, design_temp,
-    # dimension_length, dimension_diameter, or design_flowrate — from the
-    # data box on the drawing or the global databox index.
+    # Soft-coded via 'require_at_least_one_param' and
+    # 'prefer_databox_index_filter' in equipment_type_config.json.
+    #
+    # Two-tier strategy:
+    #
+    # Tier A — _databox_idx (preferred, more reliable):
+    #   _build_databox_index scans label:value pairs across the FULL OCR
+    #   text and associates each value with the NEAREST preceding tag. This
+    #   proximity-based attribution is immune to context-window bleed: even
+    #   if V-804-TF and V-308-TF both appear in a 400-char window around a
+    #   "OPER PRESS" label, the LAST tag before the label in OCR text order
+    #   is V-308-TF (the actual data-box owner). So _databox_idx accurately
+    #   contains {V-308-TF: {oper_pressure: ..., ...}} and nothing for
+    #   referenced tags like V-804-TF.
+    #   When _databox_idx has any entries, use it as the SOLE authoritative
+    #   list of primary equipment on this drawing.
+    #   Controlled by 'prefer_databox_index_filter' (default true).
+    #
+    # Tier B — context-window param-field check (fallback):
+    #   Used when _databox_idx is empty (label format not in databox_label_map,
+    #   drawing has no data boxes, etc.). Any item with at least one non-empty
+    #   core process parameter from the regex context-window pass is kept.
+    #   Controlled by 'require_at_least_one_param' (default true).
     if bool(ext_cfg.get('require_at_least_one_param', True)):
         _primary_fields = ext_cfg.get(
             'param_fields_for_primary_check',
@@ -2458,24 +2469,38 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
              'dimension_length', 'dimension_diameter',
              'design_flowrate'],
         )
+        _prefer_db_idx = bool(ext_cfg.get('prefer_databox_index_filter', True))
         _kept, _dropped = [], []
-        for _item in results:
-            _has_param = any(_item.get(f) for f in _primary_fields)
-            if not _has_param:
-                # Also check global databox index — it may have entries that
-                # the narrow-context pass missed
-                _has_param = bool(_databox_idx.get(_item['tag'].upper(), {}))
-            if _has_param:
-                _kept.append(_item)
-            else:
-                _dropped.append(_item['tag'])
-        if _dropped:
+
+        if _prefer_db_idx and _databox_idx:
+            # ── Tier A: databox-index is authoritative ───────────────────
+            # Only tags confirmed by the proximity-based label scan are primary.
+            for _item in results:
+                if _item['tag'].upper() in _databox_idx:
+                    _kept.append(_item)
+                else:
+                    _dropped.append(_item['tag'])
             print(
-                f'[EQ-DIAG] Gate2-no-param removed {len(_dropped)} referenced tag(s): '
-                + str(_dropped),
+                f'[EQ-DIAG] Gate2-TierA: kept {len(_kept)} databox-indexed tag(s), '
+                f'removed {len(_dropped)} referenced tag(s): {_dropped}',
                 flush=True,
             )
-            results = _kept
+        else:
+            # ── Tier B: context-window param check (fallback) ────────────
+            for _item in results:
+                _has_param = any(_item.get(f) for f in _primary_fields)
+                if _has_param:
+                    _kept.append(_item)
+                else:
+                    _dropped.append(_item['tag'])
+            if _dropped:
+                print(
+                    f'[EQ-DIAG] Gate2-TierB: removed {len(_dropped)} no-param '
+                    f'referenced tag(s): {_dropped}',
+                    flush=True,
+                )
+
+        results = _kept if _kept else results  # safety: never return empty when all pass
 
     # ── Post-processing: correct any inverted min/max field pairs ─────────
     # Soft-coded via config key 'minmax_correction_pairs' in the 'extraction'
