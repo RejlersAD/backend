@@ -261,81 +261,52 @@ SUCCESS_MESSAGES = {
 # access — edit here to change what any role can see.
 # ─────────────────────────────────────────────────────────────────────────────
 ROLE_MODULE_POLICY = {
-    # Process-focused engineers: datasheets + P&ID tools
-    'process_engineer': [
-        'process_datasheet',
-        'pid_analysis',
-        'pfd_to_pid',
-        'designiq',
-    ],
-    # Electrical discipline
-    'electrical_engineer': [
-        'electrical_datasheet',
-        'electrical_sld',
-        'pid_analysis',
-    ],
-    # Instrument discipline
-    'instrument_engineer': [
-        'instrument_datasheet',
-        'instrument_index',
-        'pid_analysis',
-    ],
-    # Mechanical discipline
-    'mechanical_engineer': [
-        'mechanical_datasheet',
-        'pid_analysis',
-    ],
-    # Civil / structural discipline
-    'civil_engineer': [
-        'civil_datasheet',
-    ],
-    # Piping discipline
-    'piping_engineer': [
-        'piping_datasheet',
-        'piping_pms',
-        'pid_analysis',
-    ],
-    # QHSE discipline
-    'qhse_engineer': [
-        'qhse',
-    ],
-    # DesignIQ / digital twin roles
-    'design_engineer': [
-        'designiq',
-        'pfd_to_pid',
-        'pid_analysis',
-    ],
-    # Project managers — read access across engineering disciplines
-    'project_manager': [
-        'pid_analysis',
-        'process_datasheet',
-        'designiq',
-        'reports',
-    ],
-    # Admin has access to all application modules
-    'admin': [
-        'pid_analysis',
-        'pfd_to_pid',
-        'crs_documents',
-        'process_datasheet',
-        'electrical_datasheet',
-        'electrical_sld',
-        'instrument_datasheet',
-        'instrument_index',
-        'mechanical_datasheet',
-        'civil_datasheet',
-        'piping_datasheet',
-        'piping_pms',
-        'designiq',
-        'qhse',
+    # ── DEFAULT ENGINEERING ACCESS POLICY ────────────────────────────────
+    # All roles get the full Engineering section (1.1–1.7) by default.
+    # ENGINEERING_SECTION_MODULES is the single source of truth for what
+    # constitutes the Engineering section.  To add/remove a module from the
+    # default grant, edit ENGINEERING_SECTION_MODULES above — not here.
+    # ─────────────────────────────────────────────────────────────────────
+
+    # Process-focused engineers: full Engineering section
+    'process_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Electrical discipline: full Engineering section
+    'electrical_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Instrument discipline: full Engineering section
+    'instrument_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Mechanical discipline: full Engineering section
+    'mechanical_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Civil / structural discipline: full Engineering section
+    'civil_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Piping discipline: full Engineering section
+    'piping_engineer': ENGINEERING_SECTION_MODULES,
+
+    # QHSE discipline: full Engineering section
+    'qhse_engineer': ENGINEERING_SECTION_MODULES,
+
+    # DesignIQ / digital twin roles: full Engineering section
+    'design_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Project managers: full Engineering section + reports
+    'project_manager': ENGINEERING_SECTION_MODULES + ['reports'],
+
+    # Viewer: full Engineering section (read-only enforced by UI/view guards)
+    'viewer': ENGINEERING_SECTION_MODULES,
+
+    # Admin: full Engineering section + all admin/platform modules
+    'admin': ENGINEERING_SECTION_MODULES + [
         'user_mgmt',
         'org_settings',
         'audit_logs',
         'reports',
         'api_access',
-        'digitization_datasheet',
-        'spec_customization',
     ],
+
     # Super-admins bypass module checks in the app, but listed for completeness
     'super_admin': [],
 }
