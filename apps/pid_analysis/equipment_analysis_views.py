@@ -1521,10 +1521,40 @@ def _build_databox_index(text: str, config: dict) -> dict:
                 if len(parts) == 2:
                     v0 = _clean_databox_value(parts[0])
                     v1 = _clean_databox_value(parts[1])
-                    if v0 and field_or_pair[0] not in index[tag]:
-                        index[tag][field_or_pair[0]] = v0
-                    if v1 and field_or_pair[1] not in index[tag]:
-                        index[tag][field_or_pair[1]] = v1
+                    # ── Smart numerical min/max assignment ──────────────────
+                    # When both target fields end with _min / _max, use numeric
+                    # ordering rather than position so that a box labelled
+                    # (MAX/MIN) with "185 F / -13.2 F" and one labelled (MIN/MAX)
+                    # with "-13.2 F / 185 F" both map correctly regardless of
+                    # the order in which the values appear in the cell.
+                    _f0, _f1 = field_or_pair[0], field_or_pair[1]
+                    _is_minmax = (
+                        (_f0.endswith('_min') or _f0.endswith('_max')) and
+                        (_f1.endswith('_min') or _f1.endswith('_max'))
+                    )
+                    if _is_minmax and v0 and v1:
+                        _n0 = re.search(r'-?\d+(?:\.\d+)?', v0)
+                        _n1 = re.search(r'-?\d+(?:\.\d+)?', v1)
+                        if _n0 and _n1:
+                            _flt0, _flt1 = float(_n0.group()), float(_n1.group())
+                            _min_f = _f0 if _f0.endswith('_min') else _f1
+                            _max_f = _f0 if _f0.endswith('_max') else _f1
+                            _min_v = v0 if _flt0 <= _flt1 else v1
+                            _max_v = v0 if _flt0 >= _flt1 else v1
+                            if _min_f not in index[tag]:
+                                index[tag][_min_f] = _min_v
+                            if _max_f not in index[tag]:
+                                index[tag][_max_f] = _max_v
+                        else:
+                            if v0 and _f0 not in index[tag]:
+                                index[tag][_f0] = v0
+                            if v1 and _f1 not in index[tag]:
+                                index[tag][_f1] = v1
+                    else:
+                        if v0 and field_or_pair[0] not in index[tag]:
+                            index[tag][field_or_pair[0]] = v0
+                        if v1 and field_or_pair[1] not in index[tag]:
+                            index[tag][field_or_pair[1]] = v1
                 else:
                     if field_or_pair[0] not in index[tag]:
                         index[tag][field_or_pair[0]] = raw_value
@@ -2318,8 +2348,51 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         if _db_vals:
             _last = results[-1]
             for _fk, _fv in _db_vals.items():
-                if _fk in _last and not _last[_fk]:
-                    _last[_fk] = _fv
+                if _fk in _last:
+                    # For _min/_max fields the explicit databox label extraction
+                    # (e.g. "DESIGN TEMP (MAX/MIN): 185 F / -13.2 F") is more
+                    # reliable than the narrow context scan — always override
+                    # so a wrong single-value pickup from context is corrected.
+                    if _fk.endswith(('_min', '_max')):
+                        if _fv:  # only write a non-empty databox value
+                            _last[_fk] = _fv
+                    elif not _last[_fk]:
+                        _last[_fk] = _fv
+            # Normalise oper_temperature if it was filled from the databox
+            # (the narrow-context path already calls _normalize_oper_temp;
+            #  the databox path does not, so we apply it here).
+            if _last.get('oper_temperature') and '/' in _last['oper_temperature']:
+                _last['oper_temperature'] = _normalize_oper_temp(_last['oper_temperature'])
+            # ── Fallback: split raw "X / Y" values that landed in a single
+            # _max or _min field (happens when the (MAX/MIN) label variant
+            # did not match and the shorter fallback label fired instead,
+            # e.g. "design temp" → design_temp_max = "185 F / -13.2 F").
+            # We detect these, split numerically and re-assign correctly.
+            for _single_fk in ('design_temp_max', 'design_pressure_max', 'design_temp_min', 'design_pressure_min'):
+                _sv = _last.get(_single_fk, '')
+                if _sv and '/' in _sv:
+                    _sparts = re.split(r'\s*/\s*', _sv, maxsplit=1)
+                    if len(_sparts) == 2:
+                        _sn0 = re.search(r'-?\d+(?:\.\d+)?', _sparts[0])
+                        _sn1 = re.search(r'-?\d+(?:\.\d+)?', _sparts[1])
+                        if _sn0 and _sn1:
+                            _sf0, _sf1 = float(_sn0.group()), float(_sn1.group())
+                            # Determine the _min/_max counterpart field name
+                            if _single_fk.endswith('_max'):
+                                _counterpart = _single_fk[:-4] + '_min'
+                            else:
+                                _counterpart = _single_fk[:-4] + '_max'
+                            # Assign larger to _max, smaller to _min
+                            _larger  = _sparts[0] if _sf0 >= _sf1 else _sparts[1]
+                            _smaller = _sparts[0] if _sf0 <= _sf1 else _sparts[1]
+                            if _single_fk.endswith('_max'):
+                                _last[_single_fk] = _larger
+                                if _counterpart in _last and not _last[_counterpart]:
+                                    _last[_counterpart] = _smaller
+                            else:
+                                _last[_single_fk] = _smaller
+                                if _counterpart in _last and not _last[_counterpart]:
+                                    _last[_counterpart] = _larger
             print(
                 f'[EQ-DIAG][DataBox] Merged into {tag}: '
                 + str({k: v for k, v in _db_vals.items() if _last.get(k)}),
@@ -2327,6 +2400,25 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             )
 
     results.sort(key=lambda x: x['tag'])
+
+    # ── Post-processing: correct any inverted min/max field pairs ─────────
+    # Soft-coded via config key 'minmax_correction_pairs' in the 'extraction'
+    # section. Ensures that design_temp_max is always numerically >= design_temp_min
+    # regardless of which code path populated them.
+    _minmax_pairs = ext_cfg.get('minmax_correction_pairs', [
+        ['design_temp_min',      'design_temp_max'],
+        ['design_pressure_min',  'design_pressure_max'],
+    ])
+    for _item in results:
+        for _fmin, _fmax in _minmax_pairs:
+            _vmin = _item.get(_fmin, '')
+            _vmax = _item.get(_fmax, '')
+            if _vmin and _vmax:
+                _nmin = re.search(r'-?\d+(?:\.\d+)?', _vmin)
+                _nmax = re.search(r'-?\d+(?:\.\d+)?', _vmax)
+                if _nmin and _nmax and float(_nmin.group()) > float(_nmax.group()):
+                    # Values are inverted — swap
+                    _item[_fmin], _item[_fmax] = _vmax, _vmin
 
     # ── Post-deduplication: canonicalize to the most-specific tag form ────
     # When the same physical equipment appears in two forms (e.g. both "V-308"
