@@ -168,6 +168,22 @@
       "dimension_length",
       "dimension_diameter",
       "design_flowrate"
+    ],
+
+    "_comment_multi_page": "multi_page_mode: 'per_page' (default) processes each PDF page as an independent P&ID drawing. Each page gets its own databox index, title-block DWG NO, and Gate 0/1/2 filtering — cross-page tag references cannot pollute other pages' results. 'combined' reverts to the old behavior where all pages are merged into one text blob before extraction.",
+    "multi_page_mode": "per_page",
+
+    "_comment_ctx_reject": "Gate 0 — tag_context_reject_patterns: list of regex patterns checked against 80 chars around each matched equipment tag. If any pattern matches, the tag occurrence is skipped (NOT added to seen) — so the same tag can still be extracted from a legitimate data-box context elsewhere on the same page. Designed to exclude tags that appear inside revision-cloud annotations or other non-equipment callouts.",
+    "tag_context_reject_patterns": [
+      "(?i)\\brevision\\s*cloud\\b",
+      "(?i)\\brev\\.?\\s*cloud\\b"
+    ],
+
+    "_comment_desc_reject": "description_reject_patterns: list of regex patterns matched against the extracted description field. Any equipment item whose description matches is removed from the results. Catches annotation text that OCR picks up as a description (e.g. 'Revision Cloud', 'Mrd Oil Slug Catcher' duplicate rows produced by context bleed).",
+    "description_reject_patterns": [
+      "(?i)\\brevision\\s*cloud\\b",
+      "(?i)\\brev\\.?\\s*cloud\\b",
+      "(?i)\\bmrd\\s+oil\\s+slug\\s+catcher\\b"
     ]
   },
 
