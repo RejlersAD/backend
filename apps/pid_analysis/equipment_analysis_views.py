@@ -1762,6 +1762,41 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         _tag_suffix_m = re.search(r'-([A-Z]{1,4})$', tag)
         if _tag_suffix_m and _tag_suffix_m.group(1) in _exclude_suffixes:
             continue
+
+        # ── Gate 1: connector-arrow context check ────────────────────────
+        # On ADNOC/O&G P&IDs the sheet-edge continuation arrows use the
+        # format: "[KEYWORD] [DESCRIPTION] [TAG]\n[DWG-NO]" (e.g.
+        # "SOUR GAS TO MEA INLET SCRUBBER V-804-TF\nPJ6-EXD-MRI-BQDA-0024").
+        # These are cross-sheet references to equipment that lives on a
+        # different drawing and has no data box here.
+        # Detection: a flow-routing keyword within lookback_chars BEFORE the
+        # tag AND a multi-segment drawing number within lookahead_chars AFTER.
+        # When detected, skip this occurrence WITHOUT adding to 'seen' so
+        # the same tag can still be processed if it appears in its own data
+        # box later in the OCR text of this very drawing.
+        # Soft-coded via connector_context_enabled / connector_context_lookback_chars
+        # / connector_context_lookahead_chars / connector_keywords_pattern in
+        # equipment_type_config.json extraction section.
+        if bool(ext_cfg.get('connector_context_enabled', True)):
+            _conn_lookback  = int(ext_cfg.get('connector_context_lookback_chars', 80))
+            _conn_lookahead = int(ext_cfg.get('connector_context_lookahead_chars', 120))
+            _conn_kws_pat   = ext_cfg.get(
+                'connector_keywords_pattern',
+                r'\b(?:FROM|TO|VIA|INTO|INLET|OUTLET|SUCTION|DISCHARGE|DEST(?:INATION)?|SOURCE)\b',
+            )
+            _conn_before = text[max(0, m.start() - _conn_lookback): m.start()]
+            _conn_after  = text[m.end(): min(len(text), m.end() + _conn_lookahead)]
+            if (re.search(_conn_kws_pat, _conn_before, re.IGNORECASE)
+                    and _TITLEBLOCK_DWG_NO_RE.search(_conn_after)):
+                print(
+                    f'[EQ-DIAG] Gate1-connector-ref skipped: {tag!r} '
+                    f'(keyword in lookback + dwg-no in lookahead)',
+                    flush=True,
+                )
+                # Do NOT add to seen — allow a data-box occurrence of the
+                # same tag later in the text to be processed normally.
+                continue
+
         if tag in seen:
             continue
         seen.add(tag)
@@ -2400,6 +2435,47 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             )
 
     results.sort(key=lambda x: x['tag'])
+
+    # ── Gate 2: data-box presence post-filter ────────────────────────────
+    # Soft-coded via 'require_at_least_one_param' in equipment_type_config.json
+    # extraction section.
+    # After the main extraction loop, any tag whose every process-parameter
+    # field is empty AND whose global databox index has no entry is removed.
+    # This catches cross-sheet referenced equipment that escaped Gate 1
+    # (e.g. continuation arrows without an explicit drawing number, or
+    # OCR layouts where the drawing number appeared before the tag so Gate 1's
+    # lookahead window did not see it).
+    # Primary equipment on this drawing will always have at least one of:
+    # oper_pressure, oper_temperature, design_pressure, design_temp,
+    # dimension_length, dimension_diameter, or design_flowrate — from the
+    # data box on the drawing or the global databox index.
+    if bool(ext_cfg.get('require_at_least_one_param', True)):
+        _primary_fields = ext_cfg.get(
+            'param_fields_for_primary_check',
+            ['oper_pressure', 'oper_temperature',
+             'design_pressure_min', 'design_pressure_max',
+             'design_temp_min', 'design_temp_max',
+             'dimension_length', 'dimension_diameter',
+             'design_flowrate'],
+        )
+        _kept, _dropped = [], []
+        for _item in results:
+            _has_param = any(_item.get(f) for f in _primary_fields)
+            if not _has_param:
+                # Also check global databox index — it may have entries that
+                # the narrow-context pass missed
+                _has_param = bool(_databox_idx.get(_item['tag'].upper(), {}))
+            if _has_param:
+                _kept.append(_item)
+            else:
+                _dropped.append(_item['tag'])
+        if _dropped:
+            print(
+                f'[EQ-DIAG] Gate2-no-param removed {len(_dropped)} referenced tag(s): '
+                + str(_dropped),
+                flush=True,
+            )
+            results = _kept
 
     # ── Post-processing: correct any inverted min/max field pairs ─────────
     # Soft-coded via config key 'minmax_correction_pairs' in the 'extraction'

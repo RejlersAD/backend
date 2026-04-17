@@ -146,6 +146,26 @@
       "description",
       "dimension_length",
       "dimension_diameter"
+    ],
+
+    "_comment_connector_filter": "Gate 1 — connector-arrow context check. On ADNOC/O&G P&IDs the sheet-edge continuation arrows have the format: '[KEYWORD] [DESCRIPTION] [TAG]\\n[DWG-NO]'. If a flow-routing keyword (FROM/TO/VIA etc.) appears within connector_context_lookback_chars chars BEFORE a matched tag AND a cross-reference drawing number (4-5 hyphen-separated segments) appears within connector_context_lookahead_chars chars AFTER it, the tag is classified as a cross-sheet referenced item and skipped. Critically, it is NOT added to the deduplication set — so if the same tag appears later in its own data-box context on this sheet it will still be extracted correctly. Disable by setting connector_context_enabled to false.",
+    "connector_context_enabled": true,
+    "connector_context_lookback_chars": 80,
+    "connector_context_lookahead_chars": 120,
+    "connector_keywords_pattern": "\\b(?:FROM|TO|VIA|INTO|INLET|OUTLET|SUCTION|DISCHARGE|DEST(?:INATION)?|SOURCE)\\b",
+
+    "_comment_primary_filter": "Gate 2 — data-box presence check. After the main extraction loop, any tag whose every process-parameter field is empty AND whose global databox index has no entry is discarded. This catches cross-sheet referenced equipment that escaped Gate 1 (e.g. references without an explicit drawing number on the same connector label). param_fields_for_primary_check lists the fields considered 'data-box indicators'. Disable by setting require_at_least_one_param to false.",
+    "require_at_least_one_param": true,
+    "param_fields_for_primary_check": [
+      "oper_pressure",
+      "oper_temperature",
+      "design_pressure_min",
+      "design_pressure_max",
+      "design_temp_min",
+      "design_temp_max",
+      "dimension_length",
+      "dimension_diameter",
+      "design_flowrate"
     ]
   },
 
