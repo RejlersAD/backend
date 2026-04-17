@@ -2813,116 +2813,72 @@ def analyze_pid_equipment(request):
         extraction_mode = 'register'
 
         if equipment is None:
-            # ── Stage 2: fall back to P&ID drawing mode ──────────────────────
-            # Soft-coded: multi_page_mode = "per_page" (default) processes each
-            # PDF page in isolation so cross-page tag references cannot pollute
-            # the results. Set to "combined" to revert to the old single-pass.
+            # ── Stage 2: fall back to P&ID drawing mode ──
             print('[EQ-DIAG] Register mode returned None -> falling back to P&ID mode', flush=True)
             pid_file.seek(0)
-            _pid_bytes = pid_file.read()   # read once; reuse for all page passes
+            text      = _extract_text_from_pdf(pid_file, config)
 
-            # Count pages
-            _total_pages = 1
+            # Override drawing_ref with the actual DWG NO from the title block.
+            # Strategy: try the VECTOR-ONLY text first (higher fidelity than OCR),
+            # then fall back to the full OCR-merged text.
+            # Vector text is extracted inline here to avoid re-opening the PDF.
+            _vector_dwg_no = ''
             try:
-                import fitz as _fitz_pc
-                _pc_doc = _fitz_pc.open(stream=_pid_bytes, filetype='pdf')
-                _total_pages = len(_pc_doc)
-                _pc_doc.close()
+                import fitz as _fitz_dwg
+                pid_file.seek(0)
+                _dwg_doc = _fitz_dwg.open(stream=pid_file.read(), filetype='pdf')
+                _vec_parts: list = []
+                for _pg in _dwg_doc:
+                    _vec_parts.append(_pg.get_text('text') or '')
+                    _words = _pg.get_text('words')
+                    if _words:
+                        _vec_parts.append(' '.join(w[4] for w in sorted(
+                            _words, key=lambda w: (round(w[1] / 15) * 15, w[0])
+                        )))
+                _dwg_doc.close()
+                _vector_only_text = '\n'.join(_vec_parts)
+                _vector_dwg_no = _extract_titleblock_dwg_no(_vector_only_text)
+                if _vector_dwg_no:
+                    print(f'[EQ-DIAG][DwgNo] Vector-text strategy: {_vector_dwg_no!r}', flush=True)
             except Exception as _e:
-                logger.debug('[EquipmentList] Page count failed: %s', _e)
+                logger.debug('[EquipmentList] Vector DWG NO extraction failed: %s', _e)
 
-            _multi_mode    = ext_cfg.get('multi_page_mode', 'per_page')
+            _tb_dwg_no = _vector_dwg_no or _extract_titleblock_dwg_no(text)
+            if _tb_dwg_no:
+                drawing_ref = _tb_dwg_no
+                print(f'[EQ-DIAG] Drawing ref overridden to title-block DWG NO: {drawing_ref!r}', flush=True)
+
+            raw_items = _extract_equipment_items(text, drawing_ref, config)
+            equipment = [_pid_item_to_register_schema(item) for item in raw_items]
+            extraction_mode = 'pid_drawing'
+            _debug_info.update({
+                'text_len': len(text),
+                'text_preview': text[:400] if text else '',
+                'raw_items_count': len(raw_items),
+                'after_dedup_count': len(equipment),
+            })
+            print(f'[EQ-DIAG] P&ID mode: text_len={len(text)}  raw_items={len(raw_items)}  after_dedup={len(equipment)}', flush=True)
+            print(f'[EQ-DIAG] Tags found: {[i["tag"] for i in raw_items]}', flush=True)
+
+            # ── AI gap-fill: use GPT-4o + Gemini to fill any fields still empty ──
+            # Runs AFTER regex extraction; never overwrites populated values.
+            # Controlled by ai_gap_fill_enabled in equipment_type_config.json.
+            if equipment and text:
+                equipment = _ai_gap_fill_pid_items(equipment, text, config)
+
+            # ── P&ID mode: document-level revision from title block ───────────
             _tb_rev_enabled = bool(ext_cfg.get('titleblock_revision_enabled', True))
-            print(f'[EQ-DIAG] PDF pages={_total_pages}  multi_page_mode={_multi_mode!r}', flush=True)
+            if _REVISION_USE_TOPMOST and _tb_rev_enabled:
+                _doc_rev = _extract_titleblock_revision(text)
+                if _doc_rev:
+                    for _item in equipment:
+                        _item['revision'] = _doc_rev
+                    print(f'[EQ-DIAG] Document revision "{_doc_rev}" applied to all {len(equipment)} items', flush=True)
 
-            def _process_pid_page(page_idx):
-                """Extract, filter, AI-fill and revision-stamp one PDF page.
-                Returns (schema_items, page_drawing_ref, page_text)."""
-                import io as _io_pg
-                _pf   = _io_pg.BytesIO(_pid_bytes)
-                _ptxt = _extract_text_from_pdf(_pf, config, _page_index=page_idx)
-
-                # Title-block DWG NO: try vector-only first (higher fidelity)
-                _pvec_no = ''
-                try:
-                    import fitz as _fitz_v
-                    _vdoc  = _fitz_v.open(stream=_pid_bytes, filetype='pdf')
-                    _vpg   = _vdoc[page_idx]
-                    _vtext = (_normalize_text(_vpg.get_text('text') or '') + '\n'
-                              + _normalize_text(' '.join(
-                                  w[4] for w in sorted(
-                                      _vpg.get_text('words') or [],
-                                      key=lambda w: (round(w[1] / 15) * 15, w[0])
-                                  )
-                              )))
-                    _vdoc.close()
-                    _pvec_no = _extract_titleblock_dwg_no(_vtext)
-                    if _pvec_no:
-                        print(f'[EQ-DIAG][P{page_idx+1}] Vector DWG NO: {_pvec_no!r}', flush=True)
-                except Exception as _e:
-                    logger.debug('[EquipmentList] Vector DWG NO (page %d): %s', page_idx, _e)
-
-                _pg_ref = (_pvec_no
-                           or _extract_titleblock_dwg_no(_ptxt)
-                           or (f'{drawing_ref}_P{page_idx + 1}' if _total_pages > 1 else drawing_ref))
-
-                _pg_raw = _extract_equipment_items(_ptxt, _pg_ref, config)
-                _pg_sch = [_pid_item_to_register_schema(item) for item in _pg_raw]
-                print(f'[EQ-DIAG][P{page_idx+1}] {_pg_ref!r}: {len(_pg_raw)} raw → {len(_pg_sch)} schema items', flush=True)
-                print(f'[EQ-DIAG][P{page_idx+1}] Tags: {[i["tag"] for i in _pg_raw]}', flush=True)
-
-                if _pg_sch and _ptxt:
-                    _pg_sch = _ai_gap_fill_pid_items(_pg_sch, _ptxt, config)
-
-                if _REVISION_USE_TOPMOST and _tb_rev_enabled:
-                    _pg_rev = _extract_titleblock_revision(_ptxt)
-                    if _pg_rev:
-                        for _it in _pg_sch:
-                            _it['revision'] = _pg_rev
-                        print(f'[EQ-DIAG][P{page_idx+1}] Revision "{_pg_rev}" applied to {len(_pg_sch)} items', flush=True)
-
-                return _pg_sch, _pg_ref, _ptxt
-
-            if _total_pages > 1 and _multi_mode == 'per_page':
-                # ── Multi-page: each sheet is an independent drawing ──────────
-                extraction_mode = 'pid_drawing_multipage'
-                _all_items: list = []
-                _page_refs: list = []
-                for _page_idx in range(_total_pages):
-                    _pg_items, _pg_ref, _ = _process_pid_page(_page_idx)
-                    _all_items.extend(_pg_items)
-                    if _pg_items:
-                        _page_refs.append(_pg_ref)
-                equipment = _dedup_equipment_by_tag(_all_items)
-                # drawing_ref: join unique per-page refs (or keep filename base)
-                if _page_refs:
-                    drawing_ref = ' | '.join(dict.fromkeys(_page_refs))
-                text = ''  # no single text blob in multi-page mode
-                _debug_info.update({
-                    'total_pages': _total_pages,
-                    'page_refs': _page_refs,
-                    'after_dedup_count': len(equipment),
-                })
-                print(f'[EQ-DIAG] Multi-page: {_total_pages} pages  {len(_all_items)} raw → {len(equipment)} after dedup', flush=True)
-            else:
-                # ── Single-page or combined mode ─────────────────────────────
-                _pg_items, _pg_ref, text = _process_pid_page(0)
-                equipment = _pg_items
-                drawing_ref = _pg_ref
-                extraction_mode = 'pid_drawing'
-                _debug_info.update({
-                    'text_len': len(text),
-                    'text_preview': text[:400] if text else '',
-                    'raw_items_count': len(equipment),
-                    'after_dedup_count': len(equipment),
-                })
-                print(f'[EQ-DIAG] Single-page P&ID: {_pg_ref!r}  {len(equipment)} items', flush=True)
-
-            # Diagnostic: all tag-shaped tokens (single-page mode only)
-            if text:
-                import re as _re
-                _all_candidates = _re.findall(r'\b[A-Z]{1,2}-[0-9]{3,5}[A-Z]?(?:-[A-Z0-9]{1,4})?\b', text)
-                print(f'[EQ-DIAG] All tag-shaped tokens in text: {list(dict.fromkeys(_all_candidates))}', flush=True)
+            # Diagnostic logging
+            import re as _re
+            _all_candidates = _re.findall(r'\b[A-Z]{1,2}-[0-9]{3,5}[A-Z]?(?:-[A-Z0-9]{1,4})?\b', text)
+            print(f'[EQ-DIAG] All tag-shaped tokens in text: {list(dict.fromkeys(_all_candidates))}', flush=True)
 
         for idx, item in enumerate(equipment, 1):
             if not item.get('sl_no'):
