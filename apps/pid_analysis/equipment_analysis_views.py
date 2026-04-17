@@ -2544,6 +2544,33 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                 f'[EQ-DIAG] Description-reject filter removed {_removed_dr} item(s)',
                 flush=True,
             )
+    # ── Dedup-by-description gate ──────────────────────────────────────
+    # Soft-coded via 'dedup_by_description_enabled' in equipment_type_config.json.
+    # When multiple extracted items share the same description (case-insensitive),
+    # keep only the one with the most populated fields (highest richness score).
+    # This eliminates OCR-variant duplicates such as V-803-TF vs V-803-TEF when
+    # both are matched to the same physical equipment description on the drawing.
+    if bool(ext_cfg.get('dedup_by_description_enabled', True)):
+        def _richness(item):
+            return sum(1 for v in item.values() if v and str(v).strip() not in ('', '—', 'None'))
+        _desc_groups: dict = {}
+        for _item in results:
+            _dkey = ((_item.get('description') or '').strip().lower()) or f'__notag_{_item["tag"]}'
+            if _dkey not in _desc_groups:
+                _desc_groups[_dkey] = []
+            _desc_groups[_dkey].append(_item)
+        _before_dedup = len(results)
+        results = [
+            max(_grp, key=_richness)
+            for _grp in _desc_groups.values()
+        ]
+        _removed_dd = _before_dedup - len(results)
+        if _removed_dd:
+            print(
+                f'[EQ-DIAG] Dedup-by-description removed {_removed_dd} duplicate(s)',
+                flush=True,
+            )
+
     # Soft-coded via config key 'minmax_correction_pairs' in the 'extraction'
     # section. Ensures that design_temp_max is always numerically >= design_temp_min
     # regardless of which code path populated them.

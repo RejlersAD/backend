@@ -179,8 +179,13 @@
       "(?i)\\brev\\.?\\s*cloud\\b"
     ],
 
-    "_comment_desc_reject": "description_reject_patterns: list of regex patterns matched against the extracted description field. Any equipment item whose description matches is removed from the results. Empty by default — Gate0 (tag_context_reject_patterns) handles annotation-context filtering more precisely without rejecting real equipment whose description legitimately contains those words.",
-    "description_reject_patterns": []
+    "_comment_desc_reject": "description_reject_patterns: matched against the extracted description field — removes rows whose description is a known annotation label, not a real equipment name. Only add patterns for text that is NEVER a real equipment description (e.g. 'Revision Cloud'). Do NOT add vessel/equipment names here.",
+    "description_reject_patterns": [
+      "(?i)\\brevision\\s*cloud\\b",
+      "(?i)\\brev\\.?\\s*cloud\\b"
+    ],
+    "_comment_dedup_desc": "dedup_by_description_enabled: when true, items sharing the same description are deduplicated — the most-populated record is kept, OCR-variant duplicates are discarded.",
+    "dedup_by_description_enabled": true
   },
 
   "type_labels": {
