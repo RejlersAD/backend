@@ -253,6 +253,36 @@ SUCCESS_MESSAGES = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ENGINEERING SECTION MODULE CATALOGUE
+# Single source of truth for what constitutes "full Engineering section" access.
+# All module codes here correspond to the 1. Engineering section in the frontend.
+# Edit this list (not views/commands) when adding/removing engineering modules.
+# ─────────────────────────────────────────────────────────────────────────────
+ENGINEERING_SECTION_MODULES = [
+    # ── Core P&ID / Process ───────────────────────────────────────────
+    'pid_analysis',
+    'pfd_to_pid',
+    'pfd_quality',
+    'crs_documents',
+    'designiq',
+    'qhse',
+    # ── Discipline Datasheets ─────────────────────────────────────────
+    'process_datasheet',
+    'electrical_datasheet',
+    'electrical_sld',
+    'instrument_datasheet',
+    'instrument_index',
+    'mechanical_datasheet',
+    'civil_datasheet',
+    'piping_datasheet',
+    'piping_pms',
+    # ── Digitization ─────────────────────────────────────────────────
+    'digitization_datasheet',
+    'spec_customization',
+    'non_teff_metadata',
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SOFT-CODED ROLE → MODULE POLICY
 # Maps role codes to the module codes that role should always have access to.
 # Used by: management commands (apply_role_module_policy, seed_rbac)
@@ -337,36 +367,6 @@ MODULE_DISCIPLINE_MAP = {
     'reports':           'Admin',
     'api_access':        'Admin',
 }
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ENGINEERING SECTION MODULE CATALOGUE
-# Single source of truth for what constitutes "full Engineering section" access.
-# All module codes here correspond to the 1. Engineering section in the frontend.
-# Edit this list (not views/commands) when adding/removing engineering modules.
-# ─────────────────────────────────────────────────────────────────────────────
-ENGINEERING_SECTION_MODULES = [
-    # ── Core P&ID / Process ───────────────────────────────────────────
-    'pid_analysis',
-    'pfd_to_pid',
-    'pfd_quality',
-    'crs_documents',
-    'designiq',
-    'qhse',
-    # ── Discipline Datasheets ─────────────────────────────────────────
-    'process_datasheet',
-    'electrical_datasheet',
-    'electrical_sld',
-    'instrument_datasheet',
-    'instrument_index',
-    'mechanical_datasheet',
-    'civil_datasheet',
-    'piping_datasheet',
-    'piping_pms',
-    # ── Digitization ─────────────────────────────────────────────────
-    'digitization_datasheet',
-    'spec_customization',
-    'non_teff_metadata',
-]
 
 
 def get_custom_role_code(email):
