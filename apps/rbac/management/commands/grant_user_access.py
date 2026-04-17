@@ -139,7 +139,7 @@ class Command(BaseCommand):
             pass  # non-critical
 
         # ── 8. Final verification ─────────────────────────────────────
-        accessible_modules = list(profile.get_all_modules().values_list('code', flat=True))
+        accessible_modules = [m.code for m in profile.get_all_modules()]
         qhse_ok = profile.has_module_access('qhse')
         all_roles = list(
             UserRole.objects.filter(user_profile=profile).values_list('role__code', flat=True)

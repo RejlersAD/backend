@@ -18,9 +18,10 @@ ALL_MODULES_CATALOGUE = [
     # ── Core Engineering ──────────────────────────────────────────────────
     {'code': 'pid_analysis',           'name': 'P&ID Analysis',               'icon': 'FileText',    'order': 1,  'description': 'P&ID document analysis and processing'},
     {'code': 'pfd_to_pid',             'name': 'PFD to P&ID Converter',        'icon': 'RefreshCw',   'order': 2,  'description': 'AI-powered conversion of PFD to P&ID drawings'},
-    {'code': 'crs_documents',          'name': 'CRS Document Management',      'icon': 'FolderOpen',  'order': 3,  'description': 'Upload and manage CRS documents with AI analysis'},
-    {'code': 'designiq',               'name': 'DesignIQ',                     'icon': 'Cpu',         'order': 4,  'description': 'AI-powered design intelligence and PFD verification'},
-    {'code': 'qhse',                   'name': 'QHSE Management',              'icon': 'Shield',      'order': 5,  'description': 'Quality, Health, Safety and Environment project management'},
+    {'code': 'pfd_quality',            'name': 'PFD Quality Check',            'icon': 'CheckSquare', 'order': 3,  'description': 'AI-powered quality verification of PFD documents'},
+    {'code': 'crs_documents',          'name': 'CRS Document Management',      'icon': 'FolderOpen',  'order': 4,  'description': 'Upload and manage CRS documents with AI analysis'},
+    {'code': 'designiq',               'name': 'DesignIQ',                     'icon': 'Cpu',         'order': 5,  'description': 'AI-powered design intelligence and PFD verification'},
+    {'code': 'qhse',                   'name': 'QHSE Management',              'icon': 'Shield',      'order': 6,  'description': 'Quality, Health, Safety and Environment project management'},
     # ── Discipline Datasheets ─────────────────────────────────────────────
     {'code': 'process_datasheet',      'name': 'Process Datasheet',            'icon': 'FileText',    'order': 10, 'description': 'Process equipment datasheets — MOV, SDV, pumps, pressure instruments'},
     {'code': 'electrical_datasheet',   'name': 'Electrical Datasheet',         'icon': 'Zap',         'order': 11, 'description': 'Electrical equipment and SLD-based datasheet generation'},
@@ -33,6 +34,7 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'piping_pms',             'name': 'Piping Material Specification', 'icon': 'Database',   'order': 18, 'description': 'Piping material specification management'},
     {'code': 'digitization_datasheet', 'name': 'Digitization Datasheet',       'icon': 'Scan',        'order': 19, 'description': 'AI-powered digitization of legacy datasheets'},
     {'code': 'spec_customization',     'name': 'Spec Customization',           'icon': 'Settings',    'order': 20, 'description': 'Engineering specification customization tools'},
+    {'code': 'non_teff_metadata',      'name': 'Non-TEFF Metadata Extractor',  'icon': 'Search',      'order': 21, 'description': 'Extract metadata from Non-TEFF documents (PDF, Excel, Word, AutoCAD)'},
     # ── Admin / Platform ─────────────────────────────────────────────────
     {'code': 'user_mgmt',              'name': 'User Management',              'icon': 'Users',       'order': 50, 'description': 'Manage users, roles, and permissions'},
     {'code': 'org_settings',           'name': 'Organization Settings',        'icon': 'Settings',    'order': 51, 'description': 'Configure organization settings and preferences'},
@@ -343,6 +345,7 @@ MODULE_DISCIPLINE_MAP = {
     'process_datasheet': 'Process',
     'pid_analysis':      'Process / P&ID',
     'pfd_to_pid':        'Process',
+    'pfd_quality':       'Process',
     'designiq':          'DesignIQ',
     'electrical_datasheet': 'Electrical',
     'electrical_sld':    'Electrical',
@@ -354,14 +357,45 @@ MODULE_DISCIPLINE_MAP = {
     'piping_pms':        'Piping',
     'digitization_datasheet': 'Digitization',
     'spec_customization': 'Digitization',
+    'non_teff_metadata': 'Digitization',
     'qhse':              'QHSE',
+    'crs_documents':     'CRS',
     'user_mgmt':         'Admin',
     'org_settings':      'Admin',
     'audit_logs':        'Admin',
     'reports':           'Admin',
     'api_access':        'Admin',
-    'crs_documents':     'CRS',
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENGINEERING SECTION MODULE CATALOGUE
+# Single source of truth for what constitutes "full Engineering section" access.
+# All module codes here correspond to the 1. Engineering section in the frontend.
+# Edit this list (not views/commands) when adding/removing engineering modules.
+# ─────────────────────────────────────────────────────────────────────────────
+ENGINEERING_SECTION_MODULES = [
+    # ── Core P&ID / Process ───────────────────────────────────────────
+    'pid_analysis',
+    'pfd_to_pid',
+    'pfd_quality',
+    'crs_documents',
+    'designiq',
+    'qhse',
+    # ── Discipline Datasheets ─────────────────────────────────────────
+    'process_datasheet',
+    'electrical_datasheet',
+    'electrical_sld',
+    'instrument_datasheet',
+    'instrument_index',
+    'mechanical_datasheet',
+    'civil_datasheet',
+    'piping_datasheet',
+    'piping_pms',
+    # ── Digitization ─────────────────────────────────────────────────
+    'digitization_datasheet',
+    'spec_customization',
+    'non_teff_metadata',
+]
 
 
 def get_custom_role_code(email):

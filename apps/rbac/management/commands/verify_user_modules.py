@@ -115,7 +115,7 @@ class Command(BaseCommand):
         
         # Get actual accessible modules (via profile.get_all_modules())
         actual_modules = profile.get_all_modules()
-        actual_module_codes = set(actual_modules.values_list('code', flat=True))
+        actual_module_codes = set(m.code for m in actual_modules)
         
         if not silent:
             self.stdout.write(f"\n   ✅ Actual Accessible Modules ({len(actual_module_codes)}):")
