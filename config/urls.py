@@ -197,6 +197,10 @@ if is_app_installed('apps.pfd_quality'):
 # Cross Recommendation Bridge — PID ↔ PFD smart suggestions
 if is_app_installed('apps.cross_recommendation'):
     urlpatterns.append(path('api/v1/cross-recommendation/', include('apps.cross_recommendation.urls')))
+
+# Non-TEFF Metadata Extractor — multi-format document metadata extraction
+if is_app_installed('apps.non_teff_metadata'):
+    urlpatterns.append(path('api/v1/non-teff/', include('apps.non_teff_metadata.urls')))
     print("[URL] ✅ Cross Recommendation URLs registered")
 
 # MLflow Model Orchestration API (DISABLED - not in use)

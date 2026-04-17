@@ -1,0 +1,18 @@
+{
+  "fields": [
+    {"key": "document_no",          "label": "Document No.",          "width": 16},
+    {"key": "document_title",       "label": "Document Title",        "width": 28},
+    {"key": "revision",             "label": "Rev.",                  "width":  6},
+    {"key": "discipline",           "label": "Discipline",            "width": 14},
+    {"key": "instrument_tag_no",    "label": "Instrument Tag No.",    "width": 18},
+    {"key": "line_number",          "label": "Line Number",           "width": 18},
+    {"key": "equipment_no",         "label": "Equipment No.",         "width": 16},
+    {"key": "mechanical_component", "label": "Mechanical Component",  "width": 22},
+    {"key": "status",               "label": "Status",                "width": 14},
+    {"key": "date",                 "label": "Date",                  "width": 12},
+    {"key": "originator",           "label": "Originator",            "width": 16},
+    {"key": "remarks",              "label": "Remarks",               "width": 24}
+  ],
+  "supported_formats": ["pdf", "xlsx", "xls", "docx", "doc", "dwg", "dxf"],
+  "max_file_size_mb": 50
+}
