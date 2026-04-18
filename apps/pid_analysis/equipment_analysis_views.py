@@ -682,6 +682,28 @@ def _normalize_oper_temp(raw: str) -> str:
     return f'{fmt(lo)}{_TEMP_RANGE_SEPARATOR}{fmt(hi)} {unit}'
 
 
+# Soft-coded: regex for non-numeric pressure qualifiers appended after "/" such as
+# "FV" (Full Vacuum), "FULL VAC", "FULL VACUUM".  These are engineering annotations
+# that describe a limit condition and are NOT part of the numeric pressure value.
+# Applied as a post-processing strip on design_pressure_min / design_pressure_max.
+_PRESS_STRIP_SUFFIX_RE = re.compile(
+    r'\s*/\s*(?:FV|FULL\s*VAC(?:UUM)?)\s*$', re.IGNORECASE
+)
+
+
+def _clean_pressure_value(s: str) -> str:
+    """Strip non-numeric trailing qualifiers like '/ FV' from a pressure string.
+
+    Examples:
+        "195 psig/ FV"   ->  "195 psig"
+        "195 psig"       ->  "195 psig"   (unchanged)
+        ""               ->  ""           (unchanged)
+    """
+    if not s or '/' not in s:
+        return s
+    return _PRESS_STRIP_SUFFIX_RE.sub('', s.strip()).strip()
+
+
 def _extract_titleblock_dwg_no_by_coords(file_bytes: bytes) -> str:
     """
     Extract the drawing / document number from the title block using page
@@ -1391,8 +1413,8 @@ def _extract_equipment_register_rows(file_obj, config: dict):
             'design_flowrate':     values.get('design_flowrate', ''),
             'oper_pressure':       values.get('oper_pressure', ''),
             'oper_temperature':    _normalize_oper_temp(values.get('oper_temperature', '')),
-            'design_pressure_min': values.get('design_pressure_min', ''),
-            'design_pressure_max': values.get('design_pressure_max', ''),
+            'design_pressure_min': _clean_pressure_value(values.get('design_pressure_min', '')),
+            'design_pressure_max': _clean_pressure_value(values.get('design_pressure_max', '')),
             'design_temp_min':     values.get('design_temp_min', ''),
             'design_temp_max':     values.get('design_temp_max', ''),
             'moc':                 values.get('moc', ''),
@@ -2600,6 +2622,12 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             for _single_fk in ('design_temp_max', 'design_pressure_max', 'design_temp_min', 'design_pressure_min'):
                 _sv = _last.get(_single_fk, '')
                 if _sv and '/' in _sv:
+                    # First, strip non-numeric FV-type suffixes on pressure fields
+                    if 'pressure' in _single_fk:
+                        _sv_cleaned = _clean_pressure_value(_sv)
+                        if _sv_cleaned != _sv:
+                            _last[_single_fk] = _sv_cleaned
+                            continue
                     _sparts = re.split(r'\s*/\s*', _sv, maxsplit=1)
                     if len(_sparts) == 2:
                         _sn0 = re.search(r'-?\d+(?:\.\d+)?', _sparts[0])
