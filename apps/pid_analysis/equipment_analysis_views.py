@@ -590,6 +590,56 @@ _TITLEBLOCK_DWG_LABEL_RE   = re.compile(
     r'(?:DWG\.?\s*NO\.?|DRAWING\s*NO\.?|DOCUMENT\s*NO\.?|DOC\.?\s*NO\.?)',
     re.IGNORECASE,
 )
+# Reference-context words that appear BEFORE a 'DWG NO.' label and indicate
+# that the number following it is a reference document, NOT the title-block
+# drawing number.  Look-back window is widened to _DWG_LABEL_LOOKBACK_CHARS
+# so that longer prefixes (e.g. "REFERENCE DRAWING NO.", "PFD MUBARRAZ ISLAND")
+# are captured.
+# PFD is included because P&ID reference-document lists typically list the
+# associated PFD with its own DWG. NO. entry — that number must be excluded
+# so only the actual title-block P&ID number is returned.
+_TITLEBLOCK_DWG_REF_CTX_RE = re.compile(
+    r'\b(FEED|PFD|P\.F\.D|REF(?:ERENCE)?|RELATED|FROM|VENDOR|CLIENT|PREVIOUS|PARENT|APPLICABLE|ATTACH(?:ED|MENT)?|LIST|TABLE|INDEX)\b',
+    re.IGNORECASE,
+)
+# How many characters to look back before the 'DWG NO.' label when checking
+# for reference-context words (soft-coded so it can be tuned without touching logic).
+_DWG_LABEL_LOOKBACK_CHARS  = 80
+
+# ── Soft-coded title-block coordinate extraction constants ────────────────────
+# Engineering drawings always have the title block in the bottom strip of the
+# page.  These constants define how large that strip is (as a fraction of the
+# total page height) and how wide the horizontal scan window is (in points)
+# after a 'DWG. NO.' label word is found within that strip.
+# Adjust these without touching any logic in _extract_titleblock_dwg_no_by_coords.
+_TITLEBLOCK_STRIP_FRACTION  = 0.30   # bottom 30 % of page height (wider = safer)
+_TITLEBLOCK_SCAN_WINDOW_PT  = 400    # pts to the right of the label word
+# PyMuPDF returns individual words; "DWG. NO." is split into two tokens.
+# This regex matches the FIRST token (the trigger word: DWG / DRAWING / DOC /
+# DOCUMENT).  After finding a trigger, the coord function checks whether the
+# very next word on the same row is "NO" / "NO." to confirm the label.
+_TITLEBLOCK_DWG_TRIGGER_RE  = re.compile(
+    r'^(DWG\.?|DRAW(?:ING)?\.?|DOC(?:UMENT)?\.?)$',
+    re.IGNORECASE,
+)
+# Matches the "NO" / "NO." word that follows the trigger word in the title block.
+_TITLEBLOCK_NO_WORD_RE      = re.compile(r'^NO\.?$', re.IGNORECASE)
+# Maximum horizontal gap (pts) between the trigger word and the "NO." word
+# when they are on the same row (handles varying spacing in different CAD tools).
+_TITLEBLOCK_LABEL_GAP_PT    = 80
+# Engineering title blocks often use a VERTICALLY-STACKED layout: the label
+# "DWG. NO." is on one row and the actual document number is in the cell BELOW
+# it on the next row.  This constant controls how many points below the trigger
+# word we continue to search for a doc-number pattern.
+# NOTE: on rotated A1/A0 sheets PyMuPDF stores the vertical title-block column
+# in PDF coordinate space, meaning the value cell can be ~240 pts below the
+# label.  300 pts covers that gap while staying within the title-block column.
+_TITLEBLOCK_BELOW_SCAN_PT   = 300
+# How many characters after a 'DWG. NO.' label to search in the plain text for
+# the document number.  Title blocks interleave the label row with other cells
+# (REV., DATE, DESCRIPTION, company name …) before the value row appears;
+# 600 chars is sufficient to cross that gap without reaching unrelated content.
+_TITLEBLOCK_DWG_LABEL_WINDOW_CHARS = 600
 
 # ── Soft-coded operating temperature range normalisation ─────────────────────
 # Equipment registers sometimes store two operating temperatures in a single
@@ -632,6 +682,108 @@ def _normalize_oper_temp(raw: str) -> str:
     return f'{fmt(lo)}{_TEMP_RANGE_SEPARATOR}{fmt(hi)} {unit}'
 
 
+def _extract_titleblock_dwg_no_by_coords(file_bytes: bytes) -> str:
+    """
+    Extract the drawing / document number from the title block using page
+    coordinates (PyMuPDF).
+
+    Engineering drawings always place the title block in the BOTTOM strip of
+    the last (or only) page.  This function restricts its search to that strip
+    (controlled by _TITLEBLOCK_STRIP_FRACTION) so it is immune to reference-
+    document tables that also contain 'DWG. NO.' labels higher up the page.
+
+    Key fix: PyMuPDF splits "DWG. NO." into two separate word tokens.  This
+    function therefore looks for a TRIGGER word ("DWG", "DRAWING", "DOC",
+    "DOCUMENT") and then confirms the following same-row word is "NO" / "NO."
+    before scanning to the right for the document-number pattern.
+
+    Soft-coded constants:
+        _TITLEBLOCK_STRIP_FRACTION, _TITLEBLOCK_SCAN_WINDOW_PT,
+        _TITLEBLOCK_DWG_TRIGGER_RE, _TITLEBLOCK_NO_WORD_RE,
+        _TITLEBLOCK_LABEL_GAP_PT, _TITLEBLOCK_DWG_NO_RE.
+    """
+    try:
+        import fitz as _fitz
+        doc = _fitz.open(stream=file_bytes, filetype='pdf')
+        # Title block is on the LAST page of multi-page drawings; try all pages
+        pages_to_check = list(range(len(doc) - 1, -1, -1))  # last page first
+        for pg_idx in pages_to_check:
+            pg = doc[pg_idx]
+            pg_height = pg.rect.height
+            strip_top  = pg_height * (1.0 - _TITLEBLOCK_STRIP_FRACTION)
+
+            words = pg.get_text('words')  # (x0, y0, x1, y1, word, block, line, span)
+            strip_words = [w for w in words if (w[1] + w[3]) / 2 >= strip_top]
+            print(f'[EQ-DIAG][DwgNo] Coord: page={pg_idx} height={pg_height:.0f} strip_top={strip_top:.0f} strip_words={len(strip_words)}', flush=True)
+            if not strip_words:
+                continue
+
+            # Sort left-to-right, top-to-bottom within the strip
+            strip_words.sort(key=lambda w: (round(w[1] / 10) * 10, w[0]))
+
+            for i, w in enumerate(strip_words):
+                token = w[4].strip()
+                if not _TITLEBLOCK_DWG_TRIGGER_RE.match(token):
+                    continue
+
+                trigger_x0    = w[0]   # left edge of trigger word
+                trigger_x1    = w[2]   # right edge of trigger word
+                trigger_y_mid = (w[1] + w[3]) / 2
+
+                # Locate the subsequent words on the same row
+                same_row = [
+                    nw for nw in strip_words[i + 1:]
+                    if abs((nw[1] + nw[3]) / 2 - trigger_y_mid) <= 20
+                    and nw[0] >= trigger_x1
+                ]
+
+                # Check if next word is "NO" / "NO." to confirm it's a DWG NO. label
+                scan_anchor_x1 = trigger_x1
+                scan_start_idx = 0
+                if same_row:
+                    next_w     = same_row[0]
+                    is_no_word = _TITLEBLOCK_NO_WORD_RE.match(next_w[4].strip())
+                    gap_ok     = (next_w[0] - trigger_x1) <= _TITLEBLOCK_LABEL_GAP_PT
+                    if is_no_word and gap_ok:
+                        scan_anchor_x1 = next_w[2]
+                        scan_start_idx = 1
+
+                # ── Scan to the RIGHT (same row) for doc number ──
+                for nw in same_row[scan_start_idx:]:
+                    if nw[0] - scan_anchor_x1 > _TITLEBLOCK_SCAN_WINDOW_PT:
+                        break
+                    cand = nw[4].strip().upper()
+                    if _TITLEBLOCK_DWG_NO_RE.fullmatch(cand) and re.search(r'-[0-9]{4,6}$', cand):
+                        doc.close()
+                        print(f'[EQ-DIAG][DwgNo] Coord (right) page={pg_idx} y={trigger_y_mid:.0f} trigger={token!r}: {cand!r}', flush=True)
+                        return cand
+
+                # ── Scan BELOW the trigger (vertically-stacked title block layout) ──
+                # Many engineering title blocks place "DWG. NO." label on one row
+                # and the actual document number in the cell directly below it.
+                # Scan all words within _TITLEBLOCK_BELOW_SCAN_PT pts below the
+                # trigger whose x0 is near the trigger's x0 column.
+                for nw in strip_words[i + 1:]:
+                    nw_y_mid = (nw[1] + nw[3]) / 2
+                    if nw_y_mid <= trigger_y_mid:
+                        continue   # above or same row — already scanned
+                    if nw_y_mid > trigger_y_mid + _TITLEBLOCK_BELOW_SCAN_PT:
+                        break      # too far below
+                    # x must be roughly in the same column as the trigger
+                    if abs(nw[0] - trigger_x0) > _TITLEBLOCK_SCAN_WINDOW_PT:
+                        continue
+                    cand = nw[4].strip().upper()
+                    if _TITLEBLOCK_DWG_NO_RE.fullmatch(cand) and re.search(r'-[0-9]{4,6}$', cand):
+                        doc.close()
+                        print(f'[EQ-DIAG][DwgNo] Coord (below) page={pg_idx} y={trigger_y_mid:.0f}→{nw_y_mid:.0f} trigger={token!r}: {cand!r}', flush=True)
+                        return cand
+        doc.close()
+    except Exception as _e:
+        import logging as _log
+        _log.getLogger(__name__).warning('[EquipmentList] Coord DWG NO extraction failed: %s', _e)
+    return ''
+
+
 def _extract_titleblock_dwg_no(text: str) -> str:
     """
     Extract the drawing / document number from a P&ID title block.
@@ -646,33 +798,54 @@ def _extract_titleblock_dwg_no(text: str) -> str:
     Returns the extracted drawing number string, or '' if not found.
     """
     # Strategy 1: label-adjacent.
-    # Skip "FEED DRAWING NO." — that is a reference-document label, not the
-    # main title-block drawing number.  A negative lookback of 25 chars
-    # handles both "FEED DRAWING NO." and "FROM FEED DRAWING NO." forms.
+    # Collect ALL 'DWG NO.'-label adjacent candidates, skip any whose
+    # pre-context contains a reference qualifier (FEED, REF, RELATED, etc.).
+    # Return the LAST valid candidate — title-block labels are OCR'd last
+    # because the title block sits at the bottom of the drawing sheet.
+    # Lookback window and reference-context pattern are soft-coded module
+    # constants (_DWG_LABEL_LOOKBACK_CHARS, _TITLEBLOCK_DWG_REF_CTX_RE).
+    _label_candidates: list = []
     for lbl_m in _TITLEBLOCK_DWG_LABEL_RE.finditer(text):
-        pre_ctx = text[max(0, lbl_m.start() - 25):lbl_m.start()]
-        if re.search(r'\bFEED\b', pre_ctx, re.IGNORECASE):
+        pre_ctx = text[max(0, lbl_m.start() - _DWG_LABEL_LOOKBACK_CHARS):lbl_m.start()]
+        if _TITLEBLOCK_DWG_REF_CTX_RE.search(pre_ctx):
             continue
-        window = text[lbl_m.end():lbl_m.end() + 120]
+        window = text[lbl_m.end():lbl_m.end() + _TITLEBLOCK_DWG_LABEL_WINDOW_CHARS]
         m = _TITLEBLOCK_DWG_NO_RE.search(window)
         if m:
             candidate = m.group(1).upper()
             # Must end with digits — excludes equipment tags like V-308-TF
             if re.search(r'-[0-9]{4,6}$', candidate):
-                print(f'[EQ-DIAG][DwgNo] Found via label strategy: {candidate!r}', flush=True)
-                return candidate
+                _label_candidates.append(candidate)
+    if _label_candidates:
+        # Prefer the last match (title block is at the bottom of the sheet)
+        best = _label_candidates[-1]
+        print(f'[EQ-DIAG][DwgNo] Found via label strategy (last of {len(_label_candidates)}): {best!r}', flush=True)
+        return best
 
-    # Strategy 2: most common 4–5 segment number ending in 4 digits
-    from collections import Counter
-    candidates: list = []
+    # Strategy 2: for each 'DWG NO.' label, find the nearest doc-number after it.
+    # Return the candidate found after the LAST label occurrence — because the
+    # actual title-block label is the last one OCR'd (it is at the bottom of the
+    # sheet), while reference-table labels appear earlier.
+    # Falls back to the most-frequent candidate if no label-anchored match found.
+    _s2_all: list = []
     for m in _TITLEBLOCK_DWG_NO_RE.finditer(text):
         cand = m.group(1).upper()
         if re.search(r'-[0-9]{4,6}$', cand) and len(cand) >= 10:
-            candidates.append(cand)
-    if candidates:
-        most_common = Counter(candidates).most_common(1)[0][0]
-        print(f'[EQ-DIAG][DwgNo] Found via frequency strategy: {most_common!r}', flush=True)
-        return most_common
+            _s2_all.append((m.start(), cand))
+    if _s2_all:
+        _lbl_positions = [lm.end() for lm in _TITLEBLOCK_DWG_LABEL_RE.finditer(text)]
+        if _lbl_positions:
+            # Try each label from LAST to FIRST; return the nearest candidate after it
+            for lbl_end in reversed(_lbl_positions):
+                for cpos, cval in sorted(_s2_all, key=lambda x: x[0]):
+                    if cpos >= lbl_end:
+                        print(f'[EQ-DIAG][DwgNo] Strategy2 last-label nearest: {cval!r}', flush=True)
+                        return cval
+        # Fallback: most common candidate
+        from collections import Counter as _Counter
+        freq_best = _Counter(c for _, c in _s2_all).most_common(1)[0][0]
+        print(f'[EQ-DIAG][DwgNo] Strategy2 frequency fallback: {freq_best!r}', flush=True)
+        return freq_best
 
     return ''
 
@@ -2846,31 +3019,41 @@ def analyze_pid_equipment(request):
             text      = _extract_text_from_pdf(pid_file, config)
 
             # Override drawing_ref with the actual DWG NO from the title block.
-            # Strategy: try the VECTOR-ONLY text first (higher fidelity than OCR),
-            # then fall back to the full OCR-merged text.
-            # Vector text is extracted inline here to avoid re-opening the PDF.
-            _vector_dwg_no = ''
+            # Priority order (highest confidence first):
+            #   1. Coordinate-based: scan only the bottom strip of the page
+            #      (title block location) — immune to reference-document tables.
+            #   2. Vector-text (full page text, label-adjacent strategy).
+            #   3. Full OCR-merged text (text-based fallback).
+            _coord_dwg_no = ''
             try:
-                import fitz as _fitz_dwg
                 pid_file.seek(0)
-                _dwg_doc = _fitz_dwg.open(stream=pid_file.read(), filetype='pdf')
-                _vec_parts: list = []
-                for _pg in _dwg_doc:
-                    _vec_parts.append(_pg.get_text('text') or '')
-                    _words = _pg.get_text('words')
-                    if _words:
-                        _vec_parts.append(' '.join(w[4] for w in sorted(
-                            _words, key=lambda w: (round(w[1] / 15) * 15, w[0])
-                        )))
-                _dwg_doc.close()
-                _vector_only_text = '\n'.join(_vec_parts)
-                _vector_dwg_no = _extract_titleblock_dwg_no(_vector_only_text)
-                if _vector_dwg_no:
-                    print(f'[EQ-DIAG][DwgNo] Vector-text strategy: {_vector_dwg_no!r}', flush=True)
+                _coord_dwg_no = _extract_titleblock_dwg_no_by_coords(pid_file.read())
             except Exception as _e:
-                logger.debug('[EquipmentList] Vector DWG NO extraction failed: %s', _e)
+                logger.debug('[EquipmentList] Coord DWG NO extraction failed: %s', _e)
 
-            _tb_dwg_no = _vector_dwg_no or _extract_titleblock_dwg_no(text)
+            _vector_dwg_no = ''
+            if not _coord_dwg_no:
+                try:
+                    import fitz as _fitz_dwg
+                    pid_file.seek(0)
+                    _dwg_doc = _fitz_dwg.open(stream=pid_file.read(), filetype='pdf')
+                    _vec_parts: list = []
+                    for _pg in _dwg_doc:
+                        _vec_parts.append(_pg.get_text('text') or '')
+                        _words = _pg.get_text('words')
+                        if _words:
+                            _vec_parts.append(' '.join(w[4] for w in sorted(
+                                _words, key=lambda w: (round(w[1] / 15) * 15, w[0])
+                            )))
+                    _dwg_doc.close()
+                    _vector_only_text = '\n'.join(_vec_parts)
+                    _vector_dwg_no = _extract_titleblock_dwg_no(_vector_only_text)
+                    if _vector_dwg_no:
+                        print(f'[EQ-DIAG][DwgNo] Vector-text strategy: {_vector_dwg_no!r}', flush=True)
+                except Exception as _e:
+                    logger.debug('[EquipmentList] Vector DWG NO extraction failed: %s', _e)
+
+            _tb_dwg_no = _coord_dwg_no or _vector_dwg_no or _extract_titleblock_dwg_no(text)
             if _tb_dwg_no:
                 drawing_ref = _tb_dwg_no
                 print(f'[EQ-DIAG] Drawing ref overridden to title-block DWG NO: {drawing_ref!r}', flush=True)
@@ -3185,8 +3368,16 @@ def analyze_pid_equipment_batch(request):
             if equipment is None:
                 pid_file.seek(0)
                 text      = _extract_text_from_pdf(pid_file, config)
-                # Override drawing_ref with actual DWG NO from title block
-                _tb_dwg_no = _extract_titleblock_dwg_no(text)
+                # Override drawing_ref with actual DWG NO from title block.
+                # Coordinate-based extraction (bottom strip of page) takes priority
+                # over text-based so reference-document table entries are ignored.
+                _coord_dwg_no_b = ''
+                try:
+                    pid_file.seek(0)
+                    _coord_dwg_no_b = _extract_titleblock_dwg_no_by_coords(pid_file.read())
+                except Exception:
+                    pass
+                _tb_dwg_no = _coord_dwg_no_b or _extract_titleblock_dwg_no(text)
                 if _tb_dwg_no:
                     drawing_ref          = _tb_dwg_no
                     drawing_refs[-1]     = _tb_dwg_no   # update the list entry too
