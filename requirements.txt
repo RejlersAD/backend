@@ -85,12 +85,9 @@ networkx==3.2.1
 # 9. OCR STACK (Required for P&ID/PFD Processing)
 # ==========================================
 pytesseract==0.3.13
-# easyocr and paddlepaddle/paddleocr REMOVED from production install:
-# easyocr pulls in PyTorch (~2 GB); paddlepaddle is ~700 MB.
-# Both engines are wrapped in try/except ImportError in the codebase — they
-# degrade gracefully to Tesseract + PyMuPDF when not available.
-# Net saving: ~2.7 GB → image drops from 3.3 GB to ~700 MB.
-# To re-enable locally: pip install easyocr paddlepaddle paddleocr
+easyocr==1.7.2
+paddlepaddle==3.3.0
+paddleocr==3.3.3
 opencv-python-headless==4.10.0.84
 
 # 10. DATA PROCESSING & ML (Required)
