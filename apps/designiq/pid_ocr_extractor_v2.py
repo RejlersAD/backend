@@ -24,6 +24,52 @@ import base64
 EMBEDDED_TEXT_MIN_CHARS = 80
 
 # ---------------------------------------------------------------------------
+# ADNOC format validation thresholds — soft-coded so they can be tuned
+# without touching regex/validation logic.
+#
+# ADNOC_SEQ_MIN_DIGITS : minimum digits allowed in the sequence number.
+#   Abu Dhabi Oil Co. drawings use 3-digit (e.g. 329, 454) and 4-digit
+#   (e.g. 8703, 1023) sequences.  Original code required exactly 4; relax
+#   to 3 to capture the shorter sequences on this project.
+#
+# ADNOC_PIPECLASS_MIN_LEN : minimum characters in the pipe-class segment.
+#   Standard ADNOC classes are 4+ chars (AC3N, BC2GA…) but simpler project
+#   drawings use 2-char classes (CI, RI, GA, GP…).  Original code required
+#   ≥3 chars; relax to 2.
+# ---------------------------------------------------------------------------
+ADNOC_SEQ_MIN_DIGITS  = 3   # was 4 (hard-coded); accepts 3-digit sequences
+ADNOC_PIPECLASS_MIN_LEN = 2  # was 3 (hard-coded); accepts 2-char pipe classes
+
+# ---------------------------------------------------------------------------
+# General format strategy — controls how results from all sub-formats are
+# combined when format_type='general'.
+#
+# 'merge'  : collect ALL unique line numbers found by EVERY format, deduplicated
+#             by canonical line_number string.  Returns the most complete list.
+#             Best for mixed P&IDs with pipes annotated in different conventions.
+#
+# 'winner' : legacy behaviour — return only the format with the highest count.
+#             Useful when one project consistently uses a single format and you
+#             want to avoid false positives from other formats.
+# ---------------------------------------------------------------------------
+GENERAL_STRATEGY = 'merge'   # 'merge' | 'winner'
+
+# ---------------------------------------------------------------------------
+# Multi-rotation OCR — degrees to rotate the rendered page image BEFORE
+# running Tesseract OCR on it.  PIL rotates counter-clockwise.
+#
+# 0°   → reads horizontal labels (standard)
+# 90°  → reads labels written top-to-bottom (PIL CCW = drawing CW)
+# 270° → reads labels written bottom-to-top (PIL CW  = drawing CCW)
+# 180° → reads upside-down text (rare, included for completeness)
+#
+# P&ID drawings place pipe line designations at EVERY angle.  Running OCR
+# at 0°/90°/270° covers ~99% of real-world P&ID orientations.
+# Remove angles that slow processing without adding lines on your drawings.
+# ---------------------------------------------------------------------------
+OCR_ROTATION_ANGLES = [0, 90, 270]
+
+# ---------------------------------------------------------------------------
 # Soft-coded industrial format — all configurable without touching regex code.
 # SIZE"-UNIT_NO-SERVICE_CODE-SEQUENCE-PIPING_CLASS(-END_DESIGNATOR)?
 # Examples:
@@ -130,16 +176,81 @@ class PIDLineExtractorV2:
         SOFT-CODED threshold: EMBEDDED_TEXT_MIN_CHARS (default 80) controls whether
         the result is considered "sufficient".  Return value is the raw combined
         string; the caller checks length against the threshold.
+
+        CAD NOTE: AutoCAD/SmartPlant PDFs often store text as individual character
+        glyphs (char-by-char).  "words" mode joins them with spaces making regex
+        matching fail (e.g. "2 \" - F G - C I - 3 2 9").  The rawdict span pass
+        below reconstructs each span as a contiguous token, recovering full tags.
         """
         try:
-            # "words" mode returns [(x0,y0,x1,y1,word,block_no,line_no,word_no), ...]
-            # Sorting by y0 then x0 preserves natural reading order across rotations.
+            # ----------------------------------------------------------------
+            # Pass 1: word-level extraction (sorted for natural reading order).
+            # Good for title blocks and label text stored as whole words.
+            # ----------------------------------------------------------------
             words = page.get_text("words")
+            words_text = ""
             if words:
                 sorted_words = sorted(words, key=lambda w: (round(w[1] / 10), w[0]))
-                return ' '.join(w[4] for w in sorted_words if str(w[4]).strip())
-            # Fallback: plain text block extraction
-            return page.get_text("text")
+                words_text = ' '.join(w[4] for w in sorted_words if str(w[4]).strip())
+
+            # ----------------------------------------------------------------
+            # Pass 2: rawdict span-level extraction.
+            # CAD PDFs store pipe line tags as individual character objects
+            # within a single span.  Reading spans directly reconstructs the
+            # full tag (e.g. '2"-FG-CI-329') without inter-character spaces.
+            #
+            # Direction-aware grouping:
+            # PyMuPDF sets a "dir" vector per line (the baseline direction).
+            # (1,0) = horizontal, (0,-1) = 90° CW, (0,1) = 90° CCW, (-1,0)=180°.
+            # We bucket spans by direction so rotated labels form complete tokens
+            # instead of being interleaved with horizontal text in sort order.
+            # ----------------------------------------------------------------
+            span_texts = []
+            try:
+                raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+                # Bucket: direction_key -> list of (origin_y, origin_x, text)
+                dir_buckets: dict = {}
+                for block in raw.get("blocks", []):
+                    if block.get("type") != 0:
+                        continue  # skip image blocks
+                    for line in block.get("lines", []):
+                        # Direction vector: round to 1 decimal to bucket similar angles
+                        raw_dir = line.get("dir", (1, 0))
+                        dir_key = (round(raw_dir[0], 1), round(raw_dir[1], 1))
+                        origin = line.get("bbox", [0, 0, 0, 0])
+                        line_x, line_y = origin[0], origin[1]
+                        line_parts = []
+                        for span in line.get("spans", []):
+                            t = span.get("text", "").strip()
+                            if t:
+                                line_parts.append(t)
+                        if line_parts:
+                            token = ' '.join(line_parts)
+                            dir_buckets.setdefault(dir_key, []).append(
+                                (line_y, line_x, token)
+                            )
+
+                # Emit each direction bucket sorted by position (reading order
+                # per angle), joining with spaces so regex can scan the stream.
+                for dir_key, entries in dir_buckets.items():
+                    entries.sort(key=lambda e: (round(e[0] / 10), e[1]))
+                    bucket_text = ' '.join(e[2] for e in entries)
+                    span_texts.append(bucket_text)
+                    logger.debug(
+                        f"[embedded_text] dir={dir_key} → "
+                        f"{len(entries)} spans, {len(bucket_text)} chars"
+                    )
+            except Exception as _rd_err:
+                logger.debug(f"[embedded_text] rawdict pass failed: {_rd_err}")
+
+            rawdict_text = ' '.join(span_texts)
+
+            # Combine both passes — words_text catches normal labels, rawdict
+            # catches the char-by-char CAD tags.  Duplicates are harmless for
+            # regex matching (dedup happens later).
+            combined = (words_text + ' ' + rawdict_text).strip()
+            return combined if combined else page.get_text("text")
+
         except Exception as exc:
             logger.warning(f"[embedded_text] page text extraction failed: {exc}")
             return ""
@@ -264,47 +375,69 @@ class PIDLineExtractorV2:
         # 1. Tesseract OCR - Multiple PSM modes to detect vertical text
         if PYTESSERACT_AVAILABLE and pytesseract:
             try:
-                # PSM 6: Assume uniform block of text (horizontal)
+                # PSM 6: Assume uniform block of text (horizontal) — most reliable base
                 tesseract_text = pytesseract.image_to_string(img, config='--psm 6')
-                
-                # PSM 5: Single vertical block of text
-                try:
-                    tesseract_vertical = pytesseract.image_to_string(img, config='--psm 5')
-                    if tesseract_vertical and len(tesseract_vertical.strip()) > 10:
-                        tesseract_text += ' ' + tesseract_vertical
-                        logger.info(f"  📐 Tesseract vertical text: +{len(tesseract_vertical)} characters")
-                except:
-                    pass
-                
-                # PSM 11: Sparse text. Find as much text as possible in no particular order
+
+                # PSM 11: Sparse text — finds isolated labels anywhere on page
                 try:
                     tesseract_sparse = pytesseract.image_to_string(img, config='--psm 11')
                     if tesseract_sparse and len(tesseract_sparse.strip()) > 10:
                         tesseract_text += ' ' + tesseract_sparse
                         logger.info(f"  🔍 Tesseract sparse text: +{len(tesseract_sparse)} characters")
-                except:
+                except Exception:
                     pass
-                
+
+                # ----------------------------------------------------------------
+                # Multi-rotation pass — OCR_ROTATION_ANGLES (soft-coded constant).
+                # P&ID pipe line tags are written at all angles (horizontal,
+                # top-to-bottom, bottom-to-top).  Running Tesseract PSM 6 on
+                # a PIL-rotated copy of the image converts vertical text to
+                # horizontal, which Tesseract reads with near-perfect accuracy.
+                # ----------------------------------------------------------------
+                for _angle in OCR_ROTATION_ANGLES:
+                    if _angle == 0:
+                        continue  # already processed above
+                    try:
+                        _rotated_img = img.rotate(_angle, expand=True)
+                        _rot_text = pytesseract.image_to_string(_rotated_img, config='--psm 6')
+                        if _rot_text and len(_rot_text.strip()) > 10:
+                            tesseract_text += ' ' + _rot_text
+                            logger.info(
+                                f"  📐 Tesseract {_angle}° rotation: "
+                                f"+{len(_rot_text)} chars"
+                            )
+                    except Exception as _re:
+                        logger.debug(f"  ⚠️ Tesseract {_angle}° rotation failed: {_re}")
+
                 results['tesseract'] = tesseract_text
-                logger.info(f"  ✅ Tesseract extracted {len(tesseract_text)} characters (combined)")
+                logger.info(f"  ✅ Tesseract extracted {len(tesseract_text)} characters (combined all angles)")
             except Exception as e:
                 logger.warning(f"  ⚠️ Tesseract failed: {e}")
         else:
             logger.warning(f"  ⚠️ Pytesseract not available, skipping Tesseract OCR")
         
-        # 2. EasyOCR - Enable rotation detection for vertical text
+        # 2. EasyOCR - Run at all OCR_ROTATION_ANGLES (same strategy as Tesseract)
         if self.easyocr_reader:
             try:
-                img_array = np.array(img)
-                # Basic readtext without rotation_info parameter
-                easyocr_result = self.easyocr_reader.readtext(
-                    img_array, 
-                    detail=0,
-                    paragraph=False
-                )
-                easyocr_text = ' '.join(easyocr_result)
-                results['easyocr'] = easyocr_text
-                logger.info(f"  ✅ EasyOCR extracted {len(easyocr_text)} characters")
+                easyocr_text = ""
+                for _angle in OCR_ROTATION_ANGLES:
+                    _ocr_img = img.rotate(_angle, expand=True) if _angle != 0 else img
+                    _img_array = np.array(_ocr_img)
+                    _result = self.easyocr_reader.readtext(
+                        _img_array,
+                        detail=0,
+                        paragraph=False
+                    )
+                    _angle_text = ' '.join(_result)
+                    if _angle_text.strip():
+                        easyocr_text += ' ' + _angle_text
+                        if _angle != 0:
+                            logger.info(
+                                f"  📐 EasyOCR {_angle}° rotation: "
+                                f"+{len(_angle_text)} chars"
+                            )
+                results['easyocr'] = easyocr_text.strip()
+                logger.info(f"  ✅ EasyOCR extracted {len(easyocr_text)} characters (all angles)")
             except Exception as e:
                 logger.warning(f"  ⚠️ EasyOCR failed: {e}")
         
@@ -551,9 +684,15 @@ class PIDLineExtractorV2:
             logger.info(f"  🎯 INDUSTRIAL regex found {len(found_lines)} unique lines from {len(patterns)} patterns")
             return found_lines
 
-        # 🔧 GENERAL FORMAT: Auto-detect — try ALL known formats, keep the winner
+        # 🔧 GENERAL FORMAT: Run ALL known formats then combine / pick winner.
+        # Behaviour is controlled by the soft-coded GENERAL_STRATEGY constant:
+        #   'merge'  → union of all format results, deduplicated by line_number
+        #   'winner' → legacy: return only the format with the highest count
         if format_type == 'general':
-            logger.info("  🔍 GENERAL format — auto-detecting best match from all known formats")
+            logger.info(
+                f"  🔍 GENERAL format (strategy='{GENERAL_STRATEGY}') — "
+                "running all sub-formats: industrial, onshore, offshore, adnoc, onshore+area"
+            )
             _candidates = {}
             for _fmt in ('industrial', 'onshore', 'offshore', 'adnoc'):
                 _res = self.parse_with_regex(extracted_text, page_num, include_area=False, format_type=_fmt)
@@ -562,11 +701,37 @@ class PIDLineExtractorV2:
             _res_area = self.parse_with_regex(extracted_text, page_num, include_area=True, format_type='onshore')
             _candidates['onshore_area'] = _res_area
 
-            best_fmt = max(_candidates, key=lambda f: len(_candidates[f]))
-            best_count = len(_candidates[best_fmt])
-            logger.info(f"  ✅ GENERAL best format: '{best_fmt}' with {best_count} lines "
-                        f"({', '.join(f'{f}:{len(v)}' for f, v in _candidates.items())})")
-            return _candidates[best_fmt]
+            counts_str = ', '.join(f'{f}:{len(v)}' for f, v in _candidates.items())
+
+            if GENERAL_STRATEGY == 'merge':
+                # ----------------------------------------------------------------
+                # MERGE: Combine results from every format.
+                # Deduplicate on canonical line_number (case-insensitive) so the
+                # same tag found by two formats only appears once.
+                # The first format to register a line_number wins (priority order
+                # matches the loop above: industrial → onshore → offshore → adnoc).
+                # ----------------------------------------------------------------
+                merged: list = []
+                seen_merged: set = set()
+                for _fmt, _results in _candidates.items():
+                    for item in _results:
+                        key = item.get('line_number', '').upper()
+                        if key and key not in seen_merged:
+                            seen_merged.add(key)
+                            merged.append(item)
+                logger.info(
+                    f"  ✅ GENERAL MERGE: {len(merged)} unique lines combined "
+                    f"from all formats ({counts_str})"
+                )
+                return merged
+            else:
+                # WINNER (legacy): return only the highest-count format
+                best_fmt = max(_candidates, key=lambda f: len(_candidates[f]))
+                best_count = len(_candidates[best_fmt])
+                logger.info(
+                    f"  ✅ GENERAL WINNER: '{best_fmt}' with {best_count} lines ({counts_str})"
+                )
+                return _candidates[best_fmt]
         
         format_label = 'ADNOC' if format_type == 'adnoc' else ('OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA'))
         logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({format_label})")
@@ -594,26 +759,29 @@ class PIDLineExtractorV2:
         #
         # Format ADNOC (Abu Dhabi Oil Co. Ltd): SIZE"-FLUID-PIPECLASS-SEQUENCE
         # Examples: 6"-CD-AC3N-8256, 8"-HO-BD2A-1023, 10"-AG-XY1Z-9999
+        #           6"-FG-CI-329,   2"-FL-ACGN-8703, 2"-DR-RI-454
         
         if format_type == 'adnoc':
             # ADNOC PATTERNS: SIZE"-FLUIDCODE-PIPECLASS-SEQUENCE
             # Standard Example: 6"-CD-AC3N-8256
-            # Format: [1-2 digits]"[-][2-3 uppercase letters][-][alphanumeric pipe class][-][4 digits]
+            # Format: [1-2 digits]"[-][2-3 uppercase letters][-][alphanumeric pipe class][-][3-4 digits]
+            # Uses ADNOC_SEQ_MIN_DIGITS and ADNOC_PIPECLASS_MIN_LEN soft-coded constants.
+            _sq = f'{ADNOC_SEQ_MIN_DIGITS},4'  # e.g. "3,4"
             patterns = [
                 # Pattern 1: Standard ADNOC format with quote
-                r'\b(\d{1,2})"\s*-\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{4})\b',
-                
+                rf'\b(\d{{1,2}})"\s*-\s*([A-Z]{{2,3}})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{{{_sq}}})\b',
+
                 # Pattern 2: Flexible spacing
-                r'\b(\d{1,2})"?\s*-+\s*([A-Z]{2,3})\s*-+\s*([A-Z0-9]+)\s*-+\s*(\d{4})\b',
-                
+                rf'\b(\d{{1,2}})"?\s*-+\s*([A-Z]{{2,3}})\s*-+\s*([A-Z0-9]+)\s*-+\s*(\d{{{_sq}}})\b',
+
                 # Pattern 3: Compact format
-                r'\b(\d{1,2})"-([A-Z]{2,3})-([A-Z0-9]+)-(\d{4})\b',
-                
+                rf'\b(\d{{1,2}})"-([A-Z]{{2,3}})-([A-Z0-9]+)-(\d{{{_sq}}})\b',
+
                 # Pattern 4: With word boundaries and lookahead
-                r'(?:^|\s)(\d{1,2})"?\s*-\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{4})(?=\s|$|-)',
-                
+                rf'(?:^|\s)(\d{{1,2}})"?\s*-\s*([A-Z]{{2,3}})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{{{_sq}}})(?=\s|$|-)',
+
                 # Pattern 5: Case insensitive for OCR errors
-                r'(?:^|\s)(\d{1,2})"?\s*-\s*([A-Za-z]{2,3})\s*-\s*([A-Za-z0-9]+)\s*-\s*(\d{4})(?=\s|$|-)',
+                rf'(?:^|\s)(\d{{1,2}})"?\s*-\s*([A-Za-z]{{2,3}})\s*-\s*([A-Za-z0-9]+)\s*-\s*(\d{{{_sq}}})(?=\s|$|-)',
             ]
         elif format_type == 'offshore':
             # OFFSHORE PATTERNS: AREA-FLUIDCODE-LINESIZE-PIPECLASS-SEQUENCE-INSULATION
@@ -749,13 +917,14 @@ class PIDLineExtractorV2:
                 if insulation:
                     insulation = re.sub(r'[^A-Z0-9]', '', insulation)
                 
-                # ADNOC FORMAT VALIDATION (separate rules)
+                # ADNOC FORMAT VALIDATION
+                # Uses soft-coded constants ADNOC_SEQ_MIN_DIGITS and ADNOC_PIPECLASS_MIN_LEN.
                 if format_type == 'adnoc':
                     # 1. SIZE: Must be 1-2 digits
                     if not size or not size.isdigit() or len(size) > 2:
                         rejected.append(f"Invalid ADNOC size: {size}")
                         continue
-                    
+
                     # 2. FLUID: Must be 2-3 uppercase letters/digits (after O→0 normalization)
                     if not fluid or len(fluid) < 2 or len(fluid) > 3:
                         rejected.append(f"Invalid ADNOC fluid: {fluid}")
@@ -763,25 +932,27 @@ class PIDLineExtractorV2:
                     if not re.match(r'^[A-Z0-9]+$', fluid):
                         rejected.append(f"Invalid ADNOC fluid characters: {fluid}")
                         continue
-                    
-                    # 3. SEQUENCE: Must be exactly 4 digits
-                    if not seq or not seq.isdigit() or len(seq) != 4:
+
+                    # 3. SEQUENCE: ADNOC_SEQ_MIN_DIGITS–4 digits
+                    #    Abu Dhabi drawings use 3-digit (329, 454) and 4-digit (8703) sequences.
+                    if not seq or not seq.isdigit() or not (ADNOC_SEQ_MIN_DIGITS <= len(seq) <= 4):
                         rejected.append(f"Invalid ADNOC sequence: {seq}")
                         continue
-                    
-                    # 4. PIPE CLASS: Alphanumeric, flexible length (3-6 chars typical)
-                    if not pipr_class or not pipr_class.isalnum() or len(pipr_class) < 3:
+
+                    # 4. PIPE CLASS: Alphanumeric, min ADNOC_PIPECLASS_MIN_LEN chars
+                    #    Standard classes are 4+ chars (AC3N…) but this project uses 2-char (CI, RI).
+                    if not pipr_class or not pipr_class.isalnum() or len(pipr_class) < ADNOC_PIPECLASS_MIN_LEN:
                         rejected.append(f"Invalid ADNOC pipe class: {pipr_class}")
                         continue
-                    
+
                     # Build ADNOC line number: SIZE"-FLUID-PIPECLASS-SEQUENCE
                     line_number = f"{size}\"-{fluid}-{pipr_class}-{seq}"
-                    
+
                     # Deduplicate
                     if line_number in seen_lines:
                         continue
                     seen_lines.add(line_number)
-                    
+
                     # Create line entry for ADNOC
                     line_entry = {
                         'line_number': line_number,
@@ -799,58 +970,7 @@ class PIDLineExtractorV2:
                         'extraction_method': 'regex_adnoc',
                         'original_detection': match.group(0).strip()
                     }
-                    
-                    found_lines.append(line_entry)
-                    continue  # Skip standard validation below
-                
-                # ADNOC FORMAT VALIDATION (separate rules)
-                if format_type == 'adnoc':
-                    # 1. SIZE: Must be 1-2 digits
-                    if not size or not size.isdigit() or len(size) > 2:
-                        rejected.append(f"Invalid ADNOC size: {size}")
-                        continue
-                    
-                    # 2. FLUID: Must be 2-3 uppercase letters
-                    if not fluid or not fluid.isalpha() or len(fluid) < 2 or len(fluid) > 3:
-                        rejected.append(f"Invalid ADNOC fluid: {fluid}")
-                        continue
-                    
-                    # 3. SEQUENCE: Must be exactly 4 digits
-                    if not seq or not seq.isdigit() or len(seq) != 4:
-                        rejected.append(f"Invalid ADNOC sequence: {seq}")
-                        continue
-                    
-                    # 4. PIPE CLASS: Alphanumeric, flexible length (3-6 chars typical)
-                    if not pipr_class or not pipr_class.isalnum() or len(pipr_class) < 3:
-                        rejected.append(f"Invalid ADNOC pipe class: {pipr_class}")
-                        continue
-                    
-                    # Build ADNOC line number: SIZE"-FLUID-PIPECLASS-SEQUENCE
-                    line_number = f"{size}\"-{fluid}-{pipr_class}-{seq}"
-                    
-                    # Deduplicate
-                    if line_number in seen_lines:
-                        continue
-                    seen_lines.add(line_number)
-                    
-                    # Create line entry for ADNOC
-                    line_entry = {
-                        'line_number': line_number,
-                        'size': f'{size}"',
-                        'fluid_code': fluid,
-                        'sequence_no': seq,
-                        'pipr_class': pipr_class,
-                        'piping_spec': pipr_class,
-                        'dept_deviation': '',
-                        'insulation': '',
-                        'area': '',
-                        'page': page_num,
-                        'from_equipment': '',
-                        'to_equipment': '',
-                        'extraction_method': 'regex_adnoc',
-                        'original_detection': match.group(0).strip()
-                    }
-                    
+
                     found_lines.append(line_entry)
                     continue  # Skip standard validation below
                 
@@ -1587,6 +1707,22 @@ Example 4: "10\"-PG-0003-033842-X-H"
         try:
             doc = fitz.open(pdf_path)
             all_line_items = []
+
+            # ------------------------------------------------------------------
+            # CAD-generated PDFs (AutoCAD, SmartPlant, PDMS…) split content
+            # across Optional Content Groups (layers).  Pipe line annotations
+            # are often on a layer that is marked "off" by default, so
+            # PyMuPDF's text extraction skips them entirely.
+            # Enabling every OCG before extraction ensures we see all text.
+            # ------------------------------------------------------------------
+            try:
+                ocgs = doc.get_ocgs()
+                if ocgs:
+                    for xref in ocgs.keys():
+                        doc.set_ocg(xref, True)
+                    logger.info(f"  🔓 Enabled {len(ocgs)} optional content layers for full text extraction")
+            except Exception as _ocg_err:
+                logger.warning(f"  ⚠️ Could not enable OCG layers: {_ocg_err}")
             
             all_line_items = []
             
@@ -1665,7 +1801,50 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 logger.info("🔍 PHASE 2: REGEX Pattern Recognition")
                 logger.info(f"  📝 Text sample (first 500 chars): {combined_text[:500]}")
                 line_items = self.parse_with_regex(combined_text, page_num + 1, include_area=include_area, format_type=format_type)
-                
+
+                # ------------------------------------------------------------------
+                # OCR FALLBACK: When embedded text was used (fast path) but regex
+                # found zero line numbers, the drawing content is likely image-based
+                # (e.g. title block text only, while the P&ID lines are rasterised).
+                # Fall back to the full OCR pipeline for this page.
+                # Core logic (regex, validation, formats) is unchanged.
+                # ------------------------------------------------------------------
+                if not line_items and not use_ocr:
+                    logger.info(
+                        "  ⚠️ Embedded text found no line numbers — "
+                        "drawing content may be image-based. Falling back to OCR."
+                    )
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+                    img_fb = Image.open(io.BytesIO(pix.tobytes("png")))
+                    img_fb = img_fb.convert('L')
+                    ocr_results_fb = self.extract_all_text_from_image(img_fb)
+                    if ocr_results_fb:
+                        combined_text_fb = self.combine_and_deduplicate_text(ocr_results_fb)
+                        if combined_text_fb and len(combined_text_fb) >= 10:
+                            logger.info(
+                                f"  📷 OCR fallback extracted {len(combined_text_fb)} chars — "
+                                "re-running regex"
+                            )
+                            logger.info(
+                                f"  📝 OCR fallback text sample (first 300 chars): "
+                                f"{combined_text_fb[:300]}"
+                            )
+                            combined_text = combined_text_fb
+                            # Mark as OCR path so FROM-TO phases have an image object
+                            use_ocr = True
+                            img = img_fb
+                            line_items = self.parse_with_regex(
+                                combined_text, page_num + 1,
+                                include_area=include_area, format_type=format_type
+                            )
+                            logger.info(
+                                f"  ✅ OCR fallback found {len(line_items)} line numbers"
+                            )
+                        else:
+                            logger.warning("  ⚠️ OCR fallback returned insufficient text")
+                    else:
+                        logger.warning("  ⚠️ OCR fallback returned no text")
+
                 if not line_items:
                     logger.warning("  ⚠️ No line numbers found on this page")
                     continue
