@@ -44,9 +44,10 @@ class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
                     )
                 
                 if not user.is_active:
-                    logger.warning(f"[JWT] Authentication failed - account disabled for: {email}")
+                    logger.warning(f"[JWT] Authentication failed - account pending approval for: {email}")
                     raise serializers.ValidationError(
-                        'User account is disabled',
+                        'Your account is pending administrator approval. '
+                        'You will be notified once your account is activated.',
                         code='authorization'
                     )
                 
