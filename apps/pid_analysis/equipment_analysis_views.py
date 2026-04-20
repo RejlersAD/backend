@@ -522,6 +522,21 @@ _REGISTER_REPEATED_HDR_MARGIN = 3
 _REV_PRE_TAG_WIN_CHARS = 80
 _REV_PRE_TAG_TOKENS    = 3
 
+# ---------------------------------------------------------------------------
+# QUANTITY REQUIRED — soft-coded constants.
+# QUANTITY_REQUIRED_DEFAULT   : value placed in 'quality_required' when no
+#                               explicit count callout is found on the drawing
+#                               (virtually all single-unit equipment = 1).
+# QUANTITY_REQUIRED_PATTERN   : regex to extract an explicit count callout.
+#                               Matches: "QTY: 2", "QUANTITY = 1", "NO. REQD 3"
+# QUALITY_SPEC_NACE_FULL_PAT  : sour-service NACE compliance string (full ref).
+# QUALITY_SPEC_NACE_SHORT_PAT : abbreviated NACE reference.
+# ---------------------------------------------------------------------------
+QUANTITY_REQUIRED_DEFAULT  = '1'
+QUANTITY_REQUIRED_PATTERN  = r'(?:QTY|QUANTITY|NO\.?\s*REQD?|NO\.?\s*REQUIRED|COUNT)\s*[:=]?\s*(\d+)'
+QUALITY_SPEC_NACE_FULL     = 'NACE MR0175'
+QUALITY_SPEC_NACE_SHORT    = 'NACE'
+
 # _REVISION_USE_TOPMOST      — when True, the first non-empty revision value
 #                              found in the register (topmost row) is applied to
 #                              ALL extracted rows.  Equipment registers typically
@@ -1235,7 +1250,7 @@ def _pid_item_to_register_schema(pid_item: dict) -> dict:
         'pid_no':              pid_item.get('drawing_ref', ''),
         'quality_required':    pid_item.get('quality_required', ''),
         'phase':               pid_item.get('service_fluid', ''),
-        'remarks':             pid_item.get('process_notes', ''),
+        'remarks':             pid_item.get('remarks', '') or pid_item.get('process_notes', ''),
         # Backward-compat fields kept for status/results endpoints
         'type_label':         pid_item.get('type_label', ''),
         'area':               pid_item.get('area', ''),
@@ -2507,39 +2522,54 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         if not motor_rating and prefix.upper() in _motor_na_pfxs:
             motor_rating = _motor_na_val
 
-        # ── Quality Required ─────────────────────────────────────────────
-        quality_required = ''
+        # ── Quality Specification (→ Remarks) ────────────────────────────
+        # Core logic unchanged — still extracts quality class / NACE compliance.
+        # Result is now stored in quality_spec and routed to the 'remarks' field
+        # so that 'quality_required' (→ "Quantity Required" column) can hold the
+        # numerical count.  Controlled by QUALITY_SPEC_* module-level constants.
+        quality_spec = ''
         _qr_m = re.search(_qual_pat, _pp_ctx, re.IGNORECASE)
         if _qr_m:
-            quality_required = _qr_m.group(1).strip().upper()
+            quality_spec = _qr_m.group(1).strip().upper()
 
         # Strategy 2: scan wider context for explicit NACE reference.
         # P&IDs for sour-service equipment (H2S/SOUR GAS) should comply with
         # NACE MR0175 / ISO 15156.  When the drawing has NACE in the notes or
         # title block, apply it.  Threshold is soft-coded via
         # 'quality_nace_context_chars' (default 1500).
-        if not quality_required:
+        if not quality_spec:
             _qual_ctx_chars = int(ext_cfg.get('quality_nace_context_chars', 1500))
             _qual_ctx_start = max(0, m.start() - _qual_ctx_chars)
             _qual_ctx_end   = min(len(text), m.end() + _qual_ctx_chars)
             _qual_wide_ctx  = text[_qual_ctx_start:_qual_ctx_end]
             if re.search(r'\bNACE\s*MR\s*0175\b', _qual_wide_ctx, re.IGNORECASE):
-                quality_required = 'NACE MR0175'
+                quality_spec = QUALITY_SPEC_NACE_FULL
             elif re.search(r'\bNACE\b', _qual_wide_ctx, re.IGNORECASE):
-                quality_required = 'NACE'
+                quality_spec = QUALITY_SPEC_NACE_SHORT
 
         # Strategy 3: infer from sour-service context.  If sour gas / H2S /
         # HIC is detected anywhere in the drawing, all vessels must comply
         # with NACE MR0175.  Soft-coded disable via
         # 'quality_infer_from_sour_service' = false.
         _infer_sour = bool(ext_cfg.get('quality_infer_from_sour_service', True))
-        if not quality_required and _infer_sour:
+        if not quality_spec and _infer_sour:
             _sour_ctx = text[:min(len(text), 6000)]  # check first 6 k chars
             if re.search(r'\bSOUR\s+GAS\b|\bH2S\b|\bHIC\b|\bSSC\b',
                          _sour_ctx, re.IGNORECASE):
-                quality_required = 'NACE MR0175'
+                quality_spec = QUALITY_SPEC_NACE_FULL
             elif service_fluid and re.search(r'\bsour\b', service_fluid, re.IGNORECASE):
-                quality_required = 'NACE MR0175'
+                quality_spec = QUALITY_SPEC_NACE_FULL
+
+        # ── Quantity Required (numerical count) ───────────────────────────
+        # Extracts an explicit count callout (QTY: 2, NO. REQD 1, etc.) from
+        # the narrow context window.  Defaults to QUANTITY_REQUIRED_DEFAULT
+        # ('1') when no callout is found — the vast majority of P&ID equipment
+        # items are single-unit.  Pattern is soft-coded via module-level
+        # QUANTITY_REQUIRED_PATTERN.
+        quantity_required = QUANTITY_REQUIRED_DEFAULT
+        _qty_m = re.search(QUANTITY_REQUIRED_PATTERN, _pp_ctx, re.IGNORECASE)
+        if _qty_m:
+            quantity_required = _qty_m.group(1).strip()
 
         # ── Revision & SL No — pre-tag token scan ─────────────────────────
         # Tabular PDF text writes table cells as newline-separated tokens in
@@ -2588,7 +2618,8 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             'dimension_length':    dimension_length,
             'dimension_diameter':  dimension_diameter,
             'motor_rating':        motor_rating,
-            'quality_required':    quality_required,
+            'quality_required':    quantity_required,
+            'remarks':             quality_spec,
         })
 
         # ── Merge data-box index values (fill empty fields only) ──────────

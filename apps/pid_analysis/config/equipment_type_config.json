@@ -514,8 +514,8 @@
     { "key": "design_flowrate",     "label": "Design Flowrate / Duty / Volume", "width": 22 },
     { "key": "oper_pressure",       "label": "Oper. Pressure (PSIG)",           "width": 18 },
     { "key": "oper_temperature",    "label": "Oper. Temp. (Deg F)",             "width": 18 },
-    { "key": "design_pressure_min", "label": "Design/Set Press. Min (PSIG)",    "width": 20 },
-    { "key": "design_pressure_max", "label": "Design/Set Press. Max (PSIG)",    "width": 20 },
+    { "key": "design_pressure_min", "label": "Des. Pressure (MIN)",              "width": 20 },
+    { "key": "design_pressure_max", "label": "Des. Pressure (MAX)",              "width": 20 },
     { "key": "design_temp_min",     "label": "Design Temp. Min (Deg F)",        "width": 18 },
     { "key": "design_temp_max",     "label": "Design Temp. Max (Deg F)",        "width": 18 },
     { "key": "moc",                 "label": "MOC",                             "width": 16 },
@@ -524,7 +524,7 @@
     { "key": "dimension_diameter",  "label": "Diameter / Width (mm)",           "width": 18 },
     { "key": "motor_rating",        "label": "Motor Rating (kW)",               "width": 14 },
     { "key": "pid_no",              "label": "P&ID No.",                         "width": 16 },
-    { "key": "quality_required",    "label": "Quality Required",                "width": 16 },
+    { "key": "quality_required",    "label": "Quantity Required",               "width": 16 },
     { "key": "phase",               "label": "Phase",                           "width": 12 },
     { "key": "remarks",             "label": "Remarks",                         "width": 24 }
   ]
