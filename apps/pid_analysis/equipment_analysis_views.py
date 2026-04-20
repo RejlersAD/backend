@@ -2,6 +2,7 @@
 Equipment Analysis Views - P&ID Equipment List Extraction
 """
 
+import base64
 import json
 import logging
 import os
@@ -9,11 +10,30 @@ import re
 import uuid
 from functools import lru_cache
 
+from django.core.cache import cache
 from django.http import HttpResponse
 from rest_framework import status as drf_status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+
+# ── Soft-coded async-result cache constants ───────────────────────────────────
+# Results are stored in Redis (same broker as Celery) so all gunicorn workers
+# can read them regardless of which worker handled the original upload.
+EQ_RESULT_CACHE_TTL_S   = 14400    # 4 hours — how long results stay in Redis
+EQ_RESULT_CACHE_KEY_FMT = 'eq_analysis:{upload_id}'  # must match tasks.py
+
+
+def _eq_get_result_entry(upload_id: str) -> dict | None:
+    """
+    Look up a result entry for upload_id.
+    Checks Redis cache first (written by Celery worker), then falls back to
+    the in-process _result_store (written by synchronous callers in tests).
+    """
+    entry = cache.get(EQ_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id))
+    if entry is not None:
+        return entry
+    return _result_store.get(upload_id)
 
 # Lazy import — avoids circular import at module load; models resolved at request time.
 def _get_equipment_models():
@@ -3074,7 +3094,13 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def analyze_pid_equipment(request):
-    """POST /api/v1/pid/equipment/analyze/"""
+    """POST /api/v1/pid/equipment/analyze/
+    Accepts a single P&ID PDF, dispatches extraction to a Celery background task,
+    and returns HTTP 202 with upload_id immediately.
+    The frontend polls /status/<upload_id>/ every few seconds until 'completed'.
+    """
+    from apps.pid_analysis.tasks import run_equipment_analysis_task   # lazy import avoids circular
+
     config  = _load_config()
     ext_cfg = config.get('extraction', {})
     allowed = [e.lower() for e in ext_cfg.get('allowed_extensions', ['pdf'])]
@@ -3094,220 +3120,42 @@ def analyze_pid_equipment(request):
         return Response({'error': f'File exceeds {max_mb} MB limit', 'success': False},
                         status=drf_status.HTTP_400_BAD_REQUEST)
 
-    drawing_ref = pid_file.name.rsplit('.', 1)[0]
-    upload_id   = f'EQ-{uuid.uuid4().hex[:12].upper()}'
+    upload_id = f'EQ-{uuid.uuid4().hex[:12].upper()}'
 
-    print(f'[EQ-DIAG] Analyzing: {pid_file.name}  upload_id={upload_id}', flush=True)
-    _debug_info: dict = {'file': pid_file.name, 'upload_id': upload_id}
+    # Encode file bytes as base64 so they can be passed as a JSON-serialisable
+    # task argument (Celery serialises args to JSON by default).
+    file_b64 = base64.b64encode(pid_file.read()).decode('ascii')
 
-    try:
-        # ── Stage 1: try Equipment Register (18-field table) extraction ──
-        equipment       = _extract_equipment_register_rows(pid_file, config)
-        extraction_mode = 'register'
+    # Mark as 'processing' in cache immediately so status polls never return 404.
+    cache.set(
+        EQ_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id),
+        {'status': 'processing', 'progress': 0, 'message': 'Queued for extraction…'},
+        EQ_RESULT_CACHE_TTL_S,
+    )
 
-        if equipment is None:
-            # ── Stage 2: fall back to P&ID drawing mode ──
-            print('[EQ-DIAG] Register mode returned None -> falling back to P&ID mode', flush=True)
-            pid_file.seek(0)
-            text      = _extract_text_from_pdf(pid_file, config)
+    run_equipment_analysis_task.delay(upload_id, file_b64, pid_file.name)
+    logger.info('[EquipmentList] Dispatched task  upload_id=%s  file=%s', upload_id, pid_file.name)
 
-            # Override drawing_ref with the actual DWG NO from the title block.
-            # Priority order (highest confidence first):
-            #   1. Coordinate-based: scan only the bottom strip of the page
-            #      (title block location) — immune to reference-document tables.
-            #   2. Vector-text (full page text, label-adjacent strategy).
-            #   3. Full OCR-merged text (text-based fallback).
-            _coord_dwg_no = ''
-            try:
-                pid_file.seek(0)
-                _coord_dwg_no = _extract_titleblock_dwg_no_by_coords(pid_file.read())
-            except Exception as _e:
-                logger.debug('[EquipmentList] Coord DWG NO extraction failed: %s', _e)
-
-            _vector_dwg_no = ''
-            if not _coord_dwg_no:
-                try:
-                    import fitz as _fitz_dwg
-                    pid_file.seek(0)
-                    _dwg_doc = _fitz_dwg.open(stream=pid_file.read(), filetype='pdf')
-                    _vec_parts: list = []
-                    for _pg in _dwg_doc:
-                        _vec_parts.append(_pg.get_text('text') or '')
-                        _words = _pg.get_text('words')
-                        if _words:
-                            _vec_parts.append(' '.join(w[4] for w in sorted(
-                                _words, key=lambda w: (round(w[1] / 15) * 15, w[0])
-                            )))
-                    _dwg_doc.close()
-                    _vector_only_text = '\n'.join(_vec_parts)
-                    _vector_dwg_no = _extract_titleblock_dwg_no(_vector_only_text)
-                    if _vector_dwg_no:
-                        print(f'[EQ-DIAG][DwgNo] Vector-text strategy: {_vector_dwg_no!r}', flush=True)
-                except Exception as _e:
-                    logger.debug('[EquipmentList] Vector DWG NO extraction failed: %s', _e)
-
-            _tb_dwg_no = _coord_dwg_no or _vector_dwg_no or _extract_titleblock_dwg_no(text)
-            if _tb_dwg_no:
-                drawing_ref = _tb_dwg_no
-                print(f'[EQ-DIAG] Drawing ref overridden to title-block DWG NO: {drawing_ref!r}', flush=True)
-
-            raw_items = _extract_equipment_items(text, drawing_ref, config)
-            equipment = [_pid_item_to_register_schema(item) for item in raw_items]
-            extraction_mode = 'pid_drawing'
-            _debug_info.update({
-                'text_len': len(text),
-                'text_preview': text[:400] if text else '',
-                'raw_items_count': len(raw_items),
-                'after_dedup_count': len(equipment),
-            })
-            print(f'[EQ-DIAG] P&ID mode: text_len={len(text)}  raw_items={len(raw_items)}  after_dedup={len(equipment)}', flush=True)
-            print(f'[EQ-DIAG] Tags found: {[i["tag"] for i in raw_items]}', flush=True)
-
-            # ── AI gap-fill: use GPT-4o + Gemini to fill any fields still empty ──
-            # Runs AFTER regex extraction; never overwrites populated values.
-            # Controlled by ai_gap_fill_enabled in equipment_type_config.json.
-            if equipment and text:
-                equipment = _ai_gap_fill_pid_items(equipment, text, config)
-
-            # ── P&ID mode: document-level revision from title block ───────────
-            _tb_rev_enabled = bool(ext_cfg.get('titleblock_revision_enabled', True))
-            if _REVISION_USE_TOPMOST and _tb_rev_enabled:
-                _doc_rev = _extract_titleblock_revision(text)
-                if _doc_rev:
-                    for _item in equipment:
-                        _item['revision'] = _doc_rev
-                    print(f'[EQ-DIAG] Document revision "{_doc_rev}" applied to all {len(equipment)} items', flush=True)
-
-            # Diagnostic logging
-            import re as _re
-            _all_candidates = _re.findall(r'\b[A-Z]{1,2}-[0-9]{3,5}[A-Z]?(?:-[A-Z0-9]{1,4})?\b', text)
-            print(f'[EQ-DIAG] All tag-shaped tokens in text: {list(dict.fromkeys(_all_candidates))}', flush=True)
-
-        for idx, item in enumerate(equipment, 1):
-            if not item.get('sl_no'):
-                item['sl_no'] = str(idx)
-            item['drawing_ref'] = drawing_ref
-
-        # ── Equipment type classification (soft-coded via config) ──────────
-        _desg_codes   = config.get('designation_codes', {})
-        _prefix_map   = config.get('tag_prefix_type_map', {})
-        # Sort prefix keys longest-first so 'ST' matches before 'S'
-        _pfx_keys     = sorted(_prefix_map.keys(), key=len, reverse=True)
-        _type_re      = re.compile(r'^([A-Z]{1,4})')
-        for _item in equipment:
-            _tag_pfx = _type_re.match(_item.get('tag', ''))
-            if _tag_pfx:
-                _pfx = _tag_pfx.group(1)
-                _desig = None
-                for _pk in _pfx_keys:
-                    if _pfx.startswith(_pk):
-                        _desig = _prefix_map[_pk]
-                        break
-                if _desig and _desig in _desg_codes:
-                    _item['equipment_type']      = _desig
-                    _item['equipment_type_name'] = _desg_codes[_desig]['name']
-                    _item['equipment_category']  = _desg_codes[_desig]['category']
-                else:
-                    _item.setdefault('equipment_type', '')
-                    _item.setdefault('equipment_type_name', '')
-                    _item.setdefault('equipment_category', '')
-
-        # ── Persist extracted items to DB (upsert by upload_id + tag) ──────
-        try:
-            PIDEquipmentType, PIDEquipmentItem = _get_equipment_models()
-            _db_user = getattr(request, 'user', None)
-            _scalar_keys = {
-                'revision', 'description', 'extraction_mode',
-                'sl_no', 'tag', 'drawing_ref',
-                'equipment_type', 'equipment_type_name', 'equipment_category',
-            }
-            for _item in equipment:
-                _etag  = _item.get('tag', '')
-                _edata = {k: v for k, v in _item.items() if k not in _scalar_keys}
-                _etype_code = _item.get('equipment_type') or None
-                _etype_obj  = None
-                if _etype_code:
-                    _etype_obj, _ = PIDEquipmentType.objects.get_or_create(
-                        code=_etype_code,
-                        defaults={
-                            'name':        _desg_codes.get(_etype_code, {}).get('name', _etype_code),
-                            'category':    _desg_codes.get(_etype_code, {}).get('category', 'MISC'),
-                            'is_rotating': bool(_desg_codes.get(_etype_code, {}).get('rotating', False)),
-                        },
-                    )
-                PIDEquipmentItem.objects.update_or_create(
-                    upload_id=upload_id,
-                    tag=_etag,
-                    defaults={
-                        'drawing_ref':     drawing_ref,
-                        'revision':        _item.get('revision', ''),
-                        'description':     _item.get('description', ''),
-                        'extraction_mode': extraction_mode,
-                        'equipment_type':  _etype_obj,
-                        'data':            _edata,
-                        'uploaded_by':     _db_user if _db_user and _db_user.is_authenticated else None,
-                    },
-                )
-            print(f'[EQ-DIAG] Saved {len(equipment)} items to DB (upload_id={upload_id})', flush=True)
-        except Exception as _db_exc:
-            # DB save failure must NOT break the API response
-            print(f'[EQ-DIAG] DB save WARNING: {_db_exc}', flush=True)
-
-        _result_store[upload_id] = {
-            'status':          'completed',
-            'equipment':       equipment,
-            'total':           len(equipment),
-            'drawing_ref':     drawing_ref,
-            'extraction_mode': extraction_mode,
-        }
-
-        _debug_info['extraction_mode'] = extraction_mode
-        _debug_info['total'] = len(equipment)
-        print(f'[EQ-DIAG] Done: {len(equipment)} items  mode={extraction_mode}', flush=True)
-        # Per-item diagnostic — shows tag + revision + how many fields are populated
-        for _item in equipment:
-            _pop = sum(1 for k, v in _item.items()
-                       if k not in ('sl_no','tag','type_label','area','drawing_ref',
-                                    'line_connections','nozzle_connections')
-                       and (v if not isinstance(v, list) else v))
-            print(f'[EQ-DIAG]   rev={_item.get("revision","")}  tag={_item.get("tag","")}  desc={repr(_item.get("description",""))[:40]}  pop={_pop}', flush=True)
-
-        resp_body: dict = {
-            'success':         True,
-            'upload_id':       upload_id,
-            'status':          'completed',
-            'equipment':       equipment,
-            'total':           len(equipment),
-            'drawing_ref':     drawing_ref,
-            'extraction_mode': extraction_mode,
-            'columns':         [c['label'] for c in config.get('excel_columns', []) if c['key'] != 'sl_no'],
-        }
-        # Include debug info automatically when nothing was extracted,
-        # so the frontend can display diagnostic details without Docker log access.
-        if len(equipment) == 0:
-            resp_body['debug_info'] = _debug_info
-        return Response(resp_body, status=drf_status.HTTP_200_OK)
-
-    except Exception as exc:
-        logger.error('[EquipmentList] Error: %s', exc, exc_info=True)
-        _result_store[upload_id] = {'status': 'failed', 'error': str(exc)}
-        return Response({'error': f'Extraction failed: {exc}', 'success': False},
-                        status=drf_status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+    return Response(
+        {'upload_id': upload_id, 'status': 'processing', 'message': 'Extraction queued'},
+        status=drf_status.HTTP_202_ACCEPTED,
+    )
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_equipment_analysis_status(request, upload_id):
     """GET /api/v1/pid/equipment/status/<upload_id>/"""
-    entry = _result_store.get(upload_id)
+    entry = _eq_get_result_entry(upload_id)
     if not entry:
         return Response({'upload_id': upload_id, 'status': 'not_found', 'progress': 0},
                         status=drf_status.HTTP_404_NOT_FOUND)
+    s = entry.get('status', 'processing')
     return Response({
         'upload_id': upload_id,
-        'status':    entry.get('status', 'processing'),
-        'progress':  100 if entry.get('status') == 'completed' else 50,
-        'message':   entry.get('error', 'Extraction complete' if entry.get('status') == 'completed' else 'Processing...'),
+        'status':    s,
+        'progress':  entry.get('progress', 100 if s == 'completed' else 50),
+        'message':   entry.get('message', entry.get('error',
+                         'Extraction complete' if s == 'completed' else 'Processing…')),
     })
 
 
@@ -3315,9 +3163,9 @@ def get_equipment_analysis_status(request, upload_id):
 @permission_classes([IsAuthenticated])
 def get_equipment_analysis_results(request, upload_id):
     """GET /api/v1/pid/equipment/results/<upload_id>/"""
-    entry = _result_store.get(upload_id)
+    entry = _eq_get_result_entry(upload_id)
     if not entry:
-        return Response({'error': 'Results not found - re-upload the file', 'upload_id': upload_id},
+        return Response({'error': 'Results not found — re-upload the file', 'upload_id': upload_id},
                         status=drf_status.HTTP_404_NOT_FOUND)
     if entry.get('status') == 'failed':
         return Response({'error': entry.get('error', 'Extraction failed'), 'upload_id': upload_id},
@@ -3338,7 +3186,7 @@ def get_equipment_analysis_results(request, upload_id):
 @permission_classes([IsAuthenticated])
 def download_equipment_excel(request, upload_id):
     """GET /api/v1/pid/equipment/download-excel/<upload_id>/"""
-    entry = _result_store.get(upload_id)
+    entry = _eq_get_result_entry(upload_id)
     if not entry or entry.get('status') != 'completed':
         return Response({'error': 'Results not available - re-upload the file'},
                         status=drf_status.HTTP_404_NOT_FOUND)
@@ -3422,8 +3270,11 @@ def download_equipment_excel(request, upload_id):
 @permission_classes([IsAuthenticated])
 def analyze_pid_equipment_batch(request):
     """POST /api/v1/pid/equipment/analyze-batch/
-    Accepts multiple files and returns combined equipment results for all drawings.
+    Accepts multiple files, dispatches extraction to a Celery background task,
+    and returns HTTP 202 with upload_id immediately.
     """
+    from apps.pid_analysis.tasks import run_equipment_batch_analysis_task   # lazy import
+
     config  = _load_config()
     ext_cfg = config.get('extraction', {})
     allowed = [e.lower() for e in ext_cfg.get('allowed_extensions', ['pdf'])]
@@ -3434,10 +3285,7 @@ def analyze_pid_equipment_batch(request):
         return Response({'error': 'No files provided', 'success': False},
                         status=drf_status.HTTP_400_BAD_REQUEST)
 
-    all_equipment = []
-    drawing_refs  = []
-    upload_id     = f'EQB-{uuid.uuid4().hex[:12].upper()}'
-
+    # Validate all files up-front before dispatching the task
     for pid_file in files:
         ext = pid_file.name.rsplit('.', 1)[-1].lower()
         if ext not in allowed:
@@ -3451,61 +3299,24 @@ def analyze_pid_equipment_batch(request):
                 status=drf_status.HTTP_400_BAD_REQUEST,
             )
 
-    for pid_file in files:
-        drawing_ref = pid_file.name.rsplit('.', 1)[0]
-        drawing_refs.append(drawing_ref)
-        logger.info('[EquipmentList Batch] Analyzing: %s  upload_id=%s', pid_file.name, upload_id)
-        try:
-            # Try register mode first; fall back to P&ID mode
-            equipment = _extract_equipment_register_rows(pid_file, config)
-            if equipment is None:
-                pid_file.seek(0)
-                text      = _extract_text_from_pdf(pid_file, config)
-                # Override drawing_ref with actual DWG NO from title block.
-                # Coordinate-based extraction (bottom strip of page) takes priority
-                # over text-based so reference-document table entries are ignored.
-                _coord_dwg_no_b = ''
-                try:
-                    pid_file.seek(0)
-                    _coord_dwg_no_b = _extract_titleblock_dwg_no_by_coords(pid_file.read())
-                except Exception:
-                    pass
-                _tb_dwg_no = _coord_dwg_no_b or _extract_titleblock_dwg_no(text)
-                if _tb_dwg_no:
-                    drawing_ref          = _tb_dwg_no
-                    drawing_refs[-1]     = _tb_dwg_no   # update the list entry too
-                raw_items = _extract_equipment_items(text, drawing_ref, config)
-                equipment = [_pid_item_to_register_schema(item) for item in raw_items]
-            for idx, item in enumerate(equipment, 1):
-                if not item.get('sl_no'):
-                    item['sl_no'] = str(idx)
-                item['drawing_ref'] = drawing_ref
-            all_equipment.extend(equipment)
-        except Exception as exc:
-            logger.error('[EquipmentList Batch] Error on %s: %s', pid_file.name, exc, exc_info=True)
-            _result_store[upload_id] = {'status': 'failed', 'error': str(exc)}
-            return Response({'error': f'Extraction failed for {pid_file.name}: {exc}', 'success': False},
-                            status=drf_status.HTTP_500_INTERNAL_SERVER_ERROR)
+    upload_id  = f'EQB-{uuid.uuid4().hex[:12].upper()}'
 
-    # Re-number across drawings
-    for idx, item in enumerate(all_equipment, 1):
-        item['sl_no'] = idx
+    # Encode each file as base64 for Celery JSON serialisation
+    files_data = [
+        {'b64': base64.b64encode(pid_file.read()).decode('ascii'), 'filename': pid_file.name}
+        for pid_file in files
+    ]
 
-    _result_store[upload_id] = {
-        'status':      'completed',
-        'equipment':   all_equipment,
-        'total':       len(all_equipment),
-        'drawing_ref': ', '.join(drawing_refs),
-    }
+    cache.set(
+        EQ_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id),
+        {'status': 'processing', 'progress': 0, 'message': f'Queued: 0 / {len(files)} files…'},
+        EQ_RESULT_CACHE_TTL_S,
+    )
 
-    logger.info('[EquipmentList Batch] Done: %d items from %d drawing(s)', len(all_equipment), len(files))
+    run_equipment_batch_analysis_task.delay(upload_id, files_data)
+    logger.info('[EquipmentList Batch] Dispatched task  upload_id=%s  files=%d', upload_id, len(files))
 
-    return Response({
-        'success':     True,
-        'upload_id':   upload_id,
-        'status':      'completed',
-        'equipment':   all_equipment,
-        'total':       len(all_equipment),
-        'drawing_ref': ', '.join(drawing_refs),
-        'columns':     [c['label'] for c in config.get('excel_columns', []) if c['key'] != 'sl_no'],
-    }, status=drf_status.HTTP_200_OK)
+    return Response(
+        {'upload_id': upload_id, 'status': 'processing', 'message': f'{len(files)} file(s) queued'},
+        status=drf_status.HTTP_202_ACCEPTED,
+    )
