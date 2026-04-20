@@ -537,6 +537,16 @@ QUANTITY_REQUIRED_PATTERN  = r'(?:QTY|QUANTITY|NO\.?\s*REQD?|NO\.?\s*REQUIRED|CO
 QUALITY_SPEC_NACE_FULL     = 'NACE MR0175'
 QUALITY_SPEC_NACE_SHORT    = 'NACE'
 
+# ── Dimension extraction minimum-value filters (soft-coded) ────────────────
+# Dimension values BELOW these thresholds are rejected as pipe-size / nozzle /
+# instrument-level false positives picked up by OCR from context text.
+# P&ID pipe annotations (e.g. "2"-FL-…" → OCR "2 M") are the classic source.
+# Increase thresholds here only — no logic changes required.
+DIMENSION_LENGTH_MIN_M    = 0.5   # metres  — reject vessel length  < 0.5 M
+DIMENSION_LENGTH_MIN_MM   = 500   # mm      — reject vessel length  < 500 mm
+DIMENSION_DIAMETER_MIN_M  = 0.3   # metres  — reject vessel diameter < 0.3 M
+DIMENSION_DIAMETER_MIN_MM = 300   # mm      — reject vessel diameter < 300 mm
+
 # _REVISION_USE_TOPMOST      — when True, the first non-empty revision value
 #                              found in the register (topmost row) is applied to
 #                              ALL extracted rows.  Equipment registers typically
@@ -2477,18 +2487,42 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         _dim_ctx       = text[_dim_start:_dim_end].upper()
         dimension_length   = ''
         dimension_diameter = ''
+        # ── Length / Height ──────────────────────────────────────────────
+        # OCR artefact: P&ID pipe annotations such as  2"-FL-ACIN-xxxx  are
+        # often read as  "2 M"  or  "2 MM"  by Tesseract, and re.search would
+        # pick that FIRST match before the real vessel length (e.g. 15.0 M).
+        # Fix: collect ALL value matches in the scan window, apply soft-coded
+        # minimum thresholds (DIMENSION_LENGTH_MIN_M / _MIN_MM) and take the
+        # LARGEST passing value — the vessel length always wins over pipe sizes.
         _len_lbl_m = re.search(_dim_len_lbl, _dim_ctx, re.IGNORECASE)
         if _len_lbl_m:
-            _dv = re.search(_dim_val_pat, _dim_ctx[_len_lbl_m.end():_len_lbl_m.end() + _dim_val_win], re.IGNORECASE)
-            if _dv and float(_dv.group(1)) > 0:
-                _unit = (_dv.group(2) or 'mm').upper()
-                dimension_length = f'{_dv.group(1)} {_unit}'
+            _win = _dim_ctx[_len_lbl_m.end():_len_lbl_m.end() + _dim_val_win]
+            _best_len_val, _best_len_str = 0.0, ''
+            for _dv in re.finditer(_dim_val_pat, _win, re.IGNORECASE):
+                _val  = float(_dv.group(1))
+                _unit = (_dv.group(2) or '').upper()
+                if _unit == 'M' and _val >= DIMENSION_LENGTH_MIN_M and _val > _best_len_val:
+                    _best_len_val = _val
+                    _best_len_str = f'{_dv.group(1)} M'
+                elif _unit in ('MM', '') and _val >= DIMENSION_LENGTH_MIN_MM and _val > _best_len_val:
+                    _best_len_val = _val
+                    _best_len_str = f'{_dv.group(1)} {_unit or "MM"}'
+            dimension_length = _best_len_str
+        # ── Diameter / Width ─────────────────────────────────────────────
         _dia_lbl_m = re.search(_dim_dia_lbl, _dim_ctx, re.IGNORECASE)
         if _dia_lbl_m:
-            _dv = re.search(_dim_val_pat, _dim_ctx[_dia_lbl_m.end():_dia_lbl_m.end() + _dim_val_win], re.IGNORECASE)
-            if _dv and float(_dv.group(1)) > 0:
-                _unit = (_dv.group(2) or 'mm').upper()
-                dimension_diameter = f'{_dv.group(1)} {_unit}'
+            _win = _dim_ctx[_dia_lbl_m.end():_dia_lbl_m.end() + _dim_val_win]
+            _best_dia_val, _best_dia_str = 0.0, ''
+            for _dv in re.finditer(_dim_val_pat, _win, re.IGNORECASE):
+                _val  = float(_dv.group(1))
+                _unit = (_dv.group(2) or '').upper()
+                if _unit == 'M' and _val >= DIMENSION_DIAMETER_MIN_M and _val > _best_dia_val:
+                    _best_dia_val = _val
+                    _best_dia_str = f'{_dv.group(1)} M'
+                elif _unit in ('MM', '') and _val >= DIMENSION_DIAMETER_MIN_MM and _val > _best_dia_val:
+                    _best_dia_val = _val
+                    _best_dia_str = f'{_dv.group(1)} {_unit or "MM"}'
+            dimension_diameter = _best_dia_str
 
         # ── Motor Rating ─────────────────────────────────────────────────
         # Uses a WIDER context window than _pp_ctx so motor callouts attached
