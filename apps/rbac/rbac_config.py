@@ -339,6 +339,14 @@ ROLE_MODULE_POLICY = {
 
     # Super-admins bypass module checks in the app, but listed for completeness
     'super_admin': [],
+
+    # ── Organisation-level custom roles (production DB) ───────────────────
+    # These are non-system roles created manually in the production database
+    # to grant "1. Engineering + 2. COMMON" access bundles.
+    # SOFT-CODED: add new org-role codes here to grant full engineering access.
+    # All entries here map to ENGINEERING_SECTION_MODULES so that every feature
+    # under "1. Engineering" (1.1–1.7) and "2. COMMON" is accessible.
+    'engineering_common_access': ENGINEERING_SECTION_MODULES,
 }
 
 # Which module codes map to which discipline (used for diagnostics)
