@@ -21,37 +21,21 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.contrib.auth import get_user_model
 from apps.rbac.models import Module, Role, RoleModule, UserProfile, UserRole
-from apps.rbac.rbac_config import ROLE_MODULE_POLICY
+from apps.rbac.rbac_config import ALL_MODULES_CATALOGUE, ROLE_MODULE_POLICY
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Full engineering module catalogue — single source of truth for seeding
-# SOFT-CODED: add a new module here to have it created automatically
+# SOFT-CODED: the module catalogue is now read directly from rbac_config.py
+# (ALL_MODULES_CATALOGUE). This ensures any new module added to rbac_config.py
+# is automatically seeded here without touching this file.
 # ─────────────────────────────────────────────────────────────────────────────
+# Build a compact seed list from the single source of truth so that Step 1
+# of the command can create/update modules idempotently.
 ENGINEERING_MODULES = [
-    {'code': 'pid_analysis',          'name': 'P&ID Analysis',               'order': 1},
-    {'code': 'pfd_to_pid',            'name': 'PFD to P&ID Converter',       'order': 2},
-    {'code': 'crs_documents',         'name': 'CRS Document Management',     'order': 3},
-    {'code': 'designiq',              'name': 'DesignIQ',                    'order': 4},
-    {'code': 'process_datasheet',     'name': 'Process Datasheet',           'order': 10},
-    {'code': 'electrical_datasheet',  'name': 'Electrical Datasheet',        'order': 11},
-    {'code': 'electrical_sld',        'name': 'Electrical SLD',              'order': 12},
-    {'code': 'instrument_datasheet',  'name': 'Instrument Datasheet',        'order': 13},
-    {'code': 'instrument_index',      'name': 'Instrument Index',            'order': 14},
-    {'code': 'mechanical_datasheet',  'name': 'Mechanical Datasheet',        'order': 15},
-    {'code': 'civil_datasheet',       'name': 'Civil Datasheet',             'order': 16},
-    {'code': 'piping_datasheet',      'name': 'Piping Datasheet',            'order': 17},
-    {'code': 'piping_pms',            'name': 'Piping Material Specification','order': 18},
-    {'code': 'digitization_datasheet','name': 'Digitization Datasheet',      'order': 19},
-    {'code': 'spec_customization',    'name': 'Spec Customization',          'order': 20},
-    {'code': 'qhse',                  'name': 'QHSE Management',             'order': 30},
-    {'code': 'user_mgmt',             'name': 'User Management',             'order': 40},
-    {'code': 'org_settings',          'name': 'Organization Settings',       'order': 41},
-    {'code': 'audit_logs',            'name': 'Audit Logs',                  'order': 42},
-    {'code': 'reports',               'name': 'Reports & Analytics',         'order': 43},
-    {'code': 'api_access',            'name': 'API Access',                  'order': 44},
+    {'code': m['code'], 'name': m['name'], 'order': m.get('order', 0)}
+    for m in ALL_MODULES_CATALOGUE
 ]
 
 
