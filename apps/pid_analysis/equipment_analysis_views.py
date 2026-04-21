@@ -3100,6 +3100,9 @@ _AI_GAP_FILL_DEFAULT_FIELDS = [
     'design_flowrate',
     'moc',
     'insulation',
+    'motor_rating',        # kW/HP rating for pumps & compressors
+    'dimension_diameter',  # vessel shell diameter (mm or M)
+    'dimension_length',    # vessel length/height (mm or M)
     'description',
 ]
 
@@ -3300,6 +3303,8 @@ _VISION_ITEM_FIELDS = [
     'moc',                # material of construction (e.g. 'CS', 'SS316L')
     'insulation',         # insulation type/code (e.g. 'PERS', 'HOT', 'BARE')
     'motor_rating',       # motor/driver power in kW if shown
+    'dimension_diameter', # vessel/shell diameter if shown in data box (e.g. '1200 MM', '48"')
+    'dimension_length',   # vessel length/height if shown in data box (e.g. '15000 MM', '15 M')
     'remarks',            # notes or holds visible near the tag
 ]
 
@@ -3355,8 +3360,15 @@ _VISION_EXTRACTION_PROMPT = (
     "(e.g. 'CS', 'SS316L', 'DUPLEX')\n"
     "  insulation       : insulation type code "
     "(e.g. 'PERS', 'HOT', 'BARE', 'TRACED')\n"
-    "  motor_rating     : motor/driver power rating if shown (e.g. '75 kW')\n"
-    "  remarks          : any notes, holds or TBD visible near the tag\n\n"
+    "  motor_rating       : motor/driver power rating for pumps/compressors "
+    "(e.g. '75 kW', '110 HP') — look near the pump/compressor symbol\n"
+    "  dimension_diameter : vessel or shell internal/outer diameter if shown "
+    "in a data box next to the tag (e.g. '1200 MM', '2400 MM', '48\"') — "
+    "leave blank if not visible; P&IDs often omit this\n"
+    "  dimension_length   : vessel length or height (TL-TL, tan-tan, OAL) "
+    "if shown in a data box (e.g. '15000 MM', '15 M', '6.0 M') — "
+    "leave blank if not visible\n"
+    "  remarks            : any notes, holds or TBD visible near the tag\n\n"
     "Also read the TITLE BLOCK (usually bottom-right corner) and extract:\n"
     "  drawing_no   : document/drawing number "
     "(e.g. 'PJ6-EXD-MRI-BQDA-0007')\n"
@@ -3368,7 +3380,8 @@ _VISION_EXTRACTION_PROMPT = (
     "\"design_pressure_min\":\"\",\"design_pressure_max\":\"\","
     "\"design_temp_min\":\"\",\"design_temp_max\":\"\","
     "\"design_flowrate\":\"\",\"moc\":\"\",\"insulation\":\"\","
-    "\"motor_rating\":\"\",\"remarks\":\"\"}]}\n"
+    "\"motor_rating\":\"\",\"dimension_diameter\":\"\","
+    "\"dimension_length\":\"\",\"remarks\":\"\"}]}\n"
     "If this is a legend, cover, index, or key sheet with no process equipment, "
     "return: {\"equipment\":[]}"
 )
@@ -3583,8 +3596,8 @@ def _extract_equipment_via_vision(file_bytes: bytes, drawing_ref_default: str,
                 'design_flowrate':     _vf('design_flowrate', upper=False),
                 'material_class':      _vf('moc', upper=False),
                 'insulation':          _vf('insulation', upper=False),
-                'dimension_length':    '',
-                'dimension_diameter':  '',
+                'dimension_length':    _vf('dimension_length', upper=False),
+                'dimension_diameter':  _vf('dimension_diameter', upper=False),
                 'motor_rating':        _vf('motor_rating', upper=False),
                 'process_notes':       '',
                 'line_connections':    [],
