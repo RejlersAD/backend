@@ -221,8 +221,42 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
         drawing_ref = filename.rsplit('.', 1)[0]
         pid_file    = _make_inmemory_file(file_bytes, filename)
 
-        # ── Stage 1: Equipment Register extraction ───────────────────────────
-        _set_progress(15, 'Scanning for equipment register table…')
+        # ── Early PDF readability check ──────────────────────────────────────
+        # Detect files with broken cross-reference tables (common with Adobe
+        # Acrobat "Make PDF Searchable", ABBYY FineReader, PXC OCR tools that
+        # damage the xref section).  If neither PyMuPDF nor poppler can open
+        # the file, fail immediately with a descriptive message rather than
+        # silently returning 0 items after all extraction strategies run.
+        _set_progress(8, 'Checking PDF readability…')
+        try:
+            import fitz as _fitz_ck
+            _ck_doc = _fitz_ck.open(stream=file_bytes, filetype='pdf')
+            _ck_pages = _ck_doc.page_count
+            _ck_doc.close()
+        except Exception:
+            _ck_pages = 0
+        if _ck_pages == 0:
+            # fitz sees 0 pages — try pdf2image (poppler) as secondary check
+            _poppler_ok = False
+            try:
+                from pdf2image import convert_from_bytes as _cvt_ck
+                _pop_imgs = _cvt_ck(file_bytes, dpi=72, first_page=1, last_page=1, fmt='png')
+                _poppler_ok = len(_pop_imgs) > 0
+            except Exception:
+                pass
+            if not _poppler_ok:
+                _err_msg = (
+                    'PDF could not be parsed — the file may have a corrupted '
+                    'cross-reference table. This is common with PDFs processed '
+                    'by some OCR tools (Adobe Acrobat "Make PDF Searchable", '
+                    'ABBYY FineReader, PXC). Please re-export the original '
+                    'document as PDF and re-upload.'
+                )
+                logger.error('[EQTask] Unreadable PDF  upload_id=%s  file=%s', upload_id, filename)
+                cache.set(cache_key,
+                          {'status': 'failed', 'progress': 0, 'error': _err_msg, 'message': _err_msg},
+                          EQ_RESULT_CACHE_TTL_S)
+                return
         equipment       = _extract_equipment_register_rows(pid_file, config)
         extraction_mode = 'register'
 
@@ -426,6 +460,30 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
                 f'Processing file {fi} / {n_files}: {filename}…',
             )
             logger.info('[EQBatchTask] File %d/%d: %s', fi, n_files, filename)
+
+            # Early readability check — skip corrupted files with a warning
+            try:
+                import fitz as _fitz_bck
+                _bck_doc = _fitz_bck.open(stream=file_bytes, filetype='pdf')
+                _bck_pages = _bck_doc.page_count
+                _bck_doc.close()
+            except Exception:
+                _bck_pages = 0
+            if _bck_pages == 0:
+                _poppler_ok = False
+                try:
+                    from pdf2image import convert_from_bytes as _cvt_bck
+                    _bck_imgs = _cvt_bck(file_bytes, dpi=72, first_page=1, last_page=1, fmt='png')
+                    _poppler_ok = len(_bck_imgs) > 0
+                except Exception:
+                    pass
+                if not _poppler_ok:
+                    logger.warning(
+                        '[EQBatchTask] Skipping unreadable PDF  file=%s  '
+                        '(broken xref — re-export and re-upload)',
+                        filename,
+                    )
+                    continue  # skip this file, process remaining ones
 
             try:
                 # ── Stage 1: Equipment Register extraction ───────────────────
