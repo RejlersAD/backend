@@ -3,6 +3,7 @@ Equipment Analysis Views - P&ID Equipment List Extraction
 """
 
 import base64
+import io
 import json
 import logging
 import os
@@ -22,6 +23,12 @@ from rest_framework.response import Response
 # can read them regardless of which worker handled the original upload.
 EQ_RESULT_CACHE_TTL_S   = 14400    # 4 hours — how long results stay in Redis
 EQ_RESULT_CACHE_KEY_FMT = 'eq_analysis:{upload_id}'  # must match tasks.py
+
+# Soft-coded: maximum pages probed via doc.load_page() when PyMuPDF reports
+# page_count=0 due to a broken cross-reference table — common with "searchable"
+# PDFs produced by OCR tools (Adobe Acrobat "Make PDF Searchable", ABBYY
+# FineReader, Kofax, etc.).  Set to 0 to disable the fallback.
+_PDF_PAGE_FALLBACK_MAX = 200
 
 
 def _eq_get_result_entry(upload_id: str) -> dict | None:
@@ -111,6 +118,35 @@ def _normalize_text(text: str) -> str:
     return text
 
 
+def _fitz_pages(doc, fallback_max: int = _PDF_PAGE_FALLBACK_MAX, page_index=None):
+    """
+    Yield (pg_idx, page) pairs from a PyMuPDF Document.
+
+    Handles PDFs whose cross-reference table is broken (doc.page_count == 0)
+    by probing pages via doc.load_page() up to fallback_max.  This is common
+    with searchable PDFs created by OCR tools (Adobe Acrobat "Make PDF
+    Searchable", ABBYY FineReader, Kofax) that can produce non-standard xref
+    tables which fitz enumerates as 0 pages even though the page objects exist.
+
+    page_index (int | None): when given, yield only that single page index.
+    """
+    if doc.page_count > 0:
+        for pg_idx, page in enumerate(doc):
+            if page_index is None or pg_idx == page_index:
+                yield pg_idx, page
+    else:
+        # Fallback: probe via direct index until load_page() raises
+        for pg_idx in range(fallback_max):
+            try:
+                page = doc.load_page(pg_idx)
+                if page_index is None or pg_idx == page_index:
+                    yield pg_idx, page
+                if page_index is not None:
+                    break  # found and yielded the requested page
+            except Exception:
+                break  # no more pages
+
+
 def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
     """
     Extract all text from a PDF with three progressive strategies.
@@ -165,11 +201,7 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
         file_bytes = file_obj.read()
         doc = fitz.open(stream=file_bytes, filetype='pdf')
 
-        for _pg_idx, page in enumerate(doc):
-            if _page_index is not None and _pg_idx != _page_index:
-                continue
-
-            # ── Strategy 1: block text ──────────────────────────────────
+        for _pg_idx, page in _fitz_pages(doc, _PDF_PAGE_FALLBACK_MAX, _page_index):
             # TEXT_DEHYPHENATE excluded: structural hyphens in tags (V-308-TF)
             # must NOT be removed when they span a line boundary in the stream.
             blk_text = _normalize_text(page.get_text('text') or '')
@@ -263,9 +295,7 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
                 file_bytes = file_obj.read()
             doc = fitz.open(stream=file_bytes, filetype='pdf')
             ocr_parts: list = []
-            for _pg_idx, page in enumerate(doc):
-                if _page_index is not None and _pg_idx != _page_index:
-                    continue
+            for _pg_idx, page in _fitz_pages(doc, _PDF_PAGE_FALLBACK_MAX, _page_index):
                 _r = page.rect
                 _page_min_dim = min(abs(_r.width), abs(_r.height))
                 _is_large = _page_min_dim > _LARGE_PAGE_THRESHOLD
@@ -347,6 +377,53 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
             logger.debug('[EquipmentList] Tesseract fallback issue: %s', exc)
             print(f'[EQ-DIAG] Tesseract fallback error: {exc}', flush=True)
 
+    # ── pdf2image fallback (last resort) ────────────────────────────────────
+    # Handles PDFs where PyMuPDF reports page_count=0, which is common with
+    # Adobe Acrobat "Make PDF Searchable" output and ABBYY FineReader exports
+    # that produce non-standard cross-reference streams.  Uses poppler's
+    # pdftoppm (via pdf2image) to render pages independently of PyMuPDF, then
+    # re-runs Tesseract OCR on the rendered images.
+    if not full_text.strip() and file_bytes is not None:
+        try:
+            from pdf2image import convert_from_bytes as _cvt_p2i
+            import pytesseract as _tess_p2i
+            from PIL import ImageEnhance as _IE_p2i, ImageFilter as _IF_p2i
+
+            _p2i_dpi = int(72 * float(ext_cfg.get('ocr_render_scale', 3.0)))
+            _p2i_kw: dict = dict(dpi=_p2i_dpi, fmt='png')
+            if _page_index is not None:
+                _p2i_kw['first_page'] = _page_index + 1
+                _p2i_kw['last_page']  = _page_index + 1
+            _p2i_imgs = _cvt_p2i(file_bytes, **_p2i_kw)
+            print(
+                f'[EQ-DIAG] pdf2image fallback: {len(_p2i_imgs)} page(s) dpi={_p2i_dpi}',
+                flush=True,
+            )
+            _p2i_parts: list = []
+            _p2i_seen:  set  = set()
+            for _pgi, _pil in enumerate(_p2i_imgs):
+                _pil = _IE_p2i.Contrast(_pil.convert('L')).enhance(1.8)
+                _pil = _pil.filter(_IF_p2i.SHARPEN)
+                for _angle in ocr_angles:
+                    _rot = _pil.rotate(-_angle, expand=True) if _angle else _pil
+                    for _psm in ocr_psm_modes:
+                        _t = _tess_p2i.image_to_string(
+                            _rot,
+                            config=f'--oem 1 --psm {_psm} --dpi {_p2i_dpi}',
+                        )
+                        if not _t.strip():
+                            continue
+                        _fp = ' '.join(_t.split())[:200]
+                        if _fp not in _p2i_seen:
+                            _p2i_seen.add(_fp)
+                            _p2i_parts.append(_normalize_text(_t))
+            if _p2i_parts:
+                full_text = '\n'.join(_p2i_parts)
+                print(f'[EQ-DIAG] pdf2image OCR len={len(full_text)}', flush=True)
+        except Exception as _p2i_err:
+            logger.debug('[EquipmentList] pdf2image fallback: %s', _p2i_err)
+            print(f'[EQ-DIAG] pdf2image fallback error: {_p2i_err}', flush=True)
+
     return full_text
 
 
@@ -404,7 +481,7 @@ def _extract_words_with_coords(file_obj, config: dict) -> tuple:
         import fitz
         file_bytes = file_obj.read()
         doc = fitz.open(stream=file_bytes, filetype='pdf')
-        for page_num, page in enumerate(doc):
+        for page_num, page in _fitz_pages(doc, _PDF_PAGE_FALLBACK_MAX):
             for entry in page.get_text('words'):
                 x0, y0, x1, y1, word = entry[0], entry[1], entry[2], entry[3], entry[4]
                 w = word.strip()
@@ -427,7 +504,7 @@ def _extract_words_with_coords(file_obj, config: dict) -> tuple:
         doc = fitz.open(stream=file_bytes, filetype='pdf')
         ocr_words: list = []
 
-        for page_num, page in enumerate(doc):
+        for page_num, page in _fitz_pages(doc, _PDF_PAGE_FALLBACK_MAX):
             mat = fitz.Matrix(ocr_scale, ocr_scale)
             pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
             img = Image.open(io.BytesIO(pix.tobytes('png')))
@@ -1323,8 +1400,17 @@ def _extract_equipment_register_rows(file_obj, config: dict):
         import fitz as _fitz
         _fb = file_obj.read()
         _doc = _fitz.open(stream=_fb, filetype='pdf')
+        _first_page = None
         if _doc.page_count > 0:
-            _r = _doc[0].rect
+            _first_page = _doc[0]
+        else:
+            # Fallback: try direct index access for PDFs with broken xref
+            try:
+                _first_page = _doc.load_page(0)
+            except Exception:
+                pass
+        if _first_page is not None:
+            _r = _first_page.rect
             _min_dim = min(abs(_r.width), abs(_r.height))
             print(f'[EQ-DIAG][Register] page_min_dim={_min_dim:.0f}pts  threshold={max_drawing_min_dim}', flush=True)
             if _min_dim > max_drawing_min_dim:
@@ -3227,14 +3313,43 @@ def _extract_equipment_via_vision(file_bytes: bytes, drawing_ref_default: str,
         print(f'[EQ-DIAG][Vision] PDF open failed: {_open_err}', flush=True)
         return []
 
-    n_pages = min(doc.page_count, max_pages)
+    # ── Page count + pdf2image fallback ─────────────────────────────────────
+    # When PyMuPDF reports page_count=0 (broken xref — common with Adobe
+    # "Make PDF Searchable" and similar OCR-overlay tools), use pdf2image
+    # (poppler) to render pages as PIL images and convert them to base64 PNG.
+    # The rendered images are stored in _p2i_b64 (idx → b64 string) and used
+    # by _analyze_page below instead of calling doc[page_idx].get_pixmap().
+    _p2i_b64: dict = {}  # page_idx → base64 PNG; populated only when needed
+    n_pages = doc.page_count
+    if n_pages == 0:
+        try:
+            from pdf2image import convert_from_bytes as _cvt_vis
+            _vis_dpi = max(72, int(72 * page_scale))
+            _pil_pages = _cvt_vis(file_bytes, dpi=_vis_dpi, fmt='png')
+            for _vpi, _vpil in enumerate(_pil_pages[:max_pages]):
+                _vbuf = io.BytesIO()
+                _vpil.save(_vbuf, format='PNG')
+                _p2i_b64[_vpi] = base64.b64encode(_vbuf.getvalue()).decode('utf-8')
+            n_pages = len(_p2i_b64)
+            print(
+                f'[EQ-DIAG][Vision] pdf2image rendered {n_pages} page(s) dpi={_vis_dpi}',
+                flush=True,
+            )
+        except Exception as _vis_p2i_err:
+            print(f'[EQ-DIAG][Vision] pdf2image fallback failed: {_vis_p2i_err}', flush=True)
+    else:
+        n_pages = min(n_pages, max_pages)
     print(f'[EQ-DIAG][Vision] Starting vision extraction: {n_pages} page(s)', flush=True)
 
     def _analyze_page(page_idx: int):
         """Render and analyze a single page; return (page_idx, eq_list, dwg_no, dwg_title)."""
         try:
-            page    = doc[page_idx]
-            img_b64 = _render_page_as_png_b64(page, scale=page_scale)
+            # Use pdf2image-rendered PNG when fitz can't enumerate pages
+            if page_idx in _p2i_b64:
+                img_b64 = _p2i_b64[page_idx]
+            else:
+                page    = doc[page_idx]
+                img_b64 = _render_page_as_png_b64(page, scale=page_scale)
             raw_resp = ai_svc.vision_analysis(
                 images_base64=[img_b64],
                 prompt=_VISION_EXTRACTION_PROMPT,
