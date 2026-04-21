@@ -3091,6 +3091,260 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
     return items
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Vision AI extraction — for image-based P&ID PDFs with sparse/no text layer
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Instrument / valve tag prefixes to reject from vision AI results.
+# These are extracted by OCR+regex separately; vision should only return
+# process equipment (vessels, pumps, HX, compressors, heaters, etc.).
+_VISION_INSTR_PREFIXES: frozenset = frozenset({
+    'FT', 'FI', 'FIC', 'FC', 'FE', 'FQ', 'FQI', 'FO', 'FY',
+    'PT', 'PI', 'PIC', 'PC', 'PE', 'PY',
+    'LT', 'LI', 'LIC', 'LC', 'LE', 'LY',
+    'TT', 'TI', 'TIC', 'TC', 'TE', 'TY',
+    'AT', 'AI', 'AE', 'AIT',
+    'HV', 'FV', 'XV', 'PV', 'SDV', 'BDV', 'CV', 'LV', 'TV', 'PCV',
+    'PSV', 'PRV', 'NRV', 'RO',
+    'HS', 'HI', 'HIC',
+    'ZT', 'ZI', 'ZIC', 'ZC', 'ZV',
+    'DPT', 'DPI', 'DP',
+    'SP', 'SV',
+    'JT', 'JI', 'JIC',
+    'QT', 'QI',
+    'WI', 'WT',
+})
+
+# Regex to validate and parse a tag returned by vision AI.
+# Accepts: PREFIX(1-4 letters) - NUMBER(3-5 digits, optional letter, optional -suffix)
+_VISION_TAG_RE: re.Pattern = re.compile(
+    r'^([A-Z]{1,4})-([0-9]{3,5}[A-Za-z]?(?:-[A-Za-z0-9]{1,4})?)$',
+    re.IGNORECASE,
+)
+
+_VISION_EXTRACTION_PROMPT = (
+    "You are a senior Oil & Gas P&ID engineer. Carefully examine this P&ID drawing.\n\n"
+    "TASK: Extract ALL PROCESS EQUIPMENT items visible in this drawing.\n\n"
+    "INCLUDE (process equipment with tag bubbles/labels):\n"
+    "  V-  Vessels, separators, KO drums, scrubbers\n"
+    "  P-  Pumps\n"
+    "  E-  Heat exchangers, condensers, coolers\n"
+    "  T-  or TK-  Tanks, storage vessels\n"
+    "  K-  Compressors, blowers\n"
+    "  C-  Columns, towers (also used for compressors in some projects)\n"
+    "  H-  Heaters, fired heaters, coolers\n"
+    "  F-  Filters, strainers, coalesers, furnaces\n"
+    "  SC- Slug catchers\n"
+    "  G-  Generators\n"
+    "  D-  Drums\n"
+    "  Any other major process vessel or rotating machine\n\n"
+    "DO NOT INCLUDE (instruments, valves, line elements):\n"
+    "  FT-, PT-, LT-, TT-, AT-, FI-, PI-, LI-, TI- (transmitters/indicators)\n"
+    "  FIC-, PIC-, LIC-, TIC- (controllers)\n"
+    "  FV-, HV-, XV-, PV-, LV-, TV-, CV-, SDV-, BDV- (valves)\n"
+    "  PSV-, PRV-, PCV- (safety/pressure relief valves)\n"
+    "  FE-, TE-, LE-, PE- (primary elements)\n"
+    "  Pipe tags (e.g. '4\"-OD-AC3N-1234'), line numbers\n\n"
+    "Tag format rule: PREFIX(1-3 letters) - NUMBER(3-5 digits, optional A/B/C letter, "
+    "optional train suffix like -TF/-1F/-2A)\n"
+    "Examples: V-101, P-205A, H-801-TF, C-010C-TF, E-302, K-101A, V-308-1F\n\n"
+    "For EACH equipment item found, extract:\n"
+    "  tag          : full tag (e.g. 'H-801-TF')\n"
+    "  description  : 2-6 word equipment name visible near the tag "
+    "(e.g. 'SOUR GAS COMPRESSOR', 'CRUDE OIL HEATER')\n"
+    "  service_fluid: process fluid if labeled near the tag (blank if not visible)\n"
+    "  area         : area/unit number if shown (blank if not visible)\n\n"
+    "Also read the TITLE BLOCK (usually bottom-right corner) and extract:\n"
+    "  drawing_no   : document/drawing number "
+    "(e.g. 'PJ6-EXD-MRI-BQDA-0007')\n"
+    "  drawing_title: full drawing title text\n\n"
+    "Return ONLY valid compact JSON — no markdown fences, no explanation:\n"
+    "{\"drawing_no\":\"...\",\"drawing_title\":\"...\","
+    "\"equipment\":[{\"tag\":\"...\",\"description\":\"...\","
+    "\"service_fluid\":\"\",\"area\":\"\"}]}\n"
+    "If this is a legend, cover, index, or key sheet with no process equipment, "
+    "return: {\"equipment\":[]}"
+)
+
+
+def _render_page_as_png_b64(page, scale: float) -> str:
+    """Render a single PyMuPDF Page to PNG, return base64 string."""
+    import fitz as _fitz  # noqa: F401 — imported lazily
+    mat = _fitz.Matrix(scale, scale)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    return base64.b64encode(pix.tobytes('png')).decode('utf-8')
+
+
+def _extract_equipment_via_vision(file_bytes: bytes, drawing_ref_default: str,
+                                  config: dict) -> list:
+    """
+    Vision AI extraction for image-based P&ID PDFs.
+
+    Renders each page as a PNG and sends it to a vision model (Gemini 2.0 Flash
+    preferred, GPT-4o as fallback) with a targeted prompt that asks for all
+    process equipment tags and their descriptions.
+
+    Triggered by the Celery task when OCR+regex extraction yields fewer items
+    than the soft-coded `vision_extraction_threshold` (default 5).
+
+    Returns a list of items in the same dict schema as `_extract_equipment_items`
+    output — ready to pass directly to `_pid_item_to_register_schema`.
+
+    All tuneable values are read from equipment_type_config.json (extraction
+    section) so nothing here is hardcoded.
+    """
+    import json as _json
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    ext_cfg      = config.get('extraction', {})
+    enabled      = bool(ext_cfg.get('vision_extraction_enabled', True))
+    if not enabled:
+        return []
+
+    page_scale   = float(ext_cfg.get('vision_page_render_scale', 1.5))
+    max_pages    = int(ext_cfg.get('vision_max_pages', 60))
+    max_workers  = int(ext_cfg.get('vision_max_workers', 3))
+    vision_model = str(ext_cfg.get('vision_extraction_model', 'auto'))
+    max_tokens   = int(ext_cfg.get('vision_max_tokens', 1500))
+    type_labels  = config.get('type_labels', {})
+
+    try:
+        import fitz as _fitz
+    except ImportError:
+        print('[EQ-DIAG][Vision] PyMuPDF (fitz) not available — vision skipped', flush=True)
+        return []
+
+    try:
+        from apps.pid_analysis.multi_model_service import MultiModelAIService
+        ai_svc = MultiModelAIService()
+    except Exception as _svc_err:
+        print(f'[EQ-DIAG][Vision] AI service init failed: {_svc_err}', flush=True)
+        return []
+
+    try:
+        doc = _fitz.open(stream=file_bytes, filetype='pdf')
+    except Exception as _open_err:
+        print(f'[EQ-DIAG][Vision] PDF open failed: {_open_err}', flush=True)
+        return []
+
+    n_pages = min(doc.page_count, max_pages)
+    print(f'[EQ-DIAG][Vision] Starting vision extraction: {n_pages} page(s)', flush=True)
+
+    def _analyze_page(page_idx: int):
+        """Render and analyze a single page; return (page_idx, eq_list, dwg_no, dwg_title)."""
+        try:
+            page    = doc[page_idx]
+            img_b64 = _render_page_as_png_b64(page, scale=page_scale)
+            raw_resp = ai_svc.vision_analysis(
+                images_base64=[img_b64],
+                prompt=_VISION_EXTRACTION_PROMPT,
+                model=vision_model,
+                max_tokens=max_tokens,
+                temperature=0,
+            )
+            # Strip markdown fences if the model added them
+            cleaned = re.sub(r'^```[a-z]*\s*', '', raw_resp.strip(), flags=re.IGNORECASE)
+            cleaned = re.sub(r'\s*```$', '', cleaned.strip())
+            # Locate the outermost JSON object (ignore any prefix text)
+            json_m  = re.search(r'\{[\s\S]*\}', cleaned)
+            if not json_m:
+                print(f'[EQ-DIAG][Vision] Page {page_idx}: no JSON in response', flush=True)
+                return page_idx, [], '', ''
+            parsed    = _json.loads(json_m.group())
+            eq_list   = parsed.get('equipment', []) or []
+            dwg_no    = str(parsed.get('drawing_no', '') or '').strip()
+            dwg_title = str(parsed.get('drawing_title', '') or '').strip()
+            print(
+                f'[EQ-DIAG][Vision] Page {page_idx}: {len(eq_list)} item(s)  '
+                f'dwg_no={dwg_no!r}',
+                flush=True,
+            )
+            return page_idx, eq_list, dwg_no, dwg_title
+        except Exception as _page_err:
+            print(f'[EQ-DIAG][Vision] Page {page_idx} error: {_page_err}', flush=True)
+            return page_idx, [], '', ''
+
+    # Process pages in parallel; collect by index so we reassemble in order.
+    page_results: dict = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_analyze_page, i): i for i in range(n_pages)}
+        for fut in as_completed(futures):
+            idx, eq_list, dwg_no, dwg_title = fut.result()
+            page_results[idx] = (eq_list, dwg_no, dwg_title)
+
+    doc.close()
+
+    all_items: list = []
+    seen_tags: set  = set()
+
+    for pg_idx in sorted(page_results):
+        eq_list, dwg_no, dwg_title = page_results[pg_idx]
+        page_ref = dwg_no or f'{drawing_ref_default}_P{pg_idx + 1}'
+
+        for raw_item in eq_list:
+            if not isinstance(raw_item, dict):
+                continue
+            raw_tag = str(raw_item.get('tag', '') or '').strip().upper()
+            if not raw_tag:
+                continue
+
+            # Validate tag format
+            vm = _VISION_TAG_RE.match(raw_tag)
+            if not vm:
+                continue
+            prefix = vm.group(1).upper()
+
+            # Reject instrument / valve prefixes
+            if prefix in _VISION_INSTR_PREFIXES:
+                continue
+
+            # Deduplicate across pages — first occurrence wins
+            if raw_tag in seen_tags:
+                continue
+            seen_tags.add(raw_tag)
+
+            desc = str(raw_item.get('description', '') or '').strip().upper()
+            if not desc and dwg_title:
+                # Use title as description fallback when the AI found no description
+                desc = dwg_title[:80].upper()
+
+            all_items.append({
+                'tag':                 raw_tag,
+                'type_label':          type_labels.get(prefix, ''),
+                'description':         desc,
+                'service_fluid':       str(raw_item.get('service_fluid', '') or '').strip().upper(),
+                'area':                str(raw_item.get('area', '') or '').strip(),
+                'drawing_ref':         page_ref,
+                'revision':            '',
+                'sl_no':               '',
+                # Process parameters left empty — AI gap-fill or future OCR can populate
+                'oper_pressure':       '',
+                'oper_temperature':    '',
+                'design_pressure_min': '',
+                'design_pressure_max': '',
+                'design_temp_min':     '',
+                'design_temp_max':     '',
+                'design_flowrate':     '',
+                'material_class':      '',
+                'insulation':          '',
+                'dimension_length':    '',
+                'dimension_diameter':  '',
+                'motor_rating':        '',
+                'process_notes':       '',
+                'line_connections':    [],
+                'nozzle_connections':  [],
+                'quality_required':    '',
+                'remarks':             '',
+            })
+
+    print(
+        f'[EQ-DIAG][Vision] Finished: {len(all_items)} unique equipment item(s) '
+        f'from {n_pages} page(s)',
+        flush=True,
+    )
+    return all_items
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def analyze_pid_equipment(request):

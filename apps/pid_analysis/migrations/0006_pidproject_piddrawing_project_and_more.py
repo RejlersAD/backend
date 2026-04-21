@@ -39,7 +39,7 @@ def check_and_create_pidproject_table(apps, schema_editor):
                     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
                     is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                    created_by_id BIGINT NOT NULL REFERENCES auth_user(id) ON DELETE CASCADE
+                    created_by_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE
                 )
             """)
             
@@ -103,6 +103,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+        ('users', '0001_initial'),
         ('pid_analysis', '0005_piddrawing_area_piddrawing_doc_code_and_more'),
     ]
 

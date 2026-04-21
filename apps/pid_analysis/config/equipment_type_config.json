@@ -15,7 +15,7 @@
     "_comment_ocr_thresh": "min_vector_chars_for_ocr_skip: if extracted vector text is shorter than this, the OCR fallback is triggered. Set to a very high value (e.g. 99999999) to ALWAYS run OCR in addition to vector text.",
     "min_vector_chars_for_ocr_skip": 200,
     "_comment_always_ocr": "always_include_ocr: when true, OCR results are always appended to the text pool even when vector text exceeds the threshold. Useful for CAD P&IDs where tag text may be vector but rendered in a non-standard encoding.",
-    "always_include_ocr": true,
+    "always_include_ocr": false,
     "_comment_titleblock_rev": "Title-block revision extraction for P&ID drawing mode. When _REVISION_USE_TOPMOST=True in Python, the document revision extracted from the title block is applied to ALL equipment items on the drawing. The three strategies (label, drawn-context, dwg-no proximity) are implemented in Python; only the enable flag is soft-coded here. Set titleblock_revision_enabled to false to disable and keep per-tag pre-text revision extraction.",
     "titleblock_revision_enabled": true,
     "_comment_scale": "ocr_render_scale: DPI multiplier for A4/small pages. 3.0 = ~216 dpi. For large-format A0/A1 P&IDs use ocr_render_scale_large_format — raise this if small tag text is missed.",
@@ -185,7 +185,16 @@
       "(?i)\\brev\\.?\\s*cloud\\b"
     ],
     "_comment_dedup_desc": "dedup_by_description_enabled: when true, items sharing the same description are deduplicated — the most-populated record is kept, OCR-variant duplicates are discarded.",
-    "dedup_by_description_enabled": true
+    "dedup_by_description_enabled": true,
+
+    "_comment_vision": "Vision AI extraction: when OCR+regex extraction yields fewer than vision_extraction_threshold items, each PDF page is rendered as an image and sent to a vision AI model (Gemini preferred, GPT-4V as fallback) to extract all process equipment tags directly from the visual P&ID content. This is the primary extraction strategy for image-based P&ID drawings with no embedded text layer. Set vision_extraction_enabled to false to disable. vision_page_render_scale is the PyMuPDF zoom multiplier applied when rendering pages (1.5 ≈ 108 DPI — sufficient for large-format A1 P&IDs). vision_max_pages caps total pages per upload. vision_max_workers controls parallel page threads (set to 1 to serialize). vision_extraction_model: 'gemini' or 'openai' or 'auto'.",
+    "vision_extraction_enabled": true,
+    "vision_extraction_threshold": 30,
+    "vision_page_render_scale": 1.5,
+    "vision_max_pages": 60,
+    "vision_max_workers": 3,
+    "vision_extraction_model": "auto",
+    "vision_max_tokens": 1500
   },
 
   "type_labels": {
