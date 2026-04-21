@@ -201,6 +201,8 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
         _pid_item_to_register_schema,
         _ai_gap_fill_pid_items,
         _extract_equipment_via_vision,
+        _dedup_equipment_by_tag,
+        _infer_quantity_from_tag_variants,
         _REVISION_USE_TOPMOST,
     )
 
@@ -332,6 +334,9 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
 
                 if vision_raw:
                     equipment = [_pid_item_to_register_schema(item) for item in vision_raw]
+                    # Deduplicate by tag (richest entry wins) then infer qty from A/B/C sets
+                    equipment = _dedup_equipment_by_tag(equipment)
+                    equipment = _infer_quantity_from_tag_variants(equipment, config)
                     extraction_mode = 'pid_vision'
                     # Update drawing_ref from first item with a non-default ref
                     for _vi in vision_raw:
@@ -339,7 +344,7 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
                         if _vr and '_P' not in _vr:
                             drawing_ref = _vr
                             break
-                    logger.info('[EQTask] Vision AI found %d item(s)', len(equipment))
+                    logger.info('[EQTask] Vision AI found %d item(s) after dedup', len(equipment))
 
             if equipment:
                 _set_progress(70, 'Running AI gap-fill…')
@@ -427,6 +432,8 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
         _pid_item_to_register_schema,
         _ai_gap_fill_pid_items,
         _extract_equipment_via_vision,
+        _dedup_equipment_by_tag,
+        _infer_quantity_from_tag_variants,
         _REVISION_USE_TOPMOST,
     )
 
@@ -526,6 +533,9 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
                         )
                         if vision_raw:
                             equipment = [_pid_item_to_register_schema(v) for v in vision_raw]
+                            # Deduplicate by tag then infer qty from A/B/C sets
+                            equipment = _dedup_equipment_by_tag(equipment)
+                            equipment = _infer_quantity_from_tag_variants(equipment, config)
                             extraction_mode = 'pid_vision'
                             for _vi in vision_raw:
                                 _vr = _vi.get('drawing_ref', '')

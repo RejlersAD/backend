@@ -3010,6 +3010,80 @@ def _dedup_equipment_by_tag(items: list) -> list:
     return result
 
 
+# Soft-coded: regex that splits a tag into (prefix-number, optional-letter-suffix).
+# e.g.  "P-205A"  → base="P-205",  letter="A"
+#        "V-101"   → base="V-101",  letter=""
+#        "E-302B"  → base="E-302",  letter="B"
+# Used by _infer_quantity_from_tag_variants to count A/B/C pump/exchanger sets.
+_TAG_LETTER_SUFFIX_RE: re.Pattern = re.compile(
+    r'^([A-Z]{1,4}-[0-9]{3,5})([A-Z])?((?:-[A-Za-z0-9]{1,4})*)$',
+    re.IGNORECASE,
+)
+
+# Soft-coded: minimum number of letter-variants required before we start
+# counting (e.g. A+B = 2 = override qty; a lone "P-205A" with no "P-205B"
+# visible on the drawing keeps qty=1 — the letter is just part of its tag).
+# Tune via equipment_type_config.json  extraction.qty_variant_min_count  (default 2).
+_QTY_VARIANT_MIN_COUNT_DEFAULT = 2
+
+
+def _infer_quantity_from_tag_variants(items: list, config: dict) -> list:
+    """
+    Set the 'quality_required' (Quantity Required) field on each item to the
+    number of letter-suffix variants sharing the same base tag.
+
+    Rules (all thresholds soft-coded via equipment_type_config.json):
+    • Tags with a distinct letter suffix (A/B/C…) are grouped by their base.
+      e.g.  P-205A, P-205B  → base P-205, count=2.  Both get quality_required='2'.
+    • Tags with no letter suffix, or whose letter variant count is below
+      qty_variant_min_count, keep quality_required='1'.
+    • Never overwrites a non-empty, non-'1' value already set on an item
+      (preserves explicit callouts found by OCR).
+    """
+    ext_cfg   = config.get('extraction', {})
+    min_count = int(ext_cfg.get('qty_variant_min_count', _QTY_VARIANT_MIN_COUNT_DEFAULT))
+
+    # Build: base_tag → set of letter suffixes seen
+    base_letters: dict = {}
+    for item in items:
+        tag = (item.get('tag') or '').upper()
+        m   = _TAG_LETTER_SUFFIX_RE.match(tag)
+        if not m:
+            continue
+        base   = m.group(1).upper()
+        letter = (m.group(2) or '').upper()
+        if letter:
+            base_letters.setdefault(base, set()).add(letter)
+
+    # Apply counts back to items
+    updated = 0
+    for item in items:
+        existing = str(item.get('quality_required', '') or '').strip()
+        if existing and existing != '1':
+            # Respect explicit OCR callout — do not overwrite
+            continue
+        tag = (item.get('tag') or '').upper()
+        m   = _TAG_LETTER_SUFFIX_RE.match(tag)
+        if not m:
+            item['quality_required'] = '1'
+            continue
+        base   = m.group(1).upper()
+        letter = (m.group(2) or '').upper()
+        if letter and base in base_letters and len(base_letters[base]) >= min_count:
+            qty = str(len(base_letters[base]))
+            item['quality_required'] = qty
+            updated += 1
+        else:
+            item['quality_required'] = '1'
+
+    if updated:
+        print(
+            f'[EQ-DIAG] _infer_quantity_from_tag_variants: set qty>1 on {updated} item(s)',
+            flush=True,
+        )
+    return items
+
+
 _result_store: dict = {}
 
 # ── Soft-coded AI gap-fill constants ─────────────────────────────────────────
@@ -3515,7 +3589,9 @@ def _extract_equipment_via_vision(file_bytes: bytes, drawing_ref_default: str,
                 'process_notes':       '',
                 'line_connections':    [],
                 'nozzle_connections':  [],
-                'quality_required':    '',
+                # Default to 1; _infer_quantity_from_tag_variants (called in tasks.py)
+                # will override this with the correct count for A/B/C tag sets.
+                'quality_required':    QUANTITY_REQUIRED_DEFAULT,
                 'remarks':             _vf('remarks', upper=False),
             })
 
