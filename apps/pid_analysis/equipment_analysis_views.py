@@ -3208,6 +3208,27 @@ _VISION_TAG_RE: re.Pattern = re.compile(
     re.IGNORECASE,
 )
 
+# Soft-coded: fields requested from the Vision AI per equipment item.
+# Add/remove field names here to tune what the model tries to read from the image.
+# Each field maps directly to the register schema returned by _pid_item_to_register_schema.
+_VISION_ITEM_FIELDS = [
+    'tag',
+    'description',
+    'service_fluid',
+    'area',
+    'oper_pressure',      # operating pressure (e.g. '155 PSIG', '10 barg')
+    'oper_temperature',   # operating temperature (e.g. '105 °F', '40 °C')
+    'design_pressure_min',  # minimum design/set pressure
+    'design_pressure_max',  # maximum design/set pressure
+    'design_temp_min',    # minimum design temperature
+    'design_temp_max',    # maximum design temperature
+    'design_flowrate',    # design flowrate or duty (e.g. '327 M3/H', '100 MMSCFD')
+    'moc',                # material of construction (e.g. 'CS', 'SS316L')
+    'insulation',         # insulation type/code (e.g. 'PERS', 'HOT', 'BARE')
+    'motor_rating',       # motor/driver power in kW if shown
+    'remarks',            # notes or holds visible near the tag
+]
+
 _VISION_EXTRACTION_PROMPT = (
     "You are a senior Oil & Gas P&ID engineer. Carefully examine this P&ID drawing.\n\n"
     "TASK: Extract ALL PROCESS EQUIPMENT items visible in this drawing.\n\n"
@@ -3219,7 +3240,7 @@ _VISION_EXTRACTION_PROMPT = (
     "  K-  Compressors, blowers\n"
     "  C-  Columns, towers (also used for compressors in some projects)\n"
     "  H-  Heaters, fired heaters, coolers\n"
-    "  F-  Filters, strainers, coalesers, furnaces\n"
+    "  F-  Filters, strainers, coalescers, furnaces\n"
     "  SC- Slug catchers\n"
     "  G-  Generators\n"
     "  D-  Drums\n"
@@ -3234,20 +3255,40 @@ _VISION_EXTRACTION_PROMPT = (
     "Tag format rule: PREFIX(1-3 letters) - NUMBER(3-5 digits, optional A/B/C letter, "
     "optional train suffix like -TF/-1F/-2A)\n"
     "Examples: V-101, P-205A, H-801-TF, C-010C-TF, E-302, K-101A, V-308-1F\n\n"
-    "For EACH equipment item found, extract:\n"
-    "  tag          : full tag (e.g. 'H-801-TF')\n"
-    "  description  : 2-6 word equipment name visible near the tag "
+    "For EACH equipment item found, extract (leave blank string if not visible):\n"
+    "  tag              : full tag (e.g. 'H-801-TF')\n"
+    "  description      : 2-6 word equipment name near the tag "
     "(e.g. 'SOUR GAS COMPRESSOR', 'CRUDE OIL HEATER')\n"
-    "  service_fluid: process fluid if labeled near the tag (blank if not visible)\n"
-    "  area         : area/unit number if shown (blank if not visible)\n\n"
+    "  service_fluid    : process fluid labeled near the tag\n"
+    "  area             : area/unit number if shown\n"
+    "  oper_pressure    : operating pressure with unit from data box "
+    "(e.g. '155 PSIG', '10 barg', '5 bar g')\n"
+    "  oper_temperature : operating temperature with unit "
+    "(e.g. '105 °F', '40 °C')\n"
+    "  design_pressure_min : minimum design/set pressure with unit\n"
+    "  design_pressure_max : maximum design/set pressure with unit\n"
+    "  design_temp_min  : minimum design temperature with unit\n"
+    "  design_temp_max  : maximum design temperature with unit\n"
+    "  design_flowrate  : design flowrate, duty or capacity with unit "
+    "(e.g. '327 M3/H', '100 MMSCFD', '5000 BPD')\n"
+    "  moc              : material of construction code "
+    "(e.g. 'CS', 'SS316L', 'DUPLEX')\n"
+    "  insulation       : insulation type code "
+    "(e.g. 'PERS', 'HOT', 'BARE', 'TRACED')\n"
+    "  motor_rating     : motor/driver power rating if shown (e.g. '75 kW')\n"
+    "  remarks          : any notes, holds or TBD visible near the tag\n\n"
     "Also read the TITLE BLOCK (usually bottom-right corner) and extract:\n"
     "  drawing_no   : document/drawing number "
     "(e.g. 'PJ6-EXD-MRI-BQDA-0007')\n"
     "  drawing_title: full drawing title text\n\n"
     "Return ONLY valid compact JSON — no markdown fences, no explanation:\n"
-    "{\"drawing_no\":\"...\",\"drawing_title\":\"...\","
-    "\"equipment\":[{\"tag\":\"...\",\"description\":\"...\","
-    "\"service_fluid\":\"\",\"area\":\"\"}]}\n"
+    "{\"drawing_no\":\"...\",\"drawing_title\":\"...\",\"equipment\":[{"
+    "\"tag\":\"...\",\"description\":\"...\",\"service_fluid\":\"\","
+    "\"area\":\"\",\"oper_pressure\":\"\",\"oper_temperature\":\"\","
+    "\"design_pressure_min\":\"\",\"design_pressure_max\":\"\","
+    "\"design_temp_min\":\"\",\"design_temp_max\":\"\","
+    "\"design_flowrate\":\"\",\"moc\":\"\",\"insulation\":\"\","
+    "\"motor_rating\":\"\",\"remarks\":\"\"}]}\n"
     "If this is a legend, cover, index, or key sheet with no process equipment, "
     "return: {\"equipment\":[]}"
 )
@@ -3423,33 +3464,38 @@ def _extract_equipment_via_vision(file_bytes: bytes, drawing_ref_default: str,
                 # Use title as description fallback when the AI found no description
                 desc = dwg_title[:80].upper()
 
+            # Helper: read a string field from the AI response, strip and upper-case.
+            def _vf(key, upper=True):
+                v = str(raw_item.get(key, '') or '').strip()
+                return v.upper() if (upper and v) else v
+
             all_items.append({
                 'tag':                 raw_tag,
                 'type_label':          type_labels.get(prefix, ''),
                 'description':         desc,
-                'service_fluid':       str(raw_item.get('service_fluid', '') or '').strip().upper(),
+                'service_fluid':       _vf('service_fluid'),
                 'area':                str(raw_item.get('area', '') or '').strip(),
                 'drawing_ref':         page_ref,
                 'revision':            '',
                 'sl_no':               '',
-                # Process parameters left empty — AI gap-fill or future OCR can populate
-                'oper_pressure':       '',
-                'oper_temperature':    '',
-                'design_pressure_min': '',
-                'design_pressure_max': '',
-                'design_temp_min':     '',
-                'design_temp_max':     '',
-                'design_flowrate':     '',
-                'material_class':      '',
-                'insulation':          '',
+                # Process parameters — read from Vision AI response (blank if not visible in image)
+                'oper_pressure':       _vf('oper_pressure', upper=False),
+                'oper_temperature':    _vf('oper_temperature', upper=False),
+                'design_pressure_min': _vf('design_pressure_min', upper=False),
+                'design_pressure_max': _vf('design_pressure_max', upper=False),
+                'design_temp_min':     _vf('design_temp_min', upper=False),
+                'design_temp_max':     _vf('design_temp_max', upper=False),
+                'design_flowrate':     _vf('design_flowrate', upper=False),
+                'material_class':      _vf('moc', upper=False),
+                'insulation':          _vf('insulation', upper=False),
                 'dimension_length':    '',
                 'dimension_diameter':  '',
-                'motor_rating':        '',
+                'motor_rating':        _vf('motor_rating', upper=False),
                 'process_notes':       '',
                 'line_connections':    [],
                 'nozzle_connections':  [],
                 'quality_required':    '',
-                'remarks':             '',
+                'remarks':             _vf('remarks', upper=False),
             })
 
     print(
