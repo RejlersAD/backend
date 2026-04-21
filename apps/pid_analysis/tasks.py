@@ -203,6 +203,7 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
         _extract_equipment_via_vision,
         _dedup_equipment_by_tag,
         _infer_quantity_from_tag_variants,
+        _apply_richness_quality_gate,
         _REVISION_USE_TOPMOST,
     )
 
@@ -278,8 +279,45 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
                 daemon=True,
             )
             _hb.start()
+
+            # Determine multi-page mode and page count.
+            # "per_page" (default): each sheet is processed independently so
+            # motor ratings and process parameters stay in a page-scoped context
+            # window rather than being swamped by text from adjacent sheets.
+            multi_page_mode = ext_cfg.get('multi_page_mode', 'per_page')
+            _page_count = 1
             try:
-                text = _extract_text_from_pdf(pid_file, config)
+                import fitz as _fitz_pp
+                _pp_doc = _fitz_pp.open(stream=file_bytes, filetype='pdf')
+                _page_count = _pp_doc.page_count if _pp_doc.page_count > 0 else 1
+                _pp_doc.close()
+            except Exception:
+                pass
+
+            try:
+                if multi_page_mode == 'per_page' and _page_count > 1:
+                    # Per-page extraction: each PDF sheet is OCR'd and processed
+                    # independently.  Motor-rating callouts and data-box values
+                    # are always on the SAME sheet as the equipment tag, so the
+                    # 1500-char context window easily reaches them once per-page
+                    # text is used instead of the concatenated multi-page blob.
+                    _page_texts = []
+                    _all_raw_items = []
+                    for pg_idx in range(_page_count):
+                        pid_file.seek(0)
+                        pg_text = _extract_text_from_pdf(pid_file, config, _page_index=pg_idx)
+                        _page_texts.append(pg_text)
+                        pg_items = _extract_equipment_items(pg_text, drawing_ref, config)
+                        _all_raw_items.extend(pg_items)
+                    text = '\n'.join(_page_texts)
+                    # Cross-page dedup: the same tag can appear on multiple pages
+                    # (data box on sheet 1, cross-reference on sheet 2). Each page
+                    # uses its own `seen` set so duplicates survive the per-page
+                    # extraction loop. Dedup here keeps the richest entry.
+                    raw_items = _dedup_equipment_by_tag(_all_raw_items)
+                else:
+                    text = _extract_text_from_pdf(pid_file, config)
+                    raw_items = _extract_equipment_items(text, drawing_ref, config)
             finally:
                 _stop_hb.set()
                 _hb.join(timeout=2)
@@ -296,8 +334,11 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
                 drawing_ref = _tb_dwg_no
 
             _set_progress(50, 'Extracting equipment items…')
-            raw_items   = _extract_equipment_items(text, drawing_ref, config)
-            equipment   = [_pid_item_to_register_schema(item) for item in raw_items]
+            equipment = [_pid_item_to_register_schema(item) for item in raw_items]
+            # Post-schema dedup: OCR variants (V-308 vs V-308-TF) and any
+            # residual cross-page duplicates are eliminated here. The richest
+            # entry (most populated fields) is always kept.
+            equipment = _dedup_equipment_by_tag(equipment)
             extraction_mode = 'pid_drawing'
 
             # ── Vision AI fallback ─────────────────────────────────────────
@@ -381,6 +422,16 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
         _set_progress(85, 'Classifying equipment types…')
         _classify_equipment_types(equipment, config)
 
+        # ── Gate 3: Richness quality gate (register & vision paths) ──────────
+        # OCR/regex path runs this gate inside _extract_equipment_items.
+        # Register and vision items bypass that function so the gate is applied
+        # here to catch low-quality rows from those paths as well.
+        if extraction_mode in ('register', 'pid_vision'):
+            equipment = _apply_richness_quality_gate(equipment, ext_cfg)
+            # Re-number after gate may have removed rows
+            for idx, item in enumerate(equipment, 1):
+                item['sl_no'] = str(idx)
+
         # ── Persist to DB (non-fatal) ────────────────────────────────────────
         _persist_to_db(equipment, upload_id, extraction_mode, drawing_ref, config)
 
@@ -434,6 +485,7 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
         _extract_equipment_via_vision,
         _dedup_equipment_by_tag,
         _infer_quantity_from_tag_variants,
+        _apply_richness_quality_gate,
         _REVISION_USE_TOPMOST,
     )
 
@@ -501,7 +553,35 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
                     # ── Stage 2: OCR + regex extraction ─────────────────────
                     pid_file.seek(0)
                     _set_progress(file_progress_base, f'OCR: file {fi}/{n_files}…')
-                    text = _extract_text_from_pdf(pid_file, config)
+
+                    # Per-page mode: process each sheet independently so that
+                    # motor ratings and process parameters are found within a
+                    # page-scoped context window (same logic as single-file task).
+                    _b_multi_mode = ext_cfg.get('multi_page_mode', 'per_page')
+                    _b_page_count = 1
+                    try:
+                        import fitz as _fitz_bpp
+                        _bpp_doc = _fitz_bpp.open(stream=file_bytes, filetype='pdf')
+                        _b_page_count = _bpp_doc.page_count if _bpp_doc.page_count > 0 else 1
+                        _bpp_doc.close()
+                    except Exception:
+                        pass
+
+                    if _b_multi_mode == 'per_page' and _b_page_count > 1:
+                        _b_page_texts = []
+                        _b_all_raw = []
+                        for pg_idx in range(_b_page_count):
+                            pid_file.seek(0)
+                            pg_text = _extract_text_from_pdf(pid_file, config, _page_index=pg_idx)
+                            _b_page_texts.append(pg_text)
+                            pg_items = _extract_equipment_items(pg_text, drawing_ref, config)
+                            _b_all_raw.extend(pg_items)
+                        text = '\n'.join(_b_page_texts)
+                        raw_items = _b_all_raw
+                    else:
+                        pid_file.seek(0)
+                        text = _extract_text_from_pdf(pid_file, config)
+                        raw_items = _extract_equipment_items(text, drawing_ref, config)
 
                     _coord_dwg_no = ''
                     try:
@@ -513,7 +593,6 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
                     if _tb_dwg_no:
                         drawing_ref = _tb_dwg_no
 
-                    raw_items = _extract_equipment_items(text, drawing_ref, config)
                     equipment = [_pid_item_to_register_schema(item) for item in raw_items]
                     extraction_mode = 'pid_drawing'
 
@@ -564,6 +643,10 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
                         item['sl_no'] = str(idx)
                     item['drawing_ref'] = drawing_ref
 
+                # ── Gate 3: Richness quality gate per file ───────────────────
+                if extraction_mode in ('register', 'pid_vision'):
+                    equipment = _apply_richness_quality_gate(equipment, ext_cfg)
+
                 drawing_refs.append(drawing_ref)
                 all_equipment.extend(equipment)
                 logger.info(
@@ -574,6 +657,12 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
             except Exception as file_exc:
                 logger.error('[EQBatchTask] Error on file %s: %s', filename, file_exc, exc_info=True)
                 drawing_refs.append(drawing_ref)   # still register the drawing reference
+
+        # Final cross-file dedup: the same physical equipment can appear in
+        # multiple uploaded drawings (e.g. the tag is referenced on drawing A
+        # and has its own data box on drawing B). Deduplicate across all files
+        # keeping the richest record.
+        all_equipment = _dedup_equipment_by_tag(all_equipment)
 
         # Re-number sequentially across all drawings
         for idx, item in enumerate(all_equipment, 1):
