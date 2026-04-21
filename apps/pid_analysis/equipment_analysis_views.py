@@ -3252,9 +3252,15 @@ _VISION_EXTRACTION_PROMPT = (
     "  PSV-, PRV-, PCV- (safety/pressure relief valves)\n"
     "  FE-, TE-, LE-, PE- (primary elements)\n"
     "  Pipe tags (e.g. '4\"-OD-AC3N-1234'), line numbers\n\n"
-    "Tag format rule: PREFIX(1-3 letters) - NUMBER(3-5 digits, optional A/B/C letter, "
-    "optional train suffix like -TF/-1F/-2A)\n"
-    "Examples: V-101, P-205A, H-801-TF, C-010C-TF, E-302, K-101A, V-308-1F\n\n"
+    "ALLOWED equipment tag prefixes ONLY (reject everything else):\n"
+    "  Single-letter : V  P  E  T  K  C  H  R  D  S  F  G\n"
+    "  Multi-letter  : VT  VA  VV  TK  ST  SC  AB  AG  BL  CY  DR  EJ\n"
+    "                  HX  HE  HP  KC  KT  KX  LP  MX  PK  SK  VR\n"
+    "DO NOT return any tag whose prefix is not in the list above — "
+    "even if it looks like equipment.\n\n"
+    "Tag format: PREFIX - NUMBER (number is 3-5 digits, optional letter suffix,\n"
+    "optional train suffix like -TF/-1F/-2A).\n"
+    "Examples: V-101, P-205A, H-801-TF, TK-001, SC-101-1F, E-302, K-101A\n\n"
     "For EACH equipment item found, extract (leave blank string if not visible):\n"
     "  tag              : full tag (e.g. 'H-801-TF')\n"
     "  description      : 2-6 word equipment name near the tag "
@@ -3334,6 +3340,14 @@ def _extract_equipment_via_vision(file_bytes: bytes, drawing_ref_default: str,
     vision_model = str(ext_cfg.get('vision_extraction_model', 'auto'))
     max_tokens   = int(ext_cfg.get('vision_max_tokens', 1500))
     type_labels  = config.get('type_labels', {})
+
+    # Whitelist of valid equipment tag prefixes driven by tag_prefix_type_map in
+    # equipment_type_config.json.  Only tags whose EXACT prefix (the portion
+    # before the first dash) appears in this set are accepted.  This replaces
+    # the old instrument-blocklist approach which let unknown prefixes through.
+    _prefix_whitelist: frozenset = frozenset(
+        k.upper() for k in config.get('tag_prefix_type_map', {}).keys()
+    )
 
     try:
         import fitz as _fitz
@@ -3450,8 +3464,15 @@ def _extract_equipment_via_vision(file_bytes: bytes, drawing_ref_default: str,
                 continue
             prefix = vm.group(1).upper()
 
-            # Reject instrument / valve prefixes
-            if prefix in _VISION_INSTR_PREFIXES:
+            # Whitelist gate: only known equipment prefixes pass.
+            # Rejects instruments (FT, PT, LT…), valves (XV, FV, SDV…),
+            # and any other non-equipment tag the AI may have hallucinated.
+            if prefix not in _prefix_whitelist:
+                print(
+                    f'[EQ-DIAG][Vision] Page {pg_idx}: skipping non-equipment tag '
+                    f'{raw_tag!r} (prefix {prefix!r} not in whitelist)',
+                    flush=True,
+                )
                 continue
 
             # Deduplicate across pages — first occurrence wins
