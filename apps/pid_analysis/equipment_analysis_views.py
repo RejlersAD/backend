@@ -3,7 +3,6 @@ Equipment Analysis Views - P&ID Equipment List Extraction
 """
 
 import base64
-import io
 import json
 import logging
 import os
@@ -23,12 +22,6 @@ from rest_framework.response import Response
 # can read them regardless of which worker handled the original upload.
 EQ_RESULT_CACHE_TTL_S   = 14400    # 4 hours — how long results stay in Redis
 EQ_RESULT_CACHE_KEY_FMT = 'eq_analysis:{upload_id}'  # must match tasks.py
-
-# Soft-coded: maximum pages probed via doc.load_page() when PyMuPDF reports
-# page_count=0 due to a broken cross-reference table — common with "searchable"
-# PDFs produced by OCR tools (Adobe Acrobat "Make PDF Searchable", ABBYY
-# FineReader, Kofax, etc.).  Set to 0 to disable the fallback.
-_PDF_PAGE_FALLBACK_MAX = 200
 
 
 def _eq_get_result_entry(upload_id: str) -> dict | None:
@@ -118,35 +111,6 @@ def _normalize_text(text: str) -> str:
     return text
 
 
-def _fitz_pages(doc, fallback_max: int = _PDF_PAGE_FALLBACK_MAX, page_index=None):
-    """
-    Yield (pg_idx, page) pairs from a PyMuPDF Document.
-
-    Handles PDFs whose cross-reference table is broken (doc.page_count == 0)
-    by probing pages via doc.load_page() up to fallback_max.  This is common
-    with searchable PDFs created by OCR tools (Adobe Acrobat "Make PDF
-    Searchable", ABBYY FineReader, Kofax) that can produce non-standard xref
-    tables which fitz enumerates as 0 pages even though the page objects exist.
-
-    page_index (int | None): when given, yield only that single page index.
-    """
-    if doc.page_count > 0:
-        for pg_idx, page in enumerate(doc):
-            if page_index is None or pg_idx == page_index:
-                yield pg_idx, page
-    else:
-        # Fallback: probe via direct index until load_page() raises
-        for pg_idx in range(fallback_max):
-            try:
-                page = doc.load_page(pg_idx)
-                if page_index is None or pg_idx == page_index:
-                    yield pg_idx, page
-                if page_index is not None:
-                    break  # found and yielded the requested page
-            except Exception:
-                break  # no more pages
-
-
 def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
     """
     Extract all text from a PDF with three progressive strategies.
@@ -201,7 +165,11 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
         file_bytes = file_obj.read()
         doc = fitz.open(stream=file_bytes, filetype='pdf')
 
-        for _pg_idx, page in _fitz_pages(doc, _PDF_PAGE_FALLBACK_MAX, _page_index):
+        for _pg_idx, page in enumerate(doc):
+            if _page_index is not None and _pg_idx != _page_index:
+                continue
+
+            # ── Strategy 1: block text ──────────────────────────────────
             # TEXT_DEHYPHENATE excluded: structural hyphens in tags (V-308-TF)
             # must NOT be removed when they span a line boundary in the stream.
             blk_text = _normalize_text(page.get_text('text') or '')
@@ -295,7 +263,9 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
                 file_bytes = file_obj.read()
             doc = fitz.open(stream=file_bytes, filetype='pdf')
             ocr_parts: list = []
-            for _pg_idx, page in _fitz_pages(doc, _PDF_PAGE_FALLBACK_MAX, _page_index):
+            for _pg_idx, page in enumerate(doc):
+                if _page_index is not None and _pg_idx != _page_index:
+                    continue
                 _r = page.rect
                 _page_min_dim = min(abs(_r.width), abs(_r.height))
                 _is_large = _page_min_dim > _LARGE_PAGE_THRESHOLD
@@ -377,53 +347,6 @@ def _extract_text_from_pdf(file_obj, config=None, _page_index=None) -> str:
             logger.debug('[EquipmentList] Tesseract fallback issue: %s', exc)
             print(f'[EQ-DIAG] Tesseract fallback error: {exc}', flush=True)
 
-    # ── pdf2image fallback (last resort) ────────────────────────────────────
-    # Handles PDFs where PyMuPDF reports page_count=0, which is common with
-    # Adobe Acrobat "Make PDF Searchable" output and ABBYY FineReader exports
-    # that produce non-standard cross-reference streams.  Uses poppler's
-    # pdftoppm (via pdf2image) to render pages independently of PyMuPDF, then
-    # re-runs Tesseract OCR on the rendered images.
-    if not full_text.strip() and file_bytes is not None:
-        try:
-            from pdf2image import convert_from_bytes as _cvt_p2i
-            import pytesseract as _tess_p2i
-            from PIL import ImageEnhance as _IE_p2i, ImageFilter as _IF_p2i
-
-            _p2i_dpi = int(72 * float(ext_cfg.get('ocr_render_scale', 3.0)))
-            _p2i_kw: dict = dict(dpi=_p2i_dpi, fmt='png')
-            if _page_index is not None:
-                _p2i_kw['first_page'] = _page_index + 1
-                _p2i_kw['last_page']  = _page_index + 1
-            _p2i_imgs = _cvt_p2i(file_bytes, **_p2i_kw)
-            print(
-                f'[EQ-DIAG] pdf2image fallback: {len(_p2i_imgs)} page(s) dpi={_p2i_dpi}',
-                flush=True,
-            )
-            _p2i_parts: list = []
-            _p2i_seen:  set  = set()
-            for _pgi, _pil in enumerate(_p2i_imgs):
-                _pil = _IE_p2i.Contrast(_pil.convert('L')).enhance(1.8)
-                _pil = _pil.filter(_IF_p2i.SHARPEN)
-                for _angle in ocr_angles:
-                    _rot = _pil.rotate(-_angle, expand=True) if _angle else _pil
-                    for _psm in ocr_psm_modes:
-                        _t = _tess_p2i.image_to_string(
-                            _rot,
-                            config=f'--oem 1 --psm {_psm} --dpi {_p2i_dpi}',
-                        )
-                        if not _t.strip():
-                            continue
-                        _fp = ' '.join(_t.split())[:200]
-                        if _fp not in _p2i_seen:
-                            _p2i_seen.add(_fp)
-                            _p2i_parts.append(_normalize_text(_t))
-            if _p2i_parts:
-                full_text = '\n'.join(_p2i_parts)
-                print(f'[EQ-DIAG] pdf2image OCR len={len(full_text)}', flush=True)
-        except Exception as _p2i_err:
-            logger.debug('[EquipmentList] pdf2image fallback: %s', _p2i_err)
-            print(f'[EQ-DIAG] pdf2image fallback error: {_p2i_err}', flush=True)
-
     return full_text
 
 
@@ -481,7 +404,7 @@ def _extract_words_with_coords(file_obj, config: dict) -> tuple:
         import fitz
         file_bytes = file_obj.read()
         doc = fitz.open(stream=file_bytes, filetype='pdf')
-        for page_num, page in _fitz_pages(doc, _PDF_PAGE_FALLBACK_MAX):
+        for page_num, page in enumerate(doc):
             for entry in page.get_text('words'):
                 x0, y0, x1, y1, word = entry[0], entry[1], entry[2], entry[3], entry[4]
                 w = word.strip()
@@ -504,7 +427,7 @@ def _extract_words_with_coords(file_obj, config: dict) -> tuple:
         doc = fitz.open(stream=file_bytes, filetype='pdf')
         ocr_words: list = []
 
-        for page_num, page in _fitz_pages(doc, _PDF_PAGE_FALLBACK_MAX):
+        for page_num, page in enumerate(doc):
             mat = fitz.Matrix(ocr_scale, ocr_scale)
             pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
             img = Image.open(io.BytesIO(pix.tobytes('png')))
@@ -634,162 +557,7 @@ QUANTITY_REQUIRED_PATTERN  = r'(?:QTY|QUANTITY|NO\.?\s*REQD?|NO\.?\s*REQUIRED|CO
 QUALITY_SPEC_NACE_FULL     = 'NACE MR0175'
 QUALITY_SPEC_NACE_SHORT    = 'NACE'
 
-# ---------------------------------------------------------------------------
-# REMARKS COMPOSITION — soft-coded intelligence layers.
-#
-# _compose_remarks(parts) joins non-empty, non-duplicate remark tokens with
-# '; ' separator.  Each source below contributes 0 or 1 token.
-#
-# REMARKS_HOLD_PATTERN   : HOLD / TBD / TO BE CONFIRMED / VENDOR TO ADVISE etc.
-#                           visible in the data box or note cloud near the tag.
-# REMARKS_NOTE_PATTERN   : "SEE NOTE X", "REF DWG X", "REFER TO …" callouts.
-# REMARKS_SPARE_PATTERN  : SPARE / STANDBY / FUTURE / PROPOSED annotation.
-# REMARKS_SOUR_FLAG      : appended when sour-service is confirmed for an item
-#                          but no other remarks are present (avoids redundancy
-#                          when quality_spec already says NACE MR0175).
-#
-# All patterns are case-insensitive.  Add new patterns to these constants only
-# — no Python logic changes required.
-# ---------------------------------------------------------------------------
-REMARKS_HOLD_PATTERN  = (
-    r'\b(HOLD|TBD|T\.B\.D\.?|TO\s+BE\s+(?:CONFIRMED|DETERMINED|ADVISED|DEFINED)|'
-    r'VENDOR\s+TO\s+(?:ADVISE|CONFIRM|DEFINE)|CLIENT\s+TO\s+(?:ADVISE|CONFIRM)|'
-    r'TBC|T\.B\.C\.?)\b'
-)
-REMARKS_NOTE_PATTERN  = (
-    r'\b(SEE\s+NOTE[S]?\s*[\d,&\s]+|'
-    r'REF(?:ER)?\s+(?:TO\s+)?(?:DWG|DRAWING|DOC|NOTE)[S]?[\s\.\-]*[\w\-]+|'
-    r'AS\s+PER\s+(?:DWG|DRAWING|DOC|SPEC)[\s\.\-]*[\w\-]+)\b'
-)
-REMARKS_SPARE_PATTERN = (
-    r'\b(SPARE|STAND-?BY|FUTURE|PROPOSED|NOT\s+INSTALLED|NOT\s+IN\s+CONTRACT|'
-    r'DELETED|CANCELLED)\b'
-)
-REMARKS_SOUR_FLAG     = 'SOUR SERVICE'
-
-
-def _compose_remarks(*parts: str) -> str:
-    """
-    Assemble a clean remarks string from multiple source fragments.
-
-    Each argument is a string (or empty).  Non-empty unique tokens are joined
-    with '; '.  Duplicates (case-insensitive) are collapsed.  Result is
-    stripped and title-cased for readability.
-    """
-    seen: set  = set()
-    tokens: list = []
-    for raw in parts:
-        for fragment in (raw or '').split(';'):
-            tok = fragment.strip()
-            if not tok:
-                continue
-            key = tok.upper()
-            if key not in seen:
-                seen.add(key)
-                tokens.append(tok)
-    return '; '.join(tokens)
-
-
-def _compose_vision_remarks(raw_item: dict) -> str:
-    """
-    Build a smart remarks string from a Vision AI raw item dict.
-
-    Layers applied (in priority order, deduped by _compose_remarks):
-      1. 'remarks'      field returned by the AI  (explicit callouts / notes)
-      2. HOLD/TBD       tokens detected inside the AI remarks text
-      3. SPARE/STANDBY  tokens detected inside the AI remarks text
-      4. 'process_notes' fallback when remarks are empty
-    """
-    ai_remarks = (raw_item.get('remarks') or '').strip()
-    process_notes = (raw_item.get('process_notes') or '').strip()
-
-    # Detect HOLD/TBD in the AI-returned remarks text
-    _hold_tok = ''
-    _hm = re.search(REMARKS_HOLD_PATTERN, ai_remarks, re.IGNORECASE)
-    if _hm:
-        _hold_tok = _hm.group(1).strip().upper()
-
-    # Detect SPARE/STANDBY in the AI-returned remarks text
-    _spare_tok = ''
-    _sm = re.search(REMARKS_SPARE_PATTERN, ai_remarks, re.IGNORECASE)
-    if _sm:
-        _spare_tok = _sm.group(1).strip().upper()
-
-    return _compose_remarks(ai_remarks, _hold_tok, _spare_tok, process_notes)
-
-
-# ---------------------------------------------------------------------------
-# Soft-coded: exotic MOC keywords that are worth flagging in remarks
-# because they imply special procurement / inspection requirements.
-# Add alloys here — no Python changes needed.
-# ---------------------------------------------------------------------------
-_REMARKS_EXOTIC_MOC_PATTERN = (
-    r'\b(DUPLEX|SDSS|SUPER\s+DUPLEX|INCONEL|HASTELLOY|MONEL|TITANIUM|'
-    r'ALLOY\s+20|AL6XN|317L?|904L|INCOLOY|CUPRO[- ]?NICKEL|CRA)\b'
-)
-# Soft-coded: sour-service keywords to scan in service/phase field.
-_REMARKS_SERVICE_SOUR_PATTERN = r'\b(SOUR|H2S|HIC|SSC|SULPHIDE|SULFIDE)\b'
-# Soft-coded: spare/standby keywords to scan in description.
-_REMARKS_DESC_SPARE_PATTERN   = r'\b(SPARE|STANDBY|STAND-BY|FUTURE\s+USE|PROPOSED|NOT\s+IN\s+CONTRACT)\b'
-
-
-def _compose_register_remarks(raw_remarks: str, description: str = '',
-                               moc: str = '', phase: str = '',
-                               quality_required: str = '') -> str:
-    """
-    Build smart, short remarks for a register-mode row.
-
-    Intelligence layers (all deduped by _compose_remarks):
-      1. Raw remarks text as-is from the source table (cleaned)
-      2. HOLD/TBD/SPARE annotation from raw_remarks
-      3. SPARE/STANDBY inferred from description (e.g. 'Spare Pump')
-      4. NACE MR0175 inferred when MOC mentions NACE
-      5. SOUR SERVICE inferred from phase/service fluid
-      6. Exotic MOC flag (Duplex, Inconel, etc.) — short procurement note
-    All patterns are soft-coded via module-level constants above.
-    """
-    raw = (raw_remarks or '').strip()
-
-    # Layer 2: HOLD/TBD in raw remarks
-    _hold_tok = ''
-    _hm = re.search(REMARKS_HOLD_PATTERN, raw, re.IGNORECASE)
-    if _hm:
-        _hold_tok = _hm.group(1).strip().upper()
-
-    # Layer 3: SPARE/STANDBY inferred from description
-    _spare_tok = ''
-    _desc_text = f'{description} {raw}'.strip()
-    _sp_m = re.search(_REMARKS_DESC_SPARE_PATTERN, _desc_text, re.IGNORECASE)
-    if _sp_m:
-        _spare_tok = _sp_m.group(1).strip().upper()
-
-    # Layer 4: NACE from MOC
-    _nace_tok = ''
-    if moc:
-        if re.search(r'\bNACE\s*MR\s*0175\b', moc, re.IGNORECASE):
-            _nace_tok = QUALITY_SPEC_NACE_FULL
-        elif re.search(r'\bNACE\b', moc, re.IGNORECASE):
-            _nace_tok = QUALITY_SPEC_NACE_SHORT
-
-    # Layer 5: SOUR SERVICE from phase/service field
-    _sour_tok = ''
-    _svc_text = f'{phase} {description}'.strip()
-    if re.search(_REMARKS_SERVICE_SOUR_PATTERN, _svc_text, re.IGNORECASE):
-        _sour_tok = REMARKS_SOUR_FLAG
-        # Upgrade to NACE if sour detected but no explicit NACE in MOC
-        if not _nace_tok:
-            _nace_tok = QUALITY_SPEC_NACE_FULL
-
-    # Layer 6: Exotic MOC flag
-    _exotic_tok = ''
-    if moc:
-        _ex_m = re.search(_REMARKS_EXOTIC_MOC_PATTERN, moc, re.IGNORECASE)
-        if _ex_m:
-            _exotic_tok = f'CRA - {_ex_m.group(1).upper()}'
-
-    return _compose_remarks(raw, _hold_tok, _spare_tok, _nace_tok, _sour_tok, _exotic_tok)
-
-
+# ── Dimension extraction minimum-value filters (soft-coded) ────────────────
 # Dimension values BELOW these thresholds are rejected as pipe-size / nozzle /
 # instrument-level false positives picked up by OCR from context text.
 # P&ID pipe annotations (e.g. "2"-FL-…" → OCR "2 M") are the classic source.
@@ -1555,17 +1323,8 @@ def _extract_equipment_register_rows(file_obj, config: dict):
         import fitz as _fitz
         _fb = file_obj.read()
         _doc = _fitz.open(stream=_fb, filetype='pdf')
-        _first_page = None
         if _doc.page_count > 0:
-            _first_page = _doc[0]
-        else:
-            # Fallback: try direct index access for PDFs with broken xref
-            try:
-                _first_page = _doc.load_page(0)
-            except Exception:
-                pass
-        if _first_page is not None:
-            _r = _first_page.rect
+            _r = _doc[0].rect
             _min_dim = min(abs(_r.width), abs(_r.height))
             print(f'[EQ-DIAG][Register] page_min_dim={_min_dim:.0f}pts  threshold={max_drawing_min_dim}', flush=True)
             if _min_dim > max_drawing_min_dim:
@@ -1711,16 +1470,7 @@ def _extract_equipment_register_rows(file_obj, config: dict):
             'pid_no':              values.get('pid_no', ''),
             'quality_required':    values.get('quality_required', ''),
             'phase':               values.get('phase', ''),
-            # Smart remarks: raw table cell + inferred tokens (NACE, SOUR,
-            # SPARE, HOLD/TBD, exotic MOC). Deduped and joined with '; '.
-            # Logic soft-coded via _compose_register_remarks().
-            'remarks':             _compose_register_remarks(
-                values.get('remarks', ''),
-                description = values.get('description', ''),
-                moc         = values.get('moc', ''),
-                phase       = values.get('phase', ''),
-                quality_required = values.get('quality_required', ''),
-            ),
+            'remarks':             values.get('remarks', ''),
             # Backward-compat fields
             'type_label':         '',
             'area':               '',
@@ -1729,7 +1479,7 @@ def _extract_equipment_register_rows(file_obj, config: dict):
             'nozzle_connections': [],
             'service_fluid':      values.get('oper_pressure', ''),
             'material_class':     values.get('moc', ''),
-            'process_notes':      values.get('remarks', ''),  # raw remarks preserved here
+            'process_notes':      values.get('remarks', ''),
         }
         equipment.append(item)
 
@@ -2657,35 +2407,6 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         # Normalise dual-temperature values e.g. "105/60 °F" → "60 – 105 °F"
         oper_temperature = _normalize_oper_temp(oper_temperature)
 
-        # ── Mixed pressure/temperature annotation fallback ─────────────────
-        # Handles unlabelled combined annotations like "100 PSIG/200 °F" that
-        # appear directly below the equipment tag on P&ID data bubbles without
-        # a separate OPER PRESS / OPER TEMP label line.  Also handles OCR
-        # digit-split artefacts where "100" is read as "10 0" — the pattern
-        # is applied to a wider context window.
-        # Soft-coded: mixed_press_temp_pattern, mixed_press_temp_context_chars.
-        _mixed_pt_pat   = ext_cfg.get('mixed_press_temp_pattern', '')
-        _mixed_pt_chars = int(ext_cfg.get('mixed_press_temp_context_chars', _pp_ctx_chars + 300))
-        if _mixed_pt_pat and (not oper_pressure or not oper_temperature):
-            _mpt_start = max(0, m.start() - _mixed_pt_chars)
-            _mpt_end   = min(len(text), m.end() + _mixed_pt_chars)
-            _mpt_ctx   = text[_mpt_start:_mpt_end].upper()
-            # Fix OCR digit-space artefact: '10 0 PSIG' → '100 PSIG' in scan window
-            _mpt_ctx_fixed = re.sub(
-                r'(\b\d{1,3})\s+(\d{1,3}\s*(?:PSIG|PSIA|PSI|BARG|BARA|KPAG|MPA|BAR)\b)',
-                r'\1\2', _mpt_ctx,
-            )
-            _mpt_m = re.search(_mixed_pt_pat, _mpt_ctx_fixed, re.IGNORECASE)
-            if _mpt_m:
-                if not oper_pressure:
-                    oper_pressure = f'{_mpt_m.group(1)} {_mpt_m.group(2).upper()}'
-                    print(f'[EQ-DIAG] mixed-press/temp: {tag!r} → oper_pressure={oper_pressure!r}', flush=True)
-                if not oper_temperature:
-                    _raw_tunit = _mpt_m.group(4).strip().upper()
-                    _tunit = 'C' if 'C' in _raw_tunit and 'F' not in _raw_tunit else 'F'
-                    oper_temperature = f'{_mpt_m.group(3)} °{_tunit}'
-                    print(f'[EQ-DIAG] mixed-press/temp: {tag!r} → oper_temperature={oper_temperature!r}', flush=True)
-
         # ── Design Temp min / max ─────────────────────────────────────────
         design_temp_min = ''
         design_temp_max = ''
@@ -2823,42 +2544,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                     _best_dia_str = f'{_dv.group(1)} {_unit or "MM"}'
             dimension_diameter = _best_dia_str
 
-        # ── Imperial dimension fallback ───────────────────────────────────
-        # Applied when the metric label pattern finds nothing.  Handles
-        # American/Anglo P&IDs that annotate vessel dimensions as
-        # "10'-0\" (S-S)" (length in feet-inches) and "42\" O.D." (diameter
-        # in inches).  Soft-coded via dimension_imperial_enabled,
-        # dimension_length_imperial_pattern, dimension_diameter_imperial_pattern.
-        if bool(ext_cfg.get('dimension_imperial_enabled', True)):
-            _imp_len_pat = ext_cfg.get(
-                'dimension_length_imperial_pattern',
-                r"(\d+)['-]\s*-?\s*(\d+(?:\.\d+)?)[\"”]?(?:\s*(?:S[-/]S|T[-/]T|TAN[-/]TAN|TT|SS|OA))?")
-            _imp_dia_pat = ext_cfg.get(
-                'dimension_diameter_imperial_pattern',
-                r"(\d+(?:\.\d+)?)\s*[\"”]\s*(?:O\.?D\.?|I\.?D\.?|DIA\.?|BORE|OD|ID)?")
-            if not dimension_length:
-                _il_m = re.search(_imp_len_pat, _dim_ctx, re.IGNORECASE)
-                if _il_m:
-                    try:
-                        _ft  = int(_il_m.group(1))
-                        _in  = float(_il_m.group(2))
-                        _mm  = round(_ft * 304.8 + _in * 25.4)
-                        dimension_length = f'{_mm} MM'
-                        print(f'[EQ-DIAG] imperial-dim: {tag!r} → length {_il_m.group(0)!r} → {dimension_length}', flush=True)
-                    except (ValueError, TypeError):
-                        pass
-            if not dimension_diameter:
-                _id_m = re.search(_imp_dia_pat, _dim_ctx, re.IGNORECASE)
-                if _id_m:
-                    try:
-                        _in_val  = float(_id_m.group(1))
-                        # Exclude small pipe diameters (< 6") from vessel diameter field
-                        if _in_val >= 6.0:
-                            _mm = round(_in_val * 25.4)
-                            dimension_diameter = f'{_mm} MM'
-                            print(f'[EQ-DIAG] imperial-dim: {tag!r} → dia {_id_m.group(0)!r} → {dimension_diameter}', flush=True)
-                    except (ValueError, TypeError):
-                        pass
+        # ── Motor Rating ─────────────────────────────────────────────────
         # Uses a WIDER context window than _pp_ctx so motor callouts attached
         # via lead lines (far from the tag in OCR text order) are still found.
         # Soft-coded via motor_rating_context_chars (default 800 chars each
@@ -2890,14 +2576,21 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         if not motor_rating and prefix.upper() in _motor_na_pfxs:
             motor_rating = _motor_na_val
 
-        # ── Quality Specification + Remarks composition ──────────────────
-        # Layer 1: quality class / NACE compliance from narrow context.
+        # ── Quality Specification (→ Remarks) ────────────────────────────
+        # Core logic unchanged — still extracts quality class / NACE compliance.
+        # Result is now stored in quality_spec and routed to the 'remarks' field
+        # so that 'quality_required' (→ "Quantity Required" column) can hold the
+        # numerical count.  Controlled by QUALITY_SPEC_* module-level constants.
         quality_spec = ''
         _qr_m = re.search(_qual_pat, _pp_ctx, re.IGNORECASE)
         if _qr_m:
             quality_spec = _qr_m.group(1).strip().upper()
 
-        # Layer 2: wider NACE scan (title block / notes area).
+        # Strategy 2: scan wider context for explicit NACE reference.
+        # P&IDs for sour-service equipment (H2S/SOUR GAS) should comply with
+        # NACE MR0175 / ISO 15156.  When the drawing has NACE in the notes or
+        # title block, apply it.  Threshold is soft-coded via
+        # 'quality_nace_context_chars' (default 1500).
         if not quality_spec:
             _qual_ctx_chars = int(ext_cfg.get('quality_nace_context_chars', 1500))
             _qual_ctx_start = max(0, m.start() - _qual_ctx_chars)
@@ -2908,45 +2601,18 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             elif re.search(r'\bNACE\b', _qual_wide_ctx, re.IGNORECASE):
                 quality_spec = QUALITY_SPEC_NACE_SHORT
 
-        # Layer 3: infer NACE from sour-service context.
+        # Strategy 3: infer from sour-service context.  If sour gas / H2S /
+        # HIC is detected anywhere in the drawing, all vessels must comply
+        # with NACE MR0175.  Soft-coded disable via
+        # 'quality_infer_from_sour_service' = false.
         _infer_sour = bool(ext_cfg.get('quality_infer_from_sour_service', True))
         if not quality_spec and _infer_sour:
-            _sour_ctx = text[:min(len(text), 6000)]
+            _sour_ctx = text[:min(len(text), 6000)]  # check first 6 k chars
             if re.search(r'\bSOUR\s+GAS\b|\bH2S\b|\bHIC\b|\bSSC\b',
                          _sour_ctx, re.IGNORECASE):
                 quality_spec = QUALITY_SPEC_NACE_FULL
             elif service_fluid and re.search(r'\bsour\b', service_fluid, re.IGNORECASE):
                 quality_spec = QUALITY_SPEC_NACE_FULL
-
-        # Layer 4: HOLD / TBD / TO-BE-CONFIRMED callouts near the tag.
-        # Soft-coded via REMARKS_HOLD_PATTERN module-level constant.
-        _hold_tok = ''
-        _hold_m = re.search(REMARKS_HOLD_PATTERN, _pp_ctx, re.IGNORECASE)
-        if _hold_m:
-            _hold_tok = _hold_m.group(1).strip().upper()
-
-        # Layer 5: SEE NOTE / REF DWG callouts near the tag.
-        _note_tok = ''
-        _note_m = re.search(REMARKS_NOTE_PATTERN, _pp_ctx, re.IGNORECASE)
-        if _note_m:
-            _note_tok = _note_m.group(1).strip()
-
-        # Layer 6: SPARE / STANDBY / FUTURE / PROPOSED status annotation.
-        _spare_tok = ''
-        _spare_m = re.search(REMARKS_SPARE_PATTERN, _pp_ctx, re.IGNORECASE)
-        if _spare_m:
-            _spare_tok = _spare_m.group(1).strip().upper()
-
-        # Layer 7: sour-service flag (only when no quality_spec already says so).
-        _sour_tok = ''
-        if _infer_sour and not quality_spec:
-            if service_fluid and re.search(r'\bsour\b', service_fluid, re.IGNORECASE):
-                _sour_tok = REMARKS_SOUR_FLAG
-
-        # Assemble final remarks from all layers — deduped, '; ' joined.
-        remarks_composed = _compose_remarks(
-            quality_spec, _hold_tok, _note_tok, _spare_tok, _sour_tok
-        )
 
         # ── Quantity Required (numerical count) ───────────────────────────
         # Extracts an explicit count callout (QTY: 2, NO. REQD 1, etc.) from
@@ -3007,7 +2673,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             'dimension_diameter':  dimension_diameter,
             'motor_rating':        motor_rating,
             'quality_required':    quantity_required,
-            'remarks':             remarks_composed,
+            'remarks':             quality_spec,
         })
 
         # ── Merge data-box index values (fill empty fields only) ──────────
@@ -3226,144 +2892,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         if _item['tag'] not in _full_tag_bases
     ]
 
-    # ── Gate 3: Richness / accuracy quality gate ─────────────────────────
-    # Drops records whose meaningful fields are mostly empty — typically
-    # cross-sheet referenced tags picked up by OCR noise that passed the
-    # earlier gates.
-    #
-    # Soft-coded via equipment_type_config.json  extraction section:
-    #   richness_gate_enabled        : true/false            (default true)
-    #   richness_gate_fields         : list of field keys    (default below)
-    #   richness_gate_min_fraction   : float 0-1             (default 0.15)
-    #     A record is kept when filled_count / total_gate_fields >= min_fraction.
-    #     0.15 means at least 1 field out of ~7 must be non-empty.
-    #   richness_gate_always_keep_prefixes : list of tag prefixes that always
-    #     pass the gate regardless of richness (e.g. PK, SK — package units
-    #     typically have no data box but are genuine primary equipment).
-    results = _apply_richness_quality_gate(results, ext_cfg)
-
     return results
-
-
-def _apply_richness_quality_gate(items: list, ext_cfg: dict) -> list:
-    """
-    Gate 3 — richness / accuracy filter.
-
-    Keeps only equipment records that have at least a minimum fraction of their
-    'meaningful' fields populated.  Records with all meaningful fields empty are
-    almost always cross-sheet references or OCR noise that escaped earlier gates.
-
-    All thresholds are soft-coded in equipment_type_config.json (extraction section).
-
-    Called from:
-    • _extract_equipment_items (OCR/regex path)  — via ext_cfg dict
-    • tasks.py after vision AI + gap-fill        — via _load_config()['extraction']
-    """
-    if not bool(ext_cfg.get('richness_gate_enabled', True)):
-        return items
-
-    # Soft-coded: fields that are considered "meaningful" for richness scoring.
-    # These are fields an engineer would expect to have a value for real equipment.
-    # Fields like sl_no / tag / drawing_ref / type_label are identity fields and
-    # do not count toward richness.
-    _gate_fields = list(ext_cfg.get('richness_gate_fields', [
-        'description',
-        'oper_pressure',
-        'oper_temperature',
-        'design_pressure_min',
-        'design_pressure_max',
-        'design_temp_min',
-        'design_temp_max',
-        'design_flowrate',
-        'moc',
-        'insulation',
-        'motor_rating',
-        'dimension_length',
-        'dimension_diameter',
-        'phase',
-        'service_fluid',
-        'quality_required',
-        'remarks',
-    ]))
-    # Soft-coded: minimum fraction (0-1) of gate fields that must be non-empty.
-    # Default 0.30 = at least ~5 out of 17 meaningful fields must be populated.
-    _min_frac = float(ext_cfg.get('richness_gate_min_fraction', 0.30))
-    # Soft-coded: values that are treated as "empty" for richness scoring.
-    _empty_vals = set(str(v) for v in ext_cfg.get(
-        'richness_gate_empty_values', ['', 'No', 'N/A', 'NA', 'None', '—', '-', '0']
-    ))
-    # Soft-coded: tag prefixes that always pass regardless of richness.
-    # Package units, skids, manifolds often have no data box on P&IDs.
-    _always_keep = set(p.upper() for p in ext_cfg.get(
-        'richness_gate_always_keep_prefixes',
-        ['PK', 'SK', 'MS', 'KX', 'PX', 'SX', 'FX', 'VX', 'GX', 'HX'],
-    ))
-    # Soft-coded: PROCESS DATA anchor fields.  At least
-    # richness_gate_require_anchor_count of these must be non-empty for a record
-    # to pass.  These fields only appear on equipment with a real data box —
-    # connector-arrow cross-references and OCR noise never carry them.
-    # Set richness_gate_require_anchor_count to 0 to disable the anchor check.
-    _anchor_fields = list(ext_cfg.get('richness_gate_anchor_fields', [
-        'oper_pressure', 'oper_temperature',
-        'design_pressure_min', 'design_pressure_max',
-        'design_temp_min', 'design_temp_max',
-        'dimension_length', 'dimension_diameter',
-        'design_flowrate',
-    ]))
-    _require_anchor = int(ext_cfg.get('richness_gate_require_anchor_count', 1))
-
-    n_fields = len(_gate_fields)
-    if n_fields == 0:
-        return items
-
-    kept, dropped = [], []
-    for item in items:
-        tag = (item.get('tag') or '').upper()
-        prefix = tag.split('-')[0] if '-' in tag else tag
-        if prefix in _always_keep:
-            kept.append(item)
-            continue
-
-        # ── Fraction check ──────────────────────────────────────────────
-        filled = sum(
-            1 for f in _gate_fields
-            if str(item.get(f) or '').strip() not in _empty_vals
-        )
-        fraction = filled / n_fields
-
-        # ── Anchor check ────────────────────────────────────────────────
-        # Smart process-data gate: requires at least one of
-        # pressure/temperature/dimension/flowrate to be non-empty.
-        # A record that only has description + service_fluid is almost
-        # certainly a cross-sheet connector arrow reference, not real equipment.
-        if _require_anchor > 0 and _anchor_fields:
-            anchor_filled = sum(
-                1 for f in _anchor_fields
-                if str(item.get(f) or '').strip() not in _empty_vals
-            )
-            anchor_ok = anchor_filled >= _require_anchor
-        else:
-            anchor_ok = True  # anchor check disabled
-
-        if fraction >= _min_frac and anchor_ok:
-            kept.append(item)
-        else:
-            reason = []
-            if fraction < _min_frac:
-                reason.append(f'fraction={fraction:.2f}<{_min_frac}')
-            if not anchor_ok:
-                reason.append(f'anchor_filled={anchor_filled}<{_require_anchor}')
-            dropped.append(f'{tag}({",".join(reason)})')
-
-    if dropped:
-        print(
-            f'[EQ-DIAG] Gate3-Richness: removed {len(dropped)} low-quality record(s) '
-            f'(min_fraction={_min_frac}, require_anchor={_require_anchor}): {dropped}',
-            flush=True,
-        )
-
-    # Safety: if the gate removed everything it was too aggressive — return all
-    return kept if kept else items
 
 
 def _dedup_equipment_by_tag(items: list) -> list:
@@ -3373,152 +2902,26 @@ def _dedup_equipment_by_tag(items: list) -> list:
     When the same tag appears on more than one page (e.g. it was referenced on
     page 1 AND has its own data box on page 2), keep only the entry with the
     most populated fields.  This ensures the richest extraction result wins.
-
-    Also collapses OCR-variant duplicates that refer to the same physical
-    equipment:  V-308  vs  V-308-TF  →  keeps the longer (more specific) form.
-    The canonical key is the FULL tag string (uppercased).  When two items
-    share the same full tag, the richest one wins.  A bare-base tag (V-308)
-    is merged into the suffixed entry (V-308-TF) if one exists.
-
-    Soft-coded skip list controls which fields are excluded from richness
-    scoring (identity/structural fields that are always populated).
     """
-    # Field names that must not count toward richness (always non-empty)
-    _skip_keys = frozenset({
-        'sl_no', 'tag', 'type_label', 'area', 'drawing_ref',
-        'line_connections', 'nozzle_connections', 'pid_no',
-    })
-
-    def _richness(item: dict) -> int:
-        return sum(
-            1 for k, v in item.items()
-            if k not in _skip_keys and v and str(v).strip() not in ('', 'No', 'N/A', 'NA', 'None', '—', '-')
-        )
-
-    # Step 1: group by exact uppercased tag; keep richest within each group
     by_tag: dict = {}
     for item in items:
-        tag = (item.get('tag') or '').upper().strip()
+        tag = (item.get('tag') or '').upper()
         if not tag:
             continue
         if tag not in by_tag:
             by_tag[tag] = item
         else:
-            if _richness(item) > _richness(by_tag[tag]):
+            _skip_keys = {'sl_no', 'tag', 'type_label', 'area', 'drawing_ref',
+                          'line_connections', 'nozzle_connections'}
+            _pop_new = sum(1 for k, v in item.items()
+                           if k not in _skip_keys and v and v not in ('', 'No', [], 'N/A'))
+            _pop_old = sum(1 for k, v in by_tag[tag].items()
+                           if k not in _skip_keys and v and v not in ('', 'No', [], 'N/A'))
+            if _pop_new > _pop_old:
                 by_tag[tag] = item
-
-    # Step 2: collapse bare-base duplicates into suffixed entries.
-    # E.g. if both "V-308" and "V-308-TF" exist, "V-308" is an OCR variant
-    # of the same equipment.  Merge: copy any fields that are empty in the
-    # suffixed entry from the bare-base entry, then drop the bare-base row.
-    # Soft-coded: suffix separator pattern.
-    _base_sfx_re = re.compile(r'^([A-Z]{1,3}-[0-9]{3,5}[A-Z]?)-[A-Z0-9]{1,4}$')
-    _suffixed_bases: dict = {}  # base_tag → suffixed_tag
-    for full_tag in list(by_tag.keys()):
-        m = _base_sfx_re.match(full_tag)
-        if m:
-            base = m.group(1)
-            # If the suffixed tag is richer than the bare base, record it
-            if base in by_tag:
-                _suffixed_bases[base] = full_tag
-
-    for bare_tag, suffixed_tag in _suffixed_bases.items():
-        bare_item     = by_tag[bare_tag]
-        suffixed_item = by_tag[suffixed_tag]
-        # Merge non-empty fields from bare into suffixed (only if suffixed field is empty)
-        for k, v in bare_item.items():
-            if k in _skip_keys:
-                continue
-            if v and str(v).strip() not in ('', 'No', 'N/A', 'None', '—', '-'):
-                existing = suffixed_item.get(k)
-                if not existing or str(existing).strip() in ('', 'No', 'N/A', 'None', '—', '-'):
-                    suffixed_item[k] = v
-        del by_tag[bare_tag]
-        print(
-            f'[EQ-DIAG] _dedup: merged bare tag {bare_tag!r} → {suffixed_tag!r}',
-            flush=True,
-        )
-
     result = list(by_tag.values())
-    print(
-        f'[EQ-DIAG] _dedup_equipment_by_tag: {len(items)} in → {len(result)} unique tags out',
-        flush=True,
-    )
+    print(f'[EQ-DIAG] _dedup_equipment_by_tag: {len(items)} in → {len(result)} unique tags out', flush=True)
     return result
-
-
-# Soft-coded: regex that splits a tag into (prefix-number, optional-letter-suffix).
-# e.g.  "P-205A"  → base="P-205",  letter="A"
-#        "V-101"   → base="V-101",  letter=""
-#        "E-302B"  → base="E-302",  letter="B"
-# Used by _infer_quantity_from_tag_variants to count A/B/C pump/exchanger sets.
-_TAG_LETTER_SUFFIX_RE: re.Pattern = re.compile(
-    r'^([A-Z]{1,4}-[0-9]{3,5})([A-Z])?((?:-[A-Za-z0-9]{1,4})*)$',
-    re.IGNORECASE,
-)
-
-# Soft-coded: minimum number of letter-variants required before we start
-# counting (e.g. A+B = 2 = override qty; a lone "P-205A" with no "P-205B"
-# visible on the drawing keeps qty=1 — the letter is just part of its tag).
-# Tune via equipment_type_config.json  extraction.qty_variant_min_count  (default 2).
-_QTY_VARIANT_MIN_COUNT_DEFAULT = 2
-
-
-def _infer_quantity_from_tag_variants(items: list, config: dict) -> list:
-    """
-    Set the 'quality_required' (Quantity Required) field on each item to the
-    number of letter-suffix variants sharing the same base tag.
-
-    Rules (all thresholds soft-coded via equipment_type_config.json):
-    • Tags with a distinct letter suffix (A/B/C…) are grouped by their base.
-      e.g.  P-205A, P-205B  → base P-205, count=2.  Both get quality_required='2'.
-    • Tags with no letter suffix, or whose letter variant count is below
-      qty_variant_min_count, keep quality_required='1'.
-    • Never overwrites a non-empty, non-'1' value already set on an item
-      (preserves explicit callouts found by OCR).
-    """
-    ext_cfg   = config.get('extraction', {})
-    min_count = int(ext_cfg.get('qty_variant_min_count', _QTY_VARIANT_MIN_COUNT_DEFAULT))
-
-    # Build: base_tag → set of letter suffixes seen
-    base_letters: dict = {}
-    for item in items:
-        tag = (item.get('tag') or '').upper()
-        m   = _TAG_LETTER_SUFFIX_RE.match(tag)
-        if not m:
-            continue
-        base   = m.group(1).upper()
-        letter = (m.group(2) or '').upper()
-        if letter:
-            base_letters.setdefault(base, set()).add(letter)
-
-    # Apply counts back to items
-    updated = 0
-    for item in items:
-        existing = str(item.get('quality_required', '') or '').strip()
-        if existing and existing != '1':
-            # Respect explicit OCR callout — do not overwrite
-            continue
-        tag = (item.get('tag') or '').upper()
-        m   = _TAG_LETTER_SUFFIX_RE.match(tag)
-        if not m:
-            item['quality_required'] = '1'
-            continue
-        base   = m.group(1).upper()
-        letter = (m.group(2) or '').upper()
-        if letter and base in base_letters and len(base_letters[base]) >= min_count:
-            qty = str(len(base_letters[base]))
-            item['quality_required'] = qty
-            updated += 1
-        else:
-            item['quality_required'] = '1'
-
-    if updated:
-        print(
-            f'[EQ-DIAG] _infer_quantity_from_tag_variants: set qty>1 on {updated} item(s)',
-            flush=True,
-        )
-    return items
 
 
 _result_store: dict = {}
@@ -3537,11 +2940,7 @@ _AI_GAP_FILL_DEFAULT_FIELDS = [
     'design_flowrate',
     'moc',
     'insulation',
-    'motor_rating',        # kW/HP rating for pumps & compressors
-    'dimension_diameter',  # vessel shell diameter (mm or M)
-    'dimension_length',    # vessel length/height (mm or M)
     'description',
-    'remarks',             # HOLD/TBD/SPARE/SEE NOTE callouts near the tag
 ]
 
 # JSON response validation: AI must return keys matching these field names.
@@ -3580,7 +2979,7 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
         return items
 
     fill_fields = list(ext_cfg.get('ai_gap_fill_fields', _AI_GAP_FILL_DEFAULT_FIELDS))
-    ctx_chars   = int(ext_cfg.get('ai_gap_fill_context_chars', 1600))
+    ctx_chars   = int(ext_cfg.get('ai_gap_fill_context_chars', 800))
     max_tokens  = int(ext_cfg.get('ai_gap_fill_max_tokens', 350))
     temperature = float(ext_cfg.get('ai_gap_fill_temperature', 0))
     min_empty   = int(ext_cfg.get('ai_gap_fill_min_empty_fields', 1))
@@ -3597,53 +2996,18 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
     text_upper = text.upper()
 
     # ── Shared prompt builder ────────────────────────────────────────────────
-    # Soft-coded: hints sent to the AI for each field key. Missing a field key
-    # means the AI only sees the raw key name as context — add hints here for
-    # any field the AI consistently fails to extract.
     _FIELD_HINTS = {
-        'oper_pressure':       'Operating pressure with unit (e.g. "155 PSIG" or "10 barg")',
-        'oper_temperature':    'Operating temperature with unit (e.g. "105 °F" or "40 °C")',
+        'oper_pressure':      'Operating pressure with unit (e.g. "155 PSIG" or "10 barg")',
+        'oper_temperature':   'Operating temperature with unit (e.g. "105 °F" or "40 °C")',
         'design_pressure_min': 'Minimum design/set pressure with unit (e.g. "-13.2 PSIG")',
         'design_pressure_max': 'Maximum design/set pressure with unit (e.g. "195 PSIG")',
-        'design_temp_min':     'Minimum design temperature with unit (e.g. "-13 °F")',
-        'design_temp_max':     'Maximum design temperature with unit (e.g. "185 °F")',
-        'design_flowrate':     'Design flowrate or capacity with unit (e.g. "327 M3" or "100 M3/H")',
-        'moc':                 'Material of construction abbreviation (e.g. "CS", "SS316L", "DUPLEX")',
-        'insulation':          'Insulation type code (e.g. "PERS", "HOT", "BARE", "TRACED")',
-        'description':         'Equipment description (2-6 words, e.g. "OIL SLUG CATCHER")',
-        # Fields added to gap-fill — previously had no hint so AI guessed blindly.
-        # motor_rating is the most important: callout may appear far from the tag.
-        'motor_rating':        (
-            'Electric motor/driver installed power rating near the pump or compressor symbol. '
-            'Look for patterns like "ELEC MOTOR 75 KW", "MOTOR RATING: 110 KW", '
-            '"DRIVER: 55 KW", "M.R. 45 KW", or a bare "75 KW" / "110 HP" annotation '
-            'close to the equipment. Return value + unit (e.g. "75 KW", "110 HP"). '
-            'Leave null if not found.'
-        ),
-        'dimension_diameter':  (
-            'Vessel or shell internal/outer diameter from a data box near the tag. '
-            'Look for DIA, D=, O.D., NB, DN labels followed by a value '
-            '(e.g. "1200 MM", "48 IN", "1.2 M"). Leave null if not found.'
-        ),
-        'dimension_length':    (
-            'Vessel length or height (TL-TL, tan-tan, OAL, S/S) from a data box near the tag. '
-            'Look for LENGTH, HEIGHT, TL/TL, L= labels followed by a value '
-            '(e.g. "15000 MM", "15 M", "6.0 M"). Leave null if not found.'
-        ),
-        'remarks':             (
-            'HOLD/TBD/TO BE CONFIRMED annotation, SPARE/STANDBY status, '
-            'SEE NOTE callout, or special service note near the tag. '
-            'Return the short annotation only (e.g. "HOLD", "TBD", "SPARE", '
-            '"SEE NOTE 3", "SOUR SERVICE"). Leave null if none visible.'
-        ),
+        'design_temp_min':    'Minimum design temperature with unit (e.g. "-13 °F")',
+        'design_temp_max':    'Maximum design temperature with unit (e.g. "185 °F")',
+        'design_flowrate':    'Design flowrate or capacity with unit (e.g. "327 M3" or "100 M3/H")',
+        'moc':                'Material of construction abbreviation (e.g. "CS", "SS316L", "DUPLEX")',
+        'insulation':         'Insulation type code (e.g. "PERS", "HOT", "BARE", "TRACED")',
+        'description':        'Equipment description (2-6 words, e.g. "OIL SLUG CATCHER")',
     }
-
-    # Soft-coded: fields that need a wider context window because their
-    # annotations appear far from the equipment tag on P&IDs (lead lines,
-    # remote callout boxes, motor symbols on rotating equipment).
-    # Context size is read from motor_rating_context_chars in config (default 800).
-    _WIDE_CTX_FIELDS = frozenset({'motor_rating', 'dimension_diameter', 'dimension_length'})
-    _wide_ctx_chars  = int(ext_cfg.get('motor_rating_context_chars', 800))
 
     def _build_prompt(tag: str, empty: list, ctx: str) -> str:
         field_list = '\n'.join(
@@ -3689,17 +3053,12 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
         if len(empty_fields) < min_empty:
             continue
 
-        # Re-locate tag in text for context window.
-        # Use a wider window when motor_rating / dimension fields are missing
-        # because their annotations appear far from the tag on P&IDs.
+        # Re-locate tag in text for context window
         idx = text_upper.find(tag.upper())
         if idx == -1:
             continue
-
-        has_wide_fields = bool(set(empty_fields) & _WIDE_CTX_FIELDS)
-        _half = _wide_ctx_chars if has_wide_fields else ctx_chars // 2
-        ctx_start = max(0, idx - _half)
-        ctx_end   = min(len(text), idx + _half)
+        ctx_start = max(0, idx - ctx_chars // 2)
+        ctx_end   = min(len(text), idx + ctx_chars // 2)
         ctx       = text[ctx_start:ctx_end]
 
         prompt = _build_prompt(tag, empty_fields, ctx)
@@ -3730,374 +3089,6 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
             print(f'[EQ-DIAG][AI-FILL] {tag}: AI filled {filled}', flush=True)
 
     return items
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Vision AI extraction — for image-based P&ID PDFs with sparse/no text layer
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Instrument / valve tag prefixes to reject from vision AI results.
-# These are extracted by OCR+regex separately; vision should only return
-# process equipment (vessels, pumps, HX, compressors, heaters, etc.).
-_VISION_INSTR_PREFIXES: frozenset = frozenset({
-    'FT', 'FI', 'FIC', 'FC', 'FE', 'FQ', 'FQI', 'FO', 'FY',
-    'PT', 'PI', 'PIC', 'PC', 'PE', 'PY',
-    'LT', 'LI', 'LIC', 'LC', 'LE', 'LY',
-    'TT', 'TI', 'TIC', 'TC', 'TE', 'TY',
-    'AT', 'AI', 'AE', 'AIT',
-    'HV', 'FV', 'XV', 'PV', 'SDV', 'BDV', 'CV', 'LV', 'TV', 'PCV',
-    'PSV', 'PRV', 'NRV', 'RO',
-    'HS', 'HI', 'HIC',
-    'ZT', 'ZI', 'ZIC', 'ZC', 'ZV',
-    'DPT', 'DPI', 'DP',
-    'SP', 'SV',
-    'JT', 'JI', 'JIC',
-    'QT', 'QI',
-    'WI', 'WT',
-})
-
-# Regex to validate and parse a tag returned by vision AI.
-# Accepts: PREFIX(1-4 letters) - NUMBER(3-5 digits, optional letter, optional -suffix)
-_VISION_TAG_RE: re.Pattern = re.compile(
-    r'^([A-Z]{1,4})-([0-9]{3,5}[A-Za-z]?(?:-[A-Za-z0-9]{1,4})?)$',
-    re.IGNORECASE,
-)
-
-# Soft-coded: fields requested from the Vision AI per equipment item.
-# Add/remove field names here to tune what the model tries to read from the image.
-# Each field maps directly to the register schema returned by _pid_item_to_register_schema.
-_VISION_ITEM_FIELDS = [
-    'tag',
-    'description',
-    'service_fluid',
-    'area',
-    'oper_pressure',      # operating pressure (e.g. '155 PSIG', '10 barg')
-    'oper_temperature',   # operating temperature (e.g. '105 °F', '40 °C')
-    'design_pressure_min',  # minimum design/set pressure
-    'design_pressure_max',  # maximum design/set pressure
-    'design_temp_min',    # minimum design temperature
-    'design_temp_max',    # maximum design temperature
-    'design_flowrate',    # design flowrate or duty (e.g. '327 M3/H', '100 MMSCFD')
-    'moc',                # material of construction (e.g. 'CS', 'SS316L')
-    'insulation',         # insulation type/code (e.g. 'PERS', 'HOT', 'BARE')
-    'motor_rating',       # motor/driver power in kW if shown
-    'dimension_diameter', # vessel/shell diameter if shown in data box (e.g. '1200 MM', '48"')
-    'dimension_length',   # vessel length/height if shown in data box (e.g. '15000 MM', '15 M')
-    'remarks',            # notes or holds visible near the tag
-]
-
-_VISION_EXTRACTION_PROMPT = (
-    "You are a senior Oil & Gas P&ID engineer. Carefully examine this P&ID drawing.\n\n"
-    "TASK: Extract ALL PROCESS EQUIPMENT items visible in this drawing.\n\n"
-    "INCLUDE (process equipment with tag bubbles/labels):\n"
-    "  V-  Vessels, separators, KO drums, scrubbers\n"
-    "  P-  Pumps\n"
-    "  E-  Heat exchangers, condensers, coolers\n"
-    "  T-  or TK-  Tanks, storage vessels\n"
-    "  K-  Compressors, blowers\n"
-    "  C-  Columns, towers (also used for compressors in some projects)\n"
-    "  H-  Heaters, fired heaters, coolers\n"
-    "  F-  Filters, strainers, coalescers, furnaces\n"
-    "  SC- Slug catchers\n"
-    "  G-  Generators\n"
-    "  D-  Drums\n"
-    "  Any other major process vessel or rotating machine\n\n"
-    "DO NOT INCLUDE (instruments, valves, line elements):\n"
-    "  FT-, PT-, LT-, TT-, AT-, FI-, PI-, LI-, TI- (transmitters/indicators)\n"
-    "  FIC-, PIC-, LIC-, TIC- (controllers)\n"
-    "  FV-, HV-, XV-, PV-, LV-, TV-, CV-, SDV-, BDV- (valves)\n"
-    "  PSV-, PRV-, PCV- (safety/pressure relief valves)\n"
-    "  FE-, TE-, LE-, PE- (primary elements)\n"
-    "  Pipe tags (e.g. '4\"-OD-AC3N-1234'), line numbers\n\n"
-    "ALLOWED equipment tag prefixes ONLY (reject everything else):\n"
-    "  Single-letter : V  P  E  T  K  C  H  R  D  S  F  G\n"
-    "  Multi-letter  : VT  VA  VV  TK  ST  SC  AB  AG  BL  CY  DR  EJ\n"
-    "                  HX  HE  HP  KC  KT  KX  LP  MX  PK  SK  VR\n"
-    "DO NOT return any tag whose prefix is not in the list above — "
-    "even if it looks like equipment.\n\n"
-    "Tag format: PREFIX - NUMBER (number is 3-5 digits, optional letter suffix,\n"
-    "optional train suffix like -TF/-1F/-2A).\n"
-    "Examples: V-101, P-205A, H-801-TF, TK-001, SC-101-1F, E-302, K-101A\n\n"
-    "For EACH equipment item found, extract (leave blank string if not visible):\n"
-    "  tag              : full tag (e.g. 'H-801-TF')\n"
-    "  description      : 2-6 word equipment name near the tag "
-    "(e.g. 'SOUR GAS COMPRESSOR', 'CRUDE OIL HEATER')\n"
-    "  service_fluid    : process fluid labeled near the tag\n"
-    "  area             : area/unit number if shown\n"
-    "  oper_pressure    : operating pressure with unit from data box "
-    "(e.g. '155 PSIG', '10 barg', '5 bar g')\n"
-    "  oper_temperature : operating temperature with unit "
-    "(e.g. '105 °F', '40 °C')\n"
-    "  design_pressure_min : minimum design/set pressure with unit\n"
-    "  design_pressure_max : maximum design/set pressure with unit\n"
-    "  design_temp_min  : minimum design temperature with unit\n"
-    "  design_temp_max  : maximum design temperature with unit\n"
-    "  design_flowrate  : design flowrate, duty or capacity with unit "
-    "(e.g. '327 M3/H', '100 MMSCFD', '5000 BPD')\n"
-    "  moc              : material of construction code "
-    "(e.g. 'CS', 'SS316L', 'DUPLEX')\n"
-    "  insulation       : insulation type code "
-    "(e.g. 'PERS', 'HOT', 'BARE', 'TRACED')\n"
-    "  motor_rating       : motor/driver power rating for pumps/compressors "
-    "(e.g. '75 kW', '110 HP') — look near the pump/compressor symbol\n"
-    "  dimension_diameter : vessel or shell internal/outer diameter if shown "
-    "in a data box next to the tag (e.g. '1200 MM', '2400 MM', '48\"') — "
-    "leave blank if not visible; P&IDs often omit this\n"
-    "  dimension_length   : vessel length or height (TL-TL, tan-tan, OAL) "
-    "if shown in a data box (e.g. '15000 MM', '15 M', '6.0 M') — "
-    "leave blank if not visible\n"
-    "  remarks            : HOLD/TBD/TO BE CONFIRMED annotations, SPARE/STANDBY status,\n"
-    "                        SEE NOTE or REF DWG callouts, special material or service\n"
-    "                        requirements visible near the tag (e.g. 'HOLD - VENDOR TO\n"
-    "                        CONFIRM', 'TBD', 'SPARE', 'SEE NOTE 3', 'SOUR SERVICE').\n"
-    "                        Leave blank if none are visible.\n\n"
-    "Also read the TITLE BLOCK (usually bottom-right corner) and extract:\n"
-    "  drawing_no   : document/drawing number "
-    "(e.g. 'PJ6-EXD-MRI-BQDA-0007')\n"
-    "  drawing_title: full drawing title text\n\n"
-    "Return ONLY valid compact JSON — no markdown fences, no explanation:\n"
-    "{\"drawing_no\":\"...\",\"drawing_title\":\"...\",\"equipment\":[{"
-    "\"tag\":\"...\",\"description\":\"...\",\"service_fluid\":\"\","
-    "\"area\":\"\",\"oper_pressure\":\"\",\"oper_temperature\":\"\","
-    "\"design_pressure_min\":\"\",\"design_pressure_max\":\"\","
-    "\"design_temp_min\":\"\",\"design_temp_max\":\"\","
-    "\"design_flowrate\":\"\",\"moc\":\"\",\"insulation\":\"\","
-    "\"motor_rating\":\"\",\"dimension_diameter\":\"\","
-    "\"dimension_length\":\"\",\"remarks\":\"\"}]}\n"
-    "If this is a legend, cover, index, or key sheet with no process equipment, "
-    "return: {\"equipment\":[]}"
-)
-
-
-def _render_page_as_png_b64(page, scale: float) -> str:
-    """Render a single PyMuPDF Page to PNG, return base64 string."""
-    import fitz as _fitz  # noqa: F401 — imported lazily
-    mat = _fitz.Matrix(scale, scale)
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-    return base64.b64encode(pix.tobytes('png')).decode('utf-8')
-
-
-def _extract_equipment_via_vision(file_bytes: bytes, drawing_ref_default: str,
-                                  config: dict) -> list:
-    """
-    Vision AI extraction for image-based P&ID PDFs.
-
-    Renders each page as a PNG and sends it to a vision model (Gemini 2.0 Flash
-    preferred, GPT-4o as fallback) with a targeted prompt that asks for all
-    process equipment tags and their descriptions.
-
-    Triggered by the Celery task when OCR+regex extraction yields fewer items
-    than the soft-coded `vision_extraction_threshold` (default 5).
-
-    Returns a list of items in the same dict schema as `_extract_equipment_items`
-    output — ready to pass directly to `_pid_item_to_register_schema`.
-
-    All tuneable values are read from equipment_type_config.json (extraction
-    section) so nothing here is hardcoded.
-    """
-    import json as _json
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    ext_cfg      = config.get('extraction', {})
-    enabled      = bool(ext_cfg.get('vision_extraction_enabled', True))
-    if not enabled:
-        return []
-
-    page_scale   = float(ext_cfg.get('vision_page_render_scale', 1.5))
-    max_pages    = int(ext_cfg.get('vision_max_pages', 60))
-    max_workers  = int(ext_cfg.get('vision_max_workers', 3))
-    vision_model = str(ext_cfg.get('vision_extraction_model', 'auto'))
-    max_tokens   = int(ext_cfg.get('vision_max_tokens', 1500))
-    type_labels  = config.get('type_labels', {})
-
-    # Whitelist of valid equipment tag prefixes driven by tag_prefix_type_map in
-    # equipment_type_config.json.  Only tags whose EXACT prefix (the portion
-    # before the first dash) appears in this set are accepted.  This replaces
-    # the old instrument-blocklist approach which let unknown prefixes through.
-    _prefix_whitelist: frozenset = frozenset(
-        k.upper() for k in config.get('tag_prefix_type_map', {}).keys()
-    )
-
-    try:
-        import fitz as _fitz
-    except ImportError:
-        print('[EQ-DIAG][Vision] PyMuPDF (fitz) not available — vision skipped', flush=True)
-        return []
-
-    try:
-        from apps.pid_analysis.multi_model_service import MultiModelAIService
-        ai_svc = MultiModelAIService()
-    except Exception as _svc_err:
-        print(f'[EQ-DIAG][Vision] AI service init failed: {_svc_err}', flush=True)
-        return []
-
-    try:
-        doc = _fitz.open(stream=file_bytes, filetype='pdf')
-    except Exception as _open_err:
-        print(f'[EQ-DIAG][Vision] PDF open failed: {_open_err}', flush=True)
-        return []
-
-    # ── Page count + pdf2image fallback ─────────────────────────────────────
-    # When PyMuPDF reports page_count=0 (broken xref — common with Adobe
-    # "Make PDF Searchable" and similar OCR-overlay tools), use pdf2image
-    # (poppler) to render pages as PIL images and convert them to base64 PNG.
-    # The rendered images are stored in _p2i_b64 (idx → b64 string) and used
-    # by _analyze_page below instead of calling doc[page_idx].get_pixmap().
-    _p2i_b64: dict = {}  # page_idx → base64 PNG; populated only when needed
-    n_pages = doc.page_count
-    if n_pages == 0:
-        try:
-            from pdf2image import convert_from_bytes as _cvt_vis
-            _vis_dpi = max(72, int(72 * page_scale))
-            _pil_pages = _cvt_vis(file_bytes, dpi=_vis_dpi, fmt='png')
-            for _vpi, _vpil in enumerate(_pil_pages[:max_pages]):
-                _vbuf = io.BytesIO()
-                _vpil.save(_vbuf, format='PNG')
-                _p2i_b64[_vpi] = base64.b64encode(_vbuf.getvalue()).decode('utf-8')
-            n_pages = len(_p2i_b64)
-            print(
-                f'[EQ-DIAG][Vision] pdf2image rendered {n_pages} page(s) dpi={_vis_dpi}',
-                flush=True,
-            )
-        except Exception as _vis_p2i_err:
-            print(f'[EQ-DIAG][Vision] pdf2image fallback failed: {_vis_p2i_err}', flush=True)
-    else:
-        n_pages = min(n_pages, max_pages)
-    print(f'[EQ-DIAG][Vision] Starting vision extraction: {n_pages} page(s)', flush=True)
-
-    def _analyze_page(page_idx: int):
-        """Render and analyze a single page; return (page_idx, eq_list, dwg_no, dwg_title)."""
-        try:
-            # Use pdf2image-rendered PNG when fitz can't enumerate pages
-            if page_idx in _p2i_b64:
-                img_b64 = _p2i_b64[page_idx]
-            else:
-                page    = doc[page_idx]
-                img_b64 = _render_page_as_png_b64(page, scale=page_scale)
-            raw_resp = ai_svc.vision_analysis(
-                images_base64=[img_b64],
-                prompt=_VISION_EXTRACTION_PROMPT,
-                model=vision_model,
-                max_tokens=max_tokens,
-                temperature=0,
-            )
-            # Strip markdown fences if the model added them
-            cleaned = re.sub(r'^```[a-z]*\s*', '', raw_resp.strip(), flags=re.IGNORECASE)
-            cleaned = re.sub(r'\s*```$', '', cleaned.strip())
-            # Locate the outermost JSON object (ignore any prefix text)
-            json_m  = re.search(r'\{[\s\S]*\}', cleaned)
-            if not json_m:
-                print(f'[EQ-DIAG][Vision] Page {page_idx}: no JSON in response', flush=True)
-                return page_idx, [], '', ''
-            parsed    = _json.loads(json_m.group())
-            eq_list   = parsed.get('equipment', []) or []
-            dwg_no    = str(parsed.get('drawing_no', '') or '').strip()
-            dwg_title = str(parsed.get('drawing_title', '') or '').strip()
-            print(
-                f'[EQ-DIAG][Vision] Page {page_idx}: {len(eq_list)} item(s)  '
-                f'dwg_no={dwg_no!r}',
-                flush=True,
-            )
-            return page_idx, eq_list, dwg_no, dwg_title
-        except Exception as _page_err:
-            print(f'[EQ-DIAG][Vision] Page {page_idx} error: {_page_err}', flush=True)
-            return page_idx, [], '', ''
-
-    # Process pages in parallel; collect by index so we reassemble in order.
-    page_results: dict = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_analyze_page, i): i for i in range(n_pages)}
-        for fut in as_completed(futures):
-            idx, eq_list, dwg_no, dwg_title = fut.result()
-            page_results[idx] = (eq_list, dwg_no, dwg_title)
-
-    doc.close()
-
-    all_items: list = []
-    seen_tags: set  = set()
-
-    for pg_idx in sorted(page_results):
-        eq_list, dwg_no, dwg_title = page_results[pg_idx]
-        page_ref = dwg_no or f'{drawing_ref_default}_P{pg_idx + 1}'
-
-        for raw_item in eq_list:
-            if not isinstance(raw_item, dict):
-                continue
-            raw_tag = str(raw_item.get('tag', '') or '').strip().upper()
-            if not raw_tag:
-                continue
-
-            # Validate tag format
-            vm = _VISION_TAG_RE.match(raw_tag)
-            if not vm:
-                continue
-            prefix = vm.group(1).upper()
-
-            # Whitelist gate: only known equipment prefixes pass.
-            # Rejects instruments (FT, PT, LT…), valves (XV, FV, SDV…),
-            # and any other non-equipment tag the AI may have hallucinated.
-            if prefix not in _prefix_whitelist:
-                print(
-                    f'[EQ-DIAG][Vision] Page {pg_idx}: skipping non-equipment tag '
-                    f'{raw_tag!r} (prefix {prefix!r} not in whitelist)',
-                    flush=True,
-                )
-                continue
-
-            # Deduplicate across pages — first occurrence wins
-            if raw_tag in seen_tags:
-                continue
-            seen_tags.add(raw_tag)
-
-            desc = str(raw_item.get('description', '') or '').strip().upper()
-            if not desc and dwg_title:
-                # Use title as description fallback when the AI found no description
-                desc = dwg_title[:80].upper()
-
-            # Helper: read a string field from the AI response, strip and upper-case.
-            def _vf(key, upper=True):
-                v = str(raw_item.get(key, '') or '').strip()
-                return v.upper() if (upper and v) else v
-
-            all_items.append({
-                'tag':                 raw_tag,
-                'type_label':          type_labels.get(prefix, ''),
-                'description':         desc,
-                'service_fluid':       _vf('service_fluid'),
-                'area':                str(raw_item.get('area', '') or '').strip(),
-                'drawing_ref':         page_ref,
-                'revision':            '',
-                'sl_no':               '',
-                # Process parameters — read from Vision AI response (blank if not visible in image)
-                'oper_pressure':       _vf('oper_pressure', upper=False),
-                'oper_temperature':    _vf('oper_temperature', upper=False),
-                'design_pressure_min': _vf('design_pressure_min', upper=False),
-                'design_pressure_max': _vf('design_pressure_max', upper=False),
-                'design_temp_min':     _vf('design_temp_min', upper=False),
-                'design_temp_max':     _vf('design_temp_max', upper=False),
-                'design_flowrate':     _vf('design_flowrate', upper=False),
-                'material_class':      _vf('moc', upper=False),
-                'insulation':          _vf('insulation', upper=False),
-                'dimension_length':    _vf('dimension_length', upper=False),
-                'dimension_diameter':  _vf('dimension_diameter', upper=False),
-                'motor_rating':        _vf('motor_rating', upper=False),
-                'process_notes':       '',
-                'line_connections':    [],
-                'nozzle_connections':  [],
-                # Default to 1; _infer_quantity_from_tag_variants (called in tasks.py)
-                # will override this with the correct count for A/B/C tag sets.
-                'quality_required':    QUANTITY_REQUIRED_DEFAULT,
-                # Compose remarks from Vision AI text using the same smart layers
-                # as the OCR path.  _compose_remarks deduplicates and joins '; '.
-                'remarks':             _compose_vision_remarks(raw_item),
-            })
-
-    print(
-        f'[EQ-DIAG][Vision] Finished: {len(all_items)} unique equipment item(s) '
-        f'from {n_pages} page(s)',
-        flush=True,
-    )
-    return all_items
 
 
 @api_view(['POST'])

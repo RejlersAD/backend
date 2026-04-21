@@ -15,7 +15,7 @@
     "_comment_ocr_thresh": "min_vector_chars_for_ocr_skip: if extracted vector text is shorter than this, the OCR fallback is triggered. Set to a very high value (e.g. 99999999) to ALWAYS run OCR in addition to vector text.",
     "min_vector_chars_for_ocr_skip": 200,
     "_comment_always_ocr": "always_include_ocr: when true, OCR results are always appended to the text pool even when vector text exceeds the threshold. Useful for CAD P&IDs where tag text may be vector but rendered in a non-standard encoding.",
-    "always_include_ocr": false,
+    "always_include_ocr": true,
     "_comment_titleblock_rev": "Title-block revision extraction for P&ID drawing mode. When _REVISION_USE_TOPMOST=True in Python, the document revision extracted from the title block is applied to ALL equipment items on the drawing. The three strategies (label, drawn-context, dwg-no proximity) are implemented in Python; only the enable flag is soft-coded here. Set titleblock_revision_enabled to false to disable and keep per-tag pre-text revision extraction.",
     "titleblock_revision_enabled": true,
     "_comment_scale": "ocr_render_scale: DPI multiplier for A4/small pages. 3.0 = ~216 dpi. For large-format A0/A1 P&IDs use ocr_render_scale_large_format — raise this if small tag text is missed.",
@@ -118,18 +118,8 @@
     "motor_rating_pattern": "(?:ELEC(?:TRIC)?\\s*MOTOR\\s*(?:RATING|POWER|OUTPUT)?|MOTOR\\s*(?:RATING|POWER|OUTPUT|INSTALLED|NAMEPLATE)?|DRIVER\\s*(?:RATING|POWER)?|RATED\\s*POWER|INSTALLED\\s*POWER|M\\.?R\\.?|MR|SHAFT\\s*POWER|BRAKE\\s*POWER|NAMEPLATE\\s*POWER)\\s*[:=/(]?\\s*(\\d+(?:\\.\\d+)?)\\s*(kW|KW|HP|BHP|KVA|kVA)\\b",
     "_comment_motor_bare": "Bare motor-rating scan (no label): captures lone kW/HP values in the WIDE motor context window when the label is absent. Only applied inside the motor-specific context so false positives on flowrate numbers are avoided.",
     "motor_rating_bare_pattern": "(\\d+(?:\\.\\d+)?)\\s*(kW|KW|HP|BHP)\\b",
-
-    "_comment_mixed_pt": "mixed_press_temp_pattern: matches combined operating-condition annotations like '100 PSIG/200 °F' or '150 barg / 120 °C' where pressure and temperature are slash-separated in a single text callout (no separate label). Group 1=pressure value, Group 2=pressure unit, Group 3=temperature value. Temperature unit is inferred from the trailing °F/°C token. Use mixed_press_temp_context_chars to set the scan window; defaults to process_param_context_chars + 300 to catch annotations that sit below the tag in OCR text order.",
-    "mixed_press_temp_pattern": "(-?\\d+(?:\\.\\d+)?)\\s*(PSIG|PSIA|PSI|barg|bara|kPag|MPa|bar)\\s*/\\s*(-?\\d+(?:\\.\\d+)?)\\s*(°\\s*[FC]|DEG\\.?\\s*[FC]|DEGF|DEGC)",
-    "mixed_press_temp_context_chars": 700,
-
-    "_comment_imperial_dims": "Imperial dimension patterns for drawings that use feet-inches (US/Anglo notation). dimension_length_imperial_pattern: matches '10\'-0\"' or '10\'-6\"' — group 1=feet, group 2=inches. dimension_diameter_imperial_pattern: matches '42\" O.D.' or '24\"' — group 1=inch value. Both are only applied when the metric pattern finds nothing. Set dimension_imperial_enabled to false to disable. Converted values are stored as MM integers for consistency with metric fields.",
-    "dimension_imperial_enabled": true,
-    "dimension_length_imperial_pattern": "(\\d+)['-]\\s*-?\\s*(\\d+(?:\\.\\d+)?)[\\\"\u201d]?(?:\\s*(?:S[-/]S|T[-/]T|TAN[-/]TAN|TT|SS|OA|OAL|S/S|T/T))?",
-    "dimension_diameter_imperial_pattern": "(\\d+(?:\\.\\d+)?)\\s*[\\\"\u201d]\\s*(?:O\\.?D\\.?|I\\.?D\\.?|DIA\\.?|BORE|OD|ID)?",
-
     "_comment_motor_ctx": "motor_rating_context_chars: scan radius (chars each side of tag) used ONLY for motor rating search. Wider than process_param_context_chars because motor callouts on P&IDs are attached to the motor symbol via a lead line that can be far from the equipment tag text.",
-    "motor_rating_context_chars": 1500,
+    "motor_rating_context_chars": 800,
     "_comment_motor_na": "motor_na_display_value: value written into motor_rating for non-rotating equipment (vessels, tanks, drums, etc.) when no kW value is found in context. Change to empty string to leave blank, or 'N/A' to revert to old behaviour.",
     "motor_na_display_value": "No",
 
@@ -154,7 +144,6 @@
       "moc",
       "insulation",
       "description",
-      "motor_rating",
       "dimension_length",
       "dimension_diameter"
     ],
@@ -196,54 +185,7 @@
       "(?i)\\brev\\.?\\s*cloud\\b"
     ],
     "_comment_dedup_desc": "dedup_by_description_enabled: when true, items sharing the same description are deduplicated — the most-populated record is kept, OCR-variant duplicates are discarded.",
-    "dedup_by_description_enabled": true,
-
-    "_comment_richness_gate": "Gate 3 — Richness / accuracy quality filter. richness_gate_min_fraction: minimum ratio of all gate fields that must be non-empty (0.30 = ~5 of 17). richness_gate_anchor_fields: PROCESS DATA anchors — at least richness_gate_require_anchor_count of these must be filled. Real equipment with a data box always has pressure/temperature/dimension; connector-arrow cross-references never do. This dual check (fraction AND anchor) is the smart filter: it eliminates records that only have description or service_fluid filled (cross-sheet refs) while keeping every tag that has genuine process data.",
-    "richness_gate_enabled": true,
-    "richness_gate_min_fraction": 0.30,
-    "richness_gate_fields": [
-      "description",
-      "oper_pressure",
-      "oper_temperature",
-      "design_pressure_min",
-      "design_pressure_max",
-      "design_temp_min",
-      "design_temp_max",
-      "design_flowrate",
-      "moc",
-      "insulation",
-      "motor_rating",
-      "dimension_length",
-      "dimension_diameter",
-      "phase",
-      "service_fluid",
-      "quality_required",
-      "remarks"
-    ],
-    "richness_gate_empty_values": ["", "No", "N/A", "NA", "None", "—", "-", "0"],
-    "richness_gate_always_keep_prefixes": ["PK", "SK", "MS", "KX", "PX", "SX", "FX", "VX", "GX", "HX"],
-    "_comment_anchor": "Anchor check: at least richness_gate_require_anchor_count of richness_gate_anchor_fields must be non-empty. These are pure PROCESS DATA fields that only appear when a data box exists on the drawing. Set richness_gate_require_anchor_count to 0 to disable the anchor check (fraction-only mode).",
-    "richness_gate_anchor_fields": [
-      "oper_pressure",
-      "oper_temperature",
-      "design_pressure_min",
-      "design_pressure_max",
-      "design_temp_min",
-      "design_temp_max",
-      "dimension_length",
-      "dimension_diameter",
-      "design_flowrate"
-    ],
-    "richness_gate_require_anchor_count": 1,
-
-    "_comment_vision": "Vision AI extraction: when OCR+regex extraction yields fewer than vision_extraction_threshold items, each PDF page is rendered as an image and sent to a vision AI model (Gemini preferred, GPT-4V as fallback) to extract all process equipment tags directly from the visual P&ID content. This is the primary extraction strategy for image-based P&ID drawings with no embedded text layer. Set vision_extraction_enabled to false to disable. vision_page_render_scale is the PyMuPDF zoom multiplier applied when rendering pages (1.5 ≈ 108 DPI — sufficient for large-format A1 P&IDs). vision_max_pages caps total pages per upload. vision_max_workers controls parallel page threads (set to 1 to serialize). vision_extraction_model: 'gemini' or 'openai' or 'auto'.",
-    "vision_extraction_enabled": true,
-    "vision_extraction_threshold": 30,
-    "vision_page_render_scale": 1.5,
-    "vision_max_pages": 60,
-    "vision_max_workers": 3,
-    "vision_extraction_model": "auto",
-    "vision_max_tokens": 1500
+    "dedup_by_description_enabled": true
   },
 
   "type_labels": {
