@@ -1,6 +1,9 @@
 {
   "_comment": "Soft-coded config for Equipment List extraction. Tune labels, patterns and Excel layout here — no Python changes needed.",
 
+  "_comment_async_backend": "async_backend: 'celery' uses Celery broker (.delay) with automatic thread fallback when broker is unavailable; 'thread' always uses a background thread (no broker required — recommended for Railway where no Celery worker is deployed).",
+  "async_backend": "thread",
+
   "extraction": {
     "_comment_tag": "tag_pattern: captures PREFIX-NNN[-SUFFIX] where SUFFIX is an optional 1-4 char train/unit code (e.g. -TF, -1F, -2A). Without the suffix group, equipment sharing the same base number but different train codes (V-805-TF vs V-805-1F) are incorrectly collapsed into one row.",
     "tag_pattern": "\\b([A-Za-z]{1,2})-([0-9]{3,5}[A-Za-z]?(?:-[A-Za-z0-9]{1,4})?)\\b",

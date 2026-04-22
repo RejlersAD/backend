@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import threading
 import uuid
 from functools import lru_cache
 
@@ -22,6 +23,50 @@ from rest_framework.response import Response
 # can read them regardless of which worker handled the original upload.
 EQ_RESULT_CACHE_TTL_S   = 14400    # 4 hours — how long results stay in Redis
 EQ_RESULT_CACHE_KEY_FMT = 'eq_analysis:{upload_id}'  # must match tasks.py
+
+
+def _dispatch_eq_task(task_fn, upload_id: str, config: dict, *task_args) -> None:
+    """
+    Dispatch a Celery task with automatic thread fallback.
+
+    Async backend is selected via `async_backend` in equipment_type_config.json:
+      "celery"  — use Celery broker (.delay). Falls back to thread on failure.
+      "thread"  — always use a background thread (no broker needed).
+
+    Either way the task writes its result to Redis cache and the frontend
+    polls /status/<upload_id>/ normally — the caller is unaffected.
+    """
+    backend = config.get('async_backend', 'celery')
+
+    def _run_in_thread():
+        try:
+            task_fn.apply(args=task_args)
+        except Exception as exc:
+            logger.error('[EQDispatch] Thread execution failed upload_id=%s: %s',
+                         upload_id, exc, exc_info=True)
+            cache.set(
+                EQ_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id),
+                {'status': 'failed', 'error': str(exc)},
+                EQ_RESULT_CACHE_TTL_S,
+            )
+
+    if backend == 'thread':
+        logger.info('[EQDispatch] async_backend=thread  upload_id=%s', upload_id)
+        t = threading.Thread(target=_run_in_thread, daemon=True)
+        t.start()
+        return
+
+    # Default: try Celery, fall back to thread on any broker error
+    try:
+        task_fn.delay(*task_args)
+        logger.info('[EQDispatch] Celery task dispatched  upload_id=%s', upload_id)
+    except Exception as dispatch_exc:
+        logger.warning(
+            '[EQDispatch] Celery broker unavailable (%s) — falling back to thread  upload_id=%s',
+            dispatch_exc, upload_id,
+        )
+        t = threading.Thread(target=_run_in_thread, daemon=True)
+        t.start()
 
 
 def _eq_get_result_entry(upload_id: str) -> dict | None:
@@ -3194,23 +3239,9 @@ def analyze_pid_equipment(request):
         EQ_RESULT_CACHE_TTL_S,
     )
 
-    try:
-        run_equipment_analysis_task.delay(upload_id, file_b64, pid_file.name)
-    except Exception as dispatch_exc:
-        # Covers: broker unavailable, EAGER-mode propagation, import errors.
-        logger.error('[EquipmentList] Task dispatch error  upload_id=%s  error=%s',
-                     upload_id, dispatch_exc, exc_info=True)
-        cache.set(
-            EQ_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id),
-            {'status': 'failed', 'error': f'Extraction could not start: {dispatch_exc}'},
-            EQ_RESULT_CACHE_TTL_S,
-        )
-        return Response(
-            {'error': 'Extraction service unavailable. Please try again in a moment.',
-             'upload_id': upload_id, 'success': False},
-            status=drf_status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-    logger.info('[EquipmentList] Dispatched task  upload_id=%s  file=%s', upload_id, pid_file.name)
+    _dispatch_eq_task(run_equipment_analysis_task, upload_id, config,
+                      upload_id, file_b64, pid_file.name)
+    logger.info('[EquipmentList] Task dispatched  upload_id=%s  file=%s', upload_id, pid_file.name)
 
     return Response(
         {'upload_id': upload_id, 'status': 'processing', 'message': 'Extraction queued'},
@@ -3389,22 +3420,9 @@ def analyze_pid_equipment_batch(request):
         EQ_RESULT_CACHE_TTL_S,
     )
 
-    try:
-        run_equipment_batch_analysis_task.delay(upload_id, files_data)
-    except Exception as dispatch_exc:
-        logger.error('[EquipmentList Batch] Task dispatch error  upload_id=%s  error=%s',
-                     upload_id, dispatch_exc, exc_info=True)
-        cache.set(
-            EQ_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id),
-            {'status': 'failed', 'error': f'Batch extraction could not start: {dispatch_exc}'},
-            EQ_RESULT_CACHE_TTL_S,
-        )
-        return Response(
-            {'error': 'Extraction service unavailable. Please try again in a moment.',
-             'upload_id': upload_id, 'success': False},
-            status=drf_status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-    logger.info('[EquipmentList Batch] Dispatched task  upload_id=%s  files=%d', upload_id, len(files))
+    _dispatch_eq_task(run_equipment_batch_analysis_task, upload_id, config,
+                      upload_id, files_data)
+    logger.info('[EquipmentList Batch] Task dispatched  upload_id=%s  files=%d', upload_id, len(files))
 
     return Response(
         {'upload_id': upload_id, 'status': 'processing', 'message': f'{len(files)} file(s) queued'},
