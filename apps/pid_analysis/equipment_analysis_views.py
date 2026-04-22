@@ -1588,10 +1588,19 @@ _DATABOX_VALUE_STOPS = re.compile(
     r'|\bSHALL\b'                      # notes prose
     r'|\bSCOPE\b'                      # scope note
     r'|\bHEADER\b'                     # pipe destination
+    r'|\bPRESSURIZED\b'               # ADNOC note prose after design press
+    r'|\bINTERLOCK\b'                 # safety interlock note prose
+    r'|\bELIMINATOR\b'                # internals note prose (MIST ELIMINATOR)
+    r'|\bVORTEX\b'                    # internals note prose (VORTEX BREAKER)
+    r'|>\s*FL\b'                      # ADNOC to-flare annotation (>FL)
+    r'|\s*>'                          # routing arrow (> FL -ACBN-8128); never valid in a data value
     r'|[;|]'                           # column separator / pipe char
     r'|//'                             # // separating dual-condition values
     r'|\s{3,}'                         # 3+ spaces = OCR column gap
-    r'|[\"\u201c\u201d][A-Z]{2,4}-'   # pipe tag starting with inch mark
+    r'|\s*\\\s'                       # backslash-space OCR artifact (e.g. \ 82106)
+    r'|\s+(?:[A-Z]{1,3}\d{4,}[A-Z]?|\d{4,}[A-Z]+)\b'  # ref tags with letter (8210A, Re21084) — NOT bare 1412/1219
+    r'|[\"\u201c\u201d\u00a5][A-Z]{2,4}-'   # pipe tag starting with inch mark (incl. mojibake)
+    r'|\s+\d+[\"\u201c\u201d\u00a5]\s*-\s*[A-Z]'  # N"-PIPETAG inline (e.g. 6"-SG-)
     r')',
     re.IGNORECASE,
 )
@@ -1632,14 +1641,17 @@ def _clean_databox_value(raw: str) -> str:
         raw = raw[:label_hits[1].start()]
 
     raw = raw.strip(' .,;:()')
-    # Reject values that are pure punctuation or very short after cleaning
-    if len(raw) < 1:
+    # Reject values that are pure punctuation or very short after cleaning.
+    # Minimum 2 chars: allows valid 2-char engineering codes (CS, SS, FV)
+    # while rejecting single-character OCR noise ('J', 'X', etc.).
+    if len(raw) < 2:
         return ''
 
     # ── OCR unit correction ──────────────────────────────────────────────
     # Tesseract commonly misreads 'M3' as 'MS', 'M²' as 'M2', 'm³' as 'm3'.
     # Soft-coded replacements applied ONLY to the unit portion (after a digit).
     _ocr_unit_fixes = [
+        (re.compile(r'\bft\s*[?³]\s*/\s*h', re.IGNORECASE), 'ft3/H'),  # ft³/hr, ft?/hr → ft3/H
         (re.compile(r'(\d+\.?\d*)\s*MS\b', re.IGNORECASE), r'\1 M3'),  # 327 MS → 327 M3
         (re.compile(r'\bM\s+3\b'),                              'M3'),   # M 3 → M3
         (re.compile(r'\bM3/[Hh]\b'),                            'M3/H'), # normalise
@@ -1674,6 +1686,25 @@ def _clean_databox_value(raw: str) -> str:
             if _remainder and not _is_valid_suffix:
                 raw = f'{_dim_m.group(1)} {_dim_m.group(2).upper()}'.strip()
 
+    # ── Unit boundary truncation ──────────────────────────────────────────
+    # When OCR merges junk text after a recognised engineering unit
+    # (e.g. "1412 psig Lezi0 Re21084"), truncate at the end of the unit.
+    # Cannot use lookbehind (variable length) — use re.match with capture.
+    _unit_trunc_m = re.match(
+        r'^(-?[\d][\d,.\s]*'
+        r'(?:psig|psia|psi|barg|bara|kpag|mpa|'
+        r'ft3/h(?:r)?|m3/h(?:r)?|kw|mw|gpm|bbl/d|'
+        r'°\s*[fc]|deg[fc]|degf|degc|f\b|c\b))',
+        raw, re.IGNORECASE,
+    )
+    if _unit_trunc_m and len(_unit_trunc_m.group(1)) < len(raw):
+        _after_unit = raw[len(_unit_trunc_m.group(1)):].strip()
+        # Don't truncate if followed by '/' — that may be a MIN/MAX pair separator
+        # (e.g. "-13.2 F / 185 F" or "1219 psig / 1412 psig").
+        # Use lstrip() since OCR often leaves a space before the slash.
+        if not _after_unit.lstrip().startswith('/'):
+            raw = _unit_trunc_m.group(1).strip()
+
     # ── MOC trailing noise cleanup ─────────────────────────────────────────
     # Strip OCR junk that follows a known material spec, e.g.
     # "CS + LINING ix 3.K" → "CS + LINING".
@@ -1689,6 +1720,12 @@ def _clean_databox_value(raw: str) -> str:
         # Only truncate if the remainder doesn't look like a meaningful continuation
         if not re.match(r'^(?:ASTM|AISI|ISO|EN|NACE|\+|-)', _after_moc, re.IGNORECASE):
             raw = _moc_m.group(1).strip()
+
+    # ── Full-vacuum code truncation ──────────────────────────────────────
+    # 'FV' = full vacuum; any text following it is OCR noise from adjacent
+    # annotation (e.g. 'FV SUG CACHER V_803-TE').  Truncate to bare 'FV'.
+    if re.match(r'^FV\b', raw, re.IGNORECASE) and len(raw) > 2:
+        raw = 'FV'
 
     return raw
 
@@ -1996,6 +2033,30 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
     if _slash_expanded:
         text = text + '\n' + '\n'.join(_slash_expanded)
         print(f'[EQ-DIAG] Slash expansion added: {_slash_expanded}', flush=True)
+
+    # ── Propagate databox index to slash-expanded sibling tags ────────────
+    # When a data box is labelled "P-851A/B/C-TF", the databox scanner indexes
+    # only the first letter variant (P-851A) since that is the last tag token
+    # it sees before the label in OCR text order.  The slash expansion above
+    # creates P-851B / P-851C as synthetic items so each unit gets its own row
+    # in the equipment register.  Without propagation Gate2-TierA would drop
+    # P-851B and P-851C because they are absent from _databox_idx.
+    # Soft-coded: controlled by 'databox_slash_sibling_propagate' (default true).
+    if bool(ext_cfg.get('databox_slash_sibling_propagate', True)) and _slash_expanded and _databox_idx:
+        _sibling_re = re.compile(r'^([A-Z]+-\d+)[A-Z](?:-[A-Z0-9]+)?$', re.IGNORECASE)
+        for _exp_tag in _slash_expanded:
+            _exp_upper = _exp_tag.upper()
+            if _exp_upper in _databox_idx:
+                continue  # already has its own entry
+            _sm2 = _sibling_re.match(_exp_upper)
+            if not _sm2:
+                continue
+            _base_prefix = _sm2.group(1).upper()
+            # Find a sibling that IS in the index with the same base prefix+number
+            for _idx_tag, _idx_data in _databox_idx.items():
+                if _idx_tag.upper().startswith(_base_prefix) and _idx_tag.upper() != _exp_upper:
+                    _databox_idx[_exp_upper] = dict(_idx_data)  # shallow copy
+                    break
 
     for m in tag_re.finditer(text):
         prefix = m.group(1).upper()
