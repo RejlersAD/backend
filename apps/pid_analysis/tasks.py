@@ -440,7 +440,8 @@ def run_equipment_analysis_task(self, upload_id: str, file_b64: str, filename: s
     except Exception as exc:
         logger.error('[EQTask] Failed  upload_id=%s  error=%s', upload_id, exc, exc_info=True)
         cache.set(cache_key, {'status': 'failed', 'error': str(exc)}, EQ_RESULT_CACHE_TTL_S)
-        raise   # Let Celery mark the task as FAILURE for monitoring
+        # Do NOT re-raise: failure is written to cache; the frontend reads it via
+        # /status/<upload_id>/. Re-raising in EAGER mode propagates to the view → HTTP 500.
 
 
 @shared_task(
@@ -549,4 +550,4 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
     except Exception as exc:
         logger.error('[EQBatchTask] Failed  upload_id=%s: %s', upload_id, exc, exc_info=True)
         cache.set(cache_key, {'status': 'failed', 'error': str(exc)}, EQ_RESULT_CACHE_TTL_S)
-        raise
+        # Do NOT re-raise: same reasoning as run_equipment_analysis_task.

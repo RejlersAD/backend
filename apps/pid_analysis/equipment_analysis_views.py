@@ -3194,7 +3194,22 @@ def analyze_pid_equipment(request):
         EQ_RESULT_CACHE_TTL_S,
     )
 
-    run_equipment_analysis_task.delay(upload_id, file_b64, pid_file.name)
+    try:
+        run_equipment_analysis_task.delay(upload_id, file_b64, pid_file.name)
+    except Exception as dispatch_exc:
+        # Covers: broker unavailable, EAGER-mode propagation, import errors.
+        logger.error('[EquipmentList] Task dispatch error  upload_id=%s  error=%s',
+                     upload_id, dispatch_exc, exc_info=True)
+        cache.set(
+            EQ_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id),
+            {'status': 'failed', 'error': f'Extraction could not start: {dispatch_exc}'},
+            EQ_RESULT_CACHE_TTL_S,
+        )
+        return Response(
+            {'error': 'Extraction service unavailable. Please try again in a moment.',
+             'upload_id': upload_id, 'success': False},
+            status=drf_status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     logger.info('[EquipmentList] Dispatched task  upload_id=%s  file=%s', upload_id, pid_file.name)
 
     return Response(
@@ -3374,7 +3389,21 @@ def analyze_pid_equipment_batch(request):
         EQ_RESULT_CACHE_TTL_S,
     )
 
-    run_equipment_batch_analysis_task.delay(upload_id, files_data)
+    try:
+        run_equipment_batch_analysis_task.delay(upload_id, files_data)
+    except Exception as dispatch_exc:
+        logger.error('[EquipmentList Batch] Task dispatch error  upload_id=%s  error=%s',
+                     upload_id, dispatch_exc, exc_info=True)
+        cache.set(
+            EQ_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id),
+            {'status': 'failed', 'error': f'Batch extraction could not start: {dispatch_exc}'},
+            EQ_RESULT_CACHE_TTL_S,
+        )
+        return Response(
+            {'error': 'Extraction service unavailable. Please try again in a moment.',
+             'upload_id': upload_id, 'success': False},
+            status=drf_status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     logger.info('[EquipmentList Batch] Dispatched task  upload_id=%s  files=%d', upload_id, len(files))
 
     return Response(
