@@ -602,6 +602,11 @@ QUANTITY_REQUIRED_PATTERN  = r'(?:QTY|QUANTITY|NO\.?\s*REQD?|NO\.?\s*REQUIRED|CO
 QUALITY_SPEC_NACE_FULL     = 'NACE MR0175'
 QUALITY_SPEC_NACE_SHORT    = 'NACE'
 
+# ── Equipment-list Excel download filename (soft-coded) ────────────────────
+# Kept short and constant per user request — earlier behaviour produced very
+# long filenames like "<sanitised-drawing-ref>_equipment_list.xlsx".
+EQUIPMENT_EXCEL_FILENAME   = 'Equipment_list.xlsx'
+
 # ── Dimension extraction minimum-value filters (soft-coded) ────────────────
 # Dimension values BELOW these thresholds are rejected as pipe-size / nozzle /
 # instrument-level false positives picked up by OCR from context text.
@@ -2065,6 +2070,25 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             r'(?<=[A-Za-z])' + re.escape(_bad) + r'(?=[A-Za-z])',
             _good, _slash_text
         )
+
+    # ── Whitespace-tolerant variant chain normalization (soft-coded) ──────
+    # Title blocks routinely render multi-unit tags with a space between the
+    # serial number and the first variant letter, e.g. "P-851 A/B/C-TF".
+    # The slash-expansion regex below requires the variant letter to sit
+    # immediately after the base, so without this step the title token is
+    # never expanded and only the explicitly-tagged variants on the drawing
+    # body (often missing one of the three) make it into the result list.
+    # This step collapses ONE optional whitespace gap, ONLY when the next
+    # character pair is "<letter>/<letter>" — keeping the normalization
+    # tightly scoped so unrelated text is never altered.
+    # Soft-coded by 'slash_collapse_space_before_variant' (default true).
+    if bool(ext_cfg.get('slash_collapse_space_before_variant', True)):
+        _slash_text = re.sub(
+            r'\b([A-Za-z]{1,2}-\d{3,5})\s+([A-Za-z])(?=\s*/\s*[A-Za-z])',
+            r'\1\2',
+            _slash_text,
+        )
+
     _slash_re = re.compile(
         r'\b([A-Za-z]{1,2}-\d{3,5})([A-Za-z])/([A-Za-z])(?:/([A-Za-z]))?(?:-([A-Za-z0-9]{1,4}))?\b',
         re.IGNORECASE,
@@ -2998,6 +3022,81 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         if _item['tag'] not in _full_tag_bases
     ]
 
+    # ── Sibling-unit merge (soft-coded, additive post-processing) ──────────
+    # Collapses multi-unit equipment that share one data box (e.g. triple-50%
+    # pump train "P-851A/B/C-TF") into a single row whose tag lists every
+    # variant letter joined by 'sibling_merge_separator'. All other fields
+    # (description, process params) inherit from the first variant — those
+    # values come from the shared data box on the drawing so they apply
+    # identically to every unit.
+    #
+    # Controlled by:
+    #   merge_sibling_unit_variants      (bool, default True)
+    #   sibling_merge_separator          (str,  default '/')
+    #   sibling_merge_min_group_size     (int,  default 2)
+    #
+    # No extraction logic above this point is altered; this step only
+    # rewrites the final results list.
+    if bool(ext_cfg.get('merge_sibling_unit_variants', True)):
+        _sep       = str(ext_cfg.get('sibling_merge_separator', '/'))
+        _min_group = int(ext_cfg.get('sibling_merge_min_group_size', 2))
+        # Matches  PREFIX-NNN + single alpha variant + optional -SUFFIX
+        # e.g. P-851A-TF  →  base='P-851', variant='A', suffix='TF'
+        _sibling_split_re = re.compile(
+            r'^([A-Z]{1,2}-[0-9]{3,5})([A-Z])(?:-([A-Z0-9]{1,4}))?$'
+        )
+        _groups: dict = {}          # group_key → [indices in results]
+        _group_order: list = []      # first-seen order of group keys
+        for _idx, _item in enumerate(results):
+            _sm = _sibling_split_re.match(_item['tag'])
+            if not _sm:
+                continue
+            _base, _variant, _sfx = _sm.group(1), _sm.group(2), _sm.group(3) or ''
+            _key = (_base, _sfx)
+            if _key not in _groups:
+                _groups[_key] = []
+                _group_order.append(_key)
+            _groups[_key].append((_idx, _variant))
+
+        _to_remove: set = set()
+        _merged_updates: dict = {}   # idx → new tag / qty
+        for _key in _group_order:
+            _members = _groups[_key]
+            if len(_members) < _min_group:
+                continue
+            # Preserve first-seen variant order (keeps A/B/C ordering natural)
+            _base, _sfx = _key
+            _variants_seen: list = []
+            for _idx, _variant in _members:
+                if _variant not in _variants_seen:
+                    _variants_seen.append(_variant)
+            _merged_tag = f"{_base}{_sep.join(_variants_seen)}"
+            if _sfx:
+                _merged_tag = f"{_merged_tag}-{_sfx}"
+            _keep_idx = _members[0][0]
+            _merged_updates[_keep_idx] = {
+                'tag':              _merged_tag,
+                'quality_required': str(len(_variants_seen)),
+            }
+            for _idx, _ in _members[1:]:
+                _to_remove.add(_idx)
+            print(
+                f'[EQ-DIAG] Sibling-merge: {[results[i]["tag"] for i, _ in _members]} '
+                f'→ {_merged_tag!r} (qty={len(_variants_seen)})',
+                flush=True,
+            )
+
+        if _to_remove or _merged_updates:
+            _new_results = []
+            for _idx, _item in enumerate(results):
+                if _idx in _to_remove:
+                    continue
+                if _idx in _merged_updates:
+                    _item = dict(_item)
+                    _item.update(_merged_updates[_idx])
+                _new_results.append(_item)
+            results = _new_results
+
     return results
 
 
@@ -3361,7 +3460,7 @@ def download_equipment_excel(request, upload_id):
             buf.read(),
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
-        response['Content-Disposition'] = f'attachment; filename="{safe_name}_equipment_list.xlsx"'
+        response['Content-Disposition'] = f'attachment; filename="{EQUIPMENT_EXCEL_FILENAME}"'
         return response
 
     except ImportError:
