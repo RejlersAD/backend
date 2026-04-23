@@ -15,6 +15,21 @@ from io import BytesIO
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Soft-coded Celery time limits for long-running DesignIQ tasks.
+# These accommodate large P&IDs (100+ lines) where each line triggers a
+# serial OpenAI enrichment call (~3–5s per line) on top of OCR + parsing.
+#
+# HARD limit  = worker process is SIGKILL'd (TimeLimitExceeded).
+# SOFT limit  = raises SoftTimeLimitExceeded so the task can finalise/save.
+#
+# Keep frontend POLL_MAX_ATTEMPTS × POLL_INTERVAL_MS  >=  DESIGNIQ_TASK_HARD_LIMIT
+# or users will see a timeout while the task is still processing.
+# ---------------------------------------------------------------------------
+DESIGNIQ_TASK_HARD_LIMIT = 2700  # 45 minutes
+DESIGNIQ_TASK_SOFT_LIMIT = 2580  # 43 minutes
+
+
 
 def extract_text_from_file(file_data):
     """Extract text from PDF, Excel, or Word file for enrichment"""
@@ -345,7 +360,7 @@ def call_openai_stress_criticality_batch(lines_data, section_7_text):
         return {}
 
 
-@shared_task(bind=True, time_limit=1200, soft_time_limit=1140)  # 20 minutes max
+@shared_task(bind=True, time_limit=DESIGNIQ_TASK_HARD_LIMIT, soft_time_limit=DESIGNIQ_TASK_SOFT_LIMIT)
 def process_pid_upload_async(
     self, 
     file_path, 
@@ -857,7 +872,7 @@ def process_pid_upload_async(
         raise
 
 
-@shared_task(bind=True, time_limit=1200, soft_time_limit=1140)  # 20 minutes max
+@shared_task(bind=True, time_limit=DESIGNIQ_TASK_HARD_LIMIT, soft_time_limit=DESIGNIQ_TASK_SOFT_LIMIT)
 def base_extract_lines_async(self, file_path, filename, include_area=False, format_type='onshore'):
     """
     🎯 Async Celery task for Line List base extraction (P&ID only)

@@ -19,8 +19,21 @@ from openai import OpenAI
 import os
 import json
 from decouple import config
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Soft-coded enrichment parallelism.
+# Each line triggers one OpenAI enrichment call (~3–5s). Processing serially
+# for 50+ lines easily exceeds Celery time limits, so we fan out with a
+# bounded thread pool. Tune MAX_WORKERS based on OpenAI RPM / rate limits.
+#   1  → legacy serial behaviour (original code)
+#   5  → ~5× throughput, still well under typical OpenAI rate limits
+#   10 → watch for 429s if large P&IDs
+# ---------------------------------------------------------------------------
+ENRICHMENT_MAX_WORKERS = 5
+
 
 
 class EnrichmentService:
@@ -97,53 +110,63 @@ class EnrichmentService:
         logger.debug(f"NACE preview: {nace_text[:200]}...")
         
         logger.info(f"Starting AI-powered enrichment for {len(base_lines)} lines (All 3 docs provided)")
-        logger.info("Using OpenAI GPT-4 to intelligently extract 26 enrichment columns from documents")
-        
+        logger.info(f"Using OpenAI GPT-4 · parallel workers={ENRICHMENT_MAX_WORKERS} · 26 enrichment columns per line")
+
         try:
-            enriched_lines = []
-            
-            for idx, line in enumerate(base_lines):
+            total = len(base_lines)
+
+            # Per-line worker — pure function, safe for the thread pool.
+            def _enrich_one(idx_line):
+                idx, line = idx_line
                 line_id = line.get('original_detection', f'Line-{idx+1}')
-                logger.info(f"Processing line {idx+1}/{len(base_lines)}: {line_id}")
-                
-                # Start with ALL base columns (PRESERVED FROM LOCKED LOGIC - 17 columns)
-                # This includes from_line, to_line, from_equipment, to_equipment, etc.
-                enriched_line = dict(line)  # Copy ALL base fields to preserve locked extraction
-                
-                # a"ñû AI ENRICHMENT: Extract intelligent values from all 4 documents
-                logger.info(f"   Calling OpenAI to extract enrichment data for {line_id}...")
+                enriched_line = dict(line)
                 enrichment_data = self._extract_enrichment_data(
                     line=line,
                     hmb_text=hmb_text,
                     pms_text=pms_text,
                     nace_text=nace_text,
-                    pid_text=pid_text
+                    pid_text=pid_text,
                 )
-                
-                # LOCK: Ensure all 26 enrichment columns exist (even if empty)
-                empty_enrichment = self._get_empty_enrichment_columns()
-                for key in empty_enrichment:
+                for key in self._get_empty_enrichment_columns():
                     if key not in enrichment_data:
                         enrichment_data[key] = ""
-                
-                # Set P&ID No. and Date from upload metadata
                 if pid_filename:
                     enrichment_data['pid_no'] = pid_filename
                 if upload_date:
                     enrichment_data['date'] = upload_date
-                
-                filled_count = len([v for v in enrichment_data.values() if v and v.strip()])
-                logger.info(f"   Line {idx+1} enriched: {filled_count}/26 columns filled by AI")
-                
-                # Merge enrichment into base (17 base + 26 enriched = 43 columns GUARANTEED)
                 enriched_line.update(enrichment_data)
-                enriched_lines.append(enriched_line)
-                
-                # Log the enriched line data to verify
-                logger.info(f"Enriched line {idx+1} data sample: {list(enriched_line.keys())[:5]}... (Total: {len(enriched_line)} keys)")
-            
+                filled_count = len([v for v in enrichment_data.values() if v and v.strip()])
+                return idx, line_id, filled_count, enriched_line
+
+            enriched_lines: List[Optional[Dict]] = [None] * total
+
+            with ThreadPoolExecutor(max_workers=ENRICHMENT_MAX_WORKERS) as pool:
+                futures = {pool.submit(_enrich_one, (idx, line)): idx
+                           for idx, line in enumerate(base_lines)}
+                completed = 0
+                for future in as_completed(futures):
+                    try:
+                        idx, line_id, filled_count, enriched_line = future.result()
+                        enriched_lines[idx] = enriched_line
+                        completed += 1
+                        logger.info(f"   [{completed}/{total}] Line {idx+1} '{line_id}' enriched: {filled_count}/26 columns")
+                    except Exception as worker_exc:
+                        idx = futures[future]
+                        line = base_lines[idx]
+                        line_id = line.get('original_detection', f'Line-{idx+1}')
+                        logger.error(f"   Line {idx+1} '{line_id}' enrichment failed: {worker_exc}. Keeping base columns only.")
+                        fallback = dict(line)
+                        for key in self._get_empty_enrichment_columns():
+                            fallback.setdefault(key, "")
+                        if pid_filename:
+                            fallback['pid_no'] = pid_filename
+                        if upload_date:
+                            fallback['date'] = upload_date
+                        enriched_lines[idx] = fallback
+                        completed += 1
+
             logger.info("="*80)
-            logger.info(f"Enrichment complete: {len(enriched_lines)} lines with {len(enriched_lines[0].keys())} columns (17 base + 26 enriched = 43 total)")
+            logger.info(f"Enrichment complete: {len(enriched_lines)} lines · {len(enriched_lines[0].keys()) if enriched_lines else 0} columns (17 base + 26 enriched = 43 total)")
             logger.info(f"First line sample enrichment columns:")
             if enriched_lines:
                 sample = enriched_lines[0]
@@ -151,7 +174,7 @@ class EnrichmentService:
                 logger.info(f"   - design_pressure: {sample.get('design_pressure', 'MISSING')}")
                 logger.info(f"   - design_code: {sample.get('design_code', 'MISSING')}")
             logger.info("="*80)
-            
+
             # FINAL VALIDATION: Ensure every line has at least 43 columns (17 base + 26 enriched)
             expected_total = 43
             for idx, line in enumerate(enriched_lines):
