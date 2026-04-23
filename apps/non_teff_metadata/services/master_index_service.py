@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config')
 TEMPLATE_PATH = os.path.join(_CONFIG_DIR, 'master_index_template.json')
 TAXONOMY_PATH = os.path.join(_CONFIG_DIR, 'document_taxonomy.json')
+PATTERNS_PATH = os.path.join(_CONFIG_DIR, 'extraction_patterns.json')
 
 # File format → internal format key (kept separate from views.py on purpose
 # so the service stays self-contained and testable).
@@ -97,6 +98,39 @@ def load_template() -> Dict[str, Any]:
 def load_taxonomy() -> Dict[str, Any]:
     with open(TAXONOMY_PATH, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+
+@lru_cache(maxsize=1)
+def load_patterns() -> Dict[str, Any]:
+    """Load soft-coded extraction patterns. Compiled on demand, cached."""
+    with open(PATTERNS_PATH, 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+    # Pre-compile each pattern for speed
+    flag_map = {
+        'IGNORECASE': re.IGNORECASE,
+        'MULTILINE':  re.MULTILINE,
+        'DOTALL':     re.DOTALL,
+    }
+    compiled: Dict[str, List[Dict[str, Any]]] = {}
+    for field, entries in cfg.get('patterns', {}).items():
+        out = []
+        for e in entries:
+            flags = 0
+            for f_name in e.get('flags', []):
+                flags |= flag_map.get(f_name, 0)
+            try:
+                out.append({
+                    'regex': re.compile(e['pattern'], flags),
+                    'group': int(e.get('group', 1)),
+                    'mode':  e.get('mode', 'first'),
+                })
+            except re.error:
+                logger.exception('Invalid pattern for field %s: %s', field, e.get('pattern'))
+        compiled[field] = out
+    return {
+        'compiled':   compiled,
+        'stop_words': {w.upper() for w in cfg.get('stop_words', [])},
+    }
 
 
 def get_columns() -> List[Dict[str, Any]]:
@@ -254,6 +288,46 @@ def _narrow_subtype(text: str, parent_type: str, taxonomy: Dict[str, Any]) -> st
     return ''
 
 
+def _pattern_lookup(field_key: str, text: str) -> str:
+    """
+    Soft-coded pattern-based extractor. Looks up patterns by field_key in
+    extraction_patterns.json and returns the first / all matches filtered by
+    the configured stop-words.
+    """
+    if not text or not field_key:
+        return ''
+    cfg = load_patterns()
+    entries = cfg['compiled'].get(field_key, [])
+    stop = cfg['stop_words']
+    for entry in entries:
+        regex = entry['regex']
+        group = entry['group']
+        mode  = entry['mode']
+        if mode == 'all_csv':
+            hits = []
+            seen = set()
+            for m in regex.finditer(text):
+                try:
+                    val = (m.group(group) or '').strip().rstrip('.,;:')
+                except IndexError:
+                    continue
+                if not val or val.upper() in stop or val.upper() in seen:
+                    continue
+                seen.add(val.upper())
+                hits.append(val)
+            if hits:
+                return ','.join(hits)
+        else:  # 'first'
+            for m in regex.finditer(text):
+                try:
+                    val = (m.group(group) or '').strip().rstrip('.,;:')
+                except IndexError:
+                    continue
+                if val and val.upper() not in stop:
+                    return val
+    return ''
+
+
 # ---------------------------------------------------------------------------
 # Column-class dispatcher
 # ---------------------------------------------------------------------------
@@ -266,7 +340,7 @@ def _value_file_derived(column: Dict[str, Any], *, file_name: str,
     if key == 'full_path':
         return relative_path or file_name
     if key == 'file_format':
-        return os.path.splitext(file_name)[1].lstrip('.').lower()
+        return os.path.splitext(file_name)[1].lstrip('.').upper()
     if key == 'no_of_sheets':
         pages = pdf_page_count(file_path) if fmt == 'pdf' else None
         return str(pages) if pages else ''
@@ -293,12 +367,32 @@ def _value_ai_extract(column: Dict[str, Any], *, text: str, file_name: str,
     if extractor == 'status_keyword':
         return _extract_status(text)
     if extractor == 'unit_code':
-        return _extract_unit(text)
+        # Return bare numeric unit code (matches reference format: "43" not "U43")
+        m = _UNIT_PATTERN.search(text or '')
+        if m:
+            return (m.group(1) or m.group(2) or '').lstrip('0') or '0'
+        return _pattern_lookup('unit', text)
     if extractor == 'equipment_tag':
         return _all_matches(EQUIPMENT_NO_PATTERN, text)
-    # Generic ai_extract columns without a named extractor: leave blank so the
-    # NA fallback fills them in.
-    return ''
+    if extractor == 'pattern_lookup':
+        return _pattern_lookup(column['key'], text)
+    # Fallback: try pattern_lookup using the column key — lets us enable
+    # extraction on any ai_extract column just by adding patterns to JSON.
+    return _pattern_lookup(column['key'], text)
+
+
+def _value_batch_or_extract(column: Dict[str, Any], *, batch_defaults: Dict[str, Any],
+                             text: str, na_value: str) -> str:
+    """
+    Hybrid class: prefer the batch_default value when meaningfully set;
+    otherwise fall back to pattern extraction on document text.
+    """
+    key = column['key']
+    bd = (batch_defaults.get(key) or '').strip()
+    if bd and bd.upper() != na_value.upper():
+        return bd
+    # Try per-field patterns
+    return _pattern_lookup(key, text)
 
 
 def _value_derived(column: Dict[str, Any], *, accum: Dict[str, Any],
@@ -351,6 +445,10 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
                 )
             elif cls == 'batch_default':
                 value = batch_defaults.get(key, '')
+            elif cls == 'batch_or_extract':
+                value = _value_batch_or_extract(
+                    col, batch_defaults=batch_defaults, text=text, na_value=na,
+                )
             elif cls == 'ai_extract':
                 value = _value_ai_extract(
                     col, text=text, file_name=file_name,
@@ -375,9 +473,9 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
             logger.exception('Derived column %s failed', col['key'])
             row[col['key']] = ''
 
-    # NA fallback — applied to ai_extract and derived columns only, per template.
+    # NA fallback — applied to ai_extract, derived, and batch_or_extract columns.
     for col in columns:
-        if col.get('class') in ('ai_extract', 'derived'):
+        if col.get('class') in ('ai_extract', 'derived', 'batch_or_extract'):
             if not row.get(col['key']):
                 row[col['key']] = col.get('fallback', na)
 
