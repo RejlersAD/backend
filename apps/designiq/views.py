@@ -41,17 +41,34 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
     """Spawn a daemon thread that runs P&ID OCR and writes progress to /tmp/."""
     progress_file = f'/tmp/base_extraction_{task_id}.json'
 
-    def _write(state, percent, status_msg, result=None, error=None):
+    def _write(state, percent, status_msg, result=None, error=None, **extra):
         payload = {'task_id': task_id, 'state': state, 'percent': percent, 'status': status_msg}
         if result is not None:
             payload['result'] = result
         if error is not None:
             payload['error'] = error
+        if extra:
+            payload.update(extra)
         try:
             with open(progress_file, 'w') as fh:
                 json.dump(payload, fh)
         except Exception as we:
             logger.warning(f'[base_extract_thread] progress write failed: {we}')
+
+    # Soft-coded progress band for the per-page loop (same shape as Celery task).
+    _PAGE_PROG_START = 20
+    _PAGE_PROG_END   = 80
+
+    def _page_progress(page_num, total_pages, lines_so_far, phase):
+        span = _PAGE_PROG_END - _PAGE_PROG_START
+        frac = max(0.0, min(1.0, (page_num - 1) / max(1, total_pages)))
+        percent = int(_PAGE_PROG_START + span * frac)
+        _write(
+            'PROGRESS', percent,
+            f'Page {page_num}/{total_pages} — {lines_so_far} lines extracted so far…',
+            current_page=page_num, total_pages=total_pages,
+            lines_so_far=lines_so_far, phase=phase,
+        )
 
     def _run():
         try:
@@ -90,6 +107,7 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                 file_path,
                 include_area=include_area,
                 format_type=format_type,
+                progress_callback=_page_progress,
             )
             _write('PROGRESS', 85, f'OCR complete: {len(extracted_lines)} lines found. Formatting…')
             # Build 10-column output structure with EXPLICIT field mapping

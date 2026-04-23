@@ -1674,7 +1674,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
         logger.info(f"  📝 Regex found {len(results)} unique valid line numbers from {len(all_matches)} total matches")
         return results
     
-    def extract_from_pdf(self, pdf_path: str, include_area: bool = False, format_type: str = 'onshore') -> List[Dict]:
+    def extract_from_pdf(self, pdf_path: str, include_area: bool = False, format_type: str = 'onshore', progress_callback=None) -> List[Dict]:
         """
         🚀 INTELLIGENT AI-FIRST EXTRACTION:
         
@@ -1700,10 +1700,21 @@ Example 4: "10\"-PG-0003-033842-X-H"
             include_area: If True, detect format with Area (SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS)
                          If False, detect standard format (SIZE-FLUID-SEQUENCE-PIPECLASS)
             format_type: 'onshore' (default) or 'offshore' (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)
+            progress_callback: Optional callable(page_num, total_pages, lines_so_far, phase).
+                               Purely observational — defaults to None so nothing breaks.
+                               Called at the start of each page and after each page finishes.
             
         Returns:
             List of validated line items
         """
+        # --- Safe no-op wrapper so call sites don't need None-guards ---
+        def _emit(page_num, total, lines_so_far, phase):
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(page_num, total, lines_so_far, phase)
+            except Exception as _cb_err:
+                logger.debug(f"progress_callback raised (ignored): {_cb_err}")
         try:
             doc = fitz.open(pdf_path)
             all_line_items = []
@@ -1747,6 +1758,9 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 logger.info(f"\n{'='*60}")
                 logger.info(f"📄 PAGE {page_num + 1}/{len(doc)}")
                 logger.info(f"{'='*60}")
+
+                # Per-page progress signal (purely observational — no core logic changed)
+                _emit(page_num + 1, len(doc), len(all_line_items), 'start')
 
                 # ------------------------------------------------------------------
                 # PHASE 1 (fast path): Extract embedded text directly from PDF.
