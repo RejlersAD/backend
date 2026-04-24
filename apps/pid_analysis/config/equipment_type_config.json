@@ -157,6 +157,18 @@
       "dimension_diameter"
     ],
 
+    "_comment_ai_authoritative": "ai_authoritative_fields: fields where the AI result ALWAYS overrides the regex/OCR extraction — guarantees deterministic, consistent output across users regardless of OCR noise variation (temperature=0). Use ONLY for fields where AI is more reliable than fuzzy regex heuristics (e.g. equipment description, MOC). The AI is still called with min_empty=1 as long as description is listed in ai_gap_fill_fields; fields listed here are simply force-included in every AI call. Set to [] to disable the override and revert to regex-first behaviour.",
+    "ai_authoritative_fields": ["description", "moc"],
+
+    "_comment_dim_reject_tag_serial": "dimension_reject_tag_serial: when true (default), the equipment tag's numeric serial (e.g. 851 from P-851A-TF) is excluded from candidate dimension values. OCR on P&IDs commonly bonds the tag serial to a nearby 'MM' literal producing spurious lengths like '851 MM' or '803 MM'.",
+    "dimension_reject_tag_serial": true,
+
+    "_comment_quality_spec_in_remarks": "quality_spec_in_remarks: when false (default), quality/NACE references are NOT written into the Remarks column. Oil & Gas equipment lists typically leave Remarks for project-specific notes; NACE applicability is derived from service fluid and drawing notes and is NOT a per-row property. Set to true to restore legacy behaviour.",
+    "quality_spec_in_remarks": false,
+
+    "_comment_material_ocr_filter": "material_reject_invalid_ocr: when true (default), MOC values that contain OCR-garbage keywords (HALF, OPEN, PIPE, CuNINoAN, LEVEL, NOTE, SHALL, SEE) or fail the [A-Z0-9 +/.-] token-shape test are rejected. AI gap-fill then provides a clean value. Set to false to keep raw regex output.",
+    "material_reject_invalid_ocr": true,
+
     "_comment_connector_filter": "Gate 1 — connector-arrow context check. On ADNOC/O&G P&IDs the sheet-edge continuation arrows have the format: '[KEYWORD] [DESCRIPTION] [TAG]\\n[DWG-NO]'. If a flow-routing keyword (FROM/TO/VIA etc.) appears within connector_context_lookback_chars chars BEFORE a matched tag AND a cross-reference drawing number (4-5 hyphen-separated segments) appears within connector_context_lookahead_chars chars AFTER it, the tag is classified as a cross-sheet referenced item and skipped. Critically, it is NOT added to the deduplication set — so if the same tag appears later in its own data-box context on this sheet it will still be extracted correctly. Disable by setting connector_context_enabled to false.",
     "connector_context_enabled": true,
     "connector_context_lookback_chars": 80,
@@ -193,8 +205,31 @@
       "(?i)\\brevision\\s*cloud\\b",
       "(?i)\\brev\\.?\\s*cloud\\b"
     ],
+    "_comment_desc_clear": "description_clear_patterns: descriptions matching ANY pattern are BLANKED (not dropped) so the AI gap-fill pass re-extracts the correct data-box title. Use for known notes-bleed / fragment captures that are clearly not an equipment title: single generic words (Pump, Vessel), obvious notes sentences, datasheet fragments, or extraction artefacts. Only adds cleanup — never removes rows.",
+    "description_clear_patterns": [
+      "(?i)\\brated\\s+flow\\b",
+      "(?i)\\ball\\s+instrument\\s+tag",
+      "(?i)\\ball\\s+instruments?\\b",
+      "(?i)\\bsupplied\\s+with\\b",
+      "(?i)\\bdesign\\s+temp\\b",
+      "(?i)\\bmagnetic\\s+flow(?:meter|neter)\\b",
+      "(?i)\\bsee\\s+(?:note|dwg|spec|drawing)\\b",
+      "(?i)\\bnote\\s*[:#]\\s*\\d",
+      "(?i)\\brefer\\s+to\\b",
+      "(?i)\\btag\\s+numbers?\\s+are\\s+suffixed\\b",
+      "(?i)^\\s*pump\\s*$",
+      "(?i)^\\s*vessel\\s*$",
+      "(?i)^\\s*tank\\s*$",
+      "(?i)^\\s*compressor\\s*$",
+      "(?i)^\\s*heat\\s+exchanger\\s*$"
+    ],
     "_comment_dedup_desc": "dedup_by_description_enabled: when true, items sharing the same description are deduplicated — the most-populated record is kept, OCR-variant duplicates are discarded.",
-    "dedup_by_description_enabled": true
+    "dedup_by_description_enabled": true,
+    "_comment_uppercase_fields": "uppercase_fields: canonical uppercase is enforced on these fields at post-processing time. Material codes and abbreviations must render in capitals (e.g. 'cs' → 'CS', 'cS + LINING' → 'CS + LINING'). Applied after both regex extraction and AI gap-fill. Add a field key here to normalize its casing.",
+    "uppercase_fields": [
+      "moc",
+      "insulation"
+    ]
   },
 
   "type_labels": {

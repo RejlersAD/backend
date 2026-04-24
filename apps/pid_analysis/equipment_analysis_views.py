@@ -2381,6 +2381,27 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                         material_class = _mat
                         break
 
+        # ── Material OCR sanity filter (soft-coded) ───────────────────────
+        # Reject MOC strings that contain mixed-case gibberish (OCR bleed from
+        # annotations, e.g. "CS +CuNINoAN", "HALF OPEN PIPE") or invalid chars.
+        # A valid MOC token is ALL UPPERCASE engineering code or contains only
+        # uppercase + digits + + / - space. The config flag
+        # 'material_reject_invalid_ocr' toggles the filter.
+        if material_class and bool(ext_cfg.get('material_reject_invalid_ocr', True)):
+            _mc_upper = material_class.upper().strip()
+            # Count alpha chars that would be lowercase in the ORIGINAL (pre-upper)
+            _had_lowercase = any(c.islower() for c in material_class)
+            # Known-good token shape: 2-25 chars of [A-Z0-9 +/.-]
+            _shape_ok = bool(re.fullmatch(r'[A-Z0-9 +/\.\-]{2,25}', _mc_upper))
+            # Reject common OCR-garbage keywords that are NOT materials
+            _garbage_kw = re.search(
+                r'\b(?:HALF|OPEN|PIPE|CuNINoAN|LEVEL|ONLY|NOTE|SHALL|SEE)\b',
+                material_class, re.IGNORECASE,
+            )
+            if (not _shape_ok) or _garbage_kw or (_had_lowercase and not _shape_ok):
+                print(f'[EQ-DIAG][MOC] rejected OCR-garbage MOC for {tag}: {material_class!r}', flush=True)
+                material_class = ''
+
         # ── Process note references — wider context scan ──────────────────
         _nt_start     = max(0, m.start() - note_ctx_chars)
         _nt_end       = min(len(text), m.end() + note_ctx_chars)
@@ -2637,6 +2658,25 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         _dim_ctx       = text[_dim_start:_dim_end].upper()
         dimension_length   = ''
         dimension_diameter = ''
+
+        # ── Soft-coded: reject dimension values that echo the tag serial ──
+        # OCR on P&IDs sometimes bonds the numeric serial from the equipment
+        # tag (e.g. "851" in "P-851A-TF") to a nearby "MM" / "M" literal,
+        # producing spurious values like "851 MM" or "803 MM".  We build a
+        # reject-set from the current tag's numeric serial (and close OCR
+        # variants) so the dimension scan skips them. Controlled by
+        # 'dimension_reject_tag_serial' (default true) in extraction config.
+        _dim_reject_tag_serial = bool(ext_cfg.get('dimension_reject_tag_serial', True))
+        _tag_serial_reject: set = set()
+        if _dim_reject_tag_serial:
+            _tag_ser_m = re.search(r'-([0-9]{3,5})', tag)
+            if _tag_ser_m:
+                _ts = _tag_ser_m.group(1)
+                _tag_serial_reject.add(_ts)
+                # Also reject "X<serial>" style OCR bleed where a leading digit
+                # (e.g. 82106 = "8" merged with "2106"/"106" page-y-offset noise)
+                # contains the tag serial as a substring. Anchored to exact
+                # serial-length match only to avoid rejecting legitimate 500mm etc.
         # ── Length / Height ──────────────────────────────────────────────
         # OCR artefact: P&ID pipe annotations such as  2"-FL-ACIN-xxxx  are
         # often read as  "2 M"  or  "2 MM"  by Tesseract, and re.search would
@@ -2649,14 +2689,18 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             _win = _dim_ctx[_len_lbl_m.end():_len_lbl_m.end() + _dim_val_win]
             _best_len_val, _best_len_str = 0.0, ''
             for _dv in re.finditer(_dim_val_pat, _win, re.IGNORECASE):
-                _val  = float(_dv.group(1))
+                _raw_num = _dv.group(1)
+                # Reject the current tag's own serial number (OCR bleed)
+                if _raw_num in _tag_serial_reject:
+                    continue
+                _val  = float(_raw_num)
                 _unit = (_dv.group(2) or '').upper()
                 if _unit == 'M' and _val >= DIMENSION_LENGTH_MIN_M and _val > _best_len_val:
                     _best_len_val = _val
-                    _best_len_str = f'{_dv.group(1)} M'
+                    _best_len_str = f'{_raw_num} M'
                 elif _unit in ('MM', '') and _val >= DIMENSION_LENGTH_MIN_MM and _val > _best_len_val:
                     _best_len_val = _val
-                    _best_len_str = f'{_dv.group(1)} {_unit or "MM"}'
+                    _best_len_str = f'{_raw_num} {_unit or "MM"}'
             dimension_length = _best_len_str
         # ── Diameter / Width ─────────────────────────────────────────────
         _dia_lbl_m = re.search(_dim_dia_lbl, _dim_ctx, re.IGNORECASE)
@@ -2664,14 +2708,17 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
             _win = _dim_ctx[_dia_lbl_m.end():_dia_lbl_m.end() + _dim_val_win]
             _best_dia_val, _best_dia_str = 0.0, ''
             for _dv in re.finditer(_dim_val_pat, _win, re.IGNORECASE):
-                _val  = float(_dv.group(1))
+                _raw_num = _dv.group(1)
+                if _raw_num in _tag_serial_reject:
+                    continue
+                _val  = float(_raw_num)
                 _unit = (_dv.group(2) or '').upper()
                 if _unit == 'M' and _val >= DIMENSION_DIAMETER_MIN_M and _val > _best_dia_val:
                     _best_dia_val = _val
-                    _best_dia_str = f'{_dv.group(1)} M'
+                    _best_dia_str = f'{_raw_num} M'
                 elif _unit in ('MM', '') and _val >= DIMENSION_DIAMETER_MIN_MM and _val > _best_dia_val:
                     _best_dia_val = _val
-                    _best_dia_str = f'{_dv.group(1)} {_unit or "MM"}'
+                    _best_dia_str = f'{_raw_num} {_unit or "MM"}'
             dimension_diameter = _best_dia_str
 
         # ── Motor Rating ─────────────────────────────────────────────────
@@ -2711,17 +2758,25 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         # Result is now stored in quality_spec and routed to the 'remarks' field
         # so that 'quality_required' (→ "Quantity Required" column) can hold the
         # numerical count.  Controlled by QUALITY_SPEC_* module-level constants.
+        #
+        # Soft-coded toggle: 'quality_spec_in_remarks' (default False) — when
+        # False, quality/NACE references are NOT routed into the Remarks column.
+        # Oil & Gas equipment lists typically keep Remarks for project notes only;
+        # NACE applicability is derived from service fluid / drawing notes and is
+        # NOT a per-row property. Set to True to restore legacy behaviour.
+        _quality_in_remarks = bool(ext_cfg.get('quality_spec_in_remarks', False))
         quality_spec = ''
-        _qr_m = re.search(_qual_pat, _pp_ctx, re.IGNORECASE)
-        if _qr_m:
-            quality_spec = _qr_m.group(1).strip().upper()
+        if _quality_in_remarks:
+            _qr_m = re.search(_qual_pat, _pp_ctx, re.IGNORECASE)
+            if _qr_m:
+                quality_spec = _qr_m.group(1).strip().upper()
 
         # Strategy 2: scan wider context for explicit NACE reference.
         # P&IDs for sour-service equipment (H2S/SOUR GAS) should comply with
         # NACE MR0175 / ISO 15156.  When the drawing has NACE in the notes or
         # title block, apply it.  Threshold is soft-coded via
         # 'quality_nace_context_chars' (default 1500).
-        if not quality_spec:
+        if _quality_in_remarks and not quality_spec:
             _qual_ctx_chars = int(ext_cfg.get('quality_nace_context_chars', 1500))
             _qual_ctx_start = max(0, m.start() - _qual_ctx_chars)
             _qual_ctx_end   = min(len(text), m.end() + _qual_ctx_chars)
@@ -2736,7 +2791,7 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
         # with NACE MR0175.  Soft-coded disable via
         # 'quality_infer_from_sour_service' = false.
         _infer_sour = bool(ext_cfg.get('quality_infer_from_sour_service', True))
-        if not quality_spec and _infer_sour:
+        if _quality_in_remarks and not quality_spec and _infer_sour:
             _sour_ctx = text[:min(len(text), 6000)]  # check first 6 k chars
             if re.search(r'\bSOUR\s+GAS\b|\bH2S\b|\bHIC\b|\bSSC\b',
                          _sour_ctx, re.IGNORECASE):
@@ -2960,6 +3015,31 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                 f'[EQ-DIAG] Description-reject filter removed {_removed_dr} item(s)',
                 flush=True,
             )
+
+    # ── Description CLEAR filter (keeps the row, blanks the description) ──
+    # Soft-coded via 'description_clear_patterns'. Matches cases where the
+    # regex fallback picked up notes-bleed text as the description (e.g.
+    # "Rated Flow Hr Pump Supplied With", "All Instrument Tag Numbers Are
+    # Suffixed", single-word "Pump"). Clearing the description here means the
+    # AI gap-fill pass (ai_authoritative_fields='description') will re-extract
+    # the correct data-box title. Unlike the reject filter, the equipment row
+    # itself is kept.
+    _desc_clear_pats = ext_cfg.get('description_clear_patterns', [])
+    if _desc_clear_pats:
+        _cleared = 0
+        for _item in results:
+            _desc = _item.get('description', '') or ''
+            if not _desc:
+                continue
+            if any(re.search(_dcpat, _desc) for _dcpat in _desc_clear_pats):
+                _item['description'] = ''
+                _cleared += 1
+        if _cleared:
+            print(
+                f'[EQ-DIAG] Description-clear filter blanked {_cleared} description(s)'
+                ' for AI re-extraction',
+                flush=True,
+            )
     # ── Dedup-by-description gate ──────────────────────────────────────
     # Soft-coded via 'dedup_by_description_enabled' in equipment_type_config.json.
     # When multiple extracted items share the same description (case-insensitive),
@@ -2986,6 +3066,19 @@ def _extract_equipment_items(text: str, drawing_ref: str, config: dict) -> list:
                 f'[EQ-DIAG] Dedup-by-description removed {_removed_dd} duplicate(s)',
                 flush=True,
             )
+
+    # ── Uppercase normalization for material/abbreviation fields ────────────
+    # Soft-coded via 'uppercase_fields' in equipment_type_config.json. Material
+    # codes ("cs", "cS + LINING") must render as canonical uppercase ("CS",
+    # "CS + LINING"). Uses casefold-aware upper() and preserves internal
+    # punctuation/spaces. Only applied to fields listed in config.
+    _upper_fields = ext_cfg.get('uppercase_fields', ['moc', 'insulation'])
+    if _upper_fields:
+        for _item in results:
+            for _uf in _upper_fields:
+                _uv = _item.get(_uf, '')
+                if isinstance(_uv, str) and _uv and _uv.strip() not in ('—', 'N/A'):
+                    _item[_uf] = _uv.upper()
 
     # Soft-coded via config key 'minmax_correction_pairs' in the 'extraction'
     # section. Ensures that design_temp_max is always numerically >= design_temp_min
@@ -3126,6 +3219,79 @@ def _dedup_equipment_by_tag(items: list) -> list:
                 by_tag[tag] = item
     result = list(by_tag.values())
     print(f'[EQ-DIAG] _dedup_equipment_by_tag: {len(items)} in → {len(result)} unique tags out', flush=True)
+
+    # ── Cross-page sibling-unit merge (soft-coded) ──────────────────────────
+    # After multi-page dedup, sibling variants (P-851A / P-851B / P-851C)
+    # extracted from DIFFERENT pages are now all present in `result`. The
+    # per-page sibling merge inside _extract_equipment_items cannot collapse
+    # them because they never lived in the same page's results. Run one more
+    # pass here. Toggle via 'merge_sibling_unit_variants_cross_page'
+    # (default True, inherits same merge settings).
+    try:
+        cfg     = _load_config()
+        ext_cfg = cfg.get('extraction', {})
+        if bool(ext_cfg.get('merge_sibling_unit_variants_cross_page', True)) \
+                and bool(ext_cfg.get('merge_sibling_unit_variants', True)):
+            _sep       = str(ext_cfg.get('sibling_merge_separator', '/'))
+            _min_group = int(ext_cfg.get('sibling_merge_min_group_size', 2))
+            _sibling_split_re = re.compile(
+                r'^([A-Z]{1,2}-[0-9]{3,5})([A-Z])(?:-([A-Z0-9]{1,4}))?$'
+            )
+            _groups: dict = {}
+            _order:  list = []
+            for _i, _it in enumerate(result):
+                _sm = _sibling_split_re.match((_it.get('tag') or '').upper())
+                if not _sm:
+                    continue
+                _key = (_sm.group(1), _sm.group(3) or '')
+                if _key not in _groups:
+                    _groups[_key] = []
+                    _order.append(_key)
+                _groups[_key].append((_i, _sm.group(2)))
+
+            _drop: set = set()
+            _upd:  dict = {}
+            for _key in _order:
+                _members = _groups[_key]
+                if len(_members) < _min_group:
+                    continue
+                _variants_seen: list = []
+                for _i, _v in _members:
+                    if _v not in _variants_seen:
+                        _variants_seen.append(_v)
+                _base, _sfx = _key
+                _merged_tag = f"{_base}{_sep.join(_variants_seen)}"
+                if _sfx:
+                    _merged_tag = f"{_merged_tag}-{_sfx}"
+                # Keep the richest member as the carrier row
+                def _r(it):
+                    return sum(1 for v in it.values() if v and str(v).strip() not in ('', '—', 'None', 'No'))
+                _best = max(_members, key=lambda m: _r(result[m[0]]))[0]
+                _upd[_best] = {
+                    'tag':              _merged_tag,
+                    'quality_required': str(len(_variants_seen)),
+                }
+                for _i, _ in _members:
+                    if _i != _best:
+                        _drop.add(_i)
+                print(
+                    f'[EQ-DIAG] Cross-page sibling-merge: '
+                    f'{[result[i]["tag"] for i, _ in _members]} → {_merged_tag!r}',
+                    flush=True,
+                )
+            if _drop or _upd:
+                _new: list = []
+                for _i, _it in enumerate(result):
+                    if _i in _drop:
+                        continue
+                    if _i in _upd:
+                        _it = dict(_it)
+                        _it.update(_upd[_i])
+                    _new.append(_it)
+                result = _new
+    except Exception as _e:
+        print(f'[EQ-DIAG] Cross-page sibling-merge skipped: {_e}', flush=True)
+
     return result
 
 
@@ -3189,6 +3355,9 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
     temperature = float(ext_cfg.get('ai_gap_fill_temperature', 0))
     min_empty   = int(ext_cfg.get('ai_gap_fill_min_empty_fields', 1))
     provider    = str(ext_cfg.get('ai_gap_fill_provider', 'both')).lower()
+    # Fields where AI result ALWAYS overrides regex — ensures deterministic,
+    # consistent output across users regardless of OCR noise (e.g. description).
+    authoritative_fields = set(ext_cfg.get('ai_authoritative_fields', []))
 
     # Lazy-import to avoid circular imports and keep startup fast
     try:
@@ -3211,7 +3380,15 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
         'design_flowrate':    'Design flowrate or capacity with unit (e.g. "327 M3" or "100 M3/H")',
         'moc':                'Material of construction abbreviation (e.g. "CS", "SS316L", "DUPLEX")',
         'insulation':         'Insulation type code (e.g. "PERS", "HOT", "BARE", "TRACED")',
-        'description':        'Equipment description (2-6 words, e.g. "OIL SLUG CATCHER")',
+        'description':        (
+            'Equipment service description — the exact 2-8 word ALL-CAPS title '
+            'printed in the equipment data box directly below or next to the tag '
+            '(e.g. "MRD THREE PHASE SEPARATOR", "MRD PRODUCED WATER DISPOSAL PUMP", '
+            '"MRD MEA INLET SCRUBBER"). Prefer the literal words on the drawing. '
+            'Do NOT use connector/routing text like "SOUR GAS TO ..." or "FROM ..." '
+            'or "TO ...". Do NOT include pipe tags, line numbers, or drawing numbers. '
+            'Return the title as ALL UPPERCASE.'
+        ),
     }
 
     def _build_prompt(tag: str, empty: list, ctx: str) -> str:
@@ -3255,7 +3432,14 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
             continue
 
         empty_fields = [f for f in fill_fields if not item.get(f)]
-        if len(empty_fields) < min_empty:
+        # Authoritative fields are ALWAYS queried — even when regex populated
+        # them — so the AI result overrides inconsistent OCR-derived values.
+        forced_fields = [
+            f for f in fill_fields
+            if f in authoritative_fields and f not in empty_fields
+        ]
+        query_fields = empty_fields + forced_fields
+        if len(query_fields) < min_empty:
             continue
 
         # Re-locate tag in text for context window
@@ -3266,7 +3450,7 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
         ctx_end   = min(len(text), idx + ctx_chars // 2)
         ctx       = text[ctx_start:ctx_end]
 
-        prompt = _build_prompt(tag, empty_fields, ctx)
+        prompt = _build_prompt(tag, query_fields, ctx)
 
         # ── Pass 1: primary provider (GPT-4o, with auto Gemini fallback) ──
         gpt_result = {}
@@ -3276,22 +3460,40 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
         # ── Pass 2: Gemini second-opinion (fills any fields GPT-4o left null) ──
         gem_result = {}
         if provider in ('gemini', 'both'):
-            still_empty = [f for f in empty_fields if not gpt_result.get(f)]
+            still_empty = [f for f in query_fields if not gpt_result.get(f)]
             if still_empty:
                 gem_result = _call_ai(_build_prompt(tag, still_empty, ctx), 'gemini')
 
-        # ── Merge: OpenAI wins over Gemini; neither overwrites regex values ──
+        # ── Merge: OpenAI wins over Gemini.
+        # Authoritative fields: AI always overrides regex.
+        # Non-authoritative fields: AI fills only when regex left it empty.
         filled = []
-        for f in empty_fields:
-            if item.get(f):
-                continue                       # already filled by regex — skip
+        for f in query_fields:
             val = gpt_result.get(f) or gem_result.get(f)
-            if val and str(val).strip().lower() not in ('null', 'none', ''):
-                item[f] = str(val).strip()
-                filled.append(f)
+            if not val or str(val).strip().lower() in ('null', 'none', ''):
+                continue
+            is_authoritative = f in authoritative_fields
+            if item.get(f) and not is_authoritative:
+                continue                       # already filled by regex — skip
+            new_val = str(val).strip()
+            if is_authoritative and item.get(f) == new_val:
+                continue                       # no change
+            item[f] = new_val
+            filled.append(f)
 
         if filled:
             print(f'[EQ-DIAG][AI-FILL] {tag}: AI filled {filled}', flush=True)
+
+    # ── Uppercase normalization for material/abbreviation fields ─────────
+    # Applied again here so AI-filled MOC / insulation values also render in
+    # canonical uppercase. Soft-coded via 'uppercase_fields' in config.
+    _upper_fields_ai = ext_cfg.get('uppercase_fields', ['moc', 'insulation'])
+    if _upper_fields_ai:
+        for _it in items:
+            for _uf in _upper_fields_ai:
+                _uv = _it.get(_uf, '')
+                if isinstance(_uv, str) and _uv and _uv.strip() not in ('—', 'N/A'):
+                    _it[_uf] = _uv.upper()
 
     return items
 
