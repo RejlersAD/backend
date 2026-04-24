@@ -435,6 +435,288 @@ ENRICHMENT_CONFIG = {
     "desc_min_words": 2,
 }
 
+# ────────────────────────────────────────────────────────────────────────────
+# SOFT-CODED INSTRUMENT VALIDATION / CLEAN-UP LAYER
+# ----------------------------------------------------------------------------
+# Addresses real-world P&ID feedback (see feature-instrument.instructions.md)
+#   1. Random P&ID no (not title-block)  → per-page title-block scan
+#   2. Tags inside line-numbers picked up as instruments (e.g. PG-45011 inside
+#      "12"-13-PG-45011-A0JP08-F")                            → line-context filter
+#   3. Tank-level labels mistakenly flagged as instruments
+#      (e.g. LSH-800-300 = tank level, not an instrument)    → level-label heuristic
+#   4. ISA-5.1 universal tag format: Unit-InstrumentTag-Seq  → format validator
+#   5. Accessories auto-inference: TT usually has TE + TW    → accessories map
+#   6. "Inline" function codes to prioritise                 → PG, PT, TG, TT …
+#
+# Every behaviour here can be switched off, or its threshold tuned, without
+# touching any extraction regex or engine code.  Pure post-processing.
+# ────────────────────────────────────────────────────────────────────────────
+INSTRUMENT_VALIDATION_CONFIG = {
+    "enabled": True,
+
+    # 1 ── Per-page P&ID number extraction (from title block) -----------------
+    "per_page_pid_no": {
+        "enabled": True,
+        # Fallback to drawing_info["pid_no"] when title-block detect fails
+        "fallback_to_input": True,
+    },
+
+    # 2 ── Line-context filter ----------------------------------------------
+    # If a candidate instrument tag appears as a TOKEN INSIDE a known
+    # line-number pattern on the page text, drop it — it's a line spec, not
+    # an instrument.  Patterns are the same as ENRICHMENT_CONFIG['line_no_re']
+    # so tuning one updates both.
+    "line_context_filter": {
+        "enabled": True,
+        # Minimum confidence before dropping: if we can't positively confirm
+        # the tag lives inside a line number, keep it.
+        "require_containment": True,
+    },
+
+    # 3 ── Level-label heuristic --------------------------------------------
+    # Tags matching `^L[SI]?H?L?-\d{3}-\d{3}$` where the numbers are "round"
+    # (like 800-300, 1000-500) are commonly tank level / nozzle labels, not
+    # instruments.  Flag them via notes and expose in `warnings` field.
+    "level_label_filter": {
+        "enabled": True,
+        # Function-code prefixes to check
+        "prefixes": ["LSH", "LSL", "LSHH", "LSLL", "LI", "LG"],
+        # If the trailing segment is a round multiple of this → warn
+        "round_multiple": 50,
+        # Action: 'warn'  → add note + warning, keep row
+        #         'drop'  → remove from results
+        "action": "warn",
+    },
+
+    # 4 ── ISA-5.1 universal tag-format validator ---------------------------
+    # Canonical shape: <UNIT>-<INSTRUMENT_TAG>-<SEQUENCE>
+    # UNIT     = 2–4 digits (loop / area / unit number)
+    # TAG      = 2–6 letters (ISA function code)
+    # SEQUENCE = 1–4 chars, digits optionally followed by a single letter
+    "format_validator": {
+        "enabled": True,
+        # Regexes ordered most-specific → most-permissive.  Any match = valid.
+        "valid_patterns": [
+            # Standard 3-part:  FT-3901-01, PIT-2600-12A
+            r"^[A-Z]{2,6}-\d{2,4}-\d{1,4}[A-Z]?$",
+            # 2-part (older Gulf / ADNOC FEED): FT-3901A
+            r"^[A-Z]{2,6}-\d{2,4}[A-Z]?$",
+            # Unit-prefixed 4-part: 26-FT-3901-01
+            r"^\d{2}-[A-Z]{2,6}-\d{2,4}-\d{1,4}[A-Z]?$",
+        ],
+        # When invalid → keep row but add warning + mark `format_valid=False`.
+        "action": "warn",
+    },
+
+    # 5 ── Accessory auto-inference ----------------------------------------
+    # Parent function code → list of accessory codes that are implied.
+    # Soft-coded per ISA-5.1 best practice.  Accessories inherit the parent's
+    # unit/sequence numbers and are marked `inferred=True` so engineers can
+    # confirm visually on the P&ID.
+    "accessories": {
+        "enabled": True,
+        "map": {
+            # Temperature transmitter → element + thermowell
+            "TT":  ["TE", "TW"],
+            "TIT": ["TE", "TW"],
+            # Flow transmitter → element / orifice
+            "FT":  ["FE"],
+            "FIT": ["FE"],
+            # Pressure transmitter (often) → isolation valve manifold (not auto-created —
+            # valves are not in INSTRUMENT_CATEGORIES, so we leave it off).
+            # Level transmitter (DP-type) → HP/LP taps are piping, not instruments.
+        },
+        # Duplicate guard — skip accessory if the same code+unit+seq already exists
+        "dup_guard": True,
+    },
+
+    # 6 ── Inline-instrument priority list ---------------------------------
+    # Per feedback: extractions should start from basic inline instruments.
+    # We mark these with `is_inline=True` and move them to the top of the
+    # result list (index_no is recomputed).
+    "inline_priority": {
+        "enabled": True,
+        "codes": ["PG", "PI", "PT", "TG", "TI", "TT", "LG", "LI", "LT", "FG", "FI", "FE"],
+    },
+}
+
+# ────────────────────────────────────────────────────────────────────────────
+# SOFT-CODED SMART DEFAULTS for Fail-Safe / Signal / Set-Point columns
+# ----------------------------------------------------------------------------
+# Post-enrichment layer that (1) **validates** the values produced by the
+# proximity regex scan against the instrument's function code/category, and
+# (2) fills sensible engineering defaults where the drawing does not spell
+# the value out explicitly (local gauges → "Local", transmitters → "4-20mA",
+# safety valves → "FO", etc.).
+#
+# Everything here is tunable without touching extraction / regex logic.
+# Set `enabled: False` to revert to pure drawing-only values.
+# ────────────────────────────────────────────────────────────────────────────
+SMART_FIELD_DEFAULTS_CONFIG = {
+    "enabled": True,
+
+    # ── FAIL-SAFE rules ─────────────────────────────────────────────────
+    "fail_safe": {
+        # Function-code prefix → default fail-safe position
+        # (ISA-5.1 / industry convention; override per project if needed)
+        "by_prefix": {
+            # Shutdown / ESD valves default fail-close
+            "SDV":  "FC",
+            "ESDV": "FC",
+            "ESV":  "FC",
+            "XV":   "FC",   # on/off block valve — assume FC unless marked
+            "BDV":  "FO",   # blow-down valve — fail-open to relieve
+            # Pressure-relief / safety
+            "PSV":  "FO",   # pressure safety valve — spring-operated, treat as FO
+            "PRV":  "FO",
+            "PSE":  "FO",   # rupture disc
+            # Control valves — conservative industry default = FC
+            # (process fluid isolation on air/power failure).  Project-specific
+            # services (e.g. anti-surge PCV, cooling-water FCV) may differ and
+            # should be corrected by the explicit drawing callout.
+            "FCV":  "FC", "FV": "FC",
+            "PCV":  "FC", "PV": "FC",
+            "TCV":  "FC", "TV": "FC",
+            "LCV":  "FC", "LV": "FC",
+            "HCV":  "FC", "HV": "FC",
+            "CV":   "FC",
+            # Solenoid / motor-operated — energise to open → FC on power loss
+            "SOV":  "FC", "MOV": "FC",
+            "ZV":   "FC",
+        },
+        # Category-wide fallback (used only if prefix isn't in by_prefix above)
+        "by_category": {
+            "Shutdown & ESD":   "FC",
+            "Pressure Relief":  "FO",
+            "Motor & Solenoid": "FC",
+        },
+        # Clear value if it was wrongly extracted for a non-valve instrument
+        "clear_for_non_valve": True,
+        # Function codes that qualify as "valve" — others get fail_safe cleared
+        "valve_prefixes": {
+            "SDV", "ESDV", "ESV", "XV", "BDV", "PSV", "PRV", "PSE",
+            "FCV", "PCV", "TCV", "LCV", "HCV", "FV", "PV", "TV", "LV",
+            "CV", "PV", "ZV", "MV", "TSV",
+        },
+    },
+
+    # ── SIGNAL-TYPE rules ───────────────────────────────────────────────
+    "signal_type": {
+        # Function-code prefix → default signal type
+        "by_prefix": {
+            # Transmitters — 4-20mA HART is the industry default
+            "PT":  "4-20mA HART", "PIT": "4-20mA HART",
+            "TT":  "4-20mA HART", "TIT": "4-20mA HART",
+            "FT":  "4-20mA HART", "FIT": "4-20mA HART",
+            "LT":  "4-20mA HART", "LIT": "4-20mA HART",
+            "AT":  "4-20mA HART", "AIT": "4-20mA HART",
+            "DPT": "4-20mA HART", "DT":  "4-20mA HART",
+            "VT":  "4-20mA HART", "WT":  "4-20mA HART",
+            # Switches / discrete devices
+            "PSH": "Discrete (DI)", "PSL": "Discrete (DI)",
+            "PSHH":"Discrete (DI)", "PSLL":"Discrete (DI)",
+            "TSH": "Discrete (DI)", "TSL": "Discrete (DI)",
+            "LSH": "Discrete (DI)", "LSL": "Discrete (DI)",
+            "LSHH":"Discrete (DI)", "LSLL":"Discrete (DI)",
+            "FSH": "Discrete (DI)", "FSL": "Discrete (DI)",
+            "ZSH": "Discrete (DI)", "ZSL": "Discrete (DI)",
+            # Solenoids / outputs
+            "SOV": "Discrete (DO)", "XY": "Discrete (DO)",
+            # Valves (on/off vs modulating)
+            "SDV": "Discrete (DO)", "ESDV": "Discrete (DO)",
+            "XV":  "Discrete (DO)", "BDV": "Discrete (DO)",
+            "FCV": "4-20mA", "PCV": "4-20mA",
+            "TCV": "4-20mA", "LCV": "4-20mA",
+            # Relays / computers
+            "FY": "Digital", "PY": "Digital", "TY": "Digital", "LY": "Digital",
+            # Local gauges / indicators / sight glasses → NO signal
+            "PG":  "Local (Mechanical)", "PI":  "Local (Mechanical)",
+            "TG":  "Local (Mechanical)", "TI":  "Local (Mechanical)",
+            "LG":  "Local (Mechanical)", "LI":  "Local (Mechanical)",
+            "FG":  "Local (Mechanical)", "FI":  "Local (Mechanical)",
+            "SG":  "Local (Mechanical)",
+            # Elements — upstream of a transmitter, no signal of its own
+            "TE":  "RTD / Thermocouple",
+            "TW":  "—",
+            "FE":  "—",
+            "PE":  "—",
+            "LE":  "—",
+        },
+        # Categories that NEVER carry an electronic signal — always force "Local"
+        "local_only_categories": set(),
+        # If the regex pass put "4-20mA" on a local-gauge code, override it
+        "validate_against_prefix": True,
+    },
+
+    # ── SET-POINT rules ─────────────────────────────────────────────────
+    "set_point": {
+        # When no numeric set point found on the drawing, provide a
+        # unit hint based on the instrument category so the engineer
+        # sees what kind of value is expected.
+        "unit_hint_by_category": {
+            "Pressure":              "—— bar(g)",
+            "Differential Pressure": "—— mbar",
+            "Temperature":           "—— °C",
+            "Level":                 "—— %",
+            "Flow":                  "—— m³/h",
+            "Analysis":              "—— ppm",
+            "Shutdown & ESD":        "Trip on alarm",
+            "Pressure Relief":       "—— bar(g) (set)",
+            "Motor & Solenoid":      "Energise / De-energise",
+            "Position":              "Open / Closed",
+        },
+        # Fallback when category is unknown — derive from the first letter
+        # of the ISA function code (P = Pressure, T = Temperature, etc.).
+        "unit_hint_by_first_letter": {
+            "P": "—— bar(g)",
+            "T": "—— °C",
+            "F": "—— m³/h",
+            "L": "—— %",
+            "A": "—— ppm",
+            "D": "—— mbar",     # D = Differential
+            "S": "—— rpm",      # S = Speed
+            "V": "—— m/s",      # V = Vibration/Velocity
+            "W": "—— kg",       # W = Weight
+            "J": "—— A",        # J = Power (current)
+            "I": "—— A",        # I = Current
+            "E": "—— V",        # E = Voltage
+            "Z": "Open / Closed",  # Z = Position
+        },
+        # Switches always have a set-point; mark "Field-adjustable" when missing
+        "switch_prefixes": {
+            "PSH", "PSL", "PSHH", "PSLL",
+            "TSH", "TSL", "TSHH", "TSLL",
+            "LSH", "LSL", "LSHH", "LSLL",
+            "FSH", "FSL", "ZSH", "ZSL",
+        },
+        "switch_default": "Field-adjustable",
+        # Control valves get a default when no explicit SP found on drawing
+        "control_valve_prefixes": {
+            "FCV", "PCV", "TCV", "LCV", "HCV",
+            "FV", "PV", "TV", "LV", "HV", "CV",
+        },
+        "control_valve_default": "Set by DCS loop",
+        # Transmitters / indicators / elements generally have no set-point
+        "no_setpoint_prefixes": {
+            "PT","PIT","TT","TIT","FT","FIT","LT","LIT","AT","AIT",
+            "DPT","PG","PI","TG","TI","LG","LI","FG","FI","SG",
+            "TE","TW","FE","PE","LE",
+        },
+        "no_setpoint_marker": "—",
+        # Validate current value's unit matches the category;
+        # if mismatch (e.g. "100 bar" on a Temperature instrument) → clear.
+        "validate_units_by_category": True,
+        "category_units": {
+            "Pressure":              {"bar", "barg", "bara", "kpa", "mpa", "psi", "psig", "psia"},
+            "Differential Pressure": {"mbar", "kpa", "pa", "inh2o", "mmh2o", "bar"},
+            "Temperature":           {"°c", "°f", "degc", "degf", "k"},
+            "Flow":                  {"m3/h", "nm3/h", "kg/h", "t/h", "mmscfd", "scfd", "gpm", "bpd", "lpm"},
+            "Level":                 {"%", "mm", "m", "ft", "in"},
+            "Analysis":              {"ppm", "ppb", "%", "mg/l"},
+        },
+    },
+}
+
 # Human-readable verb per instrument category — used to build default service descriptions
 _SERVICE_VERB_MAP = {
     "Flow":                  "Flow Measurement",
@@ -677,6 +959,19 @@ class InstrumentIndexService:
                     if inst.get("drawing_number") in ("N/A", "", None):
                         inst["drawing_number"] = dn
 
+            # ── Smart validation / accessory inference / inline priority ──
+            # Soft-coded via INSTRUMENT_VALIDATION_CONFIG (see top of module).
+            # Purely additive: filters out false positives (tags inside line
+            # numbers, tank-level labels), flags non-ISA-5.1 formats,
+            # synthesises accessories (TE+TW for TT, FE for FT), and re-orders
+            # inline instruments (PG/PT/TG/TT…) first.
+            try:
+                all_instruments = self._apply_post_validation(
+                    all_instruments, pid_bytes, drawing_info
+                )
+            except Exception as ve:
+                logger.warning(f"[InstrumentIndex] Post-validation skipped: {ve}")
+
             logger.info(f"[InstrumentIndex] ✅ Total unique instruments: {len(all_instruments)}")
             return all_instruments
 
@@ -688,6 +983,375 @@ class InstrumentIndexService:
     # Contextual enrichment — fills service description, line no., etc.
     # 100 % pattern-based, zero AI quota consumed.
     # ────────────────────────────────────────────────────────────────────
+
+    # ────────────────────────────────────────────────────────────────────
+    # SMART VALIDATION / CLEAN-UP LAYER
+    # All soft-coded via INSTRUMENT_VALIDATION_CONFIG.  Addresses expert
+    # feedback: random P&ID no, tags inside line numbers, tank-level labels,
+    # tag-format checks, accessory inference, inline-instrument priority.
+    # ────────────────────────────────────────────────────────────────────
+
+    def _extract_per_page_pid_numbers(self, pid_bytes):
+        """
+        Return dict {page_number (1-based) → detected P&ID No} using the same
+        title-block heuristics as the global detector, but scanned page by page.
+        If a page has no clear candidate, the entry is omitted.
+        """
+        result = {}
+        try:
+            import fitz
+        except ImportError:
+            return result
+        try:
+            doc = fitz.open(stream=pid_bytes, filetype="pdf")
+        except Exception:
+            return result
+        try:
+            for page_idx in range(len(doc)):
+                try:
+                    txt = doc[page_idx].get_text("text") or ""
+                    cand = self._extract_drawing_number_from_text(txt)
+                    if cand:
+                        result[page_idx + 1] = cand
+                except Exception:
+                    continue
+        finally:
+            doc.close()
+        return result
+
+    def _build_page_text_map(self, pid_bytes):
+        """Return {page_number → full text} for line-context filtering."""
+        out = {}
+        try:
+            import fitz
+            doc = fitz.open(stream=pid_bytes, filetype="pdf")
+        except Exception:
+            return out
+        try:
+            for page_idx in range(len(doc)):
+                try:
+                    out[page_idx + 1] = doc[page_idx].get_text("text") or ""
+                except Exception:
+                    continue
+        finally:
+            doc.close()
+        return out
+
+    def _tag_is_inside_line_number(self, tag, page_texts):
+        """
+        True if `tag` appears as a substring of any line-number token on any
+        page.  Uses ENRICHMENT_CONFIG['line_no_re'] so line-list tuning
+        automatically applies here.
+        """
+        if not tag or not page_texts:
+            return False
+        tag_u = tag.strip().upper()
+        line_patterns = [re.compile(p, re.IGNORECASE) for p in ENRICHMENT_CONFIG.get("line_no_re", [])]
+        for text in page_texts.values():
+            if not text:
+                continue
+            for lp in line_patterns:
+                for m in lp.finditer(text):
+                    token = m.group(0).upper()
+                    # Strip separators/spaces for robust containment check
+                    token_clean = re.sub(r"\s+", "", token)
+                    if tag_u in token_clean:
+                        # Confirm it's INSIDE the line (not the full line itself)
+                        if token_clean != tag_u and len(token_clean) > len(tag_u):
+                            return True
+        return False
+
+    def _is_level_label_like(self, tag):
+        """
+        Heuristic: tags shaped like LSH-800-300 where the trailing numbers are
+        round (multiples of e.g. 50) are usually tank level / nozzle labels
+        rather than instrument tags.
+        """
+        cfg = INSTRUMENT_VALIDATION_CONFIG.get("level_label_filter", {})
+        if not cfg.get("enabled"):
+            return False
+        prefixes = tuple(cfg.get("prefixes", []))
+        round_mult = int(cfg.get("round_multiple", 50)) or 50
+        tag_u = (tag or "").upper().strip()
+        m = re.match(r"^([A-Z]{1,4})-(\d{2,4})-(\d{2,4})$", tag_u)
+        if not m:
+            return False
+        if not m.group(1) in prefixes:
+            return False
+        try:
+            n1 = int(m.group(2))
+            n2 = int(m.group(3))
+        except ValueError:
+            return False
+        # Both numbers round multiples → strong level-label signal
+        return (n1 % round_mult == 0) and (n2 % round_mult == 0)
+
+    def _validate_tag_format(self, tag):
+        """Return True if the tag matches any of the ISA-5.1 universal shapes."""
+        cfg = INSTRUMENT_VALIDATION_CONFIG.get("format_validator", {})
+        if not cfg.get("enabled"):
+            return True
+        tag_u = (tag or "").strip().upper()
+        for pat in cfg.get("valid_patterns", []):
+            if re.match(pat, tag_u):
+                return True
+        return False
+
+    def _infer_accessories(self, instruments, dn, rev):
+        """
+        Given a list of extracted instruments, create accessory stub records
+        (TE, TW for TT; FE for FT, etc.) per INSTRUMENT_VALIDATION_CONFIG.
+        Accessories inherit unit/sequence numbers and are marked inferred=True.
+        """
+        cfg = INSTRUMENT_VALIDATION_CONFIG.get("accessories", {})
+        if not cfg.get("enabled"):
+            return []
+        amap = cfg.get("map", {})
+        dup_guard = cfg.get("dup_guard", True)
+
+        existing_tags = {
+            (i.get("tag_number") or "").strip().upper() for i in instruments
+        }
+        inferred = []
+        for inst in list(instruments):
+            tag = (inst.get("tag_number") or "").strip().upper()
+            m = re.match(r"^([A-Z]{2,6})(-.+)$", tag)
+            if not m:
+                continue
+            prefix = m.group(1)
+            suffix = m.group(2)  # e.g. "-3901-01"
+            if prefix not in amap:
+                continue
+            for acc_code in amap[prefix]:
+                new_tag = f"{acc_code}{suffix}"
+                if dup_guard and new_tag in existing_tags:
+                    continue
+                if acc_code not in INSTRUMENT_CATEGORIES:
+                    continue
+                rec = self._make_instrument_record(
+                    new_tag, acc_code, INSTRUMENT_CATEGORIES[acc_code],
+                    dn, rev, f"Inferred accessory of {tag}"
+                )
+                rec["inferred"] = True
+                rec["parent_tag"] = tag
+                rec["service_description"] = (
+                    inst.get("service_description") or ""
+                )
+                rec["line_number"] = inst.get("line_number") or "N/A"
+                rec["equipment_number"] = inst.get("equipment_number") or "N/A"
+                rec["pid_no"] = inst.get("pid_no") or "N/A"
+                rec["drawing_number"] = inst.get("drawing_number") or dn
+                rec["loop_number"] = inst.get("loop_number") or self._derive_loop_number(new_tag)
+                inferred.append(rec)
+                existing_tags.add(new_tag)
+        return inferred
+
+    def _apply_smart_field_defaults(self, instruments):
+        """
+        Validate + intelligently default the Fail-Safe / Signal / Set-Point
+        columns using SMART_FIELD_DEFAULTS_CONFIG.  Runs after regex-based
+        enrichment so explicit drawing values always win; we only touch a
+        field if it is N/A or clearly mis-assigned (e.g. 4-20mA on a local
+        gauge, or a pressure set-point on a temperature instrument).
+        """
+        cfg = SMART_FIELD_DEFAULTS_CONFIG
+        if not cfg.get("enabled", True) or not instruments:
+            return instruments
+
+        fs_cfg  = cfg.get("fail_safe", {})
+        sig_cfg = cfg.get("signal_type", {})
+        sp_cfg  = cfg.get("set_point", {})
+
+        fs_prefix_map = fs_cfg.get("by_prefix", {})
+        fs_cat_map    = fs_cfg.get("by_category", {})
+        valve_prefixes = set(fs_cfg.get("valve_prefixes", set()))
+
+        sig_prefix_map = sig_cfg.get("by_prefix", {})
+
+        sp_unit_hint   = sp_cfg.get("unit_hint_by_category", {})
+        sp_hint_letter = sp_cfg.get("unit_hint_by_first_letter", {})
+        sp_switches    = set(sp_cfg.get("switch_prefixes", set()))
+        sp_cvalves     = set(sp_cfg.get("control_valve_prefixes", set()))
+        sp_no_setpt    = set(sp_cfg.get("no_setpoint_prefixes", set()))
+        sp_units_cat   = sp_cfg.get("category_units", {})
+
+        cleared_fs = cleared_sig = cleared_sp = 0
+        filled_fs = filled_sig = filled_sp = 0
+
+        for inst in instruments:
+            tag = (inst.get("tag_number") or "").strip().upper()
+            m = re.match(r"^([A-Z]{2,6})", tag)
+            prefix = m.group(1) if m else ""
+            category = inst.get("category") or ""
+
+            # ── 1) FAIL-SAFE ─────────────────────────────────────────────
+            cur_fs = (inst.get("fail_safe") or "").strip()
+            is_valve = prefix in valve_prefixes
+            if fs_cfg.get("clear_for_non_valve", True) and not is_valve:
+                if cur_fs and cur_fs not in ("N/A", "—", "-"):
+                    inst["fail_safe"] = "N/A"
+                    cleared_fs += 1
+                    cur_fs = "N/A"
+            if cur_fs in ("", "N/A", None) and is_valve:
+                default_fs = fs_prefix_map.get(prefix) or fs_cat_map.get(category)
+                if default_fs:
+                    inst["fail_safe"] = default_fs
+                    filled_fs += 1
+
+            # ── 2) SIGNAL TYPE ───────────────────────────────────────────
+            cur_sig = (inst.get("signal_type") or "").strip()
+            prefix_default_sig = sig_prefix_map.get(prefix)
+
+            # Validate: override a clearly-wrong value on local-only devices
+            if sig_cfg.get("validate_against_prefix", True) and prefix_default_sig:
+                looks_local = prefix_default_sig.startswith("Local") or prefix_default_sig == "—"
+                if looks_local and cur_sig and cur_sig not in ("N/A", "", "—"):
+                    # Only override if current value looks like an electronic signal
+                    if re.search(r"(4-20|HART|FIELD|PROFI|DI|DO|DISCRETE|DIGITAL)", cur_sig, re.IGNORECASE):
+                        inst["signal_type"] = prefix_default_sig
+                        cleared_sig += 1
+                        cur_sig = prefix_default_sig
+
+            if cur_sig in ("", "N/A", None) and prefix_default_sig:
+                inst["signal_type"] = prefix_default_sig
+                filled_sig += 1
+
+            # ── 3) SET POINT ─────────────────────────────────────────────
+            cur_sp = (inst.get("set_point") or "").strip()
+
+            # Validate current set-point's unit matches category
+            if sp_cfg.get("validate_units_by_category", True) and cur_sp and cur_sp not in ("N/A", "—"):
+                expected_units = sp_units_cat.get(category)
+                if expected_units:
+                    sp_low = cur_sp.lower()
+                    if not any(u in sp_low for u in expected_units):
+                        inst["set_point"] = "N/A"
+                        cleared_sp += 1
+                        cur_sp = "N/A"
+
+            if cur_sp in ("", "N/A", None):
+                if prefix in sp_switches:
+                    inst["set_point"] = sp_cfg.get("switch_default", "Field-adjustable")
+                    filled_sp += 1
+                elif prefix in sp_no_setpt:
+                    inst["set_point"] = sp_cfg.get("no_setpoint_marker", "—")
+                    filled_sp += 1
+                elif prefix in sp_cvalves:
+                    inst["set_point"] = sp_cfg.get("control_valve_default", "Set by DCS loop")
+                    filled_sp += 1
+                elif category in sp_unit_hint:
+                    inst["set_point"] = sp_unit_hint[category]
+                    filled_sp += 1
+                elif prefix and prefix[0] in sp_hint_letter:
+                    inst["set_point"] = sp_hint_letter[prefix[0]]
+                    filled_sp += 1
+
+        logger.info(
+            f"[SmartDefaults] fail_safe: cleared={cleared_fs} filled={filled_fs} | "
+            f"signal: cleared={cleared_sig} filled={filled_sig} | "
+            f"set_point: cleared={cleared_sp} filled={filled_sp}"
+        )
+        return instruments
+
+    def _apply_post_validation(self, instruments, pid_bytes, drawing_info):
+        """
+        Orchestrate all post-processing fixes.  Pure add-on — never modifies
+        extraction/regex behaviour.  Safe to disable via
+        INSTRUMENT_VALIDATION_CONFIG['enabled'] = False.
+        """
+        if not INSTRUMENT_VALIDATION_CONFIG.get("enabled", True):
+            return instruments
+        if not instruments:
+            return instruments
+
+        dn = drawing_info.get("drawing_number", "")
+        rev = drawing_info.get("revision", "0")
+
+        # 1) Per-page P&ID number stamping
+        ppg_cfg = INSTRUMENT_VALIDATION_CONFIG.get("per_page_pid_no", {})
+        if ppg_cfg.get("enabled", True):
+            pid_per_page = self._extract_per_page_pid_numbers(pid_bytes)
+            if pid_per_page:
+                for inst in instruments:
+                    page = inst.get("page") or inst.get("page_number")
+                    resolved = pid_per_page.get(page)
+                    if resolved:
+                        inst["pid_no"] = resolved
+                    elif ppg_cfg.get("fallback_to_input", True):
+                        inst.setdefault("pid_no", drawing_info.get("pid_no") or dn)
+
+        # Pre-compute the page→text map once for the line-context filter
+        page_texts = self._build_page_text_map(pid_bytes)
+
+        # 2) Line-context filter  +  3) Level-label filter  +  4) Format check
+        lc_cfg = INSTRUMENT_VALIDATION_CONFIG.get("line_context_filter", {})
+        lvl_cfg = INSTRUMENT_VALIDATION_CONFIG.get("level_label_filter", {})
+        filtered = []
+        dropped = 0
+        for inst in instruments:
+            tag = (inst.get("tag_number") or "").strip().upper()
+            warnings = list(inst.get("warnings") or [])
+
+            # 2) inside line-number?
+            if lc_cfg.get("enabled", True) and self._tag_is_inside_line_number(tag, page_texts):
+                dropped += 1
+                logger.info(
+                    f"[Validator] ⛔ drop '{tag}' — appears inside line number token"
+                )
+                continue
+
+            # 3) tank-level label?
+            if self._is_level_label_like(tag):
+                if lvl_cfg.get("action", "warn") == "drop":
+                    dropped += 1
+                    logger.info(
+                        f"[Validator] ⛔ drop '{tag}' — tank-level label, not instrument"
+                    )
+                    continue
+                warnings.append("Possible tank-level / nozzle label — verify manually")
+
+            # 4) ISA-5.1 universal format check
+            if not self._validate_tag_format(tag):
+                warnings.append("Tag does not match ISA-5.1 Unit-Tag-Sequence format")
+                inst["format_valid"] = False
+            else:
+                inst["format_valid"] = True
+
+            if warnings:
+                inst["warnings"] = warnings
+            filtered.append(inst)
+
+        if dropped:
+            logger.info(f"[Validator] Dropped {dropped} tag(s) via line-context / level-label filters")
+
+        # 5) Accessory auto-inference
+        inferred = self._infer_accessories(filtered, dn, rev)
+        if inferred:
+            logger.info(f"[Validator] ➕ {len(inferred)} accessory instruments inferred")
+            filtered.extend(inferred)
+
+        # 5b) Smart defaults for Fail-Safe / Signal / Set-Point
+        filtered = self._apply_smart_field_defaults(filtered)
+
+        # 6) Inline-instrument priority re-sort
+        ip_cfg = INSTRUMENT_VALIDATION_CONFIG.get("inline_priority", {})
+        if ip_cfg.get("enabled", True):
+            inline_codes = set(c.upper() for c in ip_cfg.get("codes", []))
+            def _inline_key(inst):
+                tag = (inst.get("tag_number") or "").upper()
+                m = re.match(r"^([A-Z]{2,6})", tag)
+                code = m.group(1) if m else ""
+                is_inline = code in inline_codes
+                inst["is_inline"] = is_inline
+                # sort: inline first (0), then others (1); stable within group
+                return (0 if is_inline else 1,)
+            filtered.sort(key=_inline_key)
+
+        # Rebuild sequential index numbers
+        for i, inst in enumerate(filtered, start=1):
+            inst["index_no"] = i
+
+        return filtered
 
     def _enrich_from_pdf_context(self, instruments, pid_bytes):
         """
