@@ -37,6 +37,40 @@ logger = logging.getLogger(__name__)
 # Progress is written to /tmp/base_extraction_{task_id}.json so every
 # Gunicorn worker on the same container can read it during polling.
 # ---------------------------------------------------------------------------
+def _extract_pid_no_per_page(file_path: str) -> dict:
+    """
+    Build a {page_index (1-based): dwg_no} map for a P&ID PDF.
+
+    Reuses the title-block drawing-number extractor from apps.pid_analysis
+    (text-based fallback + PyMuPDF coord-based), called per page so each line
+    row can be stamped with the P&ID drawing number it belongs to. Returns
+    an empty dict on any failure — caller falls back gracefully.
+
+    Soft-coded: no new knobs here; all behaviour flows from the existing
+    title-block constants in equipment_analysis_views.
+    """
+    page_map: dict = {}
+    try:
+        import fitz as _fitz  # PyMuPDF — already a project dependency
+        from apps.pid_analysis.equipment_analysis_views import (
+            _extract_titleblock_dwg_no,
+        )
+        doc = _fitz.open(file_path)
+        try:
+            for _pg_idx in range(len(doc)):
+                try:
+                    _text = doc[_pg_idx].get_text() or ''
+                    _dwg = _extract_titleblock_dwg_no(_text) or ''
+                except Exception:
+                    _dwg = ''
+                page_map[_pg_idx + 1] = _dwg  # 1-based to match pid_ocr_extractor
+        finally:
+            doc.close()
+    except Exception as _e:
+        logger.warning(f'[base_extract_thread] P&ID No. per-page extraction failed: {_e}')
+    return page_map
+
+
 def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, format_type, legend_file_path=None):
     """Spawn a daemon thread that runs P&ID OCR and writes progress to /tmp/."""
     progress_file = f'/tmp/base_extraction_{task_id}.json'
@@ -110,15 +144,27 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                 progress_callback=_page_progress,
             )
             _write('PROGRESS', 85, f'OCR complete: {len(extracted_lines)} lines found. Formatting…')
+            # ── Per-page drawing-number (P&ID No.) extraction ────────────────
+            # Soft-coded: reuses pid_analysis title-block logic unchanged.
+            # Builds a {page_index_1based: dwg_no} dict used below. Any failure
+            # is non-fatal — the pid_no field simply remains empty.
+            _page_to_dwg = _extract_pid_no_per_page(file_path)
+            _doc_dwg = next((v for v in _page_to_dwg.values() if v), '')
+            logger.info(
+                f'[base_extract_thread] P&ID No. map: {_page_to_dwg} (doc fallback={_doc_dwg!r})'
+            )
+
             # Build 10-column output structure with EXPLICIT field mapping
             # Columns: Original Detection, Size, Fluid Code, Fluid Description,
             #          Sequence No, Piping Spec, Piping Spec Desc, Dept Deviation,
-            #          Insulation, Insulation Description, From, To
+            #          Insulation, Insulation Description, P&ID No.
             base_data = []
             for line in extracted_lines:
                 fluid = line.get('fluid_code', '')
                 insul = line.get('insulation', '')
                 piping_spec = line.get('piping_spec', line.get('pipr_class', ''))
+                _pg = line.get('page')
+                _pid_no = _page_to_dwg.get(_pg, '') or _doc_dwg
                 base_data.append({
                     'original_detection':  line.get('original_detection', line.get('line_number', '')),
                     'size':                line.get('size', ''),
@@ -129,10 +175,9 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                     'dept_deviation':      line.get('dept_deviation', ''),
                     'insulation':          insul,
                     'insulation_desc':     insulation_codes.get(insul.upper(), ''),
-                    'from':                line.get('from_line', line.get('from_equipment', '')),
-                    'to':                  line.get('to_line',   line.get('to_equipment', '')),
+                    'pid_no':              _pid_no,
                 })
-            logger.info(f'[base_extract_thread] Formatted {len(base_data)} rows with 11 columns')
+            logger.info(f'[base_extract_thread] Formatted {len(base_data)} rows with 10 columns (pid_no enriched)')
             if os.path.exists(file_path):
                 try:
                     os.unlink(file_path)
