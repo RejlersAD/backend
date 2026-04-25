@@ -154,6 +154,19 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                 f'[base_extract_thread] P&ID No. map: {_page_to_dwg} (doc fallback={_doc_dwg!r})'
             )
 
+            # ── Soft-coded breaker / page-connector inference ────────────────
+            # Fills empty from_line / to_line by spatial proximity to breaker
+            # tags (E3-SP-XXXX, TP-..., IP-..., etc.). Patterns and thresholds
+            # live in apps/designiq/breaker_inference.py — edit there freely.
+            # Pure post-processing; never overwrites existing values; runs only
+            # while the temp PDF is still on disk.
+            try:
+                from apps.designiq.breaker_inference import infer_breakers_for_lines
+                _write('PROGRESS', 90, 'Inferring From/To from page-connector breakers…')
+                infer_breakers_for_lines(extracted_lines, file_path)
+            except Exception as _be:
+                logger.warning(f'[base_extract_thread] breaker inference skipped: {_be}')
+
             # Build 10-column output structure with EXPLICIT field mapping
             # Columns: Original Detection, Size, Fluid Code, Fluid Description,
             #          Sequence No, Piping Spec, Piping Spec Desc, Dept Deviation,
@@ -175,6 +188,13 @@ def _run_base_extraction_in_thread(task_id, file_path, filename, include_area, f
                     'dept_deviation':      line.get('dept_deviation', ''),
                     'insulation':          insul,
                     'insulation_desc':     insulation_codes.get(insul.upper(), ''),
+                    # From / To — produced by spatial / vision / geometric /
+                    # breaker-inference passes upstream. Frontend column resolver
+                    # has fallback keys so any of these surfaces correctly.
+                    'from_line':           line.get('from_line', ''),
+                    'to_line':             line.get('to_line', ''),
+                    'from_equipment':      line.get('from_equipment', ''),
+                    'to_equipment':        line.get('to_equipment', ''),
                     'pid_no':              _pid_no,
                 })
             logger.info(f'[base_extract_thread] Formatted {len(base_data)} rows with 10 columns (pid_no enriched)')

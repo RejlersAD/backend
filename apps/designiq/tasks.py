@@ -952,6 +952,18 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
 
         update_progress(85, f'OCR complete: {len(extracted_lines)} lines found. Formatting…')
 
+        # ── Soft-coded breaker / page-connector inference ───────────────────
+        # Fills empty from_line / to_line by spatial proximity to breaker tags
+        # on each page. Patterns + thresholds live in
+        # apps/designiq/breaker_inference.py.  Pure post-processing — never
+        # overwrites existing values produced by earlier detectors.
+        try:
+            from apps.designiq.breaker_inference import infer_breakers_for_lines
+            update_progress(88, 'Inferring From/To from page-connector breakers…')
+            infer_breakers_for_lines(extracted_lines, file_path)
+        except Exception as _be:
+            logger.warning(f'[base_extract {task_id}] breaker inference skipped: {_be}')
+
         # Build 8-column output structure with EXPLICIT field mapping
         # Column order: Original Detection, Fluid Code, Size, Sequence No, PIPR Class, Insulation, From, To
         # Note: For offshore format (AREA-FluidCode-LineSize-PipeClass-SequenceNo-Insulation),
@@ -965,6 +977,12 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
                 'sequence_no': line.get('sequence_no', ''),
                 'pipr_class': line.get('pipr_class', ''),
                 'insulation': line.get('insulation', ''),
+                # Explicit from_line / to_line keys (frontend prefers these).
+                # Plus the legacy from / to / *_equipment keys for back-compat.
+                'from_line': line.get('from_line', ''),
+                'to_line': line.get('to_line', ''),
+                'from_equipment': line.get('from_equipment', ''),
+                'to_equipment': line.get('to_equipment', ''),
                 'from': line.get('from_line', line.get('from_equipment', '')),
                 'to': line.get('to_line', line.get('to_equipment', '')),
             })
