@@ -25,6 +25,7 @@ from rest_framework import status
 
 from .models import NonTeffExtractionJob
 from .services.extractor import run_extraction_async
+from .services import history_archive
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,13 @@ def upload_non_teff_file(request):
     # Kick off async extraction
     run_extraction_async(str(job.job_id), tmp_path, file_format)
 
+    # Best-effort: archive the source file to S3 under a role-based prefix.
+    # Failures here MUST NOT impact the upload response.
+    try:
+        history_archive.archive_source(job, tmp_path, request.user)
+    except Exception:
+        logger.warning('Non-TEFF history archive_source failed', exc_info=True)
+
     return Response({'job_id': str(job.job_id), 'status': job.status}, status=status.HTTP_202_ACCEPTED)
 
 
@@ -206,6 +214,13 @@ def get_non_teff_results(request, job_id):
         )
 
     result = job.result_json or {}
+
+    # Best-effort: archive completed result to S3 once. Idempotent (overwrite OK).
+    try:
+        history_archive.archive_result(job, request.user)
+    except Exception:
+        logger.warning('Non-TEFF history archive_result failed', exc_info=True)
+
     return Response({
         'job_id': str(job.job_id),
         'file_name': job.file_name,
@@ -246,3 +261,73 @@ def export_non_teff_excel(request, job_id):
     )
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     return response
+
+
+# ---------------------------------------------------------------------------
+# History endpoints (additive — no change to core extraction logic)
+# ---------------------------------------------------------------------------
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_non_teff_history(request):
+    """
+    List past Non-TEFF extractions visible to the current user.
+    Role-based: regular users see their own jobs; admins see all.
+    Query params:
+        ?limit=<int>   default per HISTORY_CONFIG['list_default_limit']
+    Response: { role, total, items: [...] }
+    """
+    try:
+        limit = int(request.query_params.get('limit', 0)) or None
+    except (TypeError, ValueError):
+        limit = None
+
+    items = history_archive.list_history(request.user, limit=limit)
+    return Response({
+        'role':  history_archive.resolve_user_role(request.user),
+        'total': len(items),
+        'items': items,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def load_non_teff_history(request, job_id):
+    """
+    Load full result payload for a past extraction so the user can re-open
+    it in the canvas without re-uploading the document.
+    """
+    payload = history_archive.load_history(request.user, job_id)
+    if not payload:
+        return Response(
+            {'error': 'History entry not found or access denied.'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return Response(payload)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_non_teff_history(request, job_id):
+    """
+    Delete a past extraction (single-file job or bulk batch) with RBAC.
+    """
+    ok, err = history_archive.delete_history(request.user, job_id)
+    if not ok:
+        code = status.HTTP_404_NOT_FOUND if err == 'not_found' else status.HTTP_403_FORBIDDEN
+        return Response({'error': err or 'Could not delete entry.'}, status=code)
+    return Response({'deleted': True, 'entry_id': job_id})
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def update_non_teff_history(request, job_id):
+    """
+    Modify metadata of a past extraction. Currently supported fields
+    (soft-coded in the service layer): ``name`` / ``file_name``, ``plant``.
+    """
+    ok, err, data = history_archive.update_history(request.user, job_id, request.data or {})
+    if not ok:
+        code = status.HTTP_404_NOT_FOUND if err == 'not_found' else status.HTTP_400_BAD_REQUEST
+        return Response({'error': err or 'Could not update entry.'}, status=code)
+    return Response({'updated': True, 'entry': data})

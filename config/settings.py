@@ -317,41 +317,62 @@ else:
 # Environment-aware database configuration
 # Supports: production, staging, development, testing
 # SOFT-CODED: add new environments by editing _ENV_DB_MAP only
+#
+# SECURITY: All database credentials come from environment variables (.env file
+# locally, Railway/Docker env vars in production). NEVER hardcode credentials
+# here — settings.py is committed to git.
+#
+# Required env vars (set in backend/.env for local dev):
+#   ENVIRONMENT             — one of: development | staging | preprod | production
+#   LOCAL_DATABASE_URL      — your local pgAdmin DB (e.g. postgres://user:pw@localhost:5432/dbname)
+#   TEST_DATABASE_URL       — Railway test/staging DB URL
+#   PRODUCTION_DATABASE_URL — Railway production DB URL (production only; never set locally)
+#
+# Override precedence: DATABASE_URL > _ENV_DB_MAP[ENVIRONMENT] > LOCAL_DATABASE_URL
+# Railway sets DATABASE_URL automatically — no extra config needed in production.
 
 # Get environment type — override via ENVIRONMENT env var or .env file
-ENVIRONMENT = config('ENVIRONMENT', default='production')
+ENVIRONMENT = config('ENVIRONMENT', default='development')
 
-# ── Named database URL constants ─────────────────────────────────────────────
-# TEST_DATABASE_URL  : Used for local development AND all non-production runs
-# PRODUCTION_DATABASE_URL : Live production — never used locally
-TEST_DATABASE_URL = "postgresql://postgres:OPMUckaUZIxVfSsWxgRKuVFbBsVKxPyk@nozomi.proxy.rlwy.net:43647/railway"
-PRODUCTION_DATABASE_URL = "postgresql://postgres:cJLHOrfvZxZXHKaMCWdLdRedgHgmIneU@shinkansen.proxy.rlwy.net:38534/railway"
-PREPROD_DATABASE_URL = TEST_DATABASE_URL  # backward-compat alias
+# ── Named database URL constants (loaded from env, never hardcoded) ──────────
+LOCAL_DATABASE_URL      = config('LOCAL_DATABASE_URL',      default='')
+TEST_DATABASE_URL       = config('TEST_DATABASE_URL',       default='')
+PRODUCTION_DATABASE_URL = config('PRODUCTION_DATABASE_URL', default='')
+PREPROD_DATABASE_URL    = TEST_DATABASE_URL  # backward-compat alias
 
 # ── Soft-coded environment → database routing map ────────────────────────────
 # To add a new environment: just add a key here; no other changes needed.
 _ENV_DB_MAP = {
     'production':  PRODUCTION_DATABASE_URL,
     'prod':        PRODUCTION_DATABASE_URL,
-    # All non-production environments share the testing database
     'staging':     TEST_DATABASE_URL,
     'preprod':     TEST_DATABASE_URL,
-    'development': TEST_DATABASE_URL,
-    'dev':         TEST_DATABASE_URL,
+    # Local dev uses local pgAdmin DB by default; falls back to Railway test if not set
+    'development': LOCAL_DATABASE_URL or TEST_DATABASE_URL,
+    'dev':         LOCAL_DATABASE_URL or TEST_DATABASE_URL,
+    'local':       LOCAL_DATABASE_URL or TEST_DATABASE_URL,
     'testing':     TEST_DATABASE_URL,
     'test':        TEST_DATABASE_URL,
 }
 
-_default_db_url = _ENV_DB_MAP.get(ENVIRONMENT.lower(), TEST_DATABASE_URL)
+_default_db_url = _ENV_DB_MAP.get(ENVIRONMENT.lower(), '')
 DATABASE_URL = config('DATABASE_URL', default=_default_db_url)
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        f"No database URL configured for ENVIRONMENT='{ENVIRONMENT}'. "
+        f"Set DATABASE_URL or LOCAL_DATABASE_URL/TEST_DATABASE_URL/PRODUCTION_DATABASE_URL "
+        f"in backend/.env. See backend/.env.example for template."
+    )
 
 _env_labels = {
     'production': '🏭 PRODUCTION',
     'prod':       '🏭 PRODUCTION',
     'staging':    '🚀 STAGING',
     'preprod':    '🚀 PREPROD',
-    'development':'🔧 DEVELOPMENT',
-    'dev':        '🔧 DEVELOPMENT',
+    'development':'🔧 DEVELOPMENT (local)',
+    'dev':        '🔧 DEVELOPMENT (local)',
+    'local':      '🔧 LOCAL',
     'testing':    '🧪 TESTING',
     'test':       '🧪 TESTING',
 }

@@ -42,8 +42,10 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from django.http import FileResponse
+
 from .models import NonTeffBatch, NonTeffBatchItem
-from .services import master_index_export, master_index_service
+from .services import document_search, master_index_export, master_index_service
 
 logger = logging.getLogger(__name__)
 
@@ -393,4 +395,70 @@ def export_batch(_request, batch_id):
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     batch.status = NonTeffBatch.BATCH_STATUS_EXPORTED
     batch.save(update_fields=['status', 'updated_at'])
+    return response
+
+
+# ---------------------------------------------------------------------------
+# DOCUMENT SEARCH CANVAS — additive, read-only endpoints
+# ---------------------------------------------------------------------------
+# /search/                                          → cross-batch + cross-job text search
+# /batch/<batch_id>/items/<item_id>/locate/?q=…     → bbox(es) per page for query
+# /batch/<batch_id>/items/<item_id>/page/<n>/image/ → cached PNG of page n
+# ---------------------------------------------------------------------------
+
+# Soft-coded mime + cache-control for rendered PDF page images.
+_PAGE_IMAGE_MIME = 'image/png'
+_PAGE_IMAGE_CACHE_HEADER = 'private, max-age=3600'
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def search_documents(request):
+    """Free-text search across batch items (and optionally legacy jobs)."""
+    query = (request.GET.get('q') or '').strip()
+    batch_id = request.GET.get('batch_id') or None
+    kind = request.GET.get('kind') or None  # 'batch' | 'job' | None
+    if not query:
+        return Response({'query': '', 'total': 0, 'results': []})
+    payload = document_search.search_records(query=query, batch_id=batch_id, kind=kind)
+    return Response(payload)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def locate_in_item(request, batch_id, item_id):
+    """Return per-page bounding boxes (page-size %) for *q* inside an item PDF."""
+    item = get_object_or_404(NonTeffBatchItem, batch_id=batch_id, item_id=item_id)
+    query = (request.GET.get('q') or '').strip()
+    pdf_path, err = document_search.resolve_item_pdf(item)
+    if err:
+        return Response({'matches': [], 'page_count': 0, 'error': err})
+    payload = document_search.locate_in_pdf(pdf_path, query)
+    payload.update({
+        'item_id': str(item.item_id),
+        'batch_id': str(item.batch_id),
+        'file_name': item.file_name,
+        'query': query,
+    })
+    return Response(payload)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_item_page_image(request, batch_id, item_id, page_no):
+    """Stream a rendered PNG of the requested 1-based page of the item's PDF."""
+    item = get_object_or_404(NonTeffBatchItem, batch_id=batch_id, item_id=item_id)
+    pdf_path, err = document_search.resolve_item_pdf(item)
+    if err:
+        return Response({'error': err}, status=http_status.HTTP_400_BAD_REQUEST)
+    try:
+        page_int = int(page_no)
+    except (TypeError, ValueError):
+        return Response({'error': 'invalid page number'}, status=http_status.HTTP_400_BAD_REQUEST)
+    img_path = document_search.render_pdf_page_png(pdf_path, page_int, str(item.item_id))
+    if not img_path or not os.path.exists(img_path):
+        return Response({'error': 'page render failed'}, status=http_status.HTTP_404_NOT_FOUND)
+    fh = open(img_path, 'rb')
+    response = FileResponse(fh, content_type=_PAGE_IMAGE_MIME)
+    response['Cache-Control'] = _PAGE_IMAGE_CACHE_HEADER
     return response

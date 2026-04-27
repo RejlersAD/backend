@@ -80,6 +80,135 @@ _STATUS_KEYWORDS = [
 # Title-line heuristic: first non-noise line of 5..90 chars containing letters.
 _TITLE_NOISE = re.compile(r'^(page|rev|revision|date|sheet|of)\b', re.IGNORECASE)
 
+# ---------------------------------------------------------------------------
+# SOFT-CODED text-quality config — used to reject OCR garbage.
+#
+# Symptoms in scanned PDFs (e.g. "^5 - 50/ A Po A^ -p AyfA=>^ yoyAAp:>yA77^"):
+#   • high ratio of non-alphanumeric chars
+#   • very few vowels relative to consonants
+#   • lots of single-letter "words"
+#   • unusual punctuation runs (^^, =>, :>)
+# Each threshold below tunes one heuristic. Lower numbers = stricter.
+# ---------------------------------------------------------------------------
+TEXT_QUALITY_CONFIG = {
+    'min_alpha_ratio':         0.55,   # at least 55% letters/digits
+    'min_letter_ratio':        0.45,   # at least 45% letters (digits + alpha alone is suspicious)
+    'min_vowel_ratio':         0.18,   # vowels / total letters
+    'max_special_ratio':       0.30,   # punctuation + symbols cap
+    'min_avg_word_len':        2.5,    # average alphabetic-word length
+    'max_single_letter_ratio': 0.35,   # single-letter "words" cap
+    'forbidden_runs':          re.compile(r'[\^~`]{2,}|=>{2,}|:>|<>{2,}|[\^=]{3,}'),
+    # Any single ^, ~, `, |, \, =, < or > embedded inside an alphabetic
+    # token is a strong OCR-garbage signal (e.g. "t-i^APiM", "AyfA=>").
+    'junk_in_word':            re.compile(r"[A-Za-z][\^~`|\\=<>][A-Za-z]|[A-Za-z][\^~`|\\=<>]+"),
+    'max_junk_word_ratio':     0.20,   # how many tokens may carry junk
+    'min_length':              5,
+    'max_length':              120,
+}
+# Strip / collapse control characters, mojibake, weird whitespace.
+_CONTROL_CHARS    = re.compile(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]')
+_MULTI_SPACE      = re.compile(r'\s{2,}')
+_LEADING_TRAILING_JUNK = re.compile(r'^[^A-Za-z0-9]+|[^A-Za-z0-9.)]+$')
+_VOWEL_SET        = set('aeiouAEIOU')
+
+
+def _normalize_text(text: str) -> str:
+    """Strip control chars, collapse whitespace, trim leading/trailing junk."""
+    if not text:
+        return ''
+    s = _CONTROL_CHARS.sub(' ', text)
+    s = _MULTI_SPACE.sub(' ', s).strip()
+    s = _LEADING_TRAILING_JUNK.sub('', s)
+    return s
+
+
+def _is_clean_text(text: str, cfg: Dict[str, Any] = TEXT_QUALITY_CONFIG) -> bool:
+    """
+    Heuristic OCR-garbage detector. Returns True only when the line looks
+    like real human-readable text. All thresholds are soft-coded above.
+    """
+    if not text:
+        return False
+    n = len(text)
+    if n < cfg['min_length'] or n > cfg['max_length']:
+        return False
+    if cfg['forbidden_runs'].search(text):
+        return False
+
+    alnum   = sum(1 for c in text if c.isalnum())
+    letters = sum(1 for c in text if c.isalpha())
+    vowels  = sum(1 for c in text if c in _VOWEL_SET)
+    spaces  = text.count(' ')
+    special = n - alnum - spaces
+
+    if alnum / n < cfg['min_alpha_ratio']:           return False
+    if letters / n < cfg['min_letter_ratio']:        return False
+    if special / n > cfg['max_special_ratio']:       return False
+    if letters and vowels / letters < cfg['min_vowel_ratio']:
+        return False
+
+    # Word-level checks (ignore tokens that are pure punctuation).
+    words = [w for w in re.split(r'\s+', text) if any(c.isalpha() for c in w)]
+    if not words:
+        return False
+    avg_word_len = sum(len(w) for w in words) / len(words)
+    if avg_word_len < cfg['min_avg_word_len']:       return False
+    single_letter = sum(1 for w in words if len(w) == 1)
+    if single_letter / len(words) > cfg['max_single_letter_ratio']:
+        return False
+    # Reject tokens with embedded junk like "t-i^APiM", "AyfA=>".
+    junk_words = sum(1 for w in words if cfg['junk_in_word'].search(w))
+    if junk_words / len(words) > cfg['max_junk_word_ratio']:
+        return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# SOFT-CODED value-level junk filter — used by every pattern_lookup field
+# (document_no, drawing_no, subject, project_title, etc.).
+#
+# Looser than `_is_clean_text` so legitimate short tokens like 'PT-1234',
+# '2"-P-1001-A1A', 'P16093-PR-PFD-001' still pass, but values containing
+# OCR-noise characters (^, \, weird angle brackets, multiple > or <) are
+# rejected.
+# ---------------------------------------------------------------------------
+VALUE_JUNK_CONFIG = {
+    # Any of these characters anywhere in a value = reject. They almost
+    # never appear in real engineering field values.
+    'forbidden_chars':       set('^~`|\\'),
+    # Run patterns that signal mojibake even when individual chars are valid.
+    'forbidden_run_pattern': re.compile(r'>\s*[A-Za-z]|[A-Za-z]\s*<|=>{1,}|:>|<>{2,}|[<>]{2,}'),
+    # Reject values where >40% of chars are non-alphanumeric (excluding spaces,
+    # hyphens, slashes, dots, parens, ampersands and quotes which are valid).
+    'allowed_specials':      set(' -_./()&\'",:'),
+    'max_junk_char_ratio':   0.20,
+    # Minimum letters or digits (rejects pure-symbol values).
+    'min_alnum':             2,
+}
+
+
+def _is_clean_value(val: str, cfg: Dict[str, Any] = VALUE_JUNK_CONFIG) -> bool:
+    """
+    Lightweight junk gate for individual field values returned by regex
+    extractors. Returns False for OCR-noise like 'DRAWING Nos 2^2-\\^.- OSS'
+    or 'DRAWING N^c 7^. m->&o2.'.
+    """
+    if not val:
+        return False
+    if any(c in cfg['forbidden_chars'] for c in val):
+        return False
+    if cfg['forbidden_run_pattern'].search(val):
+        return False
+    alnum = sum(1 for c in val if c.isalnum())
+    if alnum < cfg['min_alnum']:
+        return False
+    junk = sum(1 for c in val
+               if not c.isalnum() and c not in cfg['allowed_specials'])
+    if junk / len(val) > cfg['max_junk_char_ratio']:
+        return False
+    return True
+
 # Unit-code patterns (e.g. "Unit 12", "UNIT-05", "U05")
 _UNIT_PATTERN = re.compile(r'\b(?:UNIT[-\s]?([0-9]{1,3})|U([0-9]{2,3}))\b', re.IGNORECASE)
 
@@ -239,13 +368,33 @@ def detect_paper_size(file_path: str, fmt: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 
 def _extract_title(text: str) -> str:
-    for line in text.splitlines():
-        s = line.strip()
-        if 5 <= len(s) <= 90 and re.search(r'[A-Za-z]', s) and not _TITLE_NOISE.match(s):
-            # Skip bare document numbers
-            if DOCUMENT_NO_PATTERN.fullmatch(s):
-                continue
-            return s
+    """
+    Pick the first 'clean' line from a document's text as its title.
+
+    Resilient to OCR garbage from scanned PDFs: every candidate line is
+    normalized then validated with TEXT_QUALITY_CONFIG before being
+    returned. If nothing clean is found, returns '' — better an empty
+    field than "^5 - 50/ A Po A^ -p AyfA=>^ yoyAAp:>yA77^APs".
+    """
+    if not text:
+        return ''
+    for raw in text.splitlines():
+        s = _normalize_text(raw)
+        if not s:
+            continue
+        if not (5 <= len(s) <= 90):
+            continue
+        if not re.search(r'[A-Za-z]', s):
+            continue
+        if _TITLE_NOISE.match(s):
+            continue
+        # Skip bare document numbers (e.g. "P16093-PR-PFD-001")
+        if DOCUMENT_NO_PATTERN.fullmatch(s):
+            continue
+        # NEW: reject OCR garbage via soft-coded quality heuristics.
+        if not _is_clean_text(s):
+            continue
+        return s
     return ''
 
 
@@ -313,6 +462,9 @@ def _pattern_lookup(field_key: str, text: str) -> str:
                     continue
                 if not val or val.upper() in stop or val.upper() in seen:
                     continue
+                # Soft-coded junk filter — reject OCR-noise values.
+                if not _is_clean_value(val):
+                    continue
                 seen.add(val.upper())
                 hits.append(val)
             if hits:
@@ -323,7 +475,7 @@ def _pattern_lookup(field_key: str, text: str) -> str:
                     val = (m.group(group) or '').strip().rstrip('.,;:')
                 except IndexError:
                     continue
-                if val and val.upper() not in stop:
+                if val and val.upper() not in stop and _is_clean_value(val):
                     return val
     return ''
 

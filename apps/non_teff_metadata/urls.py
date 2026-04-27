@@ -19,4 +19,15 @@ urlpatterns = [
     path('batch/<uuid:batch_id>/items/<uuid:item_id>/',  batch_views.update_batch_item,   name='non-teff-batch-item-update'),
     path('batch/<uuid:batch_id>/bulk-update/',           batch_views.bulk_update_items,   name='non-teff-batch-bulk-update'),
     path('batch/<uuid:batch_id>/export/',                batch_views.export_batch,        name='non-teff-batch-export'),
+
+    # Document Search Canvas (additive — read-only locator + page renderer)
+    path('search/',                                                          batch_views.search_documents,    name='non-teff-search'),
+    path('batch/<uuid:batch_id>/items/<uuid:item_id>/locate/',               batch_views.locate_in_item,      name='non-teff-search-locate'),
+    path('batch/<uuid:batch_id>/items/<uuid:item_id>/page/<int:page_no>/image/', batch_views.get_item_page_image, name='non-teff-search-page-image'),
+
+    # History (additive — role-based, S3-backed, doesn't touch core logic)
+    path('history/',                  views.list_non_teff_history, name='non-teff-history-list'),
+    path('history/<str:job_id>/',     views.load_non_teff_history, name='non-teff-history-load'),
+    path('history/<str:job_id>/delete/', views.delete_non_teff_history, name='non-teff-history-delete'),
+    path('history/<str:job_id>/update/', views.update_non_teff_history, name='non-teff-history-update'),
 ]
