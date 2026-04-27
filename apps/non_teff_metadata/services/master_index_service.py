@@ -183,8 +183,11 @@ VALUE_JUNK_CONFIG = {
     # hyphens, slashes, dots, parens, ampersands and quotes which are valid).
     'allowed_specials':      set(' -_./()&\'",:'),
     'max_junk_char_ratio':   0.20,
-    # Minimum letters or digits (rejects pure-symbol values).
-    'min_alnum':             2,
+    # Minimum letters or digits (rejects pure-symbol values).  Set to 1 so
+    # legitimate single-character codes still pass — e.g. revision "A",
+    # class_review "2", review code "B".  The forbidden_chars / junk_ratio
+    # / forbidden_run_pattern guards continue to block real noise.
+    'min_alnum':             1,
 }
 
 
@@ -292,10 +295,17 @@ def read_file_text(file_path: str, fmt: Optional[str] = None) -> str:
 
     Reuses the same libraries that extractor.py uses, but concatenates pages
     into one string capped at _MAX_SCAN_CHARS for responsive extraction.
+
+    For PDFs whose embedded text layer is empty / OCR-garbage (typical for
+    scanned drawings and old AutoCAD print-outs) the function transparently
+    falls back to Tesseract OCR via ``vision_extractor.ocr_pdf_text``. The
+    fallback is gated by soft-coded thresholds in ``VISION_CONFIG`` and is
+    a no-op when Tesseract is unavailable.
     """
     fmt = fmt or detect_format(file_path)
     if not fmt:
         return ''
+    text = ''
     try:
         if fmt == 'pdf':
             import pdfplumber
@@ -305,8 +315,8 @@ def read_file_text(file_path: str, fmt: Optional[str] = None) -> str:
                     chunks.append(p.extract_text() or '')
                     if sum(len(c) for c in chunks) > _MAX_SCAN_CHARS:
                         break
-            return '\n'.join(chunks)[:_MAX_SCAN_CHARS]
-        if fmt == 'excel':
+            text = '\n'.join(chunks)[:_MAX_SCAN_CHARS]
+        elif fmt == 'excel':
             import openpyxl
             wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
             out: List[str] = []
@@ -317,14 +327,39 @@ def read_file_text(file_path: str, fmt: Optional[str] = None) -> str:
                         break
                 if sum(len(x) for x in out) > _MAX_SCAN_CHARS:
                     break
-            return '\n'.join(out)[:_MAX_SCAN_CHARS]
-        if fmt == 'word':
+            text = '\n'.join(out)[:_MAX_SCAN_CHARS]
+        elif fmt == 'word':
             import docx
             doc = docx.Document(file_path)
-            return '\n'.join(p.text for p in doc.paragraphs)[:_MAX_SCAN_CHARS]
+            text = '\n'.join(p.text for p in doc.paragraphs)[:_MAX_SCAN_CHARS]
     except Exception:
         logger.exception('read_file_text failed for %s', file_path)
-    return ''
+
+    # OCR fallback for PDFs whose text layer is empty / unreadable.
+    if fmt == 'pdf':
+        try:
+            from . import vision_extractor
+            if vision_extractor.needs_ocr_fallback(text):
+                ocr_text = vision_extractor.ocr_pdf_text(file_path)
+                if ocr_text and len(ocr_text.strip()) > len(text.strip()):
+                    logger.info('OCR fallback engaged for %s (text %d → %d chars)',
+                                file_path, len(text), len(ocr_text))
+                    text = (text + '\n' + ocr_text)[:_MAX_SCAN_CHARS]
+        except Exception:
+            logger.exception('OCR fallback failed for %s', file_path)
+
+        # Yellow-highlight extractor — pulls revision/approval/hold stamps
+        # that almost never appear in the text layer of older drawings.
+        try:
+            from . import yellow_region_extractor
+            yellow_blob = yellow_region_extractor.extract_yellow_text_blob(file_path)
+            if yellow_blob:
+                logger.info('Yellow-region OCR contributed %d chars for %s',
+                            len(yellow_blob), file_path)
+                text = (text + '\n' + yellow_blob)[:_MAX_SCAN_CHARS]
+        except Exception:
+            logger.exception('Yellow-region OCR failed for %s', file_path)
+    return text
 
 
 def pdf_page_count(file_path: str) -> Optional[int]:
@@ -630,5 +665,34 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
         if col.get('class') in ('ai_extract', 'derived', 'batch_or_extract'):
             if not row.get(col['key']):
                 row[col['key']] = col.get('fallback', na)
+
+    # ---------------------------------------------------------------
+    # Vision AI enrichment (post-pass). Only fills columns still equal
+    # to the NA placeholder — never overwrites a regex-extracted value.
+    # No-op when OPENAI_API_KEY is missing.
+    # ---------------------------------------------------------------
+    try:
+        from . import vision_extractor
+        # Build a sanitized view where 'NA' counts as empty, so the
+        # enricher knows which fields still need attention.
+        view = {k: ('' if str(v).strip().upper() == na.upper() else v)
+                for k, v in row.items()}
+        enrichment = vision_extractor.enrich_via_vision(
+            file_path=file_path, file_name=file_name,
+            current_row=view, na_value=na,
+            ocr_text=text,
+        )
+        if enrichment:
+            logger.info('Vision enrichment for %s filled %d field(s): %s',
+                        file_name, len(enrichment), list(enrichment.keys()))
+            for k, v in enrichment.items():
+                if not v:
+                    continue
+                # Only fill cells the regex pipeline left empty/NA.
+                cur = str(row.get(k, '')).strip()
+                if (not cur) or cur.upper() == na.upper():
+                    row[k] = v
+    except Exception:
+        logger.exception('vision enrichment failed for %s', file_name)
 
     return row

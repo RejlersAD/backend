@@ -46,6 +46,7 @@ from django.http import FileResponse
 
 from .models import NonTeffBatch, NonTeffBatchItem
 from .services import document_search, master_index_export, master_index_service
+from .services import smartplant_connector
 
 logger = logging.getLogger(__name__)
 
@@ -462,3 +463,308 @@ def get_item_page_image(request, batch_id, item_id, page_no):
     response = FileResponse(fh, content_type=_PAGE_IMAGE_MIME)
     response['Cache-Control'] = _PAGE_IMAGE_CACHE_HEADER
     return response
+
+
+# ---------------------------------------------------------------------------
+# Smart Recommendations (additive, hover-driven)
+# ---------------------------------------------------------------------------
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def recommend_for_item(request, batch_id, item_id):
+    """
+    Return a small AI-powered recommendation card for an item.
+
+    Cost-first: provider chain is Gemini-flash → OpenAI-mini, with a pure
+    heuristic fallback so the UI is never empty. Result is cached server-side
+    keyed by the item context, so repeated hovers cost nothing.
+    """
+    item = get_object_or_404(NonTeffBatchItem, batch_id=batch_id, item_id=item_id)
+    try:
+        from .services import ai_recommendations, document_search, master_index_service
+
+        # Pull a unique-per-document text excerpt so the AI has something
+        # concrete to reason about even when the metadata row is sparse.
+        # Falls back gracefully if the file cannot be resolved.
+        text_excerpt = ''
+        try:
+            pdf_path, _err = document_search.resolve_item_pdf(item)
+            if pdf_path:
+                text_excerpt = master_index_service.read_file_text(pdf_path) or ''
+        except Exception:
+            logger.debug('text_excerpt build failed for %s', item_id, exc_info=True)
+
+        payload = ai_recommendations.recommend_for_item(
+            item_id=str(item.item_id),
+            file_name=item.file_name,
+            fields=item.fields or {},
+            text_excerpt=text_excerpt,
+            sha256=item.sha256 or '',
+        )
+    except Exception:
+        logger.exception('recommend_for_item failed for item %s', item_id)
+        payload = {}
+    return Response({
+        'item_id':  str(item.item_id),
+        'batch_id': str(item.batch_id),
+        'recommendations': payload,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Yellow-region detector (additive — overlays valuable highlight stamps)
+# ---------------------------------------------------------------------------
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def yellow_regions_for_item(request, batch_id, item_id):
+    """
+    Detect yellow-highlighted rectangles in the item's PDF and OCR them.
+    Returns rect_pct coordinates (0..1) so the canvas can overlay them on
+    the rendered page image without needing a re-render.
+    """
+    item = get_object_or_404(NonTeffBatchItem, batch_id=batch_id, item_id=item_id)
+    try:
+        from .services import document_search, yellow_region_extractor
+        pdf_path, err = document_search.resolve_item_pdf(item)
+        if err:
+            return Response({'regions': [], 'error': err})
+        regions = yellow_region_extractor.extract_yellow_regions(pdf_path)
+    except Exception:
+        logger.exception('yellow_regions_for_item failed for item %s', item_id)
+        regions = []
+    # Slim down the payload — only return the fields the canvas needs.
+    payload = [
+        {
+            'page':       r.get('page'),
+            'rect_pct':   r.get('rect_pct'),
+            'text':       r.get('text'),
+            'label':      r.get('label', ''),
+            'confidence': r.get('confidence', 0.0),
+        }
+        for r in regions
+    ]
+    return Response({
+        'item_id':  str(item.item_id),
+        'batch_id': str(item.batch_id),
+        'regions':  payload,
+        'count':    len(payload),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Completeness / Coverage  (additive — no core logic touched)
+# ---------------------------------------------------------------------------
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def batch_coverage(request, batch_id):
+    """
+    Return a soft-coded completeness report for the batch:
+    overall %, per-column fill rates, weakest items, suggestions, and a
+    preview of which fields the reconcile pass would back-fill.
+    """
+    batch = get_object_or_404(NonTeffBatch, batch_id=batch_id)
+    try:
+        from .services import completeness_analyzer
+        items = list(batch.items.all())
+        report = completeness_analyzer.coverage_report(items)
+    except Exception:
+        logger.exception('batch_coverage failed for %s', batch_id)
+        report = {}
+    return Response({
+        'batch_id': str(batch.batch_id),
+        'report':   report,
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def batch_reconcile(request, batch_id):
+    """
+    Apply the cross-row reconciliation pass: back-fills NA cells of
+    "constant-across-batch" columns from the modal value when at least
+    `min_modal_share` of populated rows agree. Per-document unique columns
+    (document_number, tag, …) are never touched.
+
+    Idempotent — calling twice does nothing extra.
+    """
+    batch = get_object_or_404(NonTeffBatch, batch_id=batch_id)
+    try:
+        from .services import completeness_analyzer
+        items = list(batch.items.all())
+        result = completeness_analyzer.apply_reconciliation(items)
+        # Persist any items that were touched.
+        if result.get('applied_cells', 0) > 0:
+            touched = result.pop('touched_item_ids', set())
+            with transaction.atomic():
+                for it in items:
+                    if getattr(it, 'item_id', None) in touched:
+                        it.save(update_fields=['fields', 'updated_at'])
+        else:
+            result.pop('touched_item_ids', None)
+    except Exception:
+        logger.exception('batch_reconcile failed for %s', batch_id)
+        return Response({'detail': 'Reconciliation failed'},
+                        status=http_status.HTTP_500_INTERNAL_SERVER_ERROR)
+    return Response({
+        'batch_id': str(batch.batch_id),
+        **result,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Direct-link to original drawing/record (additive — saves user search time)
+# ---------------------------------------------------------------------------
+# Soft-coded MIME map for inline browser preview. Anything not listed falls
+# back to application/octet-stream and triggers a download.
+_INLINE_MIME_MAP = {
+    '.pdf':  'application/pdf',
+    '.png':  'image/png',
+    '.jpg':  'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif':  'image/gif',
+    '.svg':  'image/svg+xml',
+    '.txt':  'text/plain',
+    '.csv':  'text/csv',
+}
+# Extensions that should always be served inline (rendered in browser tab).
+# Everything else streams as attachment so the user gets a download.
+_INLINE_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.txt'}
+
+
+def _guess_inline_mime(file_name: str) -> tuple[str, bool]:
+    """Return (mime, inline?) for a stored file name."""
+    ext = os.path.splitext(file_name or '')[1].lower()
+    mime = _INLINE_MIME_MAP.get(ext, 'application/octet-stream')
+    return mime, ext in _INLINE_EXTENSIONS
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def item_location(request, batch_id, item_id):
+    """
+    JSON metadata about where an item's source file lives. Used by the
+    frontend to display a tooltip/breadcrumb without having to download the
+    blob. Never returns the absolute server path (security).
+    """
+    item = get_object_or_404(NonTeffBatchItem, batch_id=batch_id, item_id=item_id)
+    storage_path = item.storage_key or ''
+    exists = bool(storage_path) and os.path.exists(storage_path)
+    size = 0
+    if exists:
+        try:
+            size = os.path.getsize(storage_path)
+        except OSError:
+            size = 0
+    mime, inline = _guess_inline_mime(item.file_name)
+    return Response({
+        'batch_id':      str(item.batch_id),
+        'item_id':       str(item.item_id),
+        'file_name':     item.file_name,
+        'relative_path': item.relative_path or item.file_name,
+        'size_bytes':    size,
+        'mime':          mime,
+        'inline':        inline,
+        'available':     exists,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def download_item_file(request, batch_id, item_id):
+    """
+    Stream the original uploaded file for an item.
+
+    - PDFs / images / text → ``Content-Disposition: inline`` so the browser
+      opens them in a new tab.
+    - Everything else → ``attachment`` so the user gets a download.
+
+    The file is read from ``item.storage_key`` directly; no path traversal
+    risk because the value is set server-side at upload time and never
+    accepted from the client.
+    """
+    item = get_object_or_404(NonTeffBatchItem, batch_id=batch_id, item_id=item_id)
+    storage_path = item.storage_key or ''
+    if not storage_path or not os.path.exists(storage_path):
+        return Response({'detail': 'file missing on disk'},
+                        status=http_status.HTTP_404_NOT_FOUND)
+    mime, inline = _guess_inline_mime(item.file_name)
+    safe_name = get_valid_filename(item.file_name or 'document')
+    fh = open(storage_path, 'rb')
+    response = FileResponse(fh, content_type=mime)
+    disposition = 'inline' if inline else 'attachment'
+    response['Content-Disposition'] = f'{disposition}; filename="{safe_name}"'
+    response['Cache-Control'] = 'private, max-age=300'
+    return response
+
+
+# ---------------------------------------------------------------------------
+# SmartPlant Foundation integration (additive — uses smartplant_connector)
+# ---------------------------------------------------------------------------
+# All transport / mapping / endpoint config lives in
+# `config/smartplant_config.json`.  Endpoints below are thin wrappers.
+# ---------------------------------------------------------------------------
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def smartplant_status(request, batch_id=None):
+    """Return connector readiness + last-push history for the UI button."""
+    payload = smartplant_connector.get_status()
+    if batch_id:
+        try:
+            batch = get_object_or_404(NonTeffBatch, batch_id=batch_id)
+            payload['history'] = smartplant_connector.get_audit_history(batch)
+        except Exception:
+            logger.exception('smartplant_status history lookup failed for %s', batch_id)
+            payload['history'] = []
+    return Response(payload)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def smartplant_push(request, batch_id):
+    """
+    Push the finished Master Index for `batch_id` to SmartPlant Foundation.
+
+    Body (all optional):
+        {"mode": "rest_api" | "webhook" | "s3_dropzone"
+                  | "local_dropzone" | "dry_run"}
+
+    The grid rows used are the same ones that go into the Excel export
+    (status == ready), so what SPF receives matches what the user sees.
+    """
+    batch = get_object_or_404(NonTeffBatch, batch_id=batch_id)
+    requested_mode = (request.data.get('mode') if hasattr(request, 'data') else None) or None
+
+    items = [
+        (i.fields or {})
+        for i in batch.items.filter(status=NonTeffBatchItem.ITEM_STATUS_READY).order_by('file_name')
+    ]
+    if not items:
+        return Response(
+            {'status': 'error', 'mode': requested_mode or 'unknown',
+             'message': 'No ready rows in this batch — nothing to push.'},
+            status=http_status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        workbook_bytes = master_index_export.build_workbook(
+            batch_name=batch.name,
+            plant=batch.plant or DEFAULT_EXPORT_PLANT,
+            items=items,
+        )
+    except Exception:
+        logger.exception('smartplant_push: workbook build failed for %s', batch_id)
+        return Response(
+            {'status': 'error', 'mode': requested_mode or 'unknown',
+             'message': 'Failed to build the Master Index workbook for SPF.'},
+            status=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    result = smartplant_connector.push_batch(
+        batch=batch, items=items,
+        workbook_bytes=workbook_bytes,
+        mode=requested_mode,
+        user=getattr(request, 'user', None),
+    )
+    http_code = http_status.HTTP_200_OK if result.get('status') == 'ok' else http_status.HTTP_502_BAD_GATEWAY
+    return Response(result, status=http_code)
+

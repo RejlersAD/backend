@@ -24,6 +24,19 @@ urlpatterns = [
     path('search/',                                                          batch_views.search_documents,    name='non-teff-search'),
     path('batch/<uuid:batch_id>/items/<uuid:item_id>/locate/',               batch_views.locate_in_item,      name='non-teff-search-locate'),
     path('batch/<uuid:batch_id>/items/<uuid:item_id>/page/<int:page_no>/image/', batch_views.get_item_page_image, name='non-teff-search-page-image'),
+    path('batch/<uuid:batch_id>/items/<uuid:item_id>/recommend/',            batch_views.recommend_for_item,  name='non-teff-item-recommend'),
+    path('batch/<uuid:batch_id>/items/<uuid:item_id>/yellow/',               batch_views.yellow_regions_for_item, name='non-teff-item-yellow'),
+    path('batch/<uuid:batch_id>/coverage/',                                  batch_views.batch_coverage,      name='non-teff-batch-coverage'),
+    path('batch/<uuid:batch_id>/reconcile/',                                 batch_views.batch_reconcile,     name='non-teff-batch-reconcile'),
+
+    # Direct-link to original drawing/record (additive — saves search time)
+    path('batch/<uuid:batch_id>/items/<uuid:item_id>/file/',                 batch_views.download_item_file,  name='non-teff-item-file'),
+    path('batch/<uuid:batch_id>/items/<uuid:item_id>/location/',             batch_views.item_location,       name='non-teff-item-location'),
+
+    # SmartPlant Foundation integration (additive — config-driven)
+    path('smartplant/status/',                              batch_views.smartplant_status, name='non-teff-smartplant-status'),
+    path('batch/<uuid:batch_id>/smartplant/status/',        batch_views.smartplant_status, name='non-teff-smartplant-batch-status'),
+    path('batch/<uuid:batch_id>/smartplant/push/',          batch_views.smartplant_push,   name='non-teff-smartplant-push'),
 
     # History (additive — role-based, S3-backed, doesn't touch core logic)
     path('history/',                  views.list_non_teff_history, name='non-teff-history-list'),

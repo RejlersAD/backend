@@ -1,0 +1,98 @@
+{
+  "_doc": "SmartPlant Foundation (SPF) integration config — fully soft-coded. The connector reads ${ENV_VAR} placeholders at runtime so no secrets live in this file. Default mode 'dry_run' lets the UI work end-to-end without touching a real SPF tenant.",
+
+  "enabled": true,
+  "default_mode": "dry_run",
+
+  "_modes_doc": {
+    "disabled": "Feature off; backend returns 503.",
+    "dry_run": "Build the SPF payload + Excel, return it to the caller WITHOUT calling SPF. Useful for QA & demos.",
+    "rest_api": "POST JSON + workbook to a SPF-style REST endpoint. Auth via bearer token.",
+    "webhook": "POST JSON + base64 workbook to a generic webhook (e.g. Power Automate, n8n).",
+    "s3_dropzone": "Upload the .xlsx + manifest.json to an S3 bucket/prefix that SPF watches.",
+    "local_dropzone": "Copy the .xlsx + manifest.json to a server-mounted folder watched by SPF Adapter."
+  },
+
+  "modes": {
+    "rest_api": {
+      "endpoint":      "${SPF_REST_ENDPOINT}",
+      "auth_header":   "Authorization",
+      "auth_template": "Bearer ${SPF_REST_TOKEN}",
+      "verify_tls":    true,
+      "timeout_s":     90,
+      "retries":       2,
+      "retry_backoff_s": 5
+    },
+    "webhook": {
+      "endpoint":      "${SPF_WEBHOOK_URL}",
+      "secret_header": "X-RADAI-Signature",
+      "secret_value":  "${SPF_WEBHOOK_SECRET}",
+      "verify_tls":    true,
+      "timeout_s":     60,
+      "retries":       2,
+      "retry_backoff_s": 5
+    },
+    "s3_dropzone": {
+      "bucket":     "${SPF_S3_BUCKET}",
+      "prefix":     "spf-inbox/",
+      "region":     "${SPF_S3_REGION}",
+      "kms_key_id": "${SPF_S3_KMS_KEY_ID}"
+    },
+    "local_dropzone": {
+      "directory": "${SPF_DROPZONE_DIR}"
+    }
+  },
+
+  "_field_mapping_doc": "Maps our master-index column keys to SPF attribute names. Add/edit entries here to support a different SPF schema without code changes. Unknown keys are passed through verbatim.",
+  "field_mapping": {
+    "document_no":      "DocumentNumber",
+    "document_number":  "DocumentNumber",
+    "document_title":   "DocumentTitle",
+    "document_type":    "DocumentType",
+    "discipline":       "Discipline",
+    "category":         "Category",
+    "revision":         "Revision",
+    "revision_status":  "RevisionStatus",
+    "issue_date":       "IssueDate",
+    "originator":       "Originator",
+    "author":           "Author",
+    "plant":            "Plant",
+    "project_title":    "ProjectTitle",
+    "adnoc_project_no": "ProjectNumber",
+    "agreement_no":     "AgreementNumber",
+    "agreement_desc":   "AgreementDescription",
+    "transmittal_no":   "TransmittalNumber",
+    "class_review":     "ReviewClass",
+    "to":               "Recipient",
+    "vendor_name":      "VendorName",
+    "vendor_ref":       "VendorReference",
+    "po_no":            "PurchaseOrder",
+    "contractor_ref":   "ContractorReference",
+    "tag":              "TagNumber",
+    "system":           "System",
+    "area":             "Area",
+    "unit":             "Unit"
+  },
+
+  "_skip_doc": "Frontend-only / housekeeping columns the connector should never send to SPF.",
+  "skip_keys": [
+    "sr_no",
+    "_locate",
+    "_open"
+  ],
+
+  "transmittal": {
+    "type":              "Document Transmittal",
+    "default_workflow":  "InboundDocumentLoad",
+    "subject_template":  "RAD AI Master Index — {plant} — {batch_name}",
+    "include_workbook":  true,
+    "workbook_field":    "AttachedWorkbookBase64"
+  },
+
+  "_audit_doc": "When true the connector writes a small JSON audit record to NonTeffBatch.fields_json so users can see who pushed when and what SPF returned.",
+  "audit": {
+    "enabled":    true,
+    "field_name": "smartplant_push_history",
+    "max_entries": 10
+  }
+}
