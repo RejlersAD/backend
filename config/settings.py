@@ -358,12 +358,30 @@ _ENV_DB_MAP = {
 _default_db_url = _ENV_DB_MAP.get(ENVIRONMENT.lower(), '')
 DATABASE_URL = config('DATABASE_URL', default=_default_db_url)
 
+# ── Soft-coded list of management commands that don't need a real database ───
+# (collectstatic, makemessages, etc. are run during Docker build before any
+# DB is attached — falling back to an in-memory sqlite avoids spurious build
+# failures while still raising loudly for any DB-touching command at runtime.)
+import sys as _sys
+_DB_OPTIONAL_COMMANDS = {
+    'collectstatic', 'compilemessages', 'makemessages',
+    'check', 'help', 'version', '--version',
+}
+_running_db_optional = any(arg in _DB_OPTIONAL_COMMANDS for arg in _sys.argv)
+
 if not DATABASE_URL:
-    raise RuntimeError(
-        f"No database URL configured for ENVIRONMENT='{ENVIRONMENT}'. "
-        f"Set DATABASE_URL or LOCAL_DATABASE_URL/TEST_DATABASE_URL/PRODUCTION_DATABASE_URL "
-        f"in backend/.env. See backend/.env.example for template."
-    )
+    if _running_db_optional or config('DJANGO_SKIP_DB_CHECK', default=False, cast=bool):
+        # Stub DB — never used for queries, just keeps Django settings importable
+        # so build-time tasks (e.g. collectstatic) don't fail.
+        DATABASE_URL = 'sqlite:///:memory:'
+        print(f"[DJANGO] ⚠️  No DATABASE_URL configured — using in-memory sqlite stub "
+              f"(safe for build-time '{' '.join(_sys.argv[1:2]) or 'startup'}' only)")
+    else:
+        raise RuntimeError(
+            f"No database URL configured for ENVIRONMENT='{ENVIRONMENT}'. "
+            f"Set DATABASE_URL or LOCAL_DATABASE_URL/TEST_DATABASE_URL/PRODUCTION_DATABASE_URL "
+            f"in backend/.env. See backend/.env.example for template."
+        )
 
 _env_labels = {
     'production': '🏭 PRODUCTION',
