@@ -42,6 +42,12 @@ CACHE_PREFIX     = 'valve_mto:job:'
 CACHE_TTL        = 60 * 60 * 6                    # 6 h fast-path TTL
 DISK_TTL         = 60 * 60 * 24                   # 24 h disk retention
 DEFAULT_KIND     = 'valve_mto'
+# Watchdog heartbeat interval (seconds). The watcher thread touches
+# `updated_at` on the snapshot at this cadence while the job is running,
+# guaranteeing the frontend stall timer never fires while the worker
+# thread is alive — even during silent CPU-bound phases like PDF text
+# extraction or PDF→JPEG rendering on slim-CPU containers.
+HEARTBEAT_INTERVAL_SECS = int(os.getenv('VALVE_MTO_HEARTBEAT_SECS', '20'))
 
 # Disk directory — soft-coded. Falls back to system temp if MEDIA_ROOT missing.
 JOB_DIR_NAME     = 'valve_mto_jobs'
@@ -174,12 +180,50 @@ class JobStore:
         snap['updated_at'] = _now_iso()
         JobStore._persist(job_id, snap)
 
+    @staticmethod
+    def heartbeat(job_id: str) -> bool:
+        """
+        Touch `updated_at` without changing any other field. Returns False if
+        the job no longer exists or has reached a terminal state — the caller
+        should stop the watchdog in that case.
+        """
+        snap = JobStore.get(job_id)
+        if not snap:
+            return False
+        if snap.get('status') in ('done', 'error'):
+            return False
+        snap['updated_at'] = _now_iso()
+        JobStore._persist(job_id, snap)
+        return True
+
 
 # ─── Background runner ──────────────────────────────────────────────────
+def _heartbeat_loop(job_id: str, stop_event: threading.Event) -> None:
+    """Periodically refresh `updated_at` so the frontend stall timer never
+    trips while the worker thread is alive but in a silent CPU-bound phase
+    (PDF text extraction, page rendering, queued OpenAI calls)."""
+    while not stop_event.wait(HEARTBEAT_INTERVAL_SECS):
+        try:
+            if not JobStore.heartbeat(job_id):
+                return
+        except Exception as exc:                                      # pragma: no cover
+            logger.warning('[ValveMTO] heartbeat error for %s: %s', job_id, exc)
+            return
+
+
 def _run_in_thread(job_id: str, pdf_path: str, filename: str) -> None:
     """Execute extraction; clean up the temp file when done."""
     # Late import — keeps this module importable without the heavy deps.
     from .piping_valve_mto_extractor import extract_valve_mto_streaming
+
+    stop_heartbeat = threading.Event()
+    hb_thread = threading.Thread(
+        target=_heartbeat_loop,
+        args=(job_id, stop_heartbeat),
+        name=f'valve-mto-hb-{job_id[:8]}',
+        daemon=True,
+    )
+    hb_thread.start()
 
     try:
         JobStore.update(job_id, status='running')
@@ -205,6 +249,7 @@ def _run_in_thread(job_id: str, pdf_path: str, filename: str) -> None:
         logger.exception('[ValveMTO] job %s crashed', job_id)
         JobStore.update(job_id, status='error', error=str(exc))
     finally:
+        stop_heartbeat.set()
         try:
             if os.path.exists(pdf_path):
                 os.remove(pdf_path)
