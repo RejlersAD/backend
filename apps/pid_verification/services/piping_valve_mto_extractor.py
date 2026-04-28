@@ -52,8 +52,8 @@ VISION_MAX_PAGES       = int(os.getenv('VALVE_MTO_VISION_MAX_PAGES', '50'))
 VISION_BATCH_SIZE      = int(os.getenv('VALVE_MTO_VISION_BATCH_SIZE', '2'))
 # How many batches to run in parallel.
 VISION_PARALLEL_BATCHES = int(os.getenv('VALVE_MTO_VISION_PARALLEL', '4'))
-VISION_IMAGE_DPI       = int(os.getenv('VALVE_MTO_VISION_DPI', '150'))
-VISION_MAX_EDGE_PX     = int(os.getenv('VALVE_MTO_VISION_MAX_EDGE', '1800'))
+VISION_IMAGE_DPI       = int(os.getenv('VALVE_MTO_VISION_DPI', '120'))
+VISION_MAX_EDGE_PX     = int(os.getenv('VALVE_MTO_VISION_MAX_EDGE', '1600'))
 VISION_MODEL           = os.getenv('VALVE_MTO_VISION_MODEL', 'gpt-4o-mini')
 VISION_TEMPERATURE     = 0.0
 VISION_TIMEOUT_SECS    = float(os.getenv('VALVE_MTO_VISION_TIMEOUT', '90'))
@@ -161,12 +161,25 @@ def _extract_text(pdf_path: str) -> str:
     return '\n'.join(parts)
 
 
-def _render_pages_b64(pdf_path: str, max_pages: int, dpi: int) -> List[str]:
+def _render_pages_b64(pdf_path: str, max_pages: int, dpi: int, on_render_progress=None) -> List[str]:
+    """
+    Render PDF pages to base64 JPEG strings.
+
+    Soft-coded:
+      * `max_pages` — hard cap (VISION_MAX_PAGES)
+      * `dpi`       — render DPI (VISION_IMAGE_DPI)
+      * `VISION_MAX_EDGE_PX` / `JPEG_QUALITY`
+
+    `on_render_progress(current_page, total_pages)` fires after each page so
+    the async job runner can keep its heartbeat alive even before any AI
+    batch has completed (PDF rendering on a slim CPU can take minutes).
+    """
     images: List[str] = []
     try:
         import fitz
         from PIL import Image
         doc = fitz.open(pdf_path)
+        total_to_render = min(doc.page_count, max_pages)
         zoom = dpi / 72.0
         mat = fitz.Matrix(zoom, zoom)
         for i, page in enumerate(doc):
@@ -184,6 +197,11 @@ def _render_pages_b64(pdf_path: str, max_pages: int, dpi: int) -> List[str]:
             buf = io.BytesIO()
             img.save(buf, format='JPEG', quality=JPEG_QUALITY, optimize=True)
             images.append(base64.b64encode(buf.getvalue()).decode('ascii'))
+            if on_render_progress:
+                try:
+                    on_render_progress(i + 1, total_to_render)
+                except Exception:
+                    pass
         doc.close()
     except Exception as exc:                           # pragma: no cover
         logger.warning('Failed rendering PDF pages: %s', exc)
@@ -462,7 +480,17 @@ def extract_valve_mto_streaming(
             'warnings': warnings,
         }
 
-    images = _render_pages_b64(pdf_path, VISION_MAX_PAGES, VISION_IMAGE_DPI)
+    # Render with a per-page heartbeat so the frontend's stall timer never
+    # trips during the slow PDF→JPEG phase on slim-CPU containers.
+    images = _render_pages_b64(
+        pdf_path,
+        VISION_MAX_PAGES,
+        VISION_IMAGE_DPI,
+        on_render_progress=(
+            (lambda cur, tot: on_progress(cur, tot, 0))
+            if on_progress else None
+        ),
+    )
     if not images:
         warnings.append('vision skipped — no pages rendered')
         return {
