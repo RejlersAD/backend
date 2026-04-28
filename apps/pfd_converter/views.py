@@ -127,7 +127,12 @@ class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                 
                 # Use new advanced pipeline
                 pipeline = AdvancedPFDToPIDPipeline(project_id=pfd_doc.project_code)
-                
+
+                # Feed engineering context (fluid service, operating P/T, etc.) into the
+                # soft-coded "Intelligent Diagram Conversion Engine" prompt builder.
+                # All values are optional — missing keys are silently dropped by the builder.
+                pipeline.engineering_context = engineering_context
+
                 # Open the saved file for extraction (file pointer is at end after save)
                 pfd_doc.file.open('rb')
                 

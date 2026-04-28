@@ -3,6 +3,7 @@ P&ID Verification URL Configuration
 """
 from django.urls import path
 from . import views
+from .piping_valve_mto_view import extract_valve_mto_view, extract_valve_mto_status_view
 
 app_name = 'pid_verification'
 
@@ -55,4 +56,8 @@ urlpatterns = [
 
     # DCS / Instrument Symbol Compliance Analysis (AI — Gemini + OpenAI dual-chain)
     path('analyze-dcs/<str:document_id>/',                    views.analyze_dcs,   name='analyze-dcs'),
+
+    # Piping — Valve MTO extraction (async job pattern)
+    path('extract-valve-mto/',                                extract_valve_mto_view,        name='extract-valve-mto'),
+    path('extract-valve-mto/<str:job_id>/',                   extract_valve_mto_status_view, name='extract-valve-mto-status'),
 ]

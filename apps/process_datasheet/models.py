@@ -1741,3 +1741,67 @@ class PumpCalculationData(models.Model):
             'npsh_required': results.get('npsh_required', 0),
             'npsh_available': results.get('npsh_available', 0),
         }
+
+# ─── Pump Hydraulic Snapshot ─────────────────────────────────────────────
+# Cloud-backed history for the Pump Hydraulic Calculation tabbed workspace.
+# Stores opaque form-state JSON keyed by user + soft-coded project bucket.
+# NOTE: heavy/binary artefacts (rendered .xlsx) are intentionally NOT stored
+# here — the frontend regenerates them on demand from `form_state`. This
+# keeps the row size small and the export layer fully soft-coded.
+
+class PumpHydraulicSnapshot(models.Model):
+    """
+    Versioned snapshot of a user's Pump Hydraulic Calculation form state.
+    Mirrors the client-side localStorage model so a sync is a 1:1 push.
+    """
+
+    SOURCE_AI_EXTRACTION = "ai_extraction"
+    SOURCE_MANUAL        = "manual"
+    SOURCE_AUTO          = "auto"
+    SOURCE_CHOICES = [
+        (SOURCE_AI_EXTRACTION, "AI Extracted"),
+        (SOURCE_MANUAL,        "Manual Save"),
+        (SOURCE_AUTO,          "Auto Save"),
+    ]
+
+    id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user        = models.ForeignKey(
+                      User, on_delete=models.CASCADE,
+                      related_name="pump_hydraulic_snapshots",
+                      db_index=True,
+                  )
+    # Soft-coded project bucket — derived from form_state on the client
+    # (job_no / contract_no / project_title / client_job_no fallback chain).
+    project_key = models.CharField(max_length=255, db_index=True)
+    label       = models.CharField(max_length=255, blank=True, default="")
+    source      = models.CharField(max_length=32, choices=SOURCE_CHOICES,
+                                   default=SOURCE_MANUAL, db_index=True)
+
+    # Surfaced columns for fast listing / filtering — kept in sync with the
+    # frontend `HISTORY_META_FIELDS` config. Not exhaustive; full data lives
+    # in `form_state`.
+    project_title  = models.CharField(max_length=255, blank=True, default="")
+    job_no         = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    client_name    = models.CharField(max_length=255, blank=True, default="")
+    pump_tag_no    = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    calculation_no = models.CharField(max_length=255, blank=True, default="")
+
+    # Opaque payloads
+    form_state = models.JSONField(default=dict, help_text="Full client form state")
+    context    = models.JSONField(default=dict, blank=True,
+                                  help_text="Snapshot context (e.g. extraction summary)")
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Pump Hydraulic Snapshot"
+        verbose_name_plural = "Pump Hydraulic Snapshots"
+        indexes = [
+            models.Index(fields=["user", "project_key", "-created_at"]),
+            models.Index(fields=["user", "-created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.project_key} — {self.label or self.source} ({self.created_at:%Y-%m-%d %H:%M})"
