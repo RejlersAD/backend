@@ -135,20 +135,40 @@ def _page_count(pdf_path: str) -> int:
         return 0
 
 
-def _extract_text(pdf_path: str) -> str:
-    """Best-effort text via PyMuPDF then pdfplumber."""
+def _extract_text(pdf_path: str, on_text_progress=None) -> str:
+    """
+    Best-effort text via PyMuPDF (fast). pdfplumber is only consulted as a
+    fallback when PyMuPDF returns less than ``TEXT_SUFFICIENT_CHARS`` —
+    pdfplumber is *much* slower (often 10-30× on large searchable PDFs)
+    and Vision already handles image-only drawings, so the fallback rarely
+    pays for itself.
+
+    ``on_text_progress(current_page, total_pages)`` fires per page so the
+    job snapshot keeps advancing during this otherwise-silent phase.
+    """
     parts: List[str] = []
     try:
         import fitz
         doc = fitz.open(pdf_path)
-        for page in doc:
+        total = doc.page_count
+        for i, page in enumerate(doc):
             t = page.get_text() or ''
             if t.strip():
                 parts.append(t)
+            if on_text_progress:
+                try:
+                    on_text_progress(i + 1, total)
+                except Exception:
+                    pass
         doc.close()
     except Exception as exc:                           # pragma: no cover
         logger.warning('PyMuPDF failed: %s', exc)
 
+    combined = '\n'.join(parts)
+    if len(combined) >= TEXT_SUFFICIENT_CHARS or os.getenv('VALVE_MTO_DISABLE_PDFPLUMBER', '1') == '1':
+        return combined
+
+    # Slow fallback only when PyMuPDF clearly under-extracted.
     try:
         import pdfplumber
         with pdfplumber.open(pdf_path) as pdf:
@@ -450,7 +470,23 @@ def extract_valve_mto_streaming(
     * `on_partial(rows_so_far:list, project_meta_so_far:dict)`
     """
     pages = _page_count(pdf_path)
-    text  = _extract_text(pdf_path)
+    # Emit an immediate progress signal so the UI shows movement right after
+    # the worker thread starts, even before any page is processed.
+    if on_progress:
+        try:
+            on_progress(0, max(pages, 1), 0)
+        except Exception:
+            pass
+
+    # Per-page heartbeat during text extraction (PyMuPDF) — searchable PDFs
+    # can be 100+ pages and the user must see progress.
+    text  = _extract_text(
+        pdf_path,
+        on_text_progress=(
+            (lambda cur, tot: on_progress(cur, tot, 0))
+            if on_progress else None
+        ),
+    )
     text_meta = _extract_meta_from_text(text)
 
     api_key = os.getenv('OPENAI_API_KEY')
