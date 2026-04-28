@@ -66,6 +66,15 @@ def process_pfd_document(self, document_id: str):
             extraction  = extract_drawing(file_path, page_index=seg.page_index)
             rule_findings = run_rules(extraction)
 
+            # Persist tag_positions into drawing metadata for frontend overlay markers.
+            # Merge rather than replace so any segmentation metadata is preserved.
+            tag_positions = extraction.get('tag_positions', {})
+            if tag_positions:
+                meta = dict(drawing_obj.metadata or {})
+                meta['tag_positions'] = tag_positions
+                drawing_obj.metadata = meta
+                drawing_obj.save(update_fields=['metadata'])
+
             bulk = []
             for sl, rf in enumerate(rule_findings, start=1):
                 bulk.append(PFDQFinding(

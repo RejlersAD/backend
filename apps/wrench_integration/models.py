@@ -54,6 +54,18 @@ class WrenchConfig(models.Model):
     )
     token_obtained_at = models.DateTimeField(null=True, blank=True)
 
+    # Pre-shared token – when set, used directly for every API call (no login required).
+    # Wrench's rolling-token mechanism still applies: each response token overwrites this field.
+    # Set via the "Inject Token" action; cleared by saving new credentials.
+    pre_shared_token = models.TextField(
+        blank=True, default='',
+        help_text=(
+            'Pre-shared Wrench session token (obtained externally from the Wrench team). '
+            'When non-empty, this token is used directly — bypassing the username/password '
+            'login flow. The rolling refresh from each API response keeps it current.'
+        )
+    )
+
     organization_name = models.CharField(max_length=255, blank=True, default='')
     client_id = models.CharField(max_length=255, blank=True, default='')
 
@@ -166,6 +178,97 @@ class WrenchSyncLog(models.Model):
 
     def __str__(self):
         return f'Sync {self.direction} [{self.status}] @ {self.started_at:%Y-%m-%d %H:%M}'
+
+    @property
+    def duration_seconds(self):
+        if self.completed_at and self.started_at:
+            return (self.completed_at - self.started_at).total_seconds()
+        return None
+
+
+class WrenchS3SyncJob(models.Model):
+    """
+    Tracks a Wrench → RADAI → S3 export job.
+    Supports both batch (one-off full export) and real-time (polling loop) modes.
+    """
+    MODE_BATCH = 'batch'
+    MODE_REALTIME = 'realtime'
+    MODE_CHOICES = [
+        (MODE_BATCH,    'Batch – full export, run once'),
+        (MODE_REALTIME, 'Real-time – continuous polling'),
+    ]
+
+    ENTITY_TRANSMITTALS = 'transmittals'
+    ENTITY_DOCUMENTS    = 'documents'
+    ENTITY_ALL          = 'all'
+    ENTITY_CHOICES = [
+        (ENTITY_TRANSMITTALS, 'Transmittals'),
+        (ENTITY_DOCUMENTS,    'Documents'),
+        (ENTITY_ALL,          'All (Transmittals + Documents)'),
+    ]
+
+    STATUS_PENDING     = 'pending'
+    STATUS_IN_PROGRESS = 'in_progress'
+    STATUS_SUCCESS     = 'success'
+    STATUS_FAILED      = 'failed'
+    STATUS_STOPPED     = 'stopped'
+    STATUS_CHOICES = [
+        (STATUS_PENDING,     'Pending'),
+        (STATUS_IN_PROGRESS, 'In Progress'),
+        (STATUS_SUCCESS,     'Success'),
+        (STATUS_FAILED,      'Failed'),
+        (STATUS_STOPPED,     'Stopped'),
+    ]
+
+    config = models.ForeignKey(
+        WrenchConfig, on_delete=models.SET_NULL, null=True,
+        related_name='s3_sync_jobs',
+    )
+    triggered_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True,
+        related_name='wrench_s3_sync_jobs',
+    )
+
+    mode        = models.CharField(max_length=20, choices=MODE_CHOICES, default=MODE_BATCH)
+    entity_type = models.CharField(max_length=30, choices=ENTITY_CHOICES, default=ENTITY_TRANSMITTALS)
+    status      = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+
+    # S3 target (all soft-coded; bucket sourced from env at runtime — not stored)
+    s3_prefix   = models.CharField(
+        max_length=500, blank=True, default='wrench/',
+        help_text='S3 key prefix, e.g. "wrench/transmittals/"',
+    )
+
+    # Progress counters
+    records_exported = models.IntegerField(default=0)
+    records_failed   = models.IntegerField(default=0)
+    pages_processed  = models.IntegerField(default=0)
+
+    # Real-time state: last Wrench page successfully exported
+    last_page_exported = models.IntegerField(default=0)
+
+    error_message = models.TextField(blank=True, default='')
+    job_details   = models.JSONField(default=dict, blank=True)
+
+    # Celery task ID so we can revoke a real-time job
+    celery_task_id = models.CharField(max_length=255, blank=True, default='')
+
+    started_at   = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    updated_at   = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Wrench S3 Sync Job'
+        verbose_name_plural = 'Wrench S3 Sync Jobs'
+        ordering = ['-started_at']
+        indexes = [
+            models.Index(fields=['status']),
+            models.Index(fields=['mode']),
+            models.Index(fields=['started_at']),
+        ]
+
+    def __str__(self):
+        return f'S3 Sync [{self.mode}/{self.entity_type}] [{self.status}] @ {self.started_at:%Y-%m-%d %H:%M}'
 
     @property
     def duration_seconds(self):

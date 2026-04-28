@@ -8,12 +8,15 @@ bind = "0.0.0.0:8000"
 backlog = 2048
 
 # Worker processes
-workers = 8  # 8 workers for high concurrency (handles P&ID + other requests)
+# SOFT-CODED: Keep workers low on Railway to avoid OOM (OCR tasks are memory-heavy).
+# Each gthread worker can handle 4 concurrent connections via threads.
+# 2 workers × 4 threads = 8 concurrent connections — sufficient for API load.
+workers = 2
 worker_class = "gthread"  # Use threaded workers for better connection handling
-threads = 4  # 4 threads per worker (8 workers × 4 threads = 32 concurrent connections)
+threads = 4  # 4 threads per worker
 worker_connections = 1000
-max_requests = 0  # Disable worker recycling (prevents mid-request kills)
-max_requests_jitter = 0
+max_requests = 500          # Recycle workers after 500 requests to prevent memory leaks
+max_requests_jitter = 50    # Spread recycling to avoid simultaneous restarts
 
 # Timeout settings - CRITICAL for P&ID processing
 timeout = 1200  # 20 minutes for P&ID OCR + AI processing

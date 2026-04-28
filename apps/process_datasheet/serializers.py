@@ -10,7 +10,8 @@ from .models import (
     DatasheetTemplate,
     DatasheetValidationRule,
     DatasheetExtractionJob,
-    PumpCalculationData
+    PumpCalculationData,
+    PumpHydraulicSnapshot,
 )
 from django.contrib.auth import get_user_model
 

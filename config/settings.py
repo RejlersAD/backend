@@ -162,6 +162,7 @@ INSTALLED_APPS = [
     'apps.sld_verification',   # SLD Quality Checker — electrical single line diagram verification
     'apps.pfd_quality',          # PFD Quality Checker — deterministic rule engine
     'apps.cross_recommendation', # Cross PID/PFD recommendation bridge
+    'apps.non_teff_metadata',     # Non-TEFF Metadata Extractor — multi-format document metadata extraction
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
@@ -193,9 +194,11 @@ MIDDLEWARE = [
     # Must be first: normalise RFC-invalid Docker hostnames (underscores) before
     # CommonMiddleware's host-header validation runs. No-op in production (DEBUG=False).
     'apps.core.middleware.NormaliseDockerHostMiddleware',
+    # CORS MUST be before SecurityMiddleware so CORS headers are added even when
+    # SecurityMiddleware short-circuits the request (e.g. HTTPS enforcer redirects).
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
-    'corsheaders.middleware.CorsMiddleware',  # MUST be before CommonMiddleware
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -314,41 +317,80 @@ else:
 # Environment-aware database configuration
 # Supports: production, staging, development, testing
 # SOFT-CODED: add new environments by editing _ENV_DB_MAP only
+#
+# SECURITY: All database credentials come from environment variables (.env file
+# locally, Railway/Docker env vars in production). NEVER hardcode credentials
+# here — settings.py is committed to git.
+#
+# Required env vars (set in backend/.env for local dev):
+#   ENVIRONMENT             — one of: development | staging | preprod | production
+#   LOCAL_DATABASE_URL      — your local pgAdmin DB (e.g. postgres://user:pw@localhost:5432/dbname)
+#   TEST_DATABASE_URL       — Railway test/staging DB URL
+#   PRODUCTION_DATABASE_URL — Railway production DB URL (production only; never set locally)
+#
+# Override precedence: DATABASE_URL > _ENV_DB_MAP[ENVIRONMENT] > LOCAL_DATABASE_URL
+# Railway sets DATABASE_URL automatically — no extra config needed in production.
 
 # Get environment type — override via ENVIRONMENT env var or .env file
-ENVIRONMENT = config('ENVIRONMENT', default='production')
+ENVIRONMENT = config('ENVIRONMENT', default='development')
 
-# ── Named database URL constants ─────────────────────────────────────────────
-# TEST_DATABASE_URL  : Used for local development AND all non-production runs
-# PRODUCTION_DATABASE_URL : Live production — never used locally
-TEST_DATABASE_URL = "postgresql://postgres:OPMUckaUZIxVfSsWxgRKuVFbBsVKxPyk@nozomi.proxy.rlwy.net:43647/railway"
-PRODUCTION_DATABASE_URL = "postgresql://postgres:cJLHOrfvZxZXHKaMCWdLdRedgHgmIneU@shinkansen.proxy.rlwy.net:38534/railway"
-PREPROD_DATABASE_URL = TEST_DATABASE_URL  # backward-compat alias
+# ── Named database URL constants (loaded from env, never hardcoded) ──────────
+LOCAL_DATABASE_URL      = config('LOCAL_DATABASE_URL',      default='')
+TEST_DATABASE_URL       = config('TEST_DATABASE_URL',       default='')
+PRODUCTION_DATABASE_URL = config('PRODUCTION_DATABASE_URL', default='')
+PREPROD_DATABASE_URL    = TEST_DATABASE_URL  # backward-compat alias
 
 # ── Soft-coded environment → database routing map ────────────────────────────
 # To add a new environment: just add a key here; no other changes needed.
 _ENV_DB_MAP = {
     'production':  PRODUCTION_DATABASE_URL,
     'prod':        PRODUCTION_DATABASE_URL,
-    # All non-production environments share the testing database
     'staging':     TEST_DATABASE_URL,
     'preprod':     TEST_DATABASE_URL,
-    'development': TEST_DATABASE_URL,
-    'dev':         TEST_DATABASE_URL,
+    # Local dev uses local pgAdmin DB by default; falls back to Railway test if not set
+    'development': LOCAL_DATABASE_URL or TEST_DATABASE_URL,
+    'dev':         LOCAL_DATABASE_URL or TEST_DATABASE_URL,
+    'local':       LOCAL_DATABASE_URL or TEST_DATABASE_URL,
     'testing':     TEST_DATABASE_URL,
     'test':        TEST_DATABASE_URL,
 }
 
-_default_db_url = _ENV_DB_MAP.get(ENVIRONMENT.lower(), TEST_DATABASE_URL)
+_default_db_url = _ENV_DB_MAP.get(ENVIRONMENT.lower(), '')
 DATABASE_URL = config('DATABASE_URL', default=_default_db_url)
+
+# ── Soft-coded list of management commands that don't need a real database ───
+# (collectstatic, makemessages, etc. are run during Docker build before any
+# DB is attached — falling back to an in-memory sqlite avoids spurious build
+# failures while still raising loudly for any DB-touching command at runtime.)
+import sys as _sys
+_DB_OPTIONAL_COMMANDS = {
+    'collectstatic', 'compilemessages', 'makemessages',
+    'check', 'help', 'version', '--version',
+}
+_running_db_optional = any(arg in _DB_OPTIONAL_COMMANDS for arg in _sys.argv)
+
+if not DATABASE_URL:
+    if _running_db_optional or config('DJANGO_SKIP_DB_CHECK', default=False, cast=bool):
+        # Stub DB — never used for queries, just keeps Django settings importable
+        # so build-time tasks (e.g. collectstatic) don't fail.
+        DATABASE_URL = 'sqlite:///:memory:'
+        print(f"[DJANGO] ⚠️  No DATABASE_URL configured — using in-memory sqlite stub "
+              f"(safe for build-time '{' '.join(_sys.argv[1:2]) or 'startup'}' only)")
+    else:
+        raise RuntimeError(
+            f"No database URL configured for ENVIRONMENT='{ENVIRONMENT}'. "
+            f"Set DATABASE_URL or LOCAL_DATABASE_URL/TEST_DATABASE_URL/PRODUCTION_DATABASE_URL "
+            f"in backend/.env. See backend/.env.example for template."
+        )
 
 _env_labels = {
     'production': '🏭 PRODUCTION',
     'prod':       '🏭 PRODUCTION',
     'staging':    '🚀 STAGING',
     'preprod':    '🚀 PREPROD',
-    'development':'🔧 DEVELOPMENT',
-    'dev':        '🔧 DEVELOPMENT',
+    'development':'🔧 DEVELOPMENT (local)',
+    'dev':        '🔧 DEVELOPMENT (local)',
+    'local':      '🔧 LOCAL',
     'testing':    '🧪 TESTING',
     'test':       '🧪 TESTING',
 }
@@ -916,6 +958,11 @@ if USE_S3:
         
         # Security: Use AWS Signature Version 4 (required for some regions)
         AWS_S3_SIGNATURE_VERSION = 's3v4'
+        
+        # Force region-specific endpoint — presigned URLs for opt-in regions
+        # (e.g. me-central-1 / UAE) break if boto3 uses the global s3.amazonaws.com
+        # endpoint because S3 redirects invalidate the Signature=host header.
+        AWS_S3_ENDPOINT_URL = f'https://s3.{AWS_S3_REGION_NAME}.amazonaws.com'
         
         # Security: Enable encryption at rest
         AWS_S3_ENCRYPTION = True

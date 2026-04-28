@@ -145,3 +145,9 @@ test_*.py
 !apps/pid_analysis/config/*.txt
 
 pfd_projects/
+
+# Runtime upload / cache directories (repo-root only, NOT the apps/pid_verification/ Django app)
+/pid_verification/
+
+# Runtime-generated comparison cache snapshots (UUID-named JSON blobs)
+domain_knowledge/pid_verification/comparison_*.json

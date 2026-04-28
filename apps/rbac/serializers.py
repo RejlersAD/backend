@@ -246,7 +246,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
     permissions = serializers.SerializerMethodField()
     modules = serializers.SerializerMethodField()
     profile_photo = serializers.SerializerMethodField()
-    
+    # Engineering competency profile — stored in metadata['engineer_profile'], no migration needed
+    engineer_profile = serializers.SerializerMethodField()
+
     # User creation fields
     username = serializers.CharField(write_only=True, required=False)
     email = serializers.EmailField(write_only=True, required=False)
@@ -345,7 +347,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'employee_id', 'department', 'job_title', 'manager',
             'last_login_ip', 'last_login_at', 'failed_login_attempts',
             'must_change_password',  # Password policy field
-            'profile_photo', 'phone', 'bio', 'location',  # Profile customization
+            'profile_photo', 'phone', 'bio', 'location', 'engineer_profile',  # Profile customization
             'is_deleted', 'deleted_at', 'deleted_by',
             'created_at', 'updated_at',
             # Write-only fields for user creation
@@ -393,6 +395,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
         except Exception:
             return None
     
+    def get_engineer_profile(self, obj):
+        """Return engineering competency data from the dedicated rbac_engineer_profiles table."""
+        try:
+            return obj.engineer_profile.to_dict()
+        except Exception:
+            return {}
+
     def create(self, validated_data):
         role_ids = validated_data.pop('role_ids', [])
         module_ids = validated_data.pop('module_ids', [])

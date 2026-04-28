@@ -112,6 +112,24 @@ def process_mov_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
         if tag_warnings:
             demo_removed = raw_valve_count - len(pid_data['valves'])
             log_and_print(f"[MOV {job_id[:8]}] {demo_removed} DEMO/mock tag(s) removed. {len(pid_data['valves'])} real tag(s) remain.")
+
+        # -- FIELD VALIDATION (soft-coded JSON config in mov_field_validator.py) -
+        try:
+            from apps.process_datasheet.mov_field_validator import validate_mov_fields
+            field_result = validate_mov_fields(pid_data.get('valves', []))
+            if field_result.get('enabled'):
+                pid_data['valves'] = field_result['valves']
+                cache.set(f'mov_task_{job_id}_field_validation',
+                          field_result['summary'], timeout=3600)
+                log_and_print(
+                    f"[MOV {job_id[:8]}] FIELD VALIDATION: kept={field_result['summary']['kept']}"
+                    f" dropped={field_result['summary']['dropped']}"
+                    f" scrubbed={field_result['summary']['scrubbed']}"
+                )
+        except Exception as fv_err:
+            log_and_print(f"[MOV {job_id[:8]}] Field validator skipped: {fv_err}")
+        # -------------------------------------------------------------------------
+
         if len(pid_data.get('valves', [])) == 0:
             # Store a helpful user-facing error — do NOT raise so the except handler
             # can produce a clean 'failed' result rather than a raw traceback message.

@@ -16,6 +16,12 @@ import logging
 import traceback
 from datetime import datetime
 
+# Soft-coded post-extraction validator (additive — never modifies analyzer logic)
+try:
+    from .pressure_instrument_validator import validate_instruments as _validate_instruments
+except Exception:  # pragma: no cover - validator is best-effort
+    _validate_instruments = None
+
 # Import ALL analyzers - use V3 by default, fallback to V2, then original
 logger = logging.getLogger(__name__)
 
@@ -206,7 +212,33 @@ def analyze_pid_for_pressure_instruments(request):
             pid_file,
             drawing_info
         )
-        
+
+        # ─── Soft-coded validation pass (anti-hallucination + ISA-5.1 tag rules) ───
+        validation_summary = None
+        validation_audit = []
+        if _validate_instruments and instruments:
+            try:
+                vres = _validate_instruments(instruments, drawing_info)
+                if vres.get('enabled'):
+                    instruments = vres['instruments']
+                    validation_summary = vres['summary']
+                    validation_audit = vres['audit']
+                    logger.info(
+                        "[PressureInstrumentAPI] Validator kept=%s dropped=%s",
+                        validation_summary['kept'], validation_summary['dropped'],
+                    )
+                    # Re-build Excel from sanitised list when possible
+                    if instruments and hasattr(analyzer, 'populate_excel_datasheet'):
+                        try:
+                            excel_file = analyzer.populate_excel_datasheet(instruments, drawing_info)
+                        except Exception as rebuild_err:
+                            logger.warning(
+                                "[PressureInstrumentAPI] Excel rebuild after validation failed: %s",
+                                rebuild_err,
+                            )
+            except Exception as val_err:  # never let validator break extraction
+                logger.warning("[PressureInstrumentAPI] Validator skipped: %s", val_err)
+
         if not excel_file:
             return Response(
                 {
@@ -240,7 +272,9 @@ def analyze_pid_for_pressure_instruments(request):
                 'instruments': instruments,
                 'instruments_detected': len(instruments),
                 'drawing_info': drawing_info,
-                'excel_generated': True
+                'excel_generated': True,
+                'validation': validation_summary,
+                'validation_audit': validation_audit,
             }
             
             logger.info(f"[PressureInstrumentAPI] Analysis complete: {len(instruments)} instruments detected")
@@ -277,7 +311,20 @@ def download_pressure_instrument_excel(request):
                 {'error': 'No instrument data provided'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
+        # Soft-coded validation pass — sanitise list before Excel build
+        if _validate_instruments:
+            try:
+                vres = _validate_instruments(instruments, drawing_info)
+                if vres.get('enabled'):
+                    instruments = vres['instruments']
+                    logger.info(
+                        "[PressureInstrumentAPI] Validator (download): kept=%s dropped=%s",
+                        vres['summary']['kept'], vres['summary']['dropped'],
+                    )
+            except Exception as val_err:
+                logger.warning("[PressureInstrumentAPI] Validator skipped (download): %s", val_err)
+
         logger.info(f"[PressureInstrumentAPI] 📊 Generating Excel for {len(instruments)} instruments")
         logger.info(f"[PressureInstrumentAPI] Drawing: {drawing_info.get('drawing_number', 'N/A')}")
         

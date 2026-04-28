@@ -53,10 +53,14 @@ testing/
 # Training & Large Data Directories (CRITICAL - 20MB+)
 pfd_documents/
 pfd_training_samples/
+pfd_projects/
+pfd_quality/
 pid_drawings/
+pid_drawings_advanced/
 pid_training_samples/
 training_data_cache/
 project_data/
+domain_knowledge/
 
 # Logs
 *.log

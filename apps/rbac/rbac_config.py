@@ -18,9 +18,10 @@ ALL_MODULES_CATALOGUE = [
     # ── Core Engineering ──────────────────────────────────────────────────
     {'code': 'pid_analysis',           'name': 'P&ID Analysis',               'icon': 'FileText',    'order': 1,  'description': 'P&ID document analysis and processing'},
     {'code': 'pfd_to_pid',             'name': 'PFD to P&ID Converter',        'icon': 'RefreshCw',   'order': 2,  'description': 'AI-powered conversion of PFD to P&ID drawings'},
-    {'code': 'crs_documents',          'name': 'CRS Document Management',      'icon': 'FolderOpen',  'order': 3,  'description': 'Upload and manage CRS documents with AI analysis'},
-    {'code': 'designiq',               'name': 'DesignIQ',                     'icon': 'Cpu',         'order': 4,  'description': 'AI-powered design intelligence and PFD verification'},
-    {'code': 'qhse',                   'name': 'QHSE Management',              'icon': 'Shield',      'order': 5,  'description': 'Quality, Health, Safety and Environment project management'},
+    {'code': 'pfd_quality',            'name': 'PFD Quality Check',            'icon': 'CheckSquare', 'order': 3,  'description': 'AI-powered quality verification of PFD documents'},
+    {'code': 'crs_documents',          'name': 'CRS Document Management',      'icon': 'FolderOpen',  'order': 4,  'description': 'Upload and manage CRS documents with AI analysis'},
+    {'code': 'designiq',               'name': 'DesignIQ',                     'icon': 'Cpu',         'order': 5,  'description': 'AI-powered design intelligence and PFD verification'},
+    {'code': 'qhse',                   'name': 'QHSE Management',              'icon': 'Shield',      'order': 6,  'description': 'Quality, Health, Safety and Environment project management'},
     # ── Discipline Datasheets ─────────────────────────────────────────────
     {'code': 'process_datasheet',      'name': 'Process Datasheet',            'icon': 'FileText',    'order': 10, 'description': 'Process equipment datasheets — MOV, SDV, pumps, pressure instruments'},
     {'code': 'electrical_datasheet',   'name': 'Electrical Datasheet',         'icon': 'Zap',         'order': 11, 'description': 'Electrical equipment and SLD-based datasheet generation'},
@@ -33,6 +34,7 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'piping_pms',             'name': 'Piping Material Specification', 'icon': 'Database',   'order': 18, 'description': 'Piping material specification management'},
     {'code': 'digitization_datasheet', 'name': 'Digitization Datasheet',       'icon': 'Scan',        'order': 19, 'description': 'AI-powered digitization of legacy datasheets'},
     {'code': 'spec_customization',     'name': 'Spec Customization',           'icon': 'Settings',    'order': 20, 'description': 'Engineering specification customization tools'},
+    {'code': 'non_teff_metadata',      'name': 'Non-TEFF Metadata Extractor',  'icon': 'Search',      'order': 21, 'description': 'Extract metadata from Non-TEFF documents (PDF, Excel, Word, AutoCAD)'},
     # ── Admin / Platform ─────────────────────────────────────────────────
     {'code': 'user_mgmt',              'name': 'User Management',              'icon': 'Users',       'order': 50, 'description': 'Manage users, roles, and permissions'},
     {'code': 'org_settings',           'name': 'Organization Settings',        'icon': 'Settings',    'order': 51, 'description': 'Configure organization settings and preferences'},
@@ -251,6 +253,36 @@ SUCCESS_MESSAGES = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ENGINEERING SECTION MODULE CATALOGUE
+# Single source of truth for what constitutes "full Engineering section" access.
+# All module codes here correspond to the 1. Engineering section in the frontend.
+# Edit this list (not views/commands) when adding/removing engineering modules.
+# ─────────────────────────────────────────────────────────────────────────────
+ENGINEERING_SECTION_MODULES = [
+    # ── Core P&ID / Process ───────────────────────────────────────────
+    'pid_analysis',
+    'pfd_to_pid',
+    'pfd_quality',
+    'crs_documents',
+    'designiq',
+    'qhse',
+    # ── Discipline Datasheets ─────────────────────────────────────────
+    'process_datasheet',
+    'electrical_datasheet',
+    'electrical_sld',
+    'instrument_datasheet',
+    'instrument_index',
+    'mechanical_datasheet',
+    'civil_datasheet',
+    'piping_datasheet',
+    'piping_pms',
+    # ── Digitization ─────────────────────────────────────────────────
+    'digitization_datasheet',
+    'spec_customization',
+    'non_teff_metadata',
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SOFT-CODED ROLE → MODULE POLICY
 # Maps role codes to the module codes that role should always have access to.
 # Used by: management commands (apply_role_module_policy, seed_rbac)
@@ -259,83 +291,62 @@ SUCCESS_MESSAGES = {
 # access — edit here to change what any role can see.
 # ─────────────────────────────────────────────────────────────────────────────
 ROLE_MODULE_POLICY = {
-    # Process-focused engineers: datasheets + P&ID tools
-    'process_engineer': [
-        'process_datasheet',
-        'pid_analysis',
-        'pfd_to_pid',
-        'designiq',
-    ],
-    # Electrical discipline
-    'electrical_engineer': [
-        'electrical_datasheet',
-        'electrical_sld',
-        'pid_analysis',
-    ],
-    # Instrument discipline
-    'instrument_engineer': [
-        'instrument_datasheet',
-        'instrument_index',
-        'pid_analysis',
-    ],
-    # Mechanical discipline
-    'mechanical_engineer': [
-        'mechanical_datasheet',
-        'pid_analysis',
-    ],
-    # Civil / structural discipline
-    'civil_engineer': [
-        'civil_datasheet',
-    ],
-    # Piping discipline
-    'piping_engineer': [
-        'piping_datasheet',
-        'piping_pms',
-        'pid_analysis',
-    ],
-    # QHSE discipline
-    'qhse_engineer': [
-        'qhse',
-    ],
-    # DesignIQ / digital twin roles
-    'design_engineer': [
-        'designiq',
-        'pfd_to_pid',
-        'pid_analysis',
-    ],
-    # Project managers — read access across engineering disciplines
-    'project_manager': [
-        'pid_analysis',
-        'process_datasheet',
-        'designiq',
-        'reports',
-    ],
-    # Admin has access to all application modules
-    'admin': [
-        'pid_analysis',
-        'pfd_to_pid',
-        'crs_documents',
-        'process_datasheet',
-        'electrical_datasheet',
-        'electrical_sld',
-        'instrument_datasheet',
-        'instrument_index',
-        'mechanical_datasheet',
-        'civil_datasheet',
-        'piping_datasheet',
-        'piping_pms',
-        'designiq',
-        'qhse',
+    # ── DEFAULT ENGINEERING ACCESS POLICY ────────────────────────────────
+    # All roles get the full Engineering section (1.1–1.7) by default.
+    # ENGINEERING_SECTION_MODULES is the single source of truth for what
+    # constitutes the Engineering section.  To add/remove a module from the
+    # default grant, edit ENGINEERING_SECTION_MODULES above — not here.
+    # ─────────────────────────────────────────────────────────────────────
+
+    # Process-focused engineers: full Engineering section
+    'process_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Electrical discipline: full Engineering section
+    'electrical_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Instrument discipline: full Engineering section
+    'instrument_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Mechanical discipline: full Engineering section
+    'mechanical_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Civil / structural discipline: full Engineering section
+    'civil_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Piping discipline: full Engineering section
+    'piping_engineer': ENGINEERING_SECTION_MODULES,
+
+    # QHSE discipline: full Engineering section
+    'qhse_engineer': ENGINEERING_SECTION_MODULES,
+
+    # DesignIQ / digital twin roles: full Engineering section
+    'design_engineer': ENGINEERING_SECTION_MODULES,
+
+    # Project managers: full Engineering section + reports
+    'project_manager': ENGINEERING_SECTION_MODULES + ['reports'],
+
+    # Viewer: full Engineering section (read-only enforced by UI/view guards)
+    'viewer': ENGINEERING_SECTION_MODULES,
+
+    # Admin: full Engineering section + all admin/platform modules
+    'admin': ENGINEERING_SECTION_MODULES + [
         'user_mgmt',
         'org_settings',
         'audit_logs',
         'reports',
         'api_access',
-        'digitization_datasheet',
-        'spec_customization',
     ],
+
     # Super-admins bypass module checks in the app, but listed for completeness
     'super_admin': [],
+
+    # ── Organisation-level custom roles (production DB) ───────────────────
+    # These are non-system roles created manually in the production database
+    # to grant "1. Engineering + 2. COMMON" access bundles.
+    # SOFT-CODED: add new org-role codes here to grant full engineering access.
+    # All entries here map to ENGINEERING_SECTION_MODULES so that every feature
+    # under "1. Engineering" (1.1–1.7) and "2. COMMON" is accessible.
+    'engineering_common_access': ENGINEERING_SECTION_MODULES,
 }
 
 # Which module codes map to which discipline (used for diagnostics)
@@ -343,6 +354,7 @@ MODULE_DISCIPLINE_MAP = {
     'process_datasheet': 'Process',
     'pid_analysis':      'Process / P&ID',
     'pfd_to_pid':        'Process',
+    'pfd_quality':       'Process',
     'designiq':          'DesignIQ',
     'electrical_datasheet': 'Electrical',
     'electrical_sld':    'Electrical',
@@ -354,13 +366,14 @@ MODULE_DISCIPLINE_MAP = {
     'piping_pms':        'Piping',
     'digitization_datasheet': 'Digitization',
     'spec_customization': 'Digitization',
+    'non_teff_metadata': 'Digitization',
     'qhse':              'QHSE',
+    'crs_documents':     'CRS',
     'user_mgmt':         'Admin',
     'org_settings':      'Admin',
     'audit_logs':        'Admin',
     'reports':           'Admin',
     'api_access':        'Admin',
-    'crs_documents':     'CRS',
 }
 
 

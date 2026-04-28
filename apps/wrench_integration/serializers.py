@@ -75,7 +75,7 @@ class WrenchConfigWriteSerializer(serializers.ModelSerializer):
 
 class WrenchSyncLogSerializer(serializers.ModelSerializer):
     triggered_by_email = serializers.SerializerMethodField()
-    duration_seconds = serializers.FloatField(read_only=True, source='duration_seconds')
+    duration_seconds = serializers.FloatField(read_only=True)
 
     class Meta:
         model = WrenchSyncLog
@@ -84,6 +84,26 @@ class WrenchSyncLogSerializer(serializers.ModelSerializer):
             'records_requested', 'records_synced', 'records_failed',
             'error_message', 'sync_details',
             'triggered_by_email', 'started_at', 'completed_at', 'duration_seconds',
+        ]
+        read_only_fields = fields
+
+    def get_triggered_by_email(self, obj):
+        return obj.triggered_by.email if obj.triggered_by else None
+
+
+class WrenchS3SyncJobSerializer(serializers.ModelSerializer):
+    triggered_by_email = serializers.SerializerMethodField()
+    duration_seconds   = serializers.FloatField(read_only=True)
+
+    class Meta:
+        from .models import WrenchS3SyncJob
+        model = WrenchS3SyncJob
+        fields = [
+            'id', 'mode', 'entity_type', 'status',
+            's3_prefix',
+            'records_exported', 'records_failed', 'pages_processed', 'last_page_exported',
+            'error_message', 'job_details', 'celery_task_id',
+            'triggered_by_email', 'started_at', 'completed_at', 'updated_at', 'duration_seconds',
         ]
         read_only_fields = fields
 

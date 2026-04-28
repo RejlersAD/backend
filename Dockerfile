@@ -19,11 +19,19 @@ RUN apt-get update && apt-get install -y \
     libtesseract-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
+# ── Layer A: Heavy ML/OCR packages (easyocr → PyTorch ~2GB, paddlepaddle ~700MB)
+# This layer is pinned by version — its Docker content-hash stays identical
+# between deployments as long as these versions don't change.
+# OCI registries skip re-uploading identical layers → 2.7 GB NOT re-pushed
+# on every deploy once this layer is in Railway's registry.
+COPY requirements-prod-base.txt .
+RUN pip install --no-cache-dir -r requirements-prod-base.txt
+
+# ── Layer B: Application packages (lighter, may change with features)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# ── Layer C: Application code (changes every deploy — tiny)
 COPY . .
 
 # Create necessary directories

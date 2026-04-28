@@ -9,7 +9,8 @@ from .views import (
     # Analytics ViewSets
     AnalyticsDashboardViewSet, SystemMetricsViewSet, UserActivityAnalyticsViewSet,
     SecurityAlertViewSet, PredictiveInsightViewSet, FeatureUsageAnalyticsViewSet,
-    ErrorLogAnalyticsViewSet, SystemHealthCheckViewSet
+    ErrorLogAnalyticsViewSet, SystemHealthCheckViewSet,
+    UserExportView,
 )
 from .dashboard_views import (
     user_dashboard_stats, user_files_list, user_activity_timeline
@@ -37,6 +38,8 @@ router.register(r'analytics/error-logs', ErrorLogAnalyticsViewSet, basename='err
 router.register(r'analytics/health-checks', SystemHealthCheckViewSet, basename='health-checks')
 
 urlpatterns = [
+    # User Export — must come BEFORE router.urls to prevent users/{pk}/ swallowing 'export' as a pk
+    path('users/export/', UserExportView.as_view(), name='user-export-users'),
     path('', include(router.urls)),
     # User Dashboard endpoints
     path('dashboard/stats/', user_dashboard_stats, name='user-dashboard-stats'),

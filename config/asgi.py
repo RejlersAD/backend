@@ -18,9 +18,10 @@ django_asgi_app = get_asgi_application()
 # Import WebSocket routing after Django is initialized
 from apps.ml_detection.routing import websocket_urlpatterns as ml_detection_patterns
 from apps.activity.routing import websocket_urlpatterns as activity_patterns
+from apps.usage_tracking.routing import websocket_urlpatterns as usage_patterns
 
 # Combine all WebSocket URL patterns
-websocket_urlpatterns = ml_detection_patterns + activity_patterns
+websocket_urlpatterns = ml_detection_patterns + activity_patterns + usage_patterns
 
 # Application configuration
 application = ProtocolTypeRouter({

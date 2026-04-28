@@ -9,6 +9,15 @@ from .models import UserProfile
 
 User = get_user_model()
 
+# ---------------------------------------------------------------------------
+# SOFT-CODED: Controls whether self-registered accounts are immediately active.
+# False (default) = account is disabled until a super-administrator activates
+#   it via the Django admin or User Management panel.
+# True            = accounts become active immediately on registration (legacy
+#   behaviour — only use in trusted internal-only deployments).
+# ---------------------------------------------------------------------------
+SELF_REGISTRATION_ACTIVE = False
+
 
 class UserProfileSerializer(serializers.ModelSerializer):
     """Serializer for user profile."""
@@ -66,7 +75,10 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         """Create new user with hashed password."""
         validated_data.pop('password_confirm')
         password = validated_data.pop('password')
+        # SOFT-CODED: new accounts are inactive until approved by super admin.
+        # Controlled by the SELF_REGISTRATION_ACTIVE module-level constant.
         user = User.objects.create_user(**validated_data)
+        user.is_active = SELF_REGISTRATION_ACTIVE
         user.set_password(password)
         user.last_password_change = timezone.now()
         user.must_reset_password = False

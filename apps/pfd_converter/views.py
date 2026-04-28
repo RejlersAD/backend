@@ -79,7 +79,16 @@ class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             drawing_title = serializer.validated_data.get('drawing_title', '')
             client = serializer.validated_data.get('client', 'SARB Oil & Gas Division')
             contractor = serializer.validated_data.get('contractor', 'Rejlers Engineering AB')
-            
+
+            # Engineering context fields — feed the precision enhancer for better P&ID accuracy
+            engineering_context = {
+                'fluid_service':          request.data.get('fluid_service', '').strip(),
+                'operating_pressure':     request.data.get('operating_pressure', '').strip(),
+                'operating_temperature':  request.data.get('operating_temperature', '').strip(),
+                'applicable_standards':   request.data.get('applicable_standards', '').strip(),
+                'design_basis':           request.data.get('design_basis', '').strip(),
+            }
+
             # Create PFD document
             pfd_doc = PFDDocument.objects.create(
                 uploaded_by=request.user,
@@ -96,7 +105,18 @@ class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             )
             
             # Store metadata for later P&ID generation (in conversion_notes temporarily)
-            pfd_doc.conversion_notes = f"Intelligence: {intelligence_level} | Drawing: {drawing_title} | Client: {client} | Contractor: {contractor}"
+            pfd_doc.conversion_notes = (
+                f"Intelligence: {intelligence_level} | Drawing: {drawing_title} "
+                f"| Client: {client} | Contractor: {contractor}"
+            )
+            # Append engineering context if provided
+            ctx_parts = [
+                f"{k.replace('_', ' ').title()}: {v}"
+                for k, v in engineering_context.items()
+                if v
+            ]
+            if ctx_parts:
+                pfd_doc.conversion_notes += " | " + " | ".join(ctx_parts)
             
             # Extract PFD data using Advanced AI Pipeline
             pfd_doc.processing_started_at = timezone.now()
@@ -107,7 +127,12 @@ class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                 
                 # Use new advanced pipeline
                 pipeline = AdvancedPFDToPIDPipeline(project_id=pfd_doc.project_code)
-                
+
+                # Feed engineering context (fluid service, operating P/T, etc.) into the
+                # soft-coded "Intelligent Diagram Conversion Engine" prompt builder.
+                # All values are optional — missing keys are silently dropped by the builder.
+                pipeline.engineering_context = engineering_context
+
                 # Open the saved file for extraction (file pointer is at end after save)
                 pfd_doc.file.open('rb')
                 
@@ -117,7 +142,23 @@ class PFDDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                 pfd_doc.file.close()
                 
                 pfd_doc.extracted_data = extracted_data
-                
+
+                # ── PRECISION ENHANCEMENT (soft-coded, additive, non-breaking) ──────────
+                # Runs a second GPT-4o pass to validate instrument loops, safety devices,
+                # utility connections, and ISA 5.1 / ADNOC DEP compliance gaps.
+                # Controlled by env: ENABLE_PID_PRECISION_ENHANCER (default True)
+                logger.info("🔬 Running PID Precision Enhancement pass …")
+                try:
+                    from .pid_precision_enhancer import PIDPrecisionEnhancer
+                    enhancer = PIDPrecisionEnhancer()
+                    extracted_data = enhancer.enhance(extracted_data, engineering_context)
+                    pfd_doc.extracted_data = extracted_data
+                except Exception as _enhance_err:
+                    logger.warning(
+                        f"⚠️ Precision enhancement skipped (non-critical): {_enhance_err}"
+                    )
+                # ── END PRECISION ENHANCEMENT ─────────────────────────────────────────
+
                 # NEW: Run comprehensive analysis automatically
                 logger.info(f"🔍 Running comprehensive PFD analysis...")
                 try:

@@ -1,6 +1,7 @@
 """
 P&ID OCR Extractor V2 - Multi-Engine + AI Intelligence
 Uses Tesseract, EasyOCR, PaddleOCR + OpenAI for accurate line detection
+Supports: Onshore, Offshore, ADNOC, Industrial/Project line-number formats
 """
 
 import re
@@ -14,6 +15,179 @@ import numpy as np
 from openai import OpenAI
 from django.conf import settings
 import base64
+
+# ---------------------------------------------------------------------------
+# Soft-coded: minimum embedded-text characters before falling back to OCR.
+# For vector/searchable PDFs this is instant; for scanned images it will be 0.
+# Raise this value in environments.json if you see OCR running on clear PDFs.
+# ---------------------------------------------------------------------------
+EMBEDDED_TEXT_MIN_CHARS = 80
+
+# ---------------------------------------------------------------------------
+# ADNOC format validation thresholds — soft-coded so they can be tuned
+# without touching regex/validation logic.
+#
+# ADNOC_SEQ_MIN_DIGITS : minimum digits allowed in the sequence number.
+#   Abu Dhabi Oil Co. drawings use 3-digit (e.g. 329, 454) and 4-digit
+#   (e.g. 8703, 1023) sequences.  Original code required exactly 4; relax
+#   to 3 to capture the shorter sequences on this project.
+#
+# ADNOC_PIPECLASS_MIN_LEN : minimum characters in the pipe-class segment.
+#   Standard ADNOC classes are 4+ chars (AC3N, BC2GA…) but simpler project
+#   drawings use 2-char classes (CI, RI, GA, GP…).  Original code required
+#   ≥3 chars; relax to 2.
+# ---------------------------------------------------------------------------
+ADNOC_SEQ_MIN_DIGITS  = 3   # was 4 (hard-coded); accepts 3-digit sequences
+ADNOC_PIPECLASS_MIN_LEN = 2  # was 3 (hard-coded); accepts 2-char pipe classes
+
+# ---------------------------------------------------------------------------
+# General format strategy — controls how results from all sub-formats are
+# combined when format_type='general'.
+#
+# 'merge'  : collect ALL unique line numbers found by EVERY format, deduplicated
+#             by canonical line_number string.  Returns the most complete list.
+#             Best for mixed P&IDs with pipes annotated in different conventions.
+#
+# 'winner' : legacy behaviour — return only the format with the highest count.
+#             Useful when one project consistently uses a single format and you
+#             want to avoid false positives from other formats.
+# ---------------------------------------------------------------------------
+GENERAL_STRATEGY = 'merge'   # 'merge' | 'winner'
+
+# ---------------------------------------------------------------------------
+# Multi-rotation OCR — degrees to rotate the rendered page image BEFORE
+# running Tesseract OCR on it.  PIL rotates counter-clockwise.
+#
+# 0°   → reads horizontal labels (standard)
+# 90°  → reads labels written top-to-bottom (PIL CCW = drawing CW)
+# 270° → reads labels written bottom-to-top (PIL CW  = drawing CCW)
+# 180° → reads upside-down text (rare, included for completeness)
+#
+# P&ID drawings place pipe line designations at EVERY angle.  Running OCR
+# at 0°/90°/270° covers ~99% of real-world P&ID orientations.
+# Remove angles that slow processing without adding lines on your drawings.
+# ---------------------------------------------------------------------------
+OCR_ROTATION_ANGLES = [0, 90, 270]
+
+# ---------------------------------------------------------------------------
+# Soft-coded industrial format — all configurable without touching regex code.
+# SIZE"-UNIT_NO-SERVICE_CODE-SEQUENCE-PIPING_CLASS(-END_DESIGNATOR)?
+# Examples:
+#   2"-2600-FL-352-32070R-E     (standard)
+#   3/4"-2600-HD-430-32070R-E  (fractional size)
+#   8"-2600-P-381-31051XR-E    (single-letter service)
+#   1"-2600-FCWR-975-31210MR-V (multi-letter service, no end-desig common too)
+# ---------------------------------------------------------------------------
+INDUSTRIAL_FORMAT = {
+    # Maximum "unit number" length (digits only, e.g. 2600)
+    'unit_no_max_digits': 4,
+    # Maximum letters in service/fluid code (e.g. FCWR = 4, FCWS = 4)
+    'service_code_max_len': 6,
+    # Piping-class structure: exactly 5 digits followed by 1-2 uppercase letters
+    'piping_class_pattern': r'\d{5}[A-Z]{1,2}',
+    # Sequence number: 3-5 digits (some short, some with leading zeros)
+    'seq_digits_min': 3,
+    'seq_digits_max': 5,
+}
+
+# ---------------------------------------------------------------------------
+# Soft-coded Borouge / Linde "area-first" format.
+# Used by Borouge H2 Extraction Unit P&IDs (Linde draughting) where the
+# sequence number is 6 digits and the piping class starts with a letter.
+# Format: SIZE"-AREA-SERVICE-SEQUENCE-PIPING_CLASS-ENDDESIG
+# Examples (verbatim from OCR, spaces after hyphens are normal):
+#   1"-63- UA-149472- A1AU01- V
+#   3"-63- IA-147202- A0KU01- V
+#   4"-63- IA-140061- A0KU01- V
+#   4"-37- IA-00096- A0KU01- V
+#   2"-63- UA-140082- A1AU01- V
+# The sole structural change vs. the generic "WITH AREA" format is the
+# 6-digit (padded) sequence number. All other knobs are kept generic so
+# edits here do not affect non-Borouge drawings.
+# ---------------------------------------------------------------------------
+BOROUGE_AREA_FORMAT = {
+    'size_digits_min':      1,
+    'size_digits_max':      2,
+    'area_digits_min':      2,
+    'area_digits_max':      3,
+    'service_letters_min':  1,
+    'service_letters_max':  3,
+    'seq_digits_min':       4,   # 00096 (5-digit padded) … 149472 (6-digit)
+    'seq_digits_max':       6,
+    'pipeclass_len_min':    5,   # A1AU01, A0KU01 = 6 chars; allow 5 for OCR
+    'pipeclass_len_max':    7,
+    'enddesig_letters_min': 1,
+    'enddesig_letters_max': 2,
+}
+
+# ---------------------------------------------------------------------------
+# Soft-coded COVERAGE AUDIT configuration.
+# After the main extraction finishes, a permissive "line-like candidate"
+# scan is run over the SAME raw text that was fed to the regex engine.
+# Any candidate that does NOT appear in the final extracted set is logged
+# as a potentially-missed line.  This is purely additive — it never
+# rejects items, only reports.
+#
+# Change the patterns/knobs here to tune audit sensitivity without
+# touching any parsing code.
+# ---------------------------------------------------------------------------
+COVERAGE_AUDIT_CONFIG = {
+    # Master switch — set False to skip the audit entirely.
+    'enabled': True,
+    # Minimum number of hyphen-separated segments a candidate must have
+    # to be considered "line-like".  Real line numbers have at least 3
+    # (e.g. SIZE-FLUID-SEQ) and often 4-6.
+    'min_segments': 3,
+    # Maximum tokens we log as missed per page (prevents log spam on
+    # drawings full of near-matches).
+    'max_reported_per_page': 40,
+    # Fuzzy-match tolerance when comparing a candidate to extracted items.
+    # Uses difflib.SequenceMatcher ratio (0..1).  >= threshold = "already
+    # extracted — don't flag".  0.82 catches OCR variants like O↔0, 1↔I.
+    'fuzzy_match_threshold': 0.82,
+    # Permissive candidate regexes — each tries a different real-world
+    # line-number shape.  Order does not matter; all are tried per page.
+    # Keep patterns BROAD — the compare-to-extracted step filters noise.
+    'candidate_patterns': [
+        # SIZE"-...-...-... (hyphenated tag starting with a size)
+        r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+[A-Z0-9]{1,6}[-\s]+[A-Z0-9]{1,8}[-\s]+[A-Z0-9]{2,10}(?:[-\s]+[A-Z0-9]{1,10}){0,3}\b',
+        # AREA-FLUID-SIZE-PIPECLASS-SEQUENCE (offshore shape, size after fluid)
+        r'\b\d{2,4}[-\s]+[A-Z]{1,4}[-\s]+\d{1,2}[-\s]+[A-Z0-9]{4,10}[-\s]+\d{3,6}\b',
+        # Industrial: SIZE"-UNIT-SERVICE-SEQ-PIPINGCLASS(-END)
+        r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+\d{3,4}[-\s]+[A-Z]{1,6}[-\s]+\d{3,5}[-\s]+\d{5}[A-Z]{1,2}(?:[-\s]+[A-Z])?\b',
+    ],
+    # Characters stripped before fuzzy compare (spaces, quotes, stray OCR dots).
+    'normalise_strip_chars': ' "\'.',
+}
+
+# ---------------------------------------------------------------------------
+# Soft-coded SMART RECOVERY configuration.
+# When the coverage audit reports missed candidates, the recovery layer
+# attempts to "rescue" them — tokenising each candidate and validating
+# against the soft-coded format dicts (INDUSTRIAL_FORMAT,
+# BOROUGE_AREA_FORMAT).  Anything that structurally passes is promoted to
+# a full line item with:
+#     extraction_method = 'audit_recovery'
+#     recovered         = True
+#     confidence        = 'medium'
+#
+# The original regex/validation logic is NOT changed; recovery runs only
+# on residue the primary pipeline already rejected.
+# ---------------------------------------------------------------------------
+SMART_RECOVERY_CONFIG = {
+    'enabled': True,
+    # Global cap — never add more recovered items than this per extraction.
+    'max_recovered_items': 200,
+    # Per-candidate minimum tokens after split on [-\s]+
+    'min_tokens': 3,
+    'max_tokens': 7,
+    # When ambiguity exists between formats, prefer this order.
+    'format_priority': ['industrial', 'area', 'standard'],
+    # Duplicate-guard fuzzy threshold — recovered items whose line_number
+    # fuzzy-matches an existing extracted item at or above this ratio are
+    # skipped (avoids near-duplicates from OCR variants).
+    'dup_guard_threshold': 0.88,
+}
 
 # Conditional import for pytesseract (graceful fallback if not installed)
 try:
@@ -88,6 +262,98 @@ class PIDLineExtractorV2:
             self.geometric_detector = None
             logger.info("ℹ️ Geometric detector not available (missing dependencies)")
     
+    def _extract_pdf_embedded_text(self, page) -> str:
+        """
+        Extract text directly from a PDF page without OCR (fast, handles rotated text).
+
+        For searchable / vector PDFs the text objects are embedded in the file at
+        their correct positions regardless of rotation.  PyMuPDF returns them all
+        via get_text("words"), giving us perfect accuracy for free.
+
+        Falls back gracefully if the page has no embedded text (scanned image PDF).
+
+        SOFT-CODED threshold: EMBEDDED_TEXT_MIN_CHARS (default 80) controls whether
+        the result is considered "sufficient".  Return value is the raw combined
+        string; the caller checks length against the threshold.
+
+        CAD NOTE: AutoCAD/SmartPlant PDFs often store text as individual character
+        glyphs (char-by-char).  "words" mode joins them with spaces making regex
+        matching fail (e.g. "2 \" - F G - C I - 3 2 9").  The rawdict span pass
+        below reconstructs each span as a contiguous token, recovering full tags.
+        """
+        try:
+            # ----------------------------------------------------------------
+            # Pass 1: word-level extraction (sorted for natural reading order).
+            # Good for title blocks and label text stored as whole words.
+            # ----------------------------------------------------------------
+            words = page.get_text("words")
+            words_text = ""
+            if words:
+                sorted_words = sorted(words, key=lambda w: (round(w[1] / 10), w[0]))
+                words_text = ' '.join(w[4] for w in sorted_words if str(w[4]).strip())
+
+            # ----------------------------------------------------------------
+            # Pass 2: rawdict span-level extraction.
+            # CAD PDFs store pipe line tags as individual character objects
+            # within a single span.  Reading spans directly reconstructs the
+            # full tag (e.g. '2"-FG-CI-329') without inter-character spaces.
+            #
+            # Direction-aware grouping:
+            # PyMuPDF sets a "dir" vector per line (the baseline direction).
+            # (1,0) = horizontal, (0,-1) = 90° CW, (0,1) = 90° CCW, (-1,0)=180°.
+            # We bucket spans by direction so rotated labels form complete tokens
+            # instead of being interleaved with horizontal text in sort order.
+            # ----------------------------------------------------------------
+            span_texts = []
+            try:
+                raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+                # Bucket: direction_key -> list of (origin_y, origin_x, text)
+                dir_buckets: dict = {}
+                for block in raw.get("blocks", []):
+                    if block.get("type") != 0:
+                        continue  # skip image blocks
+                    for line in block.get("lines", []):
+                        # Direction vector: round to 1 decimal to bucket similar angles
+                        raw_dir = line.get("dir", (1, 0))
+                        dir_key = (round(raw_dir[0], 1), round(raw_dir[1], 1))
+                        origin = line.get("bbox", [0, 0, 0, 0])
+                        line_x, line_y = origin[0], origin[1]
+                        line_parts = []
+                        for span in line.get("spans", []):
+                            t = span.get("text", "").strip()
+                            if t:
+                                line_parts.append(t)
+                        if line_parts:
+                            token = ' '.join(line_parts)
+                            dir_buckets.setdefault(dir_key, []).append(
+                                (line_y, line_x, token)
+                            )
+
+                # Emit each direction bucket sorted by position (reading order
+                # per angle), joining with spaces so regex can scan the stream.
+                for dir_key, entries in dir_buckets.items():
+                    entries.sort(key=lambda e: (round(e[0] / 10), e[1]))
+                    bucket_text = ' '.join(e[2] for e in entries)
+                    span_texts.append(bucket_text)
+                    logger.debug(
+                        f"[embedded_text] dir={dir_key} → "
+                        f"{len(entries)} spans, {len(bucket_text)} chars"
+                    )
+            except Exception as _rd_err:
+                logger.debug(f"[embedded_text] rawdict pass failed: {_rd_err}")
+
+            rawdict_text = ' '.join(span_texts)
+
+            # Combine both passes — words_text catches normal labels, rawdict
+            # catches the char-by-char CAD tags.  Duplicates are harmless for
+            # regex matching (dedup happens later).
+            combined = (words_text + ' ' + rawdict_text).strip()
+            return combined if combined else page.get_text("text")
+
+        except Exception as exc:
+            logger.warning(f"[embedded_text] page text extraction failed: {exc}")
+            return ""
+
     def _normalize_ocr_text(self, text: str) -> str:
         """
         🔧 STRICT OCR NORMALIZATION - Force O → 0 conversion
@@ -208,75 +474,109 @@ class PIDLineExtractorV2:
         # 1. Tesseract OCR - Multiple PSM modes to detect vertical text
         if PYTESSERACT_AVAILABLE and pytesseract:
             try:
-                # PSM 6: Assume uniform block of text (horizontal)
+                # PSM 6: Assume uniform block of text (horizontal) — most reliable base
                 tesseract_text = pytesseract.image_to_string(img, config='--psm 6')
-                
-                # PSM 5: Single vertical block of text
-                try:
-                    tesseract_vertical = pytesseract.image_to_string(img, config='--psm 5')
-                    if tesseract_vertical and len(tesseract_vertical.strip()) > 10:
-                        tesseract_text += ' ' + tesseract_vertical
-                        logger.info(f"  📐 Tesseract vertical text: +{len(tesseract_vertical)} characters")
-                except:
-                    pass
-                
-                # PSM 11: Sparse text. Find as much text as possible in no particular order
+
+                # PSM 11: Sparse text — finds isolated labels anywhere on page
                 try:
                     tesseract_sparse = pytesseract.image_to_string(img, config='--psm 11')
                     if tesseract_sparse and len(tesseract_sparse.strip()) > 10:
                         tesseract_text += ' ' + tesseract_sparse
                         logger.info(f"  🔍 Tesseract sparse text: +{len(tesseract_sparse)} characters")
-                except:
+                except Exception:
                     pass
-                
+
+                # ----------------------------------------------------------------
+                # Multi-rotation pass — OCR_ROTATION_ANGLES (soft-coded constant).
+                # P&ID pipe line tags are written at all angles (horizontal,
+                # top-to-bottom, bottom-to-top).  Running Tesseract PSM 6 on
+                # a PIL-rotated copy of the image converts vertical text to
+                # horizontal, which Tesseract reads with near-perfect accuracy.
+                # ----------------------------------------------------------------
+                for _angle in OCR_ROTATION_ANGLES:
+                    if _angle == 0:
+                        continue  # already processed above
+                    try:
+                        _rotated_img = img.rotate(_angle, expand=True)
+                        _rot_text = pytesseract.image_to_string(_rotated_img, config='--psm 6')
+                        if _rot_text and len(_rot_text.strip()) > 10:
+                            tesseract_text += ' ' + _rot_text
+                            logger.info(
+                                f"  📐 Tesseract {_angle}° rotation: "
+                                f"+{len(_rot_text)} chars"
+                            )
+                    except Exception as _re:
+                        logger.debug(f"  ⚠️ Tesseract {_angle}° rotation failed: {_re}")
+
                 results['tesseract'] = tesseract_text
-                logger.info(f"  ✅ Tesseract extracted {len(tesseract_text)} characters (combined)")
+                logger.info(f"  ✅ Tesseract extracted {len(tesseract_text)} characters (combined all angles)")
             except Exception as e:
                 logger.warning(f"  ⚠️ Tesseract failed: {e}")
         else:
             logger.warning(f"  ⚠️ Pytesseract not available, skipping Tesseract OCR")
         
-        # 2. EasyOCR - Enable rotation detection for vertical text
+        # 2. EasyOCR - Run at all OCR_ROTATION_ANGLES (same strategy as Tesseract)
         if self.easyocr_reader:
             try:
-                img_array = np.array(img)
-                # Basic readtext without rotation_info parameter
-                easyocr_result = self.easyocr_reader.readtext(
-                    img_array, 
-                    detail=0,
-                    paragraph=False
-                )
-                easyocr_text = ' '.join(easyocr_result)
-                results['easyocr'] = easyocr_text
-                logger.info(f"  ✅ EasyOCR extracted {len(easyocr_text)} characters")
+                easyocr_text = ""
+                for _angle in OCR_ROTATION_ANGLES:
+                    _ocr_img = img.rotate(_angle, expand=True) if _angle != 0 else img
+                    _img_array = np.array(_ocr_img)
+                    _result = self.easyocr_reader.readtext(
+                        _img_array,
+                        detail=0,
+                        paragraph=False
+                    )
+                    _angle_text = ' '.join(_result)
+                    if _angle_text.strip():
+                        easyocr_text += ' ' + _angle_text
+                        if _angle != 0:
+                            logger.info(
+                                f"  📐 EasyOCR {_angle}° rotation: "
+                                f"+{len(_angle_text)} chars"
+                            )
+                results['easyocr'] = easyocr_text.strip()
+                logger.info(f"  ✅ EasyOCR extracted {len(easyocr_text)} characters (all angles)")
             except Exception as e:
                 logger.warning(f"  ⚠️ EasyOCR failed: {e}")
         
-        # 3. PaddleOCR
+        # 3. PaddleOCR — run at every OCR_ROTATION_ANGLES for parity with
+        # Tesseract/EasyOCR.  PaddleOCR has its own detector but is weakest on
+        # vertical text, so rotating the source image covers horizontal,
+        # top-to-bottom and bottom-to-top pipe-line labels uniformly.
         if self.paddleocr_reader:
             try:
-                img_array = np.array(img)
-                # PaddleOCR returns nested list structure
-                paddle_result = self.paddleocr_reader.ocr(img_array)
                 paddle_texts = []
-                
-                # Handle different result structures
-                if paddle_result:
-                    # PaddleOCR returns [[line1_data, line2_data, ...]] or None
-                    if isinstance(paddle_result, list) and len(paddle_result) > 0:
-                        first_page = paddle_result[0]
-                        if first_page and isinstance(first_page, list):
-                            for line in first_page:
-                                # Each line is [bbox, (text, confidence)]
-                                if line and isinstance(line, (list, tuple)) and len(line) >= 2:
-                                    text_data = line[1]
-                                    if isinstance(text_data, (list, tuple)) and len(text_data) > 0:
-                                        paddle_texts.append(str(text_data[0]))
-                
+                for _angle in OCR_ROTATION_ANGLES:
+                    try:
+                        _ocr_img = img.rotate(_angle, expand=True) if _angle != 0 else img
+                        img_array = np.array(_ocr_img)
+                        paddle_result = self.paddleocr_reader.ocr(img_array)
+                        _angle_texts = []
+                        # PaddleOCR returns [[line1_data, line2_data, ...]] or None
+                        if paddle_result and isinstance(paddle_result, list) and len(paddle_result) > 0:
+                            first_page = paddle_result[0]
+                            if first_page and isinstance(first_page, list):
+                                for line in first_page:
+                                    # Each line is [bbox, (text, confidence)]
+                                    if line and isinstance(line, (list, tuple)) and len(line) >= 2:
+                                        text_data = line[1]
+                                        if isinstance(text_data, (list, tuple)) and len(text_data) > 0:
+                                            _angle_texts.append(str(text_data[0]))
+                        if _angle_texts:
+                            paddle_texts.extend(_angle_texts)
+                            if _angle != 0:
+                                logger.info(
+                                    f"  📐 PaddleOCR {_angle}° rotation: "
+                                    f"+{len(_angle_texts)} tokens"
+                                )
+                    except Exception as _pe:
+                        logger.debug(f"  ⚠️ PaddleOCR {_angle}° rotation failed: {_pe}")
+
                 if paddle_texts:
                     paddle_text = ' '.join(paddle_texts)
                     results['paddleocr'] = paddle_text
-                    logger.info(f"  ✅ PaddleOCR extracted {len(paddle_text)} characters")
+                    logger.info(f"  ✅ PaddleOCR extracted {len(paddle_text)} characters (all angles)")
                 else:
                     logger.warning(f"  ⚠️ PaddleOCR: No text extracted")
             except Exception as e:
@@ -386,19 +686,163 @@ class PIDLineExtractorV2:
         - Faster processing
         - Consistent results
         """
-        # 🔧 GENERAL FORMAT FIX: Auto-detect area by trying both patterns
+        # ------------------------------------------------------------------
+        # Normalize separators up-front — all format branches need this.
+        # OCR often replaces actual hyphens with: = ~ — – ― ─ | / etc.
+        # We normalise once here so every downstream branch sees clean text.
+        # ------------------------------------------------------------------
+        normalized_text = extracted_text
+        for _ch in ['=', '~', '—', '–', '―', '─', '|', '/', '°', '″', "'", '"']:
+            normalized_text = normalized_text.replace(_ch, '-')
+        normalized_text = re.sub(r'-{2,}', '-', normalized_text)
+        normalized_text = re.sub(r'\s+-\s+', '-', normalized_text)
+
+        # -----------------------------------------------------------------------
+        # INDUSTRIAL/PROJECT FORMAT — must be checked BEFORE onshore because
+        # the unit-number segment (e.g. 2600) would otherwise be misidentified
+        # as an "area" code in the onshore-with-area branch.
+        #
+        # FORMAT: SIZE"-UNIT_NO-SERVICE_CODE-SEQ-PIPING_CLASS(-END_DESIG)?
+        # Examples:
+        #   2"-2600-FL-352-32070R-E   (process flush line)
+        #   8"-2600-P-381-31051XR-E   (process pipe, 7-char piping class)
+        #   3/4"-2600-HD-430-32070R-E (fractional size, header drain)
+        #   1"-2600-FCWR-975-31210MR-V (4-letter service code)
+        # -----------------------------------------------------------------------
+        if format_type == 'industrial':
+            logger.info("  🔍 Using REGEX pattern matching — INDUSTRIAL/PROJECT format")
+            logger.info("  📋 Examples: 2\"-2600-FL-352-32070R-E, 8\"-2600-P-381-31051XR-E")
+            # The piping-class ALWAYS ends with 1-2 uppercase letters (e.g. 32070R, 31051XR).
+            # The end-designator (E/V/I) is optional but always present in these drawings.
+            _ic = INDUSTRIAL_FORMAT
+            _seq_min = _ic['seq_digits_min']
+            _seq_max = _ic['seq_digits_max']
+            _svc_max = _ic['service_code_max_len']
+            patterns = [
+                # Pattern 1: Standard (integer size, all segments present)
+                rf'(\d{{1,2}})"?\s*-\s*(\d{{3,{_ic["unit_no_max_digits"]}}})\s*-\s*([A-Z]{{1,{_svc_max}}})\s*-\s*(\d{{{_seq_min},{_seq_max}}})\s*-\s*(\d{{5}}[A-Z]{{1,2}})(?:\s*-\s*([A-Z]))?',
+
+                # Pattern 2: Fractional size (e.g. 3/4")
+                rf'(\d+/\d+)"?\s*-\s*(\d{{3,{_ic["unit_no_max_digits"]}}})\s*-\s*([A-Z]{{1,{_svc_max}}})\s*-\s*(\d{{{_seq_min},{_seq_max}}})\s*-\s*(\d{{5}}[A-Z]{{1,2}})(?:\s*-\s*([A-Z]))?',
+
+                # Pattern 3: OCR may drop the inch-mark — match without it
+                rf'\b(\d{{1,2}})\s*-\s*(\d{{3,{_ic["unit_no_max_digits"]}}})\s*-\s*([A-Z]{{1,{_svc_max}}})\s*-\s*(\d{{{_seq_min},{_seq_max}}})\s*-\s*(\d{{5}}[A-Z]{{1,2}})(?:\s*-\s*([A-Z]))?\b',
+
+                # Pattern 4: Loose spacing/OCR noise around separators
+                rf'(\d{{1,2}}(?:/\d+)?)"?\s*-+\s*(\d{{3,{_ic["unit_no_max_digits"]}}})\s*-+\s*([A-Z]{{1,{_svc_max}}})\s*-+\s*(\d{{{_seq_min},{_seq_max}}})\s*-+\s*(\d{{5}}[A-Z]{{1,2}})(?:\s*-+\s*([A-Z]))?',
+
+                # Pattern 5: OCR replaces hyphens with spaces
+                rf'(\d{{1,2}}(?:/\d+)?)"?\s+(\d{{3,{_ic["unit_no_max_digits"]}}})\s+([A-Z]{{1,{_svc_max}}})\s+(\d{{{_seq_min},{_seq_max}}})\s+(\d{{5}}[A-Z]{{1,2}})(?:\s+([A-Z]))?',
+            ]
+
+            found_lines = []
+            seen_lines = set()
+
+            for pat_idx, pattern in enumerate(patterns, 1):
+                for match in re.finditer(pattern, normalized_text, re.IGNORECASE):
+                    # --- fractional size patterns return group(1)=e.g. "3/4" ---
+                    size_raw  = match.group(1).strip()
+                    unit_no   = match.group(2).strip()
+                    service   = match.group(3).strip().upper()
+                    seq       = match.group(4).strip()
+                    pip_class = match.group(5).strip().upper()
+                    end_desig = (match.group(6) or '').strip().upper()
+
+                    # --- Validation ---
+                    # unit_no: digits only, 3-4 chars
+                    if not unit_no.isdigit():
+                        continue
+                    # service: letters only after normalisation
+                    if not re.match(r'^[A-Z]{1,' + str(_svc_max) + r'}$', service):
+                        continue
+                    # sequence: digits only, correct length
+                    if not seq.isdigit() or not (_seq_min <= len(seq) <= _seq_max):
+                        continue
+                    # piping class: 5 digits + 1-2 uppercase letters
+                    if not re.match(r'^\d{5}[A-Z]{1,2}$', pip_class):
+                        continue
+                    # end designator: single letter if present
+                    if end_desig and not re.match(r'^[A-Z]$', end_desig):
+                        end_desig = ''
+
+                    # Build canonical line designation
+                    parts = [f'{size_raw}"-{unit_no}-{service}-{seq}-{pip_class}']
+                    if end_desig:
+                        parts.append(end_desig)
+                    line_designation = '-'.join(parts)
+
+                    if line_designation in seen_lines:
+                        continue
+                    seen_lines.add(line_designation)
+
+                    found_lines.append({
+                        'line_number':        line_designation,
+                        'original_detection': match.group(0).strip(),
+                        'size':               f'{size_raw}"',
+                        'fluid_code':         service,        # service / fluid code
+                        'sequence_no':        seq,
+                        'piping_spec':        pip_class,      # piping class
+                        'pipr_class':         pip_class,
+                        'dept_deviation':     unit_no,        # unit/area number
+                        'insulation':         end_desig,      # end designator (E/V/I)
+                        'area':               unit_no,
+                        'page':               page_num,
+                        'from_equipment':     '',
+                        'to_equipment':       '',
+                        'extraction_method':  'regex_industrial',
+                    })
+
+            logger.info(f"  🎯 INDUSTRIAL regex found {len(found_lines)} unique lines from {len(patterns)} patterns")
+            return found_lines
+
+        # 🔧 GENERAL FORMAT: Run ALL known formats then combine / pick winner.
+        # Behaviour is controlled by the soft-coded GENERAL_STRATEGY constant:
+        #   'merge'  → union of all format results, deduplicated by line_number
+        #   'winner' → legacy: return only the format with the highest count
         if format_type == 'general':
-            # Try WITH AREA first (more specific pattern), then WITHOUT AREA
-            logger.info(f"  🔍 Using REGEX pattern matching on OCR text (GENERAL - auto-detect area)")
-            results_with_area = self.parse_with_regex(extracted_text, page_num, include_area=True, format_type='onshore')
-            results_without_area = self.parse_with_regex(extracted_text, page_num, include_area=False, format_type='onshore')
-            # Return whichever found more lines (prioritize with-area if equal)
-            if len(results_with_area) >= len(results_without_area):
-                logger.info(f"  ✅ GENERAL format detected WITH AREA: {len(results_with_area)} lines")
-                return results_with_area
+            logger.info(
+                f"  🔍 GENERAL format (strategy='{GENERAL_STRATEGY}') — "
+                "running all sub-formats: industrial, onshore, offshore, adnoc, onshore+area"
+            )
+            _candidates = {}
+            for _fmt in ('industrial', 'onshore', 'offshore', 'adnoc'):
+                _res = self.parse_with_regex(extracted_text, page_num, include_area=False, format_type=_fmt)
+                _candidates[_fmt] = _res
+            # Also try onshore WITH area code
+            _res_area = self.parse_with_regex(extracted_text, page_num, include_area=True, format_type='onshore')
+            _candidates['onshore_area'] = _res_area
+
+            counts_str = ', '.join(f'{f}:{len(v)}' for f, v in _candidates.items())
+
+            if GENERAL_STRATEGY == 'merge':
+                # ----------------------------------------------------------------
+                # MERGE: Combine results from every format.
+                # Deduplicate on canonical line_number (case-insensitive) so the
+                # same tag found by two formats only appears once.
+                # The first format to register a line_number wins (priority order
+                # matches the loop above: industrial → onshore → offshore → adnoc).
+                # ----------------------------------------------------------------
+                merged: list = []
+                seen_merged: set = set()
+                for _fmt, _results in _candidates.items():
+                    for item in _results:
+                        key = item.get('line_number', '').upper()
+                        if key and key not in seen_merged:
+                            seen_merged.add(key)
+                            merged.append(item)
+                logger.info(
+                    f"  ✅ GENERAL MERGE: {len(merged)} unique lines combined "
+                    f"from all formats ({counts_str})"
+                )
+                return merged
             else:
-                logger.info(f"  ✅ GENERAL format detected WITHOUT AREA: {len(results_without_area)} lines")
-                return results_without_area
+                # WINNER (legacy): return only the highest-count format
+                best_fmt = max(_candidates, key=lambda f: len(_candidates[f]))
+                best_count = len(_candidates[best_fmt])
+                logger.info(
+                    f"  ✅ GENERAL WINNER: '{best_fmt}' with {best_count} lines ({counts_str})"
+                )
+                return _candidates[best_fmt]
         
         format_label = 'ADNOC' if format_type == 'adnoc' else ('OFFSHORE' if format_type == 'offshore' else ('WITH AREA' if include_area else 'WITHOUT AREA'))
         logger.info(f"  🔍 Using REGEX pattern matching on OCR text ({format_label})")
@@ -409,19 +853,7 @@ class PIDLineExtractorV2:
             logger.info(f"  📋 Offshore format: AREA-FLUIDCODE-SIZE-PIPECLASS-SEQUENCE-INSULATION")
             logger.info(f"  📋 ADNOC examples: 604-RO-4-AN1NLO-0011-P, 604-HO-8-BC2CA0-1071-H, 604-AG-3-ASSNLO-0007")
         
-        # First, normalize the text - replace all dash-like characters with standard hyphen
-        # OCR often sees: = ~ — – ― ─ | / as separators
-        normalized_text = extracted_text
-        for char in ['=', '~', '—', '–', '―', '─', '|', '/', '°', '″', '\'', '"']:
-            normalized_text = normalized_text.replace(char, '-')
-        
-        # Remove multiple consecutive hyphens (replace with single hyphen)
-        normalized_text = re.sub(r'-{2,}', '-', normalized_text)
-        
-        # Remove extra spaces around hyphens
-        normalized_text = re.sub(r'\s+-\s+', '-', normalized_text)
-        
-        # Add spaces around hyphens for better word boundary detection
+        # (text already normalised at top of method)
         normalized_text_spaced = normalized_text.replace('-', ' - ')
         
         logger.info(f"  📝 Normalized text sample (first 500 chars): {normalized_text[:500]}")
@@ -438,26 +870,29 @@ class PIDLineExtractorV2:
         #
         # Format ADNOC (Abu Dhabi Oil Co. Ltd): SIZE"-FLUID-PIPECLASS-SEQUENCE
         # Examples: 6"-CD-AC3N-8256, 8"-HO-BD2A-1023, 10"-AG-XY1Z-9999
+        #           6"-FG-CI-329,   2"-FL-ACGN-8703, 2"-DR-RI-454
         
         if format_type == 'adnoc':
             # ADNOC PATTERNS: SIZE"-FLUIDCODE-PIPECLASS-SEQUENCE
             # Standard Example: 6"-CD-AC3N-8256
-            # Format: [1-2 digits]"[-][2-3 uppercase letters][-][alphanumeric pipe class][-][4 digits]
+            # Format: [1-2 digits]"[-][2-3 uppercase letters][-][alphanumeric pipe class][-][3-4 digits]
+            # Uses ADNOC_SEQ_MIN_DIGITS and ADNOC_PIPECLASS_MIN_LEN soft-coded constants.
+            _sq = f'{ADNOC_SEQ_MIN_DIGITS},4'  # e.g. "3,4"
             patterns = [
                 # Pattern 1: Standard ADNOC format with quote
-                r'\b(\d{1,2})"\s*-\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{4})\b',
-                
+                rf'\b(\d{{1,2}})"\s*-\s*([A-Z]{{2,3}})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{{{_sq}}})\b',
+
                 # Pattern 2: Flexible spacing
-                r'\b(\d{1,2})"?\s*-+\s*([A-Z]{2,3})\s*-+\s*([A-Z0-9]+)\s*-+\s*(\d{4})\b',
-                
+                rf'\b(\d{{1,2}})"?\s*-+\s*([A-Z]{{2,3}})\s*-+\s*([A-Z0-9]+)\s*-+\s*(\d{{{_sq}}})\b',
+
                 # Pattern 3: Compact format
-                r'\b(\d{1,2})"-([A-Z]{2,3})-([A-Z0-9]+)-(\d{4})\b',
-                
+                rf'\b(\d{{1,2}})"-([A-Z]{{2,3}})-([A-Z0-9]+)-(\d{{{_sq}}})\b',
+
                 # Pattern 4: With word boundaries and lookahead
-                r'(?:^|\s)(\d{1,2})"?\s*-\s*([A-Z]{2,3})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{4})(?=\s|$|-)',
-                
+                rf'(?:^|\s)(\d{{1,2}})"?\s*-\s*([A-Z]{{2,3}})\s*-\s*([A-Z0-9]+)\s*-\s*(\d{{{_sq}}})(?=\s|$|-)',
+
                 # Pattern 5: Case insensitive for OCR errors
-                r'(?:^|\s)(\d{1,2})"?\s*-\s*([A-Za-z]{2,3})\s*-\s*([A-Za-z0-9]+)\s*-\s*(\d{4})(?=\s|$|-)',
+                rf'(?:^|\s)(\d{{1,2}})"?\s*-\s*([A-Za-z]{{2,3}})\s*-\s*([A-Za-z0-9]+)\s*-\s*(\d{{{_sq}}})(?=\s|$|-)',
             ]
         elif format_type == 'offshore':
             # OFFSHORE PATTERNS: AREA-FLUIDCODE-LINESIZE-PIPECLASS-SEQUENCE-INSULATION
@@ -489,6 +924,7 @@ class PIDLineExtractorV2:
             ]
         elif include_area:
             # WITH AREA PATTERNS: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+            _bg = BOROUGE_AREA_FORMAT
             patterns = [
                 # Pattern 1: With quote after size (most common with area)
                 r'\b(\d{1,2})"?\s*-\s*(\d{2,3})\s*-\s*([A-Z]{1,3})\s*-\s*(\d{4,5})\s*-\s*([A-Z0-9]{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
@@ -504,27 +940,49 @@ class PIDLineExtractorV2:
                 
                 # Pattern 5: Case insensitive
                 r'(?:^|\s)(\d{1,2})"?\s*-\s*(\d{2,3})\s*-\s*([A-Za-z]{1,3})\s*-\s*(\d{4,5})\s*-\s*([A-Za-z0-9]{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+
+                # Pattern 6: Borouge / Linde — 6-digit padded sequence,
+                # letter-first 6-char piping class (A1AU01), spaces permitted
+                # after each hyphen (OCR artefact on Linde draughting).
+                # Soft-coded via BOROUGE_AREA_FORMAT — edit the dict, not this regex.
+                rf'\b(\d{{{_bg["size_digits_min"]},{_bg["size_digits_max"]}}})"?\s*-\s*'
+                rf'(\d{{{_bg["area_digits_min"]},{_bg["area_digits_max"]}}})\s*-\s*'
+                rf'([A-Z]{{{_bg["service_letters_min"]},{_bg["service_letters_max"]}}})\s*-\s*'
+                rf'(\d{{{_bg["seq_digits_min"]},{_bg["seq_digits_max"]}}})\s*-\s*'
+                rf'([A-Z0-9]{{{_bg["pipeclass_len_min"]},{_bg["pipeclass_len_max"]}}})'
+                rf'(?:\s*-\s*([A-Z]{{{_bg["enddesig_letters_min"]},{_bg["enddesig_letters_max"]}}}))?\b',
+
+                # Pattern 7: Borouge — case-insensitive variant for rotated OCR
+                rf'(?:^|\s)(\d{{{_bg["size_digits_min"]},{_bg["size_digits_max"]}}})"?\s*-\s*'
+                rf'(\d{{{_bg["area_digits_min"]},{_bg["area_digits_max"]}}})\s*-\s*'
+                rf'([A-Za-z]{{{_bg["service_letters_min"]},{_bg["service_letters_max"]}}})\s*-\s*'
+                rf'(\d{{{_bg["seq_digits_min"]},{_bg["seq_digits_max"]}}})\s*-\s*'
+                rf'([A-Za-z0-9]{{{_bg["pipeclass_len_min"]},{_bg["pipeclass_len_max"]}}})'
+                rf'(?:\s*-\s*([A-Za-z]{{{_bg["enddesig_letters_min"]},{_bg["enddesig_letters_max"]}}}))?(?=\s|$|-)',
             ]
         else:
-            # WITHOUT AREA PATTERNS (ORIGINAL): SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+            # WITHOUT AREA PATTERNS: SIZE-FLUID-SEQUENCE-PIPING_SPEC(-DEPT_DEV(-INSULATION)?)?
+            # Example: 2"-D-6152-033842-X-N
+            #   group1=size, group2=fluid, group3=sequence(4digits),
+            #   group4=piping_spec(5-6digits), group5=dept_deviation(opt), group6=insulation(opt)
             patterns = [
                 # Pattern 1: Standard with word boundaries (most reliable)
-                r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z0-9]{1,4})(?:\s*-\s*([A-Z0-9]{1,2}))?)?\b',
+
                 # Pattern 2: With optional quote after size
-                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})-?\s*-\s*([A-Z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Z0-9]{1,4})(?:\s*-\s*([A-Z0-9]{1,2}))?)?\b',
+
                 # Pattern 3: More lenient spacing
-                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z]{1,2}))?(?:\s|$|[-,.])',
-            
+                r'(?:^|\s)(\d{1,2})\s*-+\s*([A-Z]{1,2})\s*-+\s*(\d{4})\s*-+\s*(\d{5,6})(?:\s*-+\s*([A-Z0-9]{1,4})(?:\s*-+\s*([A-Z0-9]{1,2}))?)?(?:\s|$|[-,.])',
+
                 # Pattern 4: Compact (no spaces at all)
-                r'\b(\d{1,2})-([A-Z]{1,2})-(\d{4})-(\d{5,6})(?:-([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})-([A-Z]{1,2})-(\d{4})-(\d{5,6})(?:-([A-Z0-9]{1,4})(?:-([A-Z0-9]{1,2}))?)?\b',
+
                 # Pattern 5: With flexible separators (space or hyphen)
-                r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z]{1,2}))?\b',
-            
+                r'\b(\d{1,2})[\s-]+([A-Z]{1,2})[\s-]+(\d{4})[\s-]+(\d{5,6})(?:[\s-]+([A-Z0-9]{1,4})(?:[\s-]+([A-Z0-9]{1,2}))?)?\b',
+
                 # Pattern 6: Case insensitive with word boundaries
-                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z]{1,2}))?(?=\s|$|-)',
+                r'(?:^|\s)(\d{1,2})\s*-\s*([A-Za-z]{1,2})\s*-\s*(\d{4})\s*-\s*(\d{5,6})(?:\s*-\s*([A-Za-z0-9]{1,4})(?:\s*-\s*([A-Za-z0-9]{1,2}))?)?(?=\s|$|-)',
             ]
         
         found_lines = []
@@ -544,6 +1002,7 @@ class PIDLineExtractorV2:
                     seq = match.group(4).strip()
                     area = ''
                     insulation = ''
+                    dept_deviation = ''
                 elif format_type == 'offshore':
                     # Offshore: AREA-FLUID-SIZE-PIPECLASS-SEQUENCE(-INSULATION)?
                     area = match.group(1).strip()
@@ -552,6 +1011,7 @@ class PIDLineExtractorV2:
                     pipr_class = match.group(4).strip()
                     seq = match.group(5).strip()
                     insulation = match.group(6).strip().upper() if match.lastindex >= 6 and match.group(6) else ''
+                    dept_deviation = ''
                 elif include_area:
                     # With area: SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
                     size = match.group(1).strip()
@@ -560,14 +1020,17 @@ class PIDLineExtractorV2:
                     seq = match.group(4).strip()
                     pipr_class = match.group(5).strip()
                     insulation = match.group(6).strip().upper() if match.lastindex >= 6 and match.group(6) else ''
+                    dept_deviation = ''
                 else:
-                    # Without area: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+                    # Without area: SIZE-FLUID-SEQUENCE-PIPING_SPEC(-DEPT_DEV(-INSULATION)?)?
+                    # Example: 2"-D-6152-033842-X-N
                     size = match.group(1).strip()
                     area = ''
                     fluid = match.group(2).strip().upper()
                     seq = match.group(3).strip()
-                    pipr_class = match.group(4).strip()
-                    insulation = match.group(5).strip().upper() if match.lastindex >= 5 and match.group(5) else ''
+                    pipr_class = match.group(4).strip()  # piping_spec (e.g. 033842)
+                    dept_deviation = match.group(5).strip().upper() if match.lastindex >= 5 and match.group(5) else ''
+                    insulation = match.group(6).strip().upper() if match.lastindex >= 6 and match.group(6) else ''
                 
                 # 🔧 CRITICAL: Normalize all fields - Force O → 0 conversion BEFORE any processing
                 # This eliminates OCR confusion between letter O and digit 0
@@ -585,13 +1048,14 @@ class PIDLineExtractorV2:
                 if insulation:
                     insulation = re.sub(r'[^A-Z0-9]', '', insulation)
                 
-                # ADNOC FORMAT VALIDATION (separate rules)
+                # ADNOC FORMAT VALIDATION
+                # Uses soft-coded constants ADNOC_SEQ_MIN_DIGITS and ADNOC_PIPECLASS_MIN_LEN.
                 if format_type == 'adnoc':
                     # 1. SIZE: Must be 1-2 digits
                     if not size or not size.isdigit() or len(size) > 2:
                         rejected.append(f"Invalid ADNOC size: {size}")
                         continue
-                    
+
                     # 2. FLUID: Must be 2-3 uppercase letters/digits (after O→0 normalization)
                     if not fluid or len(fluid) < 2 or len(fluid) > 3:
                         rejected.append(f"Invalid ADNOC fluid: {fluid}")
@@ -599,25 +1063,27 @@ class PIDLineExtractorV2:
                     if not re.match(r'^[A-Z0-9]+$', fluid):
                         rejected.append(f"Invalid ADNOC fluid characters: {fluid}")
                         continue
-                    
-                    # 3. SEQUENCE: Must be exactly 4 digits
-                    if not seq or not seq.isdigit() or len(seq) != 4:
+
+                    # 3. SEQUENCE: ADNOC_SEQ_MIN_DIGITS–4 digits
+                    #    Abu Dhabi drawings use 3-digit (329, 454) and 4-digit (8703) sequences.
+                    if not seq or not seq.isdigit() or not (ADNOC_SEQ_MIN_DIGITS <= len(seq) <= 4):
                         rejected.append(f"Invalid ADNOC sequence: {seq}")
                         continue
-                    
-                    # 4. PIPE CLASS: Alphanumeric, flexible length (3-6 chars typical)
-                    if not pipr_class or not pipr_class.isalnum() or len(pipr_class) < 3:
+
+                    # 4. PIPE CLASS: Alphanumeric, min ADNOC_PIPECLASS_MIN_LEN chars
+                    #    Standard classes are 4+ chars (AC3N…) but this project uses 2-char (CI, RI).
+                    if not pipr_class or not pipr_class.isalnum() or len(pipr_class) < ADNOC_PIPECLASS_MIN_LEN:
                         rejected.append(f"Invalid ADNOC pipe class: {pipr_class}")
                         continue
-                    
+
                     # Build ADNOC line number: SIZE"-FLUID-PIPECLASS-SEQUENCE
                     line_number = f"{size}\"-{fluid}-{pipr_class}-{seq}"
-                    
+
                     # Deduplicate
                     if line_number in seen_lines:
                         continue
                     seen_lines.add(line_number)
-                    
+
                     # Create line entry for ADNOC
                     line_entry = {
                         'line_number': line_number,
@@ -625,6 +1091,8 @@ class PIDLineExtractorV2:
                         'fluid_code': fluid,
                         'sequence_no': seq,
                         'pipr_class': pipr_class,
+                        'piping_spec': pipr_class,
+                        'dept_deviation': '',
                         'insulation': '',
                         'area': '',
                         'page': page_num,
@@ -633,56 +1101,7 @@ class PIDLineExtractorV2:
                         'extraction_method': 'regex_adnoc',
                         'original_detection': match.group(0).strip()
                     }
-                    
-                    found_lines.append(line_entry)
-                    continue  # Skip standard validation below
-                
-                # ADNOC FORMAT VALIDATION (separate rules)
-                if format_type == 'adnoc':
-                    # 1. SIZE: Must be 1-2 digits
-                    if not size or not size.isdigit() or len(size) > 2:
-                        rejected.append(f"Invalid ADNOC size: {size}")
-                        continue
-                    
-                    # 2. FLUID: Must be 2-3 uppercase letters
-                    if not fluid or not fluid.isalpha() or len(fluid) < 2 or len(fluid) > 3:
-                        rejected.append(f"Invalid ADNOC fluid: {fluid}")
-                        continue
-                    
-                    # 3. SEQUENCE: Must be exactly 4 digits
-                    if not seq or not seq.isdigit() or len(seq) != 4:
-                        rejected.append(f"Invalid ADNOC sequence: {seq}")
-                        continue
-                    
-                    # 4. PIPE CLASS: Alphanumeric, flexible length (3-6 chars typical)
-                    if not pipr_class or not pipr_class.isalnum() or len(pipr_class) < 3:
-                        rejected.append(f"Invalid ADNOC pipe class: {pipr_class}")
-                        continue
-                    
-                    # Build ADNOC line number: SIZE"-FLUID-PIPECLASS-SEQUENCE
-                    line_number = f"{size}\"-{fluid}-{pipr_class}-{seq}"
-                    
-                    # Deduplicate
-                    if line_number in seen_lines:
-                        continue
-                    seen_lines.add(line_number)
-                    
-                    # Create line entry for ADNOC
-                    line_entry = {
-                        'line_number': line_number,
-                        'size': f'{size}"',
-                        'fluid_code': fluid,
-                        'sequence_no': seq,
-                        'pipr_class': pipr_class,
-                        'insulation': '',
-                        'area': '',
-                        'page': page_num,
-                        'from_equipment': '',
-                        'to_equipment': '',
-                        'extraction_method': 'regex_adnoc',
-                        'original_detection': match.group(0).strip()
-                    }
-                    
+
                     found_lines.append(line_entry)
                     continue  # Skip standard validation below
                 
@@ -712,7 +1131,10 @@ class PIDLineExtractorV2:
                 
                 # 4. SEQUENCE: Must be 3-5 digits for offshore/area formats (ADNOC uses 3-4 digits like 0007, 0011), 4 for standard
                 if format_type == 'offshore' or include_area:
-                    if not seq or not seq.isdigit() or len(seq) < 3 or len(seq) > 5:
+                    # Upper bound widened via soft-coded BOROUGE_AREA_FORMAT['seq_digits_max']
+                    # so Borouge/Linde 6-digit padded sequences (e.g. 149472, 140061) pass.
+                    _seq_max_with_area = BOROUGE_AREA_FORMAT['seq_digits_max'] if include_area else 5
+                    if not seq or not seq.isdigit() or len(seq) < 3 or len(seq) > _seq_max_with_area:
                         rejected.append(f"Invalid sequence: {seq}")
                         continue
                 else:
@@ -764,28 +1186,34 @@ class PIDLineExtractorV2:
                     else:
                         line_number = f"{size}\"-{area}-{fluid}-{seq}-{pipr_class}"
                 else:
-                    # Without area format: SIZE-FLUID-SEQUENCE-PIPECLASS(-INSULATION)?
+                    # Without area format: SIZE-FLUID-SEQUENCE-PIPING_SPEC(-DEPT_DEV(-INSULATION)?)?
+                    # Example: 2"-D-6152-033842-X-N
+                    parts = [f"{size}-{fluid}-{seq}-{pipr_class}"]
+                    if dept_deviation:
+                        parts.append(dept_deviation)
                     if insulation:
-                        line_number = f"{size}-{fluid}-{seq}-{pipr_class}-{insulation}"
-                    else:
-                        line_number = f"{size}-{fluid}-{seq}-{pipr_class}"
-                
+                        parts.append(insulation)
+                    line_number = '-'.join(parts)
+
                 # 🔧 FINAL NORMALIZATION: Ensure complete O→0 conversion in final line number
                 line_number = self._normalize_ocr_text(line_number)
-                
+
                 # Deduplicate
                 if line_number in seen_lines:
                     continue
                 seen_lines.add(line_number)
-                
+
                 # 🔧 TRIPLE-SAFE: Normalize ALL output fields to guarantee NO 'O' in any field
                 # Create line entry with normalized fields
+                _dept_dev_norm = self._normalize_ocr_text(dept_deviation) if dept_deviation else ''
                 line_entry = {
                     'line_number': self._normalize_ocr_text(line_number),
                     'size': self._normalize_ocr_text(f'{size}"'),
                     'fluid_code': self._normalize_ocr_text(fluid),
                     'sequence_no': self._normalize_ocr_text(seq),
                     'pipr_class': self._normalize_ocr_text(pipr_class),
+                    'piping_spec': self._normalize_ocr_text(pipr_class),  # alias: piping_spec = pipr_class
+                    'dept_deviation': _dept_dev_norm,
                     'insulation': self._normalize_ocr_text(insulation) if insulation else '',
                     'area': self._normalize_ocr_text(area) if (format_type == 'offshore' or include_area) and area else '',
                     'page': page_num,
@@ -1380,7 +1808,7 @@ Example 4: "10\"-PG-0003-033842-X-H"
         logger.info(f"  📝 Regex found {len(results)} unique valid line numbers from {len(all_matches)} total matches")
         return results
     
-    def extract_from_pdf(self, pdf_path: str, include_area: bool = False, format_type: str = 'onshore') -> List[Dict]:
+    def extract_from_pdf(self, pdf_path: str, include_area: bool = False, format_type: str = 'onshore', progress_callback=None) -> List[Dict]:
         """
         🚀 INTELLIGENT AI-FIRST EXTRACTION:
         
@@ -1406,13 +1834,44 @@ Example 4: "10\"-PG-0003-033842-X-H"
             include_area: If True, detect format with Area (SIZE"-AREA-FLUID-SEQUENCE-PIPECLASS)
                          If False, detect standard format (SIZE-FLUID-SEQUENCE-PIPECLASS)
             format_type: 'onshore' (default) or 'offshore' (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)
+            progress_callback: Optional callable(page_num, total_pages, lines_so_far, phase).
+                               Purely observational — defaults to None so nothing breaks.
+                               Called at the start of each page and after each page finishes.
             
         Returns:
             List of validated line items
         """
+        # --- Safe no-op wrapper so call sites don't need None-guards ---
+        def _emit(page_num, total, lines_so_far, phase):
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(page_num, total, lines_so_far, phase)
+            except Exception as _cb_err:
+                logger.debug(f"progress_callback raised (ignored): {_cb_err}")
         try:
             doc = fitz.open(pdf_path)
             all_line_items = []
+            # Per-page combined text snapshot (used by the coverage audit at
+            # the end).  Populated each page AFTER we decide which text was
+            # actually fed to the regex engine (embedded or OCR fallback).
+            per_page_texts: Dict[int, str] = {}
+
+            # ------------------------------------------------------------------
+            # CAD-generated PDFs (AutoCAD, SmartPlant, PDMS…) split content
+            # across Optional Content Groups (layers).  Pipe line annotations
+            # are often on a layer that is marked "off" by default, so
+            # PyMuPDF's text extraction skips them entirely.
+            # Enabling every OCG before extraction ensures we see all text.
+            # ------------------------------------------------------------------
+            try:
+                ocgs = doc.get_ocgs()
+                if ocgs:
+                    for xref in ocgs.keys():
+                        doc.set_ocg(xref, True)
+                    logger.info(f"  🔓 Enabled {len(ocgs)} optional content layers for full text extraction")
+            except Exception as _ocg_err:
+                logger.warning(f"  ⚠️ Could not enable OCG layers: {_ocg_err}")
             
             all_line_items = []
             
@@ -1422,6 +1881,8 @@ Example 4: "10\"-PG-0003-033842-X-H"
             logger.info(f"🧠 Strategy: OCR ALL TEXT → AI INTELLIGENCE → STRICT VALIDATION")
             if format_type == 'adnoc':
                 format_msg = 'ADNOC Abu Dhabi Oil Co. Ltd (SIZE"-FLUID-PIPECLASS-SEQUENCE)'
+            elif format_type == 'industrial':
+                format_msg = 'INDUSTRIAL/PROJECT (SIZE"-UNIT-SERVICE-SEQ-PIPINGCLASS-ENDDESIG)'
             elif format_type == 'offshore':
                 format_msg = 'OFFSHORE (AREA-FLUID-SIZE-PIPECLASS-SEQUENCE)'
             elif include_area:
@@ -1435,32 +1896,111 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 logger.info(f"\n{'='*60}")
                 logger.info(f"📄 PAGE {page_num + 1}/{len(doc)}")
                 logger.info(f"{'='*60}")
+
+                # Per-page progress signal (purely observational — no core logic changed)
+                _emit(page_num + 1, len(doc), len(all_line_items), 'start')
+
+                # ------------------------------------------------------------------
+                # PHASE 1 (fast path): Extract embedded text directly from PDF.
+                # Vector/searchable PDFs have all text as proper text objects —
+                # no OCR needed.  This is instantaneous and handles rotated labels.
+                # SOFT-CODED threshold: EMBEDDED_TEXT_MIN_CHARS
+                # ------------------------------------------------------------------
+                logger.info("🔍 PHASE 1: Embedded PDF text extraction (fast path)")
+                embedded_text = self._extract_pdf_embedded_text(page)
+                use_ocr = len(embedded_text.strip()) < EMBEDDED_TEXT_MIN_CHARS
+
+                if not use_ocr:
+                    logger.info(
+                        f"  ✅ {len(embedded_text)} chars of embedded text found — "
+                        f"skipping OCR for this page"
+                    )
+                    combined_text = embedded_text
+                else:
+                    # ------------------------------------------------------------------
+                    # PHASE 1b (slow path): Scanned/image PDF — fall back to OCR.
+                    # High-resolution rendering (2.5x for crisp text)
+                    # ------------------------------------------------------------------
+                    logger.info(
+                        f"  📷 Only {len(embedded_text.strip())} embedded chars "
+                        f"(threshold {EMBEDDED_TEXT_MIN_CHARS}) — using OCR pipeline"
+                    )
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+                    img = Image.open(io.BytesIO(pix.tobytes("png")))
+                    img = img.convert('L')  # Grayscale for better OCR
+
+                    logger.info("🔍 PHASE 1b: Multi-Engine OCR Extraction")
+                    ocr_results = self.extract_all_text_from_image(img)
+
+                    if not ocr_results:
+                        logger.warning("  ⚠️ No text extracted from any OCR engine")
+                        continue
+
+                    combined_text = self.combine_and_deduplicate_text(ocr_results)
+
+                    if not combined_text or len(combined_text) < 10:
+                        logger.warning("  ⚠️ Combined OCR text too short, skipping page")
+                        continue
+
+                    # Make PIL image available for geometric FROM-TO below
+                    # (only needed when we actually ran OCR)
                 
-                # High-resolution rendering (2.5x for crisp text)
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
-                img = Image.open(io.BytesIO(pix.tobytes("png")))
-                img = img.convert('L')  # Grayscale for better OCR
-                
-                # PHASE 1: Extract ALL text with 3 OCR engines
-                logger.info("🔍 PHASE 1: Multi-Engine Text Extraction")
-                ocr_results = self.extract_all_text_from_image(img)
-                
-                if not ocr_results:
-                    logger.warning("  ⚠️ No text extracted from any OCR engine")
-                    continue
-                
-                # Combine text from all engines
-                combined_text = self.combine_and_deduplicate_text(ocr_results)
-                
-                if not combined_text or len(combined_text) < 10:
-                    logger.warning("  ⚠️ Combined text too short, skipping page")
+                if not combined_text or len(combined_text.strip()) < 10:
+                    logger.warning("  ⚠️ No usable text on this page — skipping")
                     continue
                 
                 # PHASE 2: REGEX Pattern Matching (Reliable & Fast)
                 logger.info("🔍 PHASE 2: REGEX Pattern Recognition")
-                logger.info(f"  📝 OCR Text Sample (first 500 chars): {combined_text[:500]}")
+                logger.info(f"  📝 Text sample (first 500 chars): {combined_text[:500]}")
                 line_items = self.parse_with_regex(combined_text, page_num + 1, include_area=include_area, format_type=format_type)
-                
+                # Snapshot for coverage audit (set now; may be replaced below if OCR fallback runs)
+                per_page_texts[page_num + 1] = combined_text
+
+                # ------------------------------------------------------------------
+                # OCR FALLBACK: When embedded text was used (fast path) but regex
+                # found zero line numbers, the drawing content is likely image-based
+                # (e.g. title block text only, while the P&ID lines are rasterised).
+                # Fall back to the full OCR pipeline for this page.
+                # Core logic (regex, validation, formats) is unchanged.
+                # ------------------------------------------------------------------
+                if not line_items and not use_ocr:
+                    logger.info(
+                        "  ⚠️ Embedded text found no line numbers — "
+                        "drawing content may be image-based. Falling back to OCR."
+                    )
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+                    img_fb = Image.open(io.BytesIO(pix.tobytes("png")))
+                    img_fb = img_fb.convert('L')
+                    ocr_results_fb = self.extract_all_text_from_image(img_fb)
+                    if ocr_results_fb:
+                        combined_text_fb = self.combine_and_deduplicate_text(ocr_results_fb)
+                        if combined_text_fb and len(combined_text_fb) >= 10:
+                            logger.info(
+                                f"  📷 OCR fallback extracted {len(combined_text_fb)} chars — "
+                                "re-running regex"
+                            )
+                            logger.info(
+                                f"  📝 OCR fallback text sample (first 300 chars): "
+                                f"{combined_text_fb[:300]}"
+                            )
+                            combined_text = combined_text_fb
+                            # Refresh audit snapshot with the OCR-fallback text
+                            per_page_texts[page_num + 1] = combined_text
+                            # Mark as OCR path so FROM-TO phases have an image object
+                            use_ocr = True
+                            img = img_fb
+                            line_items = self.parse_with_regex(
+                                combined_text, page_num + 1,
+                                include_area=include_area, format_type=format_type
+                            )
+                            logger.info(
+                                f"  ✅ OCR fallback found {len(line_items)} line numbers"
+                            )
+                        else:
+                            logger.warning("  ⚠️ OCR fallback returned insufficient text")
+                    else:
+                        logger.warning("  ⚠️ OCR fallback returned no text")
+
                 if not line_items:
                     logger.warning("  ⚠️ No line numbers found on this page")
                     continue
@@ -1468,7 +2008,24 @@ Example 4: "10\"-PG-0003-033842-X-H"
                 # SUCCESS: Add basic line items first
                 all_line_items.extend(line_items)
                 logger.info(f"✅ PAGE {page_num + 1} BASIC EXTRACTION: {len(line_items)} line numbers extracted")
-                
+
+                # PHASE 3A/3B/3C only make sense when we have actual image data.
+                # If we used the fast embedded-text path, we don't have an img object.
+                if use_ocr:
+                    pass  # img is already defined from OCR path above
+                else:
+                    # Render image lazily for spatial/geometric FROM-TO (low resolution is fine)
+                    try:
+                        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert('L')
+                    except Exception as _img_err:
+                        logger.warning(f"  ⚠️ Could not render page for FROM-TO detection: {_img_err}")
+                        img = None
+
+                if img is None:
+                    # Skip FROM-TO phases for this page
+                    continue
+
                 # PHASE 3A: Spatial Matching FROM-TO Detection (PRIMARY METHOD - from research paper)
                 spatial_from_to_success = False
                 try:
@@ -1677,23 +2234,413 @@ Example 4: "10\"-PG-0003-033842-X-H"
             logger.info(f"🎉 EXTRACTION COMPLETE: {len(unique_items)} UNIQUE LINE NUMBERS")
             logger.info(f"{'='*60}\n")
             
-            # 🔒 NUCLEAR OPTION: Replace ALL 'O' with '0' in EVERY string field, no exceptions!
-            logger.info("🔒 NUCLEAR SAFETY: Replacing ALL 'O' → '0' in every string field...")
+            # 🔒 NUCLEAR OPTION: Replace ALL 'O' with '0' in EVERY string field.
+            # EXCEPTION: Industrial format codes are already correct (piping classes like
+            # 32070R, service codes FL/HD/FCWR have no O to convert).  We skip this pass
+            # for industrial items to avoid corrupting equipment tag strings like MOV.
+            logger.info("🔒 NUCLEAR SAFETY: Replacing ALL 'O' → '0' in every string field (non-industrial)...")
             for item in unique_items:
+                if item.get('extraction_method', '') == 'regex_industrial':
+                    continue  # Industrial codes are already clean — skip
                 # Loop through ALL keys and replace O→0 in ANY string value
                 for key, value in item.items():
                     if isinstance(value, str) and value:
                         # FORCE replace ALL 'O' (uppercase) with '0' (digit)
                         item[key] = value.upper().replace('O', '0')
             
-            logger.info("✅ NUCLEAR NORMALIZATION COMPLETE - EVERY 'O' → '0' IN ALL FIELDS!")
-            
+            logger.info("✅ NUCLEAR NORMALIZATION COMPLETE - EVERY 'O' → '0' IN NON-INDUSTRIAL FIELDS!")
+
+            # ------------------------------------------------------------------
+            # COVERAGE AUDIT — permissive re-scan of raw text to flag any
+            # line-like candidates that were NOT extracted.  Pure reporting,
+            # never mutates results.  Controlled by COVERAGE_AUDIT_CONFIG.
+            # ------------------------------------------------------------------
+            try:
+                audit_report = self._audit_coverage(per_page_texts, unique_items)
+                # Attach a compact summary to the first item so callers can
+                # surface it in the UI without changing the return type.
+                if unique_items and audit_report.get('enabled'):
+                    unique_items[0].setdefault('_audit', {
+                        'coverage_ratio': audit_report['coverage_ratio'],
+                        'total_candidates': audit_report['total_candidates'],
+                        'matched_candidates': audit_report['matched_candidates'],
+                        'missed_count': sum(
+                            len(v) for v in audit_report['missed_candidates'].values()
+                        ),
+                    })
+
+                # Smart recovery — rescue structurally-valid missed candidates.
+                # Additive: adds items flagged `recovered=True`; never modifies
+                # existing items, never triggers re-validation of them.
+                try:
+                    recovered_items = self._smart_recover_missed(audit_report, unique_items)
+                    if recovered_items:
+                        unique_items.extend(recovered_items)
+                        # Refresh audit summary with recovered count
+                        if unique_items and '_audit' in unique_items[0]:
+                            unique_items[0]['_audit']['recovered_count'] = len(recovered_items)
+                except Exception as _rec_err:
+                    logger.warning(f"⚠️ Smart recovery failed (non-fatal): {_rec_err}")
+            except Exception as _audit_err:
+                logger.warning(f"⚠️ Coverage audit failed (non-fatal): {_audit_err}")
+
             return unique_items
             
         except Exception as e:
             logger.error(f"❌ EXTRACTION FAILED: {str(e)}", exc_info=True)
             return []
     
+    def _audit_coverage(
+        self,
+        per_page_texts: Dict[int, str],
+        extracted_items: List[Dict],
+    ) -> Dict:
+        """
+        🔎 ADVANCED COVERAGE AUDIT (soft-coded, non-intrusive)
+
+        Re-scans the raw text that was fed to the regex engine for line-like
+        candidates, then fuzzy-matches each candidate against the extracted
+        items.  Candidates with no match are reported as "potentially missed"
+        — useful for spotting OCR garble the main regex rejected.
+
+        Never mutates ``extracted_items``.  Controlled entirely by
+        ``COVERAGE_AUDIT_CONFIG`` at module top.
+
+        Returns a report dict with keys:
+          - enabled, total_extracted, total_candidates,
+          - matched_candidates, missed_candidates (per-page),
+          - coverage_ratio (0..1)
+        """
+        import difflib
+
+        cfg = COVERAGE_AUDIT_CONFIG
+        report = {
+            'enabled': bool(cfg.get('enabled', True)),
+            'total_extracted': len(extracted_items),
+            'total_candidates': 0,
+            'matched_candidates': 0,
+            'missed_candidates': {},   # page -> [candidate strings]
+            'coverage_ratio': 1.0,
+        }
+        if not report['enabled']:
+            return report
+
+        strip_chars = cfg.get('normalise_strip_chars', ' "\'.')
+        threshold = float(cfg.get('fuzzy_match_threshold', 0.82))
+        min_segments = int(cfg.get('min_segments', 3))
+        max_report = int(cfg.get('max_reported_per_page', 40))
+        patterns = [re.compile(p, re.IGNORECASE) for p in cfg.get('candidate_patterns', [])]
+
+        def _norm(s: str) -> str:
+            out = s.upper()
+            for ch in strip_chars:
+                out = out.replace(ch, '')
+            return out.replace('O', '0')  # same O→0 rule as main pipeline
+
+        extracted_keys = [
+            _norm(it.get('line_number', '')) for it in extracted_items
+        ]
+        extracted_keys = [k for k in extracted_keys if k]
+
+        for page_num, text in (per_page_texts or {}).items():
+            if not text:
+                continue
+            candidates_on_page = set()
+            for pat in patterns:
+                for m in pat.finditer(text):
+                    tok = m.group(0).strip()
+                    # Must have enough hyphen segments to look line-like
+                    if tok.count('-') + tok.count(' ') < (min_segments - 1):
+                        continue
+                    candidates_on_page.add(tok)
+
+            missed_for_page = []
+            for cand in candidates_on_page:
+                report['total_candidates'] += 1
+                cand_key = _norm(cand)
+                if not cand_key:
+                    continue
+                # Direct substring match wins immediately
+                if any(cand_key in k or k in cand_key for k in extracted_keys):
+                    report['matched_candidates'] += 1
+                    continue
+                # Fuzzy match against best extracted key
+                best_ratio = 0.0
+                if extracted_keys:
+                    best_ratio = max(
+                        difflib.SequenceMatcher(None, cand_key, k).ratio()
+                        for k in extracted_keys
+                    )
+                if best_ratio >= threshold:
+                    report['matched_candidates'] += 1
+                else:
+                    missed_for_page.append(cand)
+
+            if missed_for_page:
+                # Stable order + cap for log readability
+                missed_for_page = sorted(set(missed_for_page))[:max_report]
+                report['missed_candidates'][page_num] = missed_for_page
+
+        if report['total_candidates'] > 0:
+            report['coverage_ratio'] = round(
+                report['matched_candidates'] / report['total_candidates'], 3
+            )
+
+        # Emit a concise log summary — detail lives in the return dict
+        logger.info(f"\n{'='*60}")
+        logger.info("🔎 COVERAGE AUDIT (permissive re-scan)")
+        logger.info(f"{'='*60}")
+        logger.info(f"  📊 Extracted line items          : {report['total_extracted']}")
+        logger.info(f"  📊 Candidate tokens in raw text  : {report['total_candidates']}")
+        logger.info(f"  📊 Candidates matched to extract : {report['matched_candidates']}")
+        logger.info(f"  📊 Coverage ratio                : {report['coverage_ratio']*100:.1f}%")
+        if report['missed_candidates']:
+            total_missed = sum(len(v) for v in report['missed_candidates'].values())
+            logger.warning(
+                f"  ⚠️ {total_missed} candidate(s) on "
+                f"{len(report['missed_candidates'])} page(s) were NOT matched "
+                "— they may be OCR garble or genuinely missed."
+            )
+            for pg, cands in report['missed_candidates'].items():
+                preview = ', '.join(cands[:5])
+                more = f" (+{len(cands)-5} more)" if len(cands) > 5 else ''
+                logger.warning(f"    page {pg}: {preview}{more}")
+        else:
+            logger.info("  ✅ No candidate lines appear to have been missed.")
+
+        return report
+
+    def _smart_recover_missed(
+        self,
+        audit_report: Dict,
+        extracted_items: List[Dict],
+    ) -> List[Dict]:
+        """
+        🛟 SMART RECOVERY (soft-coded, additive).
+
+        Take the audit's ``missed_candidates`` and try to rescue each one by
+        tokenising on [-\\s]+ and validating against the soft-coded format
+        dicts (INDUSTRIAL_FORMAT, BOROUGE_AREA_FORMAT).  Structurally-valid
+        candidates become full line items flagged ``recovered=True``.
+
+        Never mutates ``extracted_items``.  The core regex and validators
+        in ``parse_with_regex`` are untouched.
+
+        Returns a list of recovered items (may be empty).
+        """
+        import difflib
+
+        cfg = SMART_RECOVERY_CONFIG
+        if not cfg.get('enabled', True):
+            return []
+        if not audit_report or not audit_report.get('missed_candidates'):
+            return []
+
+        min_tokens = int(cfg.get('min_tokens', 3))
+        max_tokens = int(cfg.get('max_tokens', 7))
+        max_recovered = int(cfg.get('max_recovered_items', 200))
+        dup_threshold = float(cfg.get('dup_guard_threshold', 0.88))
+
+        # Normalise helper — must mirror the main O→0 + strip rule
+        strip_chars = COVERAGE_AUDIT_CONFIG.get('normalise_strip_chars', ' "\'.')
+
+        def _norm(s: str) -> str:
+            out = s.upper()
+            for ch in strip_chars:
+                out = out.replace(ch, '')
+            return out.replace('O', '0')
+
+        existing_keys = [_norm(it.get('line_number', '')) for it in extracted_items]
+        existing_keys = [k for k in existing_keys if k]
+
+        # ------------------------------------------------------------------
+        # Per-format validators — each takes the token list and returns a
+        # structured dict if the shape matches, else None.  Knobs come from
+        # the soft-coded format dicts, so widening a regex knob (e.g.
+        # BOROUGE_AREA_FORMAT['seq_digits_max']) automatically widens this
+        # recovery path too.
+        # ------------------------------------------------------------------
+        def _try_industrial(tokens: List[str]):
+            # SIZE"-UNIT-SERVICE-SEQ-PIPINGCLASS(-END)
+            if len(tokens) not in (5, 6):
+                return None
+            size, unit, service, seq, pipe_class = tokens[0:5]
+            end = tokens[5] if len(tokens) == 6 else ''
+            size_digits = re.sub(r'[^0-9/]', '', size)
+            if not re.match(r'^\d{1,2}(/\d{1,2})?$', size_digits):
+                return None
+            if not (unit.isdigit() and len(unit) <= INDUSTRIAL_FORMAT['unit_no_max_digits']):
+                return None
+            if not (service.isalpha() and len(service) <= INDUSTRIAL_FORMAT['service_code_max_len']):
+                return None
+            if not (seq.isdigit()
+                    and INDUSTRIAL_FORMAT['seq_digits_min'] <= len(seq) <= INDUSTRIAL_FORMAT['seq_digits_max']):
+                return None
+            if not re.match(INDUSTRIAL_FORMAT['piping_class_pattern'], pipe_class):
+                return None
+            if end and not (end.isalpha() and len(end) <= 2):
+                return None
+            return {
+                'size': size_digits,
+                'unit_no': unit,
+                'service': service,
+                'sequence': seq,
+                'pipe_class': pipe_class,
+                'end_designator': end,
+                'format_type': 'industrial',
+            }
+
+        def _try_area(tokens: List[str]):
+            # SIZE"-AREA-SERVICE-SEQ-PIPECLASS(-END)   (Borouge / WITH AREA)
+            _b = BOROUGE_AREA_FORMAT
+            if len(tokens) not in (5, 6):
+                return None
+            size, area, service, seq, pipe_class = tokens[0:5]
+            end = tokens[5] if len(tokens) == 6 else ''
+            size_digits = re.sub(r'[^0-9/]', '', size)
+            if not re.match(r'^\d{1,2}(/\d{1,2})?$', size_digits):
+                return None
+            if not (area.isdigit()
+                    and _b['area_digits_min'] <= len(area) <= _b['area_digits_max']):
+                return None
+            if not (service.isalpha()
+                    and _b['service_letters_min'] <= len(service) <= _b['service_letters_max']):
+                return None
+            if not (seq.isdigit()
+                    and _b['seq_digits_min'] <= len(seq) <= _b['seq_digits_max']):
+                return None
+            if not (pipe_class.isalnum()
+                    and _b['pipeclass_len_min'] <= len(pipe_class) <= _b['pipeclass_len_max']):
+                return None
+            if end and not (end.isalpha()
+                            and _b['enddesig_letters_min'] <= len(end) <= _b['enddesig_letters_max']):
+                return None
+            return {
+                'size': size_digits,
+                'area': area,
+                'service': service,
+                'sequence': seq,
+                'pipe_class': pipe_class,
+                'end_designator': end,
+                'format_type': 'area',
+            }
+
+        def _try_standard(tokens: List[str]):
+            # SIZE"-FLUID-SEQ-PIPECLASS   (onshore, no area)
+            if len(tokens) not in (4, 5):
+                return None
+            size, fluid, seq, pipe_class = tokens[0:4]
+            end = tokens[4] if len(tokens) == 5 else ''
+            size_digits = re.sub(r'[^0-9/]', '', size)
+            if not re.match(r'^\d{1,2}(/\d{1,2})?$', size_digits):
+                return None
+            if not (fluid.isalpha() and 1 <= len(fluid) <= 3):
+                return None
+            if not (seq.isdigit() and 3 <= len(seq) <= 5):
+                return None
+            if not (pipe_class.isalnum() and 4 <= len(pipe_class) <= 8):
+                return None
+            if end and not (end.isalpha() and len(end) <= 2):
+                return None
+            return {
+                'size': size_digits,
+                'fluid': fluid,
+                'sequence': seq,
+                'pipe_class': pipe_class,
+                'end_designator': end,
+                'format_type': 'standard',
+            }
+
+        tryers = {
+            'industrial': _try_industrial,
+            'area': _try_area,
+            'standard': _try_standard,
+        }
+        priority = cfg.get('format_priority', ['industrial', 'area', 'standard'])
+
+        recovered: List[Dict] = []
+        seen_recovered_keys: set = set()
+
+        for page_num, cands in audit_report.get('missed_candidates', {}).items():
+            for cand in cands:
+                if len(recovered) >= max_recovered:
+                    break
+                # Split on hyphens / whitespace, drop empties
+                tokens = [t for t in re.split(r'[-\s]+', cand.strip()) if t]
+                if not (min_tokens <= len(tokens) <= max_tokens):
+                    continue
+                # O→0 per token (but keep original case for letters)
+                tokens = [t.replace('O', '0') if t.isupper() or t.isalnum() else t
+                          for t in tokens]
+                parsed = None
+                chosen_fmt = None
+                for fmt in priority:
+                    tryer = tryers.get(fmt)
+                    if not tryer:
+                        continue
+                    parsed = tryer(tokens)
+                    if parsed:
+                        chosen_fmt = fmt
+                        break
+                if not parsed:
+                    continue
+
+                # Build canonical line_number back from validated tokens
+                line_number = '-'.join(
+                    [parsed['size'] + '"'] +
+                    [str(v) for k, v in parsed.items()
+                     if k not in ('size', 'format_type', 'end_designator') and v]
+                )
+                if parsed.get('end_designator'):
+                    line_number += f"-{parsed['end_designator']}"
+
+                key = _norm(line_number)
+                if not key or key in seen_recovered_keys:
+                    continue
+
+                # Duplicate guard — skip if fuzzy-close to anything already extracted
+                if existing_keys:
+                    best_ratio = max(
+                        difflib.SequenceMatcher(None, key, k).ratio()
+                        for k in existing_keys
+                    )
+                    if best_ratio >= dup_threshold:
+                        continue
+
+                seen_recovered_keys.add(key)
+                recovered.append({
+                    'line_number': line_number,
+                    'size': parsed['size'],
+                    'fluid': parsed.get('fluid') or parsed.get('service', ''),
+                    'area': parsed.get('area', ''),
+                    'sequence': parsed['sequence'],
+                    'pipe_class': parsed['pipe_class'],
+                    'end_designator': parsed.get('end_designator', ''),
+                    'page_number': page_num,
+                    'extraction_method': f"audit_recovery:{chosen_fmt}",
+                    'recovered': True,
+                    'confidence': 'medium',
+                    'from_line': '',
+                    'to_line': '',
+                })
+
+        if recovered:
+            logger.info(f"\n{'='*60}")
+            logger.info("🛟 SMART RECOVERY")
+            logger.info(f"{'='*60}")
+            logger.info(f"  ✅ Recovered {len(recovered)} line(s) from audit residue")
+            for r in recovered[:10]:
+                logger.info(
+                    f"    p{r['page_number']} {r['line_number']} "
+                    f"[{r['extraction_method']}]"
+                )
+            if len(recovered) > 10:
+                logger.info(f"    … (+{len(recovered) - 10} more)")
+        else:
+            logger.info("🛟 SMART RECOVERY: no additional lines recovered")
+
+        return recovered
+
     def _deduplicate_items(self, items: List[Dict]) -> List[Dict]:
         """
         Remove duplicate line numbers with 2-layer OCR confusion handling

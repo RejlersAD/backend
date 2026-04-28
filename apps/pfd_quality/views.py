@@ -20,6 +20,8 @@ Engineer Review:
   PATCH  /api/v1/pfd-quality/findings/<finding_id>/ → override severity/status
 """
 import logging
+import os
+from pathlib import Path
 
 from django.http import HttpResponse
 from rest_framework import status
@@ -147,34 +149,76 @@ def upload_pfd(request):
         logger.warning(f"[PFDQUpload] Using synchronous fallback for doc_id={doc_id}")
         try:
             # Import locally to avoid circular import
+            from apps.pfd_quality.models import PFDQDrawing, PFDQFinding
             from apps.pfd_quality.services.segmentation import segment_document
             from apps.pfd_quality.services.extraction import extract_drawing
             from apps.pfd_quality.services.rule_engine import run_rules
-            
+
             doc = PFDQDocument.objects.get(document_id=doc_id)
             file_path = doc.original_file.path if doc.original_file else None
-            
+
             if not file_path:
                 raise ValueError(f"Document {doc_id} has no original file")
-            
+
             doc.status = PFDQDocument.Status.PROCESSING
             doc.save(update_fields=["status", "updated_at"])
-            
-            # Run synchronous pipeline
-            segment_document(str(doc.document_id), file_path)
-            extract_drawing(doc)
-            run_rules(doc)
-            
+
+            # Segment into drawings (one per PDF page)
+            segments = segment_document(str(doc.document_id), file_path)
+
+            for seg in segments:
+                drawing_obj, _ = PFDQDrawing.objects.get_or_create(
+                    document=doc,
+                    drawing_id=seg.drawing_id,
+                    defaults={
+                        'title':      seg.title,
+                        'page_index': seg.page_index,
+                        'metadata':   seg.metadata,
+                    }
+                )
+                drawing_obj.findings.all().delete()
+
+                # extract_drawing takes (file_path, page_index) → returns dict
+                extraction = extract_drawing(file_path, page_index=seg.page_index)
+
+                # Persist tag_positions into drawing metadata
+                tag_positions = extraction.get('tag_positions', {})
+                if tag_positions:
+                    meta = dict(drawing_obj.metadata or {})
+                    meta['tag_positions'] = tag_positions
+                    drawing_obj.metadata = meta
+                    drawing_obj.save(update_fields=['metadata'])
+
+                # run_rules takes the extraction dict → returns list of RuleFinding
+                rule_findings = run_rules(extraction)
+
+                bulk = []
+                for sl, rf in enumerate(rule_findings, start=1):
+                    bulk.append(PFDQFinding(
+                        drawing         = drawing_obj,
+                        sl_no           = sl,
+                        category        = rf.category,
+                        rule_id         = rf.rule_id,
+                        issue_observed  = rf.issue_observed,
+                        action_required = rf.action_required,
+                        evidence        = rf.evidence,
+                        direction       = rf.direction,
+                        severity        = rf.severity,
+                        status          = 'open',
+                    ))
+                PFDQFinding.objects.bulk_create(bulk)
+
             doc.status = PFDQDocument.Status.COMPLETED
             doc.save(update_fields=["status", "updated_at"])
             logger.info(f"[PFDQUpload] Sync fallback completed for doc_id={doc_id}")
         except Exception as e:
             logger.error(f"[PFDQUpload] Sync fallback failed: {e}", exc_info=True)
             try:
+                doc = PFDQDocument.objects.get(document_id=doc_id)
                 doc.status = PFDQDocument.Status.FAILED
                 doc.error_message = f"Sync processing failed: {e}"
                 doc.save(update_fields=["status", "error_message", "updated_at"])
-            except:
+            except Exception:
                 pass
     
     # Use robust queue service with fallback
@@ -378,6 +422,129 @@ def update_finding(request, finding_id):
 # ===========================================================================
 # Helpers
 # ===========================================================================
+
+# ===========================================================================
+# DRAWING IMAGE — rasterise a PDF page for the frontend overlay panel
+# ===========================================================================
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def drawing_image(request, document_id, page_index):
+    """
+    Render the specified page of an uploaded PFD as a PNG image.
+    For PDFs  → PyMuPDF rasterises at 2× zoom (~150 dpi).
+    For images → served directly (PIL converts to PNG).
+    URL: GET /api/v1/pfd-quality/drawing-image/<document_id>/<page_index>/
+    """
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if not doc.original_file:
+        return Response({"error": "Original file not stored"}, status=status.HTTP_404_NOT_FOUND)
+
+    try:
+        file_path = doc.original_file.path
+    except Exception:
+        return Response({"error": "File path unavailable"}, status=status.HTTP_404_NOT_FOUND)
+
+    if not os.path.exists(file_path):
+        return Response(
+            {"error": "Original file no longer available on this server. Please re-upload the PFD drawing."},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    ext = Path(file_path).suffix.lower().lstrip(".")
+    png_data = None
+
+    if ext == "pdf":
+        try:
+            import fitz
+            pdf_doc = fitz.open(file_path)
+            if page_index >= len(pdf_doc):
+                pdf_doc.close()
+                return Response({"error": "Page index out of range"}, status=status.HTTP_400_BAD_REQUEST)
+            page = pdf_doc[page_index]
+            mat  = fitz.Matrix(2.0, 2.0)  # 2× zoom ≈ 150 dpi for A1 drawings
+            pix  = page.get_pixmap(matrix=mat, alpha=False)
+            png_data = pix.tobytes("png")
+            pdf_doc.close()
+        except ImportError:
+            return Response({"error": "PyMuPDF not available"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        except Exception as exc:
+            logger.warning("[PFDQDrawingImage] PDF render failed: %s", exc)
+            return Response({"error": "Failed to render PDF page"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    elif ext in {"png", "jpg", "jpeg", "tiff", "tif"}:
+        try:
+            with open(file_path, "rb") as f:
+                raw = f.read()
+            if ext == "png":
+                png_data = raw
+            else:
+                from PIL import Image
+                import io
+                img = Image.open(io.BytesIO(raw)).convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                png_data = buf.getvalue()
+        except Exception as exc:
+            logger.warning("[PFDQDrawingImage] Image read failed: %s", exc)
+            return Response({"error": "Failed to read image"},  status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    else:
+        return Response({"error": f"Unsupported file type: {ext}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    response = HttpResponse(png_data, content_type="image/png")
+    response["Cache-Control"] = "private, max-age=3600"
+    response["Content-Length"] = len(png_data)
+    return response
+
+
+# ===========================================================================
+# RE-EXTRACT POSITIONS — refresh tag_positions for an existing document
+# POST /api/v1/pfd-quality/reextract/<document_id>/
+# ===========================================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def reextract_positions(request, document_id):
+    """
+    Re-run tag position extraction on an already-processed document.
+    Useful when the backend extraction has been improved (e.g. OCR added)
+    and the user wants updated overlay markers without full re-upload.
+    Synchronous — fast enough for a single drawing page.
+    """
+    doc = _get_doc_or_404(document_id, request.user)
+    if doc is None:
+        return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if not os.path.exists(doc.original_file.path):
+        return Response(
+            {"error": "Original file not available — please re-upload."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    from .services.extraction import _extract_tag_positions
+
+    updated = 0
+    for drawing in doc.drawings.all():
+        try:
+            tag_positions = _extract_tag_positions(doc.original_file.path, drawing.page_index)
+            meta = dict(drawing.metadata or {})
+            meta['tag_positions'] = tag_positions
+            drawing.metadata = meta
+            drawing.save(update_fields=['metadata'])
+            updated += 1
+            logger.info('[PFDQReextract] drawing=%s extracted %d tag positions',
+                        drawing.drawing_id, len(tag_positions))
+        except Exception as exc:
+            logger.warning('[PFDQReextract] Failed for drawing=%s: %s', drawing.drawing_id, exc)
+
+    return Response({
+        "message": f"Tag positions refreshed for {updated} drawing(s).",
+        "document_id": str(document_id),
+    })
+
 
 def _get_doc_or_404(document_id: str, user):
     try:

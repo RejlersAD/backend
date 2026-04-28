@@ -26,6 +26,53 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# ─── SOFT-CODED EXTRACTION CONFIG ─────────────────────────────────────────
+# Tweak any of these without touching extraction logic. Every value can also
+# be overridden via env-var (PI_EXTRACT_<UPPER_KEY>) for runtime control.
+PI_EXTRACTION_CONFIG = {
+    # PDF rasterisation
+    "pdf_dpi":              200,
+    "pdf_max_pages":        20,           # process up to N pages, then stop
+    "pdf_skip_blank_kb":    8,            # skip pages whose JPEG < N KB (likely blank)
+    # Image normalisation
+    "image_max_dimension":  2000,
+    "image_jpeg_quality":   85,
+    # OpenAI Vision
+    "vision_model_primary":  "gpt-4o",
+    "vision_model_fallback": "gpt-4o-mini",
+    "vision_max_tokens":    10000,
+    "vision_temperature":   0.1,
+    "vision_image_detail":  "high",
+    # Multi-page merge
+    "dedupe_key":           "tag_number", # field used to dedupe across pages
+    # Document-type intelligence
+    "accept_document_types": [
+        "P&ID",
+        "Instrument Index",
+        "Instrument Datasheet",
+        "Loop Diagram",
+        "Line Schedule",
+        "Process Data Sheet",
+    ],
+}
+
+
+def _pi_cfg(key, default=None):
+    """Resolve config value: env-var (PI_EXTRACT_<KEY>) > dict > default."""
+    env_val = os.getenv(f"PI_EXTRACT_{key.upper()}")
+    if env_val is not None:
+        # cast to type of default if numeric
+        try:
+            if isinstance(PI_EXTRACTION_CONFIG.get(key), int):
+                return int(env_val)
+            if isinstance(PI_EXTRACTION_CONFIG.get(key), float):
+                return float(env_val)
+        except ValueError:
+            pass
+        return env_val
+    return PI_EXTRACTION_CONFIG.get(key, default)
+# ───────────────────────────────────────────────────────────────────────────
+
 
 class PressureInstrumentAnalyzer:
     """
@@ -155,7 +202,25 @@ class PressureInstrumentAnalyzer:
         
         try:
             logger.info(f"[PressureInstrument] 📥 Received data type: {type(pid_image_data)}, size: {len(pid_image_data) if isinstance(pid_image_data, bytes) else 'unknown'}")
-            
+
+            # ── SMART MULTI-PAGE PATH (soft-coded) ─────────────────────────
+            # If we have PDF bytes, rasterise every page (up to pdf_max_pages),
+            # call Vision per page, merge results.  Falls back to legacy single-
+            # page path if anything goes wrong.
+            if isinstance(pid_image_data, bytes) and pid_image_data[:4] == b'%PDF':
+                try:
+                    multi = self._analyze_pdf_multipage(pid_image_data, drawing_info)
+                    # Override pid_no with filename if provided (parity with single-page path)
+                    if drawing_info.get('pid_no'):
+                        for instrument in multi:
+                            instrument['pid_no'] = drawing_info['pid_no']
+                    return multi
+                except Exception as multi_err:
+                    logger.warning(
+                        "[PressureInstrument] Multi-page path failed (%s); falling back to single-page.",
+                        multi_err,
+                    )
+
             # Convert image to base64
             if isinstance(pid_image_data, bytes):
                 # Check if PDF
@@ -264,22 +329,138 @@ class PressureInstrumentAnalyzer:
             logger.error(f"[PressureInstrument] Traceback: {traceback.format_exc()}")
             return []
 
-    def _call_openai_vision_api(self, base64_image, prompt, drawing_info):
+    # ── SMART MULTI-PAGE EXTRACTION (soft-coded) ─────────────────────────
+    def _analyze_pdf_multipage(self, pdf_bytes, drawing_info):
+        """
+        Rasterise every page of the PDF (up to PI_EXTRACTION_CONFIG['pdf_max_pages']),
+        run Vision extraction per page and merge the results, deduplicating by
+        the configured key (default: tag_number).
+
+        Falls back to a secondary model on per-page failure.  Logs page-level
+        counts so empty pages can be diagnosed.
+        """
+        max_pages    = int(_pi_cfg("pdf_max_pages", 20))
+        dpi          = int(_pi_cfg("pdf_dpi", 200))
+        max_dim      = int(_pi_cfg("image_max_dimension", 2000))
+        jpeg_q       = int(_pi_cfg("image_jpeg_quality", 85))
+        skip_blank_kb = int(_pi_cfg("pdf_skip_blank_kb", 8))
+        dedupe_key   = _pi_cfg("dedupe_key", "tag_number")
+
+        try:
+            from pdf2image import pdfinfo_from_bytes
+            info = pdfinfo_from_bytes(pdf_bytes)
+            total_pages = int(info.get("Pages", 1))
+        except Exception:
+            total_pages = max_pages
+        pages_to_scan = min(total_pages, max_pages)
+        logger.info(
+            "[PressureInstrument] 📚 Multi-page extraction: pdf has %s page(s); scanning %s.",
+            total_pages, pages_to_scan,
+        )
+
+        merged = []
+        seen_keys = set()
+        for page_num in range(1, pages_to_scan + 1):
+            try:
+                images = convert_from_bytes(
+                    pdf_bytes, first_page=page_num, last_page=page_num, dpi=dpi
+                )
+                if not images:
+                    continue
+                img = images[0]
+                if img.width > max_dim or img.height > max_dim:
+                    ratio = min(max_dim / img.width, max_dim / img.height)
+                    img = img.resize(
+                        (int(img.width * ratio), int(img.height * ratio)),
+                        Image.Resampling.LANCZOS,
+                    )
+                if img.mode in ("RGBA", "LA", "P"):
+                    rgb = Image.new("RGB", img.size, (255, 255, 255))
+                    if img.mode == "P":
+                        img = img.convert("RGBA")
+                    rgb.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                    img = rgb
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=jpeg_q, optimize=True)
+                jpeg_bytes = buf.getvalue()
+
+                if len(jpeg_bytes) < skip_blank_kb * 1024:
+                    logger.info(
+                        "[PressureInstrument] ⏭️  Page %s skipped (likely blank, %s bytes).",
+                        page_num, len(jpeg_bytes),
+                    )
+                    continue
+
+                b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
+                page_drawing_info = dict(drawing_info)
+                page_drawing_info["page_number"] = page_num
+                page_drawing_info["total_pages"] = pages_to_scan
+                prompt = self._create_analysis_prompt(page_drawing_info)
+
+                logger.info(
+                    "[PressureInstrument] 🔎 Page %s/%s → Vision call (%s KB).",
+                    page_num, pages_to_scan, len(jpeg_bytes) // 1024,
+                )
+                page_items = self._call_openai_vision_api(b64, prompt, page_drawing_info)
+
+                # Soft fallback: if nothing found, retry with the secondary
+                # model — cheaper and sometimes more permissive.
+                if not page_items:
+                    fb_model = _pi_cfg("vision_model_fallback", "gpt-4o-mini")
+                    logger.info(
+                        "[PressureInstrument] ↻ Page %s empty; retrying with fallback model %s.",
+                        page_num, fb_model,
+                    )
+                    page_items = self._call_openai_vision_api(
+                        b64, prompt, page_drawing_info, model_override=fb_model
+                    )
+
+                for item in page_items:
+                    item.setdefault("page_number", page_num)
+                    key = str(item.get(dedupe_key, "")).strip().upper()
+                    if key and key in seen_keys:
+                        continue
+                    if key:
+                        seen_keys.add(key)
+                    merged.append(item)
+
+                logger.info(
+                    "[PressureInstrument] ✅ Page %s contributed %s instrument(s); running total=%s.",
+                    page_num, len(page_items), len(merged),
+                )
+            except Exception as page_err:
+                logger.warning(
+                    "[PressureInstrument] Page %s extraction error: %s", page_num, page_err
+                )
+                continue
+
+        logger.info(
+            "[PressureInstrument] 🎯 Multi-page extraction complete: %s unique instrument(s).",
+            len(merged),
+        )
+        return merged
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _call_openai_vision_api(self, base64_image, prompt, drawing_info, model_override=None):
         """
         Call OpenAI Vision API with proper error handling.
         Separated for reusability and cleaner code.
         """
         try:
+            model_used    = model_override or _pi_cfg("vision_model_primary", "gpt-4o")
+            max_tokens    = int(_pi_cfg("vision_max_tokens", 10000))
+            temperature   = float(_pi_cfg("vision_temperature", 0.1))
+            image_detail  = _pi_cfg("vision_image_detail", "high")
+
             logger.info("[PressureInstrument] 📞 Calling OpenAI Vision API...")
-            logger.info(f"[PressureInstrument] Model: gpt-4o, Max Tokens: 10000, Temperature: 0.1")
+            logger.info(f"[PressureInstrument] Model: {model_used}, Max Tokens: {max_tokens}, Temperature: {temperature}")
             logger.info(f"[PressureInstrument] Base64 image size: {len(base64_image)} characters")
             logger.info(f"[PressureInstrument] Base64 first 100 chars: {base64_image[:100]}")
             logger.info(f"[PressureInstrument] Prompt length: {len(prompt)} characters")
-            
-            # Call OpenAI Vision API with updated model
-            # Using gpt-4o which has vision capabilities and is the latest model
+
+            # Call OpenAI Vision API (model & params soft-coded via PI_EXTRACTION_CONFIG)
             response = self.openai_client.chat.completions.create(
-                model="gpt-4o",
+                model=model_used,
                 messages=[
                     {
                         "role": "system",
@@ -324,14 +505,14 @@ class PressureInstrumentAnalyzer:
                                 "type": "image_url",
                                 "image_url": {
                                     "url": f"data:image/jpeg;base64,{base64_image}",
-                                    "detail": "high"
+                                    "detail": image_detail
                                 }
                             }
                         ]
                     }
                 ],
-                max_tokens=10000,
-                temperature=0.1
+                max_tokens=max_tokens,
+                temperature=temperature
             )
             
             logger.info(f"[PressureInstrument] ✅ OpenAI API call completed successfully")
@@ -382,10 +563,28 @@ class PressureInstrumentAnalyzer:
             str: Formatted prompt
         """
         instrument_types_list = ', '.join([f"{k} ({v['name']})" for k, v in self.INSTRUMENT_TYPES.items()])
-        
-        prompt = f"""
-🎯 MISSION: Scan this entire P&ID diagram and find EVERY SINGLE pressure instrument.
+        accept_doc_types = ', '.join(_pi_cfg("accept_document_types", []) or [])
+        page_ctx = ""
+        if drawing_info.get('page_number') and drawing_info.get('total_pages'):
+            page_ctx = (
+                f"\n📄 You are looking at PAGE {drawing_info['page_number']} of "
+                f"{drawing_info['total_pages']} in this submission. Extract whatever "
+                f"appears on THIS page only — duplicates across pages are merged "
+                f"server-side by tag number.\n"
+            )
 
+        prompt = f"""
+🎯 MISSION: Scan this engineering document and extract EVERY pressure-related instrument visible.
+
+This document may be any of: {accept_doc_types or 'P&ID'}.
+Treat it intelligently:
+  • If it is a P&ID — find instrument bubbles on lines/equipment.
+  • If it is an Instrument Index / Tag List — read every row of the table.
+  • If it is a single Instrument Datasheet — extract that one instrument with all its specs.
+  • If it is a Loop Diagram — extract every tag in the loop.
+  • If it is a Line Schedule — pick out the instrument tags and the line conditions
+    (operating/design pressure, temperature, fluid) so they can be cross-mapped.
+{page_ctx}
 📋 Drawing Information:
 - Drawing Number: {drawing_info.get('drawing_number', 'N/A')}
 - Drawing Title: {drawing_info.get('drawing_title', 'N/A')}

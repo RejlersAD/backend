@@ -64,7 +64,33 @@ def process_sdv_in_thread(pid_file_path, hmb_file_path, pid_filename, user_email
             pid_extractor = MockPIDExtractor()
             pid_data = pid_extractor.extract_from_pdf(pid_file_path, original_filename=pid_filename)
             log_and_print(f"âœ… [SDV {job_id[:8]}] Mock extraction: {len(pid_data.get('valves', []))} valves")
-        
+
+        # -- TAG + FIELD VALIDATION (soft-coded; mirrors MOV pipeline) ----------
+        try:
+            from apps.process_datasheet.tag_validator import validate_and_filter_valves
+            from apps.process_datasheet.mov_field_validator import validate_mov_fields  # generic field rules
+            raw_count = len(pid_data.get('valves', []))
+            pid_data['valves'], tag_warnings = validate_and_filter_valves(pid_data.get('valves', []))
+            for w in tag_warnings:
+                log_and_print(f"[SDV {job_id[:8]}] TAG VALIDATION: {w}")
+            if tag_warnings:
+                log_and_print(
+                    f"[SDV {job_id[:8]}] Removed {raw_count - len(pid_data['valves'])} demo/unknown tag(s)."
+                )
+            field_result = validate_mov_fields(pid_data.get('valves', []))
+            if field_result.get('enabled'):
+                pid_data['valves'] = field_result['valves']
+                cache.set(f'sdv_task_{job_id}_field_validation',
+                          field_result['summary'], timeout=3600)
+                log_and_print(
+                    f"[SDV {job_id[:8]}] FIELD VALIDATION: kept={field_result['summary']['kept']}"
+                    f" dropped={field_result['summary']['dropped']}"
+                    f" scrubbed={field_result['summary']['scrubbed']}"
+                )
+        except Exception as fv_err:
+            log_and_print(f"[SDV {job_id[:8]}] Validators skipped: {fv_err}")
+        # -----------------------------------------------------------------------
+
         cache.set(f'sdv_task_{job_id}_progress', 30, timeout=3600)
         cache.set(f'sdv_task_{job_id}_stage', 'Extracting HMB data with Vision AI (this may take 2-5 minutes)...', timeout=3600)
         

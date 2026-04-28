@@ -57,6 +57,10 @@ class AdvancedPFDToPIDPipeline:
     def __init__(self, project_id=None):
         self.model = config('OPENAI_MODEL', default='gpt-4o')
         self.project_id = project_id
+        # Optional per-upload engineering context (fluid service, operating P/T, etc.)
+        # Set by views.py before invoking _step1_computer_vision_ocr to feed the
+        # soft-coded prompt builder. Safe default = None.
+        self.engineering_context = None
         self.engineering_rules = EngineeringRulesEngine()
         self.pattern_matcher = MLPatternMatcher()
         self.graph_builder = ProcessGraphBuilder()
@@ -238,315 +242,34 @@ class AdvancedPFDToPIDPipeline:
         
         # Prepare image
         image_data = self._prepare_image(pfd_file)
-        
-        # EXPERT-LEVEL PROCESS ENGINEERING ANALYSIS PROMPT
-        # Based on ADNOC/Shell/Aramco standards for PFD to P&ID conversion
-        prompt = f"""🎯 ROLE: You are a SENIOR OIL & GAS PROCESS ENGINEER (ADNOC/Shell/Aramco standard) with expertise in:
-- Gas dehydration & export systems / Long-distance pipelines / PFD/P&ID development
-- Safety & shutdown philosophy / DEXPI and ISO 15926 modeling
 
-📥 TASK: Analyze this Process Flow Diagram (PFD) as an engineering-level technical document for PFD → P&ID conversion.
-
-🔍 EXTRACTION REQUIREMENTS - FOLLOW THIS STRUCTURE:
-
-═══════════════════════════════════════════════════════════
-1️⃣ PFD PURPOSE & PROCESS OVERVIEW
-═══════════════════════════════════════════════════════════
-Extract and explain:
-- System purpose (what does it do?)
-- Process intent (dehydration? export? treatment?)
-- Operating philosophy
-- Project context (e.g., "Sahil CDS to ASAB CDS gas export")
-- Client/Operator name
-- Contractor/EPC name
-
-═══════════════════════════════════════════════════════════
-2️⃣ PROCESS FLOW - STEP BY STEP SEQUENCE
-═══════════════════════════════════════════════════════════
-Describe exact gas/liquid/stream flow path in engineering sequence:
-- Source conditions (pressure, temp, composition)
-- Each equipment function in sequence
-- Shutdown & isolation valve logic
-- Tie-in points to headers/facilities
-Use precise engineering terminology.
-
-═══════════════════════════════════════════════════════════
-3️⃣ MAJOR EQUIPMENT IDENTIFICATION (COMPLETE TABLE)
-═══════════════════════════════════════════════════════════
-For EVERY piece of equipment, extract:
-- Tag number (e.g., V-101, P-101A/B, E-201)
-- Type (vessel, pump, heat exchanger, KO drum, pig launcher, etc.)
-- Function/Service description
-- Design Pressure (barg/psig)
-- Design Temperature (°C/°F)
-- Operating Pressure & Temperature
-- Size/Capacity (m3, dia×length, flow rate)
-- Material of Construction (CS, SS316, etc.)
-- Quantity (1 operating, 1 spare?)
-- Position (x: 0.0-1.0, y: 0.0-1.0 normalized coordinates)
-
-═══════════════════════════════════════════════════════════
-4️⃣ PIPELINE ENGINEERING DETAILS
-═══════════════════════════════════════════════════════════
-Extract for each major pipeline:
-- Line number/ID
-- Size (inch, DN)
-- Class/Schedule (150#, Sch 40, etc.)
-- Material (CS, SS, etc.)
-- Design conditions
-- Capacity (MMSCFD, m3/h)
-- Length/routing (on-plot, off-plot, export)
-- Pigging philosophy (if mentioned)
-- Corrosion allowance
-- Insulation requirements
-
-═══════════════════════════════════════════════════════════
-5️⃣ SAFETY, CONTROL & SHUTDOWN PHILOSOPHY
-═══════════════════════════════════════════════════════════
-Extract EVERY safety element:
-- **ESD Logic**: What triggers ESD? Which valves close?
-- **SDV (Shutdown Valves)**: Tag, location, fail position, actuator type
-- **PSV (Pressure Safety Valves)**: Tag, set pressure, relieving capacity, discharge to where?
-- **PSD/LSD/DPSD**: Pressure/Level/Differential Shutdown devices - tag, setpoint, action
-- **Overpressure Protection**: How is system protected?
-- **Blowdown/Depressurization**: BDV tags, routing to flare/vent
-- **Alarms**: PAH, TAH, LAH, FAH (High alarms), PAL, LAL (Low alarms)
-
-═══════════════════════════════════════════════════════════
-6️⃣ INSTRUMENTS - COMPLETE EXTRACTION (ISA-5.1 COMPLIANT)
-═══════════════════════════════════════════════════════════
-Extract EVERY instrument with full ISA nomenclature:
-
-**Flow Instruments:**
-- FE (Flow Element - orifice plate)
-- FT (Flow Transmitter)
-- FI (Flow Indicator)
-- FIC (Flow Indicator Controller)
-- FIT (Flow Indicating Transmitter)
-- FQIT (Flow Quantity Integrating Transmitter)
-- FCV (Flow Control Valve)
-- FSH/FSL (Flow Switch High/Low)
-
-**Pressure Instruments:**
-- PT (Pressure Transmitter)
-- PI (Pressure Indicator/Gauge)
-- PIC (Pressure Indicator Controller)
-- PIT (Pressure Indicating Transmitter)
-- PSV (Pressure Safety Valve)
-- PCV (Pressure Control Valve)
-- PSH/PSL (Pressure Switch High/Low)
-- DPIC (Differential Pressure Controller)
-
-**Temperature Instruments:**
-- TT (Temperature Transmitter)
-- TI (Temperature Indicator)
-- TIC (Temperature Indicator Controller)
-- TW (Thermowell)
-- TSH/TSL (Temperature Switch High/Low)
-- TCV (Temperature Control Valve)
-
-**Level Instruments:**
-- LT (Level Transmitter)
-- LI (Level Indicator)
-- LIC (Level Indicator Controller)
-- LG (Level Gauge - visual)
-- LSH/LSL/LSHH/LSLL (Level Switch)
-- LCV (Level Control Valve)
-
-**Analytical Instruments:**
-- AIT (Analyzer Indicating Transmitter)
-- QIT (Quality Indicating Transmitter)
-
-For EACH instrument extracted, specify:
-- Tag number (e.g., FT-101, PT-205A)
-- Type (transmitter, controller, valve, switch)
-- Measured variable
-- Location/Connection point
-- Range (if visible: 0-100 barg, 0-200°C)
-- Signal type (4-20mA, digital)
-- Connected equipment tag
-
-═══════════════════════════════════════════════════════════
-7️⃣ CONTROL LOOPS & AUTOMATION
-═══════════════════════════════════════════════════════════
-Identify complete control loops:
-- **Flow Control**: FIC-101 controls FCV-101 to maintain flow setpoint
-- **Pressure Control**: PIC-201 controls PCV-201 to maintain pressure
-- **Temperature Control**: TIC-301 controls TCV-301 (heating/cooling)
-- **Level Control**: LIC-401 controls LCV-401 (drain valve)
-- Control strategy: PID, cascade, split-range, ratio
-
-═══════════════════════════════════════════════════════════
-8️⃣ FLARE & DRAIN SYSTEM INTEGRATION
-═══════════════════════════════════════════════════════════
-Extract:
-- **Flare Connections**: Which equipment connects to HP/MP/LP flare?
-- **Flare Headers**: Pressure ratings, routing
-- **PSV Discharge**: Where does each PSV discharge to?
-- **Blowdown Valves (BDV)**: Tag, size, manual/auto
-- **Drain System**: HP drain, LP drain, closed drain, open drain
-- **Vent System**: Atmospheric vent, vent header
-- Environmental philosophy (zero flaring? mobile flare?)
-
-═══════════════════════════════════════════════════════════
-9️⃣ UTILITIES & SUPPORT SYSTEMS
-═══════════════════════════════════════════════════════════
-Extract connections to:
-- **Instrument Air (IA)**: Supply header, pressure (typically 7 barg)
-- **Nitrogen (N2)**: Purge/blanketing system
-- **Cooling Water**: Supply/return, temperatures
-- **Steam**: HP/MP/LP steam for heating
-- **Electrical**: Power supply to motors, heaters
-- **Fuel Gas**: If burners/heaters present
-
-═══════════════════════════════════════════════════════════
-🔟 OPERABILITY & MAINTENANCE CONSIDERATIONS
-═══════════════════════════════════════════════════════════
-Extract if visible:
-- **Pigging Operations**: Pig launcher/receiver tags, isolation valves
-- **Maintenance Isolation**: Spectacle blinds, double block & bleed
-- **Startup Philosophy**: Sequence notes
-- **Shutdown Philosophy**: Normal vs emergency
-- **Bypass Lines**: For maintenance or control override
-- **Sampling Points**: For quality control
-
-═══════════════════════════════════════════════════════════
-1️⃣1️⃣ TEXT ANNOTATIONS & ENGINEERING NOTES
-═══════════════════════════════════════════════════════════
-Extract ALL visible text:
-- Drawing title, number, revision, date
-- Project name, client name, contractor name
-- Design basis notes
-- Safety notes (e.g., "PSV sized for fire case")
-- Material specifications
-- Piping class references
-- Legends/symbols key
-- Engineering assumptions
-- Any handwritten notes or stamps
-
-═══════════════════════════════════════════════════════════
-📤 RESPONSE FORMAT - STRUCTURED JSON OUTPUT
-═══════════════════════════════════════════════════════════
-Provide comprehensive extraction in this EXACT JSON structure:
-{{
-  "equipment": [
-    {{
-      "tag": "604-P-0101A/B/C",
-      "type": "centrifugal_pump",
-      "description": "Produced Water Transfer Pump",
-      "quantity": "3 (2 operating + 1 standby)",
-      "capacity": "150 m3/h",
-      "head": "50 m",
-      "power": "22 kW",
-      "design_pressure": "16 barg",
-      "design_temperature": "120°C",
-      "operating_pressure": "8 barg",
-      "operating_temperature": "60°C",
-      "materials": "CS body, SS316 impeller",
-      "driver": "22 kW electric motor, 2900 rpm",
-      "position": {{"x": 0.15, "y": 0.6}},
-      "notes": "Spare pump available"
-    }}
-  ],
-  "process_streams": [
-    {{
-      "stream_id": "1",
-      "name": "Produced Water Feed",
-      "source": "604-P-0101A/B/C",
-      "destination": "604-T-0102",
-      "flow_rate": "150 m3/h",
-      "mass_flow": "150000 kg/h",
-      "pressure": "8 barg",
-      "temperature": "60°C",
-      "density": "1010 kg/m3",
-      "phase": "liquid",
-      "composition": "Water + oil + solids",
-      "line_size": "6 inch",
-      "line_class": "150#",
-      "material": "CS"
-    }}
-  ],
-  "instruments": [
-    {{
-      "tag": "604-FT-0101",
-      "type": "flow_transmitter",
-      "measured_variable": "volumetric_flow",
-      "location": "P-0101 discharge",
-      "connected_to": "604-P-0101",
-      "range": "0-200 m3/h",
-      "signal": "4-20 mA",
-      "service": "Measures produced water flow"
-    }},
-    {{
-      "tag": "604-PT-0102",
-      "type": "pressure_transmitter",
-      "measured_variable": "pressure",
-      "location": "T-0102 inlet",
-      "range": "0-16 barg"
-    }}
-  ],
-  "control_loops": [
-    {{
-      "controller": "604-FIC-0101",
-      "manipulated_variable": "604-FCV-0101",
-      "controlled_variable": "Flow to degasser",
-      "setpoint": "150 m3/h",
-      "control_type": "PID"
-    }}
-  ],
-  "valves": [
-    {{
-      "tag": "604-FCV-0101",
-      "type": "flow_control_valve",
-      "size": "4 inch",
-      "actuator": "pneumatic",
-      "fail_position": "fail_close",
-      "location": "on stream 1"
-    }},
-    {{
-      "type": "check_valve",
-      "size": "6 inch",
-      "location": "pump discharge"
-    }}
-  ],
-  "text_annotations": [
-    {{
-      "text": "Design Pressure: 16 barg",
-      "type": "specification",
-      "location": "equipment datasheet area"
-    }},
-    {{
-      "text": "ADNOC OFFSHORE",
-      "type": "company_name"
-    }},
-    {{
-      "text": "PRODUCED WATER TREATMENT",
-      "type": "drawing_title"
-    }}
-  ],
-  "utilities": [
-    {{
-      "type": "cooling_water",
-      "supply_header": "CW-SUP",
-      "return_header": "CW-RET",
-      "supply_pressure": "5 barg",
-      "supply_temp": "32°C",
-      "return_temp": "42°C",
-      "connected_equipment": ["604-E-0104"]
-    }}
-  ]
-}}
-
-CRITICAL INSTRUCTIONS:
-- Scan the ENTIRE drawing systematically (left to right, top to bottom)
-- Extract SMALL details - even minor valves, small instruments, annotations
-- If you see equipment tags, extract them exactly as written
-- If you see numbers, extract them with units
-- Extract company names, project names, drawing information as-is
-- Prefer OVER-EXTRACTING to ensure nothing is missed
-- Aim for 20-50+ total items for a typical engineering drawing
-
-Extract everything visible now."""
+        # ── SOFT-CODED PROMPT (Intelligent Diagram Conversion Engine v2) ──
+        # All section toggles, tag conventions, validation rules and output schema
+        # live in `pid_conversion_prompts.PFD_PROMPT_CONFIG` and can be tuned via
+        # PFD_PROMPT_<KEY> environment variables without code changes.
+        try:
+            from .pid_conversion_prompts import (
+                build_user_prompt as _build_pid_user_prompt,
+                build_system_prompt as _build_pid_system_prompt,
+            )
+            prompt = _build_pid_user_prompt(
+                engineering_context=getattr(self, 'engineering_context', None)
+            )
+            system_prompt = _build_pid_system_prompt()
+            logger.info("  → Using soft-coded Intelligent Diagram Conversion Engine prompt")
+        except Exception as _prompt_err:
+            # Fail-safe fallback to a minimal legacy prompt — preserves backwards
+            # compatibility if the prompts module is missing or broken.
+            logger.warning(f"  ⚠️ Soft-coded prompt unavailable, using fallback: {_prompt_err}")
+            prompt = (
+                "You are a Senior Oil & Gas Process Engineer. Convert this PFD into a P&ID. "
+                "Extract equipment, process_streams, instruments, control_loops, valves, "
+                "text_annotations, utilities as a strict JSON object. No prose."
+            )
+            system_prompt = (
+                "You are an expert Process Engineer analyzing technical engineering drawings. "
+                "Respond with valid JSON only."
+            )
 
         # Call GPT-4 Vision with multiple retry strategies
         max_retries = 3
@@ -568,21 +291,7 @@ Extract everything visible now."""
                     messages=[
                         {
                             "role": "system",
-                            "content": """You are an expert Process Engineer analyzing technical engineering drawings.
-
-TASK: Extract information from this Process Flow Diagram and provide it in JSON format.
-
-Focus on:
-- Equipment tags and descriptions
-- Process streams and connections
-- Instruments and control devices
-- Text labels and annotations
-
-IMPORTANT:  
-- Respond with valid JSON only
-- If the drawing is unclear, extract whatever you can identify
-- Include empty arrays for categories where nothing is found
-- Do not refuse - provide your best effort analysis"""
+                            "content": system_prompt
                         },
                         {
                             "role": "user",

@@ -15,6 +15,21 @@ from io import BytesIO
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Soft-coded Celery time limits for long-running DesignIQ tasks.
+# These accommodate large P&IDs (100+ lines) where each line triggers a
+# serial OpenAI enrichment call (~3–5s per line) on top of OCR + parsing.
+#
+# HARD limit  = worker process is SIGKILL'd (TimeLimitExceeded).
+# SOFT limit  = raises SoftTimeLimitExceeded so the task can finalise/save.
+#
+# Keep frontend POLL_MAX_ATTEMPTS × POLL_INTERVAL_MS  >=  DESIGNIQ_TASK_HARD_LIMIT
+# or users will see a timeout while the task is still processing.
+# ---------------------------------------------------------------------------
+DESIGNIQ_TASK_HARD_LIMIT = 2700  # 45 minutes
+DESIGNIQ_TASK_SOFT_LIMIT = 2580  # 43 minutes
+
+
 
 def extract_text_from_file(file_data):
     """Extract text from PDF, Excel, or Word file for enrichment"""
@@ -345,7 +360,7 @@ def call_openai_stress_criticality_batch(lines_data, section_7_text):
         return {}
 
 
-@shared_task(bind=True, time_limit=1200, soft_time_limit=1140)  # 20 minutes max
+@shared_task(bind=True, time_limit=DESIGNIQ_TASK_HARD_LIMIT, soft_time_limit=DESIGNIQ_TASK_SOFT_LIMIT)
 def process_pid_upload_async(
     self, 
     file_path, 
@@ -857,7 +872,7 @@ def process_pid_upload_async(
         raise
 
 
-@shared_task(bind=True, time_limit=1200, soft_time_limit=1140)  # 20 minutes max
+@shared_task(bind=True, time_limit=DESIGNIQ_TASK_HARD_LIMIT, soft_time_limit=DESIGNIQ_TASK_SOFT_LIMIT)
 def base_extract_lines_async(self, file_path, filename, include_area=False, format_type='onshore'):
     """
     🎯 Async Celery task for Line List base extraction (P&ID only)
@@ -879,17 +894,42 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
     task_id = self.request.id
     cache_key = f'base_extraction_progress_{task_id}'
 
-    def update_progress(percent, status_message):
-        """Write progress to cache so the status endpoint can return it."""
+    def update_progress(percent, status_message, **extra):
+        """Write progress to cache so the status endpoint can return it.
+
+        `**extra` lets us stream richer fields (current_page, total_pages,
+        lines_so_far, phase) without breaking existing callers.
+        """
         progress_data = {
             'task_id': task_id,
             'state': 'PROGRESS',
             'status': status_message,
             'percent': percent,
         }
+        if extra:
+            progress_data.update(extra)
         self.update_state(state='PROGRESS', meta=progress_data)
         cache.set(cache_key, progress_data, timeout=3600)
         logger.info(f"[base_extract {task_id}] {percent}% – {status_message}")
+
+    # Progress band reserved for the per-page extraction loop.
+    # Soft-coded: edit these two constants if you want to reshape the curve.
+    PAGE_PROGRESS_START = 20   # after OCR engine warmup
+    PAGE_PROGRESS_END   = 80   # before final formatting (leaves 80-100 for post-processing)
+
+    def _page_progress(page_num, total_pages, lines_so_far, phase):
+        """Callback passed into extract_from_pdf — runs on every page boundary."""
+        span = PAGE_PROGRESS_END - PAGE_PROGRESS_START
+        frac = max(0.0, min(1.0, (page_num - 1) / max(1, total_pages)))
+        percent = int(PAGE_PROGRESS_START + span * frac)
+        update_progress(
+            percent,
+            f'Page {page_num}/{total_pages} — {lines_so_far} lines extracted so far…',
+            current_page=page_num,
+            total_pages=total_pages,
+            lines_so_far=lines_so_far,
+            phase=phase,
+        )
 
     try:
         logger.info("=" * 70)
@@ -907,9 +947,22 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
             file_path,
             include_area=include_area,
             format_type=format_type,
+            progress_callback=_page_progress,
         )
 
         update_progress(85, f'OCR complete: {len(extracted_lines)} lines found. Formatting…')
+
+        # ── Soft-coded breaker / page-connector inference ───────────────────
+        # Fills empty from_line / to_line by spatial proximity to breaker tags
+        # on each page. Patterns + thresholds live in
+        # apps/designiq/breaker_inference.py.  Pure post-processing — never
+        # overwrites existing values produced by earlier detectors.
+        try:
+            from apps.designiq.breaker_inference import infer_breakers_for_lines
+            update_progress(88, 'Inferring From/To from page-connector breakers…')
+            infer_breakers_for_lines(extracted_lines, file_path)
+        except Exception as _be:
+            logger.warning(f'[base_extract {task_id}] breaker inference skipped: {_be}')
 
         # Build 8-column output structure with EXPLICIT field mapping
         # Column order: Original Detection, Fluid Code, Size, Sequence No, PIPR Class, Insulation, From, To
@@ -924,6 +977,12 @@ def base_extract_lines_async(self, file_path, filename, include_area=False, form
                 'sequence_no': line.get('sequence_no', ''),
                 'pipr_class': line.get('pipr_class', ''),
                 'insulation': line.get('insulation', ''),
+                # Explicit from_line / to_line keys (frontend prefers these).
+                # Plus the legacy from / to / *_equipment keys for back-compat.
+                'from_line': line.get('from_line', ''),
+                'to_line': line.get('to_line', ''),
+                'from_equipment': line.get('from_equipment', ''),
+                'to_equipment': line.get('to_equipment', ''),
                 'from': line.get('from_line', line.get('from_equipment', '')),
                 'to': line.get('to_line', line.get('to_equipment', '')),
             })
