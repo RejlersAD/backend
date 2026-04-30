@@ -614,3 +614,13 @@ class AuditLog(TimeStampedModel):
     
     def __str__(self):
         return f"{self.user_email} - {self.action} - {self.timestamp}"
+
+
+# Re-export models from sibling modules so Django auto-discovery picks them up
+# (analytics_models is already discovered via admin.py import on startup, but explicit is safer)
+from .ai_champion_models import (  # noqa: F401,E402
+    AIPricingConfig,
+    AIUsageLog,
+    ActivityEvent,
+    MonthlyChampion,
+)

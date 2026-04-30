@@ -15,6 +15,7 @@ from .views import (
 from .dashboard_views import (
     user_dashboard_stats, user_files_list, user_activity_timeline
 )
+from .ai_champion_views import AIChampionViewSet
 from apps.users.views_password import change_password
 
 router = DefaultRouter()
@@ -36,6 +37,9 @@ router.register(r'analytics/predictions', PredictiveInsightViewSet, basename='pr
 router.register(r'analytics/feature-usage', FeatureUsageAnalyticsViewSet, basename='feature-usage')
 router.register(r'analytics/error-logs', ErrorLogAnalyticsViewSet, basename='error-logs')
 router.register(r'analytics/health-checks', SystemHealthCheckViewSet, basename='health-checks')
+
+# AI Champion of the Month — gamification, tracking, cost analytics
+router.register(r'ai-champion', AIChampionViewSet, basename='ai-champion')
 
 urlpatterns = [
     # User Export — must come BEFORE router.urls to prevent users/{pk}/ swallowing 'export' as a pk
