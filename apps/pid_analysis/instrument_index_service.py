@@ -3298,14 +3298,40 @@ class InstrumentIndexService:
         )
 
         # ── Category-specific style normalisation ──────────────────────
-        # ADNOC Gas: rewrite generic ISA codes into the descriptive labels
-        # used in the manual "Manual Inst Index" sheet, and align the
-        # 'loop_number' column with the paired DCS controller tag.
+        # Each category gets its own isolated branch so edits to one
+        # client's pipeline can never bleed into another's. Adding a new
+        # category? Add a new `elif` + dedicated `_apply_<name>_style`
+        # method below — leave the existing branches untouched.
         if category == "adnoc_gas":
+            # ADNOC Gas: rewrite generic ISA codes into the descriptive
+            # labels used in the manual "Manual Inst Index" sheet, and
+            # align the 'loop_number' column with the paired DCS tag.
             self._apply_adnoc_gas_style(
                 instruments, drawing_info=drawing_info, pid_bytes=pid_bytes
             )
+        elif category == "adnoc_onshore":
+            # ADNOC Onshore: dedicated isolation hook. Currently a no-op
+            # so the legacy 15-column extraction is preserved verbatim.
+            # Add Onshore-specific normalisation rules here when needed —
+            # they cannot leak into `_apply_adnoc_gas_style` or vice
+            # versa.
+            self._apply_adnoc_onshore_style(
+                instruments, drawing_info=drawing_info, pid_bytes=pid_bytes
+            )
 
+        return instruments
+
+    # ────────────────────────────────────────────────────────────────────
+    # ADNOC ONSHORE — dedicated normaliser hook (currently a no-op).
+    # Keep this separate from `_apply_adnoc_gas_style` so the two client
+    # pipelines stay independently editable. All Onshore-specific
+    # constants should be declared in their own `_ADNOC_ONSHORE_*`
+    # module-level block above (mirroring the `_ADNOC_GAS_*` pattern).
+    # ────────────────────────────────────────────────────────────────────
+    def _apply_adnoc_onshore_style(self, instruments, drawing_info=None, pid_bytes=None):
+        # Intentionally empty — placeholder for future Onshore-only
+        # normalisation. Returning the list unchanged preserves the
+        # legacy default-template behaviour.
         return instruments
 
     # ────────────────────────────────────────────────────────────────────
