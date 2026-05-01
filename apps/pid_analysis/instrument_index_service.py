@@ -276,11 +276,123 @@ ADNOC_GAS_EXCEL_COLUMNS = [
      "accessor": lambda i: _v(i, "instrument_remark") if (i.get("instrument_remark") not in (None, "", "-")) else _v(i, "notes")},
 ]
 
+# ──────────────────────────────────────────────────────────────────────────
+# ADNOC Onshore — 18-column schema (mirrors frontend `_ADNOC_ONSHORE_TEMPLATE`)
+# Soft-coded sibling of the ADNOC Gas registry. Lives in its own constants
+# block so any column tweak here is guaranteed not to leak into ADNOC Gas
+# or the generic default schema.
+# ──────────────────────────────────────────────────────────────────────────
+_ADNOC_ONSHORE_TYPE_LABELS = {
+    "FT": "Flow Transmitter", "FE": "Flow Element (Orifice)",
+    "FIT": "Flow Indicating Transmitter", "FI": "Flow Indicator",
+    "FV": "Control Valve", "FCV": "Control Valve",
+    "FZT": "Position Transmitter", "FZI": "Position Indicator",
+    "FAL": "Flow Alarm Low",
+    "LT": "Level Transmitter", "LIT": "Level Indicating Transmitter",
+    "LI": "Level Indicator", "LG": "Level Gauge (Mag)",
+    "LV": "Control Valve", "LCV": "Control Valve",
+    "LIC": "Level Indicator Controller",
+    "LSL": "Level Switch Low", "LSH": "Level Switch High",
+    "LSLL": "Level Switch Low Low", "LSHH": "Level Switch High High",
+    "LALL": "Level Alarm Low Low",
+    "PG": "Pressure Gauge", "PT": "Pressure Transmitter",
+    "PIT": "Pressure Indicating Transmitter", "PI": "Pressure Indicator",
+    "PV": "Control Valve", "PCV": "Control Valve",
+    "PIC": "Pressure Indicator Controller", "PSV": "Pressure Safety Valve",
+    "PSH": "Pressure Switch High", "PSL": "Pressure Switch Low",
+    "TG": "Temperature Gauge", "TT": "Temperature Transmitter",
+    "TIT": "Temperature Indicating Transmitter",
+    "TI": "Temperature Indicator", "TE": "Temperature Element",
+    "TW": "Thermowell", "TIC": "Temperature Indicator Controller",
+    "TV": "Control Valve", "HS": "Hand Switch",
+    "VAH": "Vibration Alarm High", "VSH": "Vibration Switch High",
+    "SDV": "Shutdown Valve", "BDV": "Blowdown Valve",
+    "SOV": "Solenoid Valve", "MOV": "Motor Operated Valve",
+}
+
+
+def _onshore_isa(tag):
+    import re as _re
+    m = _re.match(r"^\d+\s*-\s*([A-Z]{1,5})\s*-",
+                  (tag or "").upper())
+    return m.group(1) if m else ""
+
+
+def _adnoc_onshore_instrument_type(inst):
+    cur = (inst.get("instrument_type") or "").strip()
+    isa = _onshore_isa(inst.get("tag_number"))
+    verbose = _ADNOC_ONSHORE_TYPE_LABELS.get(isa)
+    if not cur:
+        return verbose or "-"
+    if verbose and cur.upper() == isa:
+        return verbose
+    return cur
+
+
+def _adnoc_onshore_eq_or_line(inst):
+    ln = (inst.get("line_number") or "").strip()
+    if ln and ln.upper() not in ("N/A", "NA", "-", "—", "NONE", "NULL"):
+        return ln
+    eq = (inst.get("equipment_number") or "").strip()
+    if eq and eq.upper() not in ("N/A", "NA", "-", "—", "NONE", "NULL"):
+        return eq
+    return "-"
+
+
+ADNOC_ONSHORE_EXCEL_GROUP_HEADER = [
+    ("",                                 11),  # Sr…Device Status
+    ("Inst range (Refer Gen Note 5)",    3),   # Min/Max/Unit
+    ("Calibration range",                3),   # Min/Max/Unit
+    ("",                                 1),   # Remarks
+]
+
+ADNOC_ONSHORE_EXCEL_COLUMNS = [
+    {"key": "index_no",          "label": "Sr No.",         "width":  6,
+     "accessor": lambda i: i.get("index_no") or "-"},
+    {"key": "tag_number",        "label": "Tag No.",        "width": 18,
+     "accessor": lambda i: _v(i, "tag_number", mono=True)},
+    {"key": "instrument_type",   "label": "Instrument Type","width": 24,
+     "accessor": _adnoc_onshore_instrument_type},
+    {"key": "service",           "label": "Service Description", "width": 40,
+     "accessor": lambda i: _v(i, "service_description")},
+    {"key": "location",          "label": "Location",       "width": 12,
+     "accessor": lambda i: _v(i, "location")},
+    {"key": "equipment_or_line", "label": "Equipment / Line No.", "width": 26,
+     "accessor": _adnoc_onshore_eq_or_line},
+    {"key": "pid_no",            "label": "P&ID No.",       "width": 24,
+     "accessor": lambda i: _v(i, "pid_no", mono=True)},
+    {"key": "io_type",           "label": "I/O Type",       "width":  8,
+     "accessor": lambda i: _v(i, "io_type")},
+    {"key": "is_nis",            "label": "IS/NIS",         "width":  8,
+     "accessor": lambda i: _v(i, "is_nis")},
+    {"key": "system",            "label": "System",         "width": 10,
+     "accessor": lambda i: _v(i, "system")},
+    {"key": "device_status",     "label": "Device Status",  "width": 10,
+     "accessor": lambda i: _v(i, "device_status") if (i.get("device_status") not in (None, "", "-")) else "New"},
+    # Inst range
+    {"key": "inst_range_min",    "label": "Min",  "width": 8,
+     "accessor": lambda i: _v(i, "inst_range_min")},
+    {"key": "inst_range_max",    "label": "Max",  "width": 8,
+     "accessor": lambda i: _v(i, "inst_range_max")},
+    {"key": "inst_range_unit",   "label": "Unit", "width": 8,
+     "accessor": lambda i: _v(i, "inst_range_unit")},
+    # Calibration range (re-uses same backend keys as ADNOC Gas)
+    {"key": "calibration_min",   "label": "Min",  "width": 8,
+     "accessor": lambda i: _v(i, "calibration_min")},
+    {"key": "calibration_max",   "label": "Max",  "width": 8,
+     "accessor": lambda i: _v(i, "calibration_max")},
+    {"key": "calibration_unit",  "label": "Unit", "width": 8,
+     "accessor": lambda i: _v(i, "calibration_unit")},
+    {"key": "remarks",           "label": "Remarks", "width": 32,
+     "accessor": lambda i: _v(i, "instrument_remark") if (i.get("instrument_remark") not in (None, "", "-")) else _v(i, "notes")},
+]
+
 # Registry mapping project_category → (group_header, columns) tuple.
 # Add new client schemas here — `generate_excel` will pick them up
 # automatically. None for group_header means no merged-header strip.
 EXCEL_SCHEMAS = {
-    "adnoc_gas": (ADNOC_GAS_EXCEL_GROUP_HEADER, ADNOC_GAS_EXCEL_COLUMNS),
+    "adnoc_gas":     (ADNOC_GAS_EXCEL_GROUP_HEADER,     ADNOC_GAS_EXCEL_COLUMNS),
+    "adnoc_onshore": (ADNOC_ONSHORE_EXCEL_GROUP_HEADER, ADNOC_ONSHORE_EXCEL_COLUMNS),
 }
 
 # Category colour coding for Excel rows
