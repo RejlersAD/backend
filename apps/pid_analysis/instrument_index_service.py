@@ -310,6 +310,174 @@ _ADNOC_ONSHORE_TYPE_LABELS = {
     "SOV": "Solenoid Valve", "MOV": "Motor Operated Valve",
 }
 
+# ── ADNOC Onshore tag-validation soft-codes ─────────────────────────────
+# A canonical Onshore instrument tag is `<UNIT>-<ISA>-<SEQ>` where:
+#   UNIT  : 2-4 digit unit/area number (e.g. "562")
+#   ISA   : 2-5 letters drawn from the controlled vocabulary below
+#   SEQ   : 3-4 digit loop number, optionally followed by a single
+#           letter suffix (A/B/…) for redundant trains
+# Anything that doesn't match — line numbers like `562-0407-VE-3"-11030-P`,
+# equipment tags like `562-V-201`, drawing IDs like `50196-H5-562-PX-...` —
+# must be rejected. The vocabulary lives here as the single source of
+# truth; extending it is a one-line change.
+#
+# Canonical ADNOC Onshore instrument-tag shape (per manual datasheet):
+#     <UNIT>-<ISA>-<LOOP>
+#         UNIT : exactly 3 digits (e.g. "562")
+#         ISA  : 2 or 3 capital letters from `_ADNOC_ONSHORE_VALID_ISA`
+#         LOOP : exactly 4 digits, optional single-letter train suffix (A/B/…)
+# Examples that must be KEPT  : "562-FZT-1501", "562-LG-2502", "562-PSV-8501A"
+# Examples that must be DROPPED: "FE-1401-10" (legacy 3-segment form),
+#                                "562-V-201"  (single-letter ISA / 3-digit loop),
+#                                "562-FT-150" (loop too short),
+#                                "562-0407-VE-3-11030-P" (line number),
+#                                "50196-H5-562-PX-PID-00003" (drawing id)
+_ADNOC_ONSHORE_TAG_RE = __import__('re').compile(
+    r'^(?P<unit>\d{3})-(?P<isa>[A-Z]{2,3})-(?P<seq>\d{4}[A-Z]?)$'
+)
+# Soft default unit prefix (loaded from drawing context when available)
+_ADNOC_ONSHORE_DEFAULT_UNIT = "562"
+
+# Whitelisted ADNOC Onshore instrument ISA codes (ISA-5.1 + ADNOC HS/MOV
+# additions). Anything outside this set is treated as equipment / line /
+# document noise. Edit here to expand the accepted vocabulary.
+_ADNOC_ONSHORE_VALID_ISA = {
+    # Flow
+    "FT", "FE", "FIT", "FI", "FQ", "FQI", "FV", "FCV", "FZT", "FZI",
+    "FAL", "FAH", "FSL", "FSH", "FY", "FIC",
+    # Level
+    "LT", "LIT", "LI", "LG", "LV", "LCV", "LIC", "LSL", "LSH", "LSLL",
+    "LSHH", "LALL", "LAHH", "LAH", "LAL", "LY",
+    # Pressure
+    "PT", "PIT", "PI", "PG", "PV", "PCV", "PIC", "PSV", "PRV", "PVSV",
+    "PSH", "PSL", "PSHH", "PSLL", "PAH", "PAL", "PY", "PDT", "PDIT",
+    "PDI", "DPT", "DPIT", "DPI",
+    # Temperature
+    "TT", "TIT", "TI", "TG", "TE", "TW", "TIC", "TV", "TCV", "TSH",
+    "TSL", "TSHH", "TSLL", "TAH", "TAL", "TY",
+    # Analyser / vibration / hand
+    "AT", "AIT", "AI", "AE", "AAH", "AAL", "AY",
+    "VAH", "VAL", "VSH", "VSL", "VT", "XT",
+    "HS", "HV", "HIC", "HC",
+    # Shutdown / blowdown / solenoids
+    "SDV", "BDV", "SOV", "MOV", "ROV", "XV", "ESV", "SSV", "SSSV",
+    "PSE", "RO", "ZT", "ZI", "ZSH", "ZSL",
+}
+
+# ── ADNOC Onshore Location classification (soft-coded) ──────────────────
+# Maps ISA prefix → installation location used in the manual datasheet's
+# "Location" column. Order matters only when multiple buckets could apply
+# — first match wins. Edit these sets to retune the policy without
+# touching `_apply_adnoc_onshore_style`.
+_ADNOC_ONSHORE_LOCATION_LOCAL_PANEL = {
+    # Local-mount visual indicators / gauges
+    "PG", "LG", "TG", "TI", "PI", "LI", "FI", "FQI",
+}
+_ADNOC_ONSHORE_LOCATION_CONTROL_ROOM = {
+    # DCS controllers / panel-mounted recorders
+    "FIC", "LIC", "PIC", "TIC", "HIC", "AIC",
+}
+_ADNOC_ONSHORE_LOCATION_VESSEL_ISA = {
+    # Direct equipment-mounted ISA codes (level/pressure/temperature
+    # transmitters typically strapped to a vessel/drum/exchanger)
+    "LT", "LIT", "LSL", "LSH", "LSLL", "LSHH", "LALL", "LAHH",
+    "LAH", "LAL", "LY",
+    "PT", "PIT", "PDT", "PDIT", "DPT", "DPIT",
+    "TT", "TIT", "TE", "TW", "TY",
+}
+# Default fallback when no rule matches.
+_ADNOC_ONSHORE_LOCATION_DEFAULT = "Field"
+
+
+def _adnoc_onshore_derive_location(inst):
+    """Soft-coded Onshore Location classifier.
+
+    Resolution order (first match wins):
+      1. Existing non-empty `location` value is kept verbatim.
+      2. Controllers with DCS/panel ISA → ``Control Room``.
+      3. Local-panel indicators (PG/LG/TG/PI/LI/TI…) → ``Local Panel``.
+      4. Vessel-mounted transmitters with an `equipment_number` → ``Vessel``.
+      5. Anything else → ``Field`` (`_ADNOC_ONSHORE_LOCATION_DEFAULT`).
+    """
+    cur = (inst.get("location") or "").strip()
+    if cur and cur not in ("-", "—", "N/A", "n/a", "NA"):
+        return cur
+    tag = (inst.get("tag_number") or "").upper()
+    # Extract ISA from canonical `<ISA>-<LOOP>-<PAGE>`.
+    isa = ""
+    m = _ADNOC_ONSHORE_TAG_RE.match(tag)
+    if m:
+        isa = m.group("isa")
+    if isa in _ADNOC_ONSHORE_LOCATION_CONTROL_ROOM:
+        return "Control Room"
+    if isa in _ADNOC_ONSHORE_LOCATION_LOCAL_PANEL:
+        return "Local Panel"
+    eq = (inst.get("equipment_number") or "").strip()
+    if isa in _ADNOC_ONSHORE_LOCATION_VESSEL_ISA and eq and eq not in ("-", "—", "N/A"):
+        return "Vessel"
+    return _ADNOC_ONSHORE_LOCATION_DEFAULT
+
+
+def _adnoc_onshore_canonicalise_tag(raw, default_unit=None):
+    """Normalise *raw* into ADNOC Onshore canonical form ``UNIT-ISA-LOOP``.
+
+    Returns ``(canonical_tag, isa)`` on success, ``(None, None)`` if
+    *raw* cannot be reduced to a valid instrument tag in the manual
+    datasheet shape (e.g. ``562-FZT-1501``).
+
+    Resolution rules:
+      * Strict full match against `_ADNOC_ONSHORE_TAG_RE` (3-segment).
+      * Bare ``ISA-LOOP`` (e.g. ``FZT-1501``) is promoted to the
+        canonical form using *default_unit* when supplied (else
+        `_ADNOC_ONSHORE_DEFAULT_UNIT` is used as a soft fallback).
+      * Legacy ``ISA-LOOP-PAGE`` (e.g. ``FZT-1501-04``) is reduced by
+        dropping the trailing page segment.
+
+    Args:
+        raw: any value (string-like) extracted from the P&ID.
+        default_unit: optional unit prefix (e.g. ``"562"``).
+    """
+    if raw is None:
+        return None, None
+    txt = str(raw).strip().upper()
+    if not txt or txt in ("-", "N/A", "NA", "NONE", "NULL"):
+        return None, None
+    # Collapse internal whitespace and normalise dashes.
+    re_mod = __import__('re')
+    txt = re_mod.sub(r"\s*[-–—]\s*", "-", txt)
+    txt = re_mod.sub(r"\s+", "-", txt)
+
+    # Pick the unit prefix to use when input is missing one.
+    unit_prefix = (str(default_unit).strip() if default_unit else "") or _ADNOC_ONSHORE_DEFAULT_UNIT
+
+    # 1) Strict canonical match: UNIT-ISA-LOOP
+    m = _ADNOC_ONSHORE_TAG_RE.match(txt)
+    if m:
+        isa = m.group("isa")
+        if isa not in _ADNOC_ONSHORE_VALID_ISA:
+            return None, None
+        return f"{m.group('unit')}-{isa}-{m.group('seq')}", isa
+
+    # 2) Bare ISA-LOOP → promote with unit_prefix
+    bare_re = re_mod.compile(r'^([A-Z]{2,3})-(\d{4}[A-Z]?)$')
+    bm = bare_re.match(txt)
+    if bm and unit_prefix:
+        isa = bm.group(1)
+        if isa not in _ADNOC_ONSHORE_VALID_ISA:
+            return None, None
+        return f"{unit_prefix}-{isa}-{bm.group(2)}", isa
+
+    # 3) Legacy 3-segment ISA-LOOP-PAGE → drop trailing page
+    legacy_re = re_mod.compile(r'^([A-Z]{2,3})-(\d{4}[A-Z]?)-\d{1,3}$')
+    lm = legacy_re.match(txt)
+    if lm and unit_prefix:
+        isa = lm.group(1)
+        if isa not in _ADNOC_ONSHORE_VALID_ISA:
+            return None, None
+        return f"{unit_prefix}-{isa}-{lm.group(2)}", isa
+
+    return None, None
+
 
 def _onshore_isa(tag):
     import re as _re
@@ -340,15 +508,13 @@ def _adnoc_onshore_eq_or_line(inst):
 
 
 ADNOC_ONSHORE_EXCEL_GROUP_HEADER = [
-    ("",                                 11),  # Sr…Device Status
+    ("",                                 10),  # Tag…Device Status
     ("Inst range (Refer Gen Note 5)",    3),   # Min/Max/Unit
     ("Calibration range",                3),   # Min/Max/Unit
     ("",                                 1),   # Remarks
 ]
 
 ADNOC_ONSHORE_EXCEL_COLUMNS = [
-    {"key": "index_no",          "label": "Sr No.",         "width":  6,
-     "accessor": lambda i: i.get("index_no") or "-"},
     {"key": "tag_number",        "label": "Tag No.",        "width": 18,
      "accessor": lambda i: _v(i, "tag_number", mono=True)},
     {"key": "instrument_type",   "label": "Instrument Type","width": 24,
@@ -1961,6 +2127,14 @@ EXTRACTION_CONFIG = {
     # Minimum text-layer tags before skipping Vision passes
     "min_text_tags":         1,
 
+    # Categories where the full AI Vision extraction must run on every page
+    # IN ADDITION TO the free-tier extractors (text-layer + Tesseract OCR
+    # + EasyOCR/PaddleOCR). The vision results are union-merged into the
+    # free-tier pool so all three extractor families contribute. Add a new
+    # category key here to opt it in — purely additive, never replaces the
+    # cheaper engines.
+    "full_vision_categories": ["adnoc_onshore"],
+
     # Gemini rate-limit retry: sleep this many seconds then retry once before disabling
     "gemini_retry_delay":    5,
 }
@@ -2731,6 +2905,57 @@ class InstrumentIndexService:
                         logger.warning(f"[InstrumentIndex] Gemini text enrichment setup error: {_etxt}")
 
             # ── Step 3: AI Vision (enrich / fill gaps) ────────────────────
+            # Categories listed in `full_vision_categories` always get a
+            # full multi-page AI vision pass merged into the free-tier
+            # pool — guarantees all three extractor families (text-layer,
+            # Tesseract OCR, AI Vision) contribute to the final result.
+            _category = (drawing_info or {}).get("project_category") or "default"
+            _force_full_vision = _category in set(cfg.get("full_vision_categories", []))
+
+            if _force_full_vision:
+                logger.info(
+                    "[InstrumentIndex] category='%s' → forcing full multi-page AI vision pass",
+                    _category,
+                )
+                vision_full = []
+                seen_v = {(i.get("tag_number") or "").strip().upper() for i in all_free}
+                for engine in [e for e in engine_order if e != "tesseract"]:
+                    if engine == "gemini" and (self._gemini_quota_exceeded or not self.gemini_client):
+                        continue
+                    if engine == "openai" and (self._quota_exceeded or not self.openai_client):
+                        continue
+                    try:
+                        pages = self._to_jpeg_pages(pid_bytes)
+                    except Exception as pe:
+                        logger.error(f"[InstrumentIndex] PDF→image failed: {pe}")
+                        continue
+                    for page_no, jpeg_page in enumerate(pages, start=1):
+                        try:
+                            page_insts = self._analyse_page(
+                                jpeg_page, drawing_info, page_no, only_engine=engine
+                            )
+                        except Exception as pae:
+                            logger.warning(
+                                "[InstrumentIndex] %s page %d failed: %s",
+                                engine, page_no, pae,
+                            )
+                            continue
+                        for inst in page_insts:
+                            tag = (inst.get("tag_number") or "").strip().upper()
+                            if tag and tag not in seen_v:
+                                seen_v.add(tag)
+                                vision_full.append(inst)
+                            elif not tag:
+                                vision_full.append(inst)
+                    if vision_full:
+                        break  # First successful engine wins
+                if vision_full:
+                    all_free = self._merge_instruments(all_free + vision_full)
+                    logger.info(
+                        "[InstrumentIndex] Full vision merged: +%d → total %d",
+                        len(vision_full), len(all_free),
+                    )
+
             if len(all_free) >= MIN_TEXT_TAGS:
                 # Good free-tier results — use AI to enrich service descriptions and find any missed tags
                 enriched = []
@@ -3382,6 +3607,17 @@ class InstrumentIndexService:
         extra = tpl.get("extra_fields") or []
         if not extra:
             logger.info(f"[Template] category='{category}' → no extra fields")
+            # Even when the template adds no extra fields, the
+            # category-specific style normaliser must still run so
+            # ADNOC Onshore tag filtering is never bypassed.
+            if category == "adnoc_gas":
+                self._apply_adnoc_gas_style(
+                    instruments, drawing_info=drawing_info, pid_bytes=pid_bytes
+                )
+            elif category == "adnoc_onshore":
+                self._apply_adnoc_onshore_style(
+                    instruments, drawing_info=drawing_info, pid_bytes=pid_bytes
+                )
             return instruments
 
         derived_count = {f["key"]: 0 for f in extra}
@@ -3441,9 +3677,71 @@ class InstrumentIndexService:
     # module-level block above (mirroring the `_ADNOC_GAS_*` pattern).
     # ────────────────────────────────────────────────────────────────────
     def _apply_adnoc_onshore_style(self, instruments, drawing_info=None, pid_bytes=None):
-        # Intentionally empty — placeholder for future Onshore-only
-        # normalisation. Returning the list unchanged preserves the
-        # legacy default-template behaviour.
+        # ── Soft-coded ADNOC Onshore tag filter ────────────────────────
+        # Manual datasheet shape is `<ISA>-<LOOP>-<PAGE>` (e.g.
+        # ``FE-1401-10``). Anything outside that shape — equipment
+        # tags, line numbers, drawing IDs, or partial two-segment forms
+        # — is dropped here. Soft-coded via `_ADNOC_ONSHORE_TAG_RE` and
+        # `_ADNOC_ONSHORE_VALID_ISA`; this method stays a thin wiring
+        # layer.
+        kept = []
+        seen = set()
+        rejected_examples = []
+        # Resolve unit prefix once per batch (drawing_info hint → fallback).
+        default_unit = ""
+        try:
+            if drawing_info and isinstance(drawing_info, dict):
+                default_unit = (
+                    str(drawing_info.get("project_unit") or "").strip()
+                    or str(drawing_info.get("unit") or "").strip()
+                )
+        except Exception:
+            default_unit = ""
+        for inst in instruments:
+            if not isinstance(inst, dict):
+                continue
+            raw_tag = inst.get("tag_number") or inst.get("tag") or ""
+            canonical, _isa = _adnoc_onshore_canonicalise_tag(
+                raw_tag, default_unit=default_unit or None
+            )
+            if not canonical:
+                if len(rejected_examples) < 6:
+                    rejected_examples.append(str(raw_tag)[:40])
+                continue
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            inst["tag_number"] = canonical
+            kept.append(inst)
+
+        # ── Soft-coded Location fill ──────────────────────────────────
+        # Onshore template has no `extra_fields`, so the generic
+        # `_derive_location` never runs. Populate `location` here using
+        # `_adnoc_onshore_derive_location` (idempotent — never
+        # overwrites a value the AI already produced).
+        loc_filled = 0
+        for inst in kept:
+            new_loc = _adnoc_onshore_derive_location(inst)
+            if new_loc and new_loc != (inst.get("location") or "").strip():
+                inst["location"] = new_loc
+                loc_filled += 1
+            elif not (inst.get("location") or "").strip():
+                inst["location"] = new_loc
+                loc_filled += 1
+
+        # Re-number `index_no` so the surviving rows stay 1..N.
+        for i, inst in enumerate(kept, start=1):
+            inst["index_no"] = i
+
+        # In-place mutation — the caller ignores the return value.
+        instruments.clear()
+        instruments.extend(kept)
+
+        logger.info(
+            "[ADNOC Onshore] tag-filter: kept=%d unique '<ISA>-<LOOP>-<PAGE>' "
+            "instruments; location_filled=%d; rejected_examples=%s",
+            len(kept), loc_filled, rejected_examples,
+        )
         return instruments
 
     # ────────────────────────────────────────────────────────────────────
