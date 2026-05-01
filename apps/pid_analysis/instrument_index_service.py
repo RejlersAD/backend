@@ -389,6 +389,132 @@ _ADNOC_ONSHORE_LOCATION_VESSEL_ISA = {
 _ADNOC_ONSHORE_LOCATION_DEFAULT = "Field"
 
 
+# ── ADNOC Onshore I/O TYPE / SYSTEM / IS-NIS classification (soft-coded) ──
+# Mirrors the manual "Instrument Index" sheet columns. Edit the sets/maps
+# below to retune the policy without touching `_apply_adnoc_onshore_style`.
+#
+# I/O TYPE — DCS terminology used in ADNOC Onshore datasheets:
+#   AI / AO / DI / DO  (no -R suffix; Onshore datasheet keeps it terse)
+#   ""                 — purely local devices (PG/TG/LG/PSV) get blank.
+_ADNOC_ONSHORE_IO_TYPE_BY_ISA = {
+    # Analog Inputs — transmitters & indicating transmitters
+    "PT": "AI", "PIT": "AI", "PDT": "AI", "PDIT": "AI", "DPT": "AI", "DPIT": "AI",
+    "TT": "AI", "TIT": "AI", "TE": "AI",
+    "FT": "AI", "FIT": "AI", "FE": "AI", "FQ": "AI", "FQI": "AI",
+    "LT": "AI", "LIT": "AI",
+    "AT": "AI", "AIT": "AI", "AE": "AI",
+    "VT": "AI", "XT": "AI", "ZT": "AI",
+    # Controllers — DCS analog input feeding a control loop
+    "FIC": "AI", "LIC": "AI", "PIC": "AI", "TIC": "AI", "HIC": "AI", "AIC": "AI",
+    # Analog Outputs — control valves / positioners / I-P converters
+    "FV": "AO", "FCV": "AO", "LV": "AO", "LCV": "AO",
+    "PV": "AO", "PCV": "AO", "TV": "AO", "TCV": "AO",
+    "FY": "AO", "PY": "AO", "TY": "AO", "LY": "AO", "AY": "AO", "HY": "AO",
+    # Discrete Inputs — switches & position indicators
+    "PSH": "DI", "PSL": "DI", "PSHH": "DI", "PSLL": "DI",
+    "TSH": "DI", "TSL": "DI", "TSHH": "DI", "TSLL": "DI",
+    "LSH": "DI", "LSL": "DI", "LSHH": "DI", "LSLL": "DI",
+    "FSH": "DI", "FSL": "DI",
+    "VSH": "DI", "VSL": "DI",
+    "ZSH": "DI", "ZSL": "DI", "ZI": "DI",
+    "FZT": "DI", "FZI": "DI",
+    "AAH": "DI", "AAL": "DI", "PAH": "DI", "PAL": "DI",
+    "TAH": "DI", "TAL": "DI", "VAH": "DI", "VAL": "DI",
+    "LAH": "DI", "LAL": "DI", "LALL": "DI", "LAHH": "DI",
+    "FAL": "DI", "FAH": "DI",
+    "HS": "DI",
+    # Discrete Outputs — shutdown / blowdown / on-off valves & solenoids
+    "SDV": "DO", "BDV": "DO", "MOV": "DO", "ROV": "DO", "XV": "DO",
+    "ESV": "DO", "SSV": "DO", "SSSV": "DO",
+    "SOV": "DO", "HV": "DO",
+}
+# Local-only devices: no DCS I/O — column stays blank.
+_ADNOC_ONSHORE_IO_LOCAL_ISA = {
+    "PG", "TG", "LG", "PI", "TI", "LI", "FI", "FQI", "FG",
+    "PSV", "PRV", "PVSV", "PSE", "RO", "RD",
+}
+
+# SYSTEM — owning control system. Soft-coded per ISA category.
+#   DCS  — process monitoring & control (transmitters/controllers/CVs)
+#   ESD  — emergency shutdown (SDV/BDV/PSHH/LSLL/TSHH switches feeding ESD)
+#   F&G  — fire & gas (analyser detectors AT/AIT/AE/AAH/AAL)
+#   Local — PG/TG/LG/PSV — purely local devices
+_ADNOC_ONSHORE_SYSTEM_ESD_ISA = {
+    "SDV", "BDV", "ESV", "SSV", "SSSV",
+    "PSHH", "PSLL", "TSHH", "TSLL", "LSHH", "LSLL", "LALL", "LAHH",
+    "VSH", "VSL", "VAH", "VAL",
+}
+_ADNOC_ONSHORE_SYSTEM_FNG_ISA = {
+    "AT", "AIT", "AE", "AI", "AAH", "AAL", "AY", "AIC",
+}
+_ADNOC_ONSHORE_SYSTEM_LOCAL_ISA = _ADNOC_ONSHORE_IO_LOCAL_ISA  # share the local set
+_ADNOC_ONSHORE_SYSTEM_DEFAULT = "DCS"
+
+# IS / NIS — Intrinsically Safe vs Non-Intrinsically Safe (per ADNOC
+# Onshore practice: low-power 4-20 mA field instruments are IS by default;
+# high-power solenoids/MOV actuators are NIS; local mechanical devices
+# without electrical signal are blank).
+_ADNOC_ONSHORE_IS_NIS_NIS_ISA = {
+    # Solenoids and motorised on/off valves carry mains/24 V DC discrete
+    # outputs above the IS power-limit envelope.
+    "MOV", "ROV", "SOV", "HV",
+}
+_ADNOC_ONSHORE_IS_NIS_BLANK_ISA = {
+    # Purely local mechanical devices — no electrical interface.
+    "PG", "TG", "LG", "PSV", "PRV", "PVSV", "PSE", "RO", "RD",
+}
+_ADNOC_ONSHORE_IS_NIS_DEFAULT = "IS"
+
+
+def _adnoc_onshore_resolve_isa(inst):
+    """Pull the ISA token from a canonical UNIT-ISA-LOOP tag, else ''."""
+    tag = (inst.get("tag_number") or "").upper()
+    m = _ADNOC_ONSHORE_TAG_RE.match(tag)
+    if m:
+        return m.group("isa")
+    return _onshore_isa(tag)
+
+
+def _adnoc_onshore_derive_io_type(inst):
+    """Soft-coded Onshore I/O Type classifier.
+
+    Returns "" for local-only instruments so the column stays blank
+    (matches the manual "Instrument Index" sheet convention).
+    """
+    isa = _adnoc_onshore_resolve_isa(inst)
+    if not isa:
+        return ""
+    if isa in _ADNOC_ONSHORE_IO_LOCAL_ISA:
+        return ""
+    return _ADNOC_ONSHORE_IO_TYPE_BY_ISA.get(isa, "")
+
+
+def _adnoc_onshore_derive_system(inst):
+    """Soft-coded Onshore System classifier (DCS / ESD / F&G / Local)."""
+    isa = _adnoc_onshore_resolve_isa(inst)
+    if not isa:
+        return ""
+    if isa in _ADNOC_ONSHORE_SYSTEM_LOCAL_ISA:
+        return "Local"
+    if isa in _ADNOC_ONSHORE_SYSTEM_ESD_ISA:
+        return "ESD"
+    if isa in _ADNOC_ONSHORE_SYSTEM_FNG_ISA:
+        return "F&G"
+    return _ADNOC_ONSHORE_SYSTEM_DEFAULT
+
+
+def _adnoc_onshore_derive_is_nis(inst):
+    """Soft-coded Onshore IS/NIS classifier."""
+    isa = _adnoc_onshore_resolve_isa(inst)
+    if not isa:
+        return ""
+    if isa in _ADNOC_ONSHORE_IS_NIS_BLANK_ISA:
+        return ""
+    if isa in _ADNOC_ONSHORE_IS_NIS_NIS_ISA:
+        return "NIS"
+    return _ADNOC_ONSHORE_IS_NIS_DEFAULT
+
+
 def _adnoc_onshore_derive_location(inst):
     """Soft-coded Onshore Location classifier.
 
@@ -1392,6 +1518,138 @@ _ADNOC_CALIBRATION_RULES = {
     "LIT": ("level",       0, 100),
     "LC":  ("level",       0, 100),
 }
+
+# ── ADNOC Onshore typical instrument / calibration ranges (soft-coded) ──
+# Keyed by ISA. Used as a last-resort fallback when no design pressure /
+# temperature data was scraped from the P&ID. The "Inst range" column on
+# the manual datasheet captures the *physical sensor* range; the
+# "Calibration range" column captures the *configured 4-20 mA span* —
+# in absence of project-specific data the two start out identical and are
+# refined manually downstream. Edit this table to retune defaults
+# without touching `_apply_adnoc_onshore_style`.
+#
+# Each entry: (min, max, unit). ``""`` for *unit* skips the unit column.
+_ADNOC_ONSHORE_TYPICAL_RANGES = {
+    # ── Pressure ─────────────────────────────────────────────────────
+    "PT":   ("0", "10",  "barg"),
+    "PIT":  ("0", "10",  "barg"),
+    "PI":   ("0", "10",  "barg"),
+    "PG":   ("0", "10",  "barg"),
+    "PDT":  ("0", "500", "mbar"),
+    "PDIT": ("0", "500", "mbar"),
+    "DPT":  ("0", "500", "mbar"),
+    "DPIT": ("0", "500", "mbar"),
+    "DPI":  ("0", "500", "mbar"),
+    "PSH":  ("0", "10",  "barg"),
+    "PSL":  ("0", "10",  "barg"),
+    "PSHH": ("0", "10",  "barg"),
+    "PSLL": ("0", "10",  "barg"),
+    # ── Temperature ──────────────────────────────────────────────────
+    "TT":   ("0", "150", "°C"),
+    "TIT":  ("0", "150", "°C"),
+    "TI":   ("0", "150", "°C"),
+    "TG":   ("0", "150", "°C"),
+    "TE":   ("0", "150", "°C"),
+    "TW":   ("0", "150", "°C"),
+    "TSH":  ("0", "150", "°C"),
+    "TSL":  ("0", "150", "°C"),
+    "TSHH": ("0", "150", "°C"),
+    "TSLL": ("0", "150", "°C"),
+    # ── Level ────────────────────────────────────────────────────────
+    "LT":   ("0", "100", "%"),
+    "LIT":  ("0", "100", "%"),
+    "LI":   ("0", "100", "%"),
+    "LG":   ("0", "100", "%"),
+    "LSH":  ("0", "100", "%"),
+    "LSL":  ("0", "100", "%"),
+    "LSHH": ("0", "100", "%"),
+    "LSLL": ("0", "100", "%"),
+    "LALL": ("0", "100", "%"),
+    "LAHH": ("0", "100", "%"),
+    "LAH":  ("0", "100", "%"),
+    "LAL":  ("0", "100", "%"),
+    # ── Flow ─────────────────────────────────────────────────────────
+    "FT":   ("0", "100", "m³/h"),
+    "FIT":  ("0", "100", "m³/h"),
+    "FE":   ("0", "100", "m³/h"),
+    "FI":   ("0", "100", "m³/h"),
+    "FQ":   ("0", "100", "m³/h"),
+    "FQI":  ("0", "100", "m³/h"),
+    # ── Position / valve ─────────────────────────────────────────────
+    "ZT":   ("0", "100", "%"),
+    "ZI":   ("0", "100", "%"),
+    "FZT":  ("0", "100", "%"),
+    "FZI":  ("0", "100", "%"),
+    # ── Analyser ─────────────────────────────────────────────────────
+    "AT":   ("0", "100", "%"),
+    "AIT":  ("0", "100", "%"),
+    "AI":   ("0", "100", "%"),
+    "AE":   ("0", "100", "%"),
+    # ── Vibration ────────────────────────────────────────────────────
+    "VT":   ("0", "20",  "mm/s"),
+    "VSH":  ("0", "20",  "mm/s"),
+    "VSL":  ("0", "20",  "mm/s"),
+    "VAH":  ("0", "20",  "mm/s"),
+    "VAL":  ("0", "20",  "mm/s"),
+}
+
+# ISA categories whose datasheet "Inst Range" / "Calibration Range" cells
+# are conventionally left blank — final-element devices, mechanical
+# protection devices, and on/off valves don't carry a measurement span.
+_ADNOC_ONSHORE_RANGE_BLANK_ISA = {
+    # Final elements / control valves
+    "FV", "FCV", "LV", "LCV", "PV", "PCV", "TV", "TCV",
+    "FY", "PY", "TY", "LY", "AY", "HY",
+    # On/off & shutdown valves & solenoids
+    "SDV", "BDV", "SOV", "MOV", "ROV", "XV",
+    "ESV", "SSV", "SSSV", "HV",
+    # Mechanical relief / orifice
+    "PSV", "PRV", "PVSV", "PSE", "RO", "RD",
+    # Manual switches
+    "HS",
+}
+
+
+def _adnoc_onshore_design_range(cal_data, isa):
+    """Return ``(min, max, unit)`` from drawing-derived design data.
+
+    Priority:
+      * Pressure ISA → ``(0, design_press, design_press_unit)``
+      * Temperature ISA → ``(0, design_temp, design_temp_unit)``
+      * Level ISA → ``(0, 100, "%")`` (always)
+    Returns ``None`` if no rule matches or design data is missing.
+    """
+    if not cal_data or not isa:
+        return None
+    rule = _ADNOC_CALIBRATION_RULES.get(isa)
+    if not rule:
+        return None
+    kind, lo, _hi = rule
+    if kind == "pressure" and cal_data.get("design_press"):
+        return (str(lo), str(cal_data["design_press"]),
+                cal_data.get("design_press_unit") or "")
+    if kind == "temperature" and cal_data.get("design_temp"):
+        return (str(lo), str(cal_data["design_temp"]),
+                cal_data.get("design_temp_unit") or "")
+    if kind == "level":
+        return (str(lo), "100", "%")
+    return None
+
+
+def _adnoc_onshore_resolve_range(inst, cal_data):
+    """Merge drawing-derived + typical-fallback ranges, returning
+    ``(min, max, unit)`` or ``None`` when the ISA is range-blank
+    (final elements, on/off valves, mechanical reliefs)."""
+    isa = _adnoc_onshore_resolve_isa(inst)
+    if not isa or isa in _ADNOC_ONSHORE_RANGE_BLANK_ISA:
+        return None
+    # 1) Drawing-derived design data wins when available.
+    drv = _adnoc_onshore_design_range(cal_data, isa)
+    if drv:
+        return drv
+    # 2) Typical-range fallback table.
+    return _ADNOC_ONSHORE_TYPICAL_RANGES.get(isa)
+
 
 # Default alarm pattern for ISA codes that almost always carry alarms in
 # ADNOC drawings. Marker = '✓' (a tick) so the column is populated even
@@ -3729,6 +3987,95 @@ class InstrumentIndexService:
                 inst["location"] = new_loc
                 loc_filled += 1
 
+        # ── Soft-coded I/O Type / IS-NIS / System fill ────────────────
+        # Onshore datasheet exposes three classifier columns that the AI
+        # rarely produces directly. Soft-coded ISA→category maps live in
+        # `_ADNOC_ONSHORE_IO_TYPE_BY_ISA`, `_ADNOC_ONSHORE_SYSTEM_*_ISA`,
+        # and `_ADNOC_ONSHORE_IS_NIS_*_ISA` near the top of this module.
+        # Idempotent: only fills blank/dash values; AI-supplied content
+        # is preserved verbatim.
+        _BLANK_TOKENS = ("", "-", "—", "N/A", "n/a", "NA", "None", "null")
+        io_filled = 0
+        sys_filled = 0
+        is_nis_filled = 0
+        for inst in kept:
+            cur_io = (inst.get("io_type") or "").strip()
+            if cur_io in _BLANK_TOKENS:
+                new_io = _adnoc_onshore_derive_io_type(inst)
+                if new_io:
+                    inst["io_type"] = new_io
+                    io_filled += 1
+
+            cur_sys = (inst.get("system") or "").strip()
+            if cur_sys in _BLANK_TOKENS:
+                new_sys = _adnoc_onshore_derive_system(inst)
+                if new_sys:
+                    inst["system"] = new_sys
+                    sys_filled += 1
+
+            cur_isn = (inst.get("is_nis") or "").strip()
+            if cur_isn in _BLANK_TOKENS:
+                new_isn = _adnoc_onshore_derive_is_nis(inst)
+                if new_isn:
+                    inst["is_nis"] = new_isn
+                    is_nis_filled += 1
+
+        # ── Soft-coded Inst Range / Calibration Range fill ────────────
+        # Onshore datasheet exposes six range cells per instrument.
+        # Population strategy:
+        #   1. Scrape design pressure / design temperature / level cues
+        #      from the drawing's text once (free, deterministic).
+        #   2. For each instrument, resolve via
+        #      `_adnoc_onshore_resolve_range` — drawing-derived data
+        #      preferred, soft-coded `_ADNOC_ONSHORE_TYPICAL_RANGES`
+        #      table is the safety net.
+        # Idempotent: any AI-supplied numeric span is preserved verbatim.
+        cal_data = {"design_press": None, "design_press_unit": "",
+                    "design_temp":  None, "design_temp_unit":  "",
+                    "psv_setpoints": []}
+        if pid_bytes:
+            try:
+                pmap = self._build_page_text_map(pid_bytes)
+                pdf_blob = "\n".join(pmap.values()) if pmap else ""
+                cal_data = _adnoc_extract_drawing_calibration_data(pdf_blob)
+                logger.info(
+                    "[ADNOC Onshore] cal data: design_press=%s %s "
+                    "design_temp=%s %s",
+                    cal_data.get("design_press"), cal_data.get("design_press_unit"),
+                    cal_data.get("design_temp"),  cal_data.get("design_temp_unit"),
+                )
+            except Exception as _ce:
+                logger.debug(f"[ADNOC Onshore] cal scrape skipped: {_ce}")
+
+        inst_range_filled = 0
+        cal_range_filled = 0
+        for inst in kept:
+            rng = _adnoc_onshore_resolve_range(inst, cal_data)
+            if not rng:
+                continue
+            r_min, r_max, r_unit = rng
+            # Inst range
+            if (inst.get("inst_range_min") or "").strip() in _BLANK_TOKENS:
+                inst["inst_range_min"] = r_min
+                inst_range_filled += 1
+            if (inst.get("inst_range_max") or "").strip() in _BLANK_TOKENS:
+                inst["inst_range_max"] = r_max
+                inst_range_filled += 1
+            if r_unit and (inst.get("inst_range_unit") or "").strip() in _BLANK_TOKENS:
+                inst["inst_range_unit"] = r_unit
+                inst_range_filled += 1
+            # Calibration range — defaults to the same span; refined
+            # downstream when project-specific data is supplied.
+            if (inst.get("calibration_min") or "").strip() in _BLANK_TOKENS:
+                inst["calibration_min"] = r_min
+                cal_range_filled += 1
+            if (inst.get("calibration_max") or "").strip() in _BLANK_TOKENS:
+                inst["calibration_max"] = r_max
+                cal_range_filled += 1
+            if r_unit and (inst.get("calibration_unit") or "").strip() in _BLANK_TOKENS:
+                inst["calibration_unit"] = r_unit
+                cal_range_filled += 1
+
         # Re-number `index_no` so the surviving rows stay 1..N.
         for i, inst in enumerate(kept, start=1):
             inst["index_no"] = i
@@ -3739,8 +4086,11 @@ class InstrumentIndexService:
 
         logger.info(
             "[ADNOC Onshore] tag-filter: kept=%d unique '<ISA>-<LOOP>-<PAGE>' "
-            "instruments; location_filled=%d; rejected_examples=%s",
-            len(kept), loc_filled, rejected_examples,
+            "instruments; location_filled=%d io_filled=%d system_filled=%d "
+            "is_nis_filled=%d inst_range_filled=%d cal_range_filled=%d; "
+            "rejected_examples=%s",
+            len(kept), loc_filled, io_filled, sys_filled, is_nis_filled,
+            inst_range_filled, cal_range_filled, rejected_examples,
         )
         return instruments
 
