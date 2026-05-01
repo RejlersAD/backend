@@ -1297,6 +1297,100 @@ def _adnoc_resolve_io_type(inst, isa):
     return ""
 
 
+# ── Soft-coded ADNOC LINE-NUMBER scrape & normaliser ────────────────────
+# ADNOC Gas / Onshore line-number scheme (5 dash-separated parts):
+#   SIZE - UNIT(3-4 digits) - SERVICE_CODE - SEQUENCE - INSULATION
+#
+# Examples (from project P&ID_5.pdf):
+#   3/4"-803-CHXX1-33030X-V
+#   2"-803-MBWXX2-31270X-I
+#   1-1/2"-803-BAXX1-31270X-I
+#   8"-803-PXX2-31051Y-I
+#   6"-803-LSXX2-31270X-I
+#
+# The pattern is intentionally permissive on the SIZE token so it accepts:
+#   - integer NPS (8")
+#   - fraction NPS (3/4")
+#   - compound NPS (1-1/2")
+#   - any inch-symbol glyph variant (",″,'',etc.)
+_ADNOC_LINE_FULL_RE = re.compile(
+    r'((?:\d+-)?\d+(?:/\d+)?)\s*'      # group 1: SIZE token (8 | 3/4 | 1-1/2)
+    r'["″\u2033\u02BA\'\u2019\uFF02]?\s*'   # optional inch glyph
+    r'[-–—]\s*'
+    r'(\d{3,4})\s*[-–—]\s*'             # group 2: UNIT (3-4 digits)
+    r'([A-Z]{1,6}[A-Z0-9]{0,4})\s*[-–—]\s*'  # group 3: SERVICE_CODE
+    r'(\d{4,6}[A-Z]?)\s*[-–—]\s*'       # group 4: SEQUENCE (digits + opt letter)
+    r'([A-Z])\b',                       # group 5: INSULATION (single letter)
+)
+
+# Canonical inch-symbol glyph used when reformatting.
+_ADNOC_INCH_GLYPH = '"'
+
+
+def _adnoc_extract_drawing_line_numbers(pdf_text_blob):
+    """Return a deduplicated list of canonical ADNOC line numbers found
+    in ``pdf_text_blob`` (preserving first-seen order).
+
+    Each entry is normalised to:
+       <size>"-<unit>-<service>-<sequence>-<insulation>
+    so partial hits later can be looked up via simple substring match.
+    """
+    if not pdf_text_blob:
+        return []
+    seen = set()
+    out = []
+    for m in _ADNOC_LINE_FULL_RE.finditer(pdf_text_blob.upper()):
+        size, unit, svc, seq, ins = m.groups()
+        canonical = f'{size}{_ADNOC_INCH_GLYPH}-{unit}-{svc}-{seq}-{ins}'
+        if canonical not in seen:
+            seen.add(canonical)
+            out.append(canonical)
+    return out
+
+
+def _adnoc_normalise_line_number(raw, canonical_lines):
+    """Upgrade an instrument's ``line_number`` value.
+
+    Logic (priority order):
+      1. If ``raw`` already matches the full 5-part scheme, return it
+         unchanged (formatting normalised — spaces removed, inch glyph
+         restored).
+      2. Else, if ``raw`` is a non-empty substring of any canonical line,
+         return that canonical line (so AI partials get upgraded).
+      3. Else return the original ``raw`` (untouched — never invent data).
+
+    ``canonical_lines`` is the list returned by
+    :func:`_adnoc_extract_drawing_line_numbers`.
+    """
+    if not raw:
+        return raw
+    txt = str(raw).strip().upper()
+    if not txt or txt in ("-", "N/A", "NA", "NONE", "NULL"):
+        return raw
+
+    # Strip extraneous whitespace around dashes for matching.
+    compact = re.sub(r'\s*-\s*', '-', txt)
+
+    # 1) Exact canonical match — already 5-part. Just normalise inch glyph.
+    m = _ADNOC_LINE_FULL_RE.match(compact)
+    if m:
+        size, unit, svc, seq, ins = m.groups()
+        return f'{size}{_ADNOC_INCH_GLYPH}-{unit}-{svc}-{seq}-{ins}'
+
+    # 2) Partial — try to upgrade by substring match against canonicals.
+    if canonical_lines:
+        # Drop inch glyph from both sides for permissive substring search.
+        needle = compact.rstrip('"\'\u2033\u2019\u02BA').replace('"', '')
+        if len(needle) >= 5:
+            for cand in canonical_lines:
+                cand_bare = cand.replace('"', '')
+                if needle in cand_bare:
+                    return cand
+
+    # 3) No upgrade possible — return raw (never invent).
+    return raw
+
+
 def _adnoc_extract_drawing_calibration_data(pdf_text_blob):
     """Soft-coded scraper for design pressure / temperature / PSV setpoint
     values from a P&ID's title-block + equipment-data text. Returns a dict
@@ -1862,6 +1956,17 @@ ENRICHMENT_CONFIG = {
     #   • Pattern 4: partial match — SIZE-FLUID-AREA without spec class.
     #   • Pattern 5: area-first format used by SABIC and some FEED contractors.
     "line_no_re": [
+        # ADNOC Gas / Onshore 5-part: SIZE - UNIT(3-4 digits) - SERVICE_CODE
+        #   - SEQUENCE - INSULATION  (single trailing letter V / I / N / U / H)
+        # Service codes embed an "X" placeholder for hold/typical lines, e.g.
+        #   3/4"-803-CHXX1-33030X-V
+        #   2"-803-MBWXX2-31270X-I
+        #   1-1/2"-803-BAXX1-31270X-I    (compound NPS like "1-1/2")
+        #   8"-803-PXX2-31051Y-I
+        #   6"-803-LSXX2-31270X-I
+        # Size group permits: integer (8), fraction (3/4), compound (1-1/2),
+        # and any inch-symbol glyph after the digits.
+        r'(?<!\w)((?:\d+-)?\d+(?:/\d+)?["″\u2033\u02BA\'\u2019\uFF02]?\s*[-–—]\s*\d{3,4}\s*[-–—]\s*[A-Z]{1,6}[A-Z0-9]{0,4}\s*[-–—]\s*\d{4,6}[A-Z]?\s*[-–—]\s*[A-Z])(?!\w)',
         # Line-list style 5-part format: SIZE-FLUID-SEQUENCE-CLASS-INSULATION
         r'(?<!\w)(\d+(?:\.\d+)?["″\u2033\u02BA\'\u2019\uFF02]?\s*[-–—]\s*[A-Z]{1,4}\s*[-–—]\s*\d{4,6}\s*[-–—]\s*[A-Z]\d[A-Z]\d{1,2}\s*[-–—]\s*[A-Z]{1,2})(?!\w)',
         # Line-list style 6-part format: SIZE-AREA-FLUID-SEQUENCE-CLASS-INSULATION(optional)
@@ -3252,11 +3357,34 @@ class InstrumentIndexService:
             except Exception as ce:
                 logger.debug(f"[ADNOC-Cal] scrape skipped: {ce}")
 
+        # ── Soft-coded line-number scrape ─────────────────────────────
+        # Mines all canonical ADNOC line numbers (5-part scheme) from the
+        # raw PDF text blob. The list is used below to UPGRADE instrument
+        # line_number entries that are partial / formatted incorrectly
+        # (e.g. AI returned "3/4-803-CHXX1" but the drawing actually says
+        # "3/4\"-803-CHXX1-33030X-V"). Pure additive — never overrides a
+        # value that's already canonical.
+        canonical_lines = []
+        if pid_bytes:
+            try:
+                # Re-use page-text map already built for cal_data when available
+                if 'pdf_blob' not in dir() or not pdf_blob:
+                    pmap = self._build_page_text_map(pid_bytes)
+                    pdf_blob = "\n".join(pmap.values()) if pmap else ""
+                canonical_lines = _adnoc_extract_drawing_line_numbers(pdf_blob)
+                logger.info(
+                    f"[ADNOC-Line] canonical_lines={len(canonical_lines)} "
+                    f"sample={canonical_lines[:3]}"
+                )
+            except Exception as le:
+                logger.debug(f"[ADNOC-Line] scrape skipped: {le}")
+
         cal_filled = 0
         alarm_filled = 0
         psv_idx = 0  # round-robin index over collected PSV setpoints
         location_normalised = 0
         io_filled = 0
+        line_filled = 0
 
         for inst in instruments:
             tag = (inst.get("tag_number") or "").upper()
@@ -3486,6 +3614,18 @@ class InstrumentIndexService:
                     inst["io_type"] = new_io
                     io_filled += 1
 
+            # ── 9) Line Number — upgrade partials to canonical ADNOC ──
+            #     Soft-coded via _adnoc_normalise_line_number(): cleans
+            #     whitespace, restores inch glyph, and upgrades partial
+            #     hits (e.g. "3/4-803-CHXX1") to the full canonical
+            #     "3/4\"-803-CHXX1-33030X-V" found elsewhere in the PDF.
+            new_line = _adnoc_normalise_line_number(
+                inst.get("line_number"), canonical_lines
+            )
+            if new_line and new_line != (inst.get("line_number") or "").strip():
+                inst["line_number"] = new_line
+                line_filled += 1
+
         logger.info(
             f"[ADNOC-Gas style] upgraded_types={upgraded_types} "
             f"loop_rewrites={loop_rewrites} eq_filled={eq_filled} "
@@ -3493,6 +3633,7 @@ class InstrumentIndexService:
             f"cal_filled={cal_filled} alarm_filled={alarm_filled} "
             f"location_normalised={location_normalised} "
             f"io_filled={io_filled} "
+            f"line_filled={line_filled} "
             f"derived_eq_tag='{derived_eq_tag}' derived_eq_desc='{derived_eq_desc}' "
             f"records={len(instruments)}"
         )
