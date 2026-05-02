@@ -217,6 +217,56 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+# ============================================================================== 
+# AI CHAMPION TELEMETRY (SOFT-CODED)
+# ============================================================================== 
+# Runtime-tunable telemetry controls for platform-wide activity tracking.
+# These values are read by apps.rbac.ai_champion_middleware.AIChampionTelemetryMiddleware
+# and can be adjusted without touching business logic.
+
+AI_CHAMPION_TELEMETRY_ENABLED = config('AI_CHAMPION_TELEMETRY_ENABLED', default=True, cast=bool)
+AI_CHAMPION_API_PREFIX = config('AI_CHAMPION_API_PREFIX', default='/api/v1/')
+
+# Comma-separated env override supported, e.g.
+# AI_CHAMPION_TELEMETRY_EXCLUDE_PREFIXES="health/,auth/,rbac/users/me/"
+AI_CHAMPION_TELEMETRY_EXCLUDE_PREFIXES = [
+    p.strip() for p in config(
+        'AI_CHAMPION_TELEMETRY_EXCLUDE_PREFIXES',
+        default='rbac/ai-champion/,rbac/analytics/,auth/,health/,cors/,rbac/users/me/,notifications/poll'
+    ).split(',') if p.strip()
+]
+
+# Ordered URL substring map: (needle, application_code, module_code)
+# First match wins. Keep broad matches last.
+AI_CHAMPION_TELEMETRY_APPLICATION_MAP = [
+    ('pid-verification', 'pid-verification', 'process'),
+    ('pid_verification', 'pid-verification', 'process'),
+    ('pfd_quality', 'pfd-quality', 'process'),
+    ('pfd_converter', 'pfd-converter', 'process'),
+    ('pfd', 'pfd', 'process'),
+    ('process_datasheet', 'process-datasheet', 'process'),
+    ('equipment', 'equipment-list', 'process'),
+    ('line', 'line-list', 'piping'),
+    ('electrical', 'electrical', 'electrical'),
+    ('instrument', 'instrument', 'instrument'),
+    ('mechanical', 'mechanical', 'mechanical'),
+    ('piping', 'piping', 'piping'),
+    ('qhse', 'qhse', 'qhse'),
+    ('crs', 'crs', 'documents'),
+    ('designiq', 'designiq', 'designiq'),
+    ('finance', 'finance', 'finance'),
+    ('procurement', 'procurement', 'procurement'),
+    ('sales', 'sales', 'sales'),
+    ('wrench', 'wrench-integration', 'integrations'),
+    ('rbac/users', 'user-management', 'admin'),
+    ('rbac/roles', 'rbac-roles', 'admin'),
+    ('rbac/audit', 'audit', 'admin'),
+    ('rbac', 'rbac', 'admin'),
+    ('activity', 'activity-tracking', 'admin'),
+    ('usage_tracking', 'usage-tracking', 'admin'),
+    ('notifications', 'notifications', 'platform'),
+]
+
 ROOT_URLCONF = 'config.urls'
 
 # ==============================================================================
