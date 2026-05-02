@@ -16,6 +16,7 @@ from .dashboard_views import (
     user_dashboard_stats, user_files_list, user_activity_timeline
 )
 from .ai_champion_views import AIChampionViewSet
+from .activity_report_views import ActivityReportViewSet
 from apps.users.views_password import change_password
 
 router = DefaultRouter()
@@ -40,6 +41,9 @@ router.register(r'analytics/health-checks', SystemHealthCheckViewSet, basename='
 
 # AI Champion of the Month — gamification, tracking, cost analytics
 router.register(r'ai-champion', AIChampionViewSet, basename='ai-champion')
+
+# Activity Reports — admin-only engagement analytics (weekly, monthly, by-user, by-feature)
+router.register(r'activity-reports', ActivityReportViewSet, basename='activity-reports')
 
 urlpatterns = [
     # User Export — must come BEFORE router.urls to prevent users/{pk}/ swallowing 'export' as a pk
