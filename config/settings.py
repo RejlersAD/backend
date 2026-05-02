@@ -208,6 +208,11 @@ MIDDLEWARE = [
     'apps.rbac.middleware.RBACMiddleware',
     'apps.activity.tracker.ActivityMiddleware',  # Activity tracking middleware
     'apps.usage_tracking.middleware.UsageTrackingMiddleware',  # Usage metering - Internal Analytics
+    # AI Champion telemetry — captures every authenticated API request as an
+    # ActivityEvent so the leaderboard / cost dashboard at /admin/ai-champion
+    # receives LIVE data. Soft-coded URL→application/feature mapping; never
+    # raises (telemetry failures are logged but do not break the request).
+    'apps.rbac.ai_champion_middleware.AIChampionTelemetryMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
