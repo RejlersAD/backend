@@ -14,6 +14,7 @@ import tempfile
 from typing import Any, Dict, List, Optional
 
 import boto3
+from botocore.client import Config as BotoConfig
 from botocore.exceptions import ClientError
 from decouple import config
 from django.utils import timezone
@@ -22,7 +23,14 @@ logger = logging.getLogger(__name__)
 
 # ─── Soft-coded constants ────────────────────────────────────────────────────
 S3_BUCKET            = config('AWS_STORAGE_BUCKET_NAME', default='user-management-rejlers')
-S3_REGION            = config('AWS_S3_REGION_NAME',     default='us-east-1')
+# Region default reflects the production bucket location (UAE Central). Override
+# via env AWS_S3_REGION_NAME if the bucket is moved. SigV4 + region-specific
+# endpoint are required for opt-in regions like me-central-1 — otherwise
+# presigned URLs return IllegalLocationConstraintException.
+S3_REGION            = config('AWS_S3_REGION_NAME',     default='me-central-1')
+S3_ENDPOINT_URL      = config('AWS_S3_ENDPOINT_URL',    default=f'https://s3.{S3_REGION}.amazonaws.com')
+S3_SIGNATURE_VERSION = config('AWS_S3_SIGNATURE_VERSION', default='s3v4')
+S3_ADDRESSING_STYLE  = config('AWS_S3_ADDRESSING_STYLE',  default='virtual')
 S3_PREFIX            = 'electrical-datasheets'
 PRESIGN_TTL_SECONDS  = 3600                          # 1 hour
 KEY_TEMPLATE         = '{prefix}/{user}/{datasheet}/{role}/{filename}'
@@ -42,6 +50,11 @@ class _SmartStorage:
                 aws_access_key_id     = config('AWS_ACCESS_KEY_ID',     default=''),
                 aws_secret_access_key = config('AWS_SECRET_ACCESS_KEY', default=''),
                 region_name           = S3_REGION,
+                endpoint_url          = S3_ENDPOINT_URL,
+                config                = BotoConfig(
+                    signature_version = S3_SIGNATURE_VERSION,
+                    s3                = {'addressing_style': S3_ADDRESSING_STYLE},
+                ),
             )
         except Exception as exc:
             logger.error(f"[smart_storage] boto3 init failed: {exc}")
