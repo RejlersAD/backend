@@ -117,6 +117,52 @@ class WrenchConfigViewSet(viewsets.ViewSet):
         http_status = status.HTTP_200_OK if result['success'] else status.HTTP_502_BAD_GATEWAY
         return Response(result, status=http_status)
 
+    @action(detail=False, methods=['post'], url_path='discover-svc-url')
+    def discover_svc_url(self, request):
+        """
+        Auto-detect the Wrench DocumentSearch SVC URL by probing common patterns
+        derived from the configured base_url. Used by the "Auto-Detect" button
+        on the configuration form.
+
+        Optional body:
+          { "base_url": "https://...", "svc_url": "" }
+            – if provided, probes the supplied URLs INSTEAD of the saved config
+              (so admins can test before saving).
+
+        Response:
+          {
+            "recommended": "<url>" | null,
+            "candidates": [{url, probe_url, reachable, status_code, note}, ...]
+          }
+        """
+        # Allow probing with the in-progress form values (no DB write needed).
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        override_base = (request.data.get('base_url') or '').strip()
+        override_svc  = (request.data.get('svc_url')  or '').strip()
+
+        if override_base or not cfg:
+            # Build a transient (unsaved) config so we don't pollute the DB.
+            cfg = WrenchConfig(
+                base_url=override_base or (cfg.base_url if cfg else ''),
+                svc_url=override_svc,
+            )
+
+        if not cfg.base_url:
+            return Response(
+                {'detail': 'Provide base_url to probe (no active configuration found).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            result = wrench_service.probe_svc_url_candidates(cfg)
+        except Exception as exc:
+            logger.error('[Wrench] SVC URL probe failed: %s', exc, exc_info=True)
+            return Response(
+                {'detail': 'Auto-detect failed. Check server logs.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        return Response(result, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=['post'], url_path='inject-token')
     def inject_token(self, request):
         """

@@ -25,6 +25,87 @@ _TIMEOUT_SEARCH = 90     # document/transmittal search (Wrench returns full data
 _TOKEN_MAX_AGE_MINUTES = 55
 
 
+# ─── Soft-coded SVC URL discovery patterns ───────────────────────────────────
+# The DocumentSearch service may live on the same host as the WebAPI or on a
+# dedicated SVC host. These patterns are tried in order; the first one that
+# returns a non-404 response wins. Admin-set svc_url always overrides this list.
+#
+# Each entry is a callable that, given the parsed base_url components, returns
+# a candidate base URL string (without trailing slash) — or None to skip.
+#
+# Real-world SmartProject installations observed:
+#   • https://<host>/                              ← single-server / SVC at root
+#   • https://<host>/<base_path>                   ← single-server / shared path
+#   • https://<host>/WrenchSVC                     ← path-based SVC mount
+#   • https://<host>/WrenchSearchSVC               ← dedicated search mount
+#   • https://<host>/WrenchSVC_<project>_<env>     ← parallel to WebAPI naming
+#   • https://svc.<host>/                          ← dedicated SVC subdomain
+#   • https://<host-prefix>-svc.<rest>             ← dash-separated SVC host
+_SVC_URL_PATH_TEMPLATES = [
+    # Same host, no path → most common when SVC sits at the root
+    lambda scheme, netloc, path: f"{scheme}://{netloc}",
+    # Same host, original path (single-server installs share the path)
+    lambda scheme, netloc, path: f"{scheme}://{netloc}{path}" if path else None,
+    # Path-replace WebAPI → SVC (e.g. WrenchWebAPI_Rejlers_Live → WrenchSVC_Rejlers_Live)
+    lambda scheme, netloc, path: (
+        f"{scheme}://{netloc}{path.replace('WebAPI', 'SVC').replace('webapi', 'svc')}"
+        if path and 'webapi' in path.lower() else None
+    ),
+    # Path-replace WebAPI → SearchSVC
+    lambda scheme, netloc, path: (
+        f"{scheme}://{netloc}{path.replace('WebAPI', 'SearchSVC').replace('webapi', 'searchsvc')}"
+        if path and 'webapi' in path.lower() else None
+    ),
+    # Common path mounts on the same host
+    lambda scheme, netloc, path: f"{scheme}://{netloc}/WrenchSVC",
+    lambda scheme, netloc, path: f"{scheme}://{netloc}/WrenchSearchSVC",
+    lambda scheme, netloc, path: f"{scheme}://{netloc}/SearchSVC",
+    lambda scheme, netloc, path: f"{scheme}://{netloc}/SVC",
+    # Subdomain variants — only when host has a parent domain (e.g. acme.example.com)
+    lambda scheme, netloc, path: (
+        f"{scheme}://svc.{netloc}" if netloc.count('.') >= 2 else None
+    ),
+    lambda scheme, netloc, path: (
+        f"{scheme}://{netloc.split('.', 1)[0]}-svc.{netloc.split('.', 1)[1]}"
+        if netloc.count('.') >= 2 else None
+    ),
+    lambda scheme, netloc, path: (
+        f"{scheme}://{netloc.split('.', 1)[0]}svc.{netloc.split('.', 1)[1]}"
+        if netloc.count('.') >= 2 else None
+    ),
+]
+
+
+def build_svc_url_candidates(cfg: 'WrenchConfig') -> list:
+    """
+    Return an ordered, deduplicated list of candidate SVC base URLs to try.
+    Admin-configured cfg.svc_url always takes precedence and is the only entry returned.
+    """
+    if cfg.svc_url:
+        return [cfg.svc_url.rstrip('/')]
+
+    parsed = urlparse(cfg.base_url)
+    scheme = parsed.scheme or 'https'
+    netloc = parsed.netloc
+    path   = (parsed.path or '').rstrip('/')
+
+    seen = set()
+    candidates = []
+    for template in _SVC_URL_PATH_TEMPLATES:
+        try:
+            value = template(scheme, netloc, path)
+        except Exception:  # noqa: BLE001 - defensive against bad input
+            value = None
+        if not value:
+            continue
+        value = value.rstrip('/')
+        if value in seen:
+            continue
+        seen.add(value)
+        candidates.append(value)
+    return candidates
+
+
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 
 def _get_active_config() -> WrenchConfig:
@@ -276,32 +357,10 @@ def search_documents(
     }
 
     # ── Build candidate base URLs to try in order ─────────────────────────────
-    # API ref (SmartProject API - Rejlers R0.pdf):
-    #   SearchObject lives at  <<SVC URL>>/DocumentSearch/SearchObject
-    #   – SVC URL is the DocumentSearch service host, which is DIFFERENT from the
-    #     WebAPI Server URL that contains an application path (e.g. /WrenchWebAPI_Rejlers_Live).
-    #
-    # When no svc_url is configured we derive candidates from base_url intelligently:
-    #  1. scheme+host only  → e.g. https://rejlers.wrenchsp.com
-    #     (DocumentSearch usually lives at the root, not under the WebAPI sub-path)
-    #  2. full base_url     → e.g. https://rejlers.wrenchsp.com/WrenchWebAPI_Rejlers_Live
-    #     (fallback for single-server installs where both services share the same path)
-    # When svc_url IS configured, only that URL is used (admin override takes priority).
+    # Soft-coded auto-discovery: the SVC host typically uses well-known patterns
+    # derived from the WebAPI base_url. Admin-set svc_url always wins.
     _SEARCH_OBJECT_SUFFIX = '/DocumentSearch/SearchObject'
-
-    if cfg.svc_url:
-        url_candidates = [cfg.svc_url.rstrip('/')]
-    else:
-        parsed      = urlparse(cfg.base_url)
-        host_root   = f"{parsed.scheme}://{parsed.netloc}"
-        full_base   = cfg.base_url.rstrip('/')
-        # Deduplicate (single-server where base_url has no path produces duplicates)
-        seen = set()
-        url_candidates = []
-        for c in [host_root, full_base]:
-            if c not in seen:
-                seen.add(c)
-                url_candidates.append(c)
+    url_candidates = build_svc_url_candidates(cfg)
 
     last_404_url = None
     for search_base in url_candidates:
@@ -360,6 +419,58 @@ def search_documents(
         'Ask your Wrench admin for the "SVC URL" and add it in '
         'Configuration → "Document Search Service URL".'
     )
+
+
+def probe_svc_url_candidates(cfg: WrenchConfig) -> dict:
+    """
+    Auto-discovery probe — used by the "Auto-Detect" button on the config form.
+    For each candidate base URL, check whether `/DocumentSearch/SearchObject`
+    responds with anything other than 404 / DNS failure. The first reachable
+    one is returned as the recommended svc_url.
+
+    Note: this only validates *reachability* — it does NOT log into Wrench or
+    submit a real search payload. Core search logic is untouched.
+
+    Returns:
+      {
+        'recommended': str | None,    # First reachable candidate (or None)
+        'candidates': [
+          { 'url': str, 'reachable': bool, 'status_code': int|None, 'note': str }
+        ]
+      }
+    """
+    _PROBE_TIMEOUT = 6  # seconds — keep UI responsive
+    _SEARCH_OBJECT_SUFFIX = '/DocumentSearch/SearchObject'
+
+    candidates = build_svc_url_candidates(cfg)
+    results = []
+    recommended = None
+
+    for base in candidates:
+        url = f"{base}{_SEARCH_OBJECT_SUFFIX}"
+        entry = {'url': base, 'probe_url': url, 'reachable': False, 'status_code': None, 'note': ''}
+        try:
+            # POST with an empty body — a real DocumentSearch endpoint will reply
+            # with 400/401/500 (auth/payload error) but NOT 404. DNS / connection
+            # failures bubble up as ConnectionError.
+            resp = requests.post(url, json={}, timeout=_PROBE_TIMEOUT)
+            entry['status_code'] = resp.status_code
+            if resp.status_code == 404:
+                entry['note'] = 'Endpoint not found'
+            else:
+                entry['reachable'] = True
+                entry['note'] = f'Reachable (HTTP {resp.status_code})'
+                if recommended is None:
+                    recommended = base
+        except requests.exceptions.ConnectionError:
+            entry['note'] = 'DNS / connection failed'
+        except requests.exceptions.Timeout:
+            entry['note'] = f'Timed out after {_PROBE_TIMEOUT}s'
+        except requests.exceptions.RequestException as exc:
+            entry['note'] = f'Request error: {type(exc).__name__}'
+        results.append(entry)
+
+    return {'recommended': recommended, 'candidates': results}
 
 
 # ─── Soft-coded constants for document file download ─────────────────────────
