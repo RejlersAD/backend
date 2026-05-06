@@ -39,13 +39,84 @@ _TOKEN_MAX_AGE_MINUTES = 55
 #   • https://<host>/WrenchSVC                     ← path-based SVC mount
 #   • https://<host>/WrenchSearchSVC               ← dedicated search mount
 #   • https://<host>/WrenchSVC_<project>_<env>     ← parallel to WebAPI naming
+#   • https://<host>/WrenchService_<project>_<env>/SVC  ← Rejlers / newer SmartProject
+#   • https://<host>/<base_path>/SVC               ← /SVC mount appended to WebAPI path
 #   • https://svc.<host>/                          ← dedicated SVC subdomain
 #   • https://<host-prefix>-svc.<rest>             ← dash-separated SVC host
+#
+# Soft-coded suffixes that are part of OData/AtomPub metadata endpoints — admins
+# often paste these full metadata URLs (e.g. ".../SVC/AtomSVC.svc/") instead of the
+# JSON SearchObject base. The normaliser below strips them so the JSON service URL
+# is what gets used for /DocumentSearch/SearchObject calls.
+_SVC_URL_TRAILING_NOISE_SUFFIXES = (
+    '/AtomSVC.svc',          # OData AtomPub service document (Rejlers admin example)
+    '/AtomSVC.svc/$metadata',
+    '/odata.svc',
+    '/odata',
+    '/$metadata',
+)
+# Path tokens that, when found at the end, mean the URL is pointing at the
+# AtomPub/OData layer rather than the JSON SVC root — strip them.
+_SVC_URL_TRAILING_NOISE_TOKENS = (
+    'AtomSVC.svc',
+    'odata.svc',
+)
+
+
+def _normalise_svc_url(value: str) -> str:
+    """
+    Clean a user/admin-pasted SVC URL.
+    - Trim whitespace and trailing slashes.
+    - Collapse accidental double slashes in the path (e.g. ".com//Wrench…").
+    - Strip OData/AtomPub metadata suffixes so the JSON SVC base remains.
+    - Pure-string transform — never touches the search core logic.
+    """
+    if not value:
+        return value
+    cleaned = value.strip().rstrip('/')
+    # Collapse accidental "//" inside the path (after the scheme "://")
+    if '://' in cleaned:
+        scheme_part, rest = cleaned.split('://', 1)
+        # rest may contain netloc + path; only collapse leading-path "//"
+        while '//' in rest:
+            rest = rest.replace('//', '/')
+        cleaned = f'{scheme_part}://{rest}'
+    # Strip well-known metadata suffixes (case-insensitive)
+    lower = cleaned.lower()
+    for suffix in _SVC_URL_TRAILING_NOISE_SUFFIXES:
+        if lower.endswith(suffix.lower()):
+            cleaned = cleaned[: -len(suffix)]
+            lower = cleaned.lower()
+    # Strip trailing path segments that match noise tokens
+    parts = cleaned.split('/')
+    while parts and parts[-1].lower() in (t.lower() for t in _SVC_URL_TRAILING_NOISE_TOKENS):
+        parts.pop()
+    cleaned = '/'.join(parts).rstrip('/')
+    return cleaned
+
+
 _SVC_URL_PATH_TEMPLATES = [
     # Same host, no path → most common when SVC sits at the root
     lambda scheme, netloc, path: f"{scheme}://{netloc}",
     # Same host, original path (single-server installs share the path)
     lambda scheme, netloc, path: f"{scheme}://{netloc}{path}" if path else None,
+    # Same host, original path with /SVC appended (Rejlers WrenchService_*/SVC pattern)
+    lambda scheme, netloc, path: (
+        f"{scheme}://{netloc}{path}/SVC"
+        if path and not path.lower().endswith('/svc') else None
+    ),
+    # Path-replace WebAPI → Service + /SVC
+    # (e.g. /WrenchWebAPI_Rejlers_Live → /WrenchService_Rejlers_Live/SVC)
+    lambda scheme, netloc, path: (
+        f"{scheme}://{netloc}"
+        f"{path.replace('WebAPI', 'Service').replace('webapi', 'service')}/SVC"
+        if path and 'webapi' in path.lower() else None
+    ),
+    # Path-replace WebAPI → Service (no /SVC suffix — older deployments)
+    lambda scheme, netloc, path: (
+        f"{scheme}://{netloc}{path.replace('WebAPI', 'Service').replace('webapi', 'service')}"
+        if path and 'webapi' in path.lower() else None
+    ),
     # Path-replace WebAPI → SVC (e.g. WrenchWebAPI_Rejlers_Live → WrenchSVC_Rejlers_Live)
     lambda scheme, netloc, path: (
         f"{scheme}://{netloc}{path.replace('WebAPI', 'SVC').replace('webapi', 'svc')}"
@@ -79,10 +150,14 @@ _SVC_URL_PATH_TEMPLATES = [
 def build_svc_url_candidates(cfg: 'WrenchConfig') -> list:
     """
     Return an ordered, deduplicated list of candidate SVC base URLs to try.
-    Admin-configured cfg.svc_url always takes precedence and is the only entry returned.
+    Admin-configured cfg.svc_url always takes precedence and is the only entry returned
+    (after running through `_normalise_svc_url` so an admin can paste the AtomSVC.svc
+    metadata URL directly).
     """
     if cfg.svc_url:
-        return [cfg.svc_url.rstrip('/')]
+        normalised = _normalise_svc_url(cfg.svc_url)
+        if normalised:
+            return [normalised]
 
     parsed = urlparse(cfg.base_url)
     scheme = parsed.scheme or 'https'
