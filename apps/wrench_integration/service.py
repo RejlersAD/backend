@@ -479,6 +479,37 @@ def search_documents(
             'error_msg': data.get('ErrorMsg'),
         }
 
+    # ── OData / AtomSVC fallback ─────────────────────────────────────────────
+    # Some SmartProject installations (e.g. rejlers.wrenchsp.com) expose
+    # documents only through the WCF/OData layer at <svc>/AtomSVC.svc/, and not
+    # via the JSON /DocumentSearch/SearchObject route. When the JSON route is
+    # exhausted, attempt an OData query against the configured base.
+    # This is purely additive — JSON search core logic above is untouched.
+    if cfg.svc_url:
+        try:
+            odata_result = _search_documents_via_odata(
+                cfg,
+                page=page,
+                page_size=page_size,
+                doc_no=doc_no,
+                discipline=discipline,
+                doc_type=doc_type,
+                date_from=date_from,
+                date_to=date_to,
+                order_no=order_no,
+            )
+            if odata_result is not None:
+                return odata_result
+        except _ODataNotApplicable:
+            # Configured svc_url isn't an OData service — fall through to error.
+            pass
+        except Exception as exc:  # noqa: BLE001 - surface OData errors clearly
+            logger.warning('[Wrench] OData fallback failed: %s', exc)
+            raise RuntimeError(
+                f'Document search failed via both JSON SearchObject and OData fallback. '
+                f'OData error: {exc}'
+            ) from exc
+
     # All candidates exhausted — raise a helpful error
     if cfg.svc_url:
         raise RuntimeError(
@@ -493,6 +524,233 @@ def search_documents(
         'The DocumentSearch service may run on a dedicated host separate from the WebAPI. '
         'Ask your Wrench admin for the "SVC URL" and add it in '
         'Configuration → "Document Search Service URL".'
+    )
+
+
+# ─── Soft-coded OData / AtomSVC fallback (additive) ─────────────────────────
+# Activated only when JSON DocumentSearch is unavailable AND cfg.svc_url is set.
+# Many SmartProject installations expose documents at <svc>/AtomSVC.svc/<EntitySet>.
+# All constants below are soft-coded so admins can extend without touching logic.
+_ATOMSVC_SUFFIX = '/AtomSVC.svc'
+# Common OData entity-set names that hold the document index. Tried in order.
+_ODATA_DOCUMENT_ENTITY_SETS = [
+    'Documents',
+    'DocumentMaster',
+    'DocumentRevisions',
+    'WrenchDocuments',
+    'IDocs',
+    'DocumentList',
+]
+# Filterable OData fields → SmartProject column names
+_ODATA_FILTER_FIELD_MAP = {
+    'doc_no':     'DOC_NO',
+    'discipline': 'DISCIPLINE',
+    'order_no':   'ORDER_NO',
+    'doc_type':   'DOC_TYPE',
+    'date_from':  'APPROVED_ON',
+    'date_to':    'APPROVED_ON',
+}
+_ODATA_TIMEOUT = 60
+
+
+class _ODataNotApplicable(Exception):
+    """Raised when OData fallback cannot be used for this configuration."""
+    pass
+
+
+def _resolve_atomsvc_base(cfg: WrenchConfig) -> str:
+    """
+    Build the AtomSVC.svc base URL from cfg.svc_url.
+    cfg.svc_url has already been normalised (AtomSVC.svc stripped) so we re-add it.
+    """
+    if not cfg.svc_url:
+        raise _ODataNotApplicable('No svc_url configured')
+    base = cfg.svc_url.rstrip('/')
+    return f'{base}{_ATOMSVC_SUFFIX}'
+
+
+def _odata_quote(value: str) -> str:
+    """OData v3 string-literal escape: doubled single-quotes."""
+    return str(value).replace("'", "''")
+
+
+def _build_odata_filter(*, doc_no=None, discipline=None, doc_type=None,
+                       date_from=None, date_to=None, order_no=None) -> str:
+    """Compose a SmartProject-friendly OData $filter clause from search args."""
+    clauses = []
+    if doc_no:
+        clauses.append(
+            f"substringof('{_odata_quote(doc_no)}',{_ODATA_FILTER_FIELD_MAP['doc_no']})"
+        )
+    if discipline:
+        clauses.append(
+            f"{_ODATA_FILTER_FIELD_MAP['discipline']} eq '{_odata_quote(discipline)}'"
+        )
+    if doc_type:
+        clauses.append(
+            f"{_ODATA_FILTER_FIELD_MAP['doc_type']} eq '{_odata_quote(doc_type)}'"
+        )
+    if order_no:
+        clauses.append(
+            f"{_ODATA_FILTER_FIELD_MAP['order_no']} eq '{_odata_quote(order_no)}'"
+        )
+    if date_from:
+        clauses.append(
+            f"{_ODATA_FILTER_FIELD_MAP['date_from']} ge '{_odata_quote(date_from)}'"
+        )
+    if date_to:
+        clauses.append(
+            f"{_ODATA_FILTER_FIELD_MAP['date_to']} le '{_odata_quote(date_to)}'"
+        )
+    return ' and '.join(clauses)
+
+
+def _odata_discover_entity_sets(odata_base: str, token: str) -> list:
+    """
+    GET <odata_base>/  → AtomPub or OData JSON service document.
+    Extract entity-set names; fall back to soft-coded list if not parseable.
+    """
+    headers = {'Accept': 'application/json'}
+    params = {'TOKEN': token} if token else {}
+    try:
+        resp = requests.get(odata_base + '/', headers=headers, params=params, timeout=15)
+    except requests.exceptions.RequestException as exc:
+        logger.debug('[Wrench OData] discovery GET failed: %s', exc)
+        return list(_ODATA_DOCUMENT_ENTITY_SETS)
+    if resp.status_code == 404:
+        raise _ODataNotApplicable(f'AtomSVC.svc not found at {odata_base}')
+    if not resp.ok:
+        return list(_ODATA_DOCUMENT_ENTITY_SETS)
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            d = data.get('d', data)
+            if isinstance(d, dict):
+                sets = d.get('EntitySets')
+                if isinstance(sets, list) and sets:
+                    return [s for s in sets if isinstance(s, str)]
+            value = data.get('value')
+            if isinstance(value, list) and value:
+                names = [v.get('name') for v in value if isinstance(v, dict) and v.get('name')]
+                if names:
+                    return names
+    except ValueError:
+        # AtomPub XML — fall through to soft-coded list.
+        pass
+    return list(_ODATA_DOCUMENT_ENTITY_SETS)
+
+
+def _search_documents_via_odata(
+    cfg: WrenchConfig,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    doc_no: str = None,
+    discipline: str = None,
+    doc_type: str = None,
+    date_from: str = None,
+    date_to: str = None,
+    order_no: str = None,
+) -> dict:
+    """
+    Query documents via the OData/AtomPub layer at <svc>/AtomSVC.svc/.
+    Returns same shape as `search_documents`, with extra 'source': 'odata'.
+    Raises _ODataNotApplicable when the service is absent (404 on root).
+    """
+    odata_base = _resolve_atomsvc_base(cfg)
+    token = _ensure_token(cfg)
+
+    entity_sets = _odata_discover_entity_sets(odata_base, token)
+
+    skip = max((page - 1) * page_size, 0)
+    base_params = {
+        '$top':         page_size,
+        '$skip':        skip,
+        '$format':      'json',
+        '$inlinecount': 'allpages',
+    }
+    filter_str = _build_odata_filter(
+        doc_no=doc_no, discipline=discipline, doc_type=doc_type,
+        date_from=date_from, date_to=date_to, order_no=order_no,
+    )
+    if filter_str:
+        base_params['$filter'] = filter_str
+
+    last_status = None
+    for entity in entity_sets:
+        url = f'{odata_base}/{entity}'
+        params = dict(base_params)
+        if token:
+            params['TOKEN'] = token
+        logger.info('[Wrench OData] GET %s (page=%d, size=%d)', url, page, page_size)
+        try:
+            resp = requests.get(
+                url,
+                params=params,
+                headers={'Accept': 'application/json'},
+                timeout=_ODATA_TIMEOUT,
+            )
+        except requests.exceptions.RequestException as exc:
+            logger.debug('[Wrench OData] %s failed: %s', url, exc)
+            continue
+        last_status = resp.status_code
+        if resp.status_code == 404:
+            continue
+        if not resp.ok:
+            raise RuntimeError(
+                f'OData query to {url} returned HTTP {resp.status_code}: {resp.text[:200]}'
+            )
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise RuntimeError(f'OData response from {url} is not JSON: {exc}')
+
+        if isinstance(data, dict):
+            _refresh_token_from_response(cfg, data)
+
+        documents = []
+        total = None
+        if isinstance(data, dict):
+            d = data.get('d', data)
+            if isinstance(d, dict):
+                results = d.get('results')
+                if isinstance(results, list):
+                    documents = results
+                count = d.get('__count')
+                if count is not None:
+                    try:
+                        total = int(count)
+                    except (TypeError, ValueError):
+                        total = None
+            if not documents and isinstance(data.get('value'), list):
+                documents = data['value']
+            if total is None and data.get('@odata.count') is not None:
+                try:
+                    total = int(data['@odata.count'])
+                except (TypeError, ValueError):
+                    pass
+
+        cleaned_docs = []
+        for row in documents:
+            if isinstance(row, dict):
+                cleaned_docs.append({k: v for k, v in row.items() if not str(k).startswith('__')})
+        if total is None:
+            total = len(cleaned_docs)
+
+        return {
+            'total':            total,
+            'documents':        cleaned_docs,
+            'operation_status': 0,
+            'error_msg':        None,
+            'source':           'odata',
+        }
+
+    if last_status is None:
+        raise _ODataNotApplicable(f'AtomSVC.svc unreachable at {odata_base}')
+    raise RuntimeError(
+        f'OData fallback could not locate a document entity set under {odata_base}/. '
+        f'Tried: {", ".join(entity_sets)}. Ask your Wrench admin which OData '
+        f'collection holds the document index.'
     )
 
 
