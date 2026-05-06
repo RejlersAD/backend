@@ -151,3 +151,12 @@ pfd_projects/
 
 # Runtime-generated comparison cache snapshots (UUID-named JSON blobs)
 domain_knowledge/pid_verification/comparison_*.json
+
+# Runtime caches and sample binaries (added 2026-05-06)
+non_teff_batches/
+non_teff_search_cache/
+pid_drawings_advanced/
+_sample.xlsx
+eq_sample.pdf
+eq_test.pdf
+
