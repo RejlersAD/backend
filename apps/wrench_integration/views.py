@@ -189,8 +189,11 @@ class WrenchConfigViewSet(viewsets.ViewSet):
         if not cfg:
             return Response({'detail': 'No active Wrench configuration found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        cfg.pre_shared_token = token
-        cfg.session_token = token          # keep both in sync
+        # Encrypt at rest via model helper — token is never stored in plaintext.
+        cfg.set_pre_shared_token(token)
+        # Clear the session_token mirror; `_ensure_token()` always prefers the
+        # encrypted pre_shared_token, so storing a second plaintext copy is unsafe.
+        cfg.session_token = ''
         cfg.token_obtained_at = timezone.now()
         cfg.save(update_fields=['pre_shared_token', 'session_token', 'token_obtained_at'])
 

@@ -49,11 +49,19 @@ _TOKEN_MAX_AGE_MINUTES = 55
 # JSON SearchObject base. The normaliser below strips them so the JSON service URL
 # is what gets used for /DocumentSearch/SearchObject calls.
 _SVC_URL_TRAILING_NOISE_SUFFIXES = (
+    # OData / AtomPub metadata endpoints — admins often paste these directly.
     '/AtomSVC.svc',          # OData AtomPub service document (Rejlers admin example)
     '/AtomSVC.svc/$metadata',
     '/odata.svc',
     '/odata',
     '/$metadata',
+    # Operation-contract suffixes — admins may paste the full SearchObject
+    # operation URL (e.g. ".../AtomSVC.svc/https/DocumentSearch/SearchObject").
+    # We strip the operation suffix so the JSON service base remains, and the
+    # search core re-appends `/DocumentSearch/SearchObject` correctly.
+    '/DocumentSearch/SearchObject',
+    '/DocumentSearch',
+    '/SearchObject',
 )
 # Path tokens that, when found at the end, mean the URL is pointing at the
 # AtomPub/OData layer rather than the JSON SVC root — strip them.
@@ -263,14 +271,14 @@ def _login(cfg: WrenchConfig) -> str:
 
 def _ensure_token(cfg: WrenchConfig) -> str:
     """
-    Return a valid session token.
+    Return a valid session token (decrypted, ready to send).
     Priority:
       1. pre_shared_token – used as-is, no expiry check (Wrench rolling refresh keeps it current).
       2. session_token    – used when still fresh (< _TOKEN_MAX_AGE_MINUTES).
       3. Fresh login      – called when no valid token is available.
     """
-    if cfg.pre_shared_token:
-        return cfg.pre_shared_token
+    if cfg.has_pre_shared_token():
+        return cfg.get_pre_shared_token()
     if _is_token_fresh(cfg):
         return cfg.session_token
     return _login(cfg)
@@ -279,16 +287,19 @@ def _ensure_token(cfg: WrenchConfig) -> str:
 def _refresh_token_from_response(cfg: WrenchConfig, data: dict) -> None:
     """
     Wrench returns a refreshed token in every response (rolling token).
-    - When pre_shared_token mode is active: update that field so future calls stay authenticated.
+    - When pre_shared_token mode is active: update that field (encrypted) so future calls stay authenticated.
     - Otherwise: update the standard session_token.
     """
     new_token = data.get('Token') or data.get('token')
     if not new_token:
         return
-    if cfg.pre_shared_token and new_token != cfg.pre_shared_token:
-        cfg.pre_shared_token = new_token
-        cfg.save(update_fields=['pre_shared_token'])
-    elif not cfg.pre_shared_token and new_token != cfg.session_token:
+    if cfg.has_pre_shared_token():
+        # Compare against decrypted current value to avoid useless writes.
+        current = cfg.get_pre_shared_token()
+        if new_token != current:
+            cfg.set_pre_shared_token(new_token)
+            cfg.save(update_fields=['pre_shared_token'])
+    elif new_token != cfg.session_token:
         _save_token(cfg, new_token)
 
 
