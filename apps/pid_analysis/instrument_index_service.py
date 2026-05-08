@@ -213,11 +213,31 @@ def _v(inst, key, *, mono=False):
     return s.upper() if mono else s
 
 
+# ── Soft-coded "Line Number" pure column (ADNOC Gas only) ────────────────
+# Manual convention puts the EQUIPMENT TAG in the Gas "Line No (Note-7)"
+# column for vessel-mounted instruments — useful for traceability but it
+# hides the actual pipeline line ID for those rows. This extra column
+# always shows the raw `line_number` field (no equipment fallback) so
+# users can see real line IDs at a glance. Edit label/width here.
+_GAS_PURE_LINE_NO_LABEL = "LINE NO"
+_GAS_PURE_LINE_NO_WIDTH = 26
+
+
+def _adnoc_gas_pure_line_no(inst):
+    """Pure line_number accessor for ADNOC Gas — no equipment fallback."""
+    raw = (inst.get("line_number") or "")
+    s = str(raw).strip()
+    if not s or s.upper() in ("N/A", "NA", "-", "—", "NONE", "NULL"):
+        return "-"
+    return s.upper()
+
+
 ADNOC_GAS_EXCEL_GROUP_HEADER = [
     ("",                              4),
     ("Calibration Range (Note-4)",    3),
     ("Alarm (Note-7)",                4),
-    ("",                              14),
+    # Trailing block widened by 1 to host the pure "Line No." column.
+    ("",                              15),
 ]
 
 ADNOC_GAS_EXCEL_COLUMNS = [
@@ -254,6 +274,9 @@ ADNOC_GAS_EXCEL_COLUMNS = [
      "accessor": lambda i: _v(i, "system") if (i.get("system") not in (None, "", "-")) else ("DCS" if (i.get("signal_type") or "").strip() not in ("", "-", "N/A") else "-")},
     {"key": "pid_no",           "label": "PID",                  "width": 24,
      "accessor": lambda i: _v(i, "pid_no", mono=True)},
+    # Pure line number (no equipment fallback) — ADNOC Gas only.
+    {"key": "pure_line_no",     "label": _GAS_PURE_LINE_NO_LABEL, "width": _GAS_PURE_LINE_NO_WIDTH,
+     "accessor": _adnoc_gas_pure_line_no},
     {"key": "line_number",      "label": "Line No\n(Note-7)",    "width": 26,
      "accessor": _adnoc_gas_line_no},
     {"key": "equipment_number", "label": "Equip No\n(Note-7)",   "width": 18,
@@ -634,7 +657,8 @@ def _adnoc_onshore_eq_or_line(inst):
 
 
 ADNOC_ONSHORE_EXCEL_GROUP_HEADER = [
-    ("",                                 10),  # Tag…Device Status
+    # Leading block widened by 1 to host the new "LINE NO" column.
+    ("",                                 11),  # Tag…Device Status (+ LINE NO)
     ("Inst range (Refer Gen Note 5)",    3),   # Min/Max/Unit
     ("Calibration range",                3),   # Min/Max/Unit
     ("",                                 1),   # Remarks
@@ -651,6 +675,9 @@ ADNOC_ONSHORE_EXCEL_COLUMNS = [
      "accessor": lambda i: _v(i, "location")},
     {"key": "equipment_or_line", "label": "Equipment / Line No.", "width": 26,
      "accessor": _adnoc_onshore_eq_or_line},
+    # Pure line-number column — reuses the Gas accessor (no equipment fallback).
+    {"key": "pure_line_no",      "label": _GAS_PURE_LINE_NO_LABEL, "width": _GAS_PURE_LINE_NO_WIDTH,
+     "accessor": _adnoc_gas_pure_line_no},
     {"key": "pid_no",            "label": "P&ID No.",       "width": 24,
      "accessor": lambda i: _v(i, "pid_no", mono=True)},
     {"key": "io_type",           "label": "I/O Type",       "width":  8,
@@ -2402,17 +2429,49 @@ EXTRACTION_CONFIG = {
 # Extract DWG/P&ID number from title-block style labels in PDF text.
 # ────────────────────────────────────────────────────────────────────────────
 DRAWING_NUMBER_CONFIG = {
-    # Labels commonly used in title blocks
+    # Labels commonly used in title blocks. Order MATTERS — the loop in
+    # `_extract_drawing_number_from_text` returns the first valid match,
+    # so place the most specific / canonical client labels first.
     "label_patterns": [
+        # ── Highest-priority: CAD filename stamp ───────────────────────
+        # Most CAD title blocks render `FILE NAME: <drg>.dwg` on every
+        # sheet. The value sits immediately after the label (well inside
+        # the 140-char window) and equals the canonical drawing number,
+        # so this beats ambiguous body-text cross-references that share
+        # the same segmented format. The trailing ".dwg"/".pdf" is
+        # naturally clipped by the value patterns at the word boundary.
+        r'\bFILE\s*NAME\b',
+        # ── ADNOC-style title blocks ───────────────────────────────────
+        # "GROUP COMPANY DRG. NO." (a.k.a. DRG/DWG/DOC NO under the same
+        # owner column) is the canonical document identifier on ADNOC
+        # P&IDs. Win over the generic "DWG NO" so we don't accidentally
+        # pick a contractor or supplier number from elsewhere on the
+        # sheet. Punctuation (dots) and the order of the qualifier words
+        # are tolerated. Edit this list to extend to other clients.
+        r'\bGROUP\s*COMPANY\s*(?:DRG|DWG|DRAWING|DOC|DOCUMENT)\.?\s*(?:NO|NUMBER|#)\b',
+        r'\bCOMPANY\s*(?:DRG|DWG|DRAWING|DOC|DOCUMENT)\.?\s*(?:NO|NUMBER|#)\b',
+        # ── Contractor drawing number (ADNOC Gas convention) ───────────
+        # ADNOC Gas title blocks carry the canonical drawing identifier
+        # against "CONTR. DWG. NO." or "CONT. DWG. NO.". The fixed-width
+        # negative lookbehind blocks the unrelated "ENGG. CONT. DRG NO."
+        # field that appears on ADNOC Onshore P&IDs (which is a separate
+        # contractor sequence we must NOT pick).
+        r'(?<!ENGG\.\s)\bCONT(?:R|RACTOR)?\.?\s*(?:DWG|DRG|DRAWING|DOC|DOCUMENT)\.?\s*(?:NO|NUMBER|#)\b',
+        # ── Generic title-block labels ─────────────────────────────────
         r'\b(?:DWG|DRAWING)\s*(?:NO|NUMBER|#)\b',
         r'\bP\s*&\s*ID\s*(?:NO|NUMBER|#)\b',
         r'\bP\s*ID\s*(?:NO|NUMBER|#)\b',
         r'\bDOCUMENT\s*(?:NO|NUMBER|#)\b',
         r'\bDOC\s*(?:NO|NUMBER|#)\b',
     ],
-    # Candidate number formats (kept broad but engineering-oriented)
+    # Candidate number formats (kept broad but engineering-oriented).
+    # The leading segment must be ≥ 2 chars (anchor), but later segments
+    # may be a single char to support real drawing numbers like
+    # ``TAK300171-803-PRU-B-0104`` whose 4th segment is just "B". The
+    # candidate-validity filter (min_length, must-have-letter+digit, must
+    # contain a separator) downstream still rejects noise tokens.
     "value_patterns": [
-        r'\b([A-Z0-9]{2,}(?:-[A-Z0-9]{2,}){2,})\b',
+        r'\b([A-Z0-9]{2,}(?:-[A-Z0-9]+){2,})\b',
         r'\b([A-Z]{2,}[0-9]{1,}(?:-[A-Z0-9]{1,}){2,})\b',
         r'\b([A-Z0-9]{3,}(?:[./][A-Z0-9]{2,}){2,})\b',
     ],
@@ -3288,11 +3347,29 @@ class InstrumentIndexService:
             # Ensure drawing number is populated
             dn = drawing_info.get("drawing_number", "")
             pid_no = drawing_info.get("pid_no") or dn
+            # ── Soft-coded propagation policy ─────────────────────────
+            # When the title-block resolver (`_resolve_drawing_info_from_pdf`)
+            # picked up a canonical drawing/PID number, treat it as the
+            # source-of-truth and OVERRIDE per-instrument `pid_no` values
+            # the Vision/AI step may have guessed from a secondary label
+            # (e.g. an ADNOC Gas P&ID where the LLM grabs the supplier
+            # "ADNOC GAS DWG. NO." instead of the contractor "CONT. DWG.
+            # NO."). Empty/N/A per-instrument values are also filled.
+            # Set `_PID_NO_TITLEBLOCK_OVERRIDE = False` to revert to the
+            # legacy fill-only-if-empty policy without code changes.
+            _PID_NO_TITLEBLOCK_OVERRIDE = True
+            _PID_NO_EMPTY_TOKENS = ("N/A", "", None)
             if dn or pid_no:
                 for inst in all_instruments:
-                    if inst.get("pid_no") in ("N/A", "", None):
+                    cur_pid = inst.get("pid_no")
+                    if cur_pid in _PID_NO_EMPTY_TOKENS or (
+                        _PID_NO_TITLEBLOCK_OVERRIDE and pid_no and cur_pid != pid_no
+                    ):
                         inst["pid_no"] = pid_no
-                    if inst.get("drawing_number") in ("N/A", "", None):
+                    cur_dn = inst.get("drawing_number")
+                    if cur_dn in _PID_NO_EMPTY_TOKENS or (
+                        _PID_NO_TITLEBLOCK_OVERRIDE and dn and cur_dn != dn
+                    ):
                         inst["drawing_number"] = dn
 
             # ── Smart validation / accessory inference / inline priority ──
