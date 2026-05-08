@@ -40,7 +40,7 @@ import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +63,111 @@ MAX_ROWS               = int(os.getenv('VALVE_MTO_MAX_ROWS', '2000'))
 # Canonical row schema — must match frontend `valveMTO.config.js` VALVE_COLUMNS.
 ROW_KEYS = [
     'sl_no', 'area', 'type', 'pms_class', 'rating', 'size_1', 'size_2',
-    'bore', 'valve_tag', 'description', 'qty_island', 'qty_field', 'unit',
+    'bore', 'line_number', 'valve_tag', 'description', 'qty_island', 'qty_field', 'unit',
     'remarks',
 ]
 
 # Soft-coded list (kept small — vision model picks the closest match).
 VALID_AREAS       = ['ISLAND', 'Field', 'COMBINED']
-DEFAULT_UNIT      = 'EACH'
-NUMERIC_KEYS      = {'sl_no', 'qty_island', 'qty_field'}
+NUMERIC_KEYS      = {'sl_no', 'qty_island', 'qty_field', 'unit'}
+
+# ─── Soft-coded valve-suffix → Remark dictionary ─────────────────────────
+# Standard P&ID condition / operator codes that are usually appended to a
+# valve tag (e.g. ``BV-1234-LO``, ``GV-08-FBLC``). When a valve_tag contains
+# any of these tokens we surface the matching code in the Remarks column so
+# the engineer sees "LO, LC, TSO, …" without having to decode the tag.
+#
+# Order matters — longer codes are checked first so ``FBLC`` is not chopped
+# down to ``LC`` mid-match. Edit this list to add new project conventions
+# (e.g. car-sealed, fail-safe, normally-closed) without touching the core
+# extraction logic.
+VALVE_TAG_REMARK_CODES: List[Tuple[str, str]] = [
+    ('FBLO',  'FBLO'),  # Full-Bore Locked Open
+    ('FBLC',  'FBLC'),  # Full-Bore Locked Closed
+    ('CSO',   'CSO'),   # Car-Sealed Open
+    ('CSC',   'CSC'),   # Car-Sealed Closed
+    ('TSO',   'TSO'),   # Tight Shut-Off
+    ('NRV',   'NRV'),   # Non-Return Valve
+    ('LO',    'LO'),    # Locked Open
+    ('LC',    'LC'),    # Locked Closed
+    ('NO',    'NO'),    # Normally Open
+    ('NC',    'NC'),    # Normally Closed
+    ('FO',    'FO'),    # Fail Open
+    ('FC',    'FC'),    # Fail Closed
+    ('FL',    'FL'),    # Fail Last
+    ('FI',    'FI'),    # Fail Indeterminate
+]
+# Pre-compile a single regex with ordered alternation; word-boundary on both
+# sides of the token avoids matching letters embedded inside a longer word.
+# Boundary excludes letters on both sides (so FLOW does not match FL, FCV does
+# not match FC) but ALLOWS digits/hyphens/spaces — that way patterns like
+# ``BV-LO-1234``, ``V101LO``, ``LO/LC`` or ``LO 6"`` all match.
+_VALVE_TAG_REMARK_RE = re.compile(
+    r'(?<![A-Z])(' + '|'.join(re.escape(c) for c, _ in VALVE_TAG_REMARK_CODES) + r')(?![A-Z])',
+    re.IGNORECASE,
+)
+
+# Fields scanned (in priority order) when deriving Remarks from a row. The
+# Vision model sometimes puts the operational status code in the tag itself,
+# sometimes in the description, sometimes already in remarks (verbatim from
+# the drawing legend). Scan all three so we don't miss it.
+REMARK_SOURCE_FIELDS: Tuple[str, ...] = ('valve_tag', 'remarks', 'description')
+
+
+def _derive_remarks_from_row(row: Dict[str, Any]) -> str:
+    """Return a comma-separated list of suffix codes found anywhere in the row.
+
+    Scans REMARK_SOURCE_FIELDS in order. Empty string when no codes match.
+    Order of returned codes follows VALVE_TAG_REMARK_CODES so longer/more-
+    specific codes win and duplicates are dropped.
+    """
+    found: List[str] = []
+    for field in REMARK_SOURCE_FIELDS:
+        text = row.get(field, '') or ''
+        if not text:
+            continue
+        for raw in _VALVE_TAG_REMARK_RE.findall(str(text)):
+            canonical = raw.upper()
+            for code, label in VALVE_TAG_REMARK_CODES:
+                if code == canonical and label not in found:
+                    found.append(label)
+                    break
+    return ', '.join(found)
+
+
+# Backwards-compatible thin wrapper (kept in case other modules import it).
+def _derive_remarks_from_tag(valve_tag: str) -> str:
+    return _derive_remarks_from_row({'valve_tag': valve_tag})
+
+# Soft-coded fatal-error classifier. If a batch exception's stringified form
+# contains any of these substrings (case-insensitive), the whole job is
+# considered unrecoverable and the snapshot status is flipped to 'error' so
+# the frontend can show a meaningful message instead of a silent zero-row
+# result. Map: substring -> human-friendly message.
+OPENAI_FATAL_ERROR_PATTERNS: List[Tuple[str, str]] = [
+    ('insufficient_quota',
+     'OpenAI account has no remaining quota. Top up the API plan or rotate '
+     'OPENAI_API_KEY, then retry the extraction.'),
+    ('invalid_api_key',
+     'OPENAI_API_KEY is invalid or revoked. Update the backend env var and '
+     'restart the container.'),
+    ('error code: 401',
+     'OpenAI rejected the API key (401 Unauthorized). Check OPENAI_API_KEY.'),
+    ('error code: 403',
+     'OpenAI denied access to the Vision model (403). Verify the project '
+     'has access to the configured VALVE_MTO_VISION_MODEL.'),
+    ('billing_hard_limit_reached',
+     'OpenAI hard billing limit reached. Raise the limit or top up credit.'),
+]
+
+
+def _classify_openai_error(exc: Exception) -> Optional[str]:
+    """Return a friendly message if the exception matches a fatal pattern."""
+    msg = str(exc).lower()
+    for needle, friendly in OPENAI_FATAL_ERROR_PATTERNS:
+        if needle.lower() in msg:
+            return friendly
+    return None
 
 # Prompt is intentionally explicit — every column is described including
 # accepted values so the model emits clean JSON.
@@ -99,17 +196,19 @@ Schema:
       "size_1":      "<nominal bore in inches with double quotes, e.g. 2\\"",
       "size_2":      "<reduced size if any, else empty string>",
       "bore":        "FB" | "RB" | "",
+      "line_number": "<piping line number / line tag the valve sits on, e.g. 6\"-P-12345-A1A-N>",
       "valve_tag":   "<valve tag id>",
       "description": "<short service description>",
       "qty_island":  <integer total in ISLAND, 0 if none>,
       "qty_field":   <integer total in FIELD, 0 if none>,
-      "unit":        "EACH" | "NOS" | "SET",
-      "remarks":     "<free text>"
+      "unit":        <integer total quantity (units) for this valve row, 0 if none>,
+      "remarks":     "<operational status codes if visible: LO, LC, CSO, CSC, TSO, FBLO, FBLC, NRV, NO, NC, FO, FC, FL, FI — comma-separated; otherwise free text>"
     }}
   ]
 }}
 
 Rules:
+- For "remarks": inspect the valve symbol/legend in the drawing. If the valve is annotated with any of LO (Locked Open), LC (Locked Closed), CSO (Car-Sealed Open), CSC (Car-Sealed Closed), TSO (Tight Shut-Off), FBLO (Full-Bore Locked Open), FBLC (Full-Bore Locked Closed), NRV, NO, NC, FO, FC, FL, FI — emit those codes in remarks (comma-separated). These codes may also appear inside the valve tag itself (e.g. ``BV-LO-1234``); include them either way.
 - Output only valid JSON; do not wrap in markdown fences.
 - Extract EVERY valve row visible in the attached pages — do not summarise or skip.
 - Use empty strings for unknown text fields and 0 for unknown numeric fields.
@@ -247,8 +346,16 @@ def _coerce_row(raw: Dict[str, Any]) -> Dict[str, Any]:
             if row['area'].lower() == a.lower():
                 row['area'] = a
                 break
-    if not row['unit']:
-        row['unit'] = DEFAULT_UNIT
+
+    # Soft-coded Remark derivation from valve-tag / description / remarks.
+    # The Vision model often surfaces operational-status codes (LO, LC, CSO,
+    # CSC, TSO, FBLC, FBLO, NRV, NO, NC, FO, FC, FL, FI) in the valve tag,
+    # the service description, or even the original remarks string. Scan all
+    # three and replace the remarks column with the canonical code list so
+    # downstream readers see a clean, normalised value.
+    derived = _derive_remarks_from_row(row)
+    if derived:
+        row['remarks'] = derived
     return row
 
 
@@ -579,7 +686,8 @@ def extract_valve_mto_streaming(
             data = json.loads(raw)
         except Exception as exc:
             logger.warning('[ValveMTO] Batch %d failed: %s', batch_idx, exc)
-            return [], {}, [f'batch starting at page {batch_idx + 1} failed: {exc}']
+            fatal = _classify_openai_error(exc)
+            return [], {}, [f'batch starting at page {batch_idx + 1} failed: {exc}'], fatal
 
         rows_raw = data.get('rows') or []
         meta_raw = data.get('project_meta') or {}
@@ -591,11 +699,12 @@ def extract_valve_mto_streaming(
                 row = _coerce_row(r)
                 if row['valve_tag'] or row['description'] or row['type']:
                     rows.append(row)
-        return rows, _coerce_meta(meta_raw), []
+        return rows, _coerce_meta(meta_raw), [], None
 
     all_rows: List[Dict[str, Any]] = []
     merged_meta: Dict[str, str] = dict(text_meta)  # seed with regex-derived meta
     completed = 0
+    fatal_msgs: List[str] = []
 
     parallelism = max(1, min(VISION_PARALLEL_BATCHES, len(batches)))
     with ThreadPoolExecutor(max_workers=parallelism) as pool:
@@ -603,14 +712,16 @@ def extract_valve_mto_streaming(
         for fut in as_completed(futures):
             idx = futures[fut]
             try:
-                rows, meta, warns = fut.result()
+                rows, meta, warns, fatal = fut.result()
             except Exception as exc:                                            # pragma: no cover
-                rows, meta, warns = [], {}, [f'batch {idx} crashed: {exc}']
+                rows, meta, warns, fatal = [], {}, [f'batch {idx} crashed: {exc}'], None
             all_rows.extend(rows)
             for k, v in meta.items():
                 if v and not merged_meta.get(k):
                     merged_meta[k] = v
             warnings.extend(warns)
+            if fatal and fatal not in fatal_msgs:
+                fatal_msgs.append(fatal)
             completed += 1
 
             partial = _dedupe_and_renumber(list(all_rows))
@@ -626,11 +737,17 @@ def extract_valve_mto_streaming(
                     pass
 
     final_rows = _dedupe_and_renumber(all_rows)
+    # If every batch failed with a fatal error and we recovered no rows,
+    # surface a clean top-level error so the frontend can display it.
+    error_msg: Optional[str] = None
+    if not final_rows and fatal_msgs:
+        error_msg = fatal_msgs[0]
     return {
-        'status': 'ok' if final_rows or merged_meta else 'empty',
+        'status': 'error' if error_msg else ('ok' if final_rows or merged_meta else 'empty'),
         'engine': 'vision' if final_rows else ('text' if text_meta else 'none'),
         'page_count': pages,
         'rows': final_rows,
         'project_meta': merged_meta,
         'warnings': warnings,
+        'error': error_msg,
     }
