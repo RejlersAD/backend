@@ -49,26 +49,27 @@ _TOKEN_MAX_AGE_MINUTES = 55
 # JSON SearchObject base. The normaliser below strips them so the JSON service URL
 # is what gets used for /DocumentSearch/SearchObject calls.
 _SVC_URL_TRAILING_NOISE_SUFFIXES = (
-    # OData / AtomPub metadata endpoints — admins often paste these directly.
-    '/AtomSVC.svc',          # OData AtomPub service document (Rejlers admin example)
-    '/AtomSVC.svc/$metadata',
-    '/odata.svc',
-    '/odata',
+    # OData / AtomPub METADATA endpoints — admins often paste these directly.
+    # Note: bare "/AtomSVC.svc" and "/odata.svc" are NOT noise — they are part of
+    # the canonical SVC URL per the SmartProject docs (e.g. .../SVC/AtomSVC.svc).
+    # Only the metadata sub-path itself is stripped, so ".../AtomSVC.svc" remains.
     '/$metadata',
+    '/odata',
     # Operation-contract suffixes — admins may paste the full SearchObject
     # operation URL (e.g. ".../AtomSVC.svc/https/DocumentSearch/SearchObject").
-    # We strip the operation suffix so the JSON service base remains, and the
-    # search core re-appends `/DocumentSearch/SearchObject` correctly.
+    # Order matters: the longer / more-specific patterns are checked first so
+    # only the operation tail is removed, leaving ".../AtomSVC.svc" intact.
+    '/https/DocumentSearch/SearchObject',
+    '/https/DocumentSearch',
+    '/https/SearchObject',
     '/DocumentSearch/SearchObject',
     '/DocumentSearch',
     '/SearchObject',
 )
-# Path tokens that, when found at the end, mean the URL is pointing at the
-# AtomPub/OData layer rather than the JSON SVC root — strip them.
-_SVC_URL_TRAILING_NOISE_TOKENS = (
-    'AtomSVC.svc',
-    'odata.svc',
-)
+# Path tokens that, when found at the end, mean the URL is pointing at a
+# metadata sub-path. Currently no bare tokens are stripped — AtomSVC.svc /
+# odata.svc are legitimate and must be preserved.
+_SVC_URL_TRAILING_NOISE_TOKENS = ()
 
 
 def _normalise_svc_url(value: str) -> str:
@@ -338,6 +339,24 @@ def verify_connection(cfg: WrenchConfig) -> dict:
         return {'success': False, 'message': 'Unexpected error during connection test.'}
 
 
+# ─── SearchObject route + payload constants (soft-coded per SmartProject docs) ───
+# Per the official SmartProject API spec, the SearchObject operation lives at:
+#   <<SVC URL>>/https/DocumentSearch/SearchObject
+# The leading "/https" is the WCF binding name (AtomSVC.svc routes by binding).
+# Older / non-AtomSVC deployments expose the operation directly at
+#   <<SVC URL>>/DocumentSearch/SearchObject
+# We try the AtomSVC form first, then the bare form. Order matters — the first
+# non-404 response wins.
+_SEARCH_OBJECT_ROUTE_PREFIXES = ('/https', '')
+_SEARCH_OBJECT_OPERATION = '/DocumentSearch/SearchObject'
+# Result mode 1 returns full document property rows (matches the docs sample).
+# Mode 0 returns a schema-only / minimal result on most installations.
+_SEARCH_RESULT_MODE_DEFAULT = 1
+# Date filter field. CREATED_ON is universal (set on every document); APPROVED_ON
+# is only set for approved docs and is NULL for many results.
+_SEARCH_DATE_FIELD = 'CREATED_ON'
+
+
 def search_documents(
     cfg: WrenchConfig,
     *,
@@ -352,7 +371,7 @@ def search_documents(
 ) -> dict:
     """
     Search Wrench documents using the SearchObject API.
-    POST <<SVC URL>>/DocumentSearch/SearchObject
+    POST <<SVC URL>>/https/DocumentSearch/SearchObject  (per SmartProject docs)
 
     Returns the parsed response dict with:
       - 'total': int
@@ -364,11 +383,12 @@ def search_documents(
     search_criteria = []
     criterion_id = 1
 
-    # Date range filter (APPROVED_ON  Operator 4=GT, 5=LT)
+    # Date range filter (Operator 4=GT, 5=LT). Field is soft-coded — see
+    # _SEARCH_DATE_FIELD. The docs sample uses CREATED_ON.
     if date_from:
         search_criteria.append({
             'ProcessID': criterion_id,
-            'FieldName': 'APPROVED_ON',
+            'FieldName': _SEARCH_DATE_FIELD,
             'FieldValue': date_from,
             'Operator': 4,
             'RangeId': 0,
@@ -377,7 +397,7 @@ def search_documents(
     if date_to:
         search_criteria.append({
             'ProcessID': criterion_id,
-            'FieldName': 'APPROVED_ON',
+            'FieldName': _SEARCH_DATE_FIELD,
             'FieldValue': date_to,
             'Operator': 5,
             'RangeId': 0,
@@ -411,21 +431,24 @@ def search_documents(
         })
         criterion_id += 1
 
-    # Fields we want returned
+    # Fields we want returned. Per the SmartProject docs sample request,
+    # ObjectSearchFilterDetails must be a SINGLE entry whose FieldName is a
+    # comma-separated list of column names — not one entry per field.
     RETURN_FIELDS = [
+        'FILE_ID', 'ORIGINAL_F_NAME',
         'DOC_NO', 'DOC_DESCRIPTION', 'ORDER_NO', 'ORDER_DESCRIPTION',
         'GENEALOGY_STRING', 'CREATED_BY_USER', 'WF_TEAM_NAME', 'IDOC_ID',
-        'DOC_TYPE', 'IS_DEPENDENT', 'APPROVED_ON',
+        'DOC_TYPE', 'IS_DEPENDENT', _SEARCH_DATE_FIELD,
     ]
-    filter_fields = [
-        {'ProcessID': i + 1, 'FieldName': f}
-        for i, f in enumerate(RETURN_FIELDS)
-    ]
+    filter_fields = [{
+        'ProcessID': 1,
+        'FieldName': ','.join(RETURN_FIELDS),
+    }]
 
     payload = {
         'SearchObjectType': 0,
         'SearchType': 0,
-        'SearchResultMode': 0,
+        'SearchResultMode': _SEARCH_RESULT_MODE_DEFAULT,
         'ObjectSearchDetails': [{
             'ProcessID': 1,
             'RowCount': page_size,
@@ -445,12 +468,18 @@ def search_documents(
     # ── Build candidate base URLs to try in order ─────────────────────────────
     # Soft-coded auto-discovery: the SVC host typically uses well-known patterns
     # derived from the WebAPI base_url. Admin-set svc_url always wins.
-    _SEARCH_OBJECT_SUFFIX = '/DocumentSearch/SearchObject'
     url_candidates = build_svc_url_candidates(cfg)
 
     last_404_url = None
-    for search_base in url_candidates:
-        url = f"{search_base}{_SEARCH_OBJECT_SUFFIX}"
+    # Try each (base, route_prefix) combination. SmartProject AtomSVC installs
+    # require '/https' before the operation; legacy direct mounts use ''.
+    search_targets = [
+        (base, prefix)
+        for base in url_candidates
+        for prefix in _SEARCH_OBJECT_ROUTE_PREFIXES
+    ]
+    for search_base, route_prefix in search_targets:
+        url = f"{search_base}{route_prefix}{_SEARCH_OBJECT_OPERATION}"
         logger.info(
             '[Wrench] Searching documents: POST %s (page=%d, size=%d)', url, page, page_size
         )
@@ -525,11 +554,15 @@ def search_documents(
     if cfg.svc_url:
         raise RuntimeError(
             f'DocumentSearch endpoint not found at the configured SVC URL '
-            f'({cfg.svc_url.rstrip("/")}{_SEARCH_OBJECT_SUFFIX}). '
+            f'({cfg.svc_url.rstrip("/")}{_SEARCH_OBJECT_OPERATION}). '
             'Verify the URL in Configuration → "Document Search Service URL" is correct.'
         )
     # No svc_url – guide the user: auto-discovery failed, manual entry needed
-    tried = ', '.join(f'{c}{_SEARCH_OBJECT_SUFFIX}' for c in url_candidates)
+    tried = ', '.join(
+        f'{c}{prefix}{_SEARCH_OBJECT_OPERATION}'
+        for c in url_candidates
+        for prefix in _SEARCH_OBJECT_ROUTE_PREFIXES
+    )
     raise RuntimeError(
         f'Could not find the DocumentSearch endpoint. Tried: {tried}. '
         'The DocumentSearch service may run on a dedicated host separate from the WebAPI. '
