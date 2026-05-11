@@ -42,11 +42,27 @@ _VERIFY_BROAD_PAGE_SIZE   = 5        # tiny page for the broad SVC connectivity 
 
 # ─── Soft-coded constants for the Wrench project (transmittal) dropdown ─────
 # Used by `list_projects` to power the project-number selector on the PID
-# Verification page. Cached per config to keep the dropdown snappy.
-_PROJECTS_CACHE: dict = {}                          # { cfg_id: (ts, payload) }
-_PROJECTS_CACHE_TTL_SECONDS = 10 * 60               # 10-min TTL — admins can refresh via ?refresh=1
-_PROJECTS_FETCH_PAGE_SIZE   = 500                   # Wrench tenant returns ≤500 per call
-_PROJECTS_MAX_PAGES         = 10                    # safety cap → up to 5,000 transmittals
+# Verification page.
+#
+# IMPORTANT: this Wrench tenant returns the *entire* transmittal set on every
+# GetTransmittalList call (the API ignores ROW_COUNT/PAGE_NUMBER). So we make
+# ONE call with a very large page_size — paging would just re-download the
+# whole 80k+ row payload N times and time out.
+#
+# Caching strategy (stale-while-revalidate):
+#   • FRESH window  → instant response from Redis (no Wrench call)
+#   • STALE window  → still serve the cached payload immediately, BUT mark it
+#                     `is_stale=true` so the frontend can trigger a background
+#                     `?refresh=1` to refresh without blocking the user.
+#   • EXPIRED       → fetch synchronously from Wrench, replace cache.
+_PROJECTS_CACHE_KEY_PREFIX  = 'wrench:projects:v1:'  # per-config Redis key
+_PROJECTS_FRESH_SECONDS     = 30 * 60                # 30 min — considered fresh, no revalidation
+_PROJECTS_STALE_SECONDS     = 6 * 60 * 60            # 6 h    — still served, but flagged stale
+_PROJECTS_REDIS_TTL_SECONDS = 24 * 60 * 60           # 24 h   — hard TTL in Redis
+_PROJECTS_SINGLE_FETCH_SIZE = 200_000                # cover any sane tenant in one call
+_PROJECTS_ORDER_NO_KEYS     = ('ORDER_NO', 'OrderNo', 'order_no')
+_PROJECTS_DESC_KEYS         = ('ORDER_DESCRIPTION', 'OrderDescription', 'order_description', 'PROJECT_NAME')
+_PROJECTS_SINGLE_FETCH_SIZE = 200_000               # large enough to cover any sane tenant in one call
 _PROJECTS_ORDER_NO_KEYS     = ('ORDER_NO', 'OrderNo', 'order_no')
 _PROJECTS_DESC_KEYS         = ('ORDER_DESCRIPTION', 'OrderDescription', 'order_description', 'PROJECT_NAME')
 
@@ -751,7 +767,8 @@ class WrenchSyncViewSet(viewsets.ViewSet):
     # Lightweight project / transmittal dropdown feed.
     # Powers the "Project Number" selector on the PID Verification page.
     # Soft-coded constants live at the top of this module — admins can tune
-    # TTL / page-size / field aliases without touching this function.
+    # TTL / fresh / stale windows / page-size without touching this function.
+    # Uses a stale-while-revalidate pattern backed by Django cache (Redis).
     # ─────────────────────────────────────────────────────────────────────
     @action(detail=False, methods=['get'], url_path='projects')
     def list_projects(self, request):
@@ -761,10 +778,19 @@ class WrenchSyncViewSet(viewsets.ViewSet):
         (one entry per unique ORDER_NO) suitable for a <select> dropdown.
 
         Response:
-          { "total": N, "cached": bool, "projects": [
-                { "order_no": "5900647", "order_description": "...", "label": "5900647 — ..." }
-            ] }
+          {
+            "total":             N,
+            "transmittal_count": N,
+            "cached":            bool,
+            "is_stale":          bool,     # True → frontend may revalidate in background
+            "fetched_at":        epoch_seconds,
+            "age_seconds":       int,
+            "fresh_for":         int,      # seconds remaining before becoming stale
+            "projects": [ { "order_no", "order_description", "label" } ]
+          }
         """
+        from django.core.cache import cache  # local import — avoids touching module imports
+
         cfg = WrenchConfig.objects.filter(is_active=True).first()
         if not cfg:
             return Response(
@@ -772,50 +798,61 @@ class WrenchSyncViewSet(viewsets.ViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        refresh = str(request.query_params.get('refresh', '')).lower() in ('1', 'true', 'yes')
+        refresh   = str(request.query_params.get('refresh', '')).lower() in ('1', 'true', 'yes')
+        cache_key = f'{_PROJECTS_CACHE_KEY_PREFIX}{cfg.id}'
+        now       = _time.time()
 
-        # ── Soft cache hit ────────────────────────────────────────────────
-        now = _time.time()
-        cached = _PROJECTS_CACHE.get(cfg.id)
-        if not refresh and cached and (now - cached[0]) < _PROJECTS_CACHE_TTL_SECONDS:
-            payload = dict(cached[1])
-            payload['cached'] = True
-            return Response(payload, status=status.HTTP_200_OK)
+        # ── Cache hit: serve immediately if fresh OR stale (frontend revalidates) ──
+        if not refresh:
+            cached = cache.get(cache_key)
+            if cached:
+                age = max(0, int(now - cached.get('fetched_at', now)))
+                if age < _PROJECTS_STALE_SECONDS:
+                    payload = dict(cached)
+                    payload['cached']      = True
+                    payload['age_seconds'] = age
+                    payload['is_stale']    = age >= _PROJECTS_FRESH_SECONDS
+                    payload['fresh_for']   = max(0, _PROJECTS_FRESH_SECONDS - age)
+                    return Response(payload, status=status.HTTP_200_OK)
 
-        # ── Pull transmittals page-by-page (soft-fail per page) ───────────
+        # ── Cache miss / forced refresh: hit Wrench in one big call ───────
         projects: dict = {}   # order_no → order_description (longest wins)
         try:
-            for page in range(1, _PROJECTS_MAX_PAGES + 1):
-                try:
-                    chunk = wrench_service.get_transmittals(
-                        cfg, page=page, page_size=_PROJECTS_FETCH_PAGE_SIZE,
-                    )
-                except Exception as page_exc:  # noqa: BLE001 — soft-fail one page only
-                    logger.warning('[Wrench] list_projects: page=%s failed: %s', page, page_exc)
-                    break
+            chunk = wrench_service.get_transmittals(
+                cfg, page=1, page_size=_PROJECTS_SINGLE_FETCH_SIZE,
+            )
+            rows = chunk.get('transmittals') or []
+            total_available = chunk.get('total') or len(rows)
 
-                rows = chunk.get('transmittals') or chunk.get('items') or chunk.get('results') or []
-                if not rows:
-                    break
-
-                for row in rows:
-                    order_no = next((str(row.get(k)).strip() for k in _PROJECTS_ORDER_NO_KEYS
-                                     if row.get(k) is not None and str(row.get(k)).strip()), '')
-                    if not order_no:
-                        continue
-                    desc = next((str(row.get(k)).strip() for k in _PROJECTS_DESC_KEYS
+            for row in rows:
+                order_no = next((str(row.get(k)).strip() for k in _PROJECTS_ORDER_NO_KEYS
                                  if row.get(k) is not None and str(row.get(k)).strip()), '')
-                    existing = projects.get(order_no, '')
-                    if len(desc) > len(existing):
-                        projects[order_no] = desc
-
-                # Stop when last page returned fewer rows than requested
-                if len(rows) < _PROJECTS_FETCH_PAGE_SIZE:
-                    break
+                if not order_no:
+                    continue
+                desc = next((str(row.get(k)).strip() for k in _PROJECTS_DESC_KEYS
+                             if row.get(k) is not None and str(row.get(k)).strip()), '')
+                existing = projects.get(order_no, '')
+                if len(desc) > len(existing):
+                    projects[order_no] = desc
         except RuntimeError as exc:
+            # If we have any stale cache, prefer serving that over an error.
+            cached = cache.get(cache_key)
+            if cached:
+                payload = dict(cached)
+                payload['cached']    = True
+                payload['is_stale']  = True
+                payload['note']      = f'Upstream refresh failed: {exc}. Serving last-good snapshot.'
+                return Response(payload, status=status.HTTP_200_OK)
             return Response({'detail': str(exc)}, status=status.HTTP_424_FAILED_DEPENDENCY)
         except Exception as exc:  # noqa: BLE001
             logger.error('[Wrench] list_projects unexpected error: %s', exc, exc_info=True)
+            cached = cache.get(cache_key)
+            if cached:
+                payload = dict(cached)
+                payload['cached']    = True
+                payload['is_stale']  = True
+                payload['note']      = 'Upstream refresh failed. Serving last-good snapshot.'
+                return Response(payload, status=status.HTTP_200_OK)
             return Response(
                 {'detail': 'Failed to load Wrench projects. Check server logs.'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -831,8 +868,17 @@ class WrenchSyncViewSet(viewsets.ViewSet):
         ]
         items.sort(key=lambda r: r['order_no'])
 
-        payload = {'total': len(items), 'cached': False, 'projects': items}
-        _PROJECTS_CACHE[cfg.id] = (now, payload)
+        payload = {
+            'total':             len(items),
+            'transmittal_count': total_available,
+            'cached':            False,
+            'is_stale':          False,
+            'fetched_at':        int(now),
+            'age_seconds':       0,
+            'fresh_for':         _PROJECTS_FRESH_SECONDS,
+            'projects':          items,
+        }
+        cache.set(cache_key, payload, timeout=_PROJECTS_REDIS_TTL_SECONDS)
         return Response(payload, status=status.HTTP_200_OK)
 
     # ─────────────────────────────────────────────────────────────────────
