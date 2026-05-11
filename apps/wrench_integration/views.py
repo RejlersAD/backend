@@ -32,6 +32,14 @@ logger = logging.getLogger(__name__)
 _TRANS_DOC_RESULT_CACHE: dict = {}
 _TRANS_DOC_CACHE_TTL_SECONDS = 5 * 60   # 5 minutes per (project, page) entry
 
+# ─── Soft-coded diagnostic / verification constants ──────────────────────────
+# Used by the `verify_trans_documents` action. Each probe is short-timeout so
+# the diagnostic always returns within a few seconds even on a sick host.
+_VERIFY_PROBE_TIMEOUT     = 6        # seconds, per REST probe
+_VERIFY_SEARCH_TIMEOUT    = 25       # seconds, per SearchObject probe
+_VERIFY_SAMPLE_SIZE       = 3        # number of docs to include as evidence
+_VERIFY_BROAD_PAGE_SIZE   = 5        # tiny page for the broad SVC connectivity check
+
 
 class WrenchConfigViewSet(viewsets.ViewSet):
     """
@@ -558,6 +566,176 @@ class WrenchSyncViewSet(viewsets.ViewSet):
                 {'detail': 'Could not load documents for this transmittal. Check server logs.'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Diagnostic: verify whether a project genuinely has no documents in
+    # Wrench, or the empty result is due to a configuration / endpoint issue.
+    # Soft-coded, read-only, fast — does NOT mutate any cache or DB state.
+    # ─────────────────────────────────────────────────────────────────────
+    @action(detail=False, methods=['get'], url_path='trans-documents/verify')
+    def verify_trans_documents(self, request):
+        """
+        GET /api/v1/wrench/sync/trans-documents/verify/?order_no=<ORDER_NO>
+
+        Runs a multi-step diagnostic and returns a structured report:
+          • config         — base/svc URL presence (redacted)
+          • token          — login success / error
+          • host_profile   — cached dead paths / winning path / exhausted state
+          • rest_probes    — each transmittal-doc REST path with HTTP status
+          • doc_search     — DocumentSearch broad probe + per-project probe
+          • conclusion     — verdict + recommendations
+        """
+        order_no = (request.query_params.get('order_no') or '').strip()
+        if not order_no:
+            return Response(
+                {'detail': 'order_no query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        if not cfg:
+            return Response(
+                {'detail': 'No active Wrench configuration.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        def _redact(url: str) -> str:
+            if not url:
+                return ''
+            try:
+                from urllib.parse import urlparse
+                u = urlparse(url)
+                return f'{u.scheme}://{u.hostname}{u.path}' if u.hostname else url
+            except Exception:
+                return url
+
+        report = {
+            'order_no': order_no,
+            'config': {
+                'has_base_url': bool(cfg.base_url),
+                'has_svc_url':  bool(cfg.svc_url),
+                'base_url':     _redact(cfg.base_url),
+                'svc_url':      _redact(cfg.svc_url) if cfg.svc_url else None,
+                'server_id':    cfg.server_id,
+            },
+            'token':        {'acquired': False, 'error': None},
+            'host_profile': None,
+            'rest_probes':  [],
+            'doc_search':   {'broad': None, 'by_order_no': None},
+            'conclusion':   {'verdict': 'unknown', 'reasons': [], 'recommendations': []},
+        }
+
+        # 1. Token acquisition
+        try:
+            token = wrench_service._ensure_token(cfg)
+            report['token']['acquired'] = bool(token)
+        except Exception as exc:
+            report['token']['error'] = str(exc)
+            report['conclusion']['verdict']         = 'config_error'
+            report['conclusion']['reasons'].append('Wrench login failed — cannot verify documents.')
+            report['conclusion']['recommendations'].append(
+                'Check WrenchConfig credentials (base_url, server_id, login_name, password).'
+            )
+            return Response(report, status=status.HTTP_200_OK)
+
+        # 2. Host profile snapshot (read-only)
+        try:
+            prof = wrench_service._host_profile(cfg)
+            report['host_profile'] = {
+                'dead_paths':       sorted(prof.get('dead_paths') or []),
+                'winning_path':     prof.get('winning_path'),
+                'exhausted_until':  prof.get('exhausted_until'),
+                'exhausted_now':    bool(prof.get('exhausted_until') and prof['exhausted_until'] > _time.time()),
+            }
+        except Exception as exc:
+            report['host_profile'] = {'error': str(exc)}
+
+        # 3. REST probes (lightweight) — record each path's HTTP status
+        rest_paths = (
+            list(getattr(wrench_service, '_TRANS_DOC_REST_PATHS', []))
+            + [getattr(wrench_service, '_DOC_LIST_URL_PATH', '/api/Document/GetDocumentList')]
+            + list(getattr(wrench_service, '_DOC_LIST_ALT_PATHS', []))
+        )
+        payload = {
+            'TOKEN':       token,
+            'SERVER_ID':   cfg.server_id,
+            'LOGIN_NAME':  cfg.login_name,
+            'ROW_COUNT':   1,
+            'PAGE_NUMBER': 1,
+            'ORDER_NO':    order_no,
+        }
+        any_rest_ok = False
+        for path in rest_paths:
+            try:
+                url = wrench_service._api_url(cfg, path)
+                resp = http_lib.post(url, json=payload, timeout=_VERIFY_PROBE_TIMEOUT)
+                ok = resp.status_code == 200
+                if ok:
+                    any_rest_ok = True
+                report['rest_probes'].append({
+                    'path':        path,
+                    'http_status': resp.status_code,
+                    'ok':          ok,
+                })
+            except http_lib.exceptions.RequestException as exc:
+                report['rest_probes'].append({
+                    'path':        path,
+                    'http_status': None,
+                    'ok':          False,
+                    'error':       str(exc)[:200],
+                })
+
+        # 4. DocumentSearch — broad probe (no ORDER_NO) to confirm SVC reachable
+        try:
+            broad = wrench_service.search_documents(cfg, page=1, page_size=_VERIFY_BROAD_PAGE_SIZE)
+            report['doc_search']['broad'] = {
+                'ok':     True,
+                'total':  broad.get('total', 0),
+                'sample': [d.get('DOC_NO') for d in (broad.get('documents') or [])[:_VERIFY_SAMPLE_SIZE]],
+            }
+        except Exception as exc:
+            report['doc_search']['broad'] = {'ok': False, 'error': str(exc)[:300]}
+
+        # 5. DocumentSearch — per-project probe (with ORDER_NO filter)
+        try:
+            scoped = wrench_service.search_documents(cfg, page=1, page_size=_VERIFY_SAMPLE_SIZE, order_no=order_no)
+            report['doc_search']['by_order_no'] = {
+                'ok':     True,
+                'total':  scoped.get('total', 0),
+                'sample': [d.get('DOC_NO') for d in (scoped.get('documents') or [])[:_VERIFY_SAMPLE_SIZE]],
+            }
+        except Exception as exc:
+            report['doc_search']['by_order_no'] = {'ok': False, 'error': str(exc)[:300]}
+
+        # 6. Build verdict from collected evidence
+        broad      = report['doc_search']['broad']   or {}
+        by_order   = report['doc_search']['by_order_no'] or {}
+        verdict, reasons, recs = 'unknown', [], []
+
+        if not cfg.svc_url and not broad.get('ok'):
+            verdict = 'svc_url_missing'
+            reasons.append('No DocumentSearch SVC URL is configured and auto-discovery failed.')
+            recs.append('Set Wrench → Configuration → DocumentSearch SVC URL.')
+        elif broad.get('ok') and broad.get('total', 0) > 0 and by_order.get('ok') and by_order.get('total', 0) == 0:
+            verdict = 'no_documents_for_project'
+            reasons.append(f'DocumentSearch reachable; total docs in instance ≥ {broad.get("total")}, but ORDER_NO={order_no} returns 0 rows.')
+            recs.append('Confirm the project (ORDER_NO) is correct and that documents have been indexed in Wrench for it.')
+            recs.append('Try opening the project in the Wrench portal to confirm document linkage.')
+        elif broad.get('ok') and by_order.get('ok') and by_order.get('total', 0) > 0:
+            verdict = 'documents_exist_unexpectedly'
+            reasons.append('DocumentSearch returned documents for this project — the empty state was stale.')
+            recs.append('Click "Refresh" (refresh=1) to bypass the in-memory cache and re-fetch.')
+        elif not broad.get('ok'):
+            verdict = 'doc_search_unreachable'
+            reasons.append('DocumentSearch is unreachable: ' + str(broad.get('error', 'unknown error'))[:120])
+            recs.append('Verify the SVC URL host is reachable from the backend and the credentials have search permission.')
+        elif not any_rest_ok and broad.get('ok') and broad.get('total', 0) == 0:
+            verdict = 'wrench_instance_empty'
+            reasons.append('No REST per-transmittal endpoint exists AND DocumentSearch is reachable but empty.')
+            recs.append('This Wrench instance has no documents indexed at all — check with the Wrench administrator.')
+
+        report['conclusion'] = {'verdict': verdict, 'reasons': reasons, 'recommendations': recs}
+        return Response(report, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='document-download')
     def document_download(self, request):
