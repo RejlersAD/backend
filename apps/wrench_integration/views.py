@@ -553,6 +553,23 @@ class WrenchSyncViewSet(viewsets.ViewSet):
                 page_size=page_size,
             )
             result['svc_url_required'] = False
+
+            # ── Soft-coded transmittal-as-document fallback ────────────────
+            # If the core strategies returned zero documents, try synthesizing
+            # documents directly from the transmittal list (some tenants do not
+            # expose any per-transmittal document endpoint; transmittal rows
+            # themselves carry TRANS_REF_NO, TRANS_DESC, REPORT_FILE_ID, etc.).
+            if not result.get('documents'):
+                try:
+                    fb = wrench_service.synthesize_documents_from_transmittal_list(
+                        cfg, order_no=order_no, page=page, page_size=page_size,
+                    )
+                    if fb.get('documents'):
+                        result = fb
+                        result['fallback_used'] = 'transmittal_list'
+                except Exception as fb_exc:  # noqa: BLE001
+                    logger.warning('[Wrench] transmittal fallback failed for %s: %s', order_no, fb_exc)
+
             _TRANS_DOC_RESULT_CACHE[cache_key] = {
                 'payload':    result,
                 'expires_at': _time.time() + _TRANS_DOC_CACHE_TTL_SECONDS,
@@ -560,6 +577,21 @@ class WrenchSyncViewSet(viewsets.ViewSet):
             return Response(result, status=status.HTTP_200_OK)
         except RuntimeError as exc:
             logger.warning('[Wrench] trans_documents: all strategies failed for order_no=%s: %s', order_no, exc)
+            # Try the transmittal-as-document fallback even when the core service raised
+            try:
+                fb = wrench_service.synthesize_documents_from_transmittal_list(
+                    cfg, order_no=order_no, page=page, page_size=page_size,
+                )
+                if fb.get('documents'):
+                    fb['fallback_used'] = 'transmittal_list'
+                    _TRANS_DOC_RESULT_CACHE[cache_key] = {
+                        'payload':    fb,
+                        'expires_at': _time.time() + _TRANS_DOC_CACHE_TTL_SECONDS,
+                    }
+                    return Response(fb, status=status.HTTP_200_OK)
+            except Exception as fb_exc:  # noqa: BLE001
+                logger.warning('[Wrench] transmittal fallback (post-error) failed: %s', fb_exc)
+
             if _RETURN_EMPTY_ON_EXHAUSTED_STRATEGIES:
                 # Soft-fail: respond 200 with an empty document list + diagnostic
                 # note. This lets the frontend render an informative empty-state
@@ -999,16 +1031,19 @@ class WrenchSyncViewSet(viewsets.ViewSet):
             documents = doc_payload.get('documents') or []
         except Exception as exc:
             logger.warning('[Wrench] pid-recommendations: doc fetch failed: %s', exc)
-            return Response(
-                {
-                    'order_no':         order_no,
-                    'matched_via':      matched_via,
-                    'total_scanned':    0,
-                    'recommendations':  [],
-                    'note':             f'Failed to fetch documents from Wrench: {str(exc)[:200]}',
-                },
-                status=status.HTTP_200_OK,
-            )
+            documents = []
+
+        # Soft-coded fallback: synthesize documents from transmittal rows
+        # whenever the core fetch returned nothing (common on tenants where
+        # DocumentSearch is empty and per-transmittal REST is unavailable).
+        if not documents:
+            try:
+                fb = wrench_service.synthesize_documents_from_transmittal_list(
+                    cfg, order_no=order_no, page=1, page_size=_PAGE_SIZE_SCAN,
+                )
+                documents = fb.get('documents') or []
+            except Exception as fb_exc:  # noqa: BLE001
+                logger.warning('[Wrench] pid-recommendations: transmittal fallback failed: %s', fb_exc)
 
         if not documents:
             return Response(

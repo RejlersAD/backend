@@ -1046,6 +1046,96 @@ def _flatten_doc_rows(raw_list: list) -> list:
     return documents
 
 
+# ─── Soft-coded transmittal-as-document fallback ─────────────────────────────
+# Some Wrench tenants (including Rejlers Live) do not expose any per-transmittal
+# document endpoint, and DocumentSearch returns zero rows. In that case the
+# transmittal rows themselves carry enough metadata to *be* documents:
+#   • TRANS_REF_NO       → unique document number
+#   • TRANS_DESC         → document title (falls back to TRANS_TYPE_CODE)
+#   • REPORT_FILE_ID     → file identifier for download
+#   • STATUS_DESC        → revision/status
+#   • CREATED_ON         → date
+# This helper synthesizes a documents[] payload from the transmittal list,
+# keyed by ORDER_NO. It is invoked by the view layer ONLY when the existing
+# core strategies return zero documents — core logic in get_transmittal_documents
+# stays untouched.
+_TRANSMITTAL_DOC_FIELD_MAP = {
+    'DOC_NO':          ('TRANS_REF_NO',  'TRANS_ID'),
+    'DOC_DESCRIPTION': ('TRANS_DESC',    'TRANS_TYPE_CODE', 'ORDER_DESCRIPTION'),
+    'REVISION':        ('STATUS_DESC',   'REV_SERIES_ID'),
+    'DOC_DATE':        ('CREATED_ON',    'RELEASED_ON'),
+    'FILE_ID':         ('REPORT_FILE_ID',),
+    'DISCIPLINE':      ('TRANS_TYPE_CODE',),
+    'ORDER_NO':        ('ORDER_NO',),
+    'TRANS_ID':        ('TRANS_ID',),
+}
+# Document number prefixes that strongly suggest a P&ID-related drawing.
+# Used downstream by the recommender; harmless if no match.
+_TRANSMITTAL_FALLBACK_MAX_ROWS = 200_000   # large slice covers the full tenant in one call
+                                            # (upstream API returns everything in a single page anyway)
+
+
+def _row_first_nonempty(row: dict, keys: tuple) -> str:
+    for k in keys:
+        v = row.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return ''
+
+
+def synthesize_documents_from_transmittal_list(
+    cfg: WrenchConfig,
+    *,
+    order_no: str,
+    page: int = 1,
+    page_size: int = 200,
+) -> dict:
+    """
+    Synthesize a documents[] payload by filtering the transmittal list to a
+    given ORDER_NO. Used as a last-resort fallback when neither per-transmittal
+    REST endpoints nor DocumentSearch return any rows.
+
+    Returns the same shape as `get_transmittal_documents`:
+      { 'total', 'documents', 'source': 'transmittal_list', 'page', 'page_size' }
+    """
+    tx = get_transmittals(cfg, page=1, page_size=_TRANSMITTAL_FALLBACK_MAX_ROWS)
+    all_rows = tx.get('transmittals') or []
+    matching = [r for r in all_rows
+                if (str(r.get('ORDER_NO') or '').strip() == str(order_no).strip())]
+
+    documents = []
+    for row in matching:
+        synth = {}
+        for out_key, src_keys in _TRANSMITTAL_DOC_FIELD_MAP.items():
+            synth[out_key] = _row_first_nonempty(row, src_keys)
+        # Keep the original raw row under a discoverable key for the recommender.
+        synth['_raw_transmittal'] = row
+        documents.append(synth)
+
+    # Apply pagination on the synthesized list.
+    total = len(documents)
+    start = max(0, (page - 1) * page_size)
+    end   = start + page_size
+    page_slice = documents[start:end]
+
+    logger.info(
+        '[Wrench] transmittal-as-document fallback: %d transmittals for ORDER_NO=%s → %d synthesized docs',
+        len(matching), order_no, total,
+    )
+
+    return {
+        'total':            total,
+        'documents':        page_slice,
+        'source':           'transmittal_list',
+        'page':             page,
+        'page_size':        page_size,
+        'svc_url_required': False,
+    }
+
+
 def get_transmittal_documents(
     cfg: WrenchConfig,
     *,
