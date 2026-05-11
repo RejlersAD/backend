@@ -1370,6 +1370,31 @@ class WrenchS3SyncViewSet(viewsets.ViewSet):
     ]
     _DEFAULT_S3_PREFIX = 'wrench/'
 
+    # Soft-coded: when the Celery broker is unreachable on Railway, .apply_async()
+    # raises kombu.exceptions.OperationalError. We surface a clean JSON 503 so the
+    # frontend can show a useful message instead of a generic HTML 500 page.
+    @staticmethod
+    def _safe_dispatch(task_func, *, args, job):
+        """Dispatch a Celery task and translate broker errors into clean responses."""
+        try:
+            return task_func.apply_async(args=args), None
+        except Exception as exc:                                   # noqa: BLE001
+            logger.exception('[S3 View] dispatch failed for job_id=%s task=%s: %s',
+                             job.id, getattr(task_func, 'name', task_func), exc)
+            # Mark the job failed so it doesn't sit in pending forever
+            job.status = WrenchS3SyncJob.STATUS_FAILED
+            job.error_message = f'Celery dispatch failed: {exc}'[:500]
+            try:
+                job.save(update_fields=['status', 'error_message', 'updated_at'])
+            except Exception:                                      # noqa: BLE001
+                pass
+            return None, Response(
+                {'detail': 'Could not enqueue the export task. The task broker '
+                          f'(Redis) appears unreachable. ({exc})',
+                 'job_id': job.id, 'job_status': job.status},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
     def list(self, request):
         jobs = WrenchS3SyncJob.objects.select_related('triggered_by').order_by('-started_at')[:50]
         return Response(WrenchS3SyncJobSerializer(jobs, many=True).data)
@@ -1436,11 +1461,13 @@ class WrenchS3SyncViewSet(viewsets.ViewSet):
             status=WrenchS3SyncJob.STATUS_PENDING,
         )
 
-        # Dispatch async — never block the request
+        # Dispatch async — never block the request. Broker failure -> clean 503.
         if mode == WrenchS3SyncJob.MODE_BATCH:
-            task = wrench_s3_batch_export.apply_async(args=[job.id])
+            task, err = self._safe_dispatch(wrench_s3_batch_export, args=[job.id], job=job)
         else:
-            task = wrench_s3_realtime_tick.apply_async(args=[job.id])
+            task, err = self._safe_dispatch(wrench_s3_realtime_tick, args=[job.id], job=job)
+        if err is not None:
+            return err
 
         job.celery_task_id = task.id
         job.save(update_fields=['celery_task_id', 'updated_at'])
@@ -1551,9 +1578,11 @@ class WrenchS3SyncViewSet(viewsets.ViewSet):
         )
 
         if mode == WrenchS3SyncJob.MODE_BATCH:
-            task = wrench_s3_project_export.apply_async(args=[job.id])
+            task, err = self._safe_dispatch(wrench_s3_project_export, args=[job.id], job=job)
         else:
-            task = wrench_s3_project_export_tick.apply_async(args=[job.id])
+            task, err = self._safe_dispatch(wrench_s3_project_export_tick, args=[job.id], job=job)
+        if err is not None:
+            return err
 
         job.celery_task_id = task.id
         job.save(update_fields=['celery_task_id', 'updated_at'])
@@ -1629,7 +1658,9 @@ class WrenchS3SyncViewSet(viewsets.ViewSet):
             job_details={'order_no': order_no, 'kind': self._LIBRARY_WATCHER_LABEL},
         )
 
-        task = wrench_s3_library_watcher_tick.apply_async(args=[job.id])
+        task, err = self._safe_dispatch(wrench_s3_library_watcher_tick, args=[job.id], job=job)
+        if err is not None:
+            return err
         job.celery_task_id = task.id
         job.save(update_fields=['celery_task_id', 'updated_at'])
 
