@@ -40,6 +40,16 @@ _VERIFY_SEARCH_TIMEOUT    = 25       # seconds, per SearchObject probe
 _VERIFY_SAMPLE_SIZE       = 3        # number of docs to include as evidence
 _VERIFY_BROAD_PAGE_SIZE   = 5        # tiny page for the broad SVC connectivity check
 
+# ─── Soft-coded constants for the Wrench project (transmittal) dropdown ─────
+# Used by `list_projects` to power the project-number selector on the PID
+# Verification page. Cached per config to keep the dropdown snappy.
+_PROJECTS_CACHE: dict = {}                          # { cfg_id: (ts, payload) }
+_PROJECTS_CACHE_TTL_SECONDS = 10 * 60               # 10-min TTL — admins can refresh via ?refresh=1
+_PROJECTS_FETCH_PAGE_SIZE   = 500                   # Wrench tenant returns ≤500 per call
+_PROJECTS_MAX_PAGES         = 10                    # safety cap → up to 5,000 transmittals
+_PROJECTS_ORDER_NO_KEYS     = ('ORDER_NO', 'OrderNo', 'order_no')
+_PROJECTS_DESC_KEYS         = ('ORDER_DESCRIPTION', 'OrderDescription', 'order_description', 'PROJECT_NAME')
+
 
 class WrenchConfigViewSet(viewsets.ViewSet):
     """
@@ -736,6 +746,94 @@ class WrenchSyncViewSet(viewsets.ViewSet):
 
         report['conclusion'] = {'verdict': verdict, 'reasons': reasons, 'recommendations': recs}
         return Response(report, status=status.HTTP_200_OK)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Lightweight project / transmittal dropdown feed.
+    # Powers the "Project Number" selector on the PID Verification page.
+    # Soft-coded constants live at the top of this module — admins can tune
+    # TTL / page-size / field aliases without touching this function.
+    # ─────────────────────────────────────────────────────────────────────
+    @action(detail=False, methods=['get'], url_path='projects')
+    def list_projects(self, request):
+        """
+        GET /api/v1/wrench/sync/projects/?refresh=0
+        Returns a deduplicated, alphabetically-sorted list of Wrench projects
+        (one entry per unique ORDER_NO) suitable for a <select> dropdown.
+
+        Response:
+          { "total": N, "cached": bool, "projects": [
+                { "order_no": "5900647", "order_description": "...", "label": "5900647 — ..." }
+            ] }
+        """
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        if not cfg:
+            return Response(
+                {'detail': 'No active Wrench configuration. Please configure the integration first.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        refresh = str(request.query_params.get('refresh', '')).lower() in ('1', 'true', 'yes')
+
+        # ── Soft cache hit ────────────────────────────────────────────────
+        now = _time.time()
+        cached = _PROJECTS_CACHE.get(cfg.id)
+        if not refresh and cached and (now - cached[0]) < _PROJECTS_CACHE_TTL_SECONDS:
+            payload = dict(cached[1])
+            payload['cached'] = True
+            return Response(payload, status=status.HTTP_200_OK)
+
+        # ── Pull transmittals page-by-page (soft-fail per page) ───────────
+        projects: dict = {}   # order_no → order_description (longest wins)
+        try:
+            for page in range(1, _PROJECTS_MAX_PAGES + 1):
+                try:
+                    chunk = wrench_service.get_transmittals(
+                        cfg, page=page, page_size=_PROJECTS_FETCH_PAGE_SIZE,
+                    )
+                except Exception as page_exc:  # noqa: BLE001 — soft-fail one page only
+                    logger.warning('[Wrench] list_projects: page=%s failed: %s', page, page_exc)
+                    break
+
+                rows = chunk.get('transmittals') or chunk.get('items') or chunk.get('results') or []
+                if not rows:
+                    break
+
+                for row in rows:
+                    order_no = next((str(row.get(k)).strip() for k in _PROJECTS_ORDER_NO_KEYS
+                                     if row.get(k) is not None and str(row.get(k)).strip()), '')
+                    if not order_no:
+                        continue
+                    desc = next((str(row.get(k)).strip() for k in _PROJECTS_DESC_KEYS
+                                 if row.get(k) is not None and str(row.get(k)).strip()), '')
+                    existing = projects.get(order_no, '')
+                    if len(desc) > len(existing):
+                        projects[order_no] = desc
+
+                # Stop when last page returned fewer rows than requested
+                if len(rows) < _PROJECTS_FETCH_PAGE_SIZE:
+                    break
+        except RuntimeError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_424_FAILED_DEPENDENCY)
+        except Exception as exc:  # noqa: BLE001
+            logger.error('[Wrench] list_projects unexpected error: %s', exc, exc_info=True)
+            return Response(
+                {'detail': 'Failed to load Wrench projects. Check server logs.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        items = [
+            {
+                'order_no':          ono,
+                'order_description': desc,
+                'label':             f'{ono} — {desc}' if desc else ono,
+            }
+            for ono, desc in projects.items()
+        ]
+        items.sort(key=lambda r: r['order_no'])
+
+        payload = {'total': len(items), 'cached': False, 'projects': items}
+        _PROJECTS_CACHE[cfg.id] = (now, payload)
+        return Response(payload, status=status.HTTP_200_OK)
 
     # ─────────────────────────────────────────────────────────────────────
     # AI-assisted P&ID document recommendation (PID Verification page).
