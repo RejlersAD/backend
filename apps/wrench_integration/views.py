@@ -1487,3 +1487,175 @@ class WrenchS3SyncViewSet(viewsets.ViewSet):
             user_agent=request.META.get('HTTP_USER_AGENT', ''),
         )
         return Response(WrenchS3SyncJobSerializer(job).data)
+
+    # ────────────────────────────────────────────────────────────────────
+    # PROJECT DOCUMENT MIRROR (Wrench → S3, actual file bytes)
+    # Additive: reuses existing job model with entity_type='documents' and
+    # stores the ORDER_NO inside job.job_details. No core logic modified.
+    # ────────────────────────────────────────────────────────────────────
+
+    # Soft-coded label for project-export jobs in audit logs.
+    _PROJECT_EXPORT_LABEL = 'project_documents'
+
+    @action(detail=False, methods=['post'], url_path='project-export')
+    def project_export(self, request):
+        """
+        Start a Wrench → S3 mirror for an entire project (ORDER_NO).
+
+        Body:
+          order_no  – required (e.g. "5900620")
+          mode      – 'batch' | 'realtime'   (default: 'batch')
+          s3_prefix – optional                (default: 'wrench/')
+        """
+        from .tasks import wrench_s3_project_export, wrench_s3_project_export_tick
+
+        order_no  = str(request.data.get('order_no') or '').strip()
+        mode      = request.data.get('mode', WrenchS3SyncJob.MODE_BATCH)
+        s3_prefix = request.data.get('s3_prefix', self._DEFAULT_S3_PREFIX) or self._DEFAULT_S3_PREFIX
+
+        if not order_no:
+            return Response({'detail': 'order_no is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if mode not in self._VALID_MODES:
+            return Response({'detail': f'Invalid mode. Choose from {self._VALID_MODES}.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        if not cfg:
+            return Response(
+                {'detail': 'No active Wrench configuration.'},
+                status=status.HTTP_424_FAILED_DEPENDENCY,
+            )
+
+        # Avoid duplicate running export for the same project
+        running = WrenchS3SyncJob.objects.filter(
+            status=WrenchS3SyncJob.STATUS_IN_PROGRESS,
+            entity_type=WrenchS3SyncJob.ENTITY_DOCUMENTS,
+            job_details__order_no=order_no,
+        ).first()
+        if running:
+            return Response(
+                {'detail': f'Project export already running (job_id={running.id}).',
+                 'job_id': running.id},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        job = WrenchS3SyncJob.objects.create(
+            config=cfg,
+            triggered_by=request.user,
+            mode=mode,
+            entity_type=WrenchS3SyncJob.ENTITY_DOCUMENTS,
+            s3_prefix=s3_prefix,
+            status=WrenchS3SyncJob.STATUS_PENDING,
+            job_details={'order_no': order_no, 'kind': self._PROJECT_EXPORT_LABEL},
+        )
+
+        if mode == WrenchS3SyncJob.MODE_BATCH:
+            task = wrench_s3_project_export.apply_async(args=[job.id])
+        else:
+            task = wrench_s3_project_export_tick.apply_async(args=[job.id])
+
+        job.celery_task_id = task.id
+        job.save(update_fields=['celery_task_id', 'updated_at'])
+
+        create_audit_log(
+            user=request.user,
+            action='execute',
+            resource_type='WrenchS3SyncJob',
+            resource_id=None,
+            resource_repr=str(job),
+            metadata={'job_id': job.id, 'mode': mode,
+                      'kind': self._PROJECT_EXPORT_LABEL, 'order_no': order_no},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+        )
+
+        logger.info('[S3 ProjDocs] Dispatched %s job=%d order_no=%s task=%s',
+                    mode, job.id, order_no, task.id)
+        return Response(WrenchS3SyncJobSerializer(job).data,
+                        status=status.HTTP_201_CREATED)
+
+    # ────────────────────────────────────────────────────────────────────
+    # LIBRARY MIRROR WATCHER — keep S3 in sync with Wrench library in realtime
+    # ────────────────────────────────────────────────────────────────────
+
+    _LIBRARY_WATCHER_LABEL = 'library_watcher'
+
+    @action(detail=False, methods=['post'], url_path='library-watch/start')
+    def library_watch_start(self, request):
+        """
+        Start a continuous Wrench → S3 library-mirror watcher for a project.
+
+        Body:
+          order_no  – required
+          s3_prefix – optional (default 'wrench/')
+        """
+        from .tasks import wrench_s3_library_watcher_tick
+
+        order_no  = str(request.data.get('order_no') or '').strip()
+        s3_prefix = request.data.get('s3_prefix', self._DEFAULT_S3_PREFIX) or self._DEFAULT_S3_PREFIX
+
+        if not order_no:
+            return Response({'detail': 'order_no is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        if not cfg:
+            return Response(
+                {'detail': 'No active Wrench configuration.'},
+                status=status.HTTP_424_FAILED_DEPENDENCY,
+            )
+
+        running = WrenchS3SyncJob.objects.filter(
+            status=WrenchS3SyncJob.STATUS_IN_PROGRESS,
+            entity_type=WrenchS3SyncJob.ENTITY_DOCUMENTS,
+            job_details__order_no=order_no,
+            job_details__kind=self._LIBRARY_WATCHER_LABEL,
+        ).first()
+        if running:
+            return Response(
+                {'detail': f'Library watcher already running (job_id={running.id}).',
+                 'job_id': running.id},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        job = WrenchS3SyncJob.objects.create(
+            config=cfg,
+            triggered_by=request.user,
+            mode=WrenchS3SyncJob.MODE_REALTIME,
+            entity_type=WrenchS3SyncJob.ENTITY_DOCUMENTS,
+            s3_prefix=s3_prefix,
+            status=WrenchS3SyncJob.STATUS_PENDING,
+            job_details={'order_no': order_no, 'kind': self._LIBRARY_WATCHER_LABEL},
+        )
+
+        task = wrench_s3_library_watcher_tick.apply_async(args=[job.id])
+        job.celery_task_id = task.id
+        job.save(update_fields=['celery_task_id', 'updated_at'])
+
+        create_audit_log(
+            user=request.user, action='execute',
+            resource_type='WrenchS3SyncJob', resource_id=None,
+            resource_repr=str(job),
+            metadata={'job_id': job.id, 'kind': self._LIBRARY_WATCHER_LABEL,
+                      'order_no': order_no},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+        )
+        logger.info('[S3 LibWatcher] Started job=%d order_no=%s', job.id, order_no)
+        return Response(WrenchS3SyncJobSerializer(job).data,
+                        status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['get'], url_path='library-watch/status')
+    def library_watch_status(self, request):
+        """
+        List active library-mirror watchers, optionally filtered by order_no.
+        """
+        order_no = (request.query_params.get('order_no') or '').strip()
+        qs = WrenchS3SyncJob.objects.filter(
+            job_details__kind=self._LIBRARY_WATCHER_LABEL,
+        )
+        if order_no:
+            qs = qs.filter(job_details__order_no=order_no)
+        qs = qs.order_by('-started_at')[:20]
+        return Response(WrenchS3SyncJobSerializer(qs, many=True).data)

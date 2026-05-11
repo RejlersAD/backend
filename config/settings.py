@@ -1063,6 +1063,13 @@ else:
     STATIC_URL = '/static/'
     STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
+# ─────────────────────────────────────────────────────────────────────
+# Wrench → S3 Export — dedicated bucket (soft-coded via env var)
+# Set `WRENCH_S3_BUCKET` in .env / Railway. Falls back to 'wrench-radai'.
+# Used by apps.wrench_integration.s3_service._get_bucket()
+# ─────────────────────────────────────────────────────────────────────
+WRENCH_S3_BUCKET = config('WRENCH_S3_BUCKET', default='wrench-radai')
+
 # OpenAI Configuration (existing)
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o')
