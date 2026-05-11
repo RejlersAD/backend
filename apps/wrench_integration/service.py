@@ -21,8 +21,34 @@ logger = logging.getLogger(__name__)
 # Timeouts
 _TIMEOUT_FAST = 15       # login / health
 _TIMEOUT_SEARCH = 90     # document/transmittal search (Wrench returns full dataset)
+_TIMEOUT_PROBE  = 8      # soft-coded shorter timeout for endpoint-existence probes
+                          # (used when iterating fallback REST paths that may 404)
 # Token freshness window – re-login if token older than this
 _TOKEN_MAX_AGE_MINUTES = 55
+
+# ─── Soft-coded per-host endpoint capability cache ───────────────────────────
+# Persists across requests within the Django process. Keyed by base_url so each
+# Wrench instance has its own profile. Values:
+#   • dead_paths      → set of REST paths that returned 404 (skip on retry)
+#   • winning_path    → first path that returned data for get_transmittal_documents
+#                       (tried FIRST on subsequent calls)
+#   • exhausted_until → epoch timestamp; while in the future, skip all REST
+#                       probes for trans-documents and jump straight to fallback
+# The cache is in-memory only — restart the backend to clear it.
+_WRENCH_ENDPOINT_PROFILE: dict = {}
+# How long to remember "all REST paths failed for this host" before re-probing.
+# Soft-coded; tune via WRENCH_EXHAUSTED_TTL_SECONDS env if needed.
+_TRANS_DOC_EXHAUSTED_TTL_SECONDS = 15 * 60   # 15 minutes
+
+
+def _host_profile(cfg: WrenchConfig) -> dict:
+    """Get or create the per-host capability profile."""
+    key = (cfg.base_url or '').strip().rstrip('/').lower()
+    prof = _WRENCH_ENDPOINT_PROFILE.get(key)
+    if prof is None:
+        prof = {'dead_paths': set(), 'winning_path': None, 'exhausted_until': 0.0}
+        _WRENCH_ENDPOINT_PROFILE[key] = prof
+    return prof
 
 
 # ─── Soft-coded SVC URL discovery patterns ───────────────────────────────────
@@ -1054,84 +1080,97 @@ def get_transmittal_documents(
     if trans_id:
         base_payload['TRANS_ID'] = trans_id
 
-    # ── Strategy 1: Transmittal-specific REST paths ───────────────────────────
-    for path in _TRANS_DOC_REST_PATHS:
+    # ── Soft-coded fast-path via per-host capability cache ───────────────────
+    # Skip REST probing entirely when:
+    #   • we already learned all REST paths 404 for this host (within TTL), OR
+    #   • we remember a winning path → try it FIRST (and only it from strategy 1+2)
+    import time as _time
+    profile        = _host_profile(cfg)
+    dead_paths     = profile['dead_paths']
+    winning_path   = profile['winning_path']
+    exhausted_until = profile['exhausted_until']
+    skip_rest      = (exhausted_until and _time.time() < exhausted_until)
+
+    # Build the ordered REST candidate list, honouring cache hints
+    strategy1_paths = list(_TRANS_DOC_REST_PATHS)
+    strategy2_paths = [_DOC_LIST_URL_PATH] + list(_DOC_LIST_ALT_PATHS)
+    if winning_path:
+        # Try winner first; remove duplicates further down the list
+        if winning_path in strategy1_paths:
+            strategy1_paths = [winning_path] + [p for p in strategy1_paths if p != winning_path]
+        elif winning_path in strategy2_paths:
+            strategy2_paths = [winning_path] + [p for p in strategy2_paths if p != winning_path]
+
+    def _attempt_rest(path: str, timeout: int) -> dict | None:
+        """Returns a result dict on success, None on 404/error (so caller continues)."""
+        if path in dead_paths:
+            return None
         url = _api_url(cfg, path)
-        logger.info('[Wrench] get_transmittal_documents: trying %s (order_no=%s)', url, order_no)
         try:
-            resp = requests.post(url, json=base_payload, timeout=_TIMEOUT_SEARCH)
+            resp = requests.post(url, json=base_payload, timeout=timeout)
             if resp.status_code == 404:
-                logger.debug('[Wrench] %s → 404, trying next', url)
-                continue
+                dead_paths.add(path)
+                logger.debug('[Wrench] %s → 404 (cached as dead)', url)
+                return None
             resp.raise_for_status()
             data = resp.json()
             _refresh_token_from_response(cfg, data)
-
-            # Try each candidate DataList key
             raw_list = []
             for key in _TRANS_DOC_DATA_KEYS:
                 raw_list = data.get('DataList', {}).get(key, [])
                 if raw_list:
-                    logger.info('[Wrench] found %d doc rows under DataList.%s', len(raw_list), key)
                     break
-
-            # Also check top-level lists in case the response is unwrapped
             if not raw_list:
-                raw_list = data.get('DocumentList', [])
-            if not raw_list:
-                raw_list = data.get('ObjectSearchResults', [])
-
+                raw_list = (
+                    data.get('DataList', {}).get(_DOC_LIST_DATA_KEY, [])
+                    or data.get('DataList', {}).get('DOCUMENT', [])
+                    or data.get('DocumentList', [])
+                    or data.get('ObjectSearchResults', [])
+                )
             documents = _flatten_doc_rows(raw_list)
-
-            # Accept empty list as valid success — the transmittal may genuinely have no docs
             total = len(documents)
             start = (page - 1) * page_size
+            profile['winning_path'] = path           # remember success
+            profile['exhausted_until'] = 0.0
             return {
                 'total':     total,
                 'documents': documents[start: start + page_size],
                 'source':    f'rest:{path}',
             }
-
         except requests.exceptions.HTTPError as exc:
             logger.debug('[Wrench] HTTP error on %s: %s', url, exc)
-            continue
+            return None
         except Exception as exc:
             logger.debug('[Wrench] Unexpected error on %s: %s', url, exc)
-            continue
+            return None
 
-    # ── Strategy 2: Generic Document list endpoint (GetDocumentList + alts) ──
-    doc_list_paths = [_DOC_LIST_URL_PATH] + _DOC_LIST_ALT_PATHS
-    for path in doc_list_paths:
-        url = _api_url(cfg, path)
-        logger.info('[Wrench] get_transmittal_documents: fallback to %s', url)
-        try:
-            resp = requests.post(url, json=base_payload, timeout=_TIMEOUT_SEARCH)
-            if resp.status_code == 404:
-                logger.debug('[Wrench] %s → 404', url)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            _refresh_token_from_response(cfg, data)
+    if not skip_rest:
+        # ── Strategy 1: Transmittal-specific REST paths ──────────────────────
+        for path in strategy1_paths:
+            result = _attempt_rest(path, _TIMEOUT_PROBE if winning_path != path else _TIMEOUT_SEARCH)
+            if result is not None:
+                return result
 
-            raw_list = (
-                data.get('DataList', {}).get(_DOC_LIST_DATA_KEY, [])
-                or data.get('DataList', {}).get('DOCUMENT', [])
-                or data.get('DocumentList', [])
-            )
-            documents = _flatten_doc_rows(raw_list)
-            total = len(documents)
-            start = (page - 1) * page_size
-            return {
-                'total':     total,
-                'documents': documents[start: start + page_size],
-                'source':    f'rest:{path}',
-            }
-        except Exception as exc:
-            logger.debug('[Wrench] Doc-list fallback error on %s: %s', url, exc)
-            continue
+        # ── Strategy 2: Generic Document list endpoints ──────────────────────
+        for path in strategy2_paths:
+            result = _attempt_rest(path, _TIMEOUT_PROBE if winning_path != path else _TIMEOUT_SEARCH)
+            if result is not None:
+                return result
+
+        # All REST paths failed → mark host as exhausted to skip probes for TTL
+        profile['exhausted_until'] = _time.time() + _TRANS_DOC_EXHAUSTED_TTL_SECONDS
+        logger.info(
+            '[Wrench] All REST trans-doc paths failed for host; caching exhausted state for %ds',
+            _TRANS_DOC_EXHAUSTED_TTL_SECONDS,
+        )
+    else:
+        logger.info(
+            '[Wrench] Skipping REST trans-doc probing (host previously exhausted; %.0fs remain)',
+            exhausted_until - _time.time(),
+        )
 
     # ── Strategy 3: DocumentSearch/SearchObject with ORDER_NO criterion ───────
-    logger.info('[Wrench] get_transmittal_documents: all REST paths failed, trying DocumentSearch (order_no=%s)', order_no)
+    logger.info('[Wrench] get_transmittal_documents: trying DocumentSearch fallback (order_no=%s)', order_no)
     try:
         result = search_documents(cfg, page=page, page_size=page_size, order_no=order_no)
         result['source'] = 'document_search'
@@ -1142,7 +1181,7 @@ def get_transmittal_documents(
     raise RuntimeError(
         f'No Wrench endpoint returned document data for transmittal ORDER_NO={order_no}. '
         f'Tried transmittal-specific paths ({_TRANS_DOC_REST_PATHS}), '
-        f'generic document paths ({doc_list_paths}), and DocumentSearch. '
+        f'generic document paths ({[_DOC_LIST_URL_PATH] + list(_DOC_LIST_ALT_PATHS)}), and DocumentSearch. '
         'Check that the Wrench WebAPI exposes document listing, or configure a DocumentSearch SVC URL.'
     )
 

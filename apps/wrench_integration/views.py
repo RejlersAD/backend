@@ -4,6 +4,7 @@ All endpoints require IsAdmin permission (Admin or Super Admin only).
 """
 import logging
 import requests as http_lib
+import time as _time
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -23,6 +24,13 @@ from .serializers import (
 from . import service as wrench_service
 
 logger = logging.getLogger(__name__)
+
+# ─── Soft-coded in-memory cache for trans_documents responses ────────────────
+# Keyed by (config_id, order_no, trans_id, page, page_size). TTL is short so
+# users still see fresh data when they reload, but repeated clicks within a
+# session return instantly. Tunable via constants below.
+_TRANS_DOC_RESULT_CACHE: dict = {}
+_TRANS_DOC_CACHE_TTL_SECONDS = 5 * 60   # 5 minutes per (project, page) entry
 
 
 class WrenchConfigViewSet(viewsets.ViewSet):
@@ -465,6 +473,11 @@ class WrenchSyncViewSet(viewsets.ViewSet):
         """
         # Soft-coded default page size for per-transmittal document fetch
         _TRANS_DOC_DEFAULT_PAGE_SIZE = 200
+        # When all Wrench REST + DocumentSearch strategies fail (instance does not
+        # expose any per-transmittal document endpoint), return an empty 200
+        # response with an informative `note` so the UI can render a friendly
+        # "no documents" state instead of a hard error toast.
+        _RETURN_EMPTY_ON_EXHAUSTED_STRATEGIES = True
 
         order_no = request.query_params.get('order_no', '').strip()
         trans_id = request.query_params.get('trans_id', '').strip() or None
@@ -485,6 +498,18 @@ class WrenchSyncViewSet(viewsets.ViewSet):
         page      = int(request.query_params.get('page', 1))
         page_size = min(int(request.query_params.get('page_size', _TRANS_DOC_DEFAULT_PAGE_SIZE)), 500)
 
+        # ── Soft-coded in-memory result cache ─────────────────────────────
+        # Allows ?refresh=1 to bypass. Hits return instantly, skipping the
+        # whole strategy chain.
+        cache_key   = (cfg.id, order_no, trans_id or '', page, page_size)
+        force_fresh = request.query_params.get('refresh', '').lower() in ('1', 'true', 'yes')
+        if not force_fresh:
+            cached = _TRANS_DOC_RESULT_CACHE.get(cache_key)
+            if cached and cached['expires_at'] > _time.time():
+                payload = dict(cached['payload'])
+                payload['cached'] = True
+                return Response(payload, status=status.HTTP_200_OK)
+
         try:
             result = wrench_service.get_transmittal_documents(
                 cfg,
@@ -494,9 +519,35 @@ class WrenchSyncViewSet(viewsets.ViewSet):
                 page_size=page_size,
             )
             result['svc_url_required'] = False
+            _TRANS_DOC_RESULT_CACHE[cache_key] = {
+                'payload':    result,
+                'expires_at': _time.time() + _TRANS_DOC_CACHE_TTL_SECONDS,
+            }
             return Response(result, status=status.HTTP_200_OK)
         except RuntimeError as exc:
             logger.warning('[Wrench] trans_documents: all strategies failed for order_no=%s: %s', order_no, exc)
+            if _RETURN_EMPTY_ON_EXHAUSTED_STRATEGIES:
+                # Soft-fail: respond 200 with an empty document list + diagnostic
+                # note. This lets the frontend render an informative empty-state
+                # instead of a 422 error toast — core service logic is unchanged.
+                empty_payload = {
+                    'total':            0,
+                    'documents':        [],
+                    'source':           'none',
+                    'svc_url_required': False,
+                    'note':             (
+                        'No documents are indexed in Wrench for this project. '
+                        'The Wrench WebAPI on this instance does not expose a '
+                        'per-transmittal document endpoint, and the DocumentSearch '
+                        'fallback returned no rows. If you expect documents here, '
+                        'verify the Wrench DocumentSearch SVC URL in Configuration.'
+                    ),
+                }
+                _TRANS_DOC_RESULT_CACHE[cache_key] = {
+                    'payload':    empty_payload,
+                    'expires_at': _time.time() + _TRANS_DOC_CACHE_TTL_SECONDS,
+                }
+                return Response(empty_payload, status=status.HTTP_200_OK)
             return Response(
                 {'detail': str(exc)},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
