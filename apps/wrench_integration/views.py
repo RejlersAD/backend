@@ -737,7 +737,249 @@ class WrenchSyncViewSet(viewsets.ViewSet):
         report['conclusion'] = {'verdict': verdict, 'reasons': reasons, 'recommendations': recs}
         return Response(report, status=status.HTTP_200_OK)
 
-    @action(detail=False, methods=['get'], url_path='document-download')
+    # ─────────────────────────────────────────────────────────────────────
+    # AI-assisted P&ID document recommendation (PID Verification page).
+    # Optional, soft-coded, no LLM call — uses deterministic scoring
+    # heuristics that admins can tune via the constants below.
+    # ─────────────────────────────────────────────────────────────────────
+    @action(detail=False, methods=['get'], url_path='pid-recommendations')
+    def pid_recommendations(self, request):
+        """
+        GET /api/v1/wrench/sync/pid-recommendations/
+              ?order_no=<ORDER_NO>                 (one of order_no / project_name required)
+              &project_name=<RADAI_PROJECT_NAME>   (fuzzy-matched against ORDER_DESCRIPTION)
+              &drawing_hint=<optional drawing/tag hint>
+              &top=<int, default 5>
+
+        Returns:
+          {
+            "order_no":            "...",
+            "matched_via":         "explicit" | "fuzzy_project_name" | "none",
+            "total_scanned":       N,
+            "recommendations":     [ { doc_no, doc_description, score, reasons[],
+                                       download_url, discipline, revision, file_ext } ],
+            "note":                "..." (optional diagnostic)
+          }
+        """
+        # ── Soft-coded recommendation knobs (tunable, no core-logic change) ──
+        # Higher score = more likely to be a P&ID. Negative = penalty.
+        _SCORE_WEIGHTS = {
+            'pid_keyword_strong': 50,   # "P&ID", "PIPING & INSTRUMENTATION"
+            'pid_keyword_loose':  30,   # "PID", "P-AND-ID"
+            'discipline_process': 25,
+            'discipline_instr':   15,
+            'pdf_extension':      20,
+            'dwg_extension':      15,
+            'drawing_hint_token': 10,
+            'latest_revision':    8,
+            'penalty_legend':    -15,   # legend sheets aren't the target P&ID
+            'penalty_index':     -20,   # document indexes / lists
+            'penalty_report':    -10,
+        }
+        _PID_KEYWORD_STRONG = ('P&ID', 'P AND ID', 'PIPING & INSTRUMENTATION', 'PIPING AND INSTRUMENTATION')
+        _PID_KEYWORD_LOOSE  = ('PID', 'P-ID', 'P-AND-ID')
+        _DISCIPLINE_PROCESS = ('PROCESS', 'PROC')
+        _DISCIPLINE_INSTR   = ('INSTRUMENT', 'INSTR', 'I&C', 'CONTROL')
+        _NEGATIVE_KEYWORDS  = {
+            'penalty_legend': ('LEGEND', 'SYMBOLS', 'NOTES SHEET', 'TYPICAL'),
+            'penalty_index':  ('DOCUMENT INDEX', 'DRAWING INDEX', 'DOC LIST', 'MASTER LIST', 'DRAWING LIST'),
+            'penalty_report': ('REPORT', 'CALCULATION', 'STUDY', 'MINUTES'),
+        }
+        _TOP_DEFAULT      = 5
+        _TOP_MAX          = 25
+        _PAGE_SIZE_SCAN   = 200       # docs scanned from Wrench per project
+        _FUZZY_MIN_SCORE  = 60        # 0-100 cutoff for project-name fuzzy match
+
+        try:
+            top_n = max(1, min(int(request.query_params.get('top', _TOP_DEFAULT)), _TOP_MAX))
+        except (TypeError, ValueError):
+            top_n = _TOP_DEFAULT
+
+        order_no      = (request.query_params.get('order_no') or '').strip()
+        project_name  = (request.query_params.get('project_name') or '').strip()
+        drawing_hint  = (request.query_params.get('drawing_hint') or '').strip()
+
+        if not order_no and not project_name:
+            return Response(
+                {'detail': 'Either order_no or project_name query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        if not cfg:
+            return Response(
+                {'detail': 'No active Wrench configuration.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        matched_via = 'explicit' if order_no else 'none'
+
+        # ── Fuzzy-match project_name → ORDER_NO via transmittal list ──────
+        if not order_no and project_name:
+            try:
+                from difflib import SequenceMatcher
+                tlist = wrench_service.get_transmittals(cfg, page=1, page_size=500)
+                rows  = tlist.get('transmittals') or tlist.get('TransmittalList') or []
+                best, best_score = None, 0
+                pn = project_name.lower()
+                for row in rows:
+                    desc = (row.get('ORDER_DESCRIPTION') or row.get('ORDER_DESC') or '').lower()
+                    if not desc:
+                        continue
+                    s = int(SequenceMatcher(None, pn, desc).ratio() * 100)
+                    if s > best_score:
+                        best_score, best = s, row
+                if best and best_score >= _FUZZY_MIN_SCORE:
+                    order_no    = str(best.get('ORDER_NO') or '').strip()
+                    matched_via = f'fuzzy_project_name(score={best_score})'
+            except Exception as exc:
+                logger.warning('[Wrench] pid-recommendations: fuzzy match failed: %s', exc)
+
+        if not order_no:
+            return Response(
+                {
+                    'order_no':         None,
+                    'matched_via':      matched_via,
+                    'total_scanned':    0,
+                    'recommendations':  [],
+                    'note':             f'Could not resolve a Wrench ORDER_NO from project name "{project_name}".',
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # ── Fetch documents for this project ─────────────────────────────
+        try:
+            doc_payload = wrench_service.get_transmittal_documents(
+                cfg, order_no=order_no, page=1, page_size=_PAGE_SIZE_SCAN,
+            )
+            documents = doc_payload.get('documents') or []
+        except Exception as exc:
+            logger.warning('[Wrench] pid-recommendations: doc fetch failed: %s', exc)
+            return Response(
+                {
+                    'order_no':         order_no,
+                    'matched_via':      matched_via,
+                    'total_scanned':    0,
+                    'recommendations':  [],
+                    'note':             f'Failed to fetch documents from Wrench: {str(exc)[:200]}',
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        if not documents:
+            return Response(
+                {
+                    'order_no':         order_no,
+                    'matched_via':      matched_via,
+                    'total_scanned':    0,
+                    'recommendations':  [],
+                    'note':             'No documents are indexed in Wrench for this project.',
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # ── Score every document with soft-coded heuristics ───────────────
+        hint_tokens = [t.lower() for t in drawing_hint.replace('-', ' ').replace('_', ' ').split() if len(t) >= 3]
+
+        def _score(doc):
+            text = ' '.join([
+                str(doc.get('DOC_NO') or ''),
+                str(doc.get('DOC_DESCRIPTION') or ''),
+                str(doc.get('DOC_TYPE') or ''),
+                str(doc.get('GENEALOGY_STRING') or ''),
+            ]).upper()
+            disc = (doc.get('DISCIPLINE') or '').upper()
+            doc_no_upper = str(doc.get('DOC_NO') or '').upper()
+            file_ext = (doc.get('FILE_EXT') or doc.get('EXTENSION') or '').lower().lstrip('.')
+            if not file_ext and '.' in doc_no_upper:
+                file_ext = doc_no_upper.rsplit('.', 1)[-1].lower()
+
+            score   = 0
+            reasons = []
+
+            if any(k in text for k in _PID_KEYWORD_STRONG):
+                score += _SCORE_WEIGHTS['pid_keyword_strong']
+                reasons.append('Strong P&ID keyword match')
+            elif any(k in text for k in _PID_KEYWORD_LOOSE):
+                score += _SCORE_WEIGHTS['pid_keyword_loose']
+                reasons.append('P&ID keyword match')
+
+            if any(k in disc for k in _DISCIPLINE_PROCESS):
+                score += _SCORE_WEIGHTS['discipline_process']
+                reasons.append(f'Process discipline ({disc})')
+            elif any(k in disc for k in _DISCIPLINE_INSTR):
+                score += _SCORE_WEIGHTS['discipline_instr']
+                reasons.append(f'Instrument discipline ({disc})')
+
+            if file_ext == 'pdf':
+                score += _SCORE_WEIGHTS['pdf_extension']
+                reasons.append('PDF format')
+            elif file_ext == 'dwg':
+                score += _SCORE_WEIGHTS['dwg_extension']
+                reasons.append('DWG format')
+
+            for tok in hint_tokens:
+                if tok.upper() in text:
+                    score += _SCORE_WEIGHTS['drawing_hint_token']
+                    reasons.append(f'Hint match: "{tok}"')
+
+            # Revision recency — soft, prefer higher numeric revision
+            rev = str(doc.get('REVISION') or doc.get('REV') or '').strip()
+            if rev:
+                try:
+                    rev_num = int(''.join(c for c in rev if c.isdigit()) or 0)
+                    if rev_num >= 1:
+                        score += _SCORE_WEIGHTS['latest_revision']
+                        reasons.append(f'Revision {rev}')
+                except Exception:
+                    pass
+
+            for label, words in _NEGATIVE_KEYWORDS.items():
+                if any(w in text for w in words):
+                    score += _SCORE_WEIGHTS[label]
+                    reasons.append(f'Penalty: {label.replace("penalty_", "")}')
+                    break
+
+            return score, reasons, file_ext
+
+        scored = []
+        for d in documents:
+            s, why, ext = _score(d)
+            if s <= 0:
+                continue   # not even loosely a P&ID
+            doc_no = str(d.get('DOC_NO') or '').strip()
+            idoc_id = str(d.get('IDOC_ID') or d.get('iDoc_Id') or d.get('iDocId') or '').strip()
+            scored.append({
+                'doc_no':           doc_no,
+                'doc_description':  d.get('DOC_DESCRIPTION') or '',
+                'discipline':       d.get('DISCIPLINE') or '',
+                'revision':         d.get('REVISION') or d.get('REV') or '',
+                'file_ext':         ext,
+                'score':            int(min(s, 100)),
+                'reasons':          why,
+                'download_url':     (
+                    f'/api/v1/wrench/sync/document-download/'
+                    f'?idoc_id={idoc_id}&doc_no={doc_no}'
+                ) if (idoc_id or doc_no) else None,
+            })
+
+        scored.sort(key=lambda r: r['score'], reverse=True)
+
+        return Response(
+            {
+                'order_no':         order_no,
+                'matched_via':      matched_via,
+                'total_scanned':    len(documents),
+                'recommendations':  scored[:top_n],
+                'note':             (
+                    f'AI ranked {len(scored)} candidate document(s) for project {order_no} using soft-coded '
+                    f'pattern-based scoring (no LLM call). Tune weights in pid_recommendations() if needed.'
+                ),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
     def document_download(self, request):
         """
         Proxy a Wrench document file download through the backend (auth handled server-side).
