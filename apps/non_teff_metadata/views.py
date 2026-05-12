@@ -23,7 +23,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-from .models import NonTeffExtractionJob
+from .models import NonTeffExtractionJob, NonTeffProject
 from .services.extractor import run_extraction_async
 from .services import history_archive
 
@@ -146,6 +146,23 @@ def upload_non_teff_file(request):
     tmp_path = tmp.name
     tmp.close()
 
+    # Resolve optional project assignment. Accepts either form-field
+    # `project_id` or `project` (soft-coded list of accepted names so the
+    # frontend can evolve without backend churn).
+    project_obj = None
+    PROJECT_FIELD_NAMES = ('project_id', 'project', 'projectId')
+    project_ref = ''
+    for name in PROJECT_FIELD_NAMES:
+        val = (request.data.get(name) or '').strip() if hasattr(request.data, 'get') else ''
+        if val:
+            project_ref = val
+            break
+    if project_ref:
+        try:
+            project_obj = NonTeffProject.objects.get(project_id=project_ref)
+        except (NonTeffProject.DoesNotExist, ValueError, Exception):
+            project_obj = None  # ignore bad references — upload still proceeds
+
     # Create DB job record
     job = NonTeffExtractionJob.objects.create(
         file_name=uploaded_file.name,
@@ -153,6 +170,7 @@ def upload_non_teff_file(request):
         status=NonTeffExtractionJob.STATUS_PENDING,
         status_message='Queued for extraction',
         created_by=request.user,
+        project=project_obj,
     )
 
     # Kick off async extraction

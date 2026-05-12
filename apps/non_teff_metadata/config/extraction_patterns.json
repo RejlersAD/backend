@@ -31,7 +31,10 @@
     ],
 
     "po_no": [
-      { "pattern": "\\b(?:P\\.?O\\.?|PURCHASE\\s+ORDER)\\s*(?:NO\\.?|NUMBER|#)?\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9\\-/]{4,30})", "flags": ["IGNORECASE"], "group": 1, "mode": "first" }
+      { "pattern": "\\bPURCHASE\\s+ORDER\\s*(?:NO\\.?|NUMBER|#)?\\s*[:\\-]\\s*([A-Z0-9][A-Z0-9\\-/]{4,30})\\b", "flags": ["IGNORECASE"], "group": 1, "mode": "first" },
+      { "pattern": "\\bP\\.O\\.\\s*(?:NO\\.?|NUMBER|#)\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9\\-/]{4,30})\\b", "flags": ["IGNORECASE"], "group": 1, "mode": "first" },
+      { "pattern": "\\bP\\.O\\.\\s*[:\\-]\\s*([A-Z0-9][A-Z0-9\\-/]{4,30})\\b", "flags": ["IGNORECASE"], "group": 1, "mode": "first" },
+      { "pattern": "\\bPO\\s*(?:NO\\.?|NUMBER|#)\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9\\-/]{4,30})\\b", "flags": ["IGNORECASE"], "group": 1, "mode": "first" }
     ],
 
     "contractor_ref": [

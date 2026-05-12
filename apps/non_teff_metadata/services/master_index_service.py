@@ -855,7 +855,11 @@ def _date_sort_key(token: str) -> Tuple[int, int, int]:
     """
     Return a (year, month, day) tuple suitable for sorting. Two-digit years
     are expanded with a 50/2050 cutoff so '99' → 1999, '20' → 2020. Tokens
-    that fail to parse get year=0.
+    that fail to parse — OR that parse to an impossible month/day — get
+    (0, 0, 0). Strict validation is critical because the date regex is
+    lenient enough to match document-number patterns like ``62-00-002``;
+    rejecting month=0/day=0 here prevents those from ever being treated as
+    a date downstream.
     """
     s = token.strip()
     # Try numeric formats first.
@@ -872,6 +876,11 @@ def _date_sort_key(token: str) -> Tuple[int, int, int]:
             if len(parts[0]) == 4:
                 year, month, day = a, b, c
             else:
+                # Reject patterns like "62-00-002" up-front: a 3-digit third
+                # part combined with a 2-digit second part that is zero is a
+                # very strong "document number, not date" signal.
+                if len(parts[2]) >= 3 and b == 0:
+                    return (0, 0, 0)
                 # Heuristic: if first or second part > 12 it must be the day
                 # (US style M/D/Y vs intl D/M/Y). Default to M/D/Y when
                 # neither is > 12 (matches the reference sample format).
@@ -882,6 +891,9 @@ def _date_sort_key(token: str) -> Tuple[int, int, int]:
                 year = c
             if year < 100:
                 year = year + (1900 if year >= 50 else 2000)
+            # Strict month/day validation — drops doc-number look-alikes.
+            if not (1 <= month <= 12) or not (1 <= day <= 31):
+                return (0, 0, 0)
             return (year, month, day)
     # Text month formats — try a couple of strptime patterns.
     from datetime import datetime
@@ -950,6 +962,112 @@ def _extract_issue_date_smart(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# SOFT-CODED standardised issue-date format.
+#
+# Reference sample uses US "MM/DD/YYYY" (e.g. "10/18/1993"). Whatever shape
+# the smart extractor returns (`3/10/2000`, `20-12-99`, `JAN 28 1999`,
+# `1993-10-18`, …) we normalise into this single format before writing the
+# row, so the UI column is always uniform. To change format globally, edit
+# `ISSUE_DATE_OUTPUT_FORMAT` — every consumer reads through here.
+# ---------------------------------------------------------------------------
+ISSUE_DATE_OUTPUT_FORMAT = '%m/%d/%Y'      # → '10/18/1993'
+# When True, any final issue-date value we cannot confidently parse into a
+# real (Y,M,D) is dropped to NA rather than left as raw garbage. Flip to
+# False to keep the original (possibly invalid) token in the cell.
+ISSUE_DATE_DROP_INVALID = True
+# Lower bound for a "real" plant document year. Anything < this from the
+# parser is treated as garbage and the original token is left untouched
+# (which the higher-layer NA filter will later replace if needed).
+_ISSUE_DATE_MIN_YEAR = 1900
+_ISSUE_DATE_MAX_YEAR = 2100
+
+
+def _normalise_issue_date(token: str) -> str:
+    """
+    Return ``token`` reformatted to ``ISSUE_DATE_OUTPUT_FORMAT``.
+
+    Uses the same `_date_sort_key` heuristics so US M/D/Y vs intl D/M/Y is
+    resolved consistently with the rest of the pipeline. Returns ``''``
+    when the token cannot be confidently parsed — the caller decides
+    whether to drop the cell (see ``ISSUE_DATE_DROP_INVALID``).
+    """
+    if not token:
+        return ''
+    y, m, d = _date_sort_key(token)
+    if not (_ISSUE_DATE_MIN_YEAR <= y <= _ISSUE_DATE_MAX_YEAR):
+        return ''
+    if not (1 <= m <= 12) or not (1 <= d <= 31):
+        return ''
+    from datetime import datetime
+    try:
+        return datetime(y, m, d).strftime(ISSUE_DATE_OUTPUT_FORMAT)
+    except ValueError:
+        return ''
+
+
+# ---------------------------------------------------------------------------
+# SOFT-CODED Document Title polish.
+#
+# Even after `_sanitise_title_candidate` runs, OCR/vision pipelines
+# occasionally leave behind:
+#   • Decorative symbols: *, #, ^, ~, \, =, +, <, >, brackets, mojibake
+#   • Stray quotes / asterisks: "**", `''`, `""`
+#   • Trailing "N/A", "NA" or "TBD" tokens
+#   • Multiple consecutive punctuation chars
+#
+# This polish runs after the existing sanitiser and is purely cosmetic —
+# it never invents content. Every rule below is data-driven so you can
+# tune the behaviour without touching the function.
+# ---------------------------------------------------------------------------
+TITLE_POLISH_CONFIG = {
+    # Characters always replaced with a single space (decorative / OCR junk).
+    # Legitimate plant-title punctuation -, /, &, (, ), ., ,, comma, ', "
+    # is preserved.
+    'strip_chars': r'[*#^~\\=+<>\[\]{}@`¬§¶•·»«■□◆◇○●★☆→←↑↓]',
+    # Quote-style chars that should be collapsed away entirely.
+    'drop_quotes': r'["\']{2,}',
+    # Tokens that are NA-equivalents and must not appear inside a title.
+    # Whole-token match only (case-insensitive).
+    'na_tokens':    ('NA', 'N/A', 'TBD', 'TBA', 'N.A.', 'NOT APPLICABLE'),
+    # Maximum length cap (mirrors `_TITLE_MAX_LEN`).
+    'max_len':      160,
+    # Minimum letter ratio after polishing — below this the title is junk.
+    'min_letter_ratio': 0.40,
+}
+_TITLE_POLISH_STRIP_RE = re.compile(TITLE_POLISH_CONFIG['strip_chars'])
+_TITLE_POLISH_QUOTES_RE = re.compile(TITLE_POLISH_CONFIG['drop_quotes'])
+_TITLE_POLISH_NA_RE = re.compile(
+    r'\b(?:' + '|'.join(re.escape(t) for t in TITLE_POLISH_CONFIG['na_tokens']) + r')\b',
+    re.IGNORECASE,
+)
+# Collapse runs of punctuation like "-- -- :: ,, .." into one char.
+_TITLE_POLISH_PUNCT_RUN_RE = re.compile(r'([\-:,.;/&])\1{1,}')
+
+
+def _polish_title(s: str) -> str:
+    """
+    Final cosmetic pass for Document Title values.
+
+    Returns '' when the polished output is empty or fails the minimum
+    letter-ratio quality gate (caller is expected to fall back to the NA
+    placeholder in that case).
+    """
+    if not s:
+        return ''
+    out = _TITLE_POLISH_STRIP_RE.sub(' ', s)
+    out = _TITLE_POLISH_QUOTES_RE.sub('', out)
+    out = _TITLE_POLISH_NA_RE.sub(' ', out)
+    out = _TITLE_POLISH_PUNCT_RUN_RE.sub(r'\1', out)
+    out = _MULTI_SPACE.sub(' ', out).strip(' -:_,.;|/')
+    if not out:
+        return ''
+    letters = sum(1 for c in out if c.isalpha())
+    if letters / max(len(out), 1) < TITLE_POLISH_CONFIG['min_letter_ratio']:
+        return ''
+    return out[: TITLE_POLISH_CONFIG['max_len']]
+
+
+# ---------------------------------------------------------------------------
 # Smart Revision extractor
 # ---------------------------------------------------------------------------
 # Reference Master Index sample shows revisions as bare integers — `0`, `1`,
@@ -959,6 +1077,12 @@ def _extract_issue_date_smart(text: str) -> str:
 # uniform; flip `REVISION_NUMERIC_ONLY` to False to keep letters as-is.
 
 REVISION_NUMERIC_ONLY = True
+
+# When True, any final revision value that resolves to NA is replaced
+# with "0" — the engineering convention for "initial / no revision yet".
+# Reference Master Index never leaves the column blank, so we default
+# this on. Flip to False to preserve NA semantics.
+REVISION_NA_AS_ZERO = True
 
 # Industry convention: pre-issue letter revisions map to negative integers
 # in some systems and to 0+ in others. The reference sample treats first
@@ -1189,26 +1313,55 @@ _REVISION_STATUS_REGEX_PHRASES: Tuple[re.Pattern, ...] = (
     re.compile(r'\bAS[-\s]?BUILT\s+AS\s+PER\s+[A-Z0-9.\s&-]{2,40}\b', re.IGNORECASE),
     # Standalone status phrases, longest first.
     re.compile(r'\bRE[-\s]?ISSUED\s+FOR\s+CONSTRUCTION\b', re.IGNORECASE),
+    re.compile(r'\bRE[-\s]?ISSUED\s+FOR\s+APPROVAL\b', re.IGNORECASE),
+    re.compile(r'\bRE[-\s]?ISSUED\s+FOR\s+REVIEW\b', re.IGNORECASE),
+    re.compile(r'\bRE[-\s]?ISSUED\s+FOR\s+INFORMATION\b', re.IGNORECASE),
     re.compile(r'\bISSUED\s+FOR\s+CONSTRUCTION\b', re.IGNORECASE),
     re.compile(r'\bISSUED\s+FOR\s+PURCHASE\b', re.IGNORECASE),
     re.compile(r'\bISSUED\s+FOR\s+APPROVAL\b', re.IGNORECASE),
     re.compile(r'\bISSUED\s+FOR\s+REVIEW\b', re.IGNORECASE),
-    re.compile(r'\bISSUED\s+FOR\s+COMMENT\b', re.IGNORECASE),
+    re.compile(r'\bISSUED\s+FOR\s+COMMENT[S]?\b', re.IGNORECASE),
     re.compile(r'\bISSUED\s+FOR\s+INFORMATION\b', re.IGNORECASE),
+    re.compile(r'\bISSUED\s+FOR\s+DESIGN\b', re.IGNORECASE),
+    re.compile(r'\bISSUED\s+FOR\s+BID\b', re.IGNORECASE),
+    re.compile(r'\bISSUED\s+FOR\s+TENDER\b', re.IGNORECASE),
+    re.compile(r'\bISSUED\s+FOR\s+QUOTATION\b', re.IGNORECASE),
+    re.compile(r'\bISSUED\s+FOR\s+ENGINEERING\b', re.IGNORECASE),
+    re.compile(r'\bISSUED\s+FOR\s+HAZOP\b', re.IGNORECASE),
+    re.compile(r'\bISSUED\s+FOR\s+IDC\b', re.IGNORECASE),
     re.compile(r'\bAPPROVED\s+FOR\s+CONSTRUCTION\b', re.IGNORECASE),
+    re.compile(r'\bAPPROVED\s+FOR\s+DESIGN\b', re.IGNORECASE),
+    re.compile(r'\bFOR\s+APPROVAL\b', re.IGNORECASE),
+    re.compile(r'\bFOR\s+REVIEW\b', re.IGNORECASE),
+    re.compile(r'\bFOR\s+INFORMATION\b', re.IGNORECASE),
+    re.compile(r'\bFOR\s+CONSTRUCTION\b', re.IGNORECASE),
+    re.compile(r'\bFOR\s+IMPLEMENTATION\b', re.IGNORECASE),
     re.compile(r'\bAS[-\s]?BUILT\b', re.IGNORECASE),
+    re.compile(r'\bCANCELLED\b', re.IGNORECASE),
+    re.compile(r'\bSUPERS[EI]DED\b', re.IGNORECASE),
     re.compile(r'\bPRELIMINARY\b', re.IGNORECASE),
     re.compile(r'\bDRAFT\b', re.IGNORECASE),
+    re.compile(r'\bHOLD\b', re.IGNORECASE),
 )
 
 # Acronym → canonical full-form. Reference sample keeps `IFP` as-is, so we
 # return the upper-case acronym verbatim when only the acronym is found.
 _REVISION_STATUS_ACRONYMS: Tuple[Tuple[re.Pattern, str], ...] = (
-    (re.compile(r'\bIFP\b'), 'IFP'),
-    (re.compile(r'\bAFC\b'), 'AFC'),
-    (re.compile(r'\bIFC\b'), 'IFC'),
-    (re.compile(r'\bIFA\b'), 'IFA'),
-    (re.compile(r'\bIFR\b'), 'IFR'),
+    (re.compile(r'\bIFP\b'), 'IFP'),   # Issued For Purchase
+    (re.compile(r'\bIFC\b'), 'IFC'),   # Issued For Construction
+    (re.compile(r'\bAFC\b'), 'AFC'),   # Approved For Construction
+    (re.compile(r'\bIFA\b'), 'IFA'),   # Issued For Approval
+    (re.compile(r'\bIFR\b'), 'IFR'),   # Issued For Review
+    (re.compile(r'\bIFI\b'), 'IFI'),   # Issued For Information
+    (re.compile(r'\bIFD\b'), 'IFD'),   # Issued For Design
+    (re.compile(r'\bAFD\b'), 'AFD'),   # Approved For Design
+    (re.compile(r'\bIFB\b'), 'IFB'),   # Issued For Bid
+    (re.compile(r'\bIFT\b'), 'IFT'),   # Issued For Tender
+    (re.compile(r'\bIFQ\b'), 'IFQ'),   # Issued For Quotation
+    (re.compile(r'\bIFE\b'), 'IFE'),   # Issued For Engineering
+    (re.compile(r'\bIFH\b'), 'IFH'),   # Issued For HAZOP
+    (re.compile(r'\bIDC\b'), 'IDC'),   # Inter-Discipline Check
+    (re.compile(r'\bAB\b'), 'AB'),     # As-Built (short)
 )
 
 # Title-block tidiness: collapse whitespace, normalise hyphenation, upper-case.
@@ -1258,6 +1411,24 @@ _UNIT_MAX_DIGITS = 5
 _UNIT_TOKEN_RE   = re.compile(
     rf'\bUNIT[Ss]?[-\s]*([0-9]{{{_UNIT_MIN_DIGITS},{_UNIT_MAX_DIGITS}}})\b',
     re.IGNORECASE,
+)
+# Extra label variants — applied AFTER `_UNIT_TOKEN_RE` if nothing matched
+# the primary pattern. Each must capture the digits in group(1). Soft-coded
+# tuple so new vocabulary can be added without touching the extractor body.
+_UNIT_EXTRA_LABEL_PATTERNS: Tuple[re.Pattern, ...] = (
+    # "UNIT NO: 47", "UNIT NUMBER: 47", "UNIT CODE 47"
+    re.compile(rf'\bUNIT[\s_]*(?:NO\.?|NUMBER|CODE|#)[\s_]*[:\-]?[\s_]*'
+               rf'([0-9]{{{_UNIT_MIN_DIGITS},{_UNIT_MAX_DIGITS}}})\b',
+               re.IGNORECASE),
+    # "U-47", "U_47" (ADNOC filename convention)
+    re.compile(rf'\bU[-_]([0-9]{{{_UNIT_MIN_DIGITS},{_UNIT_MAX_DIGITS}}})\b',
+               re.IGNORECASE),
+    # "PLANT 47", "AREA/UNIT 47", "PROCESS UNIT 47"
+    re.compile(rf'\bPLANT[\s_]*([0-9]{{{_UNIT_MIN_DIGITS},{_UNIT_MAX_DIGITS}}})\b',
+               re.IGNORECASE),
+    re.compile(rf'\bPROCESS[\s_]*UNIT[\s_]*'
+               rf'([0-9]{{{_UNIT_MIN_DIGITS},{_UNIT_MAX_DIGITS}}})\b',
+               re.IGNORECASE),
 )
 # After a UNIT match, walk the tail for adjacent continuations using either
 # "&" or "," as separators. Tolerates "UNIT 47 & 48", "UNITS 68, 94, 95",
@@ -1337,6 +1508,19 @@ def _extract_unit_smart(text: str, *, title_hint: str = '',
                     units.append(a)
         if units:
             break  # title hit wins; don't dilute with body matches
+    if not units:
+        # Fallback pass: try secondary label vocabulary (UNIT NO:, U-47,
+        # PLANT 47, PROCESS UNIT 47). These rarely come with multi-unit
+        # tails so we only capture the single labelled value per source.
+        for src in sources:
+            for pat in _UNIT_EXTRA_LABEL_PATTERNS:
+                for m in pat.finditer(src):
+                    num = m.group(1)
+                    if num not in seen:
+                        seen.add(num)
+                        units.append(num)
+            if units:
+                break
     if not units:
         return ''
     out: List[str] = []
@@ -2063,6 +2247,20 @@ def _scan_contractor_codes_in_body(text: str, *, title_hint: str = '',
 # always contains at least one digit, and never matches plain prose.
 _PO_NO_VALID_RE = re.compile(r'^[A-Z0-9][A-Z0-9\-/]{3,29}$', re.IGNORECASE)
 
+# Structural requirement: a real PO number is one of these shapes —
+#   • pure digits (≥ 4)              e.g. "1207491"
+#   • digits + separator(s)           e.g. "PO-12345", "4500/00321", "5247-21"
+#   • known PO prefix                 e.g. "PO12345", "EPC-PO-7821"
+# Anything that's just a jumble of letters and digits with no separator
+# and no recognised prefix (e.g. "8oxNumbw", "PoBOX99") is almost
+# certainly OCR noise from the body text and must be rejected.
+_PO_NO_PURE_DIGITS_RE  = re.compile(r'^\d{4,}$')
+_PO_NO_HAS_SEPARATOR   = re.compile(r'[\-/]')
+_PO_NO_PREFIX_TOKENS: Tuple[str, ...] = ('PO', 'P.O', 'P-O', 'POR', 'PUR')
+# Reject any token containing a *lower-case* letter — engineering PO
+# numbers are uppercase by convention; mixed-case = OCR/extraction noise.
+_PO_NO_REJECT_MIXED_CASE = True
+
 
 def _is_valid_po_no(value: str) -> bool:
     if not value:
@@ -2072,7 +2270,22 @@ def _is_valid_po_no(value: str) -> bool:
         return False
     if not _PO_NO_VALID_RE.fullmatch(v):
         return False
-    return any(c.isdigit() for c in v)
+    if not any(c.isdigit() for c in v):
+        return False
+    # Mixed-case tokens (e.g. "8oxNumbw") are OCR junk, never real POs.
+    if _PO_NO_REJECT_MIXED_CASE and any(c.islower() for c in v):
+        return False
+    upper = v.upper()
+    # Pure digits — accept.
+    if _PO_NO_PURE_DIGITS_RE.fullmatch(upper):
+        return True
+    # Contains a structural separator — accept.
+    if _PO_NO_HAS_SEPARATOR.search(upper):
+        return True
+    # No separator: only accept when it starts with a known PO prefix.
+    if any(upper.startswith(p) for p in _PO_NO_PREFIX_TOKENS):
+        return True
+    return False
 
 
 
@@ -2789,7 +3002,13 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
     if cur_title and cur_title.upper() != na.upper():
         cleaned = _sanitise_title_candidate(cur_title)
         if cleaned and _is_clean_text(cleaned[:120], TEXT_QUALITY_CONFIG):
-            row[DOCUMENT_TITLE_FIELD_KEY] = cleaned[:_TITLE_MAX_LEN]
+            # Final cosmetic polish — strips decorative symbols, NA tokens
+            # and punctuation runs. Soft-coded via TITLE_POLISH_CONFIG.
+            polished = _polish_title(cleaned)
+            if polished:
+                row[DOCUMENT_TITLE_FIELD_KEY] = polished[:_TITLE_MAX_LEN]
+            else:
+                row[DOCUMENT_TITLE_FIELD_KEY] = na
         else:
             # Failed quality gate (high single-letter ratio, mojibake,
             # weird punctuation runs) — do not pollute the UI.
@@ -2802,6 +3021,12 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
     # falling back to the most-recent valid date when no label sits
     # nearby. Only overrides when the existing value parses to a
     # *worse* (older or invalid) date.
+    #
+    # Whatever value we settle on (smart pick or kept existing) is
+    # finally re-formatted via `_normalise_issue_date` so the UI
+    # column always uses `ISSUE_DATE_OUTPUT_FORMAT` (MM/DD/YYYY by
+    # default). This is purely a display normalisation — the parsed
+    # (year, month, day) is the source of truth.
     # ---------------------------------------------------------------
     if text:
         cur_date = str(row.get(ISSUE_DATE_FIELD_KEY, '') or '').strip()
@@ -2815,6 +3040,20 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
                 new_ymd = _date_sort_key(smart_date)
                 if cur_ymd[0] == 0 and new_ymd[0] > 0:
                     row[ISSUE_DATE_FIELD_KEY] = smart_date
+
+    # Standardise the stored issue-date token to ISSUE_DATE_OUTPUT_FORMAT.
+    # Runs whether the value came from the smart pass, an upstream stage,
+    # or was left untouched. When `ISSUE_DATE_DROP_INVALID` is True (the
+    # default) tokens that fail strict (Y,M,D) validation — e.g.
+    # ``62-00-002`` / ``55-18-005`` which are document-number leaks — are
+    # replaced with the NA placeholder so they never reach the UI.
+    final_date = str(row.get(ISSUE_DATE_FIELD_KEY, '') or '').strip()
+    if final_date and final_date.upper() != na.upper():
+        normalised = _normalise_issue_date(final_date)
+        if normalised:
+            row[ISSUE_DATE_FIELD_KEY] = normalised
+        elif ISSUE_DATE_DROP_INVALID:
+            row[ISSUE_DATE_FIELD_KEY] = na
 
     # ---------------------------------------------------------------
     # Revision — final authoritative pass.
@@ -2853,6 +3092,14 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
             # (e.g. "NM", "27", "ABU DHABI"). Clear it rather than
             # letting it propagate.
             row[REVISION_FIELD_KEY] = na
+
+    # Engineering convention: "no revision recorded" → "0" (initial issue).
+    # Soft-coded via REVISION_NA_AS_ZERO so this can be turned off if a
+    # downstream consumer needs to distinguish missing-vs-rev-0.
+    if REVISION_NA_AS_ZERO:
+        final_rev = str(row.get(REVISION_FIELD_KEY, '') or '').strip()
+        if (not final_rev) or final_rev.upper() == na.upper():
+            row[REVISION_FIELD_KEY] = '0'
 
     # ---------------------------------------------------------------
     # Revision Description / Status — final authoritative pass. The

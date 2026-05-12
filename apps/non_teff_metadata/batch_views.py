@@ -87,6 +87,13 @@ def _extract_batch_payload(body: dict) -> Dict:
     """Validate the batch-create payload and fold in template hints."""
     name = (body.get('name') or '').strip() or f"Batch {uuid.uuid4().hex[:8]}"
     plant = (body.get('plant') or '').strip()
+    # Soft-coded list of accepted aliases for project reference.
+    project_id = ''
+    for key in ('project_id', 'project', 'projectId'):
+        raw = body.get(key)
+        if raw:
+            project_id = str(raw).strip()
+            break
     defaults = body.get('batch_defaults') or {}
     if not isinstance(defaults, dict):
         defaults = {}
@@ -96,7 +103,8 @@ def _extract_batch_payload(body: dict) -> Dict:
         defaults.setdefault(key, value)
     if plant:
         defaults.setdefault('plant', plant)
-    return {'name': name, 'plant': plant, 'batch_defaults': defaults}
+    return {'name': name, 'plant': plant, 'project_id': project_id,
+            'batch_defaults': defaults}
 
 
 def _run_extraction_thread(batch_id: str) -> None:
@@ -189,12 +197,21 @@ def get_batch_template(_request):
 @permission_classes([IsAuthenticated])
 def create_batch(request):
     payload = _extract_batch_payload(request.data or {})
+    # Resolve optional project assignment (silently ignore bad references).
+    project_obj = None
+    if payload.get('project_id'):
+        from .models import NonTeffProject
+        try:
+            project_obj = NonTeffProject.objects.get(project_id=payload['project_id'])
+        except (NonTeffProject.DoesNotExist, ValueError, Exception):
+            project_obj = None
     batch = NonTeffBatch.objects.create(
         name=payload['name'],
         plant=payload['plant'],
         batch_defaults=payload['batch_defaults'],
         status=NonTeffBatch.BATCH_STATUS_DRAFT,
         created_by=request.user if request.user.is_authenticated else None,
+        project=project_obj,
     )
     return Response(_serialize_batch(batch), status=http_status.HTTP_201_CREATED)
 
