@@ -691,7 +691,7 @@ def _build_title_indicator_regexes(taxonomy: Dict[str, Any]) -> List[re.Pattern]
 
     for subs in (taxonomy.get('document_types', {}) or {}).values():
         for sub in subs or []:
-            for pat in _build_subtype_alias_regexes(sub):
+            for pat, _is_override in _build_subtype_alias_regexes(sub):
                 _add(pat)
 
     _TITLE_INDICATOR_CACHE[cache_key] = patterns
@@ -2554,6 +2554,11 @@ def _narrow_subtype(text: str, parent_type: str, taxonomy: Dict[str, Any]) -> st
 #   "Piping Support Standards"     →  folder "Special Pipe Support (SPS)"
 #   "Piping Data Sheet"            →  title "SLIDING PLATES DATA SHEET"
 # ---------------------------------------------------------------------------
+#   "Process Flow Diagrams (PFD)"  →  "PROCESS FLOW DIAGRAM UNIT 36" / folder
+#                                       "ASSOCIATE PROJECT_PFD"
+#   "Piping Support Standards"     →  folder "Special Pipe Support (SPS)"
+#   "Piping Data Sheet"            →  title "SLIDING PLATES DATA SHEET"
+# ---------------------------------------------------------------------------
 
 # Soft-coded alias overrides — extra free-text patterns that map onto a
 # canonical subtype. Useful when the real-world title or folder name does
@@ -2568,30 +2573,250 @@ _SUBTYPE_ALIAS_OVERRIDES: Dict[str, List[str]] = {
         # classification over the generic "data sheet" signal.
         'spring support', 'variable spring', 'rigid support',
         'shoe support', 'hanger support', 'pipe shoe',
+        'guide support', 'anchor support', 'trunnion support',
+        'dummy support', 'clamp support', 'sliding support',
     ],
     'Piping Data Sheet': [
-        'data sheet', 'datasheet',
+        'data sheet', 'datasheet', 'piping datasheet', 'piping data sheet',
+        'spec break', 'spec-break', 'material spec', 'pipe class',
     ],
     'Process Flow Diagrams (PFD)': [
-        'pfd',
+        'pfd', 'process flow diagram', 'process flow',
     ],
     'Utility Flow Diagrams (UFD)': [
-        'ufd',
+        'ufd', 'utility flow diagram', 'utility flow',
     ],
     'Process Datasheet': [
         'process datasheet', 'process data sheet',
     ],
     'Single Line Diagrams': [
-        'single line diagram', 'sld',
+        'single line diagram', 'single-line diagram', 'sld', 'one line diagram',
     ],
     'Cause and Effect Charts': [
-        'cause and effect', 'cause & effect', 'c&e',
+        'cause and effect', 'cause & effect', 'c&e', 'cause-effect',
+    ],
+    # ─── Common process / piping / instrument deliverables ──────────
+    'Piping and Instrumentation Diagrams (P&IDs)': [
+        'p&id', 'p & id', 'pid', 'piping and instrumentation',
+        'piping & instrumentation',
+    ],
+    'Equipment List': [
+        'equipment list', 'equipment register', 'mechanical equipment list',
+    ],
+    'Line List': [
+        'line list', 'piping line list', 'line schedule',
+    ],
+    'Tie-In List': [
+        'tie-in list', 'tie in list', 'tie-in schedule', 'tie in schedule',
+    ],
+    'Instrument Index': [
+        'instrument index', 'instrument list', 'instrument schedule',
+    ],
+    'Instrument Datasheet': [
+        'instrument datasheet', 'instrument data sheet',
+    ],
+    # ─── Electrical ─────────────────────────────────────────────────
+    'Electrical Cable Schedule': [
+        'cable schedule', 'cable list',
+    ],
+    'Schematic Wiring Diagrams': [
+        'schematic wiring', 'wiring diagram', 'schematic diagram',
+    ],
+    'Electrical Equipment Arrangement Layouts': [
+        'electrical equipment arrangement', 'equipment arrangement layout',
+    ],
+    'Earthing Layouts': [
+        'earthing layout', 'grounding layout', 'earth grid',
+    ],
+    'Cathodic Protection Drawings': [
+        'cathodic protection', 'cp drawing', 'cp design',
+    ],
+    # ─── Civil / Structural ─────────────────────────────────────────
+    'Foundation Drawings/Details': [
+        'foundation drawing', 'foundation detail', 'foundation plan',
+    ],
+    'Plot Plan': [
+        'plot plan', 'plant plot plan', 'site plot plan',
+    ],
+    'Topographic Drawing of Site': [
+        'topographic drawing', 'topo drawing', 'topographic survey',
+    ],
+    # ─── Mechanical / Equipment ─────────────────────────────────────
+    'General Arrangement Drawings': [
+        'general arrangement', 'ga drawing', 'g.a. drawing',
+    ],
+    'Detail Drawings': [
+        'detail drawing', 'fabrication drawing',
+    ],
+    'Calculations & Performance Curves': [
+        'performance curve', 'pump curve', 'compressor curve',
+    ],
+    # ─── F&G / Safety ───────────────────────────────────────────────
+    'F&G Schematic': [
+        'fire and gas schematic', 'f&g schematic', 'fg schematic',
+    ],
+    'Failure Modes Effects Analysis for F&G Systems': [
+        'fmea', 'failure modes', 'failure mode effects',
+    ],
+    # ─── Calculation deliverables (driven by filename/folder when
+    # OCR'd title is garbage). These cover the manually-classified
+    # Design Calculation batch (Civil, Pipeline, Procurement, Piping
+    # stress, Vessel design, generic Piping design calcs).
+    'Civil Calculations': [
+        'civil calculation', 'civil calculations',
+        'foundation calculation', 'foundation to ',
+        'pipe support calculation', 'pipe supports calculation',
+        'pipe sleeper', 'culvert calculation', 'culvert',
+        'drainage calculation', 'storm & firewater', 'open drain',
+        'structural calculation', 'structural calculations',
+        'concrete sump', 'sump calculation', 'sulphur loading',
+        'misc pipe supports', 'equipment foundation',
+        'supports and foundation', 'foundation for supports',
+    ],
+    'Pipeline Calculations': [
+        'pipeline calculation', 'pipeline design calculation',
+        'pipeline pressure calculation', 'design pressure calculation',
+        'upheaval buckling', 'lateral buckling', 'wall thickness calculation',
+        'pipeline stress', 'gas pipeline', 'liquid pipeline',
+    ],
+    'Procurement Documents': [
+        'procurement record book', 'engineering-procurement record',
+        'engineering procurement record', 'procurement record',
+        'engineering record book',
+    ],
+    'Stress Analysis Reports': [
+        'stress analysis', 'stress calculation', 'stress report',
+        'stress critical', 'critical stress', 'stress isometric',
+        'piping stress', 'caesar', 'caesar ii',
+    ],
+    'Vessel Design Calculations': [
+        'vessel design', 'vessel calculation', 'pressure vessel calc',
+        'storage tank calc', 'tank design calc',
+        'ngl storage calc', 'storage vessel calc',
+        'ngl storage', 'storage calculation', 'tank calculation',
+        'pressure vessel',
+    ],
+    'Design Calculations': [
+        # NOTE: the bare phrase 'design calculation(s)' is auto-derived
+        # from the canonical name, so we don't list it here — it would
+        # otherwise out-match more specific aliases below (stress,
+        # vessel, civil, pipeline) when those have shorter overrides.
+        'flare line support', 'flare header design',
+        'piping design calculation',
+    ],
+    # ─── HSE / F&G nuances ──────────────────────────────────────────
+    'Passive & Active Fire Protection Philosophy': [
+        'fire protection enclosure', 'passive fire protection',
+        'active fire protection', 'fire protection philosophy',
+        'pfp', 'afp',
+    ],
+    # ─── Mechanical instrumentation accessories ─────────────────────
+    'Equipment Miscellaneous': [
+        'turbine meter', 'turbine meters', 'flow meter spec',
+        'misc equipment',
     ],
 }
 
 # Single-word aliases below this length are skipped to avoid false positives,
 # unless explicitly listed in _SUBTYPE_ALIAS_OVERRIDES (acronyms get a pass).
 _SUBTYPE_MIN_AUTO_ALIAS_LEN = 8
+
+# When True, the final-pass replaces any existing document_subtype value
+# that is NOT a member of the controlled taxonomy. This is the main fix
+# for upstream regex / vision leaks (e.g. free-text titles, OCR junk,
+# discipline names) ending up in the column. Set to False to preserve
+# whatever upstream produced, regardless of whether it's a known subtype.
+SUBTYPE_OVERRIDE_INVALID = True
+# When True, the final-pass ALSO re-runs the smart matcher when the
+# existing value is valid but the smart matcher finds a *longer*
+# (more specific) match in the title — handles the "Piping" leaking
+# from folder when the title clearly says "PFD" case.
+SUBTYPE_PREFER_TITLE_MATCH = True
+# When True, titles that look like OCR-template footer noise (e.g.
+# "PLOT PLAN REF. DATA EQUIPMENT Nos. DRAWINGS", "DESIGN CALCULATIONS")
+# are demoted: they're no longer used as the priority corpus and the
+# filename + relative path become the primary signal. This is the main
+# fix for the H1 Design-Calculation batch where the title block is
+# garbled by OCR but filenames carry the real classification.
+SUBTYPE_DEMOTE_OCR_TITLES = True
+
+# Patterns that mark a title as OCR-template noise (lower-cased subs).
+# These are *form template* fields that bleed across many documents and
+# are not real titles. Order matters only for readability.
+_SUBTYPE_OCR_NOISE_PATTERNS: List[str] = [
+    'plot plan',
+    'ref. data',
+    'ref data',
+    'equipment nos',
+    'equmwent nos',  # common OCR mis-read of 'equipment nos'
+    'kquipment nos',
+    'bquipment nos',
+    'tquipment nos',
+    'commande / purchase order',
+    'commande/purchase order',
+    'specifications.',
+    'joint venture',
+    'calculation sheet sheet',
+]
+
+# A title that contains only generic calc/report words also counts as
+# too-weak signal (the smart matcher matches "design calculations" to
+# the generic 'Design Calculations' subtype regardless of discipline).
+_SUBTYPE_OCR_GENERIC_TITLES: List[str] = [
+    'design calculations',
+    'design calculation',
+    'calculation sheet',
+    'specifications',
+    'drawings',
+    'general',
+]
+
+
+def _looks_like_ocr_noise_title(title: str) -> bool:
+    """True when the title is dominated by OCR-template footer text
+    or is so generic it would mis-classify the document.
+
+    Used by the subtype final-pass to swap priority signals from
+    title → filename/path when the title is unreliable.
+    """
+    if not title:
+        return False
+    t = title.strip().lower()
+    if not t or t == 'na':
+        return True
+    for p in _SUBTYPE_OCR_NOISE_PATTERNS:
+        if p in t:
+            return True
+    # Pure generic title with no other words = noise.
+    cleaned = re.sub(r'[^a-z0-9 ]+', ' ', t)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    if cleaned in _SUBTYPE_OCR_GENERIC_TITLES:
+        return True
+    return False
+
+
+def _is_valid_subtype(value: str, taxonomy: Dict[str, Any]) -> bool:
+    """True when `value` matches a canonical subtype in the taxonomy
+    (case-insensitive). The taxonomy is loaded once per request so this
+    is cheap; ``set`` lookup with a lazy cache keeps repeated calls fast.
+    """
+    if not value:
+        return False
+    v = value.strip().lower()
+    if v in {'', 'na', 'n/a'}:
+        return False
+    cache_key = id(taxonomy)
+    cache = getattr(_is_valid_subtype, '_cache', {})
+    pool = cache.get(cache_key)
+    if pool is None:
+        pool = set()
+        for subs in (taxonomy.get('document_types') or {}).values():
+            for s in subs or []:
+                if s:
+                    pool.add(s.strip().lower())
+        cache[cache_key] = pool
+        _is_valid_subtype._cache = cache  # type: ignore[attr-defined]
+    return v in pool
 
 # Tokens too generic to count as standalone aliases.
 _SUBTYPE_GENERIC_TOKENS = {
@@ -2630,38 +2855,37 @@ def _alias_to_regex(alias: str) -> str:
     return r'\b' + r'[\s\-]*'.join(parts) + r'\b'
 
 
-def _build_subtype_alias_regexes(canonical: str) -> List[str]:
+def _build_subtype_alias_regexes(canonical: str) -> List[Tuple[str, bool]]:
     """
-    Generate ordered regex patterns for a canonical subtype name plus any
-    soft-coded overrides. Longest patterns first so scoring picks the most
-    specific signal.
+    Generate ordered (regex, is_override) tuples for a canonical subtype.
+    `is_override=True` marks a curated alias from _SUBTYPE_ALIAS_OVERRIDES;
+    the scorer uses this flag to boost curated matches over auto-derived
+    ones (so e.g. 'foundation to ' beats a longer 'design calculations'
+    auto-alias when both match the same corpus).
     """
     if not canonical:
         return []
     base_low = canonical.strip().lower()
-    forms: List[str] = [base_low]
+    forms: List[Tuple[str, bool]] = [(base_low, False)]
 
     paren = re.search(r'\(([^)]+)\)', base_low)
     if paren:
         acronym = paren.group(1).strip()
         stripped = re.sub(r'\s*\([^)]*\)\s*', ' ', base_low).strip()
-        if stripped and stripped not in forms:
-            forms.append(stripped)
-        if len(acronym) >= 3 and acronym not in forms:
-            forms.append(acronym)
+        if stripped and not any(f == stripped for f, _ in forms):
+            forms.append((stripped, False))
+        if len(acronym) >= 3 and not any(f == acronym for f, _ in forms):
+            forms.append((acronym, False))
 
-    # Soft-coded overrides (preserved verbatim — already curated).
+    # Soft-coded overrides — flagged True so the scorer can prefer them.
     for extra in _SUBTYPE_ALIAS_OVERRIDES.get(canonical, []):
         e = extra.strip().lower()
-        if e and e not in forms:
-            forms.append(e)
+        if e and not any(f == e for f, _ in forms):
+            forms.append((e, True))
 
-    patterns: List[str] = []
+    patterns: List[Tuple[str, bool]] = []
     seen = set()
-    for f in forms:
-        # Skip overly-generic single-word forms unless they are an explicit
-        # override (overrides are trusted by definition).
-        is_override = f in _SUBTYPE_ALIAS_OVERRIDES.get(canonical, [])
+    for f, is_override in forms:
         if (not is_override) and (' ' not in f):
             if f in _SUBTYPE_GENERIC_TOKENS:
                 continue
@@ -2670,7 +2894,7 @@ def _build_subtype_alias_regexes(canonical: str) -> List[str]:
         pat = _alias_to_regex(f)
         if pat not in seen:
             seen.add(pat)
-            patterns.append(pat)
+            patterns.append((pat, is_override))
     return patterns
 
 
@@ -2702,16 +2926,23 @@ def _match_subtype_smart(*, parent_type: str, corpus: str,
         best_sub, best_own, best_score = '', '', 0
         if not scope_corpus:
             return best_sub, best_own, best_score
+        # Soft-coded boost: curated override aliases outrank auto-derived
+        # ones regardless of length. This stops the bare canonical name
+        # ('design calculations') from beating a more specific override
+        # ('foundation to', 'stress calculation') that happens to be shorter.
+        OVERRIDE_BONUS = 10_000
         for owner, subs in candidate_types.items():
             for sub in subs:
-                for pattern in _build_subtype_alias_regexes(sub):
+                sub_best = 0
+                for pattern, is_override in _build_subtype_alias_regexes(sub):
                     if re.search(pattern, scope_corpus):
-                        score = len(pattern)
-                        if score > best_score:
-                            best_score = score
-                            best_sub = sub
-                            best_own = owner
-                        break
+                        score = len(pattern) + (OVERRIDE_BONUS if is_override else 0)
+                        if score > sub_best:
+                            sub_best = score
+                if sub_best > best_score:
+                    best_score = sub_best
+                    best_sub = sub
+                    best_own = owner
         return best_sub, best_own, best_score
 
     # Priority pass — anything found in the title/priority corpus wins.
@@ -3366,19 +3597,29 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
             row[DOCUMENT_NUMBER_FIELD_KEY] = stem
 
     # ---------------------------------------------------------------
-    # Document Sub-Type — smart multi-signal matcher pass. Combines
-    # title + folder/relative path + file name + body text into a single
-    # corpus and matches against auto-derived alias forms of every
-    # canonical subtype in the taxonomy. Examples it now covers:
-    #   "PROCESS FLOW DIAGRAM UNIT 36"  →  "Process Flow Diagrams (PFD)"
-    #   "Special Pipe Support (SPS)"    →  "Piping Support Standards"
-    #   "SLIDING PLATES DATA SHEET"     →  "Piping Data Sheet"
-    # If a subtype is found and document_type is missing/NA, the owning
-    # taxonomy key is back-filled into document_type as well.
+    # Document Sub-Type — final authoritative pass.
+    #
+    # Strategy (soft-coded via SUBTYPE_OVERRIDE_INVALID /
+    # SUBTYPE_PREFER_TITLE_MATCH at the top of this module):
+    #   1. If current value is empty / NA → run smart matcher.
+    #   2. If current value is NOT a canonical taxonomy subtype
+    #      (upstream regex / vision leak, free-text title, OCR junk,
+    #      bare discipline name) → replace with smart match.
+    #   3. Otherwise (current value is valid) → re-run smart matcher
+    #      restricted to the document title; if the title produces a
+    #      MORE SPECIFIC canonical subtype (longer alias hit), prefer
+    #      it. This handles cases where the folder-level hint won and
+    #      the title was clearer.
+    # When a subtype is chosen and document_type is missing/NA, the
+    # owning taxonomy key is back-filled into document_type as well.
     # ---------------------------------------------------------------
     current_sub_raw = str(row.get(DOCUMENT_SUBTYPE_FIELD_KEY, '') or '').strip()
     current_sub_empty = (not current_sub_raw) or current_sub_raw.upper() == na.upper()
-    if current_sub_empty:
+    current_sub_valid = (not current_sub_empty) and _is_valid_subtype(current_sub_raw, taxonomy)
+    should_run_smart = current_sub_empty \
+        or (SUBTYPE_OVERRIDE_INVALID and not current_sub_valid) \
+        or SUBTYPE_PREFER_TITLE_MATCH
+    if should_run_smart:
         title_text = str(row.get('document_title', '') or '')
         if title_text.strip().upper() == na.upper():
             title_text = ''
@@ -3388,13 +3629,32 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
         # Only treat type_hint as authoritative if it is already a valid
         # taxonomy key — otherwise scan all types so subtype can drive type.
         valid_parent = type_hint if type_hint in (taxonomy.get('document_types') or {}) else ''
-        title_corpus = _normalise_corpus(title_text)
-        corpus = _normalise_corpus(title_text, relative_path, file_name)
+        # Detect OCR-noise titles. When the title is unreliable, swap
+        # the priority corpus to filename + relative path so folder
+        # naming wins over OCR garbage. Soft-coded via SUBTYPE_DEMOTE_OCR_TITLES.
+        title_is_noise = (
+            SUBTYPE_DEMOTE_OCR_TITLES
+            and bool(title_text.strip())
+            and _looks_like_ocr_noise_title(title_text)
+        )
+        if title_is_noise:
+            # Filename without extension is usually the cleanest signal.
+            fname_stem = file_name or ''
+            if '.' in fname_stem:
+                fname_stem = fname_stem.rsplit('.', 1)[0]
+            priority = _normalise_corpus(fname_stem, relative_path)
+            # Keep title in the wide corpus (it may still contain real
+            # tokens) but it no longer drives the priority pass.
+            corpus = _normalise_corpus(fname_stem, relative_path, title_text)
+        else:
+            priority = _normalise_corpus(title_text)
+            corpus = _normalise_corpus(title_text, relative_path, file_name)
+        title_corpus = priority  # alias used by the prefer-title pass below
         sub_match, owner = _match_subtype_smart(
             parent_type=valid_parent, corpus=corpus, taxonomy=taxonomy,
-            priority_corpus=title_corpus,
+            priority_corpus=priority,
         )
-        # Fall back to a smaller body-text snippet when nothing matched
+        # Fall back to a body-text snippet when nothing matched
         # (titles + paths usually win, body text is noisy).
         if not sub_match and text:
             corpus2 = _normalise_corpus(text[:_MAX_SCAN_CHARS])
@@ -3402,10 +3662,32 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
                 parent_type=valid_parent, corpus=corpus2, taxonomy=taxonomy,
             )
         if sub_match:
-            row[DOCUMENT_SUBTYPE_FIELD_KEY] = sub_match
-            # Back-fill document_type when it was empty / NA / out-of-vocab.
-            if owner and (not valid_parent):
-                row[DOCUMENT_TYPE_FIELD_KEY] = owner
+            # Write when current is empty / NA / invalid.
+            if current_sub_empty or (SUBTYPE_OVERRIDE_INVALID and not current_sub_valid):
+                row[DOCUMENT_SUBTYPE_FIELD_KEY] = sub_match
+                # Back-fill document_type when it was empty / NA / out-of-vocab.
+                if owner and (not valid_parent):
+                    row[DOCUMENT_TYPE_FIELD_KEY] = owner
+            elif SUBTYPE_PREFER_TITLE_MATCH and current_sub_valid:
+                # Current is valid; only override if the title gives us a
+                # different canonical subtype (i.e. smart found a more
+                # specific signal in the title than what's stored).
+                if sub_match.strip().lower() != current_sub_raw.strip().lower():
+                    # Title hit wins only when it differs AND came from the
+                    # title corpus (priority pass). A second-pass body-text
+                    # hit is too weak to overturn a valid stored value.
+                    title_only_match, _ = _match_subtype_smart(
+                        parent_type=valid_parent, corpus=title_corpus,
+                        taxonomy=taxonomy, priority_corpus='',
+                    )
+                    if title_only_match and title_only_match == sub_match:
+                        row[DOCUMENT_SUBTYPE_FIELD_KEY] = sub_match
+                        if owner and (not valid_parent):
+                            row[DOCUMENT_TYPE_FIELD_KEY] = owner
+        elif current_sub_empty or (SUBTYPE_OVERRIDE_INVALID and not current_sub_valid):
+            # Couldn't find a match AND the current value is invalid /
+            # empty — clear to NA rather than leaving garbage.
+            row[DOCUMENT_SUBTYPE_FIELD_KEY] = na
 
     # ---------------------------------------------------------------
     # Document Type — final sanitiser pass. Reference sample only ever
