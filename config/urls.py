@@ -151,6 +151,7 @@ urlpatterns = [
     path('api/v1/process-datasheet/', include('apps.process_datasheet.urls')),  # Process Datasheet
     path('api/v1/electrical-datasheet/', include('apps.electrical_datasheet.urls')),  # Electrical Datasheet with Transformer & Switchgear
     path('api/v1/usage/', include('apps.usage_tracking.urls')),  # Usage Tracking & Internal Analytics
+    path('api/v1/instrument-tools/', include('apps.instrument_tools.urls')),  # Instrument Tools — IO List / Cable Block / Cable Schedule
     path('api/v1/projects/', include('apps.core.project_urls')),
 ]
 

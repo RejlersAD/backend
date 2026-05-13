@@ -163,6 +163,7 @@ INSTALLED_APPS = [
     'apps.pfd_quality',          # PFD Quality Checker — deterministic rule engine
     'apps.cross_recommendation', # Cross PID/PFD recommendation bridge
     'apps.non_teff_metadata',     # Non-TEFF Metadata Extractor — multi-format document metadata extraction
+    'apps.instrument_tools',     # Instrument Tools — IO List / Cable Block Diagram / Cable Schedule (Generator + QC)
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
