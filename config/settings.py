@@ -1070,6 +1070,14 @@ else:
 # ─────────────────────────────────────────────────────────────────────
 WRENCH_S3_BUCKET = config('WRENCH_S3_BUCKET', default='wrench-radai')
 
+# Mirror mode for project-document exports to S3 (soft-coded, opt-in).
+#   'flat'      → wrench/projects/{order_no}/documents/{doc_no}{ext}   (default)
+#   'genealogy' → wrench/projects/{order_no}/{folder1}/{folder2}/.../{doc_no}{ext}
+# 'genealogy' rebuilds the original R:\Projects folder hierarchy in S3 by
+# honouring each Wrench document's GENEALOGY_STRING. See
+# apps.wrench_integration.s3_documents_service for details.
+WRENCH_S3_MIRROR_MODE = config('WRENCH_S3_MIRROR_MODE', default='flat')
+
 # OpenAI Configuration (existing)
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o')

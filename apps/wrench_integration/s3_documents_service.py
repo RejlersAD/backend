@@ -29,6 +29,8 @@ import mimetypes
 import os
 import re
 import time
+
+from django.conf import settings as _dj_settings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Iterable, Optional
@@ -82,6 +84,44 @@ _S3_KEY_TEMPLATE = (
     '{prefix}projects/{order_no}/documents/{safe_doc_no}{ext}'
 )
 
+# ──────────────────────────────────────────────────────────────────────────────
+# R:\Projects-style folder mirror (additive, opt-in, soft-coded)
+# ──────────────────────────────────────────────────────────────────────────────
+# Wrench is the system of record for the R:\Projects SMB share. Each document
+# row carries its in-library folder path in `GENEALOGY_STRING` (and a few
+# alias fields used by some tenants). When `WRENCH_S3_MIRROR_MODE=genealogy`
+# is set in the environment, project exports rebuild that hierarchy under S3:
+#
+#   wrench/projects/{order_no}/{folder1}/{folder2}/.../{doc_no}{ext}
+#
+# Default mode = 'flat' → preserves the existing key layout exactly.
+# Switching modes does NOT touch download, retry, manifest, or watcher logic.
+_MIRROR_MODE_FLAT       = 'flat'
+_MIRROR_MODE_GENEALOGY  = 'genealogy'
+_MIRROR_MODE = (
+    getattr(_dj_settings, 'WRENCH_S3_MIRROR_MODE', None)
+    or os.environ.get('WRENCH_S3_MIRROR_MODE')
+    or _MIRROR_MODE_FLAT
+).strip().lower()
+
+# Wrench / R:\Projects path-segment fields, in priority order.
+_GENEALOGY_FIELDS = (
+    'GENEALOGY_STRING', 'GenealogyString',
+    'FOLDER_PATH',      'FolderPath',
+    'PATH',             'Path',
+    'FOLDER',           'Folder',
+)
+# Path separators seen across Wrench / Windows installations (/, \, >, |).
+_GENEALOGY_SEPARATOR_RE = re.compile(r'\s*[/\\>|]\s*')
+# Mirror-mode key template — placeholders identical to the flat one PLUS
+# `{folder_path}`, which is already separator-joined and per-segment safe.
+_S3_KEY_TEMPLATE_GENEALOGY = (
+    '{prefix}projects/{order_no}/{folder_path}/{safe_doc_no}{ext}'
+)
+# Cap folder depth to protect S3 key length (max 1024 bytes); excess segments
+# are merged into the last folder so no document is dropped.
+_GENEALOGY_MAX_DEPTH = 12
+
 # Manifest key written at the end of each run (cumulative log per project).
 _S3_MANIFEST_TEMPLATE = (
     '{prefix}projects/{order_no}/_manifest/run_{run_id}.json'
@@ -130,6 +170,63 @@ def _build_doc_s3_key(job: WrenchS3SyncJob, order_no: str, doc_no: str, ext: str
         safe_doc_no=_safe_name(doc_no),
         ext=ext,
     )
+
+
+def _extract_genealogy_segments(doc: dict, order_no: str) -> list:
+    """Return cleaned, de-duplicated folder segments from a Wrench doc row.
+
+    Strips a leading segment that duplicates the project ORDER_NO (Wrench
+    often includes it), splits on any of `/ \\ > |`, sanitises each piece,
+    and caps the depth to keep S3 keys under the 1024-byte limit.
+    """
+    raw = ''
+    for field in _GENEALOGY_FIELDS:
+        value = doc.get(field)
+        if value:
+            raw = str(value)
+            break
+    if not raw:
+        return []
+    segments = [s.strip() for s in _GENEALOGY_SEPARATOR_RE.split(raw) if s and s.strip()]
+    if segments and segments[0].strip().lower() == str(order_no).strip().lower():
+        segments = segments[1:]
+    cleaned = [_safe_name(s) for s in segments if _safe_name(s)]
+    if len(cleaned) > _GENEALOGY_MAX_DEPTH:
+        # Merge the overflow into the last allowed folder so no doc is lost.
+        head = cleaned[: _GENEALOGY_MAX_DEPTH - 1]
+        tail = '_'.join(cleaned[_GENEALOGY_MAX_DEPTH - 1:])
+        cleaned = head + [tail]
+    return cleaned
+
+
+def _build_doc_s3_key_genealogy(
+    job: WrenchS3SyncJob, order_no: str, doc_no: str, ext: str, doc: dict,
+) -> str:
+    """R:\\Projects-style key built from Wrench GENEALOGY_STRING.
+
+    Falls back to the flat layout when no folder path is available, so a
+    missing field never breaks the export.
+    """
+    segments = _extract_genealogy_segments(doc, order_no)
+    if not segments:
+        return _build_doc_s3_key(job, order_no, doc_no, ext)
+    prefix = (job.s3_prefix or 'wrench/').rstrip('/') + '/'
+    return _S3_KEY_TEMPLATE_GENEALOGY.format(
+        prefix=prefix,
+        order_no=_safe_name(str(order_no)),
+        folder_path='/'.join(segments),
+        safe_doc_no=_safe_name(doc_no),
+        ext=ext,
+    )
+
+
+def _resolve_doc_s3_key(
+    job: WrenchS3SyncJob, order_no: str, doc_no: str, ext: str, doc: dict,
+) -> str:
+    """Mode-aware key resolver. Default mode keeps existing flat layout."""
+    if _MIRROR_MODE == _MIRROR_MODE_GENEALOGY:
+        return _build_doc_s3_key_genealogy(job, order_no, doc_no, ext, doc)
+    return _build_doc_s3_key(job, order_no, doc_no, ext)
 
 
 def _s3_object_exists(s3, bucket: str, key: str) -> bool:
@@ -231,7 +328,7 @@ def _mirror_one_document(
     # Step 1 — early skip if already in S3 (cheap HEAD)
     # We don't know the extension yet so we tolerate either pre-known ext (PDF
     # is the Wrench default) or a re-probe pattern. Soft-coded toggle.
-    provisional_key = _build_doc_s3_key(job, order_no, doc_no, '.pdf')
+    provisional_key = _resolve_doc_s3_key(job, order_no, doc_no, '.pdf', doc)
     if _SKIP_IF_EXISTS_IN_S3:
         try:
             if _s3_object_exists(s3, bucket, provisional_key):
@@ -250,7 +347,7 @@ def _mirror_one_document(
     body         = fetched['content']
     content_type = fetched['content_type']
     ext          = _guess_extension(fetched['filename'], content_type) or '.bin'
-    s3_key       = _build_doc_s3_key(job, order_no, doc_no, ext)
+    s3_key       = _resolve_doc_s3_key(job, order_no, doc_no, ext, doc)
 
     # Step 3 — re-check existence with the *real* extension
     if _SKIP_IF_EXISTS_IN_S3 and s3_key != provisional_key:
