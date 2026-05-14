@@ -47,6 +47,14 @@ from django.http import FileResponse
 from .models import NonTeffBatch, NonTeffBatchItem
 from .services import document_search, master_index_export, master_index_service
 from .services import smartplant_connector
+from .services import history_archive
+
+# ------------------------------------------------------------------
+# Soft-coded toggle: archive every uploaded source file + the final
+# master-index JSON to S3 (best-effort, never blocks the request).
+# Flip to False to disable without touching the call sites.
+# ------------------------------------------------------------------
+BATCH_S3_ARCHIVAL_ENABLED = True
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +156,15 @@ def _run_extraction_thread(batch_id: str) -> None:
         NonTeffBatch.BATCH_STATUS_READY if ready else NonTeffBatch.BATCH_STATUS_FAILED
     )
     batch.save(update_fields=['ready_files', 'failed_files', 'status', 'updated_at'])
+
+    # Best-effort: archive the aggregated master-index payload to S3 once
+    # the batch finishes. Idempotent (overwrite OK) — failures never raise.
+    if BATCH_S3_ARCHIVAL_ENABLED:
+        try:
+            history_archive.archive_batch_result(batch)
+        except Exception:
+            logger.warning('Batch S3 result archive failed for %s',
+                           batch.batch_id, exc_info=True)
 
 
 def _serialize_batch(batch: NonTeffBatch) -> dict:
@@ -278,6 +295,15 @@ def upload_batch_files(request, batch_id):
                 status=NonTeffBatchItem.ITEM_STATUS_UPLOADED,
             )
         created.append(_serialize_item(item))
+
+        # Best-effort S3 archival of the raw source file. Failures here
+        # MUST NOT impact the upload response — archival is additive.
+        if BATCH_S3_ARCHIVAL_ENABLED:
+            try:
+                history_archive.archive_batch_source(batch, item, abs_path)
+            except Exception:
+                logger.warning('Batch S3 source archive failed for %s',
+                               original, exc_info=True)
 
     batch.total_files = batch.items.count()
     batch.storage_prefix = base_dir

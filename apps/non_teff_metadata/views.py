@@ -310,6 +310,26 @@ def list_non_teff_history(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+def non_teff_archive_diagnostics(request):
+    """
+    Lightweight read-only probe — tells the History UI whether S3 archival
+    is wired up. Soft-coded: returns whatever ``HISTORY_CONFIG`` + the live
+    boto3 connection report, no secrets leaked.
+    Response: { enabled, connected, reachable, bucket, region, root_prefix,
+                object_count, error }
+    """
+    info = history_archive.get_archive_diagnostics()
+    # Never leak full bucket name to non-admins — show short suffix only.
+    role = history_archive.resolve_user_role(request.user)
+    if role not in history_archive.HISTORY_CONFIG.get('cross_user_access_roles', set()):
+        b = info.get('bucket') or ''
+        if len(b) > 6:
+            info['bucket'] = '…' + b[-6:]
+    return Response(info)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def load_non_teff_history(request, job_id):
     """
     Load full result payload for a past extraction so the user can re-open

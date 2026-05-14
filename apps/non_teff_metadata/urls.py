@@ -55,6 +55,7 @@ urlpatterns = [
 
     # History (additive — role-based, S3-backed, doesn't touch core logic)
     path('history/',                  views.list_non_teff_history, name='non-teff-history-list'),
+    path('history/diagnostics/',      views.non_teff_archive_diagnostics, name='non-teff-history-diag'),
     path('history/<str:job_id>/',     views.load_non_teff_history, name='non-teff-history-load'),
     path('history/<str:job_id>/delete/', views.delete_non_teff_history, name='non-teff-history-delete'),
     path('history/<str:job_id>/update/', views.update_non_teff_history, name='non-teff-history-update'),
