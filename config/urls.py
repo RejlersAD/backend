@@ -204,6 +204,11 @@ if is_app_installed('apps.non_teff_metadata'):
     urlpatterns.append(path('api/v1/non-teff/', include('apps.non_teff_metadata.urls')))
     print("[URL] ✅ Cross Recommendation URLs registered")
 
+# Spec Customization — Paper Spec PDF extraction (Piping Classes)
+if is_app_installed('apps.spec_customization'):
+    urlpatterns.append(path('api/v1/spec-customization/', include('apps.spec_customization.urls')))
+    print("[URL] ✅ Spec Customization URLs registered")
+
 # MLflow Model Orchestration API (DISABLED - not in use)
 # urlpatterns.extend([
 #     path('api/v1/mlflow/', include('apps.mlflow_integration.urls')),
