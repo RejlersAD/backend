@@ -3215,6 +3215,95 @@ def _apply_author_originator_mirror(row: Dict[str, Any], na: str) -> None:
         row[ORIGINATOR_FIELD_KEY] = str(author).strip()
 
 
+# ---------------------------------------------------------------------------
+# Source Folder — derive from each file's actual location, not the form.
+#
+# The legacy behaviour treated `source_folder` as a single batch_default
+# (whatever the user typed in Advanced Defaults), so every row in a batch
+# carried the same value even when the dropped folder contained nested
+# sub-folders ("Process/Equipment/", "Mechanical/Datasheets/", …).
+# Reference master-index samples show source_folder is the immediate
+# **directory path** that contains the document, derived from the file.
+#
+# Soft-coded knobs in SOURCE_FOLDER_CONFIG:
+#   * enabled            : kill-switch
+#   * field_key          : column.key in the template (must be batch_default
+#                          or batch_or_extract — both work)
+#   * use_full_relative  : True  → "Sub1/Sub2"; False → only "Sub2" (parent)
+#   * include_top_folder : keep the top-level dropped-folder name in the path
+#   * separator          : path joiner in the output value
+#   * fallback_to_batch  : when the file lives at the upload root, fall back
+#                          to batch_defaults['source_folder'] (the form value)
+# ---------------------------------------------------------------------------
+SOURCE_FOLDER_CONFIG = {
+    'enabled':           True,
+    'field_key':         'source_folder',
+    'use_full_relative': True,
+    'include_top_folder': True,
+    'separator':         '/',
+    'fallback_to_batch': True,
+}
+
+
+def _derive_source_folder(*, relative_path: str, file_name: str,
+                          batch_defaults: Dict[str, Any], na: str) -> str:
+    """
+    Compute the per-row source_folder value from the file's actual relative
+    path within the dropped folder tree. Falls back to the batch default
+    when the file lives at the upload root and `fallback_to_batch` is True.
+    """
+    cfg = SOURCE_FOLDER_CONFIG
+    if not cfg.get('enabled'):
+        return (batch_defaults.get(cfg['field_key']) or '').strip()
+
+    rp = (relative_path or '').replace('\\', '/').strip('/')
+    # Strip the file name itself — we only want the directory portion.
+    if rp.endswith(file_name):
+        rp = rp[: -len(file_name)].rstrip('/')
+
+    parts = [p for p in rp.split('/') if p]
+    if not parts:
+        # File at the root — fall back to whatever the user typed in the form,
+        # if enabled. Otherwise leave blank so NA fills in.
+        if cfg.get('fallback_to_batch'):
+            return (batch_defaults.get(cfg['field_key']) or '').strip()
+        return ''
+
+    if not cfg.get('include_top_folder') and len(parts) > 1:
+        parts = parts[1:]
+    if not cfg.get('use_full_relative'):
+        parts = parts[-1:]
+
+    sep = cfg.get('separator', '/')
+    return sep.join(parts)
+
+
+def _apply_source_folder_smart(row: Dict[str, Any], *, relative_path: str,
+                               file_name: str, batch_defaults: Dict[str, Any],
+                               na: str) -> None:
+    """
+    Replace the batch-default source_folder with a per-file derived value.
+    Always wins over the batch default when the file has any sub-path —
+    matches reference samples where each row reflects its own folder.
+    """
+    cfg = SOURCE_FOLDER_CONFIG
+    if not cfg.get('enabled'):
+        return
+    derived = _derive_source_folder(
+        relative_path=relative_path,
+        file_name=file_name,
+        batch_defaults=batch_defaults,
+        na=na,
+    )
+    if derived:
+        row[cfg['field_key']] = derived
+    else:
+        # Nothing to derive AND no batch fallback — leave NA placeholder.
+        cur = str(row.get(cfg['field_key'], '') or '').strip()
+        if not cur:
+            row[cfg['field_key']] = na
+
+
 def build_row(*, row_index: int, file_name: str, relative_path: str,
               file_path: str, batch_defaults: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -3851,5 +3940,19 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
     # the regex pipeline only hit one of the two, copy the value across.
     # ---------------------------------------------------------------
     _apply_author_originator_mirror(row, na)
+
+    # ---------------------------------------------------------------
+    # Source Folder — derive from the file's actual relative_path so
+    # each row reflects its own sub-folder, not the form's "top folder".
+    # Falls back to the batch default only when the file is at the root.
+    # Soft-coded via SOURCE_FOLDER_CONFIG.
+    # ---------------------------------------------------------------
+    _apply_source_folder_smart(
+        row,
+        relative_path=relative_path or '',
+        file_name=file_name or '',
+        batch_defaults=batch_defaults or {},
+        na=na,
+    )
 
     return row
