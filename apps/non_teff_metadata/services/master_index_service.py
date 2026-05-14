@@ -2481,14 +2481,27 @@ def _extract_unit(text: str) -> str:
 
 def _classify_type(text: str, taxonomy: Dict[str, Any]) -> str:
     """
-    Simple keyword classifier: return the first document_type whose key appears
-    in the text (case-insensitive). Falls back to discipline keywords.
+    Keyword classifier: return the first document_type whose canonical key
+    appears as a whole word in the text (case-insensitive).
+
+    The taxonomy keys are scanned in descending length order so more-specific
+    keys win over their substring counterparts:
+      * "Civil & Structural" beats "Civil"
+      * "Quality Control"    beats "General"
+      * "Material Management" beats "Material"
+    Word-boundary matching (``\\b...\\b``) prevents partial hits like the
+    word "general" inside arbitrary body text from snapping the column to
+    the "General" type.
     """
     if not text:
         return ''
     low = text.lower()
-    for t in taxonomy.get('document_types', {}):
-        if t.lower() in low:
+    keys = list(taxonomy.get('document_types', {}).keys())
+    # Sort by length descending so the longest canonical key matches first.
+    keys.sort(key=lambda k: len(k), reverse=True)
+    for t in keys:
+        pat = r'\b' + re.escape(t.lower()) + r'\b'
+        if re.search(pat, low):
             return t
     return ''
 
@@ -2706,16 +2719,81 @@ _SUBTYPE_ALIAS_OVERRIDES: Dict[str, List[str]] = {
     ],
     # ─── HSE / F&G nuances ──────────────────────────────────────────
     'Passive & Active Fire Protection Philosophy': [
-        'fire protection enclosure', 'passive fire protection',
-        'active fire protection', 'fire protection philosophy',
-        'pfp', 'afp',
+        'fire protection enclosure', 'fire protection enclosures',
+        'passive fire protection', 'active fire protection',
+        'fire protection philosophy', 'fire protection system',
+        'on/off valve fire protection', 'pfp', 'afp',
     ],
     # ─── Mechanical instrumentation accessories ─────────────────────
     'Equipment Miscellaneous': [
         'turbine meter', 'turbine meters', 'flow meter spec',
-        'misc equipment',
+        'misc equipment', 'metering equipment', 'flow metering',
     ],
 }
+
+# ---------------------------------------------------------------------------
+# Reference-validated alias extensions (Habshan-1 Design Calculation batch).
+# These were derived from the manually-checked master index sample and
+# correspond to real-world title phrases the OCR pipeline sees. Kept in a
+# separate dict and merged at module-load time so the curated overrides
+# above stay focused, while additional reference patterns can be tuned
+# independently.
+# ---------------------------------------------------------------------------
+_SUBTYPE_ALIAS_REFERENCE_EXTRA: Dict[str, List[str]] = {
+    'Procurement Documents': [
+        # Reference title: "ENGINEERING-PROCUREMENT RECORD BOOK-DESIGN
+        # CALCULATIONS - PART IX" — matched on either the full phrase or
+        # any of its distinctive prefixes.
+        'engineering procurement record book',
+        'engineering-procurement record book',
+        'procurement record book', 'record book design calculation',
+        'epc record book', 'engineering record book design',
+    ],
+    'Civil Calculations': [
+        # Reference titles: foundations, building structures, drainage,
+        # sumps, sleepers, gantries, sulphur loading shelters.
+        'sulphur loading shelter', 'sulphur loading gantry',
+        'misc pipe supports and foundation', 'misc pipe supports and foundations',
+        'pipe sleepers', 'pipe sleeper calculation',
+        'concrete sump', 'concrete foundation',
+        'deaerator structure', 'administration building',
+        'maintenance building', 'warehouse building', 'stores building',
+        'structural calculation for', 'structural calculations for',
+        'boiler blow down sump', 'demineraliser building',
+        'desuperheater area', 'oily water drain',
+        'storm & firewater', 'storm and firewater',
+        'foundation for supports', 'mps foundation',
+    ],
+    'Pipeline Calculations': [
+        # Reference titles: pipeline pressure, buckling, ADCO P/L.
+        'lp/mp gas pipeline', 'lp mp gas pipeline',
+        'gas pipeline design pressure', 'pipeline design pressure',
+        'adco habshan p/l', 'adco habshan pl',
+        'upheaval buckling check', 'lateral buckling check',
+        'upheaval and lateral buckling',
+    ],
+    'Vessel Design Calculations': [
+        # Reference titles: NGL Storage Tank calculation sheets.
+        'calculation sheet ngl storage', 'calculation sheet-ngl storage',
+        'ngl storage tank', 'storage tank calculation sheet',
+        'pressure vessel calculation', 'tank design calculation',
+    ],
+    'Stress Analysis Reports': [
+        'engineering standard stress calculation',
+        'stress calculation index', 'stress critical line list',
+    ],
+    'Design Calculations': [
+        # Piping-discipline design calculations beyond stress / vessel.
+        'flare line supports calculation', 'flare line supports ngl',
+        'line supports ngl storage', 'piping design calculation sheet',
+    ],
+}
+
+# Merge the reference extension dict into the main overrides dict so the
+# matcher sees a single unified source. Done at module-load time (cheap
+# dict copy) so the soft-coded data stays readable in two blocks.
+for _k, _v in _SUBTYPE_ALIAS_REFERENCE_EXTRA.items():
+    _SUBTYPE_ALIAS_OVERRIDES.setdefault(_k, []).extend(_v)
 
 # Single-word aliases below this length are skipped to avoid false positives,
 # unless explicitly listed in _SUBTYPE_ALIAS_OVERRIDES (acronyms get a pass).
@@ -3096,6 +3174,45 @@ def _value_derived(column: Dict[str, Any], *, accum: Dict[str, Any],
     if rule == 'yn_if_present':
         return 'Y' if source and str(source).strip().upper() not in ('', 'NA') else 'N'
     return ''
+
+
+# ---------------------------------------------------------------------------
+# Author ⇄ Originator mirror — soft-coded post-pass.
+#
+# Reference master-index samples (Habshan-1 NONTEF Design Calculation batch,
+# 9000+ rows) show Author and From/Originator are virtually always the same
+# value — the EPC contractor that prepared the document (BECHTEL-TECHNIP
+# JOINT VENTURE, BECHTEL LIMITED, TECHNIP, …). When one of the two columns
+# was successfully extracted but the other remained empty/NA, we mirror the
+# value across so the row matches the reference convention without changing
+# any extraction algorithm.
+#
+# Toggleable via AUTHOR_ORIGINATOR_MIRROR — set to False to disable.
+# ---------------------------------------------------------------------------
+AUTHOR_ORIGINATOR_MIRROR = True
+AUTHOR_FIELD_KEY = 'author'
+
+
+def _apply_author_originator_mirror(row: Dict[str, Any], na: str) -> None:
+    """
+    If one of (author, originator) holds a meaningful value and the other is
+    empty/NA, copy the value across. Never overwrites an existing value.
+    """
+    if not AUTHOR_ORIGINATOR_MIRROR:
+        return
+    na_up = (na or '').upper()
+
+    def _is_empty(v: Any) -> bool:
+        s = str(v or '').strip()
+        return (not s) or s.upper() == na_up
+
+    author     = row.get(AUTHOR_FIELD_KEY, '')
+    originator = row.get(ORIGINATOR_FIELD_KEY, '')
+
+    if _is_empty(author) and not _is_empty(originator):
+        row[AUTHOR_FIELD_KEY] = str(originator).strip()
+    elif _is_empty(originator) and not _is_empty(author):
+        row[ORIGINATOR_FIELD_KEY] = str(author).strip()
 
 
 def build_row(*, row_index: int, file_name: str, relative_path: str,
@@ -3727,5 +3844,12 @@ def build_row(*, row_index: int, file_name: str, relative_path: str,
                     new_val = ''
                 row[col['key']] = (str(new_val).strip()
                                    if new_val else col.get('fallback', na))
+
+    # ---------------------------------------------------------------
+    # Author ⇄ Originator mirror — soft-coded post-pass. Reference
+    # samples show both columns hold the same EPC contractor name. When
+    # the regex pipeline only hit one of the two, copy the value across.
+    # ---------------------------------------------------------------
+    _apply_author_originator_mirror(row, na)
 
     return row

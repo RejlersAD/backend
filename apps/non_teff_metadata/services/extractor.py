@@ -46,17 +46,33 @@ DATE_PATTERN = re.compile(
     r'\b(\d{4}-\d{2}-\d{2}|\d{2}[./]\d{2}[./]\d{4}|\d{2}-[A-Z]{3}-\d{4})\b'
 )
 
-# Discipline keywords
+# Discipline keywords — soft-coded; longest / most-specific tokens first so
+# 'instrumentation' wins over 'instrument' when iterated in order.
+# Values use the canonical taxonomy keys from document_taxonomy.json
+# wherever a one-to-one mapping exists, so downstream code sees a value
+# the sanitiser will accept without remapping.
 DISCIPLINE_KEYWORDS = {
-    'process': 'Process',
-    'instrument': 'Instrument',
-    'electrical': 'Electrical',
-    'mechanical': 'Mechanical',
-    'piping': 'Piping',
-    'civil': 'Civil',
-    'structural': 'Structural',
-    'hvac': 'HVAC',
-    'safety': 'Safety',
+    'instrumentation': 'Instrumentation',
+    'telecommunication': 'TeleCommunication',
+    'architectural':   'Architectural',
+    'procurement':     'Procurement',
+    'inspection':      'Inspection',
+    'mechanical':      'Mechanical',
+    'electrical':      'Electrical',
+    'structural':      'Civil & Structural',
+    'pipeline':        'Pipeline',
+    'process':         'Process',
+    'piping':          'Piping',
+    'civil':           'Civil',
+    'hvac':            'HVAC',
+    'fire & gas':      'Fire & Gas',
+    'fire and gas':    'Fire & Gas',
+    'telecom':         'TeleCommunication',
+    'health':          'HSE',
+    'environment':     'HSE',
+    'safety':          'HSE',
+    'hse':             'HSE',
+    'instrument':      'Instrumentation',
 }
 
 # Mechanical component keywords
@@ -129,16 +145,33 @@ TAXONOMY_CONFIG = {
     'max_body_chars': 20000,
     # Fallback discipline → taxonomy type hint when the matcher returns
     # ambiguous results. Soft-coded so it can be tuned without code edits.
+    # Values MUST be canonical taxonomy keys from document_taxonomy.json —
+    # anything else gets cleared to NA by _sanitize_document_type and the
+    # Document Type column ends up blank.
     'discipline_to_type_hint': {
-        'Civil':        'Civil',
-        'Structural':   'Civil',
-        'Electrical':   'Electrical',
-        'Mechanical':   'Equipment',
-        'Piping':       'Piping',
-        'Instrument':   'Instrument',
-        'Process':      'Process',
-        'HVAC':         'HVAC',
-        'Safety':       'Safety',
+        'Architectural':       'Architectural',
+        'Civil':               'Civil',
+        'Civil & Structural':  'Civil & Structural',
+        'Structural':          'Civil & Structural',
+        'Electrical':          'Electrical',
+        'Equipment':           'Equipment',
+        'Fire & Gas':          'Fire & Gas',
+        'HSE':                 'HSE',
+        'Safety':              'HSE',
+        'HVAC':                'HVAC',
+        'Inspection':          'Inspection',
+        'Instrumentation':     'Instrumentation',
+        'Instrument':          'Instrumentation',
+        'Material Management': 'Material Management',
+        'Mechanical':          'Mechanical',
+        'Pipeline':            'Pipeline',
+        'Piping':              'Piping',
+        'Process':             'Process',
+        'Procurement':         'Procurement',
+        'Quality Control':     'Quality Control',
+        'TeleCommunication':   'TeleCommunication',
+        'Telecommunication':   'TeleCommunication',
+        'Telecom':             'TeleCommunication',
     },
 }
 
