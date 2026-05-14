@@ -45,6 +45,11 @@ from .services.config import (
     PROGRESS_CACHE_KEY_TPL,
     PARTIAL_CACHE_KEY_TPL,
 )
+from .services.file_normalizer import (
+    SUPPORTED_FORMATS,
+    get_accepted_extensions,
+    normalize_to_pdf,
+)
 from .tasks import extract_paper_spec
 
 logger = logging.getLogger(__name__)
@@ -79,8 +84,8 @@ def _page_count(django_file_path: str) -> int:
 @parser_classes([MultiPartParser, FormParser])
 @permission_classes([IsAuthenticated])
 def upload_paper_spec(request):
-    pdf = request.FILES.get('file') or request.FILES.get('pdf_file')
-    if not pdf:
+    src = request.FILES.get('file') or request.FILES.get('pdf_file')
+    if not src:
         return Response({"error": "No file uploaded (expected field: 'file' or 'pdf_file')"},
                         status=status.HTTP_400_BAD_REQUEST)
 
@@ -88,9 +93,12 @@ def upload_paper_spec(request):
     title = request.data.get('title') or ''
     document_number = request.data.get('document_number') or ''
 
-    # Dedupe by sha256 — reuse latest completed job for identical bytes.
-    sha = _sha256_of_file(pdf)
+    # SHA-256 of the *original* upload — stable dedupe key across formats.
+    sha = _sha256_of_file(src)
+    original_filename = src.name
+    original_size = src.size
 
+    # Dedupe before any conversion work.
     if SPEC_EXTRACTION_CONFIG.get("dedupe_by_sha256", True):
         existing = (
             PaperSpecDocument.objects
@@ -112,11 +120,19 @@ def upload_paper_spec(request):
                     "job":      PaperSpecExtractionJobSerializer(latest_completed).data,
                 })
 
-    # Persist document
+    # Smart multi-format normalisation → always store a PDF.
+    normalized = normalize_to_pdf(src)
+    if not normalized.success:
+        return Response(
+            {"error": normalized.error_message, "accepted_extensions": get_accepted_extensions()},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Persist document (always PDF on disk; remember original name for UX).
     doc = PaperSpecDocument.objects.create(
-        file=pdf,
-        original_filename=pdf.name,
-        file_size_bytes=pdf.size,
+        file=normalized.file,
+        original_filename=original_filename,
+        file_size_bytes=original_size,
         sha256_hash=sha,
         project_id=project_id,
         title=title,
@@ -299,10 +315,16 @@ def export_job(request, job_id):
 @permission_classes([IsAuthenticated])
 def config_view(request):
     """Expose soft-coded config to the UI so feature flags stay in sync."""
+    accepted_exts = get_accepted_extensions()
     return Response({
         "chunk_size_pages":          SPEC_EXTRACTION_CONFIG["chunk_size_pages"],
         "ai_engines":                SPEC_EXTRACTION_CONFIG["ai_engines"],
         "max_ai_pages_per_job":      SPEC_EXTRACTION_CONFIG["max_ai_pages_per_job"],
         "skip_ai_if_text_chars_gte": SPEC_EXTRACTION_CONFIG["skip_ai_if_text_chars_gte"],
         "dedupe_by_sha256":          SPEC_EXTRACTION_CONFIG["dedupe_by_sha256"],
+        "accepted_extensions":       accepted_exts,
+        "accept_attribute":          ','.join(f'.{e}' for e in accepted_exts),
+        "format_groups": sorted({
+            f"{desc['group']}" for desc in SUPPORTED_FORMATS.values()
+        }),
     })
