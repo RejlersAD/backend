@@ -57,6 +57,13 @@ from .services.exporters.smartplant_config import (
     SPEC_OUTPUT_FILENAME_TPL,
     CAT_OUTPUT_FILENAME_TPL,
 )
+from .services.presigned_upload import (
+    PRESIGNED_UPLOAD_CONFIG,
+    best_effort_delete,
+    fetch_uploaded_to_temp_file,
+    generate_presigned_put,
+    is_presigned_upload_available,
+)
 from .tasks import extract_paper_spec
 
 logger = logging.getLogger(__name__)
@@ -85,27 +92,23 @@ def _page_count(django_file_path: str) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Upload + start extraction
+# Shared ingest pipeline — used by both legacy multipart upload AND the new
+# direct-to-S3 presigned-upload "complete" endpoint. Centralised so both paths
+# stay byte-for-byte equivalent (SHA dedupe, normalisation, Celery enqueue).
 # ─────────────────────────────────────────────────────────────────────────────
-@api_view(['POST'])
-@parser_classes([MultiPartParser, FormParser])
-@permission_classes([IsAuthenticated])
-def upload_paper_spec(request):
-    src = request.FILES.get('file') or request.FILES.get('pdf_file')
-    if not src:
-        return Response({"error": "No file uploaded (expected field: 'file' or 'pdf_file')"},
-                        status=status.HTTP_400_BAD_REQUEST)
-
-    project_id = request.data.get('project_id') or None
-    title = request.data.get('title') or ''
-    document_number = request.data.get('document_number') or ''
-
-    # SHA-256 of the *original* upload — stable dedupe key across formats.
+def _ingest_paper_spec_file(
+    *,
+    src,                      # Django UploadedFile-like (.name, .size, .read, .seek, .chunks)
+    project_id,
+    title: str,
+    document_number: str,
+    request_user,
+):
+    """Returns a DRF ``Response`` — same shape as the legacy upload view."""
     sha = _sha256_of_file(src)
-    original_filename = src.name
-    original_size = src.size
+    original_filename = getattr(src, 'name', 'upload')
+    original_size = getattr(src, 'size', 0) or 0
 
-    # Dedupe before any conversion work.
     if SPEC_EXTRACTION_CONFIG.get("dedupe_by_sha256", True):
         existing = (
             PaperSpecDocument.objects
@@ -127,15 +130,14 @@ def upload_paper_spec(request):
                     "job":      PaperSpecExtractionJobSerializer(latest_completed).data,
                 })
 
-    # Smart multi-format normalisation → always store a PDF.
     normalized = normalize_to_pdf(src)
     if not normalized.success:
         return Response(
-            {"error": normalized.error_message, "accepted_extensions": get_accepted_extensions()},
+            {"error": normalized.error_message,
+             "accepted_extensions": get_accepted_extensions()},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Persist document (always PDF on disk; remember original name for UX).
     doc = PaperSpecDocument.objects.create(
         file=normalized.file,
         original_filename=original_filename,
@@ -144,16 +146,15 @@ def upload_paper_spec(request):
         project_id=project_id,
         title=title,
         document_number=document_number,
-        uploaded_by=request.user if request.user.is_authenticated else None,
+        uploaded_by=request_user if getattr(request_user, 'is_authenticated', False) else None,
     )
     doc.total_pages = _page_count(doc.file.path)
     doc.save(update_fields=['total_pages'])
 
-    # Queue extraction job
     job = PaperSpecExtractionJob.objects.create(
         document=doc,
         status=PaperSpecExtractionJob.STATUS_QUEUED,
-        created_by=request.user if request.user.is_authenticated else None,
+        created_by=request_user if getattr(request_user, 'is_authenticated', False) else None,
     )
 
     try:
@@ -162,7 +163,6 @@ def upload_paper_spec(request):
         job.save(update_fields=['celery_task_id'])
     except Exception as e:
         logger.exception("[SpecExtraction] failed to queue task: %s", e)
-        # Best-effort fallback: run inline (smoke test path).
         try:
             extract_paper_spec(str(job.id))
         except Exception as run_err:
@@ -175,6 +175,126 @@ def upload_paper_spec(request):
         "document": PaperSpecDocumentSerializer(doc).data,
         "job":      PaperSpecExtractionJobSerializer(job).data,
     }, status=status.HTTP_201_CREATED)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Upload + start extraction
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser])
+@permission_classes([IsAuthenticated])
+def upload_paper_spec(request):
+    src = request.FILES.get('file') or request.FILES.get('pdf_file')
+    if not src:
+        return Response({"error": "No file uploaded (expected field: 'file' or 'pdf_file')"},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    return _ingest_paper_spec_file(
+        src=src,
+        project_id=request.data.get('project_id') or None,
+        title=request.data.get('title') or '',
+        document_number=request.data.get('document_number') or '',
+        request_user=request.user,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Direct-to-S3 presigned upload (bypasses Railway's edge body-size limit).
+# Two-step flow:
+#   1) POST paper-spec/upload/presign/   → returns presigned PUT URL + s3_key
+#   2) Browser PUTs file directly to S3 (with progress)
+#   3) POST paper-spec/upload/complete/  → backend ingests via the SAME helper
+# Falls back gracefully: if S3 isn't configured or the feature flag is off,
+# `presign` returns `{"enabled": false, "reason": "..."}` and the client should
+# revert to the legacy multipart `upload/` endpoint.
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def presign_paper_spec_upload(request):
+    filename     = request.data.get('filename') or ''
+    content_type = request.data.get('content_type') or 'application/octet-stream'
+    try:
+        size_bytes = int(request.data.get('size') or 0)
+    except (TypeError, ValueError):
+        size_bytes = 0
+
+    if not filename:
+        return Response({"error": "filename is required"},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    result = generate_presigned_put(
+        filename=filename,
+        content_type=content_type,
+        size_bytes=size_bytes,
+    )
+
+    if not result.enabled:
+        # 200 OK with enabled=False — this is an *expected* fallback signal,
+        # not an error. Lets the frontend silently revert to multipart upload.
+        return Response({
+            "enabled": False,
+            "reason":  result.reason,
+        })
+
+    return Response({
+        "enabled":     True,
+        "method":      result.method,
+        "upload_url":  result.upload_url,
+        "s3_key":      result.s3_key,
+        "headers":     result.headers,
+        "expires_in":  result.expires_in,
+        "bucket":      result.bucket,
+        "max_bytes":   PRESIGNED_UPLOAD_CONFIG['max_bytes'],
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def complete_paper_spec_upload(request):
+    """Ingest a file that was already PUT to S3 via a presigned URL."""
+    s3_key            = request.data.get('s3_key') or ''
+    original_filename = request.data.get('filename') or ''
+    project_id        = request.data.get('project_id') or None
+    title             = request.data.get('title') or ''
+    document_number   = request.data.get('document_number') or ''
+
+    if not s3_key or not original_filename:
+        return Response(
+            {"error": "s3_key and filename are required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not is_presigned_upload_available():
+        return Response(
+            {"error": "presigned uploads are not available in this environment"},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    try:
+        src = fetch_uploaded_to_temp_file(
+            s3_key=s3_key,
+            original_filename=original_filename,
+        )
+    except RuntimeError as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        response = _ingest_paper_spec_file(
+            src=src,
+            project_id=project_id,
+            title=title,
+            document_number=document_number,
+            request_user=request.user,
+        )
+    finally:
+        try:
+            src.close()
+        except Exception:
+            pass
+        # Stage object served its purpose — drop it. Failure is non-fatal.
+        best_effort_delete(s3_key)
+
+    return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -374,6 +494,13 @@ def config_view(request):
         "format_groups": sorted({
             f"{desc['group']}" for desc in SUPPORTED_FORMATS.values()
         }),
+        # Soft-coded presigned-upload signalling — frontend can ask once at
+        # boot and choose direct-to-S3 vs legacy multipart accordingly.
+        "presigned_upload": {
+            "available":           is_presigned_upload_available(),
+            "max_bytes":           PRESIGNED_UPLOAD_CONFIG["max_bytes"],
+            "url_expiry_seconds":  PRESIGNED_UPLOAD_CONFIG["url_expiry_seconds"],
+        },
     })
 
 

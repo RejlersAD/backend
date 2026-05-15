@@ -8,6 +8,9 @@ app_name = 'spec_customization'
 urlpatterns = [
     # Paper Spec extraction
     path('paper-spec/upload/',                 views.upload_paper_spec, name='upload'),
+    # Direct-to-S3 presigned upload (large-file path)
+    path('paper-spec/upload/presign/',  views.presign_paper_spec_upload,  name='upload-presign'),
+    path('paper-spec/upload/complete/', views.complete_paper_spec_upload, name='upload-complete'),
     path('paper-spec/jobs/',                   views.list_jobs,         name='jobs'),
     path('paper-spec/jobs/<uuid:job_id>/',     views.job_detail,        name='job-detail'),
     path('paper-spec/jobs/<uuid:job_id>/classes/', views.job_classes,   name='job-classes'),
