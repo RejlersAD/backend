@@ -232,3 +232,56 @@ class PipingClassComponent(models.Model):
 
     def __str__(self) -> str:
         return f'{self.component_type} · {self.sub_type or "—"} · {self.size_from}–{self.size_to}'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. WorkbookCellOverride — per-cell user edits on the SPEC/CAT canvas
+# ─────────────────────────────────────────────────────────────────────────────
+class WorkbookCellOverride(models.Model):
+    """
+    User-edited override for a single cell in the SPEC or CAT workbook preview.
+
+    Identifies a cell by (job, workbook, sheet_name, row_key, column_name).
+    `row_key` is a deterministic string computed by the preview builder — it is
+    stable across rebuilds as long as the underlying class/component ids do
+    not change.
+
+    Overrides are applied at *render* time (preview JSON) AND at *export* time
+    (xlsx generation), so what the user sees in the canvas matches the file.
+    """
+    WORKBOOK_SPEC = 'spec'
+    WORKBOOK_CAT  = 'cat'
+    WORKBOOK_CHOICES = [
+        (WORKBOOK_SPEC, 'SPEC'),
+        (WORKBOOK_CAT,  'CAT'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    job = models.ForeignKey(
+        PaperSpecExtractionJob,
+        on_delete=models.CASCADE,
+        related_name='workbook_overrides',
+    )
+    workbook    = models.CharField(max_length=8, choices=WORKBOOK_CHOICES, db_index=True)
+    sheet_name  = models.CharField(max_length=128, db_index=True)
+    row_key     = models.CharField(max_length=256, db_index=True)
+    column_name = models.CharField(max_length=128)
+    value       = models.TextField(blank=True, default='')
+
+    edited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='spec_workbook_edits',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('job', 'workbook', 'sheet_name', 'row_key', 'column_name')]
+        indexes = [
+            models.Index(fields=['job', 'workbook', 'sheet_name']),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.workbook}/{self.sheet_name}/{self.row_key}/{self.column_name} = {self.value!r}'

@@ -33,6 +33,7 @@ from .models import (
     PaperSpecDocument,
     PaperSpecExtractionJob,
     PipingClass,
+    WorkbookCellOverride,
 )
 from .serializers import (
     PaperSpecDocumentSerializer,
@@ -49,6 +50,12 @@ from .services.file_normalizer import (
     SUPPORTED_FORMATS,
     get_accepted_extensions,
     normalize_to_pdf,
+)
+from .services.exporters import build_spec_workbook, build_cat_workbook
+from .services.exporters.workbook_preview import build_preview, WORKBOOK_SPEC, WORKBOOK_CAT
+from .services.exporters.smartplant_config import (
+    SPEC_OUTPUT_FILENAME_TPL,
+    CAT_OUTPUT_FILENAME_TPL,
 )
 from .tasks import extract_paper_spec
 
@@ -309,6 +316,46 @@ def export_job(request, job_id):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SmartPlant 3D — Spec / Catalog exports (two-file output)
+# ─────────────────────────────────────────────────────────────────────────────
+def _smartplant_response(buf, filename: str) -> HttpResponse:
+    resp = HttpResponse(
+        buf.read(),
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+    resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return resp
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_smartplant_spec(request, job_id):
+    """Export SmartPlant 3D SPEC workbook (rule sheets)."""
+    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    try:
+        buf = build_spec_workbook(job)
+    except Exception as e:
+        logger.exception("[SmartPlantExport] SPEC build failed for job %s", job_id)
+        return Response({"error": f"Failed to build SPEC workbook: {e}"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    return _smartplant_response(buf, SPEC_OUTPUT_FILENAME_TPL.format(job_id=job.id))
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_smartplant_cat(request, job_id):
+    """Export SmartPlant 3D Catalog workbook (component part sheets)."""
+    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    try:
+        buf = build_cat_workbook(job)
+    except Exception as e:
+        logger.exception("[SmartPlantExport] CAT build failed for job %s", job_id)
+        return Response({"error": f"Failed to build CAT workbook: {e}"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    return _smartplant_response(buf, CAT_OUTPUT_FILENAME_TPL.format(job_id=job.id))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Health / config introspection (debug-friendly)
 # ─────────────────────────────────────────────────────────────────────────────
 @api_view(['GET'])
@@ -328,3 +375,104 @@ def config_view(request):
             f"{desc['group']}" for desc in SUPPORTED_FORMATS.values()
         }),
     })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workbook canvas — preview SPEC/CAT contents as JSON + per-cell edit/clear
+# ─────────────────────────────────────────────────────────────────────────────
+_VALID_WORKBOOKS = {WORKBOOK_SPEC, WORKBOOK_CAT}
+# Soft-coded value-length guard for free-text cell edits.
+_MAX_CELL_VALUE_LEN = 2000
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def workbook_preview(request, job_id):
+    """Return the SPEC or CAT workbook as JSON for the canvas.
+
+    Query: ?workbook=spec|cat (defaults to spec).
+    """
+    workbook = (request.query_params.get('workbook') or WORKBOOK_SPEC).lower()
+    if workbook not in _VALID_WORKBOOKS:
+        return Response(
+            {"error": f"workbook must be one of {sorted(_VALID_WORKBOOKS)}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    try:
+        data = build_preview(job, workbook)
+    except Exception as e:
+        logger.exception("[WorkbookPreview] build failed for job %s / %s", job_id, workbook)
+        return Response(
+            {"error": f"Failed to build workbook preview: {e}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    return Response(data)
+
+
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def workbook_cell(request, job_id):
+    """Save (POST) or clear (DELETE) a single cell override.
+
+    Body (JSON):
+        {
+            "workbook":    "spec" | "cat",
+            "sheet_name":  "PipingMaterialsClassData",
+            "row_key":     "cls:<uuid>:b0:0",
+            "column_name": "MaterialGrade",
+            "value":       "new value"       # required for POST
+        }
+    """
+    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    payload = request.data or {}
+
+    workbook    = (payload.get('workbook') or '').lower().strip()
+    sheet_name  = (payload.get('sheet_name')  or '').strip()
+    row_key     = (payload.get('row_key')     or '').strip()
+    column_name = (payload.get('column_name') or '').strip()
+
+    if workbook not in _VALID_WORKBOOKS or not sheet_name or not row_key or not column_name:
+        return Response(
+            {"error": "workbook, sheet_name, row_key, column_name are all required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if request.method == 'DELETE':
+        deleted, _ = WorkbookCellOverride.objects.filter(
+            job=job, workbook=workbook, sheet_name=sheet_name,
+            row_key=row_key, column_name=column_name,
+        ).delete()
+        return Response({"cleared": bool(deleted)})
+
+    # POST — upsert.
+    value = payload.get('value', '')
+    if value is None:
+        value = ''
+    value = str(value)
+    if len(value) > _MAX_CELL_VALUE_LEN:
+        return Response(
+            {"error": f"value exceeds {_MAX_CELL_VALUE_LEN} characters"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    obj, created = WorkbookCellOverride.objects.update_or_create(
+        job=job, workbook=workbook, sheet_name=sheet_name,
+        row_key=row_key, column_name=column_name,
+        defaults={
+            'value':     value,
+            'edited_by': request.user if request.user.is_authenticated else None,
+        },
+    )
+    return Response(
+        {
+            "saved":       True,
+            "created":     created,
+            "workbook":    obj.workbook,
+            "sheet_name":  obj.sheet_name,
+            "row_key":     obj.row_key,
+            "column_name": obj.column_name,
+            "value":       obj.value,
+        },
+        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+    )

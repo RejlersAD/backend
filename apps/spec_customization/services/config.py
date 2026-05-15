@@ -8,14 +8,39 @@ should ever hold a literal magic number for this feature.
 """
 from __future__ import annotations
 
+import os
+
+
+def _env_int(name: str, default: int, *, lo: int = 1, hi: int | None = None) -> int:
+    """Read an integer env-var with safe bounds; falls back to `default` on
+    missing / un-parseable values. Allows ops to retune chunking via
+    environment without code changes (e.g. `SPEC_CHUNK_SIZE_PAGES=5`)."""
+    raw = os.environ.get(name)
+    if raw in (None, ''):
+        return default
+    try:
+        v = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    if v < lo:
+        return lo
+    if hi is not None and v > hi:
+        return hi
+    return v
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Master config dict — exported as `SPEC_EXTRACTION_CONFIG`
 # ─────────────────────────────────────────────────────────────────────────────
 SPEC_EXTRACTION_CONFIG = {
     # ── Chunking ────────────────────────────────────────────────────────
-    "chunk_size_pages":      20,     # pages per Celery sub-task
-    "max_chunks_parallel":   4,      # how many chunk tasks queued at once
-    "page_overlap":          0,      # set >0 if classes span chunk boundaries
+    # Smaller chunks = more accurate per-page AI extraction & finer progress
+    # granularity (better visibility for the user).  Larger chunks = fewer
+    # Celery round-trips.  Default 5 pages/chunk; override via env var
+    # `SPEC_CHUNK_SIZE_PAGES` (1..50) without redeploying.
+    "chunk_size_pages":      _env_int("SPEC_CHUNK_SIZE_PAGES", 5, lo=1, hi=50),
+    "max_chunks_parallel":   _env_int("SPEC_MAX_CHUNKS_PARALLEL", 4, lo=1, hi=32),
+    "page_overlap":          _env_int("SPEC_PAGE_OVERLAP", 0, lo=0, hi=10),
 
     # ── AI engine waterfall (first non-failed engine wins per chunk) ────
     # Supported: 'pymupdf_text', 'gemini_vision', 'openai_vision', 'tesseract'
