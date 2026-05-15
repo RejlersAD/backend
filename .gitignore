@@ -48,6 +48,8 @@ db.sqlite3
 db.sqlite3-journal
 /media
 /staticfiles
+# Runtime upload roots (MEDIA_ROOT subdirs)
+/spec_customization/paper_specs/
 
 # Temporary directories
 temp_sfiles2_*/
