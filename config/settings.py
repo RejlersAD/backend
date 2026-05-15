@@ -1066,6 +1066,33 @@ else:
     STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # ─────────────────────────────────────────────────────────────────────
+# Large-file upload tuning (soft-coded via env vars)
+# ─────────────────────────────────────────────────────────────────────
+# Engineering source documents (P&IDs, spec books, scanned catalogues) can
+# legitimately reach ~1 GB. The defaults below match the frontend cap
+# (VITE_SPEC_MAX_FILE_MB = 1024) and the Gunicorn worker timeout.
+#
+# Override per env without code deploy:
+#   DJANGO_DATA_UPLOAD_MAX_MEMORY_SIZE  → total non-file request body cap (bytes)
+#   DJANGO_FILE_UPLOAD_MAX_MEMORY_SIZE  → in-memory file threshold; above this
+#                                         Django spools to disk via TemporaryFileUploadHandler
+#   DJANGO_DATA_UPLOAD_MAX_NUMBER_FIELDS → multipart field count cap
+# ─────────────────────────────────────────────────────────────────────
+_GB = 1024 * 1024 * 1024
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    config('DJANGO_DATA_UPLOAD_MAX_MEMORY_SIZE', default=str(2 * _GB))
+)  # 2 GB headroom for ~1 GB files + form fields
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(
+    config('DJANGO_FILE_UPLOAD_MAX_MEMORY_SIZE', default=str(5 * 1024 * 1024))
+)  # 5 MB — anything larger streams to a temp file on disk (no RAM blow-up)
+DATA_UPLOAD_MAX_NUMBER_FIELDS = int(
+    config('DJANGO_DATA_UPLOAD_MAX_NUMBER_FIELDS', default='10000')
+)
+FILE_UPLOAD_HANDLERS = [
+    'django.core.files.uploadhandler.TemporaryFileUploadHandler',
+]
+
+# ─────────────────────────────────────────────────────────────────────
 # Wrench → S3 Export — dedicated bucket (soft-coded via env var)
 # Set `WRENCH_S3_BUCKET` in .env / Railway. Falls back to 'wrench-radai'.
 # Used by apps.wrench_integration.s3_service._get_bucket()
