@@ -107,32 +107,122 @@ _VALVE_TAG_REMARK_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Fields scanned (in priority order) when deriving Remarks from a row. The
-# Vision model sometimes puts the operational status code in the tag itself,
-# sometimes in the description, sometimes already in remarks (verbatim from
-# the drawing legend). Scan all three so we don't miss it.
-REMARK_SOURCE_FIELDS: Tuple[str, ...] = ('valve_tag', 'remarks', 'description')
+# ─── Soft-coded spelled-out phrase → code dictionary ────────────────────
+# Vision often emits the English phrase in `description`/`remarks` instead of
+# the short token (e.g. ``Locked Open`` rather than ``LO``). Map these to
+# the canonical code so the Remarks column stays consistent. Order matters:
+# longer/more-specific phrases first so ``FAIL OPEN`` is not stolen by ``OPEN``.
+VALVE_PHRASE_REMARK_CODES: List[Tuple[str, str]] = [
+    ('FULL-BORE LOCKED OPEN',   'FBLO'),
+    ('FULL BORE LOCKED OPEN',   'FBLO'),
+    ('FULL-BORE LOCKED CLOSED', 'FBLC'),
+    ('FULL BORE LOCKED CLOSED', 'FBLC'),
+    ('CAR-SEALED OPEN',         'CSO'),
+    ('CAR SEALED OPEN',         'CSO'),
+    ('CAR-SEALED CLOSED',       'CSC'),
+    ('CAR SEALED CLOSED',       'CSC'),
+    ('TIGHT SHUT-OFF',          'TSO'),
+    ('TIGHT SHUT OFF',          'TSO'),
+    ('TIGHT SHUTOFF',           'TSO'),
+    ('NON-RETURN VALVE',        'NRV'),
+    ('NON RETURN VALVE',        'NRV'),
+    ('LOCKED OPEN',             'LO'),
+    ('LOCKED CLOSED',           'LC'),
+    ('NORMALLY OPEN',           'NO'),
+    ('NORMALLY CLOSED',         'NC'),
+    ('FAIL OPEN',               'FO'),
+    ('FAIL CLOSED',             'FC'),
+    ('FAIL CLOSE',              'FC'),
+    ('FAIL LAST',               'FL'),
+    ('FAIL IN PLACE',           'FL'),
+    ('FAIL INDETERMINATE',      'FI'),
+]
+_VALVE_PHRASE_REMARK_RE = re.compile(
+    r'(?<![A-Z])(' + '|'.join(re.escape(p) for p, _ in VALVE_PHRASE_REMARK_CODES) + r')(?![A-Z])',
+    re.IGNORECASE,
+)
+
+# Fields scanned when deriving Remarks from a row. Vision can misplace the
+# operational status code into ANY string column (tag, description, type,
+# line_number, even pms_class), so scan every text field. Order controls
+# which field's match wins when duplicates appear (purely cosmetic since
+# duplicates are deduped against canonical codes).
+REMARK_SOURCE_FIELDS: Tuple[str, ...] = (
+    'valve_tag', 'remarks', 'description',
+    'type', 'line_number', 'pms_class', 'rating', 'bore',
+)
+
+# Substrings of the original `remarks` text that should be DROPPED when
+# merging derived codes back — these are placeholder/empty-ish values the
+# Vision model sometimes emits. Anything else free-text is preserved.
+_REMARK_DROP_PATTERNS: Tuple[str, ...] = (
+    'n/a', 'na', 'none', 'null', '-', '—', '–', '.',
+)
 
 
 def _derive_remarks_from_row(row: Dict[str, Any]) -> str:
     """Return a comma-separated list of suffix codes found anywhere in the row.
 
-    Scans REMARK_SOURCE_FIELDS in order. Empty string when no codes match.
-    Order of returned codes follows VALVE_TAG_REMARK_CODES so longer/more-
-    specific codes win and duplicates are dropped.
+    Scans REMARK_SOURCE_FIELDS for BOTH short-token codes (LO/LC/…) and
+    spelled-out phrase variants ("Locked Open" → LO). Empty string when no
+    codes match. Order of returned codes follows VALVE_TAG_REMARK_CODES so
+    longer/more-specific codes win and duplicates are dropped.
     """
     found: List[str] = []
+    label_by_code = {c.upper(): label for c, label in VALVE_TAG_REMARK_CODES}
+
+    def _add(label: str) -> None:
+        if label and label not in found:
+            found.append(label)
+
     for field in REMARK_SOURCE_FIELDS:
         text = row.get(field, '') or ''
         if not text:
             continue
-        for raw in _VALVE_TAG_REMARK_RE.findall(str(text)):
-            canonical = raw.upper()
-            for code, label in VALVE_TAG_REMARK_CODES:
-                if code == canonical and label not in found:
-                    found.append(label)
+        s = str(text)
+        # 1) Spelled-out phrases first (longer matches win).
+        for raw in _VALVE_PHRASE_REMARK_RE.findall(s):
+            phrase = raw.upper().replace('-', ' ')
+            for ph, code in VALVE_PHRASE_REMARK_CODES:
+                if ph.upper().replace('-', ' ') == phrase:
+                    _add(label_by_code.get(code.upper(), code))
                     break
+        # 2) Short-token codes (LO, LC, TSO, FBLC, FBLO, …).
+        for raw in _VALVE_TAG_REMARK_RE.findall(s):
+            _add(label_by_code.get(raw.upper(), ''))
+
+    # Preserve the canonical code-list order from VALVE_TAG_REMARK_CODES so
+    # output is deterministic regardless of which field surfaced the code.
+    order = {label: i for i, (_, label) in enumerate(VALVE_TAG_REMARK_CODES)}
+    found.sort(key=lambda l: order.get(l, 999))
     return ', '.join(found)
+
+
+def _merge_remarks(original: str, derived: str) -> str:
+    """Combine derived codes with any pre-existing free-text remarks.
+
+    Keeps the original free-text (if meaningful) and APPENDS any derived
+    codes that aren't already present — so legitimate engineering notes are
+    never destroyed by the code-derivation pass.
+    """
+    orig = (original or '').strip()
+    der  = (derived or '').strip()
+    if not der:
+        return orig
+    if not orig or orig.lower() in _REMARK_DROP_PATTERNS:
+        return der
+    # Skip merge when the original is just the same code list (case-insensitive,
+    # whitespace-insensitive comparison).
+    norm = lambda s: re.sub(r'\s+', '', s).upper()
+    if norm(orig) == norm(der):
+        return der
+    # If every derived code already appears as a sub-string of the original,
+    # leave the original untouched.
+    orig_up = orig.upper()
+    extra = [c.strip() for c in der.split(',') if c.strip() and c.strip().upper() not in orig_up]
+    if not extra:
+        return orig
+    return f"{orig} ({', '.join(extra)})"
 
 
 # Backwards-compatible thin wrapper (kept in case other modules import it).
@@ -208,7 +298,9 @@ Schema:
 }}
 
 Rules:
-- For "remarks": inspect the valve symbol/legend in the drawing. If the valve is annotated with any of LO (Locked Open), LC (Locked Closed), CSO (Car-Sealed Open), CSC (Car-Sealed Closed), TSO (Tight Shut-Off), FBLO (Full-Bore Locked Open), FBLC (Full-Bore Locked Closed), NRV, NO, NC, FO, FC, FL, FI — emit those codes in remarks (comma-separated). These codes may also appear inside the valve tag itself (e.g. ``BV-LO-1234``); include them either way.
+- For "remarks": this column is CRITICAL. Inspect EVERY valve symbol and its adjacent legend annotation on the drawing very carefully — valves are often labelled with a 2-4 letter operational-status code in small text right next to the valve body (sometimes above, below, or attached by a leader line).
+  Always emit these codes when visible (comma-separated, in this exact spelling): LO (Locked Open), LC (Locked Closed), CSO (Car-Sealed Open), CSC (Car-Sealed Closed), TSO (Tight Shut-Off), FBLO (Full-Bore Locked Open), FBLC (Full-Bore Locked Closed), NRV (Non-Return Valve), NO (Normally Open), NC (Normally Closed), FO (Fail Open), FC (Fail Closed), FL (Fail Last), FI (Fail Indeterminate).
+  These codes may ALSO appear inside the valve tag itself (e.g. ``BV-LO-1234``, ``GV-08-FBLC``) — include them either way. If the legend uses the spelled-out phrase (e.g. "Locked Open"), emit the matching short code instead. Only fall back to free text when NONE of these codes apply.
 - Output only valid JSON; do not wrap in markdown fences.
 - Extract EVERY valve row visible in the attached pages — do not summarise or skip.
 - Use empty strings for unknown text fields and 0 for unknown numeric fields.
@@ -347,15 +439,15 @@ def _coerce_row(raw: Dict[str, Any]) -> Dict[str, Any]:
                 row['area'] = a
                 break
 
-    # Soft-coded Remark derivation from valve-tag / description / remarks.
-    # The Vision model often surfaces operational-status codes (LO, LC, CSO,
-    # CSC, TSO, FBLC, FBLO, NRV, NO, NC, FO, FC, FL, FI) in the valve tag,
-    # the service description, or even the original remarks string. Scan all
-    # three and replace the remarks column with the canonical code list so
-    # downstream readers see a clean, normalised value.
+    # Soft-coded Remark derivation. Vision often surfaces operational-status
+    # codes (LO, LC, CSO, CSC, TSO, FBLC, FBLO, NRV, NO, NC, FO, FC, FL, FI)
+    # or their spelled-out forms ("Locked Open", "Fail Closed", …) inside the
+    # valve tag, description, type, line number, or remarks string itself.
+    # We scan every text field and MERGE the canonical code list with any
+    # pre-existing free-text remarks so legitimate notes aren't destroyed.
     derived = _derive_remarks_from_row(row)
     if derived:
-        row['remarks'] = derived
+        row['remarks'] = _merge_remarks(row.get('remarks', ''), derived)
     return row
 
 
