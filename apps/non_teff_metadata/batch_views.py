@@ -316,6 +316,191 @@ def upload_batch_files(request, batch_id):
     })
 
 
+# ---------------------------------------------------------------------------
+# Direct-to-S3 presigned upload (large-file / 2 GB path).
+#
+# Mirrors the proven `spec_customization` flow so very large files bypass
+# Railway's edge proxy entirely (~100-500 MB body cap, ~5-10 min request
+# timeout). Only the tiny `presign` and `complete` RPCs touch Django; the
+# bytes go browser → S3 directly. The legacy multipart `upload_batch_files`
+# view above is unchanged and remains the path for small files.
+#
+# Soft-coding: all behaviour lives in `services.presigned_upload`. The
+# client receives `{enabled: false, reason}` if S3 isn't configured and
+# silently falls back to the multipart path.
+# ---------------------------------------------------------------------------
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def presign_batch_upload(request, batch_id):
+    """
+    Returns a presigned PUT URL for ONE file. The frontend issues one
+    presign call per large file in a chunk, then PUTs each blob directly
+    to S3 in parallel.
+
+    Body: { filename, content_type?, size?, relative_path? }
+    """
+    from .services.presigned_upload import (
+        PRESIGNED_UPLOAD_CONFIG,
+        generate_presigned_put,
+    )
+
+    batch = get_object_or_404(NonTeffBatch, batch_id=batch_id)
+    filename     = request.data.get('filename') or ''
+    content_type = request.data.get('content_type') or 'application/octet-stream'
+    try:
+        size_bytes = int(request.data.get('size') or 0)
+    except (TypeError, ValueError):
+        size_bytes = 0
+
+    if not filename:
+        return Response({'error': 'filename is required'},
+                        status=http_status.HTTP_400_BAD_REQUEST)
+
+    result = generate_presigned_put(
+        filename=filename,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        batch_id=str(batch.batch_id),
+    )
+
+    if not result.enabled:
+        # 200 OK with enabled=False — expected fallback signal, not an error.
+        return Response({
+            'enabled': False,
+            'reason':  result.reason,
+            'min_mb':  PRESIGNED_UPLOAD_CONFIG['min_mb_advisory'],
+        })
+
+    return Response({
+        'enabled':     True,
+        'method':      result.method,
+        'upload_url':  result.upload_url,
+        's3_key':      result.s3_key,
+        'headers':     result.headers,
+        'expires_in':  result.expires_in,
+        'bucket':      result.bucket,
+        'max_bytes':   PRESIGNED_UPLOAD_CONFIG['max_bytes'],
+        'min_mb':      PRESIGNED_UPLOAD_CONFIG['min_mb_advisory'],
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def complete_batch_upload(request, batch_id):
+    """
+    Ingest one or more files that have already been PUT to S3 via
+    presigned URLs. Mirrors `upload_batch_files` registration logic so
+    downstream extraction sees identical NonTeffBatchItem rows.
+
+    Body: { items: [{ s3_key, file_name, relative_path?, size?, content_type? }, ...] }
+    """
+    from .services.presigned_upload import (
+        best_effort_delete,
+        fetch_uploaded_to_path,
+        is_presigned_upload_available,
+    )
+
+    batch = get_object_or_404(NonTeffBatch, batch_id=batch_id)
+
+    if not is_presigned_upload_available():
+        return Response(
+            {'error': 'presigned uploads are not available in this environment'},
+            status=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    items_in = request.data.get('items') or []
+    if not isinstance(items_in, list) or not items_in:
+        return Response({'error': 'items array is required'},
+                        status=http_status.HTTP_400_BAD_REQUEST)
+
+    limits = master_index_service.get_limits()
+    max_bytes = int(limits.get('max_file_size_mb', 500)) * 1024 * 1024
+    max_files = int(limits.get('max_files_per_batch', 2000))
+    allowed_ext = {e.lower() for e in limits.get('allowed_extensions', [])}
+
+    existing = batch.items.count()
+    if existing + len(items_in) > max_files:
+        return Response({'error': f'exceeds max_files_per_batch={max_files}'},
+                        status=http_status.HTTP_400_BAD_REQUEST)
+
+    # Move batch into uploading state — same as legacy view.
+    batch.status = NonTeffBatch.BATCH_STATUS_UPLOADING
+    batch.save(update_fields=['status', 'updated_at'])
+
+    base_dir = _batch_dir(batch.batch_id)
+    created: List[dict] = []
+    skipped: List[dict] = []
+
+    for entry in items_in:
+        s3_key   = (entry or {}).get('s3_key') or ''
+        original = (entry or {}).get('file_name') or ''
+        rel      = (entry or {}).get('relative_path') or original
+
+        if not s3_key or not original:
+            skipped.append({'file_name': original or '(missing)',
+                            'reason': 'missing s3_key or file_name'})
+            continue
+
+        ext = os.path.splitext(original)[1].lower()
+        if allowed_ext and ext not in allowed_ext:
+            skipped.append({'file_name': original, 'reason': 'extension not allowed'})
+            best_effort_delete(s3_key)
+            continue
+
+        safe_name = get_valid_filename(original)
+        stored = f"{uuid.uuid4().hex[:8]}_{safe_name}"
+        abs_path = os.path.join(base_dir, stored)
+
+        try:
+            written = fetch_uploaded_to_path(s3_key=s3_key, dest_path=abs_path)
+        except RuntimeError as exc:
+            logger.warning('S3 fetch failed for %s: %s', s3_key, exc)
+            skipped.append({'file_name': original, 'reason': f'S3 fetch failed: {exc}'})
+            continue
+
+        if written > max_bytes:
+            skipped.append({'file_name': original, 'reason': 'exceeds max size'})
+            try:
+                os.remove(abs_path)
+            except Exception:
+                pass
+            best_effort_delete(s3_key)
+            continue
+
+        with transaction.atomic():
+            item = NonTeffBatchItem.objects.create(
+                batch=batch,
+                file_name=original,
+                relative_path=rel,
+                storage_key=abs_path,
+                size_bytes=written,
+                sha256=_sha256(abs_path),
+                status=NonTeffBatchItem.ITEM_STATUS_UPLOADED,
+            )
+        created.append(_serialize_item(item))
+
+        # Best-effort S3 archival mirrors the legacy view.
+        if BATCH_S3_ARCHIVAL_ENABLED:
+            try:
+                history_archive.archive_batch_source(batch, item, abs_path)
+            except Exception:
+                logger.warning('Batch S3 source archive failed for %s',
+                               original, exc_info=True)
+
+        # Staged object has been ingested — drop it. Failure is non-fatal.
+        best_effort_delete(s3_key)
+
+    batch.total_files = batch.items.count()
+    batch.storage_prefix = base_dir
+    batch.save(update_fields=['total_files', 'storage_prefix', 'updated_at'])
+
+    return Response({
+        'batch': _serialize_batch(batch),
+        'created': created,
+        'skipped': skipped,
+    })
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def start_batch(request, batch_id):

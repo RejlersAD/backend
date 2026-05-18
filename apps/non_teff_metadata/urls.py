@@ -28,6 +28,9 @@ urlpatterns = [
     path('batch/template/', batch_views.get_batch_template, name='non-teff-batch-template'),
     path('batch/create/',   batch_views.create_batch,       name='non-teff-batch-create'),
     path('batch/<uuid:batch_id>/upload/',                batch_views.upload_batch_files,  name='non-teff-batch-upload'),
+    # Direct-to-S3 presigned upload (large-file path, bypasses Railway edge cap)
+    path('batch/<uuid:batch_id>/upload/presign/',        batch_views.presign_batch_upload,  name='non-teff-batch-upload-presign'),
+    path('batch/<uuid:batch_id>/upload/complete/',       batch_views.complete_batch_upload, name='non-teff-batch-upload-complete'),
     path('batch/<uuid:batch_id>/start/',                 batch_views.start_batch,         name='non-teff-batch-start'),
     path('batch/<uuid:batch_id>/status/',                batch_views.batch_status,        name='non-teff-batch-status'),
     path('batch/<uuid:batch_id>/items/',                 batch_views.list_batch_items,    name='non-teff-batch-items'),
