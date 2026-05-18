@@ -22,6 +22,7 @@ from .serializers import (
     WrenchS3SyncJobSerializer,
 )
 from . import service as wrench_service
+from .s3_documents_service import _extract_genealogy_segments
 
 logger = logging.getLogger(__name__)
 
@@ -914,6 +915,158 @@ class WrenchSyncViewSet(viewsets.ViewSet):
         return Response(payload, status=status.HTTP_200_OK)
 
     # ─────────────────────────────────────────────────────────────────────
+    # Sub-folder listing for a Wrench project (used by AI Document Assist
+    # panel to let users scope the recommendation to one or more sub-folders).
+    # Additive, soft-coded, no LLM call. Re-uses the same fuzzy project-name
+    # resolution and document fetch as pid_recommendations() so behaviour
+    # stays consistent across the two endpoints.
+    # ─────────────────────────────────────────────────────────────────────
+    @action(detail=False, methods=['get'], url_path='project-folders')
+    def project_folders(self, request):
+        """
+        GET /api/v1/wrench/sync/project-folders/
+              ?order_no=<ORDER_NO>                 (one of order_no / project_name required)
+              &project_name=<RADAI_PROJECT_NAME>   (fuzzy-matched against ORDER_DESCRIPTION)
+              &depth=<int>                         (optional, cap returned segments per path)
+
+        Returns:
+          {
+            "order_no":       "...",
+            "matched_via":    "explicit" | "fuzzy_project_name(...)" | "none",
+            "total_scanned":  N,
+            "total_folders":  M,
+            "folders":        [ { path, segments, count, file_exts[] } ]
+          }
+        """
+        # Soft-coded knobs (mirror pid_recommendations for consistency).
+        _PAGE_SIZE_SCAN  = 200
+        _FUZZY_MIN_SCORE = 60
+        _MAX_FOLDERS     = 500   # safety cap on response size
+        _DEPTH_DEFAULT   = 0     # 0 = no cap
+        _DEPTH_MAX       = 12
+
+        try:
+            depth_cap = max(0, min(int(request.query_params.get('depth', _DEPTH_DEFAULT)), _DEPTH_MAX))
+        except (TypeError, ValueError):
+            depth_cap = _DEPTH_DEFAULT
+
+        order_no     = (request.query_params.get('order_no') or '').strip()
+        project_name = (request.query_params.get('project_name') or '').strip()
+
+        if not order_no and not project_name:
+            return Response(
+                {'detail': 'Either order_no or project_name query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cfg = WrenchConfig.objects.filter(is_active=True).first()
+        if not cfg:
+            return Response(
+                {'detail': 'No active Wrench configuration.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        matched_via = 'explicit' if order_no else 'none'
+
+        # Re-use the same fuzzy resolver shape as pid_recommendations.
+        if not order_no and project_name:
+            try:
+                from difflib import SequenceMatcher
+                tlist = wrench_service.get_transmittals(cfg, page=1, page_size=500)
+                rows  = tlist.get('transmittals') or tlist.get('TransmittalList') or []
+                best, best_score = None, 0
+                pn = project_name.lower()
+                for row in rows:
+                    desc = (row.get('ORDER_DESCRIPTION') or row.get('ORDER_DESC') or '').lower()
+                    if not desc:
+                        continue
+                    s = int(SequenceMatcher(None, pn, desc).ratio() * 100)
+                    if s > best_score:
+                        best_score, best = s, row
+                if best and best_score >= _FUZZY_MIN_SCORE:
+                    order_no    = str(best.get('ORDER_NO') or '').strip()
+                    matched_via = f'fuzzy_project_name(score={best_score})'
+            except Exception as exc:
+                logger.warning('[Wrench] project-folders: fuzzy match failed: %s', exc)
+
+        if not order_no:
+            return Response(
+                {
+                    'order_no':      None,
+                    'matched_via':   matched_via,
+                    'total_scanned': 0,
+                    'total_folders': 0,
+                    'folders':       [],
+                    'note':          f'Could not resolve a Wrench ORDER_NO from project name "{project_name}".',
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # Fetch documents (with same transmittal-list fallback as pid_recommendations).
+        try:
+            doc_payload = wrench_service.get_transmittal_documents(
+                cfg, order_no=order_no, page=1, page_size=_PAGE_SIZE_SCAN,
+            )
+            documents = doc_payload.get('documents') or []
+        except Exception as exc:
+            logger.warning('[Wrench] project-folders: doc fetch failed: %s', exc)
+            documents = []
+        if not documents:
+            try:
+                fb = wrench_service.synthesize_documents_from_transmittal_list(
+                    cfg, order_no=order_no, page=1, page_size=_PAGE_SIZE_SCAN,
+                )
+                documents = fb.get('documents') or []
+            except Exception as fb_exc:  # noqa: BLE001
+                logger.warning('[Wrench] project-folders: transmittal fallback failed: %s', fb_exc)
+
+        # Aggregate folder paths from GENEALOGY_STRING / FOLDER_PATH / etc.
+        folder_buckets = {}   # path -> {segments, count, file_exts:set}
+        root_count = 0
+        for doc in documents:
+            segs = _extract_genealogy_segments(doc, order_no) or []
+            if depth_cap and len(segs) > depth_cap:
+                segs = segs[:depth_cap]
+            if not segs:
+                root_count += 1
+                continue
+            path = '/'.join(segs)
+            bucket = folder_buckets.setdefault(path, {
+                'path':      path,
+                'segments':  segs,
+                'count':     0,
+                'file_exts': set(),
+            })
+            bucket['count'] += 1
+            ext = (doc.get('FILE_EXT') or doc.get('EXTENSION') or '').lower().lstrip('.')
+            if not ext:
+                dn = str(doc.get('DOC_NO') or '')
+                if '.' in dn:
+                    ext = dn.rsplit('.', 1)[-1].lower()
+            if ext:
+                bucket['file_exts'].add(ext)
+
+        folders = sorted(
+            folder_buckets.values(),
+            key=lambda b: (-b['count'], b['path']),
+        )[:_MAX_FOLDERS]
+        # Serialise sets → lists for JSON safety.
+        for b in folders:
+            b['file_exts'] = sorted(b['file_exts'])
+
+        return Response(
+            {
+                'order_no':      order_no,
+                'matched_via':   matched_via,
+                'total_scanned': len(documents),
+                'total_folders': len(folder_buckets),
+                'unfiled_count': root_count,
+                'folders':       folders,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
     # AI-assisted P&ID document recommendation (PID Verification page).
     # Optional, soft-coded, no LLM call — uses deterministic scoring
     # heuristics that admins can tune via the constants below.
@@ -974,6 +1127,13 @@ class WrenchSyncViewSet(viewsets.ViewSet):
         order_no      = (request.query_params.get('order_no') or '').strip()
         project_name  = (request.query_params.get('project_name') or '').strip()
         drawing_hint  = (request.query_params.get('drawing_hint') or '').strip()
+        # Optional sub-folder filter (comma-separated folder paths returned by
+        # the /project-folders/ endpoint). Empty = no filter (legacy behaviour).
+        folders_raw   = (request.query_params.get('folders') or '').strip()
+        folder_filter = [
+            f.strip().strip('/').lower()
+            for f in folders_raw.split(',') if f and f.strip()
+        ]
 
         if not order_no and not project_name:
             return Response(
@@ -1056,6 +1216,21 @@ class WrenchSyncViewSet(viewsets.ViewSet):
                 },
                 status=status.HTTP_200_OK,
             )
+
+        # ── Optional folder-scope filter (additive, soft-coded) ───────────
+        # When the user picks one or more sub-folders in the AI Document
+        # Assist panel, narrow the scoring pool to docs whose Wrench
+        # GENEALOGY_STRING starts with one of the selected folder paths.
+        if folder_filter:
+            def _doc_folder_path(doc):
+                segs = _extract_genealogy_segments(doc, order_no) or []
+                return '/'.join(s.lower() for s in segs)
+            scoped = []
+            for d in documents:
+                fp = _doc_folder_path(d)
+                if any(fp == f or fp.startswith(f + '/') for f in folder_filter):
+                    scoped.append(d)
+            documents = scoped
 
         # ── Score every document with soft-coded heuristics ───────────────
         hint_tokens = [t.lower() for t in drawing_hint.replace('-', ' ').replace('_', ' ').split() if len(t) >= 3]
