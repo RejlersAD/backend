@@ -1113,16 +1113,30 @@ _REVISION_BLOCKLIST = {
     'NM', 'NN', 'XX', 'TT',
 }
 
-# Label keywords that sit immediately before a revision cell.
+# Label keywords that sit immediately before a revision cell. Tuple is
+# split into [:N] numeric patterns and [N:] letter patterns where
+# N = `_REVISION_NUMERIC_LABEL_COUNT`. Keep this contract when editing.
 _REVISION_LABEL_PATTERNS: Tuple[re.Pattern, ...] = (
+    # --- Numeric label patterns (must capture an integer) ---
     # "Rev. 11", "Rev No 4", "REVISION: 0"
     re.compile(r'\b[Rr]ev(?:ision)?\s*(?:no\.?|number|#)?\.?\s*[:\-]?\s*(\d{1,2})\b'),
     re.compile(r'\bREV\b\s*[:\-]?\s*(\d{1,2})\b'),
-    # Letter revisions (only honoured when REVISION_NUMERIC_ONLY=False or
-    # when no numeric form exists — the smart extractor decides).
+    # Handwritten / old-document numeric variants: extra whitespace,
+    # dash/hash separator, hand-printed "Rev-0", "rev 03".
+    re.compile(r'\b[Rr]ev(?:ision)?\.?\s*[-#]\s*(\d{1,2})\b'),
+    re.compile(r'\b[Rr]ev(?:ision)?\.?\s+(\d{1,2})\b'),
+    # Bare "R0", "R1", "R-01" — last-resort numeric form.
+    re.compile(r'(?<![A-Z])R[-_]?(\d{1,2})(?![A-Z0-9])'),
+    # --- Letter label patterns (must capture a single letter A-Z) ---
+    # Only honoured when REVISION_NUMERIC_ONLY=False or when no numeric
+    # form exists — the smart extractor decides.
     re.compile(r'\b[Rr]ev(?:ision)?\s*(?:no\.?|number|#)?\.?\s*[:\-]?\s*([A-Z])\b'),
     re.compile(r'\bREV\b\s*[:\-]?\s*([A-Z])\b'),
+    re.compile(r'\b[Rr]ev(?:ision)?\.?\s*[-#]\s*([A-Z])\b'),
+    re.compile(r'\b[Rr]ev(?:ision)?\.?\s+([A-Z])\b'),
 )
+# Soft-coded split index — numeric patterns occupy `_REVISION_LABEL_PATTERNS[:N]`.
+_REVISION_NUMERIC_LABEL_COUNT = 5
 
 # Maximum chars (or lines) the revision value may sit after the label word
 # when stacked vertically in a title-block table.
@@ -1230,8 +1244,8 @@ def _extract_revision_smart(text: str) -> str:
         return _normalise_revision_value(tok)
 
     # Pass 1: numeric label match wins outright.
-    numeric_pats = _REVISION_LABEL_PATTERNS[:2]
-    letter_pats  = _REVISION_LABEL_PATTERNS[2:]
+    numeric_pats = _REVISION_LABEL_PATTERNS[:_REVISION_NUMERIC_LABEL_COUNT]
+    letter_pats  = _REVISION_LABEL_PATTERNS[_REVISION_NUMERIC_LABEL_COUNT:]
 
     for pat in numeric_pats:
         m = pat.search(scan_text)
@@ -1429,6 +1443,38 @@ _UNIT_EXTRA_LABEL_PATTERNS: Tuple[re.Pattern, ...] = (
     re.compile(rf'\bPROCESS[\s_]*UNIT[\s_]*'
                rf'([0-9]{{{_UNIT_MIN_DIGITS},{_UNIT_MAX_DIGITS}}})\b',
                re.IGNORECASE),
+    # Old / handwritten ADNOC drawings use "Activate-Unit", "Activated Unit",
+    # "Active Unit" or "Activity Unit" as the label. OCR sometimes mangles
+    # the prefix so we also accept ACTI*, ACTV*. Capture the digit run that
+    # follows — alphanumeric suffix (e.g. "7600 L 02") is preserved by the
+    # adjacent `_UNIT_ALNUM_TOKEN_RE` scan below.
+    re.compile(rf'\bACT(?:IVAT(?:E|ED|ION|ING)?|IVE|IVITY|V)?[-\s_]*UNIT[\s_]*'
+               rf'[:\-]?[\s_]*'
+               rf'([0-9]{{{_UNIT_MIN_DIGITS},{_UNIT_MAX_DIGITS}}})\b',
+               re.IGNORECASE),
+)
+
+# ─── ADNOC alphanumeric unit codes ──────────────────────────────────────
+# Legacy Habshan / OGD title blocks print the unit as a digit-letter-digit
+# compound (e.g. "7600 L 02", "7600L-02", "7300 L 04"). We capture the full
+# alphanumeric value as a SECONDARY pass — it never overrides a clean
+# numeric unit pulled by `_UNIT_TOKEN_RE`. Soft-coded.
+_UNIT_ALNUM_PREFIX_DIGITS = 4
+_UNIT_ALNUM_LETTER_RE     = r'[A-Z]'
+_UNIT_ALNUM_SUFFIX_DIGITS = 2
+_UNIT_ALNUM_TOKEN_RE = re.compile(
+    rf'(?<![A-Z0-9])([0-9]{{{_UNIT_ALNUM_PREFIX_DIGITS}}})\s*'
+    rf'({_UNIT_ALNUM_LETTER_RE})[\s\-]*'
+    rf'([0-9]{{1,{_UNIT_ALNUM_SUFFIX_DIGITS}}})(?![A-Z0-9])',
+    re.IGNORECASE,
+)
+# Label keywords that, when seen within `_UNIT_ALNUM_LABEL_WINDOW` chars
+# *before* the alphanumeric token, qualify it as a real unit value.
+_UNIT_ALNUM_LABEL_WINDOW = 40
+_UNIT_ALNUM_LABEL_RE = re.compile(
+    r'\b(?:ACT(?:IVAT(?:E|ED|ION|ING)?|IVE|IVITY|V)?[-\s_]*UNIT|'
+    r'UNIT[\s_]*(?:NO\.?|NUMBER|CODE|#)|UNIT|PLANT[\s_]*UNIT)\b',
+    re.IGNORECASE,
 )
 # After a UNIT match, walk the tail for adjacent continuations using either
 # "&" or "," as separators. Tolerates "UNIT 47 & 48", "UNITS 68, 94, 95",
@@ -1450,6 +1496,55 @@ _UNIT_VALUE_VALID_RE = re.compile(
     rf'(?:\s*,\s*\d{{{_UNIT_MIN_DIGITS},{_UNIT_MAX_DIGITS}}})*$'
 )
 
+# Secondary validator for ADNOC alphanumeric unit codes ("7600 L 02",
+# "7600L 02", "7300L-04"). Used as a fallback when the strict numeric
+# validator rejects an otherwise label-anchored value. Soft-coded.
+_UNIT_VALUE_ALNUM_VALID_RE = re.compile(
+    rf'^\d{{{_UNIT_ALNUM_PREFIX_DIGITS}}}\s*'
+    rf'{_UNIT_ALNUM_LETTER_RE}\s*'
+    rf'\d{{1,{_UNIT_ALNUM_SUFFIX_DIGITS}}}$',
+    re.IGNORECASE,
+)
+
+# ─── ADNOC document-number filename prefix → Unit ──────────────────────
+# Old QC documents in legacy ADNOC batches (Habshan / Bechtel / Bab) carry
+# the unit code as the *first* numeric segment of the filename. Examples
+# from `DESIGN CALCULATION (Utility & Offsite's) / QC DOCUMENTS`:
+#   "055-17-009.pdf"     → unit 055 → "55"
+#   "062-17-016.pdf"     → unit 062 → "62"
+#   "096-17-021.pdf"     → unit 096 → "96"
+#   "012-95-002_136.pdf" → unit 012 → "12"
+#   "02-1540-17-109.pdf" → unit 02   (kept as "02", canonical 2-digit code)
+#   "NC-79-18-101.pdf"   → unit 79
+# Pattern: an optional 1-3 letter prefix ("NC", "SP", "DC", "U") followed
+# by the unit-digit group, then a hyphen+digits continuation. Used ONLY
+# when no labelled UNIT match was found in body / title (lowest priority).
+_UNIT_FILENAME_PREFIX_MIN_DIGITS = 2
+_UNIT_FILENAME_PREFIX_MAX_DIGITS = 3
+_UNIT_FILENAME_PREFIX_RE = re.compile(
+    rf'^(?:[A-Z]{{1,3}}[-_])?'
+    rf'([0-9]{{{_UNIT_FILENAME_PREFIX_MIN_DIGITS},{_UNIT_FILENAME_PREFIX_MAX_DIGITS}}})'
+    rf'[-_][0-9]',
+    re.IGNORECASE,
+)
+
+# ─── JOB NUMBER embedded unit ───────────────────────────────────────────
+# Legacy Bechtel calculation sheets format: "JOB NUMBER SP-62-V-002" where
+# the digit group between the two hyphens is the unit. We accept the same
+# 2-3 digit window and require the surrounding alpha-hyphen / hyphen-alpha
+# guards so plain dates like "17-2018" are rejected.
+_UNIT_JOBNO_LABEL_WINDOW = 60
+_UNIT_JOBNO_LABEL_RE = re.compile(
+    r'\bJOB[\s_]*(?:NUMBER|NO\.?|#)?\b',
+    re.IGNORECASE,
+)
+_UNIT_JOBNO_VALUE_RE = re.compile(
+    rf'\b[A-Z]{{1,3}}[-_]'
+    rf'([0-9]{{{_UNIT_FILENAME_PREFIX_MIN_DIGITS},{_UNIT_FILENAME_PREFIX_MAX_DIGITS}}})'
+    rf'[-_][A-Z]',
+    re.IGNORECASE,
+)
+
 
 def _is_valid_unit_value(value: str) -> bool:
     """True when `value` is a digit-only single or comma-joined unit code.
@@ -1459,10 +1554,16 @@ def _is_valid_unit_value(value: str) -> bool:
     `_UNIT_TAIL_MAX_DIGITS`)). This rejects upstream noise like
     "47,48,55,1177" where 1177 is a doc-number fragment, while still
     accepting "27532" alone or "68,94,95".
+
+    Also accepts the ADNOC alphanumeric form ("7600 L 02", "7600L-02")
+    via `_UNIT_VALUE_ALNUM_VALID_RE` — soft-coded fallback only,
+    never weakens the strict numeric check above.
     """
     if not value:
         return False
     v = value.strip()
+    if _UNIT_VALUE_ALNUM_VALID_RE.fullmatch(v):
+        return True
     if not _UNIT_VALUE_VALID_RE.fullmatch(v):
         return False
     tokens = [t.strip() for t in v.split(',') if t.strip()]
@@ -1488,6 +1589,17 @@ def _extract_unit_smart(text: str, *, title_hint: str = '',
     sources: List[str] = [s for s in (title_hint, text, relative_path, file_name) if s]
     seen: set = set()
     units: List[str] = []
+    # Priority pass: ADNOC alphanumeric form ("Activate-Unit 7600 L 02") —
+    # only when the alphanumeric token follows a UNIT-family label within
+    # `_UNIT_ALNUM_LABEL_WINDOW` chars. Wins over the strict-numeric path
+    # so we don't truncate "7600 L 02" → "7600". Soft-coded gate.
+    for src in sources:
+        for m in _UNIT_ALNUM_TOKEN_RE.finditer(src):
+            window_start = max(0, m.start() - _UNIT_ALNUM_LABEL_WINDOW)
+            preceding = src[window_start:m.start()]
+            if not _UNIT_ALNUM_LABEL_RE.search(preceding):
+                continue
+            return f"{m.group(1)} {m.group(2).upper()} {m.group(3)}"
     for src in sources:
         for m in _UNIT_TOKEN_RE.finditer(src):
             num = m.group(1)
@@ -1522,6 +1634,42 @@ def _extract_unit_smart(text: str, *, title_hint: str = '',
             if units:
                 break
     if not units:
+        # Late fallback: JOB NUMBER embedded unit ("JOB NUMBER SP-62-V-002").
+        # Only fire when a JOB label sits within `_UNIT_JOBNO_LABEL_WINDOW`
+        # chars BEFORE the alpha-digit-alpha token. Title / body only —
+        # filename is handled separately below.
+        for src in (title_hint, text):
+            if not src:
+                continue
+            for vm in _UNIT_JOBNO_VALUE_RE.finditer(src):
+                window_start = max(0, vm.start() - _UNIT_JOBNO_LABEL_WINDOW)
+                if _UNIT_JOBNO_LABEL_RE.search(src[window_start:vm.start()]):
+                    num = vm.group(1)
+                    if num not in seen:
+                        seen.add(num)
+                        units.append(num)
+                    break
+            if units:
+                break
+    if not units:
+        # Last-resort fallback: ADNOC document-number filename prefix
+        # ("055-17-009.pdf" → 055). Soft-coded — only triggered when the
+        # body / title gave us nothing. Walk `file_name` first so the
+        # relative_path's parent folders cannot pollute the match.
+        for src in (file_name, relative_path):
+            if not src:
+                continue
+            base = src.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+            fm = _UNIT_FILENAME_PREFIX_RE.match(base)
+            if fm:
+                num = fm.group(1)
+                if num not in seen:
+                    seen.add(num)
+                    units.append(num)
+                break
+    if not units:
+        # Final fallback: ADNOC alphanumeric form already attempted in the
+        # priority pass above; nothing else to try.
         return ''
     out: List[str] = []
     for u in units:
@@ -1818,7 +1966,7 @@ def _build_label_regex(labels: Tuple[str, ...], value_shape: str) -> re.Pattern:
     pat = (
         r'\b(?:' + label_alts + r')\b'
         r'\s*(?:NO\.?|NUMBER|#)?'
-        r'\s*[:\-=]?\s*'
+        r'\s*[:\-=.]?\s*'
         r'(' + value_shape + r')'
     )
     return re.compile(pat, re.IGNORECASE)
@@ -1911,11 +2059,130 @@ def _extract_label_value(regex: re.Pattern, *sources: str) -> str:
     return ''
 
 
+# ─── Drawing-Number aliases for Contractor Doc Reference ───────────────
+# Old / handwritten ADNOC documents almost never carry the literal
+# "CONTRACTOR DOC REFERENCE NUMBER" label — instead the title block uses
+# "DRAWING NUMBER", "DRG NO", "DWG NO", "DOC NO" or omits the label
+# entirely (the value sits on its own line). Soft-coded so a new synonym
+# is a one-line addition.
+_DRAWING_NUMBER_LABELS: Tuple[str, ...] = (
+    'DRAWING NUMBER', 'DRAWING NO', 'DRAWING #',
+    'DRG NUMBER', 'DRG NO', 'DRG #',
+    'DWG NUMBER', 'DWG NO', 'DWG #',
+    'DOCUMENT NUMBER', 'DOCUMENT NO', 'DOC NUMBER', 'DOC NO',
+    'DRAWING / DOC NO', 'DOC / DRAWING NO', 'D.W.G. NO', 'D.R.G. NO',
+)
+_DRAWING_NUMBER_RE = _build_label_regex(_DRAWING_NUMBER_LABELS, _DOCREF_VALUE_SHAPE)
+
+# ─── Multi-value continuation tail ─────────────────────────────────────
+# Legacy ADNOC drawing-number lists appear comma- or semicolon-separated:
+#   "NC-26-13-001, NC-26-13-002, NC-26-13-003"
+# Walk the tail starting at the first hit and pick up tokens that share
+# the same family (alpha-prefix + hyphen-segmented digits). Soft-coded
+# digit/segment caps.
+_DOCREF_MULTI_TAIL_WINDOW = 200          # how far past the first hit to scan
+_DOCREF_MULTI_TOKEN_RE = re.compile(
+    r'[,;/]\s*([A-Z]{1,4}(?:[-_][A-Z0-9]{1,6}){1,6}[A-Z0-9]?'
+    r'|\d{2,5}(?:[-_][A-Z0-9]{1,6}){1,6})',
+    re.IGNORECASE,
+)
+_DOCREF_MULTI_MAX_TOKENS = 20            # safety cap
+
+# ─── ADNOC drawing-number filename shape ───────────────────────────────
+# Old QC documents carry the drawing number AS the filename:
+#   "NC-26-13-001.pdf"      → "NC-26-13-001"
+#   "055-17-009.pdf"        → "055-17-009"
+#   "02-1540-17-109.pdf"    → "02-1540-17-109"
+#   "012-95-002_136.pdf"    → "012-95-002" (trailing _136 = sheet/page suffix)
+# Pattern: optional 1-3 letter alpha prefix, then a digit-hyphen chain of
+# 2..5 segments. Trailing `_NNN` / `.SHT` suffixes are stripped by the
+# cleaner. Soft-coded — adjust segment count by changing `{2,5}`.
+_DRAWING_FNAME_MIN_SEGMENTS = 2
+_DRAWING_FNAME_MAX_SEGMENTS = 5
+_DRAWING_FNAME_SHAPE_RE = re.compile(
+    rf'^(?:[A-Z]{{1,3}}[-_])?'
+    rf'(?:[0-9]{{1,5}}|[A-Z]{{1,4}}[0-9]+)'
+    rf'(?:[-_][A-Z0-9]{{1,6}}){{{_DRAWING_FNAME_MIN_SEGMENTS-1},{_DRAWING_FNAME_MAX_SEGMENTS-1}}}',
+    re.IGNORECASE,
+)
+# Trailing filename suffixes that are NOT part of the drawing number.
+# Only strips explicit sheet/page/rev markers OR underscore-joined trailing
+# digit blocks (legacy ADNOC sheet suffix convention: "012-95-002_136").
+# Hyphen-joined digit segments are KEPT — they are part of the drawing
+# number itself (e.g. "NC-26-13-001" must not lose "-001").
+_DRAWING_FNAME_TAIL_SUFFIX_RE = re.compile(
+    r'(?:_\d{1,4}'                          # underscore + 1-4 digits (e.g. "_136")
+    r'|[_-](?:SH|SHT|SHEET|PG|PAGE|REV)\d{1,4}'  # explicit sheet markers
+    r'|[_-]R\d{1,2}'                        # rev suffix
+    r'|[_-]V\d{1,2})$',                     # version suffix
+    re.IGNORECASE,
+)
+
+
 def _extract_contractor_ref_smart(text: str, *, title_hint: str = '',
                                     file_name: str = '',
                                     relative_path: str = '') -> str:
-    val = _extract_label_value(_CONTRACTOR_REF_RE, text, title_hint, file_name, relative_path)
-    return val if _is_valid_docref(val) else ''
+    """
+    Contractor Doc Reference (a.k.a. Drawing Number) extractor.
+
+    Priority chain (first non-empty wins):
+      1. Explicit CONTRACTOR DOC REFERENCE label (body / title).
+      2. DRAWING NUMBER / DRG NO / DWG NO / DOC NO label (body / title).
+      3. Filename-shape fallback for ADNOC drawing-number filenames
+         ("NC-26-13-001.pdf" → "NC-26-13-001"). Used only when no label
+         match was found in body / title.
+
+    After picking the lead value, walks a `_DOCREF_MULTI_TAIL_WINDOW`
+    window past the hit and appends comma-separated continuations of the
+    same family ("NC-26-13-001, NC-26-13-002, NC-26-13-003").
+    """
+    lead = ''
+    lead_src = ''
+    lead_end = 0
+    # Pass 1 — explicit Contractor Doc Reference label.
+    for src in (text, title_hint):
+        if not src:
+            continue
+        m = _CONTRACTOR_REF_RE.search(src)
+        if m:
+            cand = _clean_docref_value(m.group(1))
+            if _is_valid_docref(cand):
+                lead, lead_src, lead_end = cand, src, m.end()
+                break
+    # Pass 2 — Drawing Number / Doc Number label.
+    if not lead:
+        for src in (text, title_hint):
+            if not src:
+                continue
+            m = _DRAWING_NUMBER_RE.search(src)
+            if m:
+                cand = _clean_docref_value(m.group(1))
+                if _is_valid_docref(cand):
+                    lead, lead_src, lead_end = cand, src, m.end()
+                    break
+    # Pass 3 — filename-shape fallback (ADNOC drawing numbers as the
+    # bare filename). Strip extension + sheet/page suffix.
+    if not lead and file_name:
+        base = os.path.splitext(os.path.basename(file_name))[0]
+        fm = _DRAWING_FNAME_SHAPE_RE.match(base)
+        if fm:
+            cand = _DRAWING_FNAME_TAIL_SUFFIX_RE.sub('', fm.group(0)).strip()
+            if _is_valid_docref(cand):
+                return cand   # filename never has multi-value tail
+    if not lead:
+        return ''
+    # Multi-value tail walk — only when a body/title lead was found.
+    tail = lead_src[lead_end:lead_end + _DOCREF_MULTI_TAIL_WINDOW]
+    extras: List[str] = []
+    seen = {lead.upper()}
+    for tm in _DOCREF_MULTI_TOKEN_RE.finditer(tail):
+        extra = _clean_docref_value(tm.group(1))
+        if extra and extra.upper() not in seen and _is_valid_docref(extra):
+            seen.add(extra.upper())
+            extras.append(extra)
+            if len(extras) >= _DOCREF_MULTI_MAX_TOKENS:
+                break
+    return ', '.join([lead, *extras]) if extras else lead
 
 
 def _extract_vendor_ref_smart(text: str, *, title_hint: str = '',
@@ -3145,6 +3412,18 @@ def _value_ai_extract(column: Dict[str, Any], *, text: str, file_name: str,
             return smart
         return _all_matches(EQUIPMENT_NO_PATTERN, text)
     if extractor == 'pattern_lookup':
+        # Smart override for contractor_ref — wires the body/title/filename
+        # multi-source extractor with ADNOC drawing-number filename
+        # fallback. Falls back to JSON pattern_lookup when smart returns ''.
+        if column['key'] == 'contractor_ref':
+            smart = _extract_contractor_ref_smart(
+                text or '',
+                title_hint=accum.get('document_title', ''),
+                file_name=file_name,
+                relative_path=accum.get('full_path', ''),
+            )
+            if smart:
+                return smart
         return _pattern_lookup(column['key'], text)
     # Fallback: try pattern_lookup using the column key — lets us enable
     # extraction on any ai_extract column just by adding patterns to JSON.
