@@ -165,6 +165,7 @@ INSTALLED_APPS = [
     'apps.non_teff_metadata',     # Non-TEFF Metadata Extractor — multi-format document metadata extraction
     'apps.instrument_tools',     # Instrument Tools — IO List / Cable Block Diagram / Cable Schedule (Generator + QC)
     'apps.spec_customization',   # Spec Customization — Paper Spec PDF extraction (Piping Classes)
+    'apps.marketing_analytics',  # Marketing Analytics — Google Analytics (GA4) real-time dashboard widget
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
