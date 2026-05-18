@@ -1457,9 +1457,154 @@ def get_transmittals(
     }
 
 
+# ─── Soft-coded: Wrench project-library / folder-tree REST endpoints ─────────
+# Wrench SmartProject exposes the project's R:\Projects-style folder tree
+# under one of several REST paths depending on the deployment version. We try
+# each path in order and stop at the first one that returns folder rows. The
+# response shape across versions also varies — we accept any "FOLDER_LIST" /
+# "GENEALOGY_LIST" / "FOLDER" DataList key and any list-of-{FieldName,Value}
+# OR flat-dict row format (same as TRANSMITTAL_LIST).
+#
+# To add a new tenant-specific path, just append it here — no code change
+# elsewhere is required (soft-coded).
+_FOLDER_LIST_PATHS = [
+    '/api/Folder/GetFolderList',
+    '/api/Folder/GetFolderTree',
+    '/api/Folder/GetGenealogy',
+    '/api/ProjectLibrary/GetFolderList',
+    '/api/ProjectLibrary/GetFolderTree',
+    '/api/Document/GetFolderList',
+    '/api/Document/GetGenealogyList',
+    '/api/Genealogy/GetGenealogyList',
+    '/api/Library/GetFolderList',
+]
+_FOLDER_LIST_DATA_KEYS = [
+    'FOLDER_LIST', 'FolderList',
+    'GENEALOGY_LIST', 'GenealogyList',
+    'FOLDER', 'Folder',
+    'TREE', 'Tree',
+]
+# Candidate fields that hold the folder name within a row.
+_FOLDER_NAME_FIELDS = (
+    'FOLDER_NAME', 'FolderName', 'NAME', 'Name',
+    'FOLDER', 'Folder', 'TITLE', 'Title',
+    'GENEALOGY_NAME', 'GenealogyName',
+)
+# Candidate fields that hold the full path (slash-separated).
+_FOLDER_PATH_FIELDS = (
+    'GENEALOGY_STRING', 'GenealogyString',
+    'FOLDER_PATH', 'FolderPath',
+    'PATH', 'Path',
+    'FULL_PATH', 'FullPath',
+)
+
+
+def get_project_folder_tree(cfg: 'WrenchConfig', *, order_no: str) -> dict:
+    """
+    Return the Wrench project-library folder tree for `order_no`.
+
+    Tries each path in `_FOLDER_LIST_PATHS` against the main WebAPI host (no
+    SVC URL required). The first endpoint that returns a non-empty folder
+    list wins. Soft-coded so additional tenant-specific paths can be added
+    without changing call-sites.
+
+    Returns:
+      { 'folders': [ { 'path': 'Engineering', 'segments': ['Engineering'] }, ... ],
+        'source':  '<path>' | 'none',
+        'total':   N }
+    """
+    token = _ensure_token(cfg)
+    payload = {
+        'TOKEN':       token,
+        'SERVER_ID':   cfg.server_id,
+        'LOGIN_NAME':  cfg.login_name,
+        'ORDER_NO':    order_no,
+        'ROW_COUNT':   500,
+        'PAGE_NUMBER': 1,
+    }
+
+    def _row_to_path(row):
+        # Accept BOTH list-of-{FieldName,Value} and flat-dict row shapes.
+        flat = {}
+        if isinstance(row, list):
+            for f in row:
+                n = f.get('FieldName') or ''
+                if n:
+                    flat[n] = f.get('Value')
+        elif isinstance(row, dict):
+            flat = row
+        # Prefer an explicit full path.
+        for f in _FOLDER_PATH_FIELDS:
+            v = flat.get(f)
+            if v and str(v).strip():
+                return str(v).strip()
+        # Fall back to a single folder name.
+        for f in _FOLDER_NAME_FIELDS:
+            v = flat.get(f)
+            if v and str(v).strip():
+                return str(v).strip()
+        return ''
+
+    for path in _FOLDER_LIST_PATHS:
+        url = _api_url(cfg, path)
+        try:
+            resp = requests.post(url, json=payload, timeout=_TIMEOUT_SEARCH)
+        except Exception as exc:
+            logger.info('[Wrench] folder-tree %s → exception %s', path, exc)
+            continue
+        if resp.status_code == 404:
+            continue
+        try:
+            data = resp.json()
+        except Exception:
+            continue
+        _refresh_token_from_response(cfg, data)
+
+        raw = []
+        for key in _FOLDER_LIST_DATA_KEYS:
+            raw = data.get('DataList', {}).get(key) or data.get(key) or []
+            if raw:
+                break
+        if not raw:
+            continue
+
+        folders = []
+        seen = set()
+        for row in raw:
+            p = _row_to_path(row)
+            if not p:
+                continue
+            # Normalise separators → forward slash and trim leading/trailing.
+            normalised = re.sub(r'[\\>|]', '/', p).strip().strip('/')
+            if not normalised or normalised.lower() in seen:
+                continue
+            seen.add(normalised.lower())
+            segments = [s.strip() for s in normalised.split('/') if s.strip()]
+            if not segments:
+                continue
+            # Skip a leading segment that duplicates ORDER_NO.
+            if segments[0].strip().lower() == str(order_no).strip().lower():
+                segments = segments[1:]
+            if not segments:
+                continue
+            folders.append({
+                'path':     '/'.join(segments),
+                'segments': segments,
+            })
+        if folders:
+            logger.info('[Wrench] folder-tree: %s returned %d folders for ORDER_NO=%s',
+                        path, len(folders), order_no)
+            return {'folders': folders, 'source': path, 'total': len(folders)}
+
+    return {'folders': [], 'source': 'none', 'total': 0}
+
+
 # ─── Soft-coded: max transmittals to expand when no direct document endpoint exists ──
 # Increase to search more transmittals (slower); decrease for faster but narrower results.
 _MAX_TRANS_FOR_DOC_EXPANSION  = 15
+
+
+
 # Per-transmittal HTTP timeout (seconds). Short because these fire in parallel.
 _TRANS_EXPAND_CALL_TIMEOUT    = 10
 # Parallel worker cap — avoids overwhelming the Wrench server.

@@ -939,7 +939,8 @@ class WrenchSyncViewSet(viewsets.ViewSet):
           }
         """
         # Soft-coded knobs (mirror pid_recommendations for consistency).
-        _PAGE_SIZE_SCAN  = 200
+        _PAGE_SIZE_SCAN  = 500   # docs per Wrench page request
+        _MAX_PAGES       = 40    # safety cap → up to 20 000 docs scanned
         _FUZZY_MIN_SCORE = 60
         _MAX_FOLDERS     = 500   # safety cap on response size
         _DEPTH_DEFAULT   = 0     # 0 = no cap
@@ -1002,29 +1003,132 @@ class WrenchSyncViewSet(viewsets.ViewSet):
                 status=status.HTTP_200_OK,
             )
 
-        # Fetch documents (with same transmittal-list fallback as pid_recommendations).
+        # Fetch ALL documents across pages so the folder list is complete.
+        # Strategy ladder (each tier is additive — results are merged &
+        # de-duplicated by DOC_NO so the broadest possible folder list is
+        # returned even when one Wrench API is unavailable):
+        #   0. get_project_folder_tree(order_no=…) — direct Wrench Folder/
+        #      ProjectLibrary REST. Best source for the human-curated tree
+        #      (e.g. "Engineering / Records / Final Handover Package").
+        #   1. search_documents(order_no=…) — explicit DocumentSearch
+        #   2. get_transmittal_documents(order_no=…)  paginated
+        #   3. synthesize_documents_from_transmittal_list  (transmittal rows)
+        documents = []
+        seen_doc_nos = set()
+        pages_used = 0
+        sources = []
+
+        # ── Tier 0 — direct folder-tree REST. If this returns folders we
+        # surface them immediately (with count=0 placeholders) so the user
+        # sees the real Wrench library tree even when no document carries a
+        # GENEALOGY field. Document-derived counts merge on top below.
+        tree_folders = []
         try:
-            doc_payload = wrench_service.get_transmittal_documents(
-                cfg, order_no=order_no, page=1, page_size=_PAGE_SIZE_SCAN,
-            )
-            documents = doc_payload.get('documents') or []
+            tree = wrench_service.get_project_folder_tree(cfg, order_no=order_no)
+            tree_folders = tree.get('folders') or []
+            if tree_folders:
+                sources.append(f"folder_tree({tree.get('source')},{len(tree_folders)})")
         except Exception as exc:
-            logger.warning('[Wrench] project-folders: doc fetch failed: %s', exc)
-            documents = []
+            logger.warning('[Wrench] project-folders: folder-tree failed: %s', exc)
+
+        def _merge(batch):
+            added = 0
+            for d in batch or []:
+                key = (
+                    str(d.get('DOC_NO') or '').strip().lower()
+                    or str(d.get('DOC_DESCRIPTION') or '').strip().lower()[:80]
+                    or f'__row_{len(documents)}'
+                )
+                if key in seen_doc_nos:
+                    continue
+                seen_doc_nos.add(key)
+                documents.append(d)
+                added += 1
+            return added
+
+        # Tier 1 — DocumentSearch / SearchObject (broadest results when SVC URL set).
+        try:
+            sd = wrench_service.search_documents(
+                cfg, page=1, page_size=_PAGE_SIZE_SCAN, order_no=order_no,
+            )
+            t1_added = _merge(sd.get('documents'))
+            if t1_added:
+                sources.append(f'search_documents({t1_added})')
+        except Exception as exc:
+            logger.warning('[Wrench] project-folders: search_documents failed: %s', exc)
+
+        # Tier 2 — paginated transmittal-document REST.
+        for page in range(1, _MAX_PAGES + 1):
+            try:
+                doc_payload = wrench_service.get_transmittal_documents(
+                    cfg, order_no=order_no, page=page, page_size=_PAGE_SIZE_SCAN,
+                )
+                batch = doc_payload.get('documents') or []
+            except Exception as exc:
+                logger.warning('[Wrench] project-folders: doc fetch failed (page=%d): %s', page, exc)
+                batch = []
+            if not batch:
+                break
+            t2_added = _merge(batch)
+            pages_used = page
+            if t2_added == 0 and page == 1:
+                # Tier-2 returned the same docs already seen from tier 1 — stop.
+                break
+            if len(batch) < _PAGE_SIZE_SCAN:
+                break   # last page reached
+        if pages_used:
+            sources.append(f'transmittal_documents(pages={pages_used})')
+
+        # Tier 3 — transmittal-list synthesis (last-resort).
         if not documents:
             try:
                 fb = wrench_service.synthesize_documents_from_transmittal_list(
                     cfg, order_no=order_no, page=1, page_size=_PAGE_SIZE_SCAN,
                 )
-                documents = fb.get('documents') or []
+                t3_added = _merge(fb.get('documents'))
+                if t3_added:
+                    sources.append(f'transmittal_list({t3_added})')
             except Exception as fb_exc:  # noqa: BLE001
                 logger.warning('[Wrench] project-folders: transmittal fallback failed: %s', fb_exc)
+
+        logger.info(
+            '[Wrench] project-folders: order_no=%s scanned=%d sources=%s',
+            order_no, len(documents), ','.join(sources) or 'none',
+        )
+
+        # ── Soft-coded fallback ladder ─────────────────────────────────
+        # Many Wrench tenants do not populate GENEALOGY_STRING, so we
+        # synthesise a 2-level hierarchy from the structured metadata that
+        # IS always present (DISCIPLINE → DOC_TYPE / TRANS_TYPE_CODE).
+        # This mirrors how documents are physically filed on R:\Projects
+        # ("…\<Discipline>\<DocType>\…") and satisfies the user request to
+        # list sub-folders "with respect to the discipline".
+        _FALLBACK_FIELDS_L1 = ('DISCIPLINE',     'Discipline',     'DISC')
+        _FALLBACK_FIELDS_L2 = ('DOC_TYPE',       'DocType',
+                               'TRANS_TYPE_CODE','TransTypeCode',
+                               'DOC_CATEGORY',   'DocCategory')
+        _FALLBACK_DEFAULT_L1 = 'General'
+
+        def _first_nonempty(d, fields):
+            for f in fields:
+                v = d.get(f)
+                if v and str(v).strip():
+                    return str(v).strip()
+            return ''
 
         # Aggregate folder paths from GENEALOGY_STRING / FOLDER_PATH / etc.
         folder_buckets = {}   # path -> {segments, count, file_exts:set}
         root_count = 0
+        synth_used = 0
         for doc in documents:
             segs = _extract_genealogy_segments(doc, order_no) or []
+            if not segs:
+                # Fallback: build a Discipline / DocType tree from metadata.
+                lvl1 = _first_nonempty(doc, _FALLBACK_FIELDS_L1) or _FALLBACK_DEFAULT_L1
+                lvl2 = _first_nonempty(doc, _FALLBACK_FIELDS_L2)
+                segs = [lvl1] + ([lvl2] if lvl2 else [])
+                if segs and segs != [_FALLBACK_DEFAULT_L1]:
+                    synth_used += 1
             if depth_cap and len(segs) > depth_cap:
                 segs = segs[:depth_cap]
             if not segs:
@@ -1046,6 +1150,20 @@ class WrenchSyncViewSet(viewsets.ViewSet):
             if ext:
                 bucket['file_exts'].add(ext)
 
+        # Merge Tier-0 tree folders so the user sees the real Wrench library
+        # even for folders that contain no documents indexed by the search /
+        # transmittal APIs (placeholders show count=0).
+        for tf in tree_folders:
+            path = tf.get('path')
+            if not path or path in folder_buckets:
+                continue
+            folder_buckets[path] = {
+                'path':      path,
+                'segments':  tf.get('segments') or path.split('/'),
+                'count':     0,
+                'file_exts': set(),
+            }
+
         folders = sorted(
             folder_buckets.values(),
             key=lambda b: (-b['count'], b['path']),
@@ -1058,9 +1176,12 @@ class WrenchSyncViewSet(viewsets.ViewSet):
             {
                 'order_no':      order_no,
                 'matched_via':   matched_via,
+                'pages_used':    pages_used,
+                'sources':       sources,
                 'total_scanned': len(documents),
                 'total_folders': len(folder_buckets),
                 'unfiled_count': root_count,
+                'synth_used':    synth_used,
                 'folders':       folders,
             },
             status=status.HTTP_200_OK,
@@ -1219,11 +1340,27 @@ class WrenchSyncViewSet(viewsets.ViewSet):
 
         # ── Optional folder-scope filter (additive, soft-coded) ───────────
         # When the user picks one or more sub-folders in the AI Document
-        # Assist panel, narrow the scoring pool to docs whose Wrench
-        # GENEALOGY_STRING starts with one of the selected folder paths.
+        # Assist panel, narrow the scoring pool to docs whose folder path
+        # starts with one of the selected paths. The folder path is taken
+        # from GENEALOGY_STRING when present, otherwise synthesised from
+        # DISCIPLINE / DOC_TYPE — identical logic to /project-folders/.
         if folder_filter:
+            _FB_L1 = ('DISCIPLINE', 'Discipline', 'DISC')
+            _FB_L2 = ('DOC_TYPE', 'DocType', 'TRANS_TYPE_CODE',
+                      'TransTypeCode', 'DOC_CATEGORY', 'DocCategory')
+
             def _doc_folder_path(doc):
                 segs = _extract_genealogy_segments(doc, order_no) or []
+                if not segs:
+                    def _fne(fields):
+                        for f in fields:
+                            v = doc.get(f)
+                            if v and str(v).strip():
+                                return str(v).strip()
+                        return ''
+                    lvl1 = _fne(_FB_L1) or 'General'
+                    lvl2 = _fne(_FB_L2)
+                    segs = [lvl1] + ([lvl2] if lvl2 else [])
                 return '/'.join(s.lower() for s in segs)
             scoped = []
             for d in documents:
