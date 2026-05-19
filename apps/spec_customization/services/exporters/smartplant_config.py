@@ -1738,10 +1738,152 @@ def _rows_weld_clearance_rule(cls):
     }]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PipingCommodityFilter (PCF) — canonical SPEC↔CAT join sheet
+# ─────────────────────────────────────────────────────────────────────────────
+# PCF is the master commodity index referenced by every other SP3D bulkload
+# sheet. The reference LS1E-A3 workbook carries 769 rows here (the largest
+# SPEC sheet) and the join key — `CommodityCode` — is also embedded in the
+# CAT workbook's Definition rows. Without a builder, PCF showed up in the
+# Spec Customization canvas only as the LS1E template scaffold, so the
+# extracted classes were invisible. This builder emits one row per
+# (component × NPD) using the SAME `icc` recipe as PCMD, which guarantees
+# the SPEC↔CAT cross-link is consistent across both sheets.
+#
+# Side columns (FluidCode, BendRadius, MaximumTemperature, etc.) are filled
+# automatically by the existing PIPING_COMMODITY_FILTER_DEFAULTS autofill
+# pass — this builder only owns the identification + sizing + materials
+# fields that come straight from the extracted spec.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Soft-coded resolver: (component_type, sub_type keyword) → SP3D ShortCode.
+# Calibrated against the LS1E-A3 reference (PCF.ShortCode column). Keep
+# narrow keywords first; first match wins. Extend by adding a tuple — no
+# core-logic changes required.
+PCF_SHORT_CODE_RULES = [
+    # (component_type, sub_type/description keyword (lowercase), ShortCode)
+    ('pipe',    '',                'Piping'),
+    ('flange',  'blind',           'Blind Flange'),
+    ('flange',  'weld neck',       'Weld Neck Flange'),
+    ('flange',  'weldneck',        'Weld Neck Flange'),
+    ('flange',  'wn',              'Weld Neck Flange'),
+    ('flange',  '',                'Weld Neck Flange'),
+    ('fitting', '90 lr',           '90 Deg LR Elbow'),
+    ('fitting', '90 long',         '90 Deg LR Elbow'),
+    ('fitting', '45 lr',           '45 Deg LR Elbow'),
+    ('fitting', '45 long',         '45 Deg LR Elbow'),
+    ('fitting', '90',              '90 Deg Elbow'),
+    ('fitting', '45',              '45 Deg Elbow'),
+    ('fitting', 'elbow',           '90 Deg Elbow'),
+    ('fitting', 'reducing tee',    'Reducing Tee'),
+    ('fitting', 'red tee',         'Reducing Tee'),
+    ('fitting', 'tee',             'Tee'),
+    ('fitting', 'eccentric',       'Eccentric Reducer'),
+    ('fitting', 'concentric',      'Concentric Reducer'),
+    ('fitting', 'reducer',         'Concentric Reducer'),
+    ('fitting', 'swage',           'Concentric Swage'),
+    ('fitting', 'cap',             'Cap'),
+    ('fitting', 'weldolet',        'Weldolet'),
+    ('fitting', 'sockolet',        'Weldolet'),
+    ('fitting', 'thredolet',       'Weldolet'),
+    ('fitting', 'olet',            'Weldolet'),
+    ('fitting', 'coupling',        'Coupling'),
+    ('fitting', 'nipple',          'Nipple'),
+    ('fitting', 'paddle',          'Paddle'),
+    ('fitting', 'spec blind',      'Paddle'),
+    ('fitting', 'spectacle',       'Paddle'),
+    ('fitting', '',                'Pipe Fitting'),
+    ('valve',   'gate',            'Gate Valve'),
+    ('valve',   'globe',           'Globe Valve'),
+    ('valve',   'needle',          'Globe Valve'),
+    ('valve',   'check',           'Check Valve'),
+    ('valve',   'nrv',             'Check Valve'),
+    ('valve',   '',                'Valve'),
+    ('gasket',  '',                'Gasket'),
+    ('bolt',    '',                'Stud Bolt'),
+]
+
+
+def _pcf_short_code_for_component(c) -> str:
+    """Soft-coded ShortCode resolver — SPEC↔CAT class-level join key.
+
+    Closes the audit gap where SPEC.ShortCode ('Gate Valve') had to map to
+    CAT.<sheet> ('GateValve'). Both sides now derive from the same rule
+    set, eliminating the whitespace/casing drift.
+    """
+    ctype = (c.component_type or '').strip().lower()
+    blob  = f'{c.sub_type or ""} {c.description or ""}'.lower()
+    for rule_type, kw, short_code in PCF_SHORT_CODE_RULES:
+        if rule_type != ctype:
+            continue
+        if not kw or kw in blob:
+            return short_code
+    return 'Pipe Fitting'  # final fallback — never blank
+
+
+def _rows_piping_commodity_filter(cls):
+    """Emit one PCF row per (component × NPD).
+
+    Identification + sizing + materials are taken from the extracted spec;
+    the 25+ side columns (FluidCode, MaxTemp, BendRadius, etc.) are filled
+    automatically by `PIPING_COMMODITY_FILTER_DEFAULTS` so this builder
+    stays small and the side defaults remain editable from a single place.
+    """
+    rows = []
+    spec_name = _spec_name(cls)
+    cls_token = _safe_class_token(cls)
+    pressure  = _normalize_pressure_class(cls.pressure_rating)
+    fluid_code = _infer_fluid_from_spec_name(spec_name) if '_infer_fluid_from_spec_name' in globals() else ''
+
+    for c in cls.components.all().order_by('display_order'):
+        sheet = route_component_to_cat_sheet(c)
+        prefix = (CAT_SHEET_DEFAULTS.get(sheet, {}) or {}).get('icc_prefix', 'RAD_CMP')
+        npds = _enumerate_npds(c.size_from, c.size_to)
+        if not npds:
+            continue
+        short_code = _pcf_short_code_for_component(c)
+        end_prep   = _normalize_end_prep(c.end_connection) or S3D_DEFAULTS['EndPrep_BW']
+        sched      = c.schedule_or_rating or ''
+        # Optional commodity_code attribute (set at runtime by extractor on some
+        # components) — fall back to the deterministic ICC so the column is
+        # never blank and the SPEC↔CAT cross-link stays intact.
+        commodity_code_override = (getattr(c, 'commodity_code', '') or '').strip()
+
+        for npd in npds:
+            icc = f'{prefix}_{cls_token}_{_npd_token(npd)}'
+            first_size = _normalize_npd(npd)
+            rows.append({
+                # ── Identification (canonical SPEC↔CAT join key) ──────────
+                'SpecName':            spec_name,
+                'CommodityCode':       commodity_code_override or icc,
+                'ShortCode':           short_code,
+                # ── First-size range (always same value for fixed-size parts;
+                # size-reducing components are flagged by autofill via
+                # _pcf_short_code_is_size_reducer to populate SecondSize*).
+                'FirstSizeFrom':       first_size,
+                'FirstSizeTo':         first_size,
+                'FirstSizeUnits':      S3D_DEFAULTS['NpdUnitType'],
+                # ── End preparation + rating (the per-row spec rule) ──────
+                'EndPreparation':      end_prep,
+                'EndStandard':         S3D_DEFAULTS['EndStandard'],
+                'Rating1':             pressure,
+                'PressureRating':      pressure,
+                'ScheduleThickness':   sched,
+                # ── Materials ─────────────────────────────────────────────
+                'MaterialsGrade':      cls.material_grade or '',
+                'MaterialGrade':       cls.material_grade or '',
+                'GeometricIndustryStandard': c.material_standard or '',
+                # ── Fluid (mirrors GasketSelectionFilter inference) ───────
+                'FluidCode':           fluid_code or 'Process Fluid',
+            })
+    return rows
+
+
 # Sheet → list of builders. Each builder yields zero-or-more rows per class.
 # Order here also defines the order sheets appear in the workbook canvas.
 SPEC_SHEET_BUILDERS = {
     # Core (data driven from the AI extractor) ─────────────────────────────
+    'PipingCommodityFilter':           [_rows_piping_commodity_filter],
     'PipingMaterialsClassData':        [_rows_piping_materials_class_data],
     'ServiceLimits':                   [_rows_service_limits],
     'CorrosionAllowance':              [_rows_corrosion_allowance],
