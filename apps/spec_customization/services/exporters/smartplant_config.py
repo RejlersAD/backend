@@ -132,9 +132,18 @@ TEMPLATE_PASSTHROUGH_FIELD_DEFAULTS = {
     'BoltSelectionFilter':    {
         # Mirrors the builder defaults so the LS1E template rows still get
         # enriched when the user's extracted spec has no bolt components.
-        'AlternateEndPreparation':      '',
-        'AlternatePressureRating':      '',
-        'AlternateEndStandard':         '',
+        # Alt-end values below are the DOMINANT non-blank values found in
+        # the shipped LS1E reference template (~33 of 59 LS1E rows carry
+        # these; remaining rows are deliberately blank to mark "no alt").
+        # We populate the blanks so SP3D bulkload always sees a valid
+        # (EndPrep, PressureRating, EndStandard) alternate pair.
+        # MaximumTemperature is intentionally left blank: the LS1E
+        # reference template never populates it for ANY bolt row -- SP3D
+        # treats blank as "no upper temperature limit at this row" and
+        # inherits the limit from the joined material/flange class.
+        'AlternateEndPreparation':      '121',  # LS1E template most-frequent (21 rows)
+        'AlternatePressureRating':      '900',  # LS1E template most-frequent (29 rows)
+        'AlternateEndStandard':         '5',    # LS1E template only non-blank value (33 rows)
         'Priority':                     '1',
         'Comments':                     'Stud bolt per ASME B16.5 / ASTM A193 B7 with ASTM A194 2H nuts',
         'PipingNote1':                  'N/A',
@@ -798,9 +807,12 @@ SPEC_DEFAULTS = {
     # (spec, bolt-NPD) pair. Values are SP3D-valid for ASTM A193 B7 stud bolts
     # + A194 2H heavy hex nuts (ASME B16.5 flange make-up). Tune per project
     # without code change.
-    'bolt_alt_end_preparation':        '',            # blank = no alternate end-prep
-    'bolt_alt_pressure_rating':        '',            # blank = no alternate rating
-    'bolt_alt_end_standard':           '',            # blank = no alternate end-standard
+    # Alt-end defaults derived from LS1E reference template's dominant
+    # non-blank values (see audit in _diag_bolt_template.py). Override per
+    # project by editing these constants -- no code change required.
+    'bolt_alt_end_preparation':        '121',         # LS1E template: 21/33 rows
+    'bolt_alt_pressure_rating':        '900',         # LS1E template: 29/33 rows
+    'bolt_alt_end_standard':           '5',           # LS1E template: 33/33 rows
     'bolt_priority':                   '1',           # single-priority selection
     'bolt_bolt_extension_option':      '1',           # LS1E reference: BoltExtensionOption=1
     'bolt_fabrication_category_override': '7',        # LS1E reference value
