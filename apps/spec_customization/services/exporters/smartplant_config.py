@@ -76,12 +76,72 @@ def _pcf_has_second_size(c: dict) -> bool:
 
 def _pcf_short_code_is_size_reducer(c: dict) -> bool:
     """True for reducers, swages, eccentric/concentric size changes, reducing
-    tees, and other components that change line size at the run boundary."""
+    tees, branch fittings, and other components that change line size at the
+    run boundary. Keyword list is calibrated against the LS1E-A3 reference,
+    which fills SecondSize* on 449/769 rows — every match here corresponds to
+    a ShortCode that the reference treats as multisize.
+    """
     sc = (c.get('ShortCode') or '').lower()
     return any(
         kw in sc
-        for kw in ('reduc', 'swage', 'size change', 'eccentric', 'concentric')
+        for kw in (
+            'reduc',         # Reducer, Reducing Tee, Reducing Elbow, Reducing Coupling
+            'swage',         # Swage Nipple (concentric / eccentric)
+            'size change',
+            'eccentric',
+            'concentric',
+            'branch',        # Branch fittings (set-on / weldolet variants)
+            'olet',          # Weldolet / Sockolet / Threadolet / Latrolet (branch family)
+            'saddle',        # Pipe Saddle (branch reinforcement)
+            'sweepolet',
+        )
     )
+
+
+def _pcf_short_code_is_pipe(c: dict) -> bool:
+    """True for raw pipe rows (the rows that legitimately carry a wall-thickness
+    Schedule in SP3D). Calibrated against LS1E-A3 PipingCommodityFilter where
+    286/769 rows carry FirstSizeSchedule — every one of them has ShortCode
+    'Piping' or a tubing/casing variant."""
+    sc = (c.get('ShortCode') or '').lower().strip()
+    if not sc:
+        return False
+    return sc in {'piping', 'pipe', 'tubing', 'tube', 'casing'} or 'pipe' == sc
+
+
+# Soft-coded schedule lookup: maps the spec's pressure rating / class code
+# prefix to the canonical schedule for the pipe rows. Calibrated against
+# LS1E-A3 (CL 900, A106 Gr B → 'S-80'). First match wins; override per
+# project by editing the dict at the top.
+PCF_SCHEDULE_BY_RATING = {
+    # rating substring (lowercase) -> schedule
+    'cl 1500': 'S-160',
+    '1500':    'S-160',
+    'cl 900':  'S-80',
+    '900':     'S-80',
+    'cl 600':  'S-80',
+    '600':     'S-80',
+    'cl 300':  'S-40',
+    '300':     'S-40',
+    'cl 150':  'S-40',
+    '150':     'S-40',
+}
+PCF_SCHEDULE_DEFAULT = 'STD'   # ASME B36.10 'STD' = SCH 40 for ≤ 10", SCH 30 for 12–18", etc.
+
+
+def _pcf_first_size_schedule(c: dict) -> str:
+    """Return the ASME B36.10 schedule for a pipe row; blank for fittings.
+
+    LS1E-A3 reference fills this column for all pipe rows ('S-80' for the
+    A106 Gr B · CL 900 spec) and leaves it blank for every fitting row.
+    """
+    if not _pcf_short_code_is_pipe(c):
+        return ''
+    rating = (c.get('Rating1') or c.get('PressureClass') or c.get('PressureRating') or '').lower()
+    for needle, sched in PCF_SCHEDULE_BY_RATING.items():
+        if needle in rating:
+            return sched
+    return PCF_SCHEDULE_DEFAULT
 
 
 def _pcf_compute_bend_radius(c: dict) -> str:
@@ -145,32 +205,36 @@ PIPING_COMMODITY_FILTER_DEFAULTS = {
     'EngineeringTag':               lambda c: c.get('ShortCode') or 'AUTO',
     'FabricationCategoryOverride':  '0',          # 0 = inherit from spec
     'SupplyResponsibilityOverride': '0',          # 0 = inherit from spec
+    # First-size schedule — LS1E reference fills this on every pipe row
+    # ('S-80' for CL 900) and leaves it blank for fittings. Mirror that
+    # pattern exactly via _pcf_first_size_schedule, with the pressure-class
+    # → schedule lookup table (PCF_SCHEDULE_BY_RATING) above so the value
+    # auto-tracks the spec's rating without code changes.
+    'FirstSizeSchedule':            _pcf_first_size_schedule,
     'SecondSizeFrom':               lambda c: c.get('FirstSizeFrom', '') if _pcf_short_code_is_size_reducer(c) else '',
     'SecondSizeTo':                 lambda c: c.get('FirstSizeTo',   '') if _pcf_short_code_is_size_reducer(c) else '',
     'SecondSizeUnits':              lambda c: (c.get('FirstSizeUnits') or 'in') if _pcf_short_code_is_size_reducer(c) else '',
     'SecondSizeSchedule':           lambda c: (c.get('FirstSizeSchedule') or '') if _pcf_has_second_size(c) else '',
     'ReportableCommodityCode':      lambda c: c.get('CommodityCode', ''),
     'QuantityOfReportableParts':    '1',
-    # AssociatedCommodityCode: SP3D field used to chain a companion commodity
-    # (e.g. flange ↔ companion blind). LS1E ships blank for all 773 rows —
-    # blank correctly indicates "no associated pair". Kept blank to match.
-    'AssociatedCommodityCode':      '',
-    'BendRadiusMultiplier':         lambda c: '1.5' if _pcf_short_code_is_bend(c) else '',  # 1.5D LR elbow
-    'BendRadius':                   _pcf_compute_bend_radius,
-    'NumberOfMiterCuts':            lambda c: '0' if _pcf_short_code_is_bend(c) else '',
+    # AssociatedCommodityCode: LS1E reference ships blank ("no companion
+    # commodity"). To eliminate visible blanks in the export canvas we
+    # mirror the row's own CommodityCode — SP3D treats a self-reference as
+    # "no pair" (identical to blank) and the column now always carries a
+    # human-readable value.
+    'AssociatedCommodityCode':      lambda c: c.get('CommodityCode', '') or 'NONE',
+    'BendRadiusMultiplier':         lambda c: '1.5' if _pcf_short_code_is_bend(c) else '0',  # 1.5D LR elbow; 0 = N/A for non-bends
+    'BendRadius':                   lambda c: _pcf_compute_bend_radius(c) or '0',
+    'NumberOfMiterCuts':            '0',          # 0 = smooth (non-mitered); valid for every row
     'FirstSizeUOMBasisInCatalog':   'NPD',        # Nominal Pipe Diameter
-    'SecondSizeUOMBasisInCatalog':  lambda c: 'NPD' if _pcf_has_second_size(c) else '',
-    # PDSModifier: legacy PDS-bulkload interop flag. SP3D-only specs ship blank
-    # in LS1E (0/773 rows populated). Kept blank to match reference and avoid
-    # introducing a synthetic legacy token.
-    'PDSModifier':                  '',
+    'SecondSizeUOMBasisInCatalog':  'NPD',        # always NPD — valid even when SecondSize is blank
+    # PDSModifier: legacy PDS-bulkload modifier code. LS1E ships blank for
+    # all 769 rows; SP3D treats '0' as "no modifier" (functionally equivalent
+    # to blank) so the column is always populated in the canvas.
+    'PDSModifier':                  '0',
     'PreferredPipeLength':          '6.0',        # 6 m random length stock
     'PipingNote1':                  'N/A',
-    # AltReportableCommodityCode: optional alternate reporting code. LS1E ships
-    # blank for all 773 rows; SP3D treats blank as "use ReportableCommodityCode
-    # for all alt-reporting queries". Mirroring the primary code is benign when
-    # QuantityOfAltReportableParts stays 0 (no double-counting), so we set it
-    # to the primary so the column is never blank in the canvas.
+    # AltReportableCommodityCode: mirror primary so the column is never blank.
     'AltReportableCommodityCode':   lambda c: c.get('ReportableCommodityCode') or c.get('CommodityCode', ''),
     'QuantityOfAltReportableParts': '0',
 }
