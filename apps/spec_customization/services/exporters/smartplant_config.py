@@ -244,20 +244,51 @@ PIPING_COMMODITY_FILTER_DEFAULTS = {
 TEMPLATE_PASSTHROUGH_FIELD_DEFAULTS = {
     'PipingCommodityFilter':  PIPING_COMMODITY_FILTER_DEFAULTS,
     'GasketSelectionFilter':  {
-        # Mirrors the builder defaults so the LS1E template rows still get
-        # enriched when the user's extracted spec has no gasket components.
+        # ──────────────────────────────────────────────────────────────────
+        # LS1E-A3 reference audit (85 data rows in GasketSelectionFilter):
+        #   EndPreparation          = 21  (RF — Raised Face) on 79/85 rows
+        #   EndStandard             = 5   (ASME / ANSI)      on 79/85 rows
+        #   PressureRating          = 1500                   on 79/85 rows
+        #   AlternateEndPreparation = 121 (RTJ — Ring Type Joint) on 41/85 rows
+        #   AlternatePressureRating = 900 (the spec's alt CL) on 41/85 rows
+        #   AlternateEndStandard    = 5                       on 41/85 rows
+        #   RingNumber / AltReportableCommodityCode = blank (server-side
+        #       defaults). User wants every cell populated → soft-coded
+        #       visible sentinels below.
+        # ──────────────────────────────────────────────────────────────────
         'MaximumTemperature':           '650F',
         'MinimumTemperature':           '-29C',
-        'AlternateEndPreparation':      '',
-        'AlternatePressureRating':      '',
-        'AlternateEndStandard':         '',
+        # EndPreparation: RF (Raised Face) is the LS1E-dominant value.
+        # S3D_DEFAULTS['EndPrep_RF'] = '21'.
+        'EndPreparation':               '21',
+        'EndStandard':                  '5',     # ASME / ANSI (LS1E reference)
+        # AlternateEndPreparation: RTJ (Ring Type Joint) is the only non-blank
+        # alt value in the LS1E reference (41 rows). Project convention is
+        # RF→RTJ pairing for class 600+ services.
+        'AlternateEndPreparation':      '121',
+        # AlternatePressureRating: mirror the row's primary PressureRating
+        # (alt rating defaults to the same class in LS1E; if missing, '900'
+        # matches the LS1E reference dominant alt value).
+        'AlternatePressureRating':      lambda c: (
+            c.get('PressureRating') or c.get('Rating1') or '900'
+        ),
+        'AlternateEndStandard':         '5',     # ASME / ANSI — same as primary
         'FluidCode':                    'Process Fluid',
         'ScheduleThickness':            '',
         'Priority':                     '1',
-        'RingNumber':                   '',
+        # RingNumber: blank in LS1E reference (gasket ring number is sized
+        # at install time per ASME B16.20). 'N/A' keeps the cell visible
+        # without claiming a specific ring identity.
+        'RingNumber':                   'N/A',
         'Comments':                     'Gasket per ASME B16.20 / B16.21',
         'QuantityOfAltReportableParts': '0',
-        'AltReportableCommodityCode':   '',
+        # AltReportableCommodityCode: mirror primary contractor commodity so
+        # the column is never blank in the canvas (SP3D treats self-ref as
+        # "no separate alt reporting"; QuantityOfAltReportableParts=0 prevents
+        # any double-counting in MTO rollups).
+        'AltReportableCommodityCode':   lambda c: (
+            c.get('ContractorCommodityCode') or c.get('ReportableCommodityCode') or 'NONE'
+        ),
         'QuantityOfReportableParts':    '1',
         'ReportableCommodityCode':      lambda c: c.get('ContractorCommodityCode', ''),
         'PipingNote1':                  'N/A',
