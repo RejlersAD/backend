@@ -540,6 +540,127 @@ CAT_SHEET_DEFAULTS = {
 # Each builder is `(piping_class) → list[dict[column_name → value]]`.
 # Unmapped column-name keys are silently dropped by the writer.
 # ─────────────────────────────────────────────────────────────────────────────
+# ── PMCD intelligent value resolvers (soft-coded) ────────────────────────────
+# Each map is keyword-based and case-insensitive; the first matching keyword
+# wins. Add new mappings at the top to override the generic fallbacks. These
+# tables are deliberately kept module-level so they can be re-tuned without
+# touching the builder logic, and so the spec-customization override UI can
+# read them for inline editing in a later sprint.
+_PMCD_LINING_KEYWORD_MAP = [
+    # (lowercase keyword in fluid service / raw_notes, lining material value)
+    ('hcl',            'Rubber Lined'),
+    ('hydrochloric',   'Rubber Lined'),
+    ('caustic',        'Rubber Lined'),
+    ('slurry',         'Rubber Lined'),
+    ('sulphuric',      'PTFE Lined'),
+    ('sulfuric',       'PTFE Lined'),
+    ('h2so4',          'PTFE Lined'),
+    ('acid',           'PTFE Lined'),
+    ('chlorine',       'PTFE Lined'),
+    ('cement',         'Cement Lined'),
+    ('potable',        'Cement Lined'),
+    ('cooling water',  'Cement Lined'),
+    ('produced water', 'Cement Lined'),
+    ('sea water',      'Cement Lined'),
+    ('raw water',      'Cement Lined'),
+]
+
+_PMCD_JACKET_KEYWORDS = (
+    'jacket', 'jacketed', 'steam trace', 'steam-trace', 'steam tracing',
+    'heat trace', 'heat-trace', 'heat tracing',
+)
+
+_PMCD_HEATING_FLUID_KEYWORDS = [
+    # (lowercase keyword, JacketAndJumperFluidService value)
+    ('hp steam',  'HP Steam'),
+    ('mp steam',  'MP Steam'),
+    ('lp steam',  'LP Steam'),
+    ('steam',     'LP Steam'),
+    ('hot oil',   'Hot Oil'),
+    ('glycol',    'Glycol'),
+    ('hot water', 'Hot Water'),
+]
+
+
+def _pmcd_class_text(cls) -> str:
+    """Concatenated lower-cased haystack used by all PMCD keyword resolvers."""
+    parts = [
+        _spec_name(cls) or '',
+        cls.material_grade or '',
+        cls.raw_notes or '',
+        '; '.join(cls.service_list or []),
+    ]
+    return ' '.join(parts).lower()
+
+
+def _pmcd_lining_material(cls) -> str:
+    haystack = _pmcd_class_text(cls)
+    for needle, value in _PMCD_LINING_KEYWORD_MAP:
+        if needle in haystack:
+            return value
+    return SPEC_DEFAULTS['pmcd_lining_material']
+
+
+def _pmcd_is_jacketed(cls) -> bool:
+    haystack = _pmcd_class_text(cls)
+    if any(k in haystack for k in _PMCD_JACKET_KEYWORDS):
+        return True
+    # SP3D project convention: piping classes prefixed 'JK' are jacketed.
+    sn = (_spec_name(cls) or '').strip().upper()
+    return sn.startswith('JK')
+
+
+def _pmcd_jacket_fluid(cls) -> str:
+    if not _pmcd_is_jacketed(cls):
+        return SPEC_DEFAULTS['pmcd_jacket_jumper_fluid']
+    haystack = _pmcd_class_text(cls)
+    for needle, value in _PMCD_HEATING_FLUID_KEYWORDS:
+        if needle in haystack:
+            return value
+    return SPEC_DEFAULTS['pmcd_jacket_jumper_fluid_heated']
+
+
+def _pmcd_jacket_moc(cls) -> str:
+    if not _pmcd_is_jacketed(cls):
+        return SPEC_DEFAULTS['pmcd_jacket_moc_class']
+    # Mirror the class's own MOC — typical project convention for an
+    # integral steam jacket is the same metallurgy as the process pipe.
+    return (cls.material_grade or '').strip() or SPEC_DEFAULTS['pmcd_jacket_moc_class']
+
+
+def _pmcd_jacket_description(cls) -> str:
+    if not _pmcd_is_jacketed(cls):
+        return SPEC_DEFAULTS['pmcd_jacket_description']
+    moc = (cls.material_grade or '').strip()
+    return f'Jacket: {moc}' if moc else SPEC_DEFAULTS['pmcd_jacket_description']
+
+
+def _pmcd_jumper_moc(cls) -> str:
+    # Jumpers share metallurgy with the jacket whenever the spec is jacketed.
+    return _pmcd_jacket_moc(cls) if _pmcd_is_jacketed(cls) else SPEC_DEFAULTS['pmcd_jumper_moc_class']
+
+
+def _pmcd_jumper_description(cls) -> str:
+    if not _pmcd_is_jacketed(cls):
+        return SPEC_DEFAULTS['pmcd_jumper_description']
+    moc = (cls.material_grade or '').strip()
+    return f'Jumper: {moc}' if moc else SPEC_DEFAULTS['pmcd_jumper_description']
+
+
+def _pmcd_welding_procedure(cls) -> str:
+    """Derive a deterministic WPS identifier from the class's MOC.
+
+    Pattern: 'WPS-<sanitised material grade>' (alphanumerics + '-' only,
+    upper-cased, capped at 30 chars to stay inside SP3D's varchar limit).
+    Falls back to the soft-coded default when MOC is missing.
+    """
+    moc = (cls.material_grade or '').strip()
+    if not moc:
+        return SPEC_DEFAULTS['pmcd_welding_procedure_spec']
+    token = re.sub(r'[^A-Za-z0-9]+', '-', moc).strip('-').upper()[:26]
+    return f'WPS-{token}' if token else SPEC_DEFAULTS['pmcd_welding_procedure_spec']
+
+
 def _rows_piping_materials_class_data(cls):
     # LastModifiedOn / ApprovalDate — derive from the class's audit
     # timestamp so the value is deterministic per export run.
@@ -555,7 +676,7 @@ def _rows_piping_materials_class_data(cls):
         'PipingCommodityOverrideOption':  SPEC_DEFAULTS['pmcd_piping_commodity_override'],
         'WasherCreationOption':           SPEC_DEFAULTS['pmcd_washer_creation_option'],
         'GasketRequirementOverride':      '1',
-        'LiningMaterial':                 SPEC_DEFAULTS['pmcd_lining_material'],
+        'LiningMaterial':                 _pmcd_lining_material(cls),
         'PipingNote1':                    (cls.raw_notes or '')[:255],
         'PipingSpecStatus':               SPEC_DEFAULTS['pmcd_piping_spec_status'],
         'Responsibility':                 SPEC_DEFAULTS['pmcd_responsibility'],
@@ -564,17 +685,17 @@ def _rows_piping_materials_class_data(cls):
         'RevisionNumber':                 SPEC_DEFAULTS['pmcd_revision_number'],
         'ApprovedBy':                     SPEC_DEFAULTS['pmcd_approved_by'],
         'ApprovalDate':                   _date_str,
-        'JacketMatOfConstructionClass':   SPEC_DEFAULTS['pmcd_jacket_moc_class'],
-        'JumperMatOfConstructionClass':   SPEC_DEFAULTS['pmcd_jumper_moc_class'],
-        'JacketMaterialsDescription':     SPEC_DEFAULTS['pmcd_jacket_description'],
-        'JumperMaterialsDescription':     SPEC_DEFAULTS['pmcd_jumper_description'],
-        'JacketAndJumperFluidService':    SPEC_DEFAULTS['pmcd_jacket_jumper_fluid'],
+        'JacketMatOfConstructionClass':   _pmcd_jacket_moc(cls),
+        'JumperMatOfConstructionClass':   _pmcd_jumper_moc(cls),
+        'JacketMaterialsDescription':     _pmcd_jacket_description(cls),
+        'JumperMaterialsDescription':     _pmcd_jumper_description(cls),
+        'JacketAndJumperFluidService':    _pmcd_jacket_fluid(cls),
         'StressRelief':                   SPEC_DEFAULTS['pmcd_stress_relief'],
         'Examination':                    SPEC_DEFAULTS['pmcd_examination'],
         'HyperlinkToHumanSpec':           SPEC_DEFAULTS['pmcd_hyperlink_human_spec'],
         'StressReliefRequirement':        SPEC_DEFAULTS['pmcd_stress_relief_requirement'],
         'MaterialsGroup':                 SPEC_DEFAULTS['pmcd_materials_group'],
-        'WeldingProcedureSpecification':  SPEC_DEFAULTS['pmcd_welding_procedure_spec'],
+        'WeldingProcedureSpecification':  _pmcd_welding_procedure(cls),
         'MaterialsType':                  SPEC_DEFAULTS['pmcd_materials_type'],
     }]
 
@@ -939,23 +1060,35 @@ SPEC_DEFAULTS = {
     'pmcd_automated_flange_selection':    '1',     # 1 = enabled
     'pmcd_piping_commodity_override':     '1',     # 1 = allow overrides
     'pmcd_washer_creation_option':        '0',     # 0 = no auto-washer
-    'pmcd_lining_material':               '',      # blank = unlined
+    # ── Lining / Jacket / Welding intelligent defaults ───────────────────
+    # SP3D enum literal for "not applicable" in these slots is the string
+    # 'None' (not the Python None / blank). When the class metadata gives
+    # no hint of a lining/jacket requirement we still populate the cell so
+    # SP3D bulkload sees an explicit "no-jacket / no-lining" declaration
+    # instead of a missing record.
+    'pmcd_lining_material':               'None',   # SP3D sentinel for unlined
     'pmcd_piping_spec_status':            'Issued',
     'pmcd_responsibility':                'Engineering',
     'pmcd_approved_by':                   'Engineering Manager',
     'pmcd_revision_number':               '0',     # leading revision
-    'pmcd_jacket_moc_class':              '',      # not jacketed by default
-    'pmcd_jumper_moc_class':              '',
-    'pmcd_jacket_description':            '',
-    'pmcd_jumper_description':            '',
-    'pmcd_jacket_jumper_fluid':           '',
+    'pmcd_jacket_moc_class':              'None',   # SP3D sentinel for not-jacketed
+    'pmcd_jumper_moc_class':              'None',
+    'pmcd_jacket_description':            'Not Applicable',
+    'pmcd_jumper_description':            'Not Applicable',
+    'pmcd_jacket_jumper_fluid':           'None',
     'pmcd_stress_relief':                 '0',     # 0 = not required (ASME B31.3 §331)
     'pmcd_examination':                   '1',     # 1 = Normal (ASME B31.3 §341.4)
     'pmcd_hyperlink_human_spec':          '',
     'pmcd_stress_relief_requirement':     '15',    # SP3D codelist (LS1E-A3)
     'pmcd_materials_group':               '15',    # SP3D codelist (LS1E-A3)
-    'pmcd_welding_procedure_spec':        '',
+    # WeldingProcedureSpecification default — used when material grade is
+    # unknown. Builder will override with WPS-<sanitised-MOC> when grade
+    # is available (e.g. material_grade='A106 Gr B' → 'WPS-A106-GR-B').
+    'pmcd_welding_procedure_spec':        'WPS-GEN-001',
     'pmcd_materials_type':                '545',   # SP3D codelist (LS1E-A3)
+    # Heating-medium default for jacketed-spec rows (overridden when the
+    # class's raw_notes name a specific fluid like 'LP Steam').
+    'pmcd_jacket_jumper_fluid_heated':    'LP Steam',
     # Date format for LastModifiedOn / ApprovalDate (SP3D accepts ISO).
     'pmcd_date_format':                   '%Y-%m-%d',
 
