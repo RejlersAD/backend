@@ -218,6 +218,19 @@ TEMPLATE_PASSTHROUGH_FIELD_DEFAULTS = {
         'PipingNote1':                  'N/A',
         'LubricationRequirements':      'Molykote 1000 anti-seize (or equivalent) applied to threads and nut bearing faces',
     },
+    'InsideSurfaceTreatment': {
+        # LS1E reference template populates FluidCode=521 for every IST row
+        # (7/7 data rows). The numeric code is a SP3D-internal FluidCode ID;
+        # we resolve it from the row's SpecName via SPEC_NAME_NUMERIC_FLUID_MAP
+        # (defined later in this module). Falls back to the project default
+        # ('521' matching LS1E) for unmapped prefixes so the column is NEVER
+        # blank in the canvas.
+        'FluidCode': lambda c: _infer_numeric_fluid_from_spec_name(
+            c.get('SpecName') or ''
+        ),
+        'CoatingType':              '0',  # 0 = no coating, matches LS1E
+        'InsideSurfaceTreatment':   '0',  # 0 = none, matches LS1E
+    },
 }
 
 
@@ -894,6 +907,12 @@ SPEC_DEFAULTS = {
     # spec_name prefix (soft-coded SPEC_NAME_FLUID_PREFIX_MAP below), then
     # fall back to this generic default. Both tunable without code change.
     'default_fluid_code':              'Process Fluid',
+    # ── Numeric SP3D FluidCode (used by InsideSurfaceTreatment and any
+    # other sheet that requires a numeric FluidCode ID instead of a fluid
+    # name).  Matches LS1E reference template (FluidCode=521 across all
+    # 7 IST rows).  Override per-project via SPEC_NAME_NUMERIC_FLUID_MAP
+    # below; falls back to this default for unmapped spec-name prefixes.
+    'numeric_fluid_code':              '521',
     'bend_angles':                     ('90', '45'),
     'inside_surface_treatment':        '0',           # 0 = none
     'outside_surface_treatment':       '0',
@@ -1291,6 +1310,46 @@ SPEC_NAME_FLUID_PREFIX_MAP = {
 }
 
 
+# ── Soft-coded prefix → numeric SP3D FluidCode ID map ───────────────────
+# SP3D bulkload sheets like InsideSurfaceTreatment require a NUMERIC
+# FluidCode (e.g. 521 in LS1E reference) rather than a fluid name.
+# These IDs come from the project's SP3D FluidCode catalog. Keep this
+# map aligned with the customer's master list; add new prefixes as
+# additional specs are imported.  Longest-prefix-wins (same as the name
+# map above).  Anything unmatched falls back to
+# SPEC_DEFAULTS['numeric_fluid_code'].
+SPEC_NAME_NUMERIC_FLUID_MAP = {
+    # LS-prefixed specs (low-pressure service) — LS1E reference uses 521
+    'LS':  '521',
+    # Common Rejlers/ADNOC numeric IDs (placeholders aligned to LS1E
+    # family; override per project via SP3D FluidCode master).
+    'HS':  '521',
+    'MS':  '521',
+    # Hydrocarbon / process families default to the same generic ID until
+    # the customer provides an authoritative FluidCode map.
+    'HC':  '521',
+    'NG':  '521',
+    'FG':  '521',
+}
+
+
+def _infer_numeric_fluid_from_spec_name(spec_name: str) -> str:
+    """Soft-coded prefix → numeric FluidCode ID.  Used by sheets whose
+    SP3D bulkload column expects a numeric FluidCode (e.g.
+    InsideSurfaceTreatment in the LS1E reference uses 521).  Falls back to
+    SPEC_DEFAULTS['numeric_fluid_code'] for unmapped prefixes."""
+    default = SPEC_DEFAULTS['numeric_fluid_code']
+    if not spec_name:
+        return default
+    sn = str(spec_name).upper().strip()
+    if ':' in sn:
+        sn = sn.split(':', 1)[1].strip()
+    for prefix in sorted(SPEC_NAME_NUMERIC_FLUID_MAP.keys(), key=len, reverse=True):
+        if sn.startswith(prefix):
+            return SPEC_NAME_NUMERIC_FLUID_MAP[prefix]
+    return default
+
+
 def _rows_allowable_piping_materials_class(cls):
     """Emit one FluidCode row per service. Smart fallback chain ensures the
     column is NEVER blank: explicit service_list → inferred-from-spec-name →
@@ -1339,11 +1398,17 @@ def _rows_inside_surface_treatment(cls):
                    for n in _enumerate_npds(c.size_from, c.size_to)})
     if not npds:
         return []
+    spec_name = _spec_name(cls)
+    # FluidCode: numeric SP3D ID resolved from spec_name prefix
+    # (SPEC_NAME_NUMERIC_FLUID_MAP). LS1E reference template populates
+    # this column for every IST row — never blank.
+    fluid_code = _infer_numeric_fluid_from_spec_name(spec_name)
     return [{
-        'SpecName':                       _spec_name(cls),
+        'SpecName':                       spec_name,
         'NominalPipingDiameterFrom':      _normalize_npd(min(npds)),
         'NominalPipingDiameterTo':        _normalize_npd(max(npds)),
         'NominalPipingDiameterUnits':     S3D_DEFAULTS['NpdUnitType'],
+        'FluidCode':                      fluid_code,
         'CoatingType':                    SPEC_DEFAULTS['coating_type'],
         'InsideSurfaceTreatment':         SPEC_DEFAULTS['inside_surface_treatment'],
     }]
