@@ -59,36 +59,83 @@ WORKBOOK_CAT  = 'cat'
 _HEADER_SCAN_DEPTH = 60
 
 
-def _template_headers(template_path: str, sheet_name: str) -> list[str]:
-    """Read the column headers (left-to-right) from a template sheet.
+def _scan_header_rows(template_path: str, sheet_name: str) -> tuple[int | None, list[str]]:
+    """Locate the header row and return its 1-indexed row number + values.
 
-    The header row is the LAST row in the first ~60 rows whose column-A value
-    is in `cfg.HEADER_MARKERS`.  Returns headers in column order, dropping
-    blank columns at the end.
+    Two layouts are supported:
+
+      1. **Marker layout** (most SP3D bulkload sheets) — col A contains a
+         token in ``cfg.HEADER_MARKERS`` (e.g. ``Head``). The LAST marker
+         row within the first ~60 rows wins.
+      2. **Filter layout** (e.g. ``PipingCommodityFilter``) — col A blank,
+         headers begin at col B on row 2. Detected by scanning the first
+         ``cfg.HEADER_FALLBACK_SCAN_ROWS`` rows for one where col A is
+         empty and at least ``cfg.HEADER_FALLBACK_MIN_LABELS`` cells
+         (starting col B) are non-empty strings.
+
+    Returns ``(header_row, header_values)`` or ``(None, [])`` if neither
+    layout matches.
     """
     try:
         wb = load_workbook(template_path, read_only=True, data_only=True)
     except Exception:
         logger.exception("[WorkbookPreview] could not open template %s", template_path)
-        return []
+        return None, []
     if sheet_name not in wb.sheetnames:
-        return []
+        return None, []
     ws = wb[sheet_name]
-    header_row = None
-    for r in range(1, min(ws.max_row, _HEADER_SCAN_DEPTH) + 1):
-        v = ws.cell(r, 1).value
+
+    fallback_depth = max(
+        _HEADER_SCAN_DEPTH,
+        getattr(cfg, 'HEADER_FALLBACK_SCAN_ROWS', 10),
+    )
+    # Pull just the first `fallback_depth` rows once — iter_rows is O(rows)
+    # in read-only mode, whereas ws.cell() in read-only is O(rows²).
+    initial_rows: list[tuple] = []
+    for row in ws.iter_rows(min_row=1, max_row=fallback_depth, values_only=True):
+        initial_rows.append(row)
+
+    marker_row_idx: int | None = None
+    for idx, row in enumerate(initial_rows[:_HEADER_SCAN_DEPTH], start=1):
+        if not row:
+            continue
+        v = row[0]
         if v is not None and str(v).strip() in cfg.HEADER_MARKERS:
-            header_row = r
-    if header_row is None:
-        return []
-    headers: list[str] = []
-    for c in range(1, ws.max_column + 1):
-        v = ws.cell(header_row, c).value
-        headers.append(str(v).strip() if v is not None else '')
-    # Trim trailing blanks.
+            marker_row_idx = idx
+
+    chosen_row_idx: int | None = marker_row_idx
+    if chosen_row_idx is None:
+        scan_n = getattr(cfg, 'HEADER_FALLBACK_SCAN_ROWS', 10)
+        min_lbl = getattr(cfg, 'HEADER_FALLBACK_MIN_LABELS', 3)
+        for idx, row in enumerate(initial_rows[:scan_n], start=1):
+            if not row:
+                continue
+            if row[0] not in (None, ''):
+                continue
+            label_count = sum(
+                1 for v in row[1:]
+                if isinstance(v, str) and v.strip()
+            )
+            if label_count >= min_lbl:
+                chosen_row_idx = idx
+                break
+
+    if chosen_row_idx is None or chosen_row_idx > len(initial_rows):
+        return None, []
+
+    header_row = initial_rows[chosen_row_idx - 1]
+    headers = [
+        (str(v).strip() if v is not None else '')
+        for v in header_row
+    ]
     while headers and not headers[-1]:
         headers.pop()
-    return headers
+    return chosen_row_idx, headers
+
+
+def _template_headers(template_path: str, sheet_name: str) -> list[str]:
+    """Public-style helper (cached via `_get_headers`)."""
+    return _scan_header_rows(template_path, sheet_name)[1]
 
 
 # Module-level cache: template_path → {sheet_name → [headers]}
@@ -100,6 +147,77 @@ def _get_headers(template_path: str, sheet_name: str) -> list[str]:
     if sheet_name not in by_sheet:
         by_sheet[sheet_name] = _template_headers(template_path, sheet_name)
     return by_sheet[sheet_name]
+
+
+def _template_passthrough_rows(
+    template_path: str,
+    sheet_name: str,
+    headers: list[str],
+) -> list[dict]:
+    """Read static data rows below the header row from the template.
+
+    Used for sheets that have no builder registered (e.g. SP3D static
+    reference sheets like ``PipingCommodityFilter``) so the canvas reflects
+    the LS1E reference content.  Returns rows in preview shape with stable
+    ``row_key``s of the form ``tpl:{sheet}:{row_idx}``.
+    """
+    if not headers:
+        return []
+    if not getattr(cfg, 'TEMPLATE_PASSTHROUGH_ENABLED', True):
+        return []
+    header_row_idx, _ = _scan_header_rows(template_path, sheet_name)
+    if header_row_idx is None:
+        return []
+    try:
+        wb = load_workbook(template_path, read_only=True, data_only=True)
+    except Exception:
+        return []
+    if sheet_name not in wb.sheetnames:
+        return []
+    ws = wb[sheet_name]
+    max_rows = getattr(cfg, 'TEMPLATE_PASSTHROUGH_MAX_ROWS', 5000)
+    end_markers = set(cfg.END_MARKERS)
+    n_cols = len(headers)
+
+    out: list[dict] = []
+    # iter_rows is O(rows) and the only efficient access pattern in
+    # read-only mode.  We slice it to the first N columns we actually need.
+    for row_offset, row in enumerate(
+        ws.iter_rows(min_row=header_row_idx + 1, max_col=n_cols, values_only=True),
+        start=1,
+    ):
+        if len(out) >= max_rows:
+            break
+        # Stop at SP3D End sentinel.
+        col_a = row[0] if row else None
+        if col_a is not None and str(col_a).strip() in end_markers:
+            break
+        if not row or all(v in (None, '') for v in row):
+            continue
+        cells: dict = {}
+        for idx, header in enumerate(headers):
+            v = row[idx] if idx < len(row) else None
+            key = header or f'_col{idx}'
+            if v is None:
+                cells[key] = ''
+            elif isinstance(v, str):
+                cells[key] = v
+            else:
+                cells[key] = str(v)
+        # Soft-coded blank-cell enrichment (SP3D-valid defaults).  Safe no-op
+        # for sheets without a defaults entry in smartplant_config.
+        try:
+            cfg.apply_passthrough_defaults(sheet_name, cells)
+        except Exception:
+            logger.exception("[WorkbookPreview] apply_passthrough_defaults failed for %s",
+                             sheet_name)
+        out.append({
+            'row_key':    f'tpl:{sheet_name}:{header_row_idx + row_offset}',
+            'cells':      cells,
+            'overridden': [],
+            'source':     {'class_id': None, 'class_code': None, 'component_id': None},
+        })
+    return out
 
 
 # ─── Row enumeration (reuses exporter builders) ──────────────────────────────
@@ -213,6 +331,41 @@ def build_preview(job, workbook: str) -> dict:
             'headers':    headers,
             'row_count':  len(rows_by_sheet[sheet_name]),
             'rows':       rows_by_sheet[sheet_name],
+        })
+
+    # Surface every template sheet in the canvas — even sheets with no
+    # auto-generated rows (e.g. `CustomInterfaces`, `PipingCommodityFilter`).
+    # This keeps the UI aligned with the LS1E-A3 reference workbook so the
+    # user can see the full bulkload schema, not just the populated subset.
+    try:
+        _wb = load_workbook(template_path, read_only=True, data_only=True)
+        template_sheet_names = list(_wb.sheetnames)
+    except Exception:
+        logger.exception("[WorkbookPreview] could not enumerate template sheets at %s",
+                         template_path)
+        template_sheet_names = []
+
+    rendered = {s['name'] for s in sheets_out}
+    for sheet_name in template_sheet_names:
+        if sheet_name in rendered:
+            continue
+        headers = _get_headers(template_path, sheet_name)
+        if not headers:
+            # Skip sheets whose Head row could not be detected.
+            continue
+        # Surface template-shipped static data (e.g. PipingCommodityFilter's
+        # 700+ LS1E reference rows) and apply any saved cell overrides on top.
+        passthrough = _template_passthrough_rows(template_path, sheet_name, headers)
+        for row in passthrough:
+            sheet_overrides = overrides.get((sheet_name, row['row_key']), {})
+            if sheet_overrides:
+                row['cells'].update(sheet_overrides)
+                row['overridden'] = sorted(sheet_overrides.keys())
+        sheets_out.append({
+            'name':       sheet_name,
+            'headers':    headers,
+            'row_count':  len(passthrough),
+            'rows':       passthrough,
         })
 
     return {
