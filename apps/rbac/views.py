@@ -1748,6 +1748,14 @@ class AnalyticsDashboardViewSet(viewsets.ViewSet):
         Get comprehensive dashboard overview
         Includes system health, user stats, security alerts, and AI insights
         """
+        # Refresh analytics snapshots (TTL-gated, soft-coded intervals).
+        # This only ingests live data — it does not alter the read logic below.
+        try:
+            from .analytics_collectors import ensure_fresh
+            ensure_fresh()
+        except Exception:  # never let collector failure break the dashboard
+            pass
+
         today = timezone.now().date()
         yesterday = today - timedelta(days=1)
         

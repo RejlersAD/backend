@@ -80,6 +80,7 @@ google-auth-oauthlib>=1.1.0
 numpy>=1.24.0
 pandas>=2.1.0
 networkx==3.2.1
+psutil>=5.9.0  # Real-time CPU/memory/disk metrics for the admin dashboard
 
 # ==========================================
 # 9. OCR STACK (Required for P&ID/PFD Processing)
