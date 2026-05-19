@@ -74,12 +74,67 @@ def _pcf_has_second_size(c: dict) -> bool:
     return v not in (None, '', '0', '0.0')
 
 
+def _pcf_short_code_is_size_reducer(c: dict) -> bool:
+    """True for reducers, swages, eccentric/concentric size changes, reducing
+    tees, and other components that change line size at the run boundary."""
+    sc = (c.get('ShortCode') or '').lower()
+    return any(
+        kw in sc
+        for kw in ('reduc', 'swage', 'size change', 'eccentric', 'concentric')
+    )
+
+
+def _pcf_compute_bend_radius(c: dict) -> str:
+    """Compute SP3D BendRadius = FirstSizeFrom × BendRadiusMultiplier for
+    bend/elbow rows. Returns blank for non-bends or unparseable sizes so we
+    never emit an SP3D-invalid numeric.
+
+    SP3D LS1E reference leaves this column blank (server-computes from
+    multiplier×size at runtime); explicit numeric is equally valid and is
+    preferred here so the bulkload spreadsheet is self-documenting.
+    """
+    if not _pcf_short_code_is_bend(c):
+        return ''
+    try:
+        size = float(c.get('FirstSizeFrom') or 0)
+    except (TypeError, ValueError):
+        return ''
+    if size <= 0:
+        return ''
+    # Multiplier: keep in sync with the BendRadiusMultiplier default below.
+    # 1.5D = long-radius elbow per ASME B16.9.
+    try:
+        mult = float(c.get('BendRadiusMultiplier') or '1.5')
+    except (TypeError, ValueError):
+        mult = 1.5
+    radius = size * mult
+    # Trim trailing zeros for clean SP3D display (e.g. 3.0 → "3", 1.125 → "1.125")
+    return ('%g' % radius)
+
+
 # Soft-coded SP3D-valid defaults applied ONLY to blank cells in
 # PipingCommodityFilter passthrough rows. Values may be literals or callables
 # taking the row's cell dict (so context-aware defaults like
 # "EngineeringTag := ShortCode" or "BendRadius only when ShortCode is bend"
 # stay declarative). To tune per project, override individual keys without
 # touching code by replacing this dict via Django settings at runtime.
+#
+# ───────────────────────────────────────────────────────────────────────
+# LS1E reference audit (smartplant_spec_template.xlsx → PipingCommodityFilter
+# 773 data rows). The columns below are ENTIRELY blank in the shipped LS1E
+# reference and SP3D treats blank as "use server-side default":
+#   • SupplyResponsibilityOverride  → '0' (inherit from spec)
+#   • AssociatedCommodityCode       → '' (no companion-commodity linkage)
+#   • BendRadiusMultiplier          → '1.5' for bends; '' otherwise
+#   • BendRadius                    → computed = size × multiplier for bends
+#   • NumberOfMiterCuts             → '0'  for bends; '' otherwise (non-mitered)
+#   • SecondSizeUOMBasisInCatalog   → 'NPD' for multisize; '' otherwise
+#   • PDSModifier                   → '' (legacy PDS interop; blank in SP3D-only)
+#   • AltReportableCommodityCode    → '' (no alternate reporting code)
+# Per-row size columns (SecondSizeFrom/To/Units) are template-driven and stay
+# blank for full-bore fittings — the LS1E template itself populates them only
+# for size-reducing components (449/773 rows).
+# ───────────────────────────────────────────────────────────────────────
 PIPING_COMMODITY_FILTER_DEFAULTS = {
     'MultisizeOption':              lambda c: '1' if _pcf_has_second_size(c) else '0',
     'Comments':                     'SP3D auto-bulkload',
@@ -90,19 +145,33 @@ PIPING_COMMODITY_FILTER_DEFAULTS = {
     'EngineeringTag':               lambda c: c.get('ShortCode') or 'AUTO',
     'FabricationCategoryOverride':  '0',          # 0 = inherit from spec
     'SupplyResponsibilityOverride': '0',          # 0 = inherit from spec
+    'SecondSizeFrom':               lambda c: c.get('FirstSizeFrom', '') if _pcf_short_code_is_size_reducer(c) else '',
+    'SecondSizeTo':                 lambda c: c.get('FirstSizeTo',   '') if _pcf_short_code_is_size_reducer(c) else '',
+    'SecondSizeUnits':              lambda c: (c.get('FirstSizeUnits') or 'in') if _pcf_short_code_is_size_reducer(c) else '',
     'SecondSizeSchedule':           lambda c: (c.get('FirstSizeSchedule') or '') if _pcf_has_second_size(c) else '',
     'ReportableCommodityCode':      lambda c: c.get('CommodityCode', ''),
     'QuantityOfReportableParts':    '1',
+    # AssociatedCommodityCode: SP3D field used to chain a companion commodity
+    # (e.g. flange ↔ companion blind). LS1E ships blank for all 773 rows —
+    # blank correctly indicates "no associated pair". Kept blank to match.
     'AssociatedCommodityCode':      '',
     'BendRadiusMultiplier':         lambda c: '1.5' if _pcf_short_code_is_bend(c) else '',  # 1.5D LR elbow
-    'BendRadius':                   '',
+    'BendRadius':                   _pcf_compute_bend_radius,
     'NumberOfMiterCuts':            lambda c: '0' if _pcf_short_code_is_bend(c) else '',
     'FirstSizeUOMBasisInCatalog':   'NPD',        # Nominal Pipe Diameter
     'SecondSizeUOMBasisInCatalog':  lambda c: 'NPD' if _pcf_has_second_size(c) else '',
+    # PDSModifier: legacy PDS-bulkload interop flag. SP3D-only specs ship blank
+    # in LS1E (0/773 rows populated). Kept blank to match reference and avoid
+    # introducing a synthetic legacy token.
     'PDSModifier':                  '',
     'PreferredPipeLength':          '6.0',        # 6 m random length stock
     'PipingNote1':                  'N/A',
-    'AltReportableCommodityCode':   '',
+    # AltReportableCommodityCode: optional alternate reporting code. LS1E ships
+    # blank for all 773 rows; SP3D treats blank as "use ReportableCommodityCode
+    # for all alt-reporting queries". Mirroring the primary code is benign when
+    # QuantityOfAltReportableParts stays 0 (no double-counting), so we set it
+    # to the primary so the column is never blank in the canvas.
+    'AltReportableCommodityCode':   lambda c: c.get('ReportableCommodityCode') or c.get('CommodityCode', ''),
     'QuantityOfAltReportableParts': '0',
 }
 
