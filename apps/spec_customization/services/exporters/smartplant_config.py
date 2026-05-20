@@ -581,9 +581,16 @@ def _normalize_pressure_class(rating: str | None) -> str:
 #   bend_angle      — Optional, used for elbow sheets
 #   primary_label   — '' or ':Primary' suffix for Npd column name
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# `primary_label` / `secondary_label` — optional ':Primary' / ':Secondary'
+# suffixes appended to `Npd[N]` column-name variants so the writer can match
+# whichever header the LS1E-A3 reference template ships (some sheets use the
+# bare `Npd[1]` form, others use `Npd[1]:Primary`/`Npd[2]:Secondary`).
+# Soft-coded so the suffix scheme is auditable against the reference workbook.
 CAT_SHEET_DEFAULTS = {
     'PipeStock':         dict(commodity_type='PIPE',  geometry_type=None,  symbol_def=None,
-                              icc_prefix='RAD_PIP', ports=2, primary_label=':Primary'),
+                              icc_prefix='RAD_PIP', ports=2,
+                              primary_label=':Primary', secondary_label=':Secondary'),
     'WeldNeckFlange':    dict(commodity_type='FWN',   geometry_type='15',  symbol_def='Flange,Ingr.SP3D.Content.Piping.Flange',
                               icc_prefix='RAD_FWN', ports=2),
     'BlindFlange':       dict(commodity_type='FBLD',  geometry_type='220', symbol_def='BlindFlange,Ingr.SP3D.Content.Piping.BlindFlange',
@@ -597,9 +604,11 @@ CAT_SHEET_DEFAULTS = {
     '45DegLRElbow':      dict(commodity_type='E45LR', geometry_type='20',  symbol_def='45DegreeElbow,Ingr.SP3D.Content.Piping.Elbow45Deg',
                               icc_prefix='RAD_E4L', ports=2, bend_angle='45deg'),
     'Tee':               dict(commodity_type='T',     geometry_type='75',  symbol_def='Tee,Ingr.SP3D.Content.Piping.Tee',
-                              icc_prefix='RAD_TEE', ports=3, primary_label=':Primary'),
+                              icc_prefix='RAD_TEE', ports=3,
+                              primary_label=':Primary', secondary_label=':Primary'),
     'ReducingTee':       dict(commodity_type='TR',    geometry_type='75',  symbol_def='Tee,Ingr.SP3D.Content.Piping.Tee',
-                              icc_prefix='RAD_TER', ports=3, primary_label=':Primary'),
+                              icc_prefix='RAD_TER', ports=3,
+                              primary_label=':Primary', secondary_label=':Primary'),
     'ConcentricSwage':   dict(commodity_type='SWGC',  geometry_type='70',  symbol_def='ConcentricReducer,Ingr.SP3D.Content.Piping.Concentric',
                               icc_prefix='RAD_SWG', ports=2),
     'ConcentricReducer': dict(commodity_type='REDC',  geometry_type='70',  symbol_def='ConcentricReducer,Ingr.SP3D.Content.Piping.Concentric',
@@ -627,6 +636,511 @@ CAT_SHEET_DEFAULTS = {
     'BoltPartData':      dict(commodity_type=None,    geometry_type=None,  symbol_def=None,
                               icc_prefix='RAD_BLT', ports=0),
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4b. CAT DIMENSIONAL / IDENTIFIER FIELDS  (soft-coded per sheet)
+# ─────────────────────────────────────────────────────────────────────────────
+# Values calibrated against the LS1E-A3 reference workbook
+# (Documents/Digitization/Spec Customisation/LS1E-A3_CAT.xlsx). Each entry
+# maps a CAT sheet → {column_name: value | callable(cls, comp) -> value}.
+#
+# Purpose: the base `_common_part_row` only fills generic identifiers + port
+# fields. The reference workbook also carries sheet-specific *constants*
+# (PartDataBasis, ManufacturingMethod, Density, valve trim/model numbers,
+# symbol icons, dimensional sentinels). Adding them here — rather than
+# inside the builder — keeps the builder small and lets us re-tune any
+# value in one place without touching code paths.
+#
+# • Static values are written as-is.
+# • Callables are invoked with (cls, comp) and may return '' to skip.
+# • Empty strings / None are dropped by `_write_row` (single source of truth)
+#   so columns with no project-wide value stay blank without polluting xlsx.
+#
+# Extending: add a new sheet entry OR a new column key to an existing entry.
+# No core-logic changes required.
+# ─────────────────────────────────────────────────────────────────────────────
+CAT_DIMENSIONAL_FIELDS: dict[str, dict[str, object]] = {
+    # ── Pipe stock ────────────────────────────────────────────────────────
+    'PipeStock': {
+        # Carbon-steel default density (LS1E reference: '490 lbm/ft^3'). For
+        # alloy/SS classes the extractor's material_grade lookup should
+        # override this via the callable form once a density resolver lands.
+        'Density':             '490 lbm/ft^3',
+        'ManufacturingMethod': '5',   # 5 = Seamless (LS1E dominant value)
+        # ── Pipe-supply / dimensional fallbacks (LS1E reference leaves these
+        # blank because SP3D's dimension tables resolve them at bulk-load
+        # time. We fill SP3D-safe defaults so the canvas never shows empty
+        # cells; the merge_fill_blank() helper guarantees real extracted
+        # values keep winning. Override any value via WorkbookCellOverride
+        # on the canvas, no code change needed.
+        'PurchaseLength':      '6 m',     # ASME B36.10 random length (~6 m)
+        'MinimumPipeLength':   '0.05 m',  # 50 mm trim-off cutoff
+        'MaximumPipeLength':   '6 m',
+        'SurfacePreparation':  '0',       # 0 = None / mill finish
+        'LiningMaterial':      '0',       # 0 = None / unlined
+        # Pipe stock has no end-cap weights — SP3D bulkload accepts 0.
+        'DryWeightForEnd1':    '0',
+        'DryWeightForEnd2':    '0',
+        # SP3D dimension table resolves WeightPerUnitLength from
+        # GeometricIndustryStandard + Schedule + NPD. Leave blank so the
+        # bulk-loader computes it; extractor can override per row.
+    },
+    # ── Flanges ───────────────────────────────────────────────────────────
+    'WeldNeckFlange': {
+        'PartDataBasis':       '15',  # LS1E reference WNF rows = 15
+        # ── SP3D-safe defaults for columns LS1E leaves blank ──────────────
+        # All values are merged via merge_fill_blank() so any real extractor
+        # value (e.g. comp.weight_kg → DryWeight) keeps winning.
+        # Override any default via WorkbookCellOverride on the canvas — no
+        # code change needed.
+        'LiningMaterial':              '0',   # 0 = None / unlined
+        'BendRadius':                  '0',   # N/A for flange
+        'BendRadiusMultiplier':        '0',
+        'MirrorBehaviorOption':        '0',   # 0 = no mirror (default)
+        # Valve columns explicitly suppressed — WNF is not a valve.
+        # (cat_sheet_constants() filters '' so these never appear, but
+        # listing them documents intent and keeps the schema explicit.)
+        'ValveManufacturer':           '',
+        'ValveModelNumber':            '',
+        'ValveTrim':                   '',
+        # ASME B16.5 RF default flange-face finish enum (0 = mill finish /
+        # SP3D resolves from MaterialGrade); refine via extractor per class.
+        'FlangeFaceSurfaceFinish':     '0',
+        'SurfacePreparation':          '0',
+        'ManufacturingMethod':         '1',   # 1 = Forged (B16.5 default)
+        'MiscRequisitionClassification': '0',
+        # Id[1] / Id[2] are SP3D internal IDs — auto-generated at bulk-load,
+        # left blank on purpose.
+        # PipingNote1 is extractor-derived; default to blank.
+        'PipingNote1':                 '',
+        # Weight / centre-of-gravity / dimensional fields are computed by
+        # the SP3D 3D-model engine from the symbol + NPD; default '0'
+        # ensures the canvas never shows empty cells while still letting
+        # real extractor values win via merge_fill_blank().
+        'DryWeight':                   '0',
+        'DryCogX':                     '0',
+        'DryCogY':                     '0',
+        'DryCogZ':                     '0',
+        'WaterWeight':                 '0',
+        'WaterCogX':                   '0',
+        'WaterCogY':                   '0',
+        'WaterCogZ':                   '0',
+        'SurfaceArea':                 '0',
+        'VolumetricCapacity':          '0',
+        # FacetoFace is per-NPD per-pressure dimensional value from
+        # ASME B16.5. Left for the extractor / dimensional resolver to
+        # populate per row — adding a single static default would be wrong.
+    },
+    'BlindFlange': {
+        # BlindFlange has no PartDataBasis in LS1E reference; intentionally
+        # left empty so the column doesn't show a spurious value.
+        # ── SP3D-safe defaults for columns LS1E leaves blank ──────────────
+        # All values are merged via merge_fill_blank() so any real extractor
+        # value (e.g. comp.weight_kg → DryWeight) keeps winning. Override
+        # any default via WorkbookCellOverride on the canvas — no code change.
+        'LiningMaterial':              '0',   # 0 = None / unlined
+        'BendRadius':                  '0',   # N/A for flange
+        'BendRadiusMultiplier':        '0',
+        'MirrorBehaviorOption':        '0',   # 0 = no mirror (default)
+        # Valve columns explicitly suppressed — BlindFlange is not a valve.
+        'ValveManufacturer':           '',
+        'ValveModelNumber':            '',
+        'ValveTrim':                   '',
+        # Flange-face / surface defaults (B16.5 RF, 0 = mill finish).
+        'FlangeFaceSurfaceFinish':     '0',
+        'SurfacePreparation':          '0',
+        'ManufacturingMethod':         '1',   # 1 = Forged (B16.5 default)
+        'MiscRequisitionClassification': '0',
+        # PipingNote1 is extractor-derived; default to blank.
+        'PipingNote1':                 '',
+        # Weight / centre-of-gravity / dimensional fields are computed by
+        # the SP3D 3D-model engine from the symbol + NPD; default '0' keeps
+        # the canvas populated and merge_fill_blank() lets real values win.
+        'DryWeight':                   '0',
+        'DryCogX':                     '0',
+        'DryCogY':                     '0',
+        'DryCogZ':                     '0',
+        'WaterWeight':                 '0',
+        'WaterCogX':                   '0',
+        'WaterCogY':                   '0',
+        'WaterCogZ':                   '0',
+        'SurfaceArea':                 '0',
+        'VolumetricCapacity':          '0',
+    },
+    # ── Elbows ────────────────────────────────────────────────────────────
+    '90DegElbow':   {
+        # LS1E reference leaves all of the columns below blank for
+        # 90DegElbow rows (PartDataBasis included). Sentinel defaults
+        # below keep the canvas populated; merge_fill_blank() ensures any
+        # real extractor / per-row computed value keeps winning. Override
+        # any default per row via WorkbookCellOverride — no code change.
+        # NOTE: BendRadius / BendRadiusMultiplier are computed per NPD by
+        # the closure builders in _common_part_row(); the '0' defaults
+        # here only fill rows where extraction yields nothing.
+        'LiningMaterial':              '0',   # 0 = None / unlined
+        'BendRadius':                  '0',
+        'BendRadiusMultiplier':        '0',
+        'MirrorBehaviorOption':        '0',   # 0 = no mirror
+        # Valve columns explicitly suppressed — elbows are not valves.
+        'ValveManufacturer':           '',
+        'ValveModelNumber':            '',
+        'ValveTrim':                   '',
+        'FlangeFaceSurfaceFinish':     '0',
+        'SurfacePreparation':          '0',
+        'ManufacturingMethod':         '1',   # 1 = Forged (B16.9 default)
+        'MiscRequisitionClassification': '0',
+        'PipingNote1':                 '',
+        # Weight / centre-of-gravity / dimensional columns — SP3D 3D-model
+        # engine resolves these from the symbol + NPD at bulk-load time.
+        'DryWeight':                   '0',
+        'DryCogX':                     '0',
+        'DryCogY':                     '0',
+        'DryCogZ':                     '0',
+        'WaterWeight':                 '0',
+        'WaterCogX':                   '0',
+        'WaterCogY':                   '0',
+        'WaterCogZ':                   '0',
+        'SurfaceArea':                 '0',
+        'VolumetricCapacity':          '0',
+    },
+    '90DegLRElbow': {
+        # LS1E reference leaves all of the columns below blank for
+        # 90DegLRElbow rows (PartDataBasis included). Sentinel defaults
+        # below keep the canvas populated; merge_fill_blank() ensures any
+        # real extractor / per-row computed value keeps winning. Override
+        # any default per row via WorkbookCellOverride — no code change.
+        # NOTE: BendRadius / BendRadiusMultiplier are computed per NPD by
+        # the closure builders in _common_part_row(); the '0' defaults
+        # here only fill rows where extraction yields nothing.
+        'BendRadius':                  '0',
+        'BendRadiusMultiplier':        '0',
+        'MirrorBehaviorOption':        '0',   # 0 = no mirror
+        # Valve columns explicitly suppressed — elbows are not valves.
+        'ValveManufacturer':           '',
+        'ValveModelNumber':            '',
+        'ValveTrim':                   '',
+        'FlangeFaceSurfaceFinish':     '0',
+        'SurfacePreparation':          '0',
+        'ManufacturingMethod':         '1',   # 1 = Forged (B16.9 default)
+        'MiscRequisitionClassification': '0',
+        'PipingNote1':                 '',
+        # Weight / centre-of-gravity / dimensional columns: SP3D 3D-model
+        # engine resolves these from the symbol + NPD at bulk-load time;
+        # '0' sentinel keeps the canvas populated.
+        'DryWeight':                   '0',
+        'DryCogX':                     '0',
+        'DryCogY':                     '0',
+        'DryCogZ':                     '0',
+        'WaterWeight':                 '0',
+        'WaterCogX':                   '0',
+        'WaterCogY':                   '0',
+        'WaterCogZ':                   '0',
+        'SurfaceArea':                 '0',
+        'VolumetricCapacity':          '0',
+        # FacetoCenter is extractor-derived per NPD (e.g. '152mm', '610mm');
+        # default '0' only fires when extraction yields nothing.
+        'FacetoCenter':                '0',
+    },
+    '45DegElbow':   {
+        # LS1E reference (sheet '45DegElbow', CommodityPart section, rows 9-12)
+        # leaves every column below blank — same footprint as 90DegElbow.
+        # Sentinel defaults keep the canvas populated; merge_fill_blank()
+        # ensures extractor / per-row computed values always win. Override
+        # per row via WorkbookCellOverride — no code change required.
+        # BendRadius / BendRadiusMultiplier are computed per NPD by closure
+        # builders in _common_part_row(); '0' here only fires on blank.
+        # Standard-radius (1.0D) elbow — distinct from 45DegLRElbow.
+        'LiningMaterial':              '0',   # 0 = None / unlined
+        'BendRadius':                  '0',
+        'BendRadiusMultiplier':        '0',
+        'MirrorBehaviorOption':        '0',
+        'ValveManufacturer':           '',
+        'ValveModelNumber':            '',
+        'ValveTrim':                   '',
+        'FlangeFaceSurfaceFinish':     '0',
+        'SurfacePreparation':          '0',
+        'ManufacturingMethod':         '1',   # 1 = Forged (B16.9 default)
+        'MiscRequisitionClassification': '0',
+        'PipingNote1':                 '',
+        'DryWeight':                   '0',
+        'DryCogX':                     '0',
+        'DryCogY':                     '0',
+        'DryCogZ':                     '0',
+        'WaterWeight':                 '0',
+        'WaterCogX':                   '0',
+        'WaterCogY':                   '0',
+        'WaterCogZ':                   '0',
+        'SurfaceArea':                 '0',
+        'VolumetricCapacity':          '0',
+    },
+    '45DegLRElbow': {
+        'PartDataBasis':       '10',  # LS1E reference 45LR rows = 10
+    },
+    # ── Tees ──────────────────────────────────────────────────────────────
+    'Tee':          {},
+    'ReducingTee': {
+        # LS1E reference (sheet 'ReducingTee', CommodityPart section,
+        # row 7 = field codes, 84 part rows). Only PartDataBasis=860,
+        # GeometricIndustryStandard=39 and MaterialGrade=264 are populated
+        # — every target column listed below is blank in every row.
+        # Sentinel defaults keep the spec canvas populated; merge_fill_blank()
+        # ensures any real extractor value always wins. Override per row
+        # via WorkbookCellOverride. No core logic touched.
+        # BendRadius / BendRadiusMultiplier are computed per NPD by closure
+        # builders in _common_part_row(); the '0' default only fires on blank.
+        # Tees are 3-port (run × run × branch) — Id[n] / PressureRating[n]
+        # are per-port routing values that MUST come from the extractor;
+        # we keep them as '' so cat_sheet_constants() filters them out and
+        # SP3D never receives a bogus NPD / rating placeholder.
+        'PartDataBasis':                 '860',  # LS1E reference reducing-tee
+        'GraphicalRepresentationOrNot':  '0',
+        'LiningMaterial':                '0',   # 0 = None / unlined
+        'BendRadius':                    '0',
+        'BendRadiusMultiplier':          '0',
+        'MirrorBehaviorOption':          '0',
+        'ValveManufacturer':             '',
+        'ValveModelNumber':              '',
+        'ValveTrim':                     '',
+        'FlangeFaceSurfaceFinish':       '0',
+        'SurfacePreparation':            '0',
+        'ManufacturingMethod':           '1',   # 1 = Forged (B16.9 default)
+        'MiscRequisitionClassification': '0',
+        # Per-port routing identifiers — extractor-only (kept blank so the
+        # cat_sheet_constants() filter drops them; SP3D never receives '0').
+        'Id[1]':                         '',
+        'PressureRating[1]':             '',
+        'Id[2]':                         '',
+        'PressureRating[2]':             '',
+        'Id[3]':                         '',
+        'PressureRating[3]':             '',
+        'PipingNote1':                   '',
+        'DryWeight':                     '0',
+        'DryCogX':                       '0',
+        'DryCogY':                       '0',
+        'DryCogZ':                       '0',
+        'WaterWeight':                   '0',
+        'WaterCogX':                     '0',
+        'WaterCogY':                     '0',
+        'WaterCogZ':                     '0',
+        'SurfaceArea':                   '0',
+        'VolumetricCapacity':            '0',
+    },
+    # ── Reducers / Swages ─────────────────────────────────────────────────
+    'ConcentricSwage':   {},
+    'ConcentricReducer': {},
+    'EccentricReducer':  {},
+    # ── Cap ───────────────────────────────────────────────────────────────
+    'Cap': {},
+    # ── Branch / Olets ────────────────────────────────────────────────────
+    'Weldolet': {
+        'PartDataBasis':       '3394',  # LS1E reference weldolet = 3394
+    },
+    # ── Valves (sheet-level catalogue identifiers) ────────────────────────
+    # LS1E reference column-by-column inspection (CommodityPart section,
+    # row 7 = field codes, rows 9+ = data):
+    #   GateValve  → PartDataBasis=2258, ValveModelNumber=1070,
+    #                ValveTrim=99, MiscReq=290, GIS=40, MaterialGrade=60
+    #   GlobeValve → PartDataBasis=2200, ValveTrim=35, GIS=40,
+    #                MaterialGrade=150, GraphicalRepresentationOrNot=15
+    # Every other target attribute is left blank for every part-row in the
+    # reference; the sentinels below match SP3D's "Not Specified / 0" enum
+    # so the canvas never shows empty cells while merge_fill_blank() keeps
+    # any real extractor value as the winner.
+    # NOTE: ManufacturingMethod = '0' (Not Specified) for valves — unlike
+    # forged fittings (B16.9 → '1'), valve bodies are cast/forged per model.
+    'GateValve': {
+        'PartDataBasis':                 '2258',
+        'ValveModelNumber':              '1070',
+        'ValveTrim':                     '99',
+        'MiscRequisitionClassification': '290',
+        'LiningMaterial':                '0',
+        'BendRadius':                    '0',
+        'BendRadiusMultiplier':          '0',
+        'MirrorBehaviorOption':          '0',
+        'ValveManufacturer':             '',
+        'FlangeFaceSurfaceFinish':       '0',
+        'SurfacePreparation':            '0',
+        'ManufacturingMethod':           '0',
+        'PipingNote1':                   '',
+        'DryWeight':                     '0',
+        'DryCogX':                       '0',
+        'DryCogY':                       '0',
+        'DryCogZ':                       '0',
+        'WaterWeight':                   '0',
+        'WaterCogX':                     '0',
+        'WaterCogY':                     '0',
+        'WaterCogZ':                     '0',
+        'SurfaceArea':                   '0',
+        'VolumetricCapacity':            '0',
+    },
+    'GlobeValve': {
+        'PartDataBasis':                 '2200',
+        'ValveTrim':                     '35',
+        # LS1E reference is the only sheet that populates this column.
+        'GraphicalRepresentationOrNot':  '15',
+        'ValveModelNumber':              '',
+        'MiscRequisitionClassification': '0',
+        'LiningMaterial':                '0',
+        'BendRadius':                    '0',
+        'BendRadiusMultiplier':          '0',
+        'MirrorBehaviorOption':          '0',
+        'ValveManufacturer':             '',
+        'FlangeFaceSurfaceFinish':       '0',
+        'SurfacePreparation':            '0',
+        'ManufacturingMethod':           '0',
+        'PipingNote1':                   '',
+        'DryWeight':                     '0',
+        'DryCogX':                       '0',
+        'DryCogY':                       '0',
+        'DryCogZ':                       '0',
+        'WaterWeight':                   '0',
+        'WaterCogX':                     '0',
+        'WaterCogY':                     '0',
+        'WaterCogZ':                     '0',
+        'SurfaceArea':                   '0',
+        'VolumetricCapacity':            '0',
+    },
+    'CheckValve': {
+        'PartDataBasis':                 '2267',
+        'ValveTrim':                     '55',
+    },
+    # ── Specialties ───────────────────────────────────────────────────────
+    'Paddle': {
+        # LS1E reference symbol icon for Paddle Blind / Spectacle Blind.
+        'SymbolIcon':          'SymbolIcons\\SP3DPaddleBlind.gif',
+    },
+    'Coupling': {},
+    'Nipple': {
+        # Seamless nipples per ASME B36.10 (LS1E dominant value).
+        'ManufacturingMethod': '5',
+    },
+    # ── Gasket / Bolt part data ───────────────────────────────────────────
+    'GasketPartData': {
+        # ASME B16.20 spiral-wound / RTJ thickness defaults. The reference
+        # ships these as the only thickness columns SP3D bulkload needs.
+        'ThicknessFor3DModel':  '1/8"',
+        'ProcurementThickness': '1/8"',
+    },
+    'BoltPartData': {},
+}
+
+
+def cat_sheet_constants(sheet_name: str, cls=None, comp=None) -> dict:
+    """Resolve `CAT_DIMENSIONAL_FIELDS[sheet_name]`, evaluating callables.
+
+    Soft-coded helper used by both `_common_part_row` and the specialised
+    gasket/bolt builders. Returns a fresh dict (no shared mutable state).
+    Empty / None values are filtered so the writer's "skip on empty" rule
+    behaves identically whether a column is unmapped or mapped-to-empty.
+    """
+    raw = CAT_DIMENSIONAL_FIELDS.get(sheet_name) or {}
+    out: dict = {}
+    for k, v in raw.items():
+        try:
+            value = v(cls, comp) if callable(v) else v
+        except Exception:
+            value = ''
+        if value not in (None, ''):
+            out[k] = value
+    return out
+
+
+def merge_fill_blank(row: dict, defaults: dict) -> dict:
+    """Soft-coded fill-if-blank merge.
+
+    Copies every key in `defaults` into `row` *only* when `row` is missing the
+    key or holds an empty / None value. Extractor-derived values therefore
+    always win over the sheet-level defaults in `CAT_DIMENSIONAL_FIELDS`
+    — preserving real data while filling gaps the reference workbook expects.
+    """
+    for k, v in defaults.items():
+        if row.get(k) in (None, ''):
+            row[k] = v
+    return row
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4c. GEOMETRIC INDUSTRY STANDARD — string → SP3D enumeration code map
+# ─────────────────────────────────────────────────────────────────────────────
+# SP3D bulk-load expects numeric codes for the GeometricIndustryStandard
+# column, not human-readable strings ("ASME B36.10M" → code '100'). Codes
+# are taken from the LS1E-A3 reference workbook and the SP3D Reference Data
+# Guide. Add new entries here (key is lower-case, whitespace/dot stripped);
+# the resolver `_resolve_gis_code()` normalises lookups.
+# ─────────────────────────────────────────────────────────────────────────────
+GEOMETRIC_INDUSTRY_STANDARD_CODES: dict[str, str] = {
+    # Pipe schedules
+    'asmeb3610':   '100',  # Carbon / alloy seamless & welded pipe
+    'asmeb3610m':  '100',
+    'asmeb3619':   '110',  # Stainless steel pipe
+    'asmeb3619m':  '110',
+    # Flanges (LS1E reference uses code '35' for ASME B16.5)
+    'asmeb165':    '35',
+    'asmeb1647':   '35',
+    # Buttweld fittings
+    'asmeb169':    '10',
+    # Threaded / SW fittings
+    'asmeb1611':   '20',
+    # Gaskets
+    'asmeb1620':   '600',
+    'asmeb1621':   '601',
+    # Bolts / studs
+    'asmeb181':    '700',
+    'asmeb1821':   '701',
+}
+
+# Per-sheet fallback when `comp.material_standard` is blank. Soft-coded so
+# new sheets can be supported without touching `_common_part_row`.
+GEOMETRIC_INDUSTRY_STANDARD_SHEET_DEFAULTS: dict[str, str] = {
+    'PipeStock':         '100',  # LS1E reference value
+    'WeldNeckFlange':    '35',   # LS1E reference value (ASME B16.5)
+    'BlindFlange':       '35',
+    '90DegElbow':        '10',
+    '90DegLRElbow':      '10',
+    '45DegElbow':        '10',
+    '45DegLRElbow':      '10',
+    'Tee':               '10',
+    'ReducingTee':       '10',
+    'ConcentricSwage':   '10',
+    'ConcentricReducer': '10',
+    'EccentricReducer':  '10',
+    'Cap':               '10',
+    'Weldolet':          '10',
+    'GateValve':         '',    # SP3D resolves via ValveModelNumber
+    'GlobeValve':        '',
+    'CheckValve':        '',
+    'Paddle':            '15',
+    'Coupling':          '20',
+    'Nipple':            '20',
+    'GasketPartData':    '600',
+    'BoltPartData':      '700',
+}
+
+
+def _resolve_gis_code(sheet_name: str, raw_value) -> str:
+    """Normalise `comp.material_standard` to the SP3D enumeration code.
+
+    Soft-coded lookup order:
+      1. If `raw_value` already looks like a numeric SP3D code  → keep as-is.
+      2. If a normalised key matches `GEOMETRIC_INDUSTRY_STANDARD_CODES`
+         → return the mapped code.
+      3. Else fall back to `GEOMETRIC_INDUSTRY_STANDARD_SHEET_DEFAULTS`.
+      4. Else return the original string (or '' for unknown sheets).
+    """
+    if raw_value not in (None, ''):
+        s = str(raw_value).strip()
+        # Already a numeric SP3D code → keep
+        if s.isdigit():
+            return s
+        # Normalise: strip whitespace, punctuation, lowercase
+        key = ''.join(ch.lower() for ch in s if ch.isalnum())
+        if key in GEOMETRIC_INDUSTRY_STANDARD_CODES:
+            return GEOMETRIC_INDUSTRY_STANDARD_CODES[key]
+        # Unknown human-readable string → keep it; SP3D ref-data guide may
+        # accept the textual form on import.
+        return s
+    return GEOMETRIC_INDUSTRY_STANDARD_SHEET_DEFAULTS.get(sheet_name, '')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2012,7 +2526,8 @@ def _common_part_row(cls, comp, sheet_name, npd1, npd2=None, npd3=None) -> dict:
     end_prep = _normalize_end_prep(comp.end_connection) or S3D_DEFAULTS['EndPrep_BW']
     sched = comp.schedule_or_rating or 'STD'
     pressure = _normalize_pressure_class(cls.pressure_rating)
-    primary_lbl = d.get('primary_label', '')
+    primary_lbl   = d.get('primary_label', '')
+    secondary_lbl = d.get('secondary_label', '')
 
     row: dict = {
         'IndustryCommodityCode':         icc,
@@ -2021,7 +2536,7 @@ def _common_part_row(cls, comp, sheet_name, npd1, npd2=None, npd3=None) -> dict:
         'GraphicalRepresentationOrNot':  S3D_DEFAULTS['GraphicalRep'],
         'SymbolDefinition':              d.get('symbol_def') or '',
         'MaterialGrade':                 cls.material_grade or '',
-        'GeometricIndustryStandard':     comp.material_standard or '',
+        'GeometricIndustryStandard':     _resolve_gis_code(sheet_name, comp.material_standard),
         # Port 1 (always present)
         'PipingPointBasis[1]':           S3D_DEFAULTS['PipingPointBasis'],
         'PressureRating[1]':             pressure,
@@ -2047,7 +2562,10 @@ def _common_part_row(cls, comp, sheet_name, npd1, npd2=None, npd3=None) -> dict:
             'ScheduleThickness[2]':      sched,
             'FlowDirection[2]':          S3D_DEFAULTS['FlowDirection_Bidir'],
             'Npd[2]':                    _normalize_npd(npd2),
-            f'Npd[2]{primary_lbl}':      _normalize_npd(npd2),
+            # LS1E reference: PipeStock uses ':Secondary' on Npd[2], Tee uses
+            # ':Primary' on Npd[2]. Emit both bare + suffixed; writer keeps
+            # whichever header the template actually carries.
+            f'Npd[2]{secondary_lbl}':    _normalize_npd(npd2),
             'NpdUnitType[2]':            S3D_DEFAULTS['NpdUnitType'],
         })
 
@@ -2068,6 +2586,12 @@ def _common_part_row(cls, comp, sheet_name, npd1, npd2=None, npd3=None) -> dict:
     # Single-port shapes (BlindFlange, Cap) → unidirectional flow.
     if d.get('ports', 1) == 1:
         row['FlowDirection[1]'] = S3D_DEFAULTS['FlowDirection_OutOnly']
+
+    # Sheet-specific constants (PartDataBasis, ManufacturingMethod, valve
+    # trim/model identifiers, SymbolIcon, etc.) — soft-coded per LS1E-A3
+    # reference. Merged as fill-if-blank so extractor-derived values keep
+    # winning over the static defaults.
+    merge_fill_blank(row, cat_sheet_constants(sheet_name, cls, comp))
 
     return row
 
@@ -2099,9 +2623,10 @@ def _build_gasket_part_rows(cls, comp) -> list[dict]:
     if not npds:
         return []
     rows = []
+    sheet_constants = cat_sheet_constants('GasketPartData', cls, comp)
     for npd in npds:
         icc = f'{d["icc_prefix"]}_{cls_token}_{_npd_token(npd)}'
-        rows.append({
+        row = {
             'IndustryCommodityCode':  icc,
             'NominalDiameterFrom':    _normalize_npd(npd),
             'NominalDiameterTo':      _normalize_npd(npd),
@@ -2112,7 +2637,11 @@ def _build_gasket_part_rows(cls, comp) -> list[dict]:
             'MaterialsGrade':         cls.material_grade or '',
             'FlangeFacing':           cls.flange_facing or 'RF',
             'MaximumPressure':        _normalize_pressure_class(cls.pressure_rating),
-        })
+        }
+        # Sheet-level constants (ThicknessFor3DModel, ProcurementThickness,
+        # etc.) — soft-coded in CAT_DIMENSIONAL_FIELDS, per LS1E-A3 reference.
+        merge_fill_blank(row, sheet_constants)
+        rows.append(row)
     return rows
 
 
@@ -2123,15 +2652,19 @@ def _build_bolt_part_rows(cls, comp) -> list[dict]:
     if not npds:
         return []
     rows = []
+    sheet_constants = cat_sheet_constants('BoltPartData', cls, comp)
     for npd in npds:
         icc = f'{d["icc_prefix"]}_{cls_token}_{_npd_token(npd)}'
-        rows.append({
+        row = {
             'IndustryCommodityCode':     icc,
             'BoltType':                  comp.sub_type or 'Stud',
-            'GeometricIndustryStandard': comp.material_standard or 'ASME B16.5',
+            'GeometricIndustryStandard': _resolve_gis_code('BoltPartData', comp.material_standard),
             'MaterialsGrade':            cls.material_grade or '',
             'CoatingType':               '0',
-        })
+        }
+        # Sheet-level constants merged from CAT_DIMENSIONAL_FIELDS.
+        merge_fill_blank(row, sheet_constants)
+        rows.append(row)
     return rows
 
 
