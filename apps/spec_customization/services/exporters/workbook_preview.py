@@ -310,6 +310,15 @@ def build_preview(job, workbook: str) -> dict:
         sheet_overrides = overrides.get((sheet_name, row_key), {})
         # Apply overrides (string-typed; UI sends strings).
         merged = {k: ('' if v is None else v) for k, v in cells.items()}
+        # Soft-coded blank-cell enrichment (SP3D-valid defaults & calculations).
+        # Runs on the builder-emitted dict BEFORE overrides so the lambdas in
+        # TEMPLATE_PASSTHROUGH_FIELD_DEFAULTS see only deterministic data, then
+        # overrides win on top.  Safe no-op when sheet has no defaults entry.
+        try:
+            cfg.apply_passthrough_defaults(sheet_name, merged)
+        except Exception:
+            logger.exception("[WorkbookPreview] apply_passthrough_defaults failed for %s/%s",
+                             sheet_name, row_key)
         for k, v in sheet_overrides.items():
             merged[k] = v
         rows_by_sheet[sheet_name].append({

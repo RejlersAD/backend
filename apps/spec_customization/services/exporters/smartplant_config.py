@@ -196,7 +196,17 @@ def _pcf_compute_bend_radius(c: dict) -> str:
 # for size-reducing components (449/773 rows).
 # ───────────────────────────────────────────────────────────────────────
 PIPING_COMMODITY_FILTER_DEFAULTS = {
-    'MultisizeOption':              lambda c: '1' if _pcf_has_second_size(c) else '0',
+    # OptionCode: SP3D commodity-option codelist. LS1E reference ships '1'
+    # (primary/main-line option) on every one of its 769 rows. Aligns with
+    # SPEC_DEFAULTS['commodity_option_main'] used by the PCMD builder.
+    'OptionCode':                   '1',
+    # SelectionBasis: SP3D codelist 1=NPD-driven (size-based selection). LS1E
+    # reference ships '1' on every row — matches FirstSizeUOMBasisInCatalog='NPD'.
+    'SelectionBasis':               '1',
+    # MultisizeOption derives from ShortCode (independent of dict-iteration
+    # order) so it always evaluates correctly regardless of when SecondSizeFrom
+    # is filled. 1 = multisize (reducers/swages/branches), 0 = single-size.
+    'MultisizeOption':              lambda c: '1' if _pcf_short_code_is_size_reducer(c) else '0',
     'Comments':                     'SP3D auto-bulkload',
     'FluidCode':                    'Process Fluid',
     'JacketedPipingBasis':          '0',          # 0 = not jacketed
@@ -327,6 +337,414 @@ TEMPLATE_PASSTHROUGH_FIELD_DEFAULTS = {
         'InsideSurfaceTreatment':   '0',  # 0 = none, matches LS1E
     },
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Forged butt-weld B16.9 fitting passthrough defaults (SOFT-CODED)
+# ─────────────────────────────────────────────────────────────────────────────
+# When the LS1E reference template ships pre-populated rows for a fitting
+# sheet (e.g. 45DegElbow) but leaves the dimensional / weight / CoG / piping
+# note columns blank, the canvas surfaced those blanks. The dict below is
+# applied via apply_passthrough_defaults() to fill SP3D-safe sentinels so
+# every cell renders. Real extracted values and WorkbookCellOverride rows
+# always win because the autofill skips any cell that already has content.
+#
+# Soft-coding rationale:
+#  • One shared dict, reused by every B16.9 forged fitting sheet via dict
+#    spread → updating a single value here propagates to all fittings.
+#  • BendRadiusMultiplier is per-geometry (1.0 = SR, 1.5 = LR), so each
+#    sheet entry overrides only that single key.
+#  • Numeric callables derive `BendRadius` from the row's `Npd[1]` cell
+#    when available — falls back to the '0' sentinel if NPD is missing.
+#    No core logic touched.
+# ─────────────────────────────────────────────────────────────────────────────
+def _parse_npd_inches(cell_value: str) -> float | None:
+    """Return NPD as a float in inches, or None if unparseable.
+
+    Accepts forms like '6"', '6 in', '6.0', '150mm', '150 mm'. Soft-coded
+    so future units (DN50, etc.) can be added without touching callers.
+    """
+    if not cell_value:
+        return None
+    s = str(cell_value).strip().lower().replace('"', '').replace("'", '')
+    # mm form → convert to inches (1 inch = 25.4 mm)
+    if s.endswith('mm'):
+        try:
+            return float(s[:-2].strip()) / 25.4
+        except ValueError:
+            return None
+    # 'in' suffix or plain number → inches
+    s = s.replace('in', '').strip()
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _bend_radius_for_npd(cells: dict, multiplier: float) -> str:
+    """Compute BendRadius = NPD × multiplier (in mm) from the row's Npd[1].
+
+    Returns the value as a string with 'mm' suffix matching SP3D bulkload
+    convention (e.g. '152mm' for 4" SR elbow). Falls back to '0' if NPD
+    cannot be parsed — keeping the cell visible without claiming a wrong
+    dimension.
+    """
+    npd_in = _parse_npd_inches(cells.get('Npd[1]') or cells.get('Npd[1]:Primary') or '')
+    if npd_in is None:
+        return '0'
+    radius_mm = round(npd_in * 25.4 * multiplier)
+    return f'{radius_mm}mm'
+
+
+# Shared sentinel block — every forged B16.9 fitting passthrough entry
+# below merges this dict before applying its own overrides.
+_FORGED_FITTING_PASSTHROUGH_BASE: dict = {
+    'GraphicalRepresentationOrNot': '0',
+    'LiningMaterial':               '0',     # 0 = None / unlined
+    'BendRadiusMultiplier':         '1.0',   # SR default; LR sheets override
+    'BendRadius':                   '0',     # SR default; LR sheets override via lambda
+    'MirrorBehaviorOption':         '0',
+    'PartDataBasis':                '10',    # B16.9 forged butt-weld
+    'ValveManufacturer':            'N/A',   # N/A keeps cell visible (fitting, not valve)
+    'ValveModelNumber':             'N/A',
+    'ValveTrim':                    'N/A',
+    'FlangeFaceSurfaceFinish':      '0',
+    'SurfacePreparation':           '0',
+    'ManufacturingMethod':          '1',     # 1 = Forged
+    'MiscRequisitionClassification':'0',
+    'Id[1]':                        '0',
+    'PressureRating[1]':            lambda c: (
+        c.get('Rating1') or c.get('PressureRating') or c.get('PressureRating[1]') or '0'
+    ),
+    'PipingNote1':                  'Forged butt-weld fitting per ASME B16.9',
+    # Weight / CoG / dimensional sentinels — '0' keeps every cell visible;
+    # SP3D 3D-model engine resolves real values from symbol+NPD at bulkload.
+    'DryWeight':                    '0',
+    'DryCogX':                      '0',
+    'DryCogY':                      '0',
+    'DryCogZ':                      '0',
+    'WaterWeight':                  '0',
+    'WaterCogX':                    '0',
+    'WaterCogY':                    '0',
+    'WaterCogZ':                    '0',
+    'SurfaceArea':                  '0',
+    'VolumetricCapacity':           '0',
+}
+
+
+# Register one passthrough entry per B16.9 fitting sheet. Each entry merges
+# the shared base, then applies sheet-specific overrides (e.g. LR elbows
+# carry BendRadiusMultiplier=1.5 and a derived BendRadius).
+TEMPLATE_PASSTHROUGH_FIELD_DEFAULTS.update({
+    '45DegElbow': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        # SR (1.0D) bend radius — derived from NPD if present, else '0'.
+        'BendRadius':           lambda c: _bend_radius_for_npd(c, 1.0),
+        'BendRadiusMultiplier': '1.0',
+    },
+    '45DegLRElbow': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        # LR (1.5D) bend radius — ASME B16.9 long-radius standard.
+        'BendRadius':           lambda c: _bend_radius_for_npd(c, 1.5),
+        'BendRadiusMultiplier': '1.5',
+    },
+    '90DegElbow': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':           lambda c: _bend_radius_for_npd(c, 1.0),
+        'BendRadiusMultiplier': '1.0',
+    },
+    '90DegLRElbow': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':           lambda c: _bend_radius_for_npd(c, 1.5),
+        'BendRadiusMultiplier': '1.5',
+    },
+    'Tee': {
+        # Tees have no bend radius — explicitly suppress to '0'.
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':           '0',
+        'BendRadiusMultiplier': '0',
+        'PipingNote1':          'Equal-bore tee per ASME B16.9',
+    },
+    'ReducingTee': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':           '0',
+        'BendRadiusMultiplier': '0',
+        'PartDataBasis':        '860',  # LS1E reducing-tee reference
+        'PipingNote1':          'Reducing tee per ASME B16.9',
+    },
+    # ── Two-port reducer-style fittings (large-end + small-end) ──────────
+    # ConcentricSwage = MSS-SP-95 forged swage nipple (concentric size step).
+    # Has TWO independent ports → Id[2] / PressureRating[2] also required.
+    'ConcentricSwage': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':           '0',
+        'BendRadiusMultiplier': '0',
+        'PartDataBasis':        '10',   # MSS-SP-95 forged
+        'PipingNote1':          'Concentric swage nipple per MSS-SP-95',
+        # Secondary-port sentinels — small end of the swage.
+        'Id[2]':                '0',
+        'PressureRating[2]':    lambda c: (
+            c.get('Rating2') or c.get('PressureRating2')
+            or c.get('PressureRating[2]') or c.get('Rating1')
+            or c.get('PressureRating') or c.get('PressureRating[1]') or '0'
+        ),
+    },
+    # ConcentricReducer = ASME B16.9 wrought butt-weld reducer (large bore).
+    # Two-port like swage; sentinel-fills second port too so SP3D bulkload
+    # is consistent even when the canvas display only shows port-1 columns.
+    'ConcentricReducer': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':           '0',
+        'BendRadiusMultiplier': '0',
+        'PartDataBasis':        '10',   # ASME B16.9 wrought
+        'PipingNote1':          'Concentric reducer per ASME B16.9',
+        'Id[2]':                '0',
+        'PressureRating[2]':    lambda c: (
+            c.get('Rating2') or c.get('PressureRating2')
+            or c.get('PressureRating[2]') or c.get('Rating1')
+            or c.get('PressureRating') or c.get('PressureRating[1]') or '0'
+        ),
+    },
+    # EccentricReducer = ASME B16.9 wrought butt-weld reducer (offset axis).
+    # Same dimensional family as ConcentricReducer; SP3D symbol differs
+    # (Eccentric vs Concentric) so MirrorBehaviorOption stays at base '0'
+    # but PipingNote1 documents the offset orientation for the bulkload.
+    'EccentricReducer': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':           '0',
+        'BendRadiusMultiplier': '0',
+        'PartDataBasis':        '10',   # ASME B16.9 wrought
+        'PipingNote1':          'Eccentric reducer per ASME B16.9 (flat side oriented per piping isometric)',
+        'Id[2]':                '0',
+        'PressureRating[2]':    lambda c: (
+            c.get('Rating2') or c.get('PressureRating2')
+            or c.get('PressureRating[2]') or c.get('Rating1')
+            or c.get('PressureRating') or c.get('PressureRating[1]') or '0'
+        ),
+    },
+    # Cap = ASME B16.9 butt-weld pipe end-cap. Single port (welded end);
+    # the closed end has no port → only Id[1]/PressureRating[1] are
+    # applicable. Same forged-fitting sentinel block as elbows/reducers.
+    'Cap': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':           '0',
+        'BendRadiusMultiplier': '0',
+        'PartDataBasis':        '10',   # ASME B16.9 wrought
+        'PipingNote1':          'Pipe end cap per ASME B16.9',
+    },
+    # Weldolet = MSS-SP-97 forged branch-connection (butt-weld outlet on
+    # run pipe, integrally reinforced). Two ports: run-side bore (Id[1] /
+    # PressureRating[1]) and branch-side bore (Id[2] / PressureRating[2]).
+    # PartDataBasis '3394' is the LS1E reference enum for olet families
+    # (already used by the builder fallback at L1238); we keep the same
+    # value here so passthrough and builder agree.
+    # PipingNote1 documents the standard so canvas reviewers can audit it.
+    # Weight / CoG / SurfaceArea / VolumetricCapacity are sentinel '0' —
+    # SP3D's olet symbol resolves real values from
+    # (run NPD, branch NPD, schedule, rating) at bulkload; hardcoding
+    # would conflict with the 3D-model engine.
+    'Weldolet': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':           '0',
+        'BendRadiusMultiplier': '0',
+        'PartDataBasis':        '3394',  # MSS-SP-97 olet (LS1E ref)
+        'PipingNote1':          'Forged branch connection per MSS-SP-97 (Weldolet, butt-weld outlet)',
+        'Id[2]':                '0',
+        'PressureRating[2]':    lambda c: (
+            c.get('Rating2') or c.get('PressureRating2')
+            or c.get('PressureRating[2]') or c.get('Rating1')
+            or c.get('PressureRating') or c.get('PressureRating[1]') or '0'
+        ),
+    },
+    # Paddle = ASME B16.48 line blank / paddle blind / spectacle blind —
+    # a flat plate sandwiched between two flange faces. Geometry-wise it
+    # behaves like a flat disc (no bend, no second port — the run line
+    # reuses NPD[1] for both sides since the blind sits between mating
+    # flanges of identical NPD/rating). The plate thickness is governed
+    # by ASME B16.48 Tables 2-7 as a function of (NPD, PressureRating);
+    # SP3D's `PaddleSpacer,Ingr.SP3D.Content.Piping.PaddleSpacer` symbol
+    # resolves the actual thickness, mass, CoG, surface area, and
+    # displaced-water volume from those inputs at bulkload.
+    # ScheduleThickness[1] sentinel '0' lets SP3D B16.48 lookup take over;
+    # extractor + WorkbookCellOverride still win on any explicit value.
+    'Paddle': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':            '0',
+        'BendRadiusMultiplier':  '0',
+        'PartDataBasis':         '15',   # LS1E paddle-blind family
+        'PipingNote1':           'Line blank / paddle blind per ASME B16.48',
+        'ScheduleThickness[1]':  lambda c: (
+            c.get('ScheduleThickness1') or c.get('ScheduleThickness[1]')
+            or c.get('Schedule1') or c.get('Schedule') or c.get('Schedule[1]')
+            or '0'
+        ),
+    },
+    # Coupling = ASME B16.11 forged socket-weld / threaded coupling
+    # (full coupling, half coupling, or reducing coupling). Two ports
+    # share the same body bore on a full coupling; on a reducing coupling
+    # port-2 has a smaller bore. SP3D's
+    # `Coupling,Ingr.SP3D.Content.Piping.Coupling` symbol resolves the
+    # full B16.11 dimensional table (body length, socket depth, wall
+    # thickness, mass, CoG) from (Npd[1], Npd[2], PressureRating[1]).
+    # PartDataBasis '20' matches the builder default at L1505 — both
+    # paths agree.
+    # Id[2] / ScheduleThickness[2] lambdas mirror Id[1]/ScheduleThickness[1]
+    # for full couplings (where bores are identical) and gracefully fall
+    # back to '0' for reducing couplings (so SP3D B16.11 lookup wins).
+    'Coupling': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':           '0',
+        'BendRadiusMultiplier': '0',
+        'PartDataBasis':        '20',   # ASME B16.11 forged coupling (LS1E ref)
+        'PipingNote1':          'Forged coupling per ASME B16.11 (socket-weld / threaded)',
+        'Id[2]':                '0',
+        'ScheduleThickness[2]': lambda c: (
+            c.get('ScheduleThickness2') or c.get('ScheduleThickness[2]')
+            or c.get('Schedule2') or c.get('ScheduleThickness1')
+            or c.get('ScheduleThickness[1]') or c.get('Schedule1')
+            or c.get('Schedule') or c.get('Schedule[1]') or '0'
+        ),
+        'PressureRating[2]':    lambda c: (
+            c.get('Rating2') or c.get('PressureRating2')
+            or c.get('PressureRating[2]') or c.get('Rating1')
+            or c.get('PressureRating') or c.get('PressureRating[1]') or '0'
+        ),
+    },
+    # Nipple = short cut-to-length seamless pipe (ASME B36.10 carbon /
+    # B36.19 stainless) with both ends prepared per the parent piping
+    # spec (PE / TBE / TOE / SE). Two ports share **identical** NPD,
+    # schedule, and rating since the nipple is just a piece of pipe.
+    # SP3D's `Nipple,Ingr.SP3D.Content.Piping.Nipple` symbol resolves
+    # mass / CoG / surface / displaced-water from
+    # (Npd[1], ScheduleThickness[1], length) at bulkload — never
+    # hardcode here, otherwise non-standard cut lengths would race the
+    # 3D-model engine.
+    # ManufacturingMethod = '5' (seamless) overrides the forged default
+    # '1' from the shared base — already aligned with the existing
+    # builder entry at L1436.
+    'Nipple': {
+        **_FORGED_FITTING_PASSTHROUGH_BASE,
+        'BendRadius':           '0',
+        'BendRadiusMultiplier': '0',
+        'ManufacturingMethod':  '5',    # Seamless per ASME B36.10 (overrides base '1')
+        'PartDataBasis':        '20',   # ASME B36.10 pipe nipple (LS1E ref)
+        'PipingNote1':          'Seamless pipe nipple per ASME B36.10 / B36.19 (length per spec)',
+        'Id[2]':                '0',
+        'PressureRating[2]':    lambda c: (
+            c.get('Rating2') or c.get('PressureRating2')
+            or c.get('PressureRating[2]') or c.get('Rating1')
+            or c.get('PressureRating') or c.get('PressureRating[1]') or '0'
+        ),
+    },
+    # ──────────────────────────────────────────────────────────────────────
+    # GasketPartData = the SP3D Reference-Data sheet that carries the
+    # PHYSICAL gasket properties used by the flange-leakage / joint-
+    # tightness analyser (NOT the lookup criteria — that is on the
+    # GasketSelectionFilter sheet, already configured above).
+    #
+    # Source authority chain for every cell below (highest → lowest):
+    #   1. ASME B16.20 (spiral-wound metal-jacketed) / B16.21 (non-metallic)
+    #      — geometry comes straight from the standard once (NPD, Class)
+    #      are known, so dimension cells use SP3D-recognised '0' sentinels
+    #      that the bulkload engine fills from the matched gasket symbol.
+    #   2. ASME BPVC Section VIII Div 1, Mandatory Appendix 2, Table 2-5.1
+    #      — provides the m (gasket factor) and y (minimum design seating
+    #      stress, psi) for every ASME-recognised gasket type. These are
+    #      hard ENGINEERING values that SP3D reads directly from this
+    #      sheet — leaving them blank forces SP3D to fall back to its
+    #      generic carbon-steel default which under-predicts seating
+    #      stress for graphite-filled service. Populated explicitly.
+    #   3. PVRC ROTT (Pressure Vessel Research Council Room-Temperature
+    #      Operational Tightness Test) — the modern leakage model. Each
+    #      gasket vendor publishes Gb / a / Gs / Tp_min / Tp_max from
+    #      their own ROTT test. Project-level constants below default to
+    #      sentinel '0' (= "use ASME m/y instead") because ROTT data is
+    #      vendor-specific and over-claiming a value would silently bias
+    #      the leakage analysis. Override per project when a specific
+    #      gasket vendor (Flexitallic, Garlock, Lamons, …) is fixed.
+    #   4. SP3D codelist — FlangeFacing '21' (Raised Face) and
+    #      GasketIndustryStandard '600' (ASME B16.20) match the values
+    #      already wired into GasketSelectionFilter.EndPreparation /
+    #      EndStandard so the two sheets stay aligned across rows.
+    #
+    # Default profile chosen: SPIRAL-WOUND, FLEXIBLE-GRAPHITE FILLER, with
+    # inner & outer rings (B16.20 Style "CGI"). This is the LS1E-A3
+    # reference's predominant gasket and the default for every Class
+    # 150–2500 ASME B16.5 / B16.47 flange make-up in process service.
+    # ──────────────────────────────────────────────────────────────────────
+    'GasketPartData': {
+        # — Standard / identity ————————————————————————————————————————
+        'GasketIndustryStandard':                       '600',     # ASME B16.20 (codelist)
+        'RingNumber':                                   'N/A',     # sized at install per B16.20 Table 5
+        'StyleNumber':                                  'CGI',     # B16.20: spiral-wound w/ Centring + Graphite + Inner ring
+        # — Geometry (SP3D resolves from B16.20 table at bulkload) ————————
+        'GasketOutsideDiameter':                        '0',
+        'GasketInsideDiameter':                         '0',
+        'GasketOutsideDiameterBasis':                   '0',       # 0 = inherited from gasket catalog
+        'GasketInsideDiameterBasis':                    '0',
+        # — Flange insulation kit (not applicable to standard service) ——
+        'FlangeInsulationKitType':                      '0',       # 0 = no kit
+        'InsulatingWasherThickness':                    '0',
+        'MetallicElectroPlatedWasherThk':               '0',
+        # — ASME BPVC Sec VIII Div 1, Appx 2, Table 2-5.1 ——————————————
+        # Spiral-wound, flexible-graphite filler, Type 304/316 windings.
+        # m  = MaintenanceFactor (gasket factor, dimensionless)
+        # y  = StressAtWhichSealIsInitiated (min design seating stress, psi)
+        'MaintenanceFactor':                            '3.0',     # ASME m for SW + flex-graphite
+        'StressAtWhichSealIsInitiated':                 '10000',   # ASME y, psi
+        # — PVRC ROTT (sentinel '0' = use ASME m/y above) ——————————————
+        # If a project fixes the gasket vendor, replace these with the
+        # vendor's ROTT data sheet values: Gb (TightnessCurveSlope intercept,
+        # psi), a (slope, dimensionless), Gs (IntersectionOfUnloadCurve…,
+        # psi), and the Tp envelope (MinimumTightnessParameter /
+        # MaximumTightnessParameter). Soft-coded — no engine logic depends
+        # on these being non-zero unless the analyser is run in PVRC mode.
+        'TightnessCurveSlope':                          '0',
+        'IntersectionOfUnloadCurveWithVerticalAxis':    '0',
+        'MinimumTightnessParameter':                    '0',
+        'MaximumTightnessParameter':                    '0',
+        # — Service-limit envelope —————————————————————————————————————
+        # MaximumTemperature aligned with GasketSelectionFilter (same row
+        # joins both sheets in SP3D). Pressure left as sentinel '0' so
+        # SP3D resolves the limit from the joined PressureRating column
+        # at bulkload — prevents drift between the two sheets.
+        'FlangePressure':                               '0',
+        'MaximumPressure':                              '0',
+        'MaximumTemperature':                           '650F',    # ASTM A516-70 / Flexitallic CG max
+        # — Mating-flange face / facing (matches GasketSelectionFilter) ——
+        'FlangeFacing':                                 '21',      # 21 = Raised Face (SP3D codelist)
+    },
+    # ──────────────────────────────────────────────────────────────────────
+    # BoltPartData = SP3D Reference-Data sheet for the PHYSICAL bolt /
+    # stud properties (separate from BoltSelectionFilter which is the
+    # lookup-criteria sheet, already configured above).
+    #
+    # The LS1E-A3 reference template populates every dimensional and
+    # coding column from `_build_bolt_part_rows` at L3170+ — geometry,
+    # GeometricIndustryStandard, ContractorCommodityCode, etc. are all
+    # produced by the builder. The single column the LS1E reference
+    # leaves blank in passthrough rows is `CoatingType`.
+    #
+    # SP3D codelist for CoatingType (LS1E reference):
+    #   0 = No coating (bare metal)            ← matches builder default
+    #                                            at L3189 and the LS1E
+    #                                            reference dominant value.
+    #   1 = PTFE / xylan                       (project add-on)
+    #   2 = Cadmium plating                    (legacy / superseded)
+    #   3 = Zinc plating                       (galvanised studs)
+    #   4 = Hot-dip galvanised                 (heavy-duty external)
+    #
+    # Default '0' is correct for ASTM A193 B7 + A194 2H assemblies
+    # supplied with anti-seize lubrication (see
+    # SPEC_DEFAULTS['bolt_lubrication_requirements']) — the lubricant
+    # provides the corrosion barrier, not a factory coating. Override
+    # per project (e.g. offshore / atmospheric service) by editing the
+    # value below or via WorkbookCellOverride at row level.
+    # ──────────────────────────────────────────────────────────────────────
+    'BoltPartData': {
+        'CoatingType': '0',   # No coating — matches builder L3189 + LS1E reference
+    },
+})
 
 
 def apply_passthrough_defaults(sheet_name: str, cells: dict) -> None:
@@ -851,6 +1269,13 @@ CAT_DIMENSIONAL_FIELDS: dict[str, dict[str, object]] = {
         # BendRadius / BendRadiusMultiplier are computed per NPD by closure
         # builders in _common_part_row(); '0' here only fires on blank.
         # Standard-radius (1.0D) elbow — distinct from 45DegLRElbow.
+        # PartDataBasis: same code as 45DegLRElbow per LS1E (forged 45° elbow
+        # share same SP3D part-data category).
+        'PartDataBasis':               '10',
+        # GraphicalRepresentationOrNot: 0 = symbol-only (default for elbows).
+        # GlobeValve uses '15' (its body is the only sheet LS1E populates
+        # for this column); elbows render via the symbol_def alone.
+        'GraphicalRepresentationOrNot': '0',
         'LiningMaterial':              '0',   # 0 = None / unlined
         'BendRadius':                  '0',
         'BendRadiusMultiplier':        '0',
@@ -862,6 +1287,14 @@ CAT_DIMENSIONAL_FIELDS: dict[str, dict[str, object]] = {
         'SurfacePreparation':          '0',
         'ManufacturingMethod':         '1',   # 1 = Forged (B16.9 default)
         'MiscRequisitionClassification': '0',
+        # Per-port routing identifiers (elbows are 2-port). '0' sentinel
+        # keeps the canvas populated; extractor / per-row builder always
+        # wins via merge_fill_blank(). Without a sentinel these keys are
+        # filtered by cat_sheet_constants() and the cell renders blank.
+        'Id[1]':                       '0',
+        'PressureRating[1]':           '0',
+        'Id[2]':                       '0',
+        'PressureRating[2]':           '0',
         'PipingNote1':                 '',
         'DryWeight':                   '0',
         'DryCogX':                     '0',
@@ -875,10 +1308,97 @@ CAT_DIMENSIONAL_FIELDS: dict[str, dict[str, object]] = {
         'VolumetricCapacity':          '0',
     },
     '45DegLRElbow': {
-        'PartDataBasis':       '10',  # LS1E reference 45LR rows = 10
+        # LS1E reference leaves all of the columns below blank for
+        # 45DegLRElbow rows (PartDataBasis=10 is the only globally populated
+        # column). Sentinel defaults below keep the canvas populated;
+        # merge_fill_blank() ensures any real extractor / per-row computed
+        # value keeps winning. Override per row via WorkbookCellOverride —
+        # no code change required.
+        # NOTE: BendRadius / BendRadiusMultiplier are computed per NPD by
+        # the closure builders in _common_part_row(); the '0' defaults
+        # here only fire when extraction yields nothing.
+        # 45° long-radius elbow — schema is identical to 90DegLRElbow
+        # (ASME B16.9 long-radius butt-weld fitting, 1.5D centreline radius).
+        'PartDataBasis':                 '10',  # LS1E reference 45LR rows = 10
+        'LiningMaterial':                '0',   # 0 = None / unlined
+        'BendRadius':                    '0',
+        'BendRadiusMultiplier':          '0',
+        'MirrorBehaviorOption':          '0',   # 0 = no mirror
+        # Valve columns explicitly suppressed — elbows are not valves.
+        'ValveManufacturer':             '',
+        'ValveModelNumber':              '',
+        'ValveTrim':                     '',
+        'FlangeFaceSurfaceFinish':       '0',
+        'SurfacePreparation':            '0',
+        'ManufacturingMethod':           '1',   # 1 = Forged (B16.9 default)
+        'MiscRequisitionClassification': '0',
+        'PipingNote1':                   '',
+        # Weight / centre-of-gravity / dimensional columns — SP3D 3D-model
+        # engine resolves these from the symbol + NPD at bulk-load time;
+        # '0' sentinel keeps the canvas populated.
+        'DryWeight':                     '0',
+        'DryCogX':                       '0',
+        'DryCogY':                       '0',
+        'DryCogZ':                       '0',
+        'WaterWeight':                   '0',
+        'WaterCogX':                     '0',
+        'WaterCogY':                     '0',
+        'WaterCogZ':                     '0',
+        'SurfaceArea':                   '0',
+        'VolumetricCapacity':            '0',
+        # FacetoCenter is extractor-derived per NPD (e.g. '38mm', '152mm');
+        # default '0' only fires when extraction yields nothing.
+        'FacetoCenter':                  '0',
     },
     # ── Tees ──────────────────────────────────────────────────────────────
-    'Tee':          {},
+    'Tee': {
+        # LS1E reference (sheet 'Tee', CommodityPart section, row 7 = field
+        # codes, 21 part rows). Only GeometricIndustryStandard=41 and
+        # MaterialGrade=150 are populated globally. PressureRating[1..3]
+        # show '3000' on a single socketweld row only — kept blank here
+        # so the extractor always provides the real rating per part.
+        #
+        # IMPORTANT: PartDataBasis is BLANK across all 21 rows in LS1E for
+        # equal-bore tees (SP3D auto-selects the part geometrically from the
+        # symbol + NPD trio). Unlike ReducingTee (=860), no code is supplied
+        # here — sentinel '' is filtered by cat_sheet_constants() so SP3D
+        # never receives a bogus PartDataBasis on equal tees.
+        #
+        # Sentinel defaults populate the spec canvas; merge_fill_blank()
+        # ensures any real extractor value always wins. No core logic touched.
+        'GraphicalRepresentationOrNot':  '0',
+        'LiningMaterial':                '0',
+        'BendRadius':                    '0',
+        'BendRadiusMultiplier':          '0',
+        'MirrorBehaviorOption':          '0',
+        'PartDataBasis':                 '',   # filtered — auto-selected by SP3D for equal tees
+        'ValveManufacturer':             '',
+        'ValveModelNumber':              '',
+        'ValveTrim':                     '',
+        'FlangeFaceSurfaceFinish':       '0',
+        'SurfacePreparation':            '0',
+        'ManufacturingMethod':           '1',  # 1 = Forged (B16.9 default for tee fittings)
+        'MiscRequisitionClassification': '0',
+        # Per-port routing identifiers — extractor-only (kept blank so the
+        # cat_sheet_constants() filter drops them; SP3D never receives '0').
+        'Id[1]':                         '',
+        'PressureRating[1]':             '',
+        'Id[2]':                         '',
+        'PressureRating[2]':             '',
+        'Id[3]':                         '',
+        'PressureRating[3]':             '',
+        'PipingNote1':                   '',
+        'DryWeight':                     '0',
+        'DryCogX':                       '0',
+        'DryCogY':                       '0',
+        'DryCogZ':                       '0',
+        'WaterWeight':                   '0',
+        'WaterCogX':                     '0',
+        'WaterCogY':                     '0',
+        'WaterCogZ':                     '0',
+        'SurfaceArea':                   '0',
+        'VolumetricCapacity':            '0',
+    },
     'ReducingTee': {
         # LS1E reference (sheet 'ReducingTee', CommodityPart section,
         # row 7 = field codes, 84 part rows). Only PartDataBasis=860,
@@ -906,14 +1426,18 @@ CAT_DIMENSIONAL_FIELDS: dict[str, dict[str, object]] = {
         'SurfacePreparation':            '0',
         'ManufacturingMethod':           '1',   # 1 = Forged (B16.9 default)
         'MiscRequisitionClassification': '0',
-        # Per-port routing identifiers — extractor-only (kept blank so the
-        # cat_sheet_constants() filter drops them; SP3D never receives '0').
-        'Id[1]':                         '',
-        'PressureRating[1]':             '',
-        'Id[2]':                         '',
-        'PressureRating[2]':             '',
-        'Id[3]':                         '',
-        'PressureRating[3]':             '',
+        # Per-port routing identifiers — extractor-driven. Populated as
+        # '0' sentinel (instead of '' which cat_sheet_constants() would
+        # filter) so the spec canvas always shows a value. The extractor
+        # / row builder always overrides with the real per-port NPD /
+        # ANSI pressure-class via merge_fill_blank() — the '0' fires
+        # only when extraction yields nothing for a row.
+        'Id[1]':                         '0',
+        'PressureRating[1]':             '0',
+        'Id[2]':                         '0',
+        'PressureRating[2]':             '0',
+        'Id[3]':                         '0',
+        'PressureRating[3]':             '0',
         'PipingNote1':                   '',
         'DryWeight':                     '0',
         'DryCogX':                       '0',
@@ -1002,8 +1526,50 @@ CAT_DIMENSIONAL_FIELDS: dict[str, dict[str, object]] = {
         'VolumetricCapacity':            '0',
     },
     'CheckValve': {
+        # ── SP3D-safe defaults for columns LS1E leaves blank ──────────────
+        # Same merge contract as GateValve / GlobeValve: real extractor /
+        # row-builder values always win via merge_fill_blank(); these are
+        # last-resort sentinels so the canvas never renders empty cells.
+        # Override any value on the canvas via WorkbookCellOverride —
+        # no code change required.
+        # ASME B16.34 / B16.10 cast or forged check-valve body.
         'PartDataBasis':                 '2267',
         'ValveTrim':                     '55',
+        # GeometricIndustryStandard is resolved per-row by _resolve_gis_code()
+        # against comp.material_standard; intentionally NOT defaulted here.
+        'LiningMaterial':                '0',   # 0 = None / unlined
+        'BendRadius':                    '0',   # N/A for valve body
+        'BendRadiusMultiplier':          '0',
+        'MirrorBehaviorOption':          '0',   # 0 = no mirror
+        # Valve identity columns — extractor / catalogue resolver fills these
+        # from the spec sheet. Blank sentinels keep cells visible without
+        # injecting fake data.
+        'ValveManufacturer':             '',
+        'ValveModelNumber':              '',
+        'FlangeFaceSurfaceFinish':       '0',
+        'SurfacePreparation':            '0',
+        # ManufacturingMethod = '0' (Not Specified) for valves — body may be
+        # cast (B16.34) or forged depending on model; resolver may override.
+        'ManufacturingMethod':           '0',
+        'MiscRequisitionClassification': '0',
+        'PipingNote1':                   '',
+        # Weight / centre-of-gravity columns: SP3D 3D-model engine resolves
+        # these from the symbol + NPD at bulk-load time. Sentinel '0' keeps
+        # the canvas populated until extractor / catalogue feeds real values.
+        'DryWeight':                     '0',
+        'DryCogX':                       '0',
+        'DryCogY':                       '0',
+        'DryCogZ':                       '0',
+        'WaterWeight':                   '0',
+        'WaterCogX':                     '0',
+        'WaterCogY':                     '0',
+        'WaterCogZ':                     '0',
+        'SurfaceArea':                   '0',
+        'VolumetricCapacity':            '0',
+        # FacetoFace is per-NPD per-pressure-class value from ASME B16.10
+        # (e.g. 6"-150 SW = 165mm, 6"-150 FL = 451mm). Sentinel '0' fires
+        # only when extractor yields nothing for the row.
+        'FacetoFace':                    '0',
     },
     # ── Specialties ───────────────────────────────────────────────────────
     'Paddle': {
