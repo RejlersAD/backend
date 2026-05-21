@@ -285,3 +285,8 @@ class WorkbookCellOverride(models.Model):
 
     def __str__(self) -> str:
         return f'{self.workbook}/{self.sheet_name}/{self.row_key}/{self.column_name} = {self.value!r}'
+
+# ---------------------------------------------------------------------------
+# Project organiser (additive — see project_models.py)
+# ---------------------------------------------------------------------------
+from .project_models import SpecProject  # noqa: E402,F401

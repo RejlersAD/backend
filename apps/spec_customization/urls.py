@@ -1,11 +1,16 @@
 """Spec Customization — URL routing."""
 from django.urls import path
 
-from . import views
+from . import views, project_views
 
 app_name = 'spec_customization'
 
 urlpatterns = [
+    # Project organiser (additive — independent of extraction pipeline)
+    path('projects/',                          project_views.projects_collection, name='projects'),
+    path('projects/<uuid:project_id>/',        project_views.project_detail,      name='project-detail'),
+    path('projects/<uuid:project_id>/items/',  project_views.list_project_items,  name='project-items'),
+
     # Paper Spec extraction
     path('paper-spec/upload/',                 views.upload_paper_spec, name='upload'),
     # Direct-to-S3 presigned upload (large-file path)

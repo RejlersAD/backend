@@ -61,7 +61,10 @@ SPEC_EXTRACTION_CONFIG = {
     # ── Cost guard rails ────────────────────────────────────────────────
     # If a page already has ≥ this many chars from PyMuPDF text-layer,
     # do NOT send it to Vision AI — saves $$ on bulk PDFs.
-    "skip_ai_if_text_chars_gte": 800,
+    # IMPORTANT: only skip AI if the text-layer regex already found classes.
+    # A page may be text-rich yet use a non-standard header — AI must still run.
+    # Raised from 800 to 3000 so only clearly data-dense text pages skip AI.
+    "skip_ai_if_text_chars_gte": 3000,
 
     # Hard ceiling on how many pages may be sent to a Vision AI per job.
     # Once exceeded, remaining pages are processed by PyMuPDF/Tesseract only.
@@ -79,14 +82,27 @@ SPEC_EXTRACTION_CONFIG = {
     "job_total_timeout_s":   60 * 60,  # 60 min absolute job cap
 
     # ── Extraction quality knobs ────────────────────────────────────────
-    "confidence_threshold":  0.45,   # below this, class flagged low-confidence
-    "min_components_to_keep":  1,    # discard classes with fewer than N rows
+    "confidence_threshold":  0.35,   # below this, class flagged low-confidence
+    "min_components_to_keep":  0,    # keep header-only detections (0 = no filter)
 
     # ── Regex patterns (soft-coded) ─────────────────────────────────────
-    # Matches headers like "PIPING SPEC: A" / "PIPING SPECIFICATION: A4Z"
+    # Broad regex covers common Oil & Gas PMS header formats:
+    #   PIPING SPEC: A  |  PIPING SPECIFICATION: A  |  CLASS 150-A
+    #   PIPING MATERIAL SPECIFICATION A  |  P.M.S. A  |  PMS: A
+    #   PIPING CLASS: A1  |  SPEC CODE: A1A  |  MATERIAL CLASS A
+    #   LINE CLASS: A  |  PIPE CLASS A
     "piping_class_header_regex": (
-        r'PIPING\s+SPEC(?:IFICATION)?\s*[:\-]\s*'
-        r'(?P<code>[A-Z][A-Z0-9]{0,8})\b'
+        r'(?:'
+        r'PIPING\s+(?:MATERIAL\s+)?SPEC(?:IFICATION)?'  # PIPING [MATERIAL] SPEC[IFICATION]
+        r'|P\.?M\.?S\.?'                                 # PMS or P.M.S.
+        r'|PIPE\s+CLASS'                                  # PIPE CLASS
+        r'|PIPING\s+CLASS'                                # PIPING CLASS
+        r'|LINE\s+CLASS'                                  # LINE CLASS
+        r'|MATERIAL\s+CLASS'                              # MATERIAL CLASS
+        r'|SPEC(?:IFICATION)?\s+CODE'                     # SPEC CODE
+        r')'
+        r'\s*[:\-]?\s*'
+        r'(?P<code>[A-Z][A-Z0-9]{0,10})\b'
     ),
     # Recognises P/T rating tables (column-1 = pressure, col-2 = temperature)
     "pt_table_header_regex": (

@@ -16,7 +16,15 @@ visible on the page, return an empty string for that field, NOT a guess.
 """
 
 EXTRACT_PIPING_CLASS_PROMPT = """Analyse the page(s) below and identify every
-PIPING SPEC class. For each class produce one object in this exact schema:
+PIPING SPEC class (also known as: Piping Material Specification, PMS, Line Class,
+Pipe Class, Material Class, Spec Code, or similar). The header may appear in any
+of these forms — treat them all as piping class headers:
+  • "PIPING SPEC: A"      • "PIPING SPECIFICATION: A1"
+  • "PIPING CLASS A"      • "PIPE CLASS A"
+  • "LINE CLASS: A1B"     • "MATERIAL CLASS A"
+  • "SPEC CODE: A1A"      • "P.M.S. A"  / "PMS: A"
+  • "CLASS 150-A"         • "PIPING MATERIAL SPECIFICATION A"
+For each class produce one object in this exact schema:
 
 {
   "class_code":           "A",                       # single letter or short code
