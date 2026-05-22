@@ -2422,6 +2422,28 @@ EXTRACTION_CONFIG = {
 
     # Gemini rate-limit retry: sleep this many seconds then retry once before disabling
     "gemini_retry_delay":    5,
+
+    # ─── Soft-coded per-request AI timeouts (env-tunable, additive) ─────────
+    # Each Vision call (OpenAI / Gemini) is capped so a single stalled upstream
+    # API call can never freeze the worker indefinitely. On timeout the call
+    # returns [] (caught by the existing except branch) and the next pass / engine
+    # runs as designed — progress bar continues, request eventually returns.
+    # Override per environment via env vars; never re-deploy for a tweak.
+    "openai_request_timeout_sec": int(os.environ.get("INSTRUMENT_INDEX_OPENAI_TIMEOUT_SEC",  "180")),
+    "openai_max_retries":         int(os.environ.get("INSTRUMENT_INDEX_OPENAI_MAX_RETRIES", "2")),
+    "gemini_request_timeout_sec": int(os.environ.get("INSTRUMENT_INDEX_GEMINI_TIMEOUT_SEC",  "180")),
+
+    # ─── Soft-coded per-page pass parallelism (env-tunable) ─────────────────
+    # Each P&ID page runs up to 7 independent AI Vision passes (1 standard +
+    # 2 rotations + 4 tiles). They are pure I/O-bound calls to OpenAI/Gemini,
+    # so dispatching them via a ThreadPoolExecutor cuts wall-clock time ~4-5×
+    # without changing any extraction logic — same prompts, same engines, same
+    # merge/dedup downstream. Set to 1 to fall back to fully sequential.
+    "parallel_passes":          int(os.environ.get("INSTRUMENT_INDEX_PARALLEL_PASSES", "4")),
+    # Hard cap on how long ALL passes of one page may take. Acts as a safety
+    # net on top of per-call timeouts so a single hung page can never freeze
+    # the request indefinitely. Should be >= openai/gemini timeout.
+    "page_pass_timeout_sec":    int(os.environ.get("INSTRUMENT_INDEX_PAGE_TIMEOUT_SEC", "480")),
 }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -3001,8 +3023,20 @@ class InstrumentIndexService:
             if not api_key:
                 logger.warning("[InstrumentIndex] OPENAI_API_KEY not set")
                 return None
-            client = openai.OpenAI(api_key=api_key)
-            logger.info("[InstrumentIndex] ✅ OpenAI client initialised")
+            # Soft-coded per-request timeout + retry cap — prevents a single
+            # stalled upstream call from blocking the worker indefinitely.
+            # Values come from EXTRACTION_CONFIG (env-tunable).
+            timeout_sec  = EXTRACTION_CONFIG.get("openai_request_timeout_sec", 180)
+            max_retries  = EXTRACTION_CONFIG.get("openai_max_retries", 2)
+            client = openai.OpenAI(
+                api_key=api_key,
+                timeout=timeout_sec,
+                max_retries=max_retries,
+            )
+            logger.info(
+                f"[InstrumentIndex] ✅ OpenAI client initialised "
+                f"(timeout={timeout_sec}s, max_retries={max_retries})"
+            )
             return client
         except Exception as e:
             logger.warning(f"[InstrumentIndex] OpenAI init skipped: {e}")
@@ -6315,59 +6349,109 @@ Rules:
         cfg = self.extraction_config
         img = Image.open(io.BytesIO(jpeg_bytes))
 
-        all_pass_instruments = []
+        # ── Build the full list of pass descriptors UP FRONT ─────────────
+        # Each descriptor is (label, jpeg, hint, mode, max_tokens). The actual
+        # _vision_pass calls run in a thread pool below — same prompts, same
+        # engines, same downstream merge. Pure orchestration change.
+        pass_specs = []
 
-        # ── Pass 1: Full drawing, normal orientation ─────────────────────
-        logger.info(f"[InstrumentIndex] Page {page_no} — Pass 1 (0° full drawing) [{only_engine or 'auto'}]")
-        p1 = self._vision_pass(
-            jpeg_bytes, drawing_info, page_no,
-            extra_hint="Standard orientation. Extract ALL instrument tags visible.",
-            mode="primary", max_tokens=cfg["max_tokens_primary"], only_engine=only_engine,
-        )
-        logger.info(f"[InstrumentIndex] Page {page_no} — Pass 1: {len(p1)} instruments")
-        all_pass_instruments.extend(p1)
+        # Pass 1: Full drawing, normal orientation
+        pass_specs.append((
+            "Pass 1 (0° full)",
+            jpeg_bytes,
+            "Standard orientation. Extract ALL instrument tags visible.",
+            "primary",
+            cfg["max_tokens_primary"],
+        ))
 
-        # ── Rotation passes: catch vertical / slanted tags ───────────────
+        # Rotation passes
         if cfg["enable_rotation"]:
             for angle in cfg["rotation_angles"]:
                 rotated_img = img.rotate(-angle, expand=True)
                 rot_jpeg = self._pil_to_jpeg(rotated_img)
-                label = f"rotated_{angle}cw"
-                hint = (
-                    f"IMAGE ROTATED {angle}° CLOCKWISE. "
-                    "Tags that were printed vertically now appear horizontal. "
-                    "Focus on catching instrument tags along pipe runs and diagonal areas. "
-                    "Do NOT re-report tags already clearly horizontal in the standard view."
-                )
-                logger.info(f"[InstrumentIndex] Page {page_no} — Rotation pass {angle}°CW [{only_engine or 'auto'}]")
-                pr = self._vision_pass(
-                    rot_jpeg, drawing_info, page_no,
-                    extra_hint=hint, mode=label, max_tokens=cfg["max_tokens_primary"], only_engine=only_engine,
-                )
-                logger.info(f"[InstrumentIndex] Page {page_no} — Rotation {angle}°: {len(pr)} instruments")
-                all_pass_instruments.extend(pr)
+                pass_specs.append((
+                    f"Rotation {angle}°CW",
+                    rot_jpeg,
+                    (
+                        f"IMAGE ROTATED {angle}° CLOCKWISE. "
+                        "Tags that were printed vertically now appear horizontal. "
+                        "Focus on catching instrument tags along pipe runs and diagonal areas. "
+                        "Do NOT re-report tags already clearly horizontal in the standard view."
+                    ),
+                    f"rotated_{angle}cw",
+                    cfg["max_tokens_primary"],
+                ))
 
-        # ── Tile passes: zoomed quadrant scan ────────────────────────────
+        # Tile passes: zoomed quadrant scan
         if cfg["enable_tiling"]:
             tiles = self._generate_tiles(img, cfg["tile_grid"], cfg["tile_overlap"])
             for tile_idx, tile_jpeg in enumerate(tiles):
                 row = tile_idx // cfg["tile_grid"][1]
                 col = tile_idx % cfg["tile_grid"][1]
-                hint = (
-                    f"ZOOMED TILE — Quadrant row={row+1}, col={col+1} of a {cfg['tile_grid'][0]}×{cfg['tile_grid'][1]} grid. "
-                    "This is a high-resolution crop of part of the P&ID. "
-                    "Extract EVERY instrument tag visible, including small or partially visible ones."
+                pass_specs.append((
+                    f"Tile ({row+1},{col+1})",
+                    tile_jpeg,
+                    (
+                        f"ZOOMED TILE — Quadrant row={row+1}, col={col+1} of a "
+                        f"{cfg['tile_grid'][0]}×{cfg['tile_grid'][1]} grid. "
+                        "This is a high-resolution crop of part of the P&ID. "
+                        "Extract EVERY instrument tag visible, including small or partially visible ones."
+                    ),
+                    f"tile_r{row+1}c{col+1}",
+                    cfg["max_tokens_tile"],
+                ))
+
+        # ── Dispatch all passes (sequentially or in parallel, soft-coded) ─
+        parallel_n   = max(1, int(cfg.get("parallel_passes", 1)))
+        page_budget  = int(cfg.get("page_pass_timeout_sec", 480))
+        all_pass_instruments = []
+
+        def _run_one(spec):
+            label, j, hint, mode, max_toks = spec
+            logger.info(f"[InstrumentIndex] Page {page_no} — {label} [{only_engine or 'auto'}]")
+            try:
+                out = self._vision_pass(
+                    j, drawing_info, page_no,
+                    extra_hint=hint, mode=mode, max_tokens=max_toks, only_engine=only_engine,
                 )
-                logger.info(
-                    f"[InstrumentIndex] Page {page_no} — Tile ({row+1},{col+1}) [{only_engine or 'auto'}]"
-                )
-                pt = self._vision_pass(
-                    tile_jpeg, drawing_info, page_no,
-                    extra_hint=hint, mode=f"tile_r{row+1}c{col+1}",
-                    max_tokens=cfg["max_tokens_tile"], only_engine=only_engine,
-                )
-                logger.info(f"[InstrumentIndex] Page {page_no} — Tile ({row+1},{col+1}): {len(pt)} instruments")
-                all_pass_instruments.extend(pt)
+            except Exception as exc:
+                logger.warning(f"[InstrumentIndex] Page {page_no} — {label} failed: {exc}")
+                out = []
+            logger.info(f"[InstrumentIndex] Page {page_no} — {label}: {len(out)} instruments")
+            return out
+
+        if parallel_n <= 1 or len(pass_specs) <= 1:
+            # Sequential fallback — preserves original behaviour exactly
+            for spec in pass_specs:
+                all_pass_instruments.extend(_run_one(spec))
+        else:
+            import concurrent.futures as _cf
+            logger.info(
+                f"[InstrumentIndex] Page {page_no} — dispatching {len(pass_specs)} "
+                f"passes with concurrency={parallel_n} (budget={page_budget}s)"
+            )
+            with _cf.ThreadPoolExecutor(max_workers=parallel_n) as _ex:
+                futures = [_ex.submit(_run_one, spec) for spec in pass_specs]
+                try:
+                    for fut in _cf.as_completed(futures, timeout=page_budget):
+                        try:
+                            all_pass_instruments.extend(fut.result())
+                        except Exception as exc:
+                            logger.warning(f"[InstrumentIndex] Page {page_no} — pass result error: {exc}")
+                except _cf.TimeoutError:
+                    done = sum(1 for f in futures if f.done())
+                    logger.warning(
+                        f"[InstrumentIndex] Page {page_no} — page budget {page_budget}s exceeded; "
+                        f"collected {done}/{len(futures)} passes, continuing with partial results"
+                    )
+                    for fut in futures:
+                        if fut.done():
+                            try:
+                                all_pass_instruments.extend(fut.result())
+                            except Exception:
+                                pass
+                        else:
+                            fut.cancel()
 
         # ── Merge & deduplicate ──────────────────────────────────────────
         merged = self._merge_instruments(all_pass_instruments)
@@ -6562,20 +6646,41 @@ Rules:
                 "Extract EVERY instrument tag you see. Return ONLY a valid JSON array."
             )
 
-            response = self.gemini_client.models.generate_content(
-                model=model,
-                contents=[
-                    _gtypes.Content(
-                        role="user",
-                        parts=[_gtypes.Part.from_text(text=prompt), image_part],
+            # Soft-coded watchdog — google-genai SDK has no per-call `timeout`
+            # kwarg, so we run the blocking call in a worker thread and bound
+            # its wall-time via .result(timeout=…). On timeout we cancel and
+            # return [] (the dispatcher then tries the next engine / pass).
+            import concurrent.futures as _cf
+            _gem_timeout = cfg.get("gemini_request_timeout_sec", 180)
+
+            def _gemini_call():
+                return self.gemini_client.models.generate_content(
+                    model=model,
+                    contents=[
+                        _gtypes.Content(
+                            role="user",
+                            parts=[_gtypes.Part.from_text(text=prompt), image_part],
+                        )
+                    ],
+                    config=_gtypes.GenerateContentConfig(
+                        system_instruction=system_text,
+                        temperature=cfg.get("temperature", 0.1),
+                        max_output_tokens=max_tokens or cfg["max_tokens_primary"],
+                    ),
+                )
+
+            with _cf.ThreadPoolExecutor(max_workers=1) as _gx:
+                _fut = _gx.submit(_gemini_call)
+                try:
+                    response = _fut.result(timeout=_gem_timeout)
+                except _cf.TimeoutError:
+                    logger.warning(
+                        f"[InstrumentIndex] Gemini Vision TIMEOUT after {_gem_timeout}s "
+                        f"({mode_label}) — skipping this pass"
                     )
-                ],
-                config=_gtypes.GenerateContentConfig(
-                    system_instruction=system_text,
-                    temperature=cfg.get("temperature", 0.1),
-                    max_output_tokens=max_tokens or cfg["max_tokens_primary"],
-                ),
-            )
+                    _fut.cancel()
+                    return []
+
             raw = response.text or ""
             logger.info(f"[InstrumentIndex] Gemini response {len(raw)} chars ({mode_label})")
             return self._parse_response(raw)

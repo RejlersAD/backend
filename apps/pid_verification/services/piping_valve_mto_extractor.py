@@ -49,7 +49,10 @@ TEXT_SUFFICIENT_CHARS  = int(os.getenv('VALVE_MTO_TEXT_THRESHOLD', '1500'))
 # Hard cap on pages we'll process — protects against runaway docs.
 VISION_MAX_PAGES       = int(os.getenv('VALVE_MTO_VISION_MAX_PAGES', '50'))
 # How many pages to bundle into a single OpenAI call (smaller = more accurate, larger = cheaper).
-VISION_BATCH_SIZE      = int(os.getenv('VALVE_MTO_VISION_BATCH_SIZE', '2'))
+# Default lowered to 1 so each Vision call focuses on a single page — dramatically
+# improves line-number recall on dense valve MTO drawings. Override via env if
+# token-cost is more important than completeness.
+VISION_BATCH_SIZE      = int(os.getenv('VALVE_MTO_VISION_BATCH_SIZE', '1'))
 # How many batches to run in parallel.
 VISION_PARALLEL_BATCHES = int(os.getenv('VALVE_MTO_VISION_PARALLEL', '4'))
 VISION_IMAGE_DPI       = int(os.getenv('VALVE_MTO_VISION_DPI', '120'))
@@ -61,15 +64,83 @@ JPEG_QUALITY           = 80
 MAX_ROWS               = int(os.getenv('VALVE_MTO_MAX_ROWS', '2000'))
 
 # Canonical row schema — must match frontend `valveMTO.config.js` VALVE_COLUMNS.
+# NOTE: order does not affect extraction; new keys are additive. Frontend
+# default-row init iterates this list and treats unknown keys as text.
 ROW_KEYS = [
-    'sl_no', 'area', 'type', 'pms_class', 'rating', 'size_1', 'size_2',
-    'bore', 'line_number', 'valve_tag', 'description', 'qty_island', 'qty_field', 'unit',
+    'sl_no', 'area', 'type', 'pms_class', 'piping_class', 'rating', 'size_1', 'size_2',
+    'bore', 'line_number', 'line_list', 'valve_tag', 'description', 'qty_island', 'qty_field', 'unit',
     'remarks',
 ]
 
 # Soft-coded list (kept small — vision model picks the closest match).
 VALID_AREAS       = ['ISLAND', 'Field', 'COMBINED']
 NUMERIC_KEYS      = {'sl_no', 'qty_island', 'qty_field', 'unit'}
+
+# ─── Soft-coded line-number harvester ───────────────────────────────────
+# Multi-format regex patterns mirrored from the Line List engine
+# (apps/designiq/pid_ocr_extractor_v2.py → COVERAGE_AUDIT_CONFIG). Scans the
+# PyMuPDF-extracted text and surfaces EVERY plausible line designation. The
+# harvested list is then injected into the Vision prompt as a hint so the
+# model does not skip line numbers that are clearly present in the embedded
+# PDF text layer. Pure additive helper — never overrides Vision output.
+#
+# Supported shapes (any of these match):
+#   • Onshore         2"-D-6152-033842-X-N
+#   • Industrial      2"-2600-FL-352-32070R-E
+#   • Offshore        604-LFG-3-AC2GA0-2012
+#   • ADNOC           6"-CD-AC3N-8256
+#   • General         4"-41-SWR-64313-A2AU16-V
+#   • Borouge/Linde   1"-63-UA-149472-A1AU01-V
+LINE_NUMBER_HARVEST_PATTERNS: List[str] = [
+    # SIZE"-FLUID-SEQ-PIPESPEC-DEPT-INSUL (Onshore)
+    r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+[A-Z]{1,4}[-\s]+\d{3,6}[-\s]+\d{4,8}(?:[-\s]+[A-Z0-9]{1,4}){0,3}\b',
+    # SIZE"-UNIT-SERVICE-SEQ-PIPECLASS(-END) (Industrial / Samsung / Foster Wheeler)
+    r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+\d{3,4}[-\s]+[A-Z]{1,6}[-\s]+\d{3,5}[-\s]+\d{5}[A-Z]{1,2}(?:[-\s]+[A-Z])?\b',
+    # AREA-FLUID-SIZE-PIPECLASS-SEQ (Offshore)
+    r'\b\d{2,4}[-\s]+[A-Z]{1,4}[-\s]+\d{1,2}["]?[-\s]+[A-Z0-9]{4,10}[-\s]+\d{3,6}\b',
+    # SIZE"-FLUID-CLASS-SEQ (ADNOC compact)
+    r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+[A-Z]{1,4}[-\s]+[A-Z0-9]{3,6}[-\s]+\d{3,6}\b',
+    # SIZE"-AREA-SERVICE-SEQ-PIPECLASS-END (Borouge / Linde area-first)
+    r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+\d{2,3}[-\s]+[A-Z]{1,3}[-\s]+\d{4,6}[-\s]+[A-Z0-9]{5,7}[-\s]+[A-Z]{1,2}\b',
+    # Generic hyphenated tag — broad fallback (3-6 segments, alphanumerics)
+    r'\b\d{1,2}(?:/\d{1,2})?["]?[-\s]+[A-Z0-9]{1,6}[-\s]+[A-Z0-9]{1,8}[-\s]+[A-Z0-9]{2,10}(?:[-\s]+[A-Z0-9]{1,10}){0,3}\b',
+]
+_LINE_NUMBER_HARVEST_RE = [re.compile(p, re.IGNORECASE) for p in LINE_NUMBER_HARVEST_PATTERNS]
+
+# Cap how many candidates we forward to the Vision prompt (avoid token blow-up).
+LINE_NUMBER_HARVEST_MAX_CANDIDATES = int(os.getenv('VALVE_MTO_LINE_HARVEST_MAX', '200'))
+
+
+def _harvest_line_numbers(text: str) -> List[str]:
+    """Return a deduplicated, normalised list of plausible line numbers.
+
+    Pure additive helper used to inject high-quality candidates into the
+    Vision prompt. Never raises — returns ``[]`` on any failure. Order is
+    preserved (first occurrence wins) so the prompt list reads top-to-bottom
+    of the source document.
+    """
+    if not text:
+        return []
+    seen: set = set()
+    out: List[str] = []
+    try:
+        for regex in _LINE_NUMBER_HARVEST_RE:
+            for match in regex.findall(text):
+                # ``findall`` returns either str or tuple depending on groups.
+                tag = match if isinstance(match, str) else (match[0] if match else '')
+                tag = re.sub(r'\s+', '', tag).strip().upper()
+                # Drop obvious noise — must contain at least one digit AND one letter.
+                if not tag or not re.search(r'\d', tag) or not re.search(r'[A-Z]', tag):
+                    continue
+                if tag in seen:
+                    continue
+                seen.add(tag)
+                out.append(tag)
+                if len(out) >= LINE_NUMBER_HARVEST_MAX_CANDIDATES:
+                    return out
+    except Exception as exc:                                            # pragma: no cover
+        logger.warning('[ValveMTO] line-number harvest failed: %s', exc)
+    return out
 
 # ─── Soft-coded valve-suffix → Remark dictionary ─────────────────────────
 # Standard P&ID condition / operator codes that are usually appended to a
@@ -281,12 +352,14 @@ Schema:
       "sl_no":       <integer>,
       "area":        "ISLAND" | "Field" | "COMBINED",
       "type":        "<BALL VALVE | GATE VALVE | GLOBE VALVE | CHECK VALVE | PLUG VALVE | BUTTERFLY VALVE | NEEDLE VALVE>",
-      "pms_class":   "<piping material class code>",
+      "pms_class":   "<piping material class — long descriptive name, e.g. 'CS A106 Gr B'>",
+      "piping_class": "<piping spec class — short code only, e.g. 'A1A', 'B1B', 'CS1A'>",
       "rating":      "<e.g. CLASS 150 RF, CLASS 600 RTJ>",
       "size_1":      "<nominal bore in inches with double quotes, e.g. 2\\"",
       "size_2":      "<reduced size if any, else empty string>",
       "bore":        "FB" | "RB" | "",
-      "line_number": "<piping line number / line tag the valve sits on, e.g. 6\"-P-12345-A1A-N>",
+      "line_number": "<piping line number / line tag / P&ID number the valve sits on, e.g. 6\"-P-12345-A1A-N>",
+      "line_list":   "<line-list document ref or LL row id if visible (e.g. 'LL-001', 'PJ6-LL-003'), else empty string>",
       "valve_tag":   "<valve tag id>",
       "description": "<short service description>",
       "qty_island":  <integer total in ISLAND, 0 if none>,
@@ -301,12 +374,24 @@ Rules:
 - For "remarks": this column is CRITICAL. Inspect EVERY valve symbol and its adjacent legend annotation on the drawing very carefully — valves are often labelled with a 2-4 letter operational-status code in small text right next to the valve body (sometimes above, below, or attached by a leader line).
   Always emit these codes when visible (comma-separated, in this exact spelling): LO (Locked Open), LC (Locked Closed), CSO (Car-Sealed Open), CSC (Car-Sealed Closed), TSO (Tight Shut-Off), FBLO (Full-Bore Locked Open), FBLC (Full-Bore Locked Closed), NRV (Non-Return Valve), NO (Normally Open), NC (Normally Closed), FO (Fail Open), FC (Fail Closed), FL (Fail Last), FI (Fail Indeterminate).
   These codes may ALSO appear inside the valve tag itself (e.g. ``BV-LO-1234``, ``GV-08-FBLC``) — include them either way. If the legend uses the spelled-out phrase (e.g. "Locked Open"), emit the matching short code instead. Only fall back to free text when NONE of these codes apply.
+- For "line_number" (a.k.a. P&ID NUMBER): this column is ALSO CRITICAL. Extract the COMPLETE line designation for every valve row. Line numbers follow one of these standard formats — recognise ALL of them, do not skip lines simply because they look unusual:
+    * Onshore         2"-D-6152-033842-X-N            (SIZE-FLUID-SEQ-PIPESPEC-DEPT-INSUL)
+    * Industrial      2"-2600-FL-352-32070R-E         (SIZE-UNIT-SERVICE-SEQ-PIPECLASS-END)
+    * Offshore        604-LFG-3-AC2GA0-2012           (AREA-FLUID-SIZE-PIPECLASS-SEQ)
+    * ADNOC compact   6"-CD-AC3N-8256                 (SIZE-FLUID-CLASS-SEQ)
+    * General         4"-41-SWR-64313-A2AU16-V        (auto-detect any hyphenated tag with size + alphanumerics)
+    * Borouge/Linde   1"-63-UA-149472-A1AU01-V        (SIZE-AREA-SERVICE-SEQ-PIPECLASS-END)
+  When the same valve sits on more than one line, emit a separate row per line. Never leave line_number empty if the line designation is visible anywhere on the drawing or in the text excerpt below.
+- For "line_list": if the drawing references a line-list document number (e.g. 'PJ6-LL-003', 'LL-001'), emit it verbatim; otherwise leave empty — do not invent.
 - Output only valid JSON; do not wrap in markdown fences.
 - Extract EVERY valve row visible in the attached pages — do not summarise or skip.
 - Use empty strings for unknown text fields and 0 for unknown numeric fields.
 - Do not invent valve tags or sizes — leave empty if uncertain.
 - Renumber sl_no starting from 1 within this batch (the server merges batches).
 - Maximum {max_rows} rows per batch.
+
+Candidate line numbers detected in the PDF text layer (validated against standard formats — every one of these IS a real line; cross-check the drawing and assign each to the correct valve row when applicable):
+{candidate_line_numbers}
 
 Embedded text excerpt (use as ground truth where it conflicts with the image):
 ---
@@ -498,6 +583,10 @@ def _extract_via_vision(pdf_path: str, text_excerpt: str) -> Dict[str, Any]:
     if not images:
         return {'rows': [], 'project_meta': {}, 'warnings': ['vision skipped — no pages rendered']}
 
+    # Harvest line-number candidates from PDF text — passed to Vision as a hint.
+    candidate_lines = _harvest_line_numbers(text_excerpt or '')
+    candidate_block = '\n'.join(f'  • {ln}' for ln in candidate_lines) if candidate_lines else '  (none detected in text layer — rely on drawing imagery)'
+
     # Split into batches.
     batches: List[Tuple[int, List[str]]] = []
     for i in range(0, len(images), VISION_BATCH_SIZE):
@@ -515,6 +604,7 @@ def _extract_via_vision(pdf_path: str, text_excerpt: str) -> Dict[str, Any]:
             max_rows=MAX_ROWS,
             text_excerpt=(text_excerpt or '')[:6000],
             page_range=f'{batch_idx + 1}–{batch_idx + len(batch_imgs)}',
+            candidate_line_numbers=candidate_block,
         )
         content: List[Dict[str, Any]] = [{'type': 'text', 'text': prompt}]
         for b64 in batch_imgs:
@@ -748,6 +838,13 @@ def extract_valve_mto_streaming(
         except Exception:
             pass
 
+    # Harvest line-number candidates from PDF text — passed to Vision as a hint
+    # so the model does not miss line designations already present in the text layer.
+    candidate_lines  = _harvest_line_numbers(text or '')
+    candidate_block  = '\n'.join(f'  • {ln}' for ln in candidate_lines) if candidate_lines else '  (none detected in text layer — rely on drawing imagery)'
+    if candidate_lines:
+        logger.info('[ValveMTO] Harvested %d candidate line numbers from text layer', len(candidate_lines))
+
     client = OpenAI(api_key=api_key, timeout=VISION_TIMEOUT_SECS)
     logger.info(
         '[ValveMTO] Streaming vision → model=%s pages=%d batches=%d (size=%d, parallel=%d)',
@@ -760,6 +857,7 @@ def extract_valve_mto_streaming(
             max_rows=MAX_ROWS,
             text_excerpt=(text or '')[:6000],
             page_range=f'{batch_idx + 1}–{batch_idx + len(batch_imgs)}',
+            candidate_line_numbers=candidate_block,
         )
         content: List[Dict[str, Any]] = [{'type': 'text', 'text': prompt}]
         for b64 in batch_imgs:
@@ -829,6 +927,30 @@ def extract_valve_mto_streaming(
                     pass
 
     final_rows = _dedupe_and_renumber(all_rows)
+
+    # ── Soft-coded line-number recovery pass ───────────────────────────────
+    # Any line number harvested from the PDF text layer that Vision DID NOT
+    # surface anywhere in its output rows is appended as a "line-only" row
+    # (sl_no, line_number, line_list populated; other fields empty). This
+    # guarantees the user sees every detected line on the PMS table — the
+    # same completeness guarantee that the dedicated Line List page offers.
+    # Disabled when VALVE_MTO_APPEND_MISSING_LINES=0.
+    if candidate_lines and os.getenv('VALVE_MTO_APPEND_MISSING_LINES', '1') == '1':
+        _norm = lambda s: re.sub(r'\s+', '', str(s or '')).upper()
+        seen_lines = {_norm(r.get('line_number')) for r in final_rows if r.get('line_number')}
+        missing = [ln for ln in candidate_lines if _norm(ln) not in seen_lines]
+        if missing:
+            logger.info(
+                '[ValveMTO] Appending %d line-only rows for line numbers Vision missed',
+                len(missing),
+            )
+            next_sl = len(final_rows) + 1
+            for ln in missing:
+                synthetic = _coerce_row({'line_number': ln, 'line_list': ln})
+                synthetic['sl_no'] = next_sl
+                next_sl += 1
+                final_rows.append(synthetic)
+
     # If every batch failed with a fatal error and we recovered no rows,
     # surface a clean top-level error so the frontend can display it.
     error_msg: Optional[str] = None
@@ -842,4 +964,5 @@ def extract_valve_mto_streaming(
         'project_meta': merged_meta,
         'warnings': warnings,
         'error': error_msg,
+        'harvested_line_numbers': candidate_lines,
     }
