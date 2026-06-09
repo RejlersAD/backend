@@ -228,6 +228,55 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
             )
         return Response(self.get_serializer(document).data)
 
+    # ---- patch a single extracted row --------------------------------
+    @action(
+        detail=True,
+        methods=['patch'],
+        url_path=r'rows/(?P<row_pk>[^/.]+)',
+        url_name='patch-row',
+    )
+    def patch_row(self, request, pk=None, row_pk=None):
+        """
+        PATCH /documents/{doc_id}/rows/{row_id}/
+
+        Body: flat dict — any subset of column keys.
+        Special top-level model fields: 'tag_number', 'page_number'.
+        All other keys are merged (not replaced) into the row.data JSONField.
+        """
+        document = self.get_object()
+        try:
+            row = document.extracted_rows.get(pk=row_pk)
+        except IOListExtractedRow.DoesNotExist:
+            raise Http404('Row not found')
+
+        payload = request.data
+        update_fields = []
+
+        if 'tag_number' in payload:
+            row.tag_number = str(payload['tag_number'])
+            update_fields.append('tag_number')
+
+        if 'page_number' in payload:
+            try:
+                row.page_number = int(payload['page_number'])
+            except (ValueError, TypeError):
+                row.page_number = None
+            update_fields.append('page_number')
+
+        # All remaining keys are merged into the data JSONField
+        data_updates = {
+            k: v for k, v in payload.items()
+            if k not in ('tag_number', 'page_number')
+        }
+        if data_updates:
+            row.data = {**(row.data or {}), **data_updates}
+            update_fields.append('data')
+
+        if update_fields:
+            row.save(update_fields=update_fields)
+
+        return Response(IOListExtractedRowSerializer(row).data)
+
     # ---- xlsx export -------------------------------------------------
     @action(detail=True, methods=['get'], url_path='export-xlsx')
     def export_xlsx(self, request, pk=None):

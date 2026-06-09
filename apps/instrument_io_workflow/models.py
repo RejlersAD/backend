@@ -31,7 +31,10 @@ class IOListDocument(models.Model):
     unit              = models.CharField(max_length=60,  blank=True, default='')
 
     # Storage
-    pdf_file          = models.FileField(upload_to='instrument_io_workflow/%Y/%m/')
+    pdf_file          = models.FileField(
+        upload_to='instrument_io_workflow/%Y/%m/',
+        storage='apps.core.storage_backends.IOListDocumentStorage',
+    )
     pdf_sha256        = models.CharField(max_length=64, db_index=True)
 
     # Extraction state

@@ -1035,6 +1035,9 @@ if USE_S3:
         
         # URL expiration for presigned URLs (1 hour)
         AWS_QUERYSTRING_EXPIRE = 3600
+
+        # Per-feature presigned URL expiry (soft-coded, env-overridable)
+        IO_LIST_PDF_PRESIGN_EXPIRY = int(config('IO_LIST_PDF_PRESIGN_EXPIRY', default='3600'))
         
         # Performance: Connection settings
         AWS_S3_MAX_MEMORY_SIZE = 100 * 1024 * 1024  # 100MB

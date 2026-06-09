@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from collections import Counter
 from typing import Dict, Any
 
 from .config import ENABLE_HASH_CACHE, ENABLE_VISION_FALLBACK
@@ -71,13 +72,21 @@ def extract_document(pdf_bytes: bytes) -> Dict[str, Any]:
         'comments': comments,
         'io_rows':  io_rows,
         'stats': {
-            'total_pages':     len(pages),
-            'comment_pages':   len(comment_page_idx),
-            'io_table_pages':  len(io_page_idx),
-            'comments_found':  len(comments),
-            'io_rows_found':   len(io_rows),
-            'linked_comments': sum(1 for c in comments if c.get('linked_tags')),
-            'elapsed_seconds': round(time.time() - started, 2),
+            'total_pages':          len(pages),
+            'comment_pages':        len(comment_page_idx),
+            'io_table_pages':       len(io_page_idx),
+            'comments_found':       len(comments),
+            'io_rows_found':        len(io_rows),
+            'linked_comments':      sum(1 for c in comments if c.get('linked_tags')),
+            'elapsed_seconds':      round(time.time() - started, 2),
+            # Precomputed breakdown so the frontend chart never needs to
+            # iterate extracted_comments (soft-coded: all keys come from data).
+            'status_code_breakdown': dict(
+                Counter(
+                    (c.get('status_code') or '').strip() or 'unknown'
+                    for c in comments
+                )
+            ),
         },
         'cost_profile': {
             'cache_hit':            False,
