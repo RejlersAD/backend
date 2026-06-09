@@ -705,30 +705,55 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 class UserProfileListSerializer(serializers.ModelSerializer):
     """
-    Optimized user profile serializer for lists
-    
-    Performance Optimization:
-    - Uses prefetched data from queryset (no additional DB queries)
-    - Caches full_name and primary_role computation
-    - Reduces response time from 90s to <2s for 276 users
+    Optimized user profile serializer for lists.
+
+    Performance:
+    - Uses prefetched user + organization (no extra DB queries).
+    - Caches full_name and primary_role computation.
+    - <2s response for 276 users.
+
+    Field selection (soft-coded — append-only; never remove without bumping API version):
+    Core identity comes nested on `user` (matches detail serializer shape so the
+    same frontend code paths work for list and detail responses without forks).
+    Flat aliases (email, full_name, first_name, last_name) are kept for
+    backward compatibility with callers that read the legacy flat shape.
     """
+    # ── Identity (flat aliases — legacy callers depend on these) ───────────
     email = serializers.EmailField(source='user.email', read_only=True)
+    first_name = serializers.CharField(source='user.first_name', read_only=True)
+    last_name = serializers.CharField(source='user.last_name', read_only=True)
     full_name = serializers.SerializerMethodField()
+    # ── Identity (nested — matches UserProfileSerializer for shape parity) ─
+    user = UserSerializer(read_only=True)
+    # ── Organisation & roles ───────────────────────────────────────────────
     organization_name = serializers.CharField(source='organization.name', read_only=True)
     primary_role = serializers.SerializerMethodField()
-    
+    # ── HR-facing fields already loaded on UserProfile — no extra query ────
+    profile_photo = serializers.SerializerMethodField()
+
     class Meta:
         model = UserProfile
         fields = [
-            'id', 'email', 'full_name', 'organization_name',
-            'status', 'primary_role', 'employee_id', 'department',
-            'last_login_at', 'created_at'
+            # Identity
+            'id', 'user', 'email', 'first_name', 'last_name', 'full_name',
+            # Organisation / role
+            'organization_name', 'primary_role',
+            # Employment
+            'employee_id', 'department', 'job_title',
+            # Contact / location
+            'phone', 'location', 'bio',
+            # Status & security
+            'status', 'is_mfa_enabled',
+            # Media
+            'profile_photo',
+            # Timestamps
+            'last_login_at', 'created_at', 'updated_at',
         ]
-    
+
     def get_full_name(self, obj):
         """Get full name from prefetched user data"""
         return f"{obj.user.first_name} {obj.user.last_name}".strip()
-    
+
     def get_primary_role(self, obj):
         """
         Get primary role from prefetched userrole_set
@@ -743,6 +768,24 @@ class UserProfileListSerializer(serializers.ModelSerializer):
                     'name': user_role.role.name
                 }
         return None
+
+    def get_profile_photo(self, obj):
+        """Return absolute presigned URL for profile photo (same logic as detail serializer)."""
+        if not obj.profile_photo:
+            return None
+        try:
+            url = obj.profile_photo.url
+            if url.startswith('http'):
+                return url
+            request = self.context.get('request')
+            if request:
+                absolute_uri = request.build_absolute_uri(url)
+                if ':5173' in absolute_uri:
+                    absolute_uri = absolute_uri.replace('http://localhost:5173', 'http://localhost:8000')
+                return absolute_uri
+            return url
+        except Exception:
+            return None
 
 
 class UserStorageSerializer(serializers.ModelSerializer):
