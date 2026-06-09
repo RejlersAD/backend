@@ -249,14 +249,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
     # Engineering competency profile — stored in metadata['engineer_profile'], no migration needed
     engineer_profile = serializers.SerializerMethodField()
 
-    # User creation fields
+    # User creation fields (used on POST). phone is intentionally NOT redeclared
+    # here so the auto-generated model field stays read+write — otherwise the
+    # Profile page can never re-display a saved phone number after refresh.
     username = serializers.CharField(write_only=True, required=False)
     email = serializers.EmailField(write_only=True, required=False)
     password = serializers.CharField(write_only=True, required=False, min_length=8)
     first_name = serializers.CharField(write_only=True, required=False)
     last_name = serializers.CharField(write_only=True, required=False)
-    phone = serializers.CharField(write_only=True, required=False)
-    
+
     def validate(self, attrs):
         """Validate required fields for creation"""
         import logging
