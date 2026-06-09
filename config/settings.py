@@ -167,6 +167,7 @@ INSTALLED_APPS = [
     'apps.instrument_io_workflow',  # Instrument IO List Workflow — CRS-style multi-revision IO List doc handling
     'apps.spec_customization',   # Spec Customization — Paper Spec PDF extraction (Piping Classes)
     'apps.marketing_analytics',  # Marketing Analytics — Google Analytics (GA4) real-time dashboard widget
+    'apps.timesheet',            # Time Sheet Analytics — SQL Server attendance integration
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)

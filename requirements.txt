@@ -58,6 +58,10 @@ python-docx==1.1.0
 pdfplumber>=0.10.0
 python-dateutil==2.8.2
 
+# SQL Server connector for Time Sheet Analytics (apps.timesheet)
+# pymssql ships manylinux wheels — no system ODBC driver needed.
+pymssql>=2.2.11
+
 # ==========================================
 # 6. AWS S3 STORAGE (Required)
 # ==========================================
