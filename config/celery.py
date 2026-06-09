@@ -31,6 +31,12 @@ try:
 except Exception:
     pass
 
+try:
+    from apps.project_control.config import BEAT_SCHEDULE as _project_control_beat
+    _beat_schedule.update(_project_control_beat)
+except Exception:
+    pass
+
 if _beat_schedule:
     app.conf.beat_schedule = _beat_schedule
 

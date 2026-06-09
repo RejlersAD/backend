@@ -168,6 +168,7 @@ INSTALLED_APPS = [
     'apps.spec_customization',   # Spec Customization — Paper Spec PDF extraction (Piping Classes)
     'apps.marketing_analytics',  # Marketing Analytics — Google Analytics (GA4) real-time dashboard widget
     'apps.timesheet',            # Time Sheet Analytics — SQL Server attendance integration
+    'apps.project_control',      # Project Management — phased cost dashboards, estimates, documents, AI take-off (stubbed)
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
