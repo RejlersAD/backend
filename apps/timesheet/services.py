@@ -393,7 +393,8 @@ def _working_days(start: dt.date, end: dt.date) -> int:
 def user_history(employee_code: Optional[str] = None,
                  email: Optional[str] = None,
                  from_date: Optional[str] = None,
-                 to_date: Optional[str] = None) -> dict:
+                 to_date: Optional[str] = None,
+                 include_punches: bool = False) -> dict:
     today = dt.date.today()
     start = _parse_date(from_date, today - dt.timedelta(days=30))
     end = _parse_date(to_date, today)
@@ -481,13 +482,88 @@ def user_history(employee_code: Optional[str] = None,
             }
             for r in rows
         ]
+    # ── Consolidated summary + monthly breakdown + optional raw punches
+    full_day_hours = float(ts_config.RULES.get('full_day_hours', 8.0))
+    total_hours    = sum((r['hours'] or 0) for r in daily_rows)
+    total_punches  = sum((r['punches'] or 0) for r in daily_rows)
+    days_present   = len(daily_rows)
+    days_full      = sum(1 for r in daily_rows if (r['hours'] or 0) >= full_day_hours)
+    days_partial   = days_present - days_full
+
+    def _avg_hhmm(timestamps):
+        valid = [t for t in timestamps if t]
+        if not valid:
+            return None
+        secs = [(t.hour * 3600 + t.minute * 60 + t.second) for t in valid]
+        avg = sum(secs) // len(secs)
+        return f'{avg // 3600:02d}:{(avg % 3600) // 60:02d}'
+
+    first_ins, last_outs = [], []
+    if variant == 'event_stream':
+        for v in per_day.values():
+            if v['first_in']:
+                first_ins.append(v['first_in'])
+            if v['last_out'] and v['last_out'] != v['first_in']:
+                last_outs.append(v['last_out'])
+
+    summary = {
+        'total_hours':       round(total_hours, 2),
+        'total_punches':     total_punches,
+        'days_present':      days_present,
+        'days_full':         days_full,
+        'days_partial':      days_partial,
+        'avg_hours_per_day': round(total_hours / days_present, 2) if days_present else 0,
+        'avg_first_in':      _avg_hhmm(first_ins),
+        'avg_last_out':      _avg_hhmm(last_outs),
+        'range_days':        (end - start).days + 1,
+    }
+
+    monthly_buckets: dict[str, dict] = defaultdict(lambda: {'hours': 0.0, 'days': 0, 'punches': 0})
+    for r in daily_rows:
+        ym = (r['date'] or '')[:7]
+        if not ym:
+            continue
+        b = monthly_buckets[ym]
+        b['hours']   += r['hours'] or 0
+        b['days']    += 1
+        b['punches'] += r['punches'] or 0
+    monthly_breakdown = [
+        {
+            'month':        ym,
+            'hours':        round(b['hours'], 2),
+            'days_present': b['days'],
+            'punches':      b['punches'],
+            'avg_per_day':  round(b['hours'] / b['days'], 2) if b['days'] else 0,
+        }
+        for ym, b in sorted(monthly_buckets.items())
+    ]
+
+    raw_punches = None
+    if include_punches and variant == 'event_stream':
+        raw_punches = []
+        for r in rows:
+            t = r.get('punch_time')
+            if isinstance(t, str):
+                try:
+                    t = dt.datetime.fromisoformat(t)
+                except ValueError:
+                    continue
+            raw_punches.append({
+                'event_time': t.isoformat() if t else None,
+                'event_type': r.get('punch_type'),
+                'date':       t.date().isoformat() if t else None,
+            })
+
     return {
-        'employee_code': employee_code,
-        'email': email,
-        'from': start.isoformat(),
-        'to': end.isoformat(),
-        'rows': daily_rows,
-        'variant': variant,
+        'employee_code':     employee_code,
+        'email':             email,
+        'from':              start.isoformat(),
+        'to':                end.isoformat(),
+        'rows':              daily_rows,
+        'summary':           summary,
+        'monthly_breakdown': monthly_breakdown,
+        'punches':           raw_punches,
+        'variant':           variant,
     }
 
 

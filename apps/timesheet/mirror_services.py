@@ -212,7 +212,8 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
 def user_history(employee_code: Optional[str] = None,
                  email: Optional[str] = None,
                  from_date: Optional[str] = None,
-                 to_date: Optional[str] = None) -> dict:
+                 to_date: Optional[str] = None,
+                 include_punches: bool = False) -> dict:
     today = dt.date.today()
     start = _parse_date(from_date, today - dt.timedelta(days=30))
     end = _parse_date(to_date, today)
@@ -228,6 +229,9 @@ def user_history(employee_code: Optional[str] = None,
         qs = qs.filter(employee_email__iexact=str(email))
 
     per_day = defaultdict(lambda: {'first_in': None, 'last_out': None, 'punches': 0})
+    raw_punches: list[dict] = []  # optional, per-event detail
+    employee_meta = {'employee_code': '', 'employee_name': '', 'employee_email': '', 'department': ''}
+
     for ev in qs.order_by('event_time'):
         d = ev.event_time.date().isoformat()
         slot = per_day[d]
@@ -237,16 +241,98 @@ def user_history(employee_code: Optional[str] = None,
         if slot['last_out'] is None or ts > slot['last_out']:
             slot['last_out'] = ts
         slot['punches'] += 1
+        # First seen wins for the employee header metadata
+        if not employee_meta['employee_code']:
+            employee_meta = {
+                'employee_code':  ev.employee_code,
+                'employee_name':  ev.employee_name,
+                'employee_email': ev.employee_email,
+                'department':     ev.department,
+            }
+        if include_punches:
+            raw_punches.append({
+                'event_time': ts.isoformat() if ts else None,
+                'event_type': ev.event_type,
+                'date':       d,
+            })
 
+    # Per-day rows (same shape as before)
     rows = []
     for d, slot in sorted(per_day.items()):
         hours = _hours_between(slot['first_in'], slot['last_out']) or 0
         rows.append({
-            'date': d,
-            'first_in': str(slot['first_in']) if slot['first_in'] else None,
-            'last_out': str(slot['last_out']) if slot['last_out'] else None,
+            'date':         d,
+            'first_in':     str(slot['first_in']) if slot['first_in'] else None,
+            'last_out':     str(slot['last_out']) if slot['last_out'] else None,
             'hours_worked': round(hours, 2),
-            'punch_count': slot['punches'],
+            'punch_count':  slot['punches'],
         })
 
-    return {'rows': rows, 'variant': _VARIANT}
+    # ── Consolidated summary across the whole range
+    full_day_hours = float(ts_config.RULES.get('full_day_hours', 8.0))
+    total_hours    = sum(r['hours_worked'] for r in rows)
+    total_punches  = sum(r['punch_count'] or 0 for r in rows)
+    days_present   = len(rows)
+    days_full      = sum(1 for r in rows if (r['hours_worked'] or 0) >= full_day_hours)
+    days_partial   = days_present - days_full
+
+    # Average punch-in / punch-out time (HH:MM)
+    def _avg_time(values):
+        valid = [v for v in values if v]
+        if not valid:
+            return None
+        secs = [v.hour * 3600 + v.minute * 60 + v.second for v in valid]
+        avg = sum(secs) // len(secs)
+        return f'{avg // 3600:02d}:{(avg % 3600) // 60:02d}'
+
+    first_ins = []
+    last_outs = []
+    for d, slot in per_day.items():
+        if slot['first_in']:
+            first_ins.append(slot['first_in'])
+        if slot['last_out'] and slot['last_out'] != slot['first_in']:
+            last_outs.append(slot['last_out'])
+
+    summary = {
+        'total_hours':         round(total_hours, 2),
+        'total_punches':       total_punches,
+        'days_present':        days_present,
+        'days_full':           days_full,
+        'days_partial':        days_partial,
+        'avg_hours_per_day':   round(total_hours / days_present, 2) if days_present else 0,
+        'avg_first_in':        _avg_time(first_ins),
+        'avg_last_out':        _avg_time(last_outs),
+        'range_days':          (end - start).days + 1,
+    }
+
+    # ── Monthly breakdown (one entry per YYYY-MM in range)
+    monthly_buckets: dict[str, dict] = defaultdict(lambda: {
+        'hours': 0.0, 'days': 0, 'punches': 0,
+    })
+    for r in rows:
+        ym = r['date'][:7]  # 'YYYY-MM'
+        b = monthly_buckets[ym]
+        b['hours']   += r['hours_worked'] or 0
+        b['days']    += 1
+        b['punches'] += r['punch_count'] or 0
+    monthly_breakdown = [
+        {
+            'month':        ym,
+            'hours':        round(b['hours'], 2),
+            'days_present': b['days'],
+            'punches':      b['punches'],
+            'avg_per_day':  round(b['hours'] / b['days'], 2) if b['days'] else 0,
+        }
+        for ym, b in sorted(monthly_buckets.items())
+    ]
+
+    return {
+        'employee':          employee_meta,
+        'from':              start.isoformat(),
+        'to':                end.isoformat(),
+        'rows':              rows,
+        'summary':           summary,
+        'monthly_breakdown': monthly_breakdown,
+        'punches':           raw_punches if include_punches else None,
+        'variant':           _VARIANT,
+    }

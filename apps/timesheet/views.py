@@ -277,6 +277,7 @@ def user_drill(request):
                 email=request.GET.get('email'),
                 from_date=request.GET.get('from'),
                 to_date=request.GET.get('to'),
+                include_punches=str(request.GET.get('include_punches', '')).lower() in ('1', 'true', 'yes'),
             ),
         })
     except (TimesheetConnectionError, TimesheetDriverError) as exc:
