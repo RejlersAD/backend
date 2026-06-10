@@ -109,7 +109,9 @@ SCHEMA = {
     'table': _env_first(['TIMESHEET_TABLE'], default=''),
     'columns': {
         'employee_code':  _env_first(['TIMESHEET_COL_EMP_CODE',  'TIMESHEET_COL_EMPCODE'], default='EmpCode'),
-        'employee_email': _env_first(['TIMESHEET_COL_EMP_EMAIL', 'TIMESHEET_COL_EMAIL'],   default='EmpEmail'),
+        # Empty default = "no email column in this schema" (e.g. Matrix biometric).
+        # services.py emits the email field conditionally — same pattern as 'department'.
+        'employee_email': _env_first(['TIMESHEET_COL_EMP_EMAIL', 'TIMESHEET_COL_EMAIL'],   default=''),
         'employee_name':  _env_first(['TIMESHEET_COL_EMP_NAME',  'TIMESHEET_COL_NAME'],    default='EmpName'),
         'department':     _env_first(['TIMESHEET_COL_DEPARTMENT', 'TIMESHEET_COL_DEPT'],   default=''),
         # Schema variant A: one row per punch with a type column

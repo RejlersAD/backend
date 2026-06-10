@@ -47,6 +47,20 @@ def _col(key: str) -> str:
     return f'[{_safe(name)}]' if name else ''
 
 
+def _opt_select(key: str, alias: str, *, prefix: str = '', agg: str | None = None) -> str:
+    """Soft-coded SELECT-fragment for an optional column.
+
+    Returns ``'<prefix><col> AS alias,'`` (or ``'<agg>(<prefix><col>) AS alias,'``)
+    when the column is configured, else an empty string. Lets any timesheet
+    schema work without code changes — drop the env var and the field is gone.
+    """
+    col = _col(key)
+    if not col:
+        return ''
+    expr = f'{prefix}{col}' if not agg else f'{agg}({prefix}{col})'
+    return f'{expr} AS {alias}, '
+
+
 def _safe(ident: str) -> str:
     return ''.join(c for c in (ident or '') if c.isalnum() or c == '_')
 
@@ -135,9 +149,9 @@ def live_status() -> dict:
     if variant == 'event_stream':
         sql = (
             f"SELECT a.{_col('employee_code')} AS employee_code, "
-            f"       a.{_col('employee_email')} AS email, "
+            f"       {_opt_select('employee_email', 'email', prefix='a.')}"
             f"       a.{_col('employee_name')} AS name, "
-            f"       {_col('department') + ' AS department,' if _col('department') else ''}"
+            f"       {('a.' + _col('department') + ' AS department,') if _col('department') else ''}"
             f"       a.{_col('punch_time')} AS punch_time, "
             f"       a.{_col('punch_type')} AS punch_type "
             f"FROM {_table()} a "
@@ -154,9 +168,9 @@ def live_status() -> dict:
     else:  # two_column
         sql = (
             f"SELECT {_col('employee_code')} AS employee_code, "
-            f"       {_col('employee_email')} AS email, "
+            f"       {_opt_select('employee_email', 'email')}"
             f"       {_col('employee_name')} AS name, "
-            f"       {_col('department') + ' AS department,' if _col('department') else ''}"
+            f"       {(_col('department') + ' AS department,') if _col('department') else ''}"
             f"       {_col('login_time')} AS login_time, "
             f"       {_col('logout_time')} AS logout_time, "
             f"       {_col('date')} AS work_date "
@@ -229,7 +243,7 @@ def daily_report(date: Optional[str] = None) -> dict:
     if variant == 'event_stream':
         sql = (
             f"SELECT {_col('employee_code')} AS employee_code, "
-            f"       MAX({_col('employee_email')}) AS email, "
+            f"       {_opt_select('employee_email', 'email', agg='MAX')}"
             f"       MAX({_col('employee_name')}) AS name, "
             f"       {('MAX(' + _col('department') + ') AS department,') if _col('department') else ''}"
             f"       MIN({_col('punch_time')}) AS first_in, "
@@ -243,7 +257,7 @@ def daily_report(date: Optional[str] = None) -> dict:
     else:
         sql = (
             f"SELECT {_col('employee_code')} AS employee_code, "
-            f"       {_col('employee_email')} AS email, "
+            f"       {_opt_select('employee_email', 'email')}"
             f"       {_col('employee_name')} AS name, "
             f"       {(_col('department') + ' AS department,') if _col('department') else ''}"
             f"       {_col('login_time')} AS first_in, "
@@ -281,7 +295,7 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
     if variant == 'event_stream':
         sql = (
             f"SELECT {_col('employee_code')} AS employee_code, "
-            f"       MAX({_col('employee_email')}) AS email, "
+            f"       {_opt_select('employee_email', 'email', agg='MAX')}"
             f"       MAX({_col('employee_name')}) AS name, "
             f"       {('MAX(' + _col('department') + ') AS department,') if _col('department') else ''}"
             f"       CAST({_col('punch_time')} AS DATE) AS work_date, "
@@ -295,7 +309,7 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
     else:
         sql = (
             f"SELECT {_col('employee_code')} AS employee_code, "
-            f"       {_col('employee_email')} AS email, "
+            f"       {_opt_select('employee_email', 'email')}"
             f"       {_col('employee_name')} AS name, "
             f"       {(_col('department') + ' AS department,') if _col('department') else ''}"
             f"       CAST({_col('date')} AS DATE) AS work_date, "
