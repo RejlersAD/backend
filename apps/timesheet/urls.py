@@ -24,4 +24,8 @@ urlpatterns = [
     path('export/daily/',          views.export_daily_excel,   name='export-daily'),
     path('export/monthly/',        views.export_monthly_excel, name='export-monthly'),
     path('export/monthly/pdf/',    views.export_monthly_pdf,   name='export-monthly-pdf'),
+
+    # Mirror ingest — office-side sync agent POSTs batched events here.
+    # Auth via X-Timesheet-Mirror-Key header (TIMESHEET_MIRROR_API_KEY env var).
+    path('mirror/ingest/',         views.ingest_events,        name='mirror-ingest'),
 ]

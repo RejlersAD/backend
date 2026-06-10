@@ -114,6 +114,22 @@ FEATURE_ENABLED = config('TIMESHEET_FEATURE_ENABLED', default='true').lower() in
     '1', 'true', 'yes', 'on',
 )
 
+# Soft-coded data source selector.
+#   'sqlserver' → query the on-prem Matrix SQL Server directly (local LAN only)
+#   'mirror'    → query the Postgres TimesheetEvent table populated by the
+#                 office-side sync agent (works anywhere, incl. Railway)
+DATA_SOURCE = config('TIMESHEET_DATA_SOURCE', default='sqlserver').lower().strip()
+if DATA_SOURCE not in ('sqlserver', 'mirror'):
+    DATA_SOURCE = 'sqlserver'
+
+# Shared secret for the office agent → Railway ingest endpoint. Generate a
+# strong random string and set this identically on both sides. Empty value
+# means ingest is disabled (returns 403).
+MIRROR_API_KEY = config('TIMESHEET_MIRROR_API_KEY', default='')
+
+# Soft cap on a single ingest batch — guards against runaway POST bodies.
+MIRROR_INGEST_MAX_BATCH = _env_int('TIMESHEET_MIRROR_MAX_BATCH', 5000)
+
 SCHEMA = {
     'table': _env_first(['TIMESHEET_TABLE'], default=''),
     'columns': {
@@ -155,6 +171,10 @@ def is_configured() -> bool:
     """Quick check: do we have the bare minimum to attempt a query?"""
     if not FEATURE_ENABLED:
         return False
+    # Mirror mode needs no SQL Server creds — the Postgres table is always
+    # there. Just check the feature is on; reads return empty list naturally.
+    if DATA_SOURCE == 'mirror':
+        return True
     return bool(
         SQLSERVER['host']
         and SQLSERVER['user']
@@ -168,6 +188,7 @@ def configuration_status() -> dict:
     """Detailed health snapshot for the Setup wizard."""
     return {
         'feature_enabled':   FEATURE_ENABLED,
+        'data_source':       DATA_SOURCE,
         'host':              bool(SQLSERVER['host']),
         'credentials':       bool(SQLSERVER['user'] and SQLSERVER['password']),
         'database_selected': bool(SQLSERVER['database']),

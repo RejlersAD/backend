@@ -15,8 +15,14 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from . import services as ts_services
+from . import services as ts_services_sql
+from . import mirror_services as ts_services_mirror
 from . import config as ts_config
+
+
+def _svc():
+    """Soft-coded backend dispatcher (mirrors views._svc)."""
+    return ts_services_mirror if ts_config.DATA_SOURCE == 'mirror' else ts_services_sql
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -27,7 +33,7 @@ HEADER_FONT = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
 
 
 def export_daily_excel(date: str | None = None) -> HttpResponse:
-    payload = ts_services.daily_report(date)
+    payload = _svc().daily_report(date)
     wb = Workbook()
     ws = wb.active
     ws.title = f"Daily {payload['date']}"
@@ -53,7 +59,7 @@ def export_daily_excel(date: str | None = None) -> HttpResponse:
 
 
 def export_monthly_excel(year: int | None = None, month: int | None = None) -> HttpResponse:
-    payload = ts_services.monthly_report(year, month)
+    payload = _svc().monthly_report(year, month)
     wb = Workbook()
     ws = wb.active
     ws.title = f"Monthly {payload['year']}-{payload['month']:02d}"
@@ -141,7 +147,7 @@ def export_monthly_pdf(year: int | None = None, month: int | None = None) -> Htt
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
     )
 
-    payload = ts_services.monthly_report(year, month)
+    payload = _svc().monthly_report(year, month)
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
                             leftMargin=12 * mm, rightMargin=12 * mm,

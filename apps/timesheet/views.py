@@ -31,11 +31,20 @@ from rest_framework.response import Response
 from . import config as ts_config
 from . import discovery as ts_discovery
 from . import exports as ts_exports
-from . import services as ts_services
+from . import services as ts_services_sql
+from . import mirror_services as ts_services_mirror
 from . import sqlserver as ts_sql
+from .mirror_views import ingest_events  # re-exported via urls.py
 from .sqlserver import TimesheetConnectionError, TimesheetDriverError
 
 logger = logging.getLogger(__name__)
+
+
+def _svc():
+    """Soft-coded backend dispatcher. Resolved at call time so flipping
+    TIMESHEET_DATA_SOURCE in Railway env vars takes effect on the very next
+    request without a code change."""
+    return ts_services_mirror if ts_config.DATA_SOURCE == 'mirror' else ts_services_sql
 
 
 # Soft-coded copy returned when the SQL Server can't be reached from this
@@ -158,7 +167,7 @@ def live(request):
     if not ts_config.is_configured():
         return Response({'configured': False, 'rows': [], 'summary': {}})
     try:
-        return Response({'configured': True, **ts_services.live_status()})
+        return Response({'configured': True, **_svc().live_status()})
     except (TimesheetConnectionError, TimesheetDriverError) as exc:
         return _graceful_unavailable(exc)
     except Exception as exc:
@@ -171,7 +180,7 @@ def daily(request):
     if not ts_config.is_configured():
         return Response({'configured': False, 'rows': []})
     try:
-        return Response({'configured': True, **ts_services.daily_report(request.GET.get('date'))})
+        return Response({'configured': True, **_svc().daily_report(request.GET.get('date'))})
     except (TimesheetConnectionError, TimesheetDriverError) as exc:
         return _graceful_unavailable(exc)
     except Exception as exc:
@@ -188,7 +197,7 @@ def monthly(request):
     try:
         return Response({
             'configured': True,
-            **ts_services.monthly_report(int(y) if y else None, int(m) if m else None),
+            **_svc().monthly_report(int(y) if y else None, int(m) if m else None),
         })
     except (TimesheetConnectionError, TimesheetDriverError) as exc:
         return _graceful_unavailable(exc)
@@ -204,7 +213,7 @@ def user_drill(request):
     try:
         return Response({
             'configured': True,
-            **ts_services.user_history(
+            **_svc().user_history(
                 employee_code=request.GET.get('employee_code'),
                 email=request.GET.get('email'),
                 from_date=request.GET.get('from'),
