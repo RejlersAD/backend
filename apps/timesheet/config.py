@@ -101,9 +101,18 @@ SQLSERVER = {
     'user':     config('TIMESHEET_USER',     default=''),
     'password': config('TIMESHEET_PASSWORD', default=''),
     'database': config('TIMESHEET_DATABASE', default=''),
-    'timeout':  _env_int('TIMESHEET_TIMEOUT', 10),
+    # Short default so cloud envs (Railway) that can't reach the on-prem
+    # SQL Server (private LAN IP) fail in ~5s instead of hanging 110s.
+    'timeout':  _env_int('TIMESHEET_TIMEOUT', 5),
     'driver':   config('TIMESHEET_DRIVER',   default='auto'),  # 'pymssql' | 'pyodbc' | 'auto'
 }
+
+# Soft-coded master switch. Set TIMESHEET_FEATURE_ENABLED=false on Railway/
+# any environment that has no network path to the biometric SQL Server. The
+# UI then renders the existing 'Not Configured' banner instead of erroring.
+FEATURE_ENABLED = config('TIMESHEET_FEATURE_ENABLED', default='true').lower() in (
+    '1', 'true', 'yes', 'on',
+)
 
 SCHEMA = {
     'table': _env_first(['TIMESHEET_TABLE'], default=''),
@@ -144,6 +153,8 @@ USER_MAPPING_PRIORITY = ['email', 'employee_id']
 
 def is_configured() -> bool:
     """Quick check: do we have the bare minimum to attempt a query?"""
+    if not FEATURE_ENABLED:
+        return False
     return bool(
         SQLSERVER['host']
         and SQLSERVER['user']
@@ -156,6 +167,7 @@ def is_configured() -> bool:
 def configuration_status() -> dict:
     """Detailed health snapshot for the Setup wizard."""
     return {
+        'feature_enabled':   FEATURE_ENABLED,
         'host':              bool(SQLSERVER['host']),
         'credentials':       bool(SQLSERVER['user'] and SQLSERVER['password']),
         'database_selected': bool(SQLSERVER['database']),

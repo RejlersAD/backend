@@ -33,8 +33,42 @@ from . import discovery as ts_discovery
 from . import exports as ts_exports
 from . import services as ts_services
 from . import sqlserver as ts_sql
+from .sqlserver import TimesheetConnectionError, TimesheetDriverError
 
 logger = logging.getLogger(__name__)
+
+
+# Soft-coded copy returned when the SQL Server can't be reached from this
+# environment (e.g. Railway production has no route to the office LAN IP).
+# Frontend treats `configured: False` as the trigger for the 'Not Configured'
+# banner, so connection failures are presented gracefully instead of red.
+_UNREACHABLE_MESSAGE = (
+    'Time Sheet biometric server is not reachable from this environment. '
+    'This feature is only available on the office network.'
+)
+_DRIVER_MISSING_MESSAGE = (
+    'SQL Server driver is not installed on this environment.'
+)
+
+
+def _graceful_unavailable(exc: Exception, *, extra_keys: dict | None = None):
+    """Return a 200 OK payload that mirrors the not-configured response shape
+    so the existing frontend banner handles it without changes."""
+    if isinstance(exc, TimesheetDriverError):
+        reason, message = 'driver_missing', _DRIVER_MISSING_MESSAGE
+    else:
+        reason, message = 'unreachable', _UNREACHABLE_MESSAGE
+    logger.info('[timesheet] gracefully degrading (%s): %s', reason, exc)
+    payload = {
+        'configured': False,
+        'reason': reason,
+        'message': message,
+        'rows': [],
+        'summary': {},
+    }
+    if extra_keys:
+        payload.update(extra_keys)
+    return Response(payload)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,6 +159,8 @@ def live(request):
         return Response({'configured': False, 'rows': [], 'summary': {}})
     try:
         return Response({'configured': True, **ts_services.live_status()})
+    except (TimesheetConnectionError, TimesheetDriverError) as exc:
+        return _graceful_unavailable(exc)
     except Exception as exc:
         return _error_response(exc)
 
@@ -136,6 +172,8 @@ def daily(request):
         return Response({'configured': False, 'rows': []})
     try:
         return Response({'configured': True, **ts_services.daily_report(request.GET.get('date'))})
+    except (TimesheetConnectionError, TimesheetDriverError) as exc:
+        return _graceful_unavailable(exc)
     except Exception as exc:
         return _error_response(exc)
 
@@ -152,6 +190,8 @@ def monthly(request):
             'configured': True,
             **ts_services.monthly_report(int(y) if y else None, int(m) if m else None),
         })
+    except (TimesheetConnectionError, TimesheetDriverError) as exc:
+        return _graceful_unavailable(exc)
     except Exception as exc:
         return _error_response(exc)
 
@@ -171,6 +211,8 @@ def user_drill(request):
                 to_date=request.GET.get('to'),
             ),
         })
+    except (TimesheetConnectionError, TimesheetDriverError) as exc:
+        return _graceful_unavailable(exc)
     except Exception as exc:
         return _error_response(exc)
 
