@@ -264,9 +264,16 @@ def export_monthly_pdf(request):
 
 # ─────────────────────────────────────────────────────────────────────────────
 def _error_response(exc: Exception):
+    # Connection or missing-driver errors mean the on-prem SQL Server is not
+    # reachable from this environment (e.g. Railway production has no route to
+    # an office LAN IP / ngrok tunnel offline). Surface as a graceful 200 with
+    # `configured: false` so the existing frontend banner handles it without
+    # showing a red error — same shape as the not-configured branch.
+    if isinstance(exc, (TimesheetDriverError, TimesheetConnectionError)):
+        return _graceful_unavailable(exc)
     kind = type(exc).__name__
-    code = status.HTTP_503_SERVICE_UNAVAILABLE if kind in (
-        'TimesheetDriverError', 'TimesheetConnectionError'
-    ) else status.HTTP_500_INTERNAL_SERVER_ERROR
     logger.warning('[timesheet] %s: %s', kind, exc)
-    return Response({'error': str(exc), 'kind': kind}, status=code)
+    return Response(
+        {'error': str(exc), 'kind': kind},
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    )
