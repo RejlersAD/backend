@@ -86,16 +86,75 @@ def _graceful_unavailable(exc: Exception, *, extra_keys: dict | None = None):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def health(request):
-    """Aggregated health snapshot used by the Setup wizard."""
-    drv = ts_sql.driver_status()
-    cfg = ts_config.configuration_status()
-    ping = ts_sql.health_check() if cfg['configured'] or drv['driver_in_use'] else {'ok': False}
+    """Aggregated health snapshot used by the Setup wizard.
+
+    Critical guarantee: this endpoint must NEVER raise an unhandled exception
+    or block long enough for Railway's gunicorn worker to time out — if it
+    does, Railway returns its own 502 page without CORS headers and the
+    frontend reports a misleading 'CORS' error. Every code path is wrapped
+    so the response always carries the project's CORS middleware headers.
+    """
+    try:
+        cfg = ts_config.configuration_status()
+    except Exception as exc:
+        logger.warning('[timesheet.health] config_status failed: %s', exc)
+        cfg = {'configured': False, 'data_source': ts_config.DATA_SOURCE,
+               'error': str(exc)}
+
+    # ── Mirror mode: serve health from the Postgres mirror table only.
+    # No outbound SQL Server ping (Railway has no route to the office LAN).
+    if ts_config.DATA_SOURCE == 'mirror':
+        try:
+            from .models import TimesheetEvent
+            qs = TimesheetEvent.objects.all()
+            event_count = qs.count()
+            latest = qs.order_by('-event_time').values_list(
+                'event_time', flat=True).first()
+            ping = {
+                'ok':           event_count > 0,
+                'mode':         'mirror',
+                'event_count':  event_count,
+                'latest_event': latest.isoformat() if latest else None,
+            }
+            drv = {'driver_in_use': 'postgres-mirror', 'available': True}
+        except Exception as exc:
+            logger.warning('[timesheet.health] mirror read failed: %s', exc)
+            ping = {'ok': False, 'mode': 'mirror', 'error': str(exc)}
+            drv = {'driver_in_use': 'postgres-mirror', 'available': False,
+                   'error': str(exc)}
+        return Response({
+            'driver':         drv,
+            'config':         cfg,
+            'ping':           ping,
+            'data_source':    'mirror',
+            'sqlserver_host': '',
+            'sqlserver_port': 0,
+        })
+
+    # ── SQL Server (direct LAN) mode: original behaviour, but every call is
+    # wrapped so we never bubble an exception up through the worker.
+    try:
+        drv = ts_sql.driver_status()
+    except Exception as exc:
+        logger.warning('[timesheet.health] driver_status failed: %s', exc)
+        drv = {'driver_in_use': '', 'available': False, 'error': str(exc)}
+
+    try:
+        if cfg.get('configured') or drv.get('driver_in_use'):
+            ping = ts_sql.health_check()
+        else:
+            ping = {'ok': False}
+    except Exception as exc:
+        logger.warning('[timesheet.health] ping failed: %s', exc)
+        ping = {'ok': False, 'error': str(exc)}
+
     return Response({
-        'driver': drv,
-        'config': cfg,
-        'ping': ping,
-        'sqlserver_host': ts_config.SQLSERVER['host'],
-        'sqlserver_port': ts_config.SQLSERVER['port'],
+        'driver':         drv,
+        'config':         cfg,
+        'ping':           ping,
+        'data_source':    'sqlserver',
+        'sqlserver_host': ts_config.SQLSERVER.get('host', ''),
+        'sqlserver_port': ts_config.SQLSERVER.get('port', 0),
     })
 
 
