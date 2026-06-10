@@ -222,11 +222,16 @@ def user_history(employee_code: Optional[str] = None,
     if not (employee_code or email):
         return {'rows': [], 'error': 'employee_code or email required'}
 
+    from django.db.models import Q
     qs = TimesheetEvent.objects.filter(event_time__gte=start, event_time__lt=end_exclusive)
+    # OR-match: either identifier may resolve the record. This mirrors the
+    # email-first / employee_id-fallback strategy used by `_enrich_with_rad_users`.
+    cond = Q()
     if employee_code:
-        qs = qs.filter(employee_code=str(employee_code))
-    elif email:
-        qs = qs.filter(employee_email__iexact=str(email))
+        cond |= Q(employee_code=str(employee_code))
+    if email:
+        cond |= Q(employee_email__iexact=str(email))
+    qs = qs.filter(cond)
 
     per_day = defaultdict(lambda: {'first_in': None, 'last_out': None, 'punches': 0})
     raw_punches: list[dict] = []  # optional, per-event detail

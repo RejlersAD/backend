@@ -269,17 +269,43 @@ def monthly(request):
 def user_drill(request):
     if not ts_config.is_configured():
         return Response({'configured': False, 'rows': []})
+
+    # Resolve identifiers. If the caller passes `user_id`, look up the RAD AI
+    # UserProfile and use BOTH that user's email and their `employee_id` so the
+    # downstream OR-match has the best chance of finding biometric rows even
+    # when one of the two identifiers is missing/stale.
+    employee_code = request.GET.get('employee_code')
+    email         = request.GET.get('email')
+    user_id       = request.GET.get('user_id')
+    resolved      = {'used_user_id': False, 'employee_code': employee_code, 'email': email}
+    if user_id and not (employee_code and email):
+        try:
+            from apps.rbac.models import UserProfile
+            p = UserProfile.objects.select_related('user').filter(user_id=user_id, is_deleted=False).first()
+            if p:
+                if not employee_code and p.employee_id:
+                    employee_code = str(p.employee_id)
+                if not email and p.user and p.user.email:
+                    email = p.user.email
+                resolved.update({
+                    'used_user_id':  True,
+                    'employee_code': employee_code,
+                    'email':         email,
+                })
+        except Exception:
+            pass  # never let lookup failure break the report
+
     try:
-        return Response({
-            'configured': True,
-            **_svc().user_history(
-                employee_code=request.GET.get('employee_code'),
-                email=request.GET.get('email'),
-                from_date=request.GET.get('from'),
-                to_date=request.GET.get('to'),
-                include_punches=str(request.GET.get('include_punches', '')).lower() in ('1', 'true', 'yes'),
-            ),
-        })
+        payload = _svc().user_history(
+            employee_code=employee_code,
+            email=email,
+            from_date=request.GET.get('from'),
+            to_date=request.GET.get('to'),
+            include_punches=str(request.GET.get('include_punches', '')).lower() in ('1', 'true', 'yes'),
+        )
+        payload['configured'] = True
+        payload['resolved']   = resolved
+        return Response(payload)
     except (TimesheetConnectionError, TimesheetDriverError) as exc:
         return _graceful_unavailable(exc)
     except Exception as exc:

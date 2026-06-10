@@ -413,7 +413,9 @@ def user_history(employee_code: Optional[str] = None,
     if email and cols['employee_email']:
         where.append(f"{_col('employee_email')} = %s")
         params.append(email)
-    where_sql = ' AND '.join(where) if where else '1=1'
+    # OR-match (either identifier resolves the record). Mirrors the email-first /
+    # employee_id-fallback strategy used by `_enrich_with_rad_users`.
+    where_sql = ' OR '.join(where) if where else '1=1'
 
     if variant == 'event_stream':
         sql = (
