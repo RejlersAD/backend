@@ -33,7 +33,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from . import config as ts_config
-from .models import TimesheetEvent
+from .models import TimesheetEvent, BiometricUserMaster
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,96 @@ def ingest_events(request):
     )
     return Response({
         'received': len(events),
+        'inserted': inserted,
+        'updated':  updated,
+        'skipped':  skipped,
+        'errors':   errors,
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# User-master mirror — Card1 / OfficeEmail / FullName from Mx_VEW_UserDetails
+# ─────────────────────────────────────────────────────────────────────────────
+# Soft-coded payload key → model field map. The agent can omit any key; only
+# `employee_code` is required. Unknown keys are stashed in `extra` so adding a
+# new Matrix column doesn't require a code change on Railway.
+_USER_MASTER_FIELDS = {
+    'full_name':      'full_name',
+    'card1':          'card1',
+    'card2':          'card2',
+    'office_email':   'office_email',
+    'personal_email': 'personal_email',
+    'designation':    'designation',
+    'department':     'department',
+}
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def ingest_users(request):
+    """Accept a batch of biometric user-master rows and upsert by
+    `employee_code`. Mirrors Matrix `Mx_VEW_UserDetails` to Postgres so the
+    production frontend can show Card1 / OfficeEmail without LAN access."""
+    key_header = request.META.get('HTTP_X_TIMESHEET_MIRROR_KEY', '')
+    expected = ts_config.MIRROR_API_KEY or ''
+    if not expected:
+        return Response({'error': 'mirror ingest disabled (no key configured)'},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    if key_header != expected:
+        return Response({'error': 'invalid mirror key'}, status=status.HTTP_403_FORBIDDEN)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    users = payload.get('users') or []
+    if not isinstance(users, list):
+        return Response({'error': 'users must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+
+    max_batch = ts_config.MIRROR_INGEST_MAX_BATCH
+    if len(users) > max_batch:
+        return Response(
+            {'error': f'batch too large ({len(users)} > {max_batch})'},
+            status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        )
+
+    inserted = updated = skipped = 0
+    errors: list[dict] = []
+
+    for idx, u in enumerate(users):
+        try:
+            emp_code = str(u.get('employee_code') or '').strip()
+            if not emp_code:
+                skipped += 1
+                continue
+            defaults = {}
+            for payload_key, model_field in _USER_MASTER_FIELDS.items():
+                val = u.get(payload_key)
+                if val is None:
+                    continue
+                defaults[model_field] = str(val).strip()[:255]
+            # Bucket anything the agent pushes that isn't in the known map.
+            known = set(_USER_MASTER_FIELDS) | {'employee_code', 'extra'}
+            extra = {k: v for k, v in u.items() if k not in known}
+            if 'extra' in u and isinstance(u['extra'], dict):
+                extra.update(u['extra'])
+            if extra:
+                defaults['extra'] = extra
+            _, created = BiometricUserMaster.objects.update_or_create(
+                employee_code=emp_code, defaults=defaults,
+            )
+            if created:
+                inserted += 1
+            else:
+                updated += 1
+        except Exception as exc:
+            logger.warning('[timesheet.ingest-users] row %s failed: %s', idx, exc)
+            errors.append({'index': idx, 'error': str(exc)})
+
+    logger.info(
+        '[timesheet.ingest-users] %s in, %s updated, %s skipped, %s errors',
+        inserted, updated, skipped, len(errors),
+    )
+    return Response({
+        'received': len(users),
         'inserted': inserted,
         'updated':  updated,
         'skipped':  skipped,

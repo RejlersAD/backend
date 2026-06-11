@@ -18,9 +18,10 @@ from django.db.models import Max, Min
 from django.utils import timezone
 
 from . import config as ts_config
-from .models import TimesheetEvent
+from .models import TimesheetEvent, BiometricUserMaster
 from .services import (
-    _enrich_with_rad_users, _hours_between, _is_late, _empty_summary,
+    _enrich_with_rad_users, _backfill_email_from_matrix_name,
+    _hours_between, _is_late, _empty_summary,
     _working_days, _parse_date,
     # Soft-coded helpers reused from the SQL Server backend so both data
     # sources behave identically when matching a RAD AI user → biometric row.
@@ -45,6 +46,58 @@ def _to_naive(t):
     if hasattr(t, 'tzinfo') and t.tzinfo is not None:
         return t.astimezone(timezone.get_current_timezone()).replace(tzinfo=None)
     return t
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Soft-coded BiometricUserMaster enrichment (mirror backend)
+# ─────────────────────────────────────────────────────────────────────────────
+# Map model field → row payload key. Same alias scheme as the SQL Server
+# `_enrich_with_user_details` so the frontend reads the same keys in either
+# data source. Add a row here to expose a new column on production.
+_USER_MASTER_ROW_FIELDS = (
+    ('card1',          'card1'),
+    ('card2',          'card2'),
+    ('office_email',   'office_email'),
+    ('personal_email', 'personal_email'),
+    ('full_name',      'matrix_full_name'),
+    ('designation',    'designation'),
+    ('department',     'department_master'),
+)
+
+
+def _enrich_from_user_master_mirror(rows: list[dict]) -> list[dict]:
+    """Merge `BiometricUserMaster` columns (Card1, OfficeEmail, FullName …)
+    into each attendance row by `employee_code`. Safe-by-default: if the
+    table is empty (agent hasn't synced yet) the rows are returned unchanged
+    with the new keys absent — the frontend already renders that as `—`."""
+    if not rows:
+        return rows
+    codes = [str(r.get('employee_code') or '').strip()
+             for r in rows if r.get('employee_code')]
+    if not codes:
+        return rows
+    try:
+        master = {
+            m.employee_code: m
+            for m in BiometricUserMaster.objects.filter(employee_code__in=codes)
+        }
+    except Exception:
+        return rows
+    if not master:
+        return rows
+    for r in rows:
+        m = master.get(str(r.get('employee_code') or '').strip())
+        if not m:
+            continue
+        for src, alias in _USER_MASTER_ROW_FIELDS:
+            val = getattr(m, src, '') or ''
+            if alias not in r or r.get(alias) in (None, ''):
+                r[alias] = val
+        # Backfill `employee_name` (used by `_backfill_email_from_matrix_name`)
+        # if the attendance event itself shipped without a name.
+        if m.full_name and not (r.get('employee_name') or r.get('name')):
+            r['employee_name'] = m.full_name
+    return rows
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,12 +289,15 @@ def live_status() -> dict:
             'employee_code': ev.employee_code,
             'email': ev.employee_email or None,
             'name': ev.employee_name,
+            'employee_name': ev.employee_name,
             'department': ev.department,
             'punch_time': _to_naive(ev.event_time),
             'punch_type': ev.event_type,
         })
 
+    rows = _enrich_from_user_master_mirror(rows)
     rows = _enrich_with_rad_users(rows)
+    rows = _backfill_email_from_matrix_name(rows)
 
     summary = _empty_summary()
     for r in rows:
@@ -294,6 +350,7 @@ def daily_report(date: Optional[str] = None) -> dict:
             'employee_code': r['employee_code'],
             'email': m.get('employee_email') or None,
             'name': m.get('employee_name', ''),
+            'employee_name': m.get('employee_name', ''),
             'department': m.get('department', ''),
             'first_in': first_in,
             'last_out': last_out,
@@ -302,7 +359,9 @@ def daily_report(date: Optional[str] = None) -> dict:
             'is_full_day': hours >= ts_config.RULES['full_day_hours'],
         })
 
+    rows = _enrich_from_user_master_mirror(rows)
     rows = _enrich_with_rad_users(rows)
+    rows = _backfill_email_from_matrix_name(rows)
     rows.sort(key=lambda r: r.get('first_in') or dt.datetime.min)
     return {'date': day.isoformat(), 'rows': rows, 'variant': _VARIANT}
 
@@ -340,6 +399,7 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             'employee_code': key,
             'email': m_.get('employee_email') or None,
             'name': m_.get('employee_name', ''),
+            'employee_name': m_.get('employee_name', ''),
             'department': m_.get('department', ''),
             'days_present': 0,
             'full_days': 0,
@@ -372,7 +432,9 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
         slot['avg_hours_per_day'] = (
             round(slot['total_hours'] / slot['days_present'], 2) if slot['days_present'] else 0
         )
+    rows = _enrich_from_user_master_mirror(rows)
     rows = _enrich_with_rad_users(rows)
+    rows = _backfill_email_from_matrix_name(rows)
     rows.sort(key=lambda x: (x.get('radai_full_name') or x.get('name') or ''))
     return {
         'year': y,

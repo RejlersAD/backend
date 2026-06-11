@@ -29,4 +29,5 @@ urlpatterns = [
     # Mirror ingest — office-side sync agent POSTs batched events here.
     # Auth via X-Timesheet-Mirror-Key header (TIMESHEET_MIRROR_API_KEY env var).
     path('mirror/ingest/',         views.ingest_events,        name='mirror-ingest'),
+    path('mirror/ingest-users/',   views.ingest_users,         name='mirror-ingest-users'),
 ]

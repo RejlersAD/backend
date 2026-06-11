@@ -34,7 +34,7 @@ from . import exports as ts_exports
 from . import services as ts_services_sql
 from . import mirror_services as ts_services_mirror
 from . import sqlserver as ts_sql
-from .mirror_views import ingest_events  # re-exported via urls.py
+from .mirror_views import ingest_events, ingest_users  # re-exported via urls.py
 from .sqlserver import TimesheetConnectionError, TimesheetDriverError
 
 logger = logging.getLogger(__name__)

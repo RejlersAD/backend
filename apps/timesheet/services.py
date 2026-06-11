@@ -420,9 +420,13 @@ def _enrich_with_user_details(rows: list[dict]) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 def _backfill_email_from_matrix_name(rows: list[dict]) -> list[dict]:
     """Last-resort email resolver. For rows that still have no `radai_email`
-    after the primary email/employee_id match AND no email anywhere on the
-    Matrix side, tokenise the Matrix `FullName` (alias `matrix_full_name`)
-    and search RAD AI `UserProfile`s for a name-token overlap.
+    after the primary email/employee_id match, tokenise the best available
+    name source and search RAD AI `UserProfile`s for a name-token overlap.
+
+    Name source priority (first non-empty wins):
+      matrix_full_name → from Mx_VEW_UserDetails enrichment (SQL backend)
+      employee_name    → on every TimesheetEvent / attendance row (both)
+      name             → legacy alias used by older code paths
 
     Soft-coded via `ts_config.NAME_BACKFILL`:
       enabled        — master toggle
@@ -438,7 +442,12 @@ def _backfill_email_from_matrix_name(rows: list[dict]) -> list[dict]:
     for r in rows:
         if r.get('radai_email'):
             continue
-        full = r.get('matrix_full_name') or r.get('name') or ''
+        full = (
+            r.get('matrix_full_name')
+            or r.get('employee_name')
+            or r.get('name')
+            or ''
+        )
         toks = _name_tokens(full)
         if toks:
             needs.append((r, toks))
