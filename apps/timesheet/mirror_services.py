@@ -19,7 +19,15 @@ from django.utils import timezone
 
 from . import config as ts_config
 from .models import TimesheetEvent
-from .services import _enrich_with_rad_users, _hours_between, _is_late, _empty_summary, _working_days, _parse_date
+from .services import (
+    _enrich_with_rad_users, _hours_between, _is_late, _empty_summary,
+    _working_days, _parse_date,
+    # Soft-coded helpers reused from the SQL Server backend so both data
+    # sources behave identically when matching a RAD AI user → biometric row.
+    _norm_key, _name_tokens,
+    _USER_NAME_RESOLVE, _USER_NAME_RESOLVE_MIN_TOKS,
+    _USER_NAME_RESOLVE_MAX_HITS, _USER_NAME_RESOLVE_TTL_SEC,
+)
 
 
 _VARIANT = 'mirror'
@@ -37,6 +45,127 @@ def _to_naive(t):
     if hasattr(t, 'tzinfo') and t.tzinfo is not None:
         return t.astimezone(timezone.get_current_timezone()).replace(tzinfo=None)
     return t
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Soft-coded biometric employee_code resolver (mirror backend)
+# ─────────────────────────────────────────────────────────────────────────────
+def _resolve_biometric_codes_mirror(*, profile=None,
+                                    email: Optional[str] = None,
+                                    employee_code: Optional[str] = None) -> set[str]:
+    """Resolve a RAD AI user → set of `TimesheetEvent.employee_code` values
+    via fuzzy ``employee_name__icontains`` matching. Same multi-strategy
+    approach as ``services._resolve_biometric_user_ids`` but operating on the
+    Postgres mirror table — so Railway/production users whose biometric
+    `employee_code` (system-generated badge number) bears no relation to
+    their RAD AI ``UserProfile.employee_id`` still resolve.
+    """
+    if not _USER_NAME_RESOLVE:
+        return set()
+
+    first = (profile.user.first_name if profile and profile.user else '') or ''
+    last  = (profile.user.last_name  if profile and profile.user else '') or ''
+    # Try strategies in order of confidence — first one yielding 1..N hits wins.
+    strategies: list[tuple[str, tuple]] = [
+        ('email_stem',          (email,)),
+        ('email_and_code_stem', (email, employee_code)),
+        ('profile_full_name',   (first, last)),
+        ('profile_and_email',   (first, last, email)),
+    ]
+
+    cache_key = f'ts:bio_uid_mirror:{(_norm_key(email) or _norm_key(employee_code))[:128]}'
+    cache = None
+    try:
+        from django.core.cache import cache as _c
+        cache = _c
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return set(cached)
+    except Exception:
+        cache = None
+
+    chosen_hits: list[dict] = []
+    chosen_strategy = None
+    chosen_tokens: list[str] = []
+    for label, sources in strategies:
+        tokens = _name_tokens(*sources)
+        if len(tokens) < _USER_NAME_RESOLVE_MIN_TOKS:
+            continue
+        qs = TimesheetEvent.objects.all()
+        for t in tokens:
+            qs = qs.filter(employee_name__icontains=t)
+        hits = list(
+            qs.values('employee_code', 'employee_name')
+              .distinct()[: _USER_NAME_RESOLVE_MAX_HITS + 1]
+        )
+        if 0 < len(hits) <= _USER_NAME_RESOLVE_MAX_HITS:
+            chosen_hits = hits
+            chosen_strategy = label
+            chosen_tokens = tokens
+            break
+
+    if not chosen_hits:
+        if cache is not None:
+            try: cache.set(cache_key, [], _USER_NAME_RESOLVE_TTL_SEC)
+            except Exception: pass
+        return set()
+
+    resolved = {str(h.get('employee_code') or '').strip() for h in chosen_hits if h.get('employee_code')}
+    resolved.discard('')
+    import logging
+    logging.getLogger(__name__).info(
+        'Timesheet mirror name-resolver[%s]: tokens=%s → codes=%s (%s)',
+        chosen_strategy, chosen_tokens, sorted(resolved),
+        [(h.get('employee_code'), h.get('employee_name')) for h in chosen_hits],
+    )
+    if cache is not None:
+        try: cache.set(cache_key, list(resolved), _USER_NAME_RESOLVE_TTL_SEC)
+        except Exception: pass
+    return resolved
+
+
+def _resolve_user_aliases_mirror(employee_code: Optional[str],
+                                 email: Optional[str]) -> tuple[set[str], set[str]]:
+    """Return ({normalised emails}, {biometric employee_codes}) for a RAD AI
+    user. Combines profile aliases with fuzzy-resolved biometric codes."""
+    emails: set[str] = set()
+    codes: set[str] = set()
+    if email:
+        emails.add(_norm_key(email))
+    if employee_code:
+        codes.add(str(employee_code).strip())
+
+    resolved_profile = None
+    try:
+        from apps.rbac.models import UserProfile
+        from django.db.models import Q
+        cond = None
+        if email:
+            cond = Q(user__email__iexact=str(email).strip())
+        if employee_code:
+            c2 = Q(employee_id__iexact=str(employee_code).strip())
+            cond = c2 if cond is None else (cond | c2)
+        if cond is not None:
+            for p in UserProfile.objects.select_related('user').filter(cond, is_deleted=False):
+                resolved_profile = resolved_profile or p
+                if p.user and p.user.email:
+                    emails.add(_norm_key(p.user.email))
+                if p.employee_id:
+                    codes.add(str(p.employee_id).strip())
+    except Exception:
+        # Never let RAD AI lookup failure break biometric reporting
+        pass
+
+    try:
+        codes |= _resolve_biometric_codes_mirror(
+            profile=resolved_profile, email=email, employee_code=employee_code,
+        )
+    except Exception:
+        pass
+
+    emails.discard('')
+    codes.discard('')
+    return emails, codes
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -224,13 +353,18 @@ def user_history(employee_code: Optional[str] = None,
 
     from django.db.models import Q
     qs = TimesheetEvent.objects.filter(event_time__gte=start, event_time__lt=end_exclusive)
-    # OR-match: either identifier may resolve the record. This mirrors the
-    # email-first / employee_id-fallback strategy used by `_enrich_with_rad_users`.
+    # OR-match: either identifier may resolve the record. Aliases include
+    # alternate emails from the RAD AI UserProfile AND biometric employee_codes
+    # discovered by fuzzy [employee_name] match — same multi-strategy logic
+    # used by the SQL Server backend in services._resolve_user_aliases.
+    alias_emails, alias_codes = _resolve_user_aliases_mirror(employee_code, email)
     cond = Q()
-    if employee_code:
-        cond |= Q(employee_code=str(employee_code))
-    if email:
-        cond |= Q(employee_email__iexact=str(email))
+    if alias_codes:
+        cond |= Q(employee_code__in=list(alias_codes))
+    for e in alias_emails:
+        cond |= Q(employee_email__iexact=e)
+    if cond == Q():  # no usable identifier resolved
+        return {'rows': [], 'error': 'employee_code or email required'}
     qs = qs.filter(cond)
 
     per_day = defaultdict(lambda: {'first_in': None, 'last_out': None, 'punches': 0})
