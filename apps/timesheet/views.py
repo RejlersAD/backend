@@ -302,6 +302,7 @@ def user_drill(request):
             from_date=request.GET.get('from'),
             to_date=request.GET.get('to'),
             include_punches=str(request.GET.get('include_punches', '')).lower() in ('1', 'true', 'yes'),
+            with_trace=True,
         )
         payload['configured'] = True
         payload['resolved']   = resolved
@@ -333,6 +334,94 @@ def lookup_by_code(request):
         return _graceful_unavailable(exc, extra_keys={'found': False, 'code': code})
     except Exception as exc:
         return _error_response(exc)
+
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsAdminUser])
+def lookup_debug(request):
+    """Admin-only diagnostic for per-user biometric lookup. Same resolver
+    pipeline as ``/timesheet/user/`` but returns ONLY the diagnostic trace,
+    no event rows. Use when an HR record shows the "No biometric record
+    matches…" banner — the response explains exactly which step failed and
+    which knob to turn (sync agent, user-master columns, RAD AI profile).
+
+    Query params (any combination):
+        email          — RAD AI / corporate email to probe
+        employee_code  — RAD AI UserProfile.employee_id (NOT biometric code)
+        user_id        — UserProfile.user_id; auto-resolves email + code
+
+    Response shape:
+        {
+            'configured':    bool,
+            'inputs':        {'email','employee_code','user_id'},
+            'resolved':      {'email','employee_code','used_user_id'},
+            'trace':         { … same shape as user_history diagnostic },
+            'master_table':  {'total_rows', 'sample': [first 5 rows by code]}
+        }
+    """
+    email          = (request.GET.get('email') or '').strip() or None
+    employee_code  = (request.GET.get('employee_code') or '').strip() or None
+    user_id        = (request.GET.get('user_id') or '').strip() or None
+    resolved       = {'used_user_id': False, 'employee_code': employee_code, 'email': email}
+
+    if user_id:
+        try:
+            from apps.rbac.models import UserProfile
+            p = UserProfile.objects.select_related('user').filter(user_id=user_id, is_deleted=False).first()
+            if p:
+                if not employee_code and p.employee_id:
+                    employee_code = str(p.employee_id)
+                if not email and p.user and p.user.email:
+                    email = p.user.email
+                resolved.update({
+                    'used_user_id':  True,
+                    'employee_code': employee_code,
+                    'email':         email,
+                })
+        except Exception as exc:
+            resolved['profile_error'] = str(exc)[:200]
+
+    if not (email or employee_code):
+        return Response({
+            'configured': bool(ts_config.is_configured()),
+            'error':      'supply at least one of email / employee_code / user_id',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    out: dict = {
+        'configured':    bool(ts_config.is_configured()),
+        'data_source':   ts_config.DATA_SOURCE,
+        'inputs':        {'email': email, 'employee_code': employee_code, 'user_id': user_id},
+        'resolved':      resolved,
+    }
+
+    # Only mirror backend exposes the structured resolver trace today.
+    if ts_config.DATA_SOURCE == 'mirror':
+        try:
+            from . import mirror_services as msrv
+            from .models import BiometricUserMaster
+            _, _, trace = msrv._resolve_user_aliases_mirror(
+                employee_code, email, with_trace=True,
+            )
+            out['trace'] = trace
+            try:
+                out['master_table'] = {
+                    'total_rows': BiometricUserMaster.objects.count(),
+                    'sample': list(
+                        BiometricUserMaster.objects
+                            .values('employee_code', 'full_name', 'office_email', 'personal_email')
+                            .order_by('employee_code')[:5]
+                    ),
+                }
+            except Exception as exc:
+                out['master_table'] = {'error': str(exc)[:200]}
+        except Exception as exc:
+            out['trace_error'] = str(exc)[:500]
+            logger.exception('[timesheet.lookup_debug] mirror trace failed: %s', exc)
+    else:
+        out['note'] = 'lookup_debug trace currently implemented for DATA_SOURCE=mirror only'
+
+    return Response(out)
 
 
 

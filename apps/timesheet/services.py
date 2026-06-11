@@ -955,7 +955,8 @@ def user_history(employee_code: Optional[str] = None,
                  email: Optional[str] = None,
                  from_date: Optional[str] = None,
                  to_date: Optional[str] = None,
-                 include_punches: bool = False) -> dict:
+                 include_punches: bool = False,
+                 with_trace: bool = False) -> dict:
     today = dt.date.today()
     start = _parse_date(from_date, today - dt.timedelta(days=30))
     end = _parse_date(to_date, today)

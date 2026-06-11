@@ -259,9 +259,29 @@ def _resolve_biometric_codes_mirror(*, profile=None,
 
 
 def _resolve_user_aliases_mirror(employee_code: Optional[str],
-                                 email: Optional[str]) -> tuple[set[str], set[str]]:
+                                 email: Optional[str],
+                                 *, with_trace: bool = False):
     """Return ({normalised emails}, {biometric employee_codes}) for a RAD AI
-    user. Combines profile aliases with fuzzy-resolved biometric codes."""
+    user. Combines profile aliases with fuzzy-resolved biometric codes.
+
+    When ``with_trace=True`` returns ``(emails, codes, trace)`` where ``trace``
+    is a dict capturing every step considered (which sources were tried, how
+    many rows each one returned). This makes per-user lookup failures
+    diagnosable from the response payload without trawling server logs.
+    """
+    trace: dict = {
+        'input_email':        _norm_key(email) if email else '',
+        'input_code':         (str(employee_code).strip() if employee_code else ''),
+        'user_master_cols':   list(_USER_MASTER_EMAIL_COLUMNS),
+        'profile_matched':    False,
+        'profile_emails':     [],
+        'profile_codes':      [],
+        'name_resolver_used': False,
+        'name_resolver_codes': [],
+        'master_email_hits':  [],   # BiometricUserMaster rows matched via email
+        'master_code_hits':   [],   # BiometricUserMaster rows matched via code
+    }
+
     emails: set[str] = set()
     codes: set[str] = set()
     if email:
@@ -283,19 +303,30 @@ def _resolve_user_aliases_mirror(employee_code: Optional[str],
             for p in UserProfile.objects.select_related('user').filter(cond, is_deleted=False):
                 resolved_profile = resolved_profile or p
                 if p.user and p.user.email:
-                    emails.add(_norm_key(p.user.email))
+                    e = _norm_key(p.user.email)
+                    emails.add(e)
+                    if e not in trace['profile_emails']:
+                        trace['profile_emails'].append(e)
                 if p.employee_id:
-                    codes.add(str(p.employee_id).strip())
-    except Exception:
+                    c = str(p.employee_id).strip()
+                    codes.add(c)
+                    if c not in trace['profile_codes']:
+                        trace['profile_codes'].append(c)
+                trace['profile_matched'] = True
+    except Exception as exc:
         # Never let RAD AI lookup failure break biometric reporting
-        pass
+        trace['profile_error'] = str(exc)[:200]
 
     try:
-        codes |= _resolve_biometric_codes_mirror(
+        bio_codes = _resolve_biometric_codes_mirror(
             profile=resolved_profile, email=email, employee_code=employee_code,
         )
-    except Exception:
-        pass
+        codes |= bio_codes
+        if bio_codes:
+            trace['name_resolver_used'] = True
+            trace['name_resolver_codes'] = sorted(bio_codes)
+    except Exception as exc:
+        trace['name_resolver_error'] = str(exc)[:200]
 
     # Also bridge any BiometricUserMaster row whose office/personal email
     # matches the user's known emails, OR whose `employee_code` is already
@@ -316,17 +347,38 @@ def _resolve_user_aliases_mirror(employee_code: Optional[str],
             has_master_cond = True
         if has_master_cond:
             for m in BiometricUserMaster.objects.filter(master_cond):
+                hit = {
+                    'employee_code': str(m.employee_code or '').strip(),
+                    'full_name':     m.full_name or '',
+                    'office_email':  m.office_email or '',
+                    'personal_email': m.personal_email or '',
+                }
+                # Decide whether this row was found via email or code so the
+                # diagnostic message points to the right configuration knob.
+                via_email = any(
+                    _norm_key(getattr(m, col, '')) in emails
+                    for col in _USER_MASTER_EMAIL_COLUMNS
+                )
+                if via_email:
+                    trace['master_email_hits'].append(hit)
+                else:
+                    trace['master_code_hits'].append(hit)
                 if m.employee_code:
                     codes.add(str(m.employee_code).strip())
                 for col in _USER_MASTER_EMAIL_COLUMNS:
                     val = getattr(m, col, '') or ''
                     if val:
                         emails.add(_norm_key(val))
-    except Exception:
-        pass
+    except Exception as exc:
+        trace['master_error'] = str(exc)[:200]
 
     emails.discard('')
     codes.discard('')
+
+    if with_trace:
+        trace['final_emails'] = sorted(emails)
+        trace['final_codes']  = sorted(codes)
+        return emails, codes, trace
     return emails, codes
 
 
@@ -530,14 +582,18 @@ def user_history(employee_code: Optional[str] = None,
                  email: Optional[str] = None,
                  from_date: Optional[str] = None,
                  to_date: Optional[str] = None,
-                 include_punches: bool = False) -> dict:
+                 include_punches: bool = False,
+                 with_trace: bool = False) -> dict:
     today = dt.date.today()
     start = _parse_date(from_date, today - dt.timedelta(days=30))
     end = _parse_date(to_date, today)
     end_exclusive = end + dt.timedelta(days=1)
 
     if not (employee_code or email):
-        return {'rows': [], 'error': 'employee_code or email required'}
+        payload = {'rows': [], 'error': 'employee_code or email required'}
+        if with_trace:
+            payload['diagnostic'] = {'reason': 'no_identifier_supplied'}
+        return payload
 
     from django.db.models import Q
     import logging
@@ -547,10 +603,14 @@ def user_history(employee_code: Optional[str] = None,
     # alternate emails from the RAD AI UserProfile AND biometric employee_codes
     # discovered by fuzzy [employee_name] match — same multi-strategy logic
     # used by the SQL Server backend in services._resolve_user_aliases.
-    alias_emails, alias_codes = _resolve_user_aliases_mirror(employee_code, email)
+    alias_emails, alias_codes, trace = _resolve_user_aliases_mirror(
+        employee_code, email, with_trace=True,
+    )
     log.info(
-        'timesheet.user_history.mirror inputs code=%r email=%r → aliases emails=%s codes=%s',
+        'timesheet.user_history.mirror inputs code=%r email=%r → aliases emails=%s codes=%s '
+        'master_email_hits=%d master_code_hits=%d',
         employee_code, email, sorted(alias_emails), sorted(alias_codes),
+        len(trace.get('master_email_hits') or []), len(trace.get('master_code_hits') or []),
     )
     cond = Q()
     has_filter = False
@@ -561,9 +621,22 @@ def user_history(employee_code: Optional[str] = None,
         cond |= Q(employee_email__iexact=e)
         has_filter = True
     if not has_filter:
-        return {'rows': [], 'error': 'employee_code or email required'}
+        payload = {'rows': [], 'error': 'employee_code or email required'}
+        if with_trace:
+            trace['reason'] = 'no_aliases_resolved'
+            payload['diagnostic'] = trace
+        return payload
     qs = qs.filter(cond)
-    log.info('timesheet.user_history.mirror matched %d events', qs.count())
+    matched = qs.count()
+    log.info('timesheet.user_history.mirror matched %d events', matched)
+    trace['matched_events_in_range'] = matched
+    # Diagnostic: total events for any of these aliases regardless of date
+    # range. Useful when the user picks a range that has no punches yet.
+    try:
+        total_for_aliases = TimesheetEvent.objects.filter(cond).count()
+        trace['matched_events_all_time'] = total_for_aliases
+    except Exception:
+        pass
 
     per_day = defaultdict(lambda: {'first_in': None, 'last_out': None, 'punches': 0})
     raw_punches: list[dict] = []  # optional, per-event detail
@@ -672,4 +745,5 @@ def user_history(employee_code: Optional[str] = None,
         'monthly_breakdown': monthly_breakdown,
         'punches':           raw_punches if include_punches else None,
         'variant':           _VARIANT,
+        **({'diagnostic': trace} if with_trace else {}),
     }
