@@ -14,7 +14,7 @@ import datetime as dt
 from collections import defaultdict
 from typing import Optional
 
-from django.db.models import Max, Min
+from django.db.models import Max, Min, Q
 from django.utils import timezone
 
 from . import config as ts_config
@@ -63,6 +63,12 @@ _USER_MASTER_ROW_FIELDS = (
     ('designation',    'designation'),
     ('department',     'department_master'),
 )
+
+# Soft-coded list of BiometricUserMaster email columns checked when resolving
+# a RAD AI user's email → biometric employee_code. Order matters — the first
+# match wins. Add a column here (and to BiometricUserMaster) to bridge a new
+# email source without changing resolver code.
+_USER_MASTER_EMAIL_COLUMNS = ('office_email', 'personal_email')
 
 
 def _enrich_from_user_master_mirror(rows: list[dict]) -> list[dict]:
@@ -132,7 +138,7 @@ def _resolve_biometric_codes_mirror(*, profile=None,
     # Versioned cache key — bumping _CACHE_VER below invalidates ALL stale
     # entries from older deploys (e.g. a previous deploy that cached an
     # empty result before the resolver was active).
-    _CACHE_VER = 'v2'
+    _CACHE_VER = 'v3'
     cache_key = f'ts:bio_uid_mirror:{_CACHE_VER}:{(_norm_key(email) or _norm_key(employee_code))[:128]}'
     cache = None
     try:
@@ -165,6 +171,31 @@ def _resolve_biometric_codes_mirror(*, profile=None,
             if 0 < len(email_hits) <= _USER_NAME_RESOLVE_MAX_HITS:
                 chosen_hits = email_hits
                 chosen_strategy = 'email_exact'
+                chosen_tokens = [email_norm]
+
+    # Strategy 0b — BiometricUserMaster bridge. The mirror table holds the
+    # Matrix `Mx_VEW_UserDetails` snapshot the office-side agent pushes (or
+    # that auto-seeds from JOINed event payloads). It is the authoritative
+    # source for email ↔ employee_code mapping when individual events ship
+    # without `employee_email`. Soft-coded via _USER_MASTER_EMAIL_COLUMNS so
+    # operators can extend / reorder the columns checked without changing
+    # code.
+    if not chosen_hits and email:
+        email_norm = _norm_key(email)
+        if email_norm:
+            master_cond = Q()
+            for col in _USER_MASTER_EMAIL_COLUMNS:
+                master_cond |= Q(**{f'{col}__iexact': email_norm})
+            master_codes = list(
+                BiometricUserMaster.objects
+                    .filter(master_cond)
+                    .values_list('employee_code', flat=True)
+                    .distinct()[: _USER_NAME_RESOLVE_MAX_HITS + 1]
+            )
+            master_codes = [c for c in master_codes if c]
+            if 0 < len(master_codes) <= _USER_NAME_RESOLVE_MAX_HITS:
+                chosen_hits = [{'employee_code': c, 'employee_name': ''} for c in master_codes]
+                chosen_strategy = 'user_master_email'
                 chosen_tokens = [email_norm]
 
     for label, sources in strategies:
@@ -263,6 +294,34 @@ def _resolve_user_aliases_mirror(employee_code: Optional[str],
         codes |= _resolve_biometric_codes_mirror(
             profile=resolved_profile, email=email, employee_code=employee_code,
         )
+    except Exception:
+        pass
+
+    # Also bridge any BiometricUserMaster row whose office/personal email
+    # matches the user's known emails, OR whose `employee_code` is already
+    # in `codes`. Pulls the master's full set of email aliases into the
+    # email filter so per-user history works even when individual events
+    # ship without `employee_email`.
+    try:
+        master_cond = Q()
+        has_master_cond = False
+        for e in list(emails):
+            if not e:
+                continue
+            for col in _USER_MASTER_EMAIL_COLUMNS:
+                master_cond |= Q(**{f'{col}__iexact': e})
+                has_master_cond = True
+        if codes:
+            master_cond |= Q(employee_code__in=list(codes))
+            has_master_cond = True
+        if has_master_cond:
+            for m in BiometricUserMaster.objects.filter(master_cond):
+                if m.employee_code:
+                    codes.add(str(m.employee_code).strip())
+                for col in _USER_MASTER_EMAIL_COLUMNS:
+                    val = getattr(m, col, '') or ''
+                    if val:
+                        emails.add(_norm_key(val))
     except Exception:
         pass
 

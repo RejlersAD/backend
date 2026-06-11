@@ -135,7 +135,7 @@ def _resolve_biometric_user_ids(*, profile=None, email: Optional[str] = None,
     ]
 
     # Versioned cache key so deploys invalidate any stale empty entries.
-    _CACHE_VER = 'v2'
+    _CACHE_VER = 'v3'
     cache_key = f'ts:bio_uid:{_CACHE_VER}:{(_norm_key(email) or _norm_key(employee_code))[:128]}'
     cache = None
     try:
@@ -167,7 +167,49 @@ def _resolve_biometric_user_ids(*, profile=None, email: Optional[str] = None,
     chosen_hits: list[dict] = []
     chosen_strategy = None
     chosen_tokens: list[str] = []
+
+    # Strategy 0 — Mx_VEW_UserDetails email bridge. The user-details view
+    # holds the authoritative email ↔ UserID mapping; using it as the first
+    # step lets per-user lookups succeed even when the attendance view has
+    # no email column at all. All identifiers (table, columns) come from
+    # ``ts_config.USER_DETAILS`` so swapping the source view requires no
+    # code change.
+    if email:
+        try:
+            ud_cfg  = ts_config.USER_DETAILS
+            ud_tbl  = (ud_cfg.get('table') or '').strip()
+            ud_join = (ud_cfg.get('join_col') or '').strip()
+            # Detect which email columns the view exposes — soft-coded via
+            # the same TIMESHEET_USER_DETAILS_COLUMNS list (entries like
+            # "OfficeEmail:office_email" map source → alias). We only need
+            # the source side here.
+            ud_emails: list[str] = []
+            for raw in (ud_cfg.get('columns') or []):
+                src = (raw.split(':', 1)[0] if isinstance(raw, str) else '').strip()
+                low = src.lower()
+                if 'email' in low and src not in ud_emails:
+                    ud_emails.append(src)
+            if ud_cfg.get('enabled') and ud_tbl and ud_join and ud_emails:
+                conds = ' OR '.join(f'[{_safe(c)}] = %s' for c in ud_emails)
+                sql = (
+                    f'SELECT DISTINCT TOP {max(1, _USER_NAME_RESOLVE_MAX_HITS + 1)} '
+                    f'[{_safe(ud_join)}] AS code FROM {ud_tbl} WHERE {conds}'
+                )
+                params = tuple(str(email).strip() for _ in ud_emails)
+                with connect() as cur:
+                    cur.execute(sql, params)
+                    ud_hits = rows_to_dicts(cur, cur.fetchall())
+                ud_hits = [h for h in ud_hits if h.get('code')]
+                if 0 < len(ud_hits) <= _USER_NAME_RESOLVE_MAX_HITS:
+                    chosen_hits = [{'code': h['code'], 'name': ''} for h in ud_hits]
+                    chosen_strategy = 'user_details_email'
+                    chosen_tokens = [str(email).strip()]
+        except Exception as exc:
+            logger.warning('Timesheet user-details email bridge failed: %s', exc)
+
     for label, sources in strategies:
+        if chosen_hits:
+            break
         tokens = _name_tokens(*sources)
         if not tokens:
             continue
