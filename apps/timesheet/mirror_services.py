@@ -66,6 +66,9 @@ def _resolve_biometric_codes_mirror(*, profile=None,
     first = (profile.user.first_name if profile and profile.user else '') or ''
     last  = (profile.user.last_name  if profile and profile.user else '') or ''
     # Try strategies in order of confidence — first one yielding 1..N hits wins.
+    # NOTE: 'email_exact' and 'last_name_only' are mirror-only strategies that
+    # leverage columns the SQL Server biometric view does not expose. Both are
+    # soft-bounded by MAX_HITS so an over-broad match never resolves.
     strategies: list[tuple[str, tuple]] = [
         ('email_stem',          (email,)),
         ('email_and_code_stem', (email, employee_code)),
@@ -91,7 +94,29 @@ def _resolve_biometric_codes_mirror(*, profile=None,
     chosen_hits: list[dict] = []
     chosen_strategy = None
     chosen_tokens: list[str] = []
+
+    # Strategy 0 — direct email match against the mirror's `employee_email`
+    # column. The biometric sync agent populates this when the source system
+    # exposes an email; when it does, this is the most reliable signal and
+    # zero-token-dependent (works even if the user's biometric `employee_name`
+    # is mis-spelled, abbreviated, or stored in a non-Latin script).
+    if email:
+        email_norm = _norm_key(email)
+        if email_norm:
+            email_hits = list(
+                TimesheetEvent.objects
+                    .filter(employee_email__iexact=email_norm)
+                    .values('employee_code', 'employee_name')
+                    .distinct()[: _USER_NAME_RESOLVE_MAX_HITS + 1]
+            )
+            if 0 < len(email_hits) <= _USER_NAME_RESOLVE_MAX_HITS:
+                chosen_hits = email_hits
+                chosen_strategy = 'email_exact'
+                chosen_tokens = [email_norm]
+
     for label, sources in strategies:
+        if chosen_hits:
+            break
         tokens = _name_tokens(*sources)
         if len(tokens) < _USER_NAME_RESOLVE_MIN_TOKS:
             continue
@@ -107,6 +132,27 @@ def _resolve_biometric_codes_mirror(*, profile=None,
             chosen_strategy = label
             chosen_tokens = tokens
             break
+
+    # Last-resort — most-distinctive single token (usually the surname).
+    # Only runs when every multi-token strategy returned 0 hits. Bounded by
+    # MAX_HITS so a too-common token (e.g. 'mohammed' across 50 rows) is
+    # rejected rather than guessed.
+    if not chosen_hits:
+        all_tokens = _name_tokens(email, employee_code, first, last)
+        if all_tokens:
+            # Longest token first — most discriminating.
+            for t in sorted(set(all_tokens), key=len, reverse=True):
+                hits = list(
+                    TimesheetEvent.objects
+                        .filter(employee_name__icontains=t)
+                        .values('employee_code', 'employee_name')
+                        .distinct()[: _USER_NAME_RESOLVE_MAX_HITS + 1]
+                )
+                if 0 < len(hits) <= _USER_NAME_RESOLVE_MAX_HITS:
+                    chosen_hits = hits
+                    chosen_strategy = f'single_token({t})'
+                    chosen_tokens = [t]
+                    break
 
     if not chosen_hits:
         if cache is not None:
