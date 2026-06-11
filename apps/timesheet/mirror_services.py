@@ -70,6 +70,14 @@ _USER_MASTER_ROW_FIELDS = (
 # email source without changing resolver code.
 _USER_MASTER_EMAIL_COLUMNS = ('office_email', 'personal_email')
 
+# Soft-coded list of BiometricUserMaster *name* columns checked when the email
+# bridge has no hit (e.g. the user is in the master under a record that lacks
+# OfficeEmail/PersEmail but has a FullName). Each entry is searched with
+# `__icontains` ANDed across tokens. Add a column here (and the field on
+# BiometricUserMaster) to bridge a new name source — order matters; the first
+# column with hits wins. Empty tuple disables the name bridge entirely.
+_USER_MASTER_NAME_COLUMNS = ('full_name',)
+
 
 def _enrich_from_user_master_mirror(rows: list[dict]) -> list[dict]:
     """Merge `BiometricUserMaster` columns (Card1, OfficeEmail, FullName …)
@@ -138,7 +146,7 @@ def _resolve_biometric_codes_mirror(*, profile=None,
     # Versioned cache key — bumping _CACHE_VER below invalidates ALL stale
     # entries from older deploys (e.g. a previous deploy that cached an
     # empty result before the resolver was active).
-    _CACHE_VER = 'v3'
+    _CACHE_VER = 'v4'
     cache_key = f'ts:bio_uid_mirror:{_CACHE_VER}:{(_norm_key(email) or _norm_key(employee_code))[:128]}'
     cache = None
     try:
@@ -273,6 +281,7 @@ def _resolve_user_aliases_mirror(employee_code: Optional[str],
         'input_email':        _norm_key(email) if email else '',
         'input_code':         (str(employee_code).strip() if employee_code else ''),
         'user_master_cols':   list(_USER_MASTER_EMAIL_COLUMNS),
+        'user_master_name_cols': list(_USER_MASTER_NAME_COLUMNS),
         'profile_matched':    False,
         'profile_emails':     [],
         'profile_codes':      [],
@@ -280,6 +289,9 @@ def _resolve_user_aliases_mirror(employee_code: Optional[str],
         'name_resolver_codes': [],
         'master_email_hits':  [],   # BiometricUserMaster rows matched via email
         'master_code_hits':   [],   # BiometricUserMaster rows matched via code
+        'master_name_hits':   [],   # BiometricUserMaster rows matched via name tokens
+        'master_name_tokens': [],
+        'master_name_strategy': None,
     }
 
     emails: set[str] = set()
@@ -371,6 +383,78 @@ def _resolve_user_aliases_mirror(employee_code: Optional[str],
                         emails.add(_norm_key(val))
     except Exception as exc:
         trace['master_error'] = str(exc)[:200]
+
+    # Bridge by NAME against BiometricUserMaster.full_name — last-resort
+    # before giving up. Triggered only when neither the email nor code
+    # bridges produced any new code, and the master table has rows worth
+    # searching. Soft-coded via _USER_MASTER_NAME_COLUMNS; bounded by
+    # _USER_NAME_RESOLVE_MAX_HITS so an over-broad token never wins.
+    if (
+        _USER_MASTER_NAME_COLUMNS
+        and not trace['master_email_hits']
+        and not trace['master_code_hits']
+    ):
+        try:
+            first = (resolved_profile.user.first_name
+                     if resolved_profile and resolved_profile.user else '') or ''
+            last  = (resolved_profile.user.last_name
+                     if resolved_profile and resolved_profile.user else '') or ''
+            # Build a few token strategies — most specific first. First one
+            # that yields 1..MAX_HITS rows wins. Soft-coded order so adding
+            # a new strategy is a single-line change.
+            name_strategies: list[tuple[str, list[str]]] = []
+            if first and last:
+                name_strategies.append(('profile_full_name', _name_tokens(first, last)))
+            if email:
+                # `_name_tokens` already strips the @domain and stop-words,
+                # so 'michelle.dehoedt@rejlers.ae' → ['michelle', 'dehoedt'].
+                name_strategies.append(('email_local_part', _name_tokens(email)))
+            if last:
+                name_strategies.append(('profile_last_name', _name_tokens(last)))
+
+            chosen_rows = []
+            chosen_label = None
+            chosen_tokens: list[str] = []
+            for label, toks in name_strategies:
+                toks = [t for t in toks if t]
+                if not toks:
+                    continue
+                name_cond = Q()
+                for col in _USER_MASTER_NAME_COLUMNS:
+                    sub = Q()
+                    for t in toks:
+                        sub &= Q(**{f'{col}__icontains': t})
+                    name_cond |= sub
+                rows = list(
+                    BiometricUserMaster.objects
+                        .filter(name_cond)
+                        .distinct()[: _USER_NAME_RESOLVE_MAX_HITS + 1]
+                )
+                if 0 < len(rows) <= _USER_NAME_RESOLVE_MAX_HITS:
+                    chosen_rows  = rows
+                    chosen_label = label
+                    chosen_tokens = toks
+                    break
+
+            if chosen_rows:
+                trace['master_name_strategy'] = chosen_label
+                trace['master_name_tokens']   = chosen_tokens
+                for m in chosen_rows:
+                    hit = {
+                        'employee_code':  str(m.employee_code or '').strip(),
+                        'full_name':      m.full_name or '',
+                        'office_email':   m.office_email or '',
+                        'personal_email': m.personal_email or '',
+                    }
+                    trace['master_name_hits'].append(hit)
+                    if m.employee_code:
+                        codes.add(str(m.employee_code).strip())
+                    for col in _USER_MASTER_EMAIL_COLUMNS:
+                        val = getattr(m, col, '') or ''
+                        if val:
+                            emails.add(_norm_key(val))
+        except Exception as exc:
+            trace['master_name_error'] = str(exc)[:200]
 
     emails.discard('')
     codes.discard('')
@@ -608,9 +692,10 @@ def user_history(employee_code: Optional[str] = None,
     )
     log.info(
         'timesheet.user_history.mirror inputs code=%r email=%r → aliases emails=%s codes=%s '
-        'master_email_hits=%d master_code_hits=%d',
+        'master_email_hits=%d master_code_hits=%d master_name_hits=%d (strategy=%s)',
         employee_code, email, sorted(alias_emails), sorted(alias_codes),
         len(trace.get('master_email_hits') or []), len(trace.get('master_code_hits') or []),
+        len(trace.get('master_name_hits') or []), trace.get('master_name_strategy'),
     )
     cond = Q()
     has_filter = False
