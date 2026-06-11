@@ -20,12 +20,228 @@ from collections import defaultdict
 from typing import Iterable, Optional
 
 from django.contrib.auth import get_user_model
+from decouple import config as _env
 
 from . import config as ts_config
 from .sqlserver import connect, rows_to_dicts
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Soft-coded per-user match strategy
+# ─────────────────────────────────────────────────────────────────────────────
+# When True, the per-user SQL filter is case-insensitive and trim-tolerant —
+# mirrors the normalised email/code matching used by `_enrich_with_rad_users`
+# in the live aggregate. Required because SQL Server collations are often
+# case-sensitive and biometric tables routinely contain trailing whitespace
+# in [EmpEmail] / [EmpCode]. Override to 'false' only if a downstream
+# collation explicitly requires strict comparison.
+_USER_MATCH_NORMALISE = _env('TIMESHEET_USER_MATCH_NORMALISE', default='true').lower() in ('1', 'true', 'yes', 'on')
+
+# When True, a per-user query that returns zero rows triggers a second pass:
+# fetch all punches in the (already date-bounded) window and filter in Python
+# using the same normalised keys plus alternate identifiers resolved from the
+# RAD AI UserProfile. Handles edge cases the SQL `LOWER(LTRIM(RTRIM(...)))`
+# can't (non-ASCII whitespace, NFC/NFD Unicode, alternate email aliases).
+_USER_MATCH_PY_FALLBACK = _env('TIMESHEET_USER_MATCH_PY_FALLBACK', default='true').lower() in ('1', 'true', 'yes', 'on')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Soft-coded NAME-BASED resolver
+# ─────────────────────────────────────────────────────────────────────────────
+# Many biometric systems expose only [UserID] and [UserName] — the UserID is
+# a system-generated badge number (e.g. '22972') that bears no relation to
+# the HR employee code (e.g. 'EMP001'). To make per-user lookups work without
+# requiring an admin to manually maintain a mapping table, we resolve the
+# biometric UserID from the user's name and email-stem via a `LIKE`-match
+# against [UserName] the first time we see them, then cache it.
+_USER_NAME_RESOLVE          = _env('TIMESHEET_USER_NAME_RESOLVE',          default='true').lower() in ('1', 'true', 'yes', 'on')
+_USER_NAME_RESOLVE_MIN_TOKS = int(_env('TIMESHEET_USER_NAME_RESOLVE_MIN_TOKENS', default='2'))
+_USER_NAME_RESOLVE_MAX_HITS = int(_env('TIMESHEET_USER_NAME_RESOLVE_MAX_MATCHES', default='5'))
+_USER_NAME_RESOLVE_TTL_SEC  = int(_env('TIMESHEET_USER_NAME_RESOLVE_CACHE_SEC',  default='3600'))
+# Tokens shorter than this are dropped (avoids matching everyone with "al"
+# or "el" in their name).
+_USER_NAME_TOKEN_MIN_LEN    = int(_env('TIMESHEET_USER_NAME_TOKEN_MIN_LEN',      default='3'))
+# Common email-prefix words that should not be used as name tokens.
+_USER_NAME_TOKEN_STOPWORDS  = set(
+    s.strip().lower() for s in
+    _env('TIMESHEET_USER_NAME_TOKEN_STOPWORDS', default='admin,info,test,demo,user,mail,no-reply,noreply,support')
+    .split(',')
+    if s.strip()
+)
+
+
+def _norm_key(v) -> str:
+    """Normalise an identifier for case/whitespace-insensitive comparison."""
+    return (str(v) if v is not None else '').strip().lower()
+
+
+def _name_tokens(*sources: str) -> list[str]:
+    """Extract clean name tokens from arbitrary sources (first/last name,
+    email local-part, employee code stem). Used to drive a fuzzy
+    `[UserName] LIKE` resolver when no shared id exists between RAD AI and
+    the biometric DB."""
+    import re
+    toks: list[str] = []
+    seen: set[str] = set()
+    for src in sources:
+        if not src:
+            continue
+        # Strip email domain if present
+        s = str(src).split('@', 1)[0]
+        # Split on every non-letter so we keep only word-like tokens
+        for raw in re.split(r'[^A-Za-z\u00C0-\u024F]+', s):
+            t = raw.strip().lower()
+            if (
+                len(t) >= _USER_NAME_TOKEN_MIN_LEN
+                and t not in _USER_NAME_TOKEN_STOPWORDS
+                and t not in seen
+            ):
+                seen.add(t)
+                toks.append(t)
+    return toks
+
+
+def _resolve_biometric_user_ids(*, profile=None, email: Optional[str] = None,
+                                 employee_code: Optional[str] = None) -> set[str]:
+    """Resolve a RAD AI user → set of biometric UserIDs via fuzzy
+    `[UserName] LIKE` matching. Cached per `(email|code)` key for
+    `_USER_NAME_RESOLVE_TTL_SEC` seconds.
+
+    Tries multiple token strategies in order of confidence and returns the
+    first one that yields between 1 and `_USER_NAME_RESOLVE_MAX_HITS`
+    matches. Common cases:
+      • Real corporate email (`firstname.lastname@…`) → email-stem tokens
+        alone uniquely identify the user.
+      • Email is generic (`info@…`) → fall back to profile first/last name.
+      • Profile name is a placeholder (`Smoke Test`) → email-stem still wins.
+    """
+    if not _USER_NAME_RESOLVE:
+        return set()
+    name_col = ts_config.SCHEMA['columns'].get('employee_name', '')
+    code_col = ts_config.SCHEMA['columns'].get('employee_code', '')
+    if not (name_col and code_col):
+        return set()
+
+    first = (profile.user.first_name if profile and profile.user else '') or ''
+    last  = (profile.user.last_name  if profile and profile.user else '') or ''
+    # Ordered strategies (most-canonical first). Each entry is a tuple of
+    # token-source strings; tokens from all sources in the tuple are ANDed.
+    strategies: list[tuple[str, tuple]] = [
+        ('email_stem',          (email,)),
+        ('email_and_code_stem', (email, employee_code)),
+        ('profile_full_name',   (first, last)),
+        ('profile_and_email',   (first, last, email)),
+    ]
+
+    cache_key = f'ts:bio_uid:{(_norm_key(email) or _norm_key(employee_code))[:128]}'
+    cache = None
+    try:
+        from django.core.cache import cache as _c
+        cache = _c
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return set(cached)
+    except Exception:
+        cache = None
+
+    def _run_match(tokens: list[str]) -> list[dict]:
+        if len(tokens) < _USER_NAME_RESOLVE_MIN_TOKS:
+            return []
+        where = ' AND '.join([f"[{_safe(name_col)}] LIKE %s" for _ in tokens])
+        sql = (
+            f"SELECT DISTINCT TOP {max(1, _USER_NAME_RESOLVE_MAX_HITS + 1)} "
+            f"[{_safe(code_col)}] AS code, [{_safe(name_col)}] AS name "
+            f"FROM {_table()} WHERE {where}"
+        )
+        try:
+            with connect() as cur:
+                cur.execute(sql, tuple(f'%{t}%' for t in tokens))
+                return rows_to_dicts(cur, cur.fetchall())
+        except Exception as exc:
+            logger.warning('Timesheet name-resolver SQL failed (tokens=%s): %s', tokens, exc)
+            return []
+
+    chosen_hits: list[dict] = []
+    chosen_strategy = None
+    chosen_tokens: list[str] = []
+    for label, sources in strategies:
+        tokens = _name_tokens(*sources)
+        if not tokens:
+            continue
+        hits = _run_match(tokens)
+        # Refuse to guess when the strategy is too ambiguous, but keep trying
+        # narrower strategies — earlier strategies are broader by design.
+        if 0 < len(hits) <= _USER_NAME_RESOLVE_MAX_HITS:
+            chosen_hits = hits
+            chosen_strategy = label
+            chosen_tokens = tokens
+            break
+
+    if not chosen_hits:
+        if cache is not None:
+            try: cache.set(cache_key, [], _USER_NAME_RESOLVE_TTL_SEC)
+            except Exception: pass
+        return set()
+
+    resolved = {_norm_key(h.get('code')) for h in chosen_hits if h.get('code')}
+    resolved.discard('')
+    logger.info(
+        'Timesheet name-resolver[%s]: tokens=%s → biometric UserIDs=%s (%s)',
+        chosen_strategy, chosen_tokens, sorted(resolved),
+        [(h.get('code'), h.get('name')) for h in chosen_hits],
+    )
+    if cache is not None:
+        try: cache.set(cache_key, list(resolved), _USER_NAME_RESOLVE_TTL_SEC)
+        except Exception: pass
+    return resolved
+
+
+def _resolve_user_aliases(employee_code: Optional[str], email: Optional[str]) -> tuple[set[str], set[str]]:
+    """Return ({normalised emails}, {normalised employee codes}) including the
+    primary identifiers AND any alternates discovered on the RAD AI
+    UserProfile (so a user who logs into RAD AI with one email but is mapped
+    to a different email in the biometric DB still resolves). Also folds in
+    biometric UserIDs resolved by fuzzy [UserName] match when enabled."""
+    emails: set[str] = set()
+    codes: set[str] = set()
+    if email:
+        emails.add(_norm_key(email))
+    if employee_code:
+        codes.add(_norm_key(employee_code))
+    resolved_profile = None
+    try:
+        from apps.rbac.models import UserProfile
+        qs = UserProfile.objects.select_related('user').filter(is_deleted=False)
+        cond = None
+        from django.db.models import Q
+        if email:
+            cond = Q(user__email__iexact=str(email).strip())
+        if employee_code:
+            c2 = Q(employee_id__iexact=str(employee_code).strip())
+            cond = c2 if cond is None else (cond | c2)
+        if cond is not None:
+            for p in qs.filter(cond):
+                resolved_profile = resolved_profile or p
+                if p.user and p.user.email:
+                    emails.add(_norm_key(p.user.email))
+                if p.employee_id:
+                    codes.add(_norm_key(p.employee_id))
+    except Exception:
+        # Never let RAD AI lookup failure break biometric reporting
+        pass
+
+    # Augment with biometric UserIDs discovered via fuzzy name match.
+    try:
+        codes |= _resolve_biometric_user_ids(
+            profile=resolved_profile, email=email, employee_code=employee_code,
+        )
+    except Exception as exc:
+        logger.warning('Timesheet biometric UserID resolver failed: %s', exc)
+
+    emails.discard('')
+    codes.discard('')
+    return emails, codes
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema helpers
@@ -390,6 +606,61 @@ def _working_days(start: dt.date, end: dt.date) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-user drill-down
 # ─────────────────────────────────────────────────────────────────────────────
+def _fallback_user_scan(variant: str,
+                        alias_emails: set[str],
+                        alias_codes: set[str],
+                        start: dt.date,
+                        end: dt.date) -> list[dict]:
+    """Scan the biometric table for the given date window with no WHERE clause
+    and filter in Python using the supplied normalised aliases. Used as the
+    last-resort matcher when the strict (even normalised) SQL `=` returns
+    nothing — mirrors the way `live_status` succeeds via `_enrich_with_rad_users`.
+    """
+    cols = ts_config.SCHEMA['columns']
+    has_email = bool(cols.get('employee_email'))
+    if variant == 'event_stream':
+        sql = (
+            f"SELECT {_col('punch_time')} AS punch_time, "
+            f"       {_col('punch_type')} AS punch_type, "
+            f"       {_col('employee_code')} AS employee_code"
+            f"{(', ' + _col('employee_email') + ' AS email') if has_email else ''} "
+            f"FROM {_table()} "
+            f"WHERE {_col('punch_time')} >= %s "
+            f"  AND {_col('punch_time')} < DATEADD(DAY, 1, %s) "
+            f"ORDER BY {_col('punch_time')}"
+        )
+    else:
+        sql = (
+            f"SELECT {_col('date')} AS work_date, "
+            f"       {_col('login_time')} AS first_in, "
+            f"       {_col('logout_time')} AS last_out, "
+            f"       {_col('employee_code')} AS employee_code"
+            f"{(', ' + _col('employee_email') + ' AS email') if has_email else ''} "
+            f"FROM {_table()} "
+            f"WHERE {_col('date')} >= %s AND {_col('date')} <= %s "
+            f"ORDER BY {_col('date')}"
+        )
+    try:
+        with connect() as cur:
+            cur.execute(sql, (start, end))
+            scanned = rows_to_dicts(cur, cur.fetchall())
+    except Exception as exc:
+        logger.warning('Timesheet user fallback scan failed: %s', exc)
+        return []
+
+    matched = [
+        r for r in scanned
+        if _norm_key(r.get('email')) in alias_emails
+        or _norm_key(r.get('employee_code')) in alias_codes
+    ]
+    if matched:
+        logger.info(
+            'Timesheet user fallback matched %d/%d rows via aliases (emails=%s codes=%s)',
+            len(matched), len(scanned), alias_emails, alias_codes,
+        )
+    return matched
+
+
 def user_history(employee_code: Optional[str] = None,
                  email: Optional[str] = None,
                  from_date: Optional[str] = None,
@@ -407,12 +678,26 @@ def user_history(employee_code: Optional[str] = None,
     cols = ts_config.SCHEMA['columns']
     where = []
     params: list = []
-    if employee_code:
-        where.append(f"{_col('employee_code')} = %s")
-        params.append(employee_code)
-    if email and cols['employee_email']:
-        where.append(f"{_col('employee_email')} = %s")
-        params.append(email)
+    # ── Normalised (case-insensitive + trim) matching ─────────────────────
+    # Aligns the per-user filter with `_enrich_with_rad_users`, which keys
+    # off `(email or '').strip().lower()` and `str(emp_code).strip()`. Without
+    # this, SQL Server's case-sensitive default collation (and routine
+    # trailing spaces in [EmpEmail]) make the strict `=` match fail even
+    # though the same record shows up in /live/.
+    if _USER_MATCH_NORMALISE:
+        if employee_code:
+            where.append(f"LTRIM(RTRIM({_col('employee_code')})) = LTRIM(RTRIM(%s))")
+            params.append(str(employee_code).strip())
+        if email and cols['employee_email']:
+            where.append(f"LOWER(LTRIM(RTRIM({_col('employee_email')}))) = LOWER(LTRIM(RTRIM(%s)))")
+            params.append(str(email).strip().lower())
+    else:
+        if employee_code:
+            where.append(f"{_col('employee_code')} = %s")
+            params.append(employee_code)
+        if email and cols['employee_email']:
+            where.append(f"{_col('employee_email')} = %s")
+            params.append(email)
     # OR-match (either identifier resolves the record). Mirrors the email-first /
     # employee_id-fallback strategy used by `_enrich_with_rad_users`.
     where_sql = ' OR '.join(where) if where else '1=1'
@@ -445,6 +730,16 @@ def user_history(employee_code: Optional[str] = None,
     with connect() as cur:
         cur.execute(sql, tuple(params))
         rows = rows_to_dicts(cur, cur.fetchall())
+
+    # ── Fallback: rescan the date window without WHERE and filter in Python.
+    # Triggered only when the normalised SQL filter still returned nothing —
+    # covers edge cases like non-ASCII whitespace in [EmpEmail], Unicode
+    # NFC/NFD differences, or users whose RAD AI email differs from the
+    # biometric DB email (alternate aliases pulled from UserProfile).
+    if not rows and _USER_MATCH_PY_FALLBACK and (employee_code or email):
+        alias_emails, alias_codes = _resolve_user_aliases(employee_code, email)
+        if alias_emails or alias_codes:
+            rows = _fallback_user_scan(variant, alias_emails, alias_codes, start, end)
 
     if variant == 'event_stream':
         # collapse to per-day in/out pairs
