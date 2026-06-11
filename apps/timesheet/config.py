@@ -163,6 +163,40 @@ UI = {
     'polling_seconds': _env_int('TIMESHEET_POLL_SEC', 30),
 }
 
+# Soft-coded biometric user-details enrichment.
+# Pulls the configured columns (default Card1) from the Matrix user-details
+# view and joins them onto attendance rows by UserID. Disable by setting
+# TIMESHEET_USER_DETAILS_ENABLED=false. Cache TTL governs how long results
+# are remembered per (set-of-userids) — default 10 minutes.
+USER_DETAILS = {
+    'enabled':     config('TIMESHEET_USER_DETAILS_ENABLED', default='true').lower() in ('1', 'true', 'yes', 'on'),
+    'table':       config('TIMESHEET_USER_DETAILS_TABLE',   default='dbo.Mx_VEW_UserDetails'),
+    'join_col':    config('TIMESHEET_USER_DETAILS_JOIN_COL', default='UserID'),
+    # Comma-separated list of columns to expose. Each entry can be a bare
+    # column name (used as-is for both source + payload key) or a
+    # `Source:alias` pair so the JSON key stays stable when the source name
+    # changes. Defaults expose Card1, OfficeEmail / PersEmail and FullName
+    # so the Time Sheet table can (a) show the badge card, (b) fall back to
+    # Matrix-side emails when the attendance view has no email column and
+    # (c) drive name-based RAD AI matching when neither side has an email.
+    'columns':     _env_csv(
+        'TIMESHEET_USER_DETAILS_COLUMNS',
+        ['Card1', 'OfficeEmail:office_email', 'PersEmail:personal_email', 'FullName:matrix_full_name'],
+    ),
+    'cache_ttl':   _env_int('TIMESHEET_USER_DETAILS_CACHE_TTL_SEC', 600),
+}
+
+# When True, rows still missing `radai_email` after the primary email/employee_id
+# match are back-filled by tokenising the Matrix `FullName` and searching
+# `UserProfile.user` (first_name/last_name/email/username). Soft cap on how many
+# tokens must match for a hit — 1 = lenient (single distinctive token wins),
+# 2 = stricter (e.g. first + last). Set to 0 to disable the backfill entirely.
+NAME_BACKFILL = {
+    'enabled':        config('TIMESHEET_NAME_BACKFILL_ENABLED', default='true').lower() in ('1', 'true', 'yes', 'on'),
+    'min_token_hits': _env_int('TIMESHEET_NAME_BACKFILL_MIN_HITS', 2),
+    'max_candidates': _env_int('TIMESHEET_NAME_BACKFILL_MAX_CANDIDATES', 8),
+}
+
 # Soft-coded user-mapping priority (email primary, employee_id fallback)
 USER_MAPPING_PRIORITY = ['email', 'employee_id']
 

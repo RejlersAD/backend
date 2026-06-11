@@ -19,6 +19,7 @@ urlpatterns = [
     path('daily/',                 views.daily,            name='daily'),
     path('monthly/',               views.monthly,          name='monthly'),
     path('user/',                  views.user_drill,       name='user'),
+    path('lookup-by-code/',        views.lookup_by_code,   name='lookup-by-code'),
 
     # Exports
     path('export/daily/',          views.export_daily_excel,   name='export-daily'),

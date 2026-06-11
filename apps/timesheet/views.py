@@ -313,8 +313,29 @@ def user_drill(request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Exports (Excel + PDF)
+# Reverse lookup: biometric code → {name, email}
+# Used by /hr/employees search box so HR can type a badge number (e.g. 22972)
+# and the page jumps to the matching RAD AI user. Works against whichever
+# backend (sqlserver or mirror) is active so it stays consistent end-to-end.
 # ─────────────────────────────────────────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def lookup_by_code(request):
+    code = (request.GET.get('code') or '').strip()
+    if not code:
+        return Response({'found': False, 'error': 'code required'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        row = _svc().lookup_by_code(code)
+        if not row:
+            return Response({'found': False, 'code': code})
+        return Response({'found': True, **row})
+    except (TimesheetConnectionError, TimesheetDriverError) as exc:
+        return _graceful_unavailable(exc, extra_keys={'found': False, 'code': code})
+    except Exception as exc:
+        return _error_response(exc)
+
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def export_daily_excel(request):

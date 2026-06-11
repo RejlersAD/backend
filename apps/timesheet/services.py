@@ -307,6 +307,206 @@ def _month_range(year: int, month: int) -> tuple[dt.date, dt.date]:
 # ─────────────────────────────────────────────────────────────────────────────
 # RAD AI user enrichment (email-first, employee_id fallback)
 # ─────────────────────────────────────────────────────────────────────────────
+def _parse_user_details_columns() -> list[tuple[str, str]]:
+    """Resolve TIMESHEET_USER_DETAILS_COLUMNS env into [(source, alias), ...].
+    Accepts plain names or 'Source:alias' entries. Lower-snake-cased keys
+    keep the JSON payload predictable for the frontend."""
+    out: list[tuple[str, str]] = []
+    for entry in ts_config.USER_DETAILS.get('columns', []) or []:
+        s = str(entry).strip()
+        if not s:
+            continue
+        if ':' in s:
+            src, alias = s.split(':', 1)
+            src, alias = src.strip(), alias.strip()
+        else:
+            src = s
+            # 'Card1' → 'card1', 'OfficeEmail' → 'office_email'
+            alias = ''.join(
+                ('_' + c.lower()) if c.isupper() and i > 0 else c.lower()
+                for i, c in enumerate(s)
+            )
+        if src and alias:
+            out.append((src, alias))
+    return out
+
+
+def _safe_ident(name: str) -> str:
+    """Allow only ASCII letters/digits/underscore — defence-in-depth so an
+    env-var typo can't introduce SQL injection in column/table names."""
+    return ''.join(ch for ch in str(name or '') if ch.isalnum() or ch == '_')
+
+
+def _enrich_with_user_details(rows: list[dict]) -> list[dict]:
+    """Pull the soft-coded columns (default Card1) from Mx_VEW_UserDetails
+    and merge them into each attendance row by employee_code (UserID).
+
+    Safe-by-default:
+      - no-op when the feature is disabled or no columns configured
+      - never raises on SQL errors — attendance reporting must keep working
+        even if the user-details view is missing or unreachable
+      - cached per (sorted-userids) for USER_DETAILS.cache_ttl seconds to
+        keep repeated daily-report calls cheap
+    """
+    cfg = ts_config.USER_DETAILS
+    if not cfg.get('enabled') or not rows:
+        return rows
+    cols = _parse_user_details_columns()
+    if not cols:
+        return rows
+
+    codes = sorted({str(r.get('employee_code') or '').strip()
+                    for r in rows if r.get('employee_code')})
+    if not codes:
+        return rows
+
+    table = _safe_ident(cfg['table'].split('.', 1)[-1])
+    schema = _safe_ident(cfg['table'].split('.', 1)[0]) if '.' in cfg['table'] else 'dbo'
+    join_col = _safe_ident(cfg['join_col'])
+    safe_cols = [(_safe_ident(src), alias) for src, alias in cols]
+    safe_cols = [(s, a) for s, a in safe_cols if s]  # drop typos
+    if not (table and join_col and safe_cols):
+        return rows
+
+    cache_key = (
+        f"ts:user_details:v1:{table}:{join_col}:"
+        f"{','.join(a for _, a in safe_cols)}:{hash(tuple(codes)) & 0xFFFFFFFF:x}"
+    )
+    cached = None
+    try:
+        from django.core.cache import cache
+        cached = cache.get(cache_key)
+    except Exception:
+        cache = None  # type: ignore
+
+    if cached is None:
+        select_list = ', '.join([f'[{join_col}]'] + [f'[{s}]' for s, _ in safe_cols])
+        placeholders = ', '.join(['%s'] * len(codes))
+        sql = (
+            f'SELECT DISTINCT {select_list} '
+            f'FROM [{schema}].[{table}] '
+            f'WHERE [{join_col}] IN ({placeholders})'
+        )
+        cached = {}
+        try:
+            from .sqlserver import connect
+            with connect() as cur:
+                cur.execute(sql, tuple(codes))
+                for row in cur.fetchall():
+                    key = str(row.get(join_col) or '').strip()
+                    if not key:
+                        continue
+                    cached[key] = {alias: row.get(src) for src, alias in safe_cols}
+        except Exception as exc:
+            logger.info('[timesheet] user-details enrichment skipped: %s', exc)
+            cached = {}
+        try:
+            if cache is not None:
+                cache.set(cache_key, cached, cfg.get('cache_ttl', 600))
+        except Exception:
+            pass
+
+    for r in rows:
+        details = cached.get(str(r.get('employee_code') or '').strip()) or {}
+        for _, alias in safe_cols:
+            # Don't overwrite a value already populated upstream
+            if alias not in r or r.get(alias) in (None, ''):
+                r[alias] = details.get(alias) or ''
+    return rows
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAD AI user enrichment (email-first, employee_id fallback)
+# ─────────────────────────────────────────────────────────────────────────────
+def _backfill_email_from_matrix_name(rows: list[dict]) -> list[dict]:
+    """Last-resort email resolver. For rows that still have no `radai_email`
+    after the primary email/employee_id match AND no email anywhere on the
+    Matrix side, tokenise the Matrix `FullName` (alias `matrix_full_name`)
+    and search RAD AI `UserProfile`s for a name-token overlap.
+
+    Soft-coded via `ts_config.NAME_BACKFILL`:
+      enabled        — master toggle
+      min_token_hits — minimum number of name tokens that must overlap
+      max_candidates — cap on `__icontains` query results per token to
+                       prevent runaway DB scans
+    """
+    cfg = getattr(ts_config, 'NAME_BACKFILL', None) or {}
+    if not cfg.get('enabled', False) or not rows:
+        return rows
+
+    needs: list[tuple[dict, list[str]]] = []
+    for r in rows:
+        if r.get('radai_email'):
+            continue
+        full = r.get('matrix_full_name') or r.get('name') or ''
+        toks = _name_tokens(full)
+        if toks:
+            needs.append((r, toks))
+    if not needs:
+        return rows
+
+    try:
+        from apps.rbac.models import UserProfile
+        from django.db.models import Q
+    except Exception:
+        return rows
+
+    min_hits = max(1, int(cfg.get('min_token_hits', 2)))
+    cap = max(1, int(cfg.get('max_candidates', 8)))
+
+    # Aggregate every distinct token across all needy rows so we issue
+    # ONE candidate query per token instead of N per-row queries.
+    token_to_rows: dict[str, list[tuple[dict, set[str]]]] = {}
+    for r, toks in needs:
+        tset = set(toks)
+        for t in tset:
+            token_to_rows.setdefault(t, []).append((r, tset))
+
+    candidate_cache: dict[str, list] = {}
+    for token in token_to_rows.keys():
+        if len(token) < 3:
+            continue
+        try:
+            qs = UserProfile.objects.select_related('user').filter(
+                is_deleted=False
+            ).filter(
+                Q(user__first_name__icontains=token)
+                | Q(user__last_name__icontains=token)
+                | Q(user__email__icontains=token)
+                | Q(user__username__icontains=token)
+            )[:cap]
+            candidate_cache[token] = list(qs)
+        except Exception as exc:
+            logger.info('[timesheet] name-backfill token=%r skipped: %s', token, exc)
+            candidate_cache[token] = []
+
+    for r, toks in needs:
+        tset = set(toks)
+        best_hits, best_profile = 0, None
+        seen_ids: set = set()
+        for token in tset:
+            for profile in candidate_cache.get(token, []):
+                if profile.user_id in seen_ids:
+                    continue
+                seen_ids.add(profile.user_id)
+                u = profile.user
+                profile_tokens = set(_name_tokens(
+                    u.first_name, u.last_name, u.email, u.username
+                ))
+                hits = len(tset & profile_tokens)
+                if hits > best_hits:
+                    best_hits, best_profile = hits, profile
+        if best_profile and best_hits >= min_hits:
+            u = best_profile.user
+            r['radai_user_id'] = str(u.id)
+            r['radai_email'] = u.email
+            r['radai_full_name'] = f'{u.first_name or ""} {u.last_name or ""}'.strip() or r.get('matrix_full_name')
+            r['radai_department'] = best_profile.department or r.get('department') or ''
+            r['radai_job_title'] = best_profile.job_title or r.get('radai_job_title') or ''
+            r['matched_by'] = 'matrix_name'
+    return rows
+
+
 def _enrich_with_rad_users(rows: list[dict]) -> list[dict]:
     """Add `radai_user_id`, `radai_email`, `radai_full_name` to each row by
     matching on email (primary) then employee_id (fallback)."""
@@ -403,6 +603,8 @@ def live_status() -> dict:
         rows = rows_to_dicts(cur, cur.fetchall())
 
     rows = _enrich_with_rad_users(rows)
+    rows = _enrich_with_user_details(rows)
+    rows = _backfill_email_from_matrix_name(rows)
 
     # Compute IN/OUT/late counters
     in_value = (ts_config.SCHEMA['columns']['in_value'] or 'IN').upper()
@@ -495,6 +697,8 @@ def daily_report(date: Optional[str] = None) -> dict:
         r['is_full_day'] = (r['hours_worked'] or 0) >= ts_config.RULES['full_day_hours']
 
     rows = _enrich_with_rad_users(rows)
+    rows = _enrich_with_user_details(rows)
+    rows = _backfill_email_from_matrix_name(rows)
     return {'date': day.isoformat(), 'rows': rows, 'variant': variant}
 
 
@@ -581,6 +785,8 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             round(slot['total_hours'] / slot['days_present'], 2) if slot['days_present'] else 0
         )
     rows = _enrich_with_rad_users(rows)
+    rows = _enrich_with_user_details(rows)
+    rows = _backfill_email_from_matrix_name(rows)
     rows.sort(key=lambda x: (x.get('radai_full_name') or x.get('name') or ''))
     return {
         'year': y,
@@ -661,6 +867,37 @@ def _fallback_user_scan(variant: str,
             len(matched), len(scanned), alias_emails, alias_codes,
         )
     return matched
+
+
+def lookup_by_code(code: str) -> Optional[dict]:
+    """Reverse lookup: biometric employee_code → {employee_code, employee_name,
+    employee_email}. Returns None if not found. Used by the HR Employees page
+    so a user can type a badge number and the page jumps to the matching RAD
+    AI record. Email is only returned when the schema exposes an email column.
+    """
+    code = (code or '').strip()
+    if not code:
+        return None
+    tbl = _table()
+    code_col = _col('employee_code')
+    name_col = _col('employee_name')
+    email_col = _col('employee_email')  # '' when schema has no email column
+    select_extra = f', {email_col} AS email' if email_col else ''
+    sql = (
+        f"SELECT TOP 1 {code_col} AS code, {name_col} AS name{select_extra} "
+        f"FROM {tbl} WHERE {code_col} = %s"
+    )
+    from .sqlserver import connect
+    with connect() as cur:
+        cur.execute(sql, (code,))
+        r = cur.fetchone()
+    if not r:
+        return None
+    return {
+        'employee_code': r.get('code') or '',
+        'employee_name': r.get('name') or '',
+        'employee_email': (r.get('email') or '') if email_col else '',
+    }
 
 
 def user_history(employee_code: Optional[str] = None,

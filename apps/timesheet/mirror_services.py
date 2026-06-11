@@ -385,6 +385,23 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
     }
 
 
+def lookup_by_code(code: str) -> Optional[dict]:
+    """Reverse lookup against the Postgres mirror — biometric ``employee_code``
+    → ``{employee_code, employee_name, employee_email}``. Same contract as
+    ``services.lookup_by_code`` so the dispatcher in views can stay backend-
+    agnostic."""
+    code = (code or '').strip()
+    if not code:
+        return None
+    row = (
+        TimesheetEvent.objects
+            .filter(employee_code=code)
+            .values('employee_code', 'employee_name', 'employee_email')
+            .first()
+    )
+    return row or None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-user drill-down
 # ─────────────────────────────────────────────────────────────────────────────
