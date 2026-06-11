@@ -134,7 +134,9 @@ def _resolve_biometric_user_ids(*, profile=None, email: Optional[str] = None,
         ('profile_and_email',   (first, last, email)),
     ]
 
-    cache_key = f'ts:bio_uid:{(_norm_key(email) or _norm_key(employee_code))[:128]}'
+    # Versioned cache key so deploys invalidate any stale empty entries.
+    _CACHE_VER = 'v2'
+    cache_key = f'ts:bio_uid:{_CACHE_VER}:{(_norm_key(email) or _norm_key(employee_code))[:128]}'
     cache = None
     try:
         from django.core.cache import cache as _c

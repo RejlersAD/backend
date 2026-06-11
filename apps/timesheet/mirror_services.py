@@ -73,7 +73,11 @@ def _resolve_biometric_codes_mirror(*, profile=None,
         ('profile_and_email',   (first, last, email)),
     ]
 
-    cache_key = f'ts:bio_uid_mirror:{(_norm_key(email) or _norm_key(employee_code))[:128]}'
+    # Versioned cache key — bumping _CACHE_VER below invalidates ALL stale
+    # entries from older deploys (e.g. a previous deploy that cached an
+    # empty result before the resolver was active).
+    _CACHE_VER = 'v2'
+    cache_key = f'ts:bio_uid_mirror:{_CACHE_VER}:{(_norm_key(email) or _norm_key(employee_code))[:128]}'
     cache = None
     try:
         from django.core.cache import cache as _c
@@ -352,20 +356,30 @@ def user_history(employee_code: Optional[str] = None,
         return {'rows': [], 'error': 'employee_code or email required'}
 
     from django.db.models import Q
+    import logging
+    log = logging.getLogger(__name__)
     qs = TimesheetEvent.objects.filter(event_time__gte=start, event_time__lt=end_exclusive)
     # OR-match: either identifier may resolve the record. Aliases include
     # alternate emails from the RAD AI UserProfile AND biometric employee_codes
     # discovered by fuzzy [employee_name] match — same multi-strategy logic
     # used by the SQL Server backend in services._resolve_user_aliases.
     alias_emails, alias_codes = _resolve_user_aliases_mirror(employee_code, email)
+    log.info(
+        'timesheet.user_history.mirror inputs code=%r email=%r → aliases emails=%s codes=%s',
+        employee_code, email, sorted(alias_emails), sorted(alias_codes),
+    )
     cond = Q()
+    has_filter = False
     if alias_codes:
         cond |= Q(employee_code__in=list(alias_codes))
+        has_filter = True
     for e in alias_emails:
         cond |= Q(employee_email__iexact=e)
-    if cond == Q():  # no usable identifier resolved
+        has_filter = True
+    if not has_filter:
         return {'rows': [], 'error': 'employee_code or email required'}
     qs = qs.filter(cond)
+    log.info('timesheet.user_history.mirror matched %d events', qs.count())
 
     per_day = defaultdict(lambda: {'first_in': None, 'last_out': None, 'punches': 0})
     raw_punches: list[dict] = []  # optional, per-event detail
