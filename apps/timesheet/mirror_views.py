@@ -49,6 +49,54 @@ def _parse_event_time(raw: Any):
     return parsed if timezone.is_aware(parsed) else timezone.make_aware(parsed, dt_timezone.utc)
 
 
+# Soft-coded list of optional per-event keys that, when present, also seed
+# `BiometricUserMaster`. Mirrors the ingest-users payload map so a single
+# event row can carry full master data — letting the routine event sync
+# bootstrap Card1 / OfficeEmail without a separate `--users` run.
+_EVENT_TO_MASTER_FIELDS = {
+    'card1':          'card1',
+    'card2':          'card2',
+    'office_email':   'office_email',
+    'personal_email': 'personal_email',
+    'full_name':      'full_name',
+    'designation':    'designation',
+    # `employee_name` / `employee_email` / `department` are the legacy event
+    # keys — map them onto the master too so older agents still help seed it.
+    'employee_name':  'full_name',
+    'employee_email': 'office_email',
+    'department':     'department',
+}
+
+
+def _maybe_upsert_user_master_from_event(ev: dict, emp_code: str) -> None:
+    """Populate or refresh `BiometricUserMaster` from any user-master keys
+    the event payload carries. No-op if none are present. Failures are
+    swallowed so the event ingest itself can never fail because of master
+    enrichment."""
+    if not emp_code:
+        return
+    defaults = {}
+    for src, model_field in _EVENT_TO_MASTER_FIELDS.items():
+        val = ev.get(src)
+        if val is None:
+            continue
+        s = str(val).strip()
+        if not s:
+            continue
+        # Never overwrite a stronger key with a weaker legacy one (the dict
+        # iteration order means legacy keys come last, so we only set the
+        # field if it isn't already set in this defaults dict).
+        defaults.setdefault(model_field, s[:255])
+    if not defaults:
+        return
+    try:
+        BiometricUserMaster.objects.update_or_create(
+            employee_code=emp_code, defaults=defaults,
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.debug('[timesheet.ingest] user-master upsert skipped for %s: %s', emp_code, exc)
+
+
 @api_view(['POST'])
 @authentication_classes([])  # API-key auth only — no JWT required
 @permission_classes([AllowAny])
@@ -103,6 +151,12 @@ def ingest_events(request):
                 inserted += 1
             else:
                 updated += 1
+
+            # Opportunistically seed BiometricUserMaster from any extra
+            # user-master fields the agent included on this event. This makes
+            # the routine event sync also populate Card1 / OfficeEmail without
+            # requiring a separate `--users` run. Keys ignored unless present.
+            _maybe_upsert_user_master_from_event(ev, emp_code)
         except Exception as exc:  # pragma: no cover — never let one bad row kill the batch
             logger.warning('[timesheet.ingest] row %s failed: %s', idx, exc)
             errors.append({'index': idx, 'error': str(exc)})
