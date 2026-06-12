@@ -26,6 +26,7 @@ from rest_framework.response import Response
 from .models import CustomerInvoice, InvoiceAttachment, PaymentStatus, InvoiceCategory
 from .serializers import CustomerInvoiceSerializer, InvoiceAttachmentSerializer
 from .services.excel_importer import import_workbook
+from .services.finance_engine import FINANCE_RULES, recompute
 
 
 # Soft-coded: aggregations exposed by /stats/
@@ -171,6 +172,37 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
         return Response(InvoiceAttachmentSerializer(
             attachment, context={'request': request}).data,
             status=status.HTTP_201_CREATED)
+
+    # ── Finance-engine config (read-only) ──────────────────────────
+    @action(detail=False, methods=['get'], url_path='config',
+            permission_classes=[IsAuthenticated])
+    def config(self, request):
+        """Return the soft-coded FINANCE_RULES so the frontend can render
+        FX rates, VAT, ICV, and status labels without re-hard-coding them."""
+        rules = FINANCE_RULES
+        return Response({
+            'vat_rate':                  float(rules['vat_rate']),
+            'icv_retention_rate':        float(rules['icv_retention_rate']),
+            'default_payment_terms_days': rules['default_payment_terms_days'],
+            'paid_tolerance_aed':        float(rules['paid_tolerance_aed']),
+            'fx_to_aed': {ccy: float(rate) for ccy, rate in rules['fx_to_aed'].items()},
+            'status_auto_derive':        rules['status_auto_derive'],
+            'status_labels':             rules['status'],
+        })
+
+    # ── Recompute a single invoice ─────────────────────────────────
+    @action(detail=True, methods=['post'], url_path='recompute')
+    def recompute(self, request, pk=None):
+        """Re-apply every Excel-derived formula and persist the result.
+        Useful after FX rates change, after a payment is logged, or when
+        the user clicks the 'Recompute' button in the detail drawer."""
+        invoice = self.get_object()
+        changed = invoice.recompute_all()
+        invoice.save(_skip_recompute=True)  # avoid double-recompute on save
+        return Response({
+            'changed_fields': sorted(changed),
+            'invoice': CustomerInvoiceSerializer(invoice).data,
+        })
 
 
 class InvoiceAttachmentViewSet(viewsets.GenericViewSet):

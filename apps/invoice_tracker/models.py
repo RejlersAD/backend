@@ -140,6 +140,21 @@ class CustomerInvoice(models.Model):
         delta = (timezone.now().date() - self.due_date).days
         self.days_overdue = max(delta, 0) if delta > 0 else None
 
+    def recompute_all(self, *, today=None) -> set[str]:
+        """Apply every Excel-derived formula (PPC, retention, FX, due-date,
+        balance, status). Returns the set of fields whose value changed.
+
+        Auto-runs on save() unless caller passes _skip_recompute=True.
+        """
+        from .services.finance_engine import recompute
+        return recompute(self, today=today)
+
+    def save(self, *args, **kwargs):
+        skip = kwargs.pop('_skip_recompute', False)
+        if not skip:
+            self.recompute_all()
+        return super().save(*args, **kwargs)
+
 
 class InvoiceAttachment(models.Model):
     """PDF / supporting document stored on AWS S3."""
