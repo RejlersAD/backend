@@ -148,6 +148,7 @@ urlpatterns = [
     path('api/v1/pfd/', include('apps.pfd_converter.urls')),
     path('api/v1/crs/', include('apps.crs.urls')),
     path('api/v1/finance/', include('apps.finance.urls')),  # Finance Invoice Automation
+    path('api/v1/invoice-tracker/', include('apps.invoice_tracker.urls')),  # Invoice Tracker (A/R) — Excel-driven + S3 attachments
     path('api/v1/designiq/', include('apps.designiq.urls')),  # DesignIQ - AI Design Intelligence
     path('api/v1/process-datasheet/', include('apps.process_datasheet.urls')),  # Process Datasheet
     path('api/v1/electrical-datasheet/', include('apps.electrical_datasheet.urls')),  # Electrical Datasheet with Transformer & Switchgear

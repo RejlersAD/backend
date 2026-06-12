@@ -169,6 +169,7 @@ INSTALLED_APPS = [
     'apps.marketing_analytics',  # Marketing Analytics — Google Analytics (GA4) real-time dashboard widget
     'apps.timesheet',            # Time Sheet Analytics — SQL Server attendance integration
     'apps.project_control',      # Project Management — phased cost dashboards, estimates, documents, AI take-off (stubbed)
+    'apps.invoice_tracker',      # Invoice Tracker — Accounts Receivable register (external + internal) + Excel import + S3 attachments
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
