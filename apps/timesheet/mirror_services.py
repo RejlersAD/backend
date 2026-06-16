@@ -496,11 +496,14 @@ def live_status() -> dict:
 
     summary = _empty_summary()
     for r in rows:
-        if str(r.get('punch_type', '')).upper() == TimesheetEvent.EVENT_IN:
+        is_in = str(r.get('punch_type', '')).upper() == TimesheetEvent.EVENT_IN
+        r['is_in'] = is_in
+        r['is_late'] = _is_late(r)
+        if is_in:
             summary['currently_in'] += 1
         else:
             summary['currently_out'] += 1
-        if _is_late(r):
+        if r['is_late']:
             summary['late_today'] += 1
     summary['total_seen_today'] = len(rows)
     summary['matched_to_radai'] = sum(1 for r in rows if r.get('radai_user_id'))
