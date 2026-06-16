@@ -341,6 +341,12 @@ class EmployeeLeaveRecord(models.Model):
     # Carryforward from previous year
     carryforward        = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('0'))
 
+    # Branch / legal entity — RAD = Rejlers AB; RIN = Rejlers IN
+    BRANCH_CHOICES      = [('RAD', 'Rejlers AB'), ('RIN', 'Rejlers IN')]
+    branch              = models.CharField(
+        max_length=10, choices=BRANCH_CHOICES, default='RAD', db_index=True,
+    )
+
     # Source tracking
     source_file         = models.CharField(max_length=500, blank=True)
     imported_at         = models.DateTimeField(auto_now=True)

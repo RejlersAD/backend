@@ -133,12 +133,14 @@ class EmployeeLeaveMonthlySerializer(serializers.ModelSerializer):
 
 class EmployeeLeaveRecordSerializer(serializers.ModelSerializer):
     monthly_breakdown = EmployeeLeaveMonthlySerializer(many=True, read_only=True)
+    branch_display    = serializers.CharField(source='get_branch_display', read_only=True)
 
     class Meta:
         model  = EmployeeLeaveRecord
         fields = [
             'id', 'employee_code', 'employee_name', 'department',
             'job_title', 'joining_date', 'annual_entitlement', 'year',
+            'branch', 'branch_display',
             'total_earned', 'total_taken', 'total_encashed', 'leave_balance',
             'carryforward', 'source_file', 'imported_at', 'monthly_breakdown',
         ]
@@ -147,11 +149,14 @@ class EmployeeLeaveRecordSerializer(serializers.ModelSerializer):
 
 class EmployeeLeaveRecordListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for list view (no monthly breakdown)."""
+    branch_display = serializers.CharField(source='get_branch_display', read_only=True)
+
     class Meta:
         model  = EmployeeLeaveRecord
         fields = [
             'id', 'employee_code', 'employee_name', 'department',
             'job_title', 'joining_date', 'annual_entitlement', 'year',
+            'branch', 'branch_display',
             'total_earned', 'total_taken', 'total_encashed', 'leave_balance',
             'carryforward', 'imported_at',
         ]

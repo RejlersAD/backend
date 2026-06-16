@@ -33,7 +33,7 @@ LEAVE_EXCEL_MAP = {
     'emp_no_cell':        (2, 2),    # B2
     'dept_cell':          (2, 4),    # D2
     'title_cell':         (3, 2),    # B3
-    'joining_cell':       (1, 5),    # E1
+    'joining_cell':       (1, 5),    # E1  (RAD default — overridden for RIN)
     'entitlement_cell':   (6, 2),    # B6  ("22 working days")
 
     # Monthly summary table rows — Row 9 = header, Row 10 = carryforward
@@ -62,13 +62,33 @@ LEAVE_EXCEL_MAP = {
     'source_tag': 'Summary Leave Calculation-RAD-Updated.xlsx',
 }
 
-# Default path used when --path is not supplied
-DEFAULT_EXCEL_PATH = os.path.join(
-    os.path.dirname(__file__),  # management/commands/
-    '..', '..', '..', '..', '..',  # → project root
-    'Documents', 'Human Resource', 'Payroll',
-    'Summary Leave Calculation-RAD-Updated.xlsx',
-)
+# Per-branch overrides — only fields that differ from the base map above.
+# The import command merges base + branch override before parsing.
+# Key = branch code (uppercase), value = dict of LEAVE_EXCEL_MAP keys to override.
+BRANCH_OVERRIDES = {
+    'RAD': {
+        # joining date is at E1 (col 5) in the RAD file
+        'joining_cell': (1, 5),
+        'source_tag':   'Summary Leave Calculation-RAD-Updated.xlsx',
+        'default_path': os.path.join(
+            os.path.dirname(__file__),
+            '..', '..', '..', '..', '..',
+            'Documents', 'Human Resource', 'Payroll',
+            'Summary Leave Calculation-RAD-Updated.xlsx',
+        ),
+    },
+    'RIN': {
+        # joining date is at D1 (col 4) in the RIN file — only difference!
+        'joining_cell': (1, 4),
+        'source_tag':   'Summary Leave Calculation-RIN.xlsx',
+        'default_path': os.path.join(
+            os.path.dirname(__file__),
+            '..', '..', '..', '..', '..',
+            'Documents', 'Human Resource', 'Payroll',
+            'Summary Leave Calculation-RIN.xlsx',
+        ),
+    },
+}
 
 
 def _to_dec(val, default: str = '0') -> Decimal:
@@ -137,7 +157,13 @@ class Command(BaseCommand):
         parser.add_argument(
             '--path',
             default=None,
-            help='Absolute path to the Excel file (default: Documents/Human Resource/Payroll/...)',
+            help='Absolute path to the Excel file (defaults to the branch default path)',
+        )
+        parser.add_argument(
+            '--branch',
+            default='RAD',
+            choices=['RAD', 'RIN'],
+            help='Branch / legal entity: RAD (Rejlers AB, default) or RIN (Rejlers IN)',
         )
         parser.add_argument(
             '--year',
@@ -160,7 +186,16 @@ class Command(BaseCommand):
         # Lazy import to avoid circular imports at module load
         from apps.payroll.models import EmployeeLeaveRecord, EmployeeLeaveMonthly
 
-        path = options['path'] or os.path.normpath(DEFAULT_EXCEL_PATH)
+        branch_arg = options['branch'].upper()
+
+        # Merge base map with branch-specific overrides
+        override = BRANCH_OVERRIDES.get(branch_arg, {})
+        em = {**LEAVE_EXCEL_MAP, **{k: v for k, v in override.items() if k != 'default_path'}}
+        em['source_tag'] = override.get('source_tag', LEAVE_EXCEL_MAP['source_tag'])
+
+        path = options['path'] or os.path.normpath(
+            override.get('default_path', BRANCH_OVERRIDES['RAD']['default_path'])
+        )
         year = options['year']
         dry  = options['dry_run']
 
@@ -171,9 +206,8 @@ class Command(BaseCommand):
         warnings.filterwarnings('ignore')
         wb = openpyxl.load_workbook(path, data_only=True)
         sheets = wb.sheetnames
-        self.stdout.write(f'   {len(sheets)} sheets found')
+        self.stdout.write(f'   {len(sheets)} sheets found  [branch={branch_arg}]')
 
-        em    = LEAVE_EXCEL_MAP
         mmap  = em['month_map']
         src   = em['source_tag']
 
@@ -225,6 +259,7 @@ class Command(BaseCommand):
                         job_title       = job_title or None,
                         joining_date    = joining_date,
                         year            = year,
+                        branch          = branch_arg,
                         total_earned    = total_earned,
                         total_taken     = total_taken,
                         total_encashed  = total_encashed,

@@ -325,6 +325,9 @@ class EmployeeLeaveRecordViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(employee_code=code)
         if search:
             qs = qs.filter(employee_name__icontains=search)
+        branch = self.request.query_params.get('branch')
+        if branch:
+            qs = qs.filter(branch__iexact=branch)
         return qs.order_by('employee_name')
 
     def get_serializer_class(self):
