@@ -15,6 +15,7 @@ from .views import (
     LeaveTypeViewSet,
     LeaveRequestViewSet,
     leave_calendar,
+    branch_employee_codes,
 )
 
 app_name = 'payroll'
@@ -30,7 +31,8 @@ router.register(r'leave-types',        LeaveTypeViewSet,              basename='
 router.register(r'leave-requests',     LeaveRequestViewSet,           basename='leave-request')
 
 urlpatterns = [
-    path('dashboard-summary/', PayrollDashboardSummaryView.as_view(), name='dashboard-summary'),
-    path('leave-calendar/',    leave_calendar,                        name='leave-calendar'),
+    path('dashboard-summary/',       PayrollDashboardSummaryView.as_view(), name='dashboard-summary'),
+    path('leave-calendar/',          leave_calendar,                        name='leave-calendar'),
+    path('branch-employee-codes/',   branch_employee_codes,                 name='branch-employee-codes'),
     path('', include(router.urls)),
 ]

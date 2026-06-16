@@ -434,6 +434,36 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
 # 10. Leave Calendar  — per-employee, per-day approved leave map
 #     Consumed by the Summary attendance pivot table to overlay leave codes.
 # ─────────────────────────────────────────────────────────────────────────────
+# 10. branch_employee_codes — lightweight codes-only endpoint for branch filter
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def branch_employee_codes(request):
+    """
+    GET /api/v1/payroll/branch-employee-codes/?branch=RIN&year=2026
+
+    Returns a flat list of employee_code values for a given branch (and
+    optionally a year).  Used by the frontend Attendance Summary tab to
+    filter biometric rows by legal entity without fetching full leave records.
+
+    Response: { "branch": "RIN", "year": 2026, "codes": ["E001", "E002", …] }
+    """
+    branch = request.GET.get('branch', '').upper().strip()
+    year   = request.GET.get('year')
+
+    if not branch:
+        return Response({'error': 'branch parameter is required.'}, status=400)
+
+    qs = EmployeeLeaveRecord.objects.filter(branch__iexact=branch)
+    if year:
+        qs = qs.filter(year=int(year))
+
+    codes = list(qs.values_list('employee_code', flat=True).order_by('employee_code'))
+    return Response({'branch': branch, 'year': int(year) if year else None, 'codes': codes})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
