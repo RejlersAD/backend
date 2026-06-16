@@ -170,6 +170,7 @@ INSTALLED_APPS = [
     'apps.timesheet',            # Time Sheet Analytics — SQL Server attendance integration
     'apps.project_control',      # Project Management — phased cost dashboards, estimates, documents, AI take-off (stubbed)
     'apps.invoice_tracker',      # Invoice Tracker — Accounts Receivable register (external + internal) + Excel import + S3 attachments
+    'apps.payroll',              # Payroll Intelligence Platform — validation, audit alerts, project costing, AI insights, chatbot
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
@@ -1106,6 +1107,14 @@ FILE_UPLOAD_HANDLERS = [
 # Used by apps.wrench_integration.s3_service._get_bucket()
 # ─────────────────────────────────────────────────────────────────────
 WRENCH_S3_BUCKET = config('WRENCH_S3_BUCKET', default='wrench-radai')
+
+# ─────────────────────────────────────────────────────────────────────
+# Payroll Intelligence — S3 prefix config (reuses AWS_STORAGE_BUCKET_NAME)
+# Files land in payroll/slips/, payroll/documents/, payroll/exports/
+# ─────────────────────────────────────────────────────────────────────
+PAYROLL_S3_PREFIX          = config('PAYROLL_S3_PREFIX',         default='payroll/slips')
+PAYROLL_DOCS_S3_PREFIX     = config('PAYROLL_DOCS_S3_PREFIX',    default='payroll/documents')
+PAYROLL_EXPORTS_S3_PREFIX  = config('PAYROLL_EXPORTS_S3_PREFIX', default='payroll/exports')
 
 # Mirror mode for project-document exports to S3 (soft-coded, opt-in).
 #   'flat'      → wrench/projects/{order_no}/documents/{doc_no}{ext}   (default)
