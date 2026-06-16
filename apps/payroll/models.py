@@ -392,3 +392,146 @@ class EmployeeLeaveMonthly(models.Model):
 
     def __str__(self):
         return f'{self.record.employee_name} — {self.get_month_display()} {self.record.year}'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. LeaveType  — master list of leave type codes
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LeaveType(models.Model):
+    """
+    Master list of leave type codes.  Seeded with defaults in migration 0003;
+    HR admins can add custom types via the Django admin without code changes.
+    The Tailwind badge classes are stored as plain strings so PurgeCSS on the
+    backend does not strip them; the frontend reads them directly from the API.
+    """
+    code              = models.CharField(max_length=10, unique=True, db_index=True)
+    name              = models.CharField(max_length=100)
+    color_hex         = models.CharField(
+        max_length=7, default='#6b7280',
+        help_text='Hex colour for charts and calendar heatmap',
+    )
+    # Tailwind utility classes — stored as strings (safe from PurgeCSS)
+    badge_bg          = models.CharField(max_length=60, blank=True, default='bg-slate-100')
+    badge_text        = models.CharField(max_length=60, blank=True, default='text-slate-700')
+    badge_border      = models.CharField(max_length=60, blank=True, default='border-slate-300')
+    # Policy flags
+    is_paid           = models.BooleanField(default=True)
+    requires_approval = models.BooleanField(default=True)
+    requires_document = models.BooleanField(default=False)
+    is_active         = models.BooleanField(default=True)
+    display_order     = models.PositiveSmallIntegerField(default=99)
+
+    class Meta:
+        db_table = 'payroll_leave_type'
+        ordering = ['display_order', 'code']
+
+    def __str__(self):
+        return f'{self.code} — {self.name}'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. LeaveRequest  — individual employee leave application
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LeaveRequestStatus(models.TextChoices):
+    PENDING   = 'PENDING',   'Pending'
+    APPROVED  = 'APPROVED',  'Approved'
+    REJECTED  = 'REJECTED',  'Rejected'
+    CANCELLED = 'CANCELLED', 'Cancelled'
+
+
+class LeaveRequest(models.Model):
+    """
+    One leave application covering a contiguous date range.
+    Supports both RAD AI system users (employee FK) and non-system employees
+    (employee_code / employee_name plain text).  HR can submit on behalf of
+    any employee by supplying employee_code + employee_name directly.
+    """
+    id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # Employee identity — RAD AI user account (optional)
+    employee         = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='leave_requests',
+    )
+    # Denormalised fields — auto-populated from the User FK on save; also
+    # allow HR to create requests for employees without RAD AI accounts.
+    employee_code    = models.CharField(max_length=30, null=True, blank=True, db_index=True)
+    employee_name    = models.CharField(max_length=255, db_index=True)
+    department       = models.CharField(max_length=100, blank=True)
+
+    # Leave details
+    leave_type       = models.ForeignKey(
+        LeaveType, on_delete=models.PROTECT, related_name='requests',
+    )
+    start_date       = models.DateField()
+    end_date         = models.DateField()
+    # Computed Mon–Fri count stored for fast balance checks
+    days_requested   = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal('0'))
+    reason           = models.TextField(blank=True)
+
+    # Approval workflow
+    status           = models.CharField(
+        max_length=20, choices=LeaveRequestStatus.choices,
+        default=LeaveRequestStatus.PENDING, db_index=True,
+    )
+    reviewed_by      = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='reviewed_leave_requests',
+    )
+    reviewed_at      = models.DateTimeField(null=True, blank=True)
+    reviewer_note    = models.TextField(blank=True)
+
+    created_at       = models.DateTimeField(auto_now_add=True)
+    updated_at       = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'payroll_leave_request'
+        ordering = ['-created_at']
+        indexes  = [
+            models.Index(fields=['employee_code', 'start_date', 'end_date'],
+                         name='payroll_lr_code_dates_idx'),
+            models.Index(fields=['status', 'start_date'],
+                         name='payroll_lr_status_date_idx'),
+        ]
+
+    def __str__(self):
+        lt = getattr(self.leave_type, 'code', self.leave_type_id or '?')
+        return (
+            f'{self.employee_name} · {lt} · '
+            f'{self.start_date}→{self.end_date} [{self.status}]'
+        )
+
+    def save(self, *args, **kwargs):
+        import datetime as _dt
+        # Auto-populate identity fields from the User FK
+        if self.employee:
+            u = self.employee
+            if not self.employee_name:
+                self.employee_name = (
+                    f'{u.first_name} {u.last_name}'.strip() or u.email
+                )
+            if not self.employee_code or not self.department:
+                try:
+                    from apps.rbac.models import UserProfile
+                    p = UserProfile.objects.filter(
+                        user=u, is_deleted=False,
+                    ).first()
+                    if p:
+                        if not self.employee_code and p.employee_id:
+                            self.employee_code = str(p.employee_id)
+                        if not self.department and getattr(p, 'department', None):
+                            self.department = p.department
+                except Exception:
+                    pass
+        # Compute days_requested — working days (Mon–Fri) only
+        if self.start_date and self.end_date:
+            days = 0
+            cur = self.start_date
+            while cur <= self.end_date:
+                if cur.weekday() < 5:
+                    days += 1
+                cur += _dt.timedelta(days=1)
+            self.days_requested = Decimal(str(days))
+        super().save(*args, **kwargs)

@@ -32,6 +32,9 @@ from .models import (
     ChatbotMessage,
     AlertStatus,
     EmployeeLeaveRecord,
+    LeaveType,
+    LeaveRequest,
+    LeaveRequestStatus,
 )
 from .serializers import (
     PayrollValidationLogSerializer,
@@ -41,6 +44,8 @@ from .serializers import (
     ChatbotMessageSerializer,
     EmployeeLeaveRecordSerializer,
     EmployeeLeaveRecordListSerializer,
+    LeaveTypeSerializer,
+    LeaveRequestSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -327,3 +332,156 @@ class EmployeeLeaveRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if self.action == 'retrieve':
             return EmployeeLeaveRecordSerializer
         return EmployeeLeaveRecordListSerializer
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. LeaveType — read-only list of leave type codes
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LeaveTypeViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Read-only list of active leave types.
+    Admins can create/edit types in the Django admin; they appear here immediately.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class   = LeaveTypeSerializer
+    queryset           = LeaveType.objects.filter(is_active=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. LeaveRequest — full CRUD with approve / reject / cancel actions
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LeaveRequestViewSet(viewsets.ModelViewSet):
+    """
+    Full CRUD for leave requests.
+    POST to create (any auth user / HR on behalf of employee).
+    Custom actions: /approve/, /reject/, /cancel/
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class   = LeaveRequestSerializer
+
+    def get_queryset(self):
+        qs = (
+            LeaveRequest.objects
+            .select_related('leave_type', 'employee', 'reviewed_by')
+            .all()
+        )
+        params = self.request.query_params
+        st      = params.get('status')
+        code    = params.get('employee_code')
+        year    = params.get('year')
+        month   = params.get('month')
+        search  = params.get('search')
+        if st:
+            qs = qs.filter(status__iexact=st)
+        if code:
+            qs = qs.filter(employee_code=code)
+        if year and month:
+            import datetime as _dt, calendar as _cal
+            y, m = int(year), int(month)
+            first = _dt.date(y, m, 1)
+            last  = _dt.date(y, m, _cal.monthrange(y, m)[1])
+            qs = qs.filter(start_date__lte=last, end_date__gte=first)
+        elif year:
+            qs = qs.filter(start_date__year=int(year))
+        if search:
+            qs = qs.filter(employee_name__icontains=search)
+        return qs.order_by('-created_at')
+
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve(self, request, pk=None):
+        req = self.get_object()
+        if req.status != LeaveRequestStatus.PENDING:
+            return Response(
+                {'error': f'Cannot approve a {req.status} request'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        req.status       = LeaveRequestStatus.APPROVED
+        req.reviewed_by  = request.user
+        req.reviewed_at  = timezone.now()
+        req.reviewer_note = request.data.get('note', '')
+        req.save()
+        return Response(LeaveRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject(self, request, pk=None):
+        req = self.get_object()
+        if req.status != LeaveRequestStatus.PENDING:
+            return Response(
+                {'error': f'Cannot reject a {req.status} request'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        req.status       = LeaveRequestStatus.REJECTED
+        req.reviewed_by  = request.user
+        req.reviewed_at  = timezone.now()
+        req.reviewer_note = request.data.get('note', '')
+        req.save()
+        return Response(LeaveRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        req = self.get_object()
+        req.status = LeaveRequestStatus.CANCELLED
+        req.save()
+        return Response(LeaveRequestSerializer(req).data)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Leave Calendar  — per-employee, per-day approved leave map
+#     Consumed by the Summary attendance pivot table to overlay leave codes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def leave_calendar(request):
+    """
+    GET /api/v1/payroll/leave-calendar/?year=2026&month=6
+
+    Returns approved leave for all employees in a given month, keyed by
+    employee_code → { YYYY-MM-DD: {code, name, color, badge_bg, badge_text, request_id} }.
+    Only working days (Mon–Fri) are included.  Used by the Summary attendance
+    view to overlay leave codes on the biometric attendance pivot table.
+    """
+    import calendar as _cal
+    import datetime as _dt
+
+    year  = int(request.GET.get('year',  timezone.now().year))
+    month = int(request.GET.get('month', timezone.now().month))
+
+    first_day = _dt.date(year, month, 1)
+    last_day  = _dt.date(year, month, _cal.monthrange(year, month)[1])
+
+    requests = (
+        LeaveRequest.objects
+        .select_related('leave_type')
+        .filter(
+            status=LeaveRequestStatus.APPROVED,
+            start_date__lte=last_day,
+            end_date__gte=first_day,
+        )
+    )
+
+    calendar_data: dict = {}
+    for req in requests:
+        if not req.employee_code:
+            continue
+        emp = req.employee_code
+        if emp not in calendar_data:
+            calendar_data[emp] = {}
+        # Expand date range, clamped to the requested month
+        cur = max(req.start_date, first_day)
+        end = min(req.end_date, last_day)
+        while cur <= end:
+            if cur.weekday() < 5:   # weekdays only (0=Mon…4=Fri)
+                calendar_data[emp][cur.isoformat()] = {
+                    'code':       req.leave_type.code,
+                    'name':       req.leave_type.name,
+                    'color':      req.leave_type.color_hex,
+                    'badge_bg':   req.leave_type.badge_bg,
+                    'badge_text': req.leave_type.badge_text,
+                    'request_id': str(req.id),
+                }
+            cur += _dt.timedelta(days=1)
+
+    return Response({'year': year, 'month': month, 'calendar': calendar_data})

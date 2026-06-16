@@ -12,6 +12,9 @@ from .views import (
     AIInsightSnapshotViewSet,
     ChatbotMessageViewSet,
     EmployeeLeaveRecordViewSet,
+    LeaveTypeViewSet,
+    LeaveRequestViewSet,
+    leave_calendar,
 )
 
 app_name = 'payroll'
@@ -23,8 +26,11 @@ router.register(r'project-costs',      ProjectCostAllocationViewSet,  basename='
 router.register(r'ai-insights',        AIInsightSnapshotViewSet,      basename='ai-insight')
 router.register(r'chatbot-messages',   ChatbotMessageViewSet,         basename='chatbot-message')
 router.register(r'leave-records',      EmployeeLeaveRecordViewSet,    basename='leave-record')
+router.register(r'leave-types',        LeaveTypeViewSet,              basename='leave-type')
+router.register(r'leave-requests',     LeaveRequestViewSet,           basename='leave-request')
 
 urlpatterns = [
     path('dashboard-summary/', PayrollDashboardSummaryView.as_view(), name='dashboard-summary'),
+    path('leave-calendar/',    leave_calendar,                        name='leave-calendar'),
     path('', include(router.urls)),
 ]

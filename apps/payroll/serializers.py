@@ -156,3 +156,51 @@ class EmployeeLeaveRecordListSerializer(serializers.ModelSerializer):
             'carryforward', 'imported_at',
         ]
         read_only_fields = ['id', 'imported_at']
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Leave Type + Leave Request serializers
+# ────────────────────────────────────────────────────────────────────────────────
+from .models import LeaveType, LeaveRequest  # noqa: E402
+
+
+class LeaveTypeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = LeaveType
+        fields = [
+            'id', 'code', 'name', 'color_hex',
+            'badge_bg', 'badge_text', 'badge_border',
+            'is_paid', 'requires_approval', 'requires_document',
+            'is_active', 'display_order',
+        ]
+        read_only_fields = ['id']
+
+
+class LeaveRequestSerializer(serializers.ModelSerializer):
+    leave_type_detail = LeaveTypeSerializer(source='leave_type', read_only=True)
+    status_display    = serializers.CharField(source='get_status_display', read_only=True)
+    reviewed_by_name  = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = LeaveRequest
+        fields = [
+            'id', 'employee', 'employee_code', 'employee_name', 'department',
+            'leave_type', 'leave_type_detail',
+            'start_date', 'end_date', 'days_requested', 'reason',
+            'status', 'status_display',
+            'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'reviewer_note',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'days_requested', 'status', 'status_display',
+            'reviewed_by', 'reviewed_by_name', 'reviewed_at',
+            'created_at', 'updated_at', 'leave_type_detail',
+        ]
+
+    def get_reviewed_by_name(self, obj):
+        if obj.reviewed_by:
+            return (
+                f'{obj.reviewed_by.first_name} {obj.reviewed_by.last_name}'.strip()
+                or obj.reviewed_by.email
+            )
+        return None

@@ -5,6 +5,8 @@ from .models import (
     ProjectCostAllocation,
     AIInsightSnapshot,
     ChatbotMessage,
+    LeaveType,
+    LeaveRequest,
 )
 
 
@@ -44,3 +46,21 @@ class ChatbotMessageAdmin(admin.ModelAdmin):
     list_filter   = ('role', 'persona')
     search_fields = ('content', 'intent')
     raw_id_fields = ('user',)
+
+
+@admin.register(LeaveType)
+class LeaveTypeAdmin(admin.ModelAdmin):
+    list_display  = ('code', 'name', 'color_hex', 'is_paid', 'requires_approval', 'is_active', 'display_order')
+    list_editable = ('display_order', 'is_active')
+    search_fields = ('code', 'name')
+    ordering      = ('display_order', 'code')
+
+
+@admin.register(LeaveRequest)
+class LeaveRequestAdmin(admin.ModelAdmin):
+    list_display   = ('employee_name', 'employee_code', 'leave_type', 'start_date', 'end_date', 'days_requested', 'status', 'created_at')
+    list_filter    = ('status', 'leave_type', 'start_date')
+    search_fields  = ('employee_name', 'employee_code', 'department')
+    raw_id_fields  = ('employee', 'reviewed_by')
+    date_hierarchy = 'start_date'
+    readonly_fields = ('days_requested', 'created_at', 'updated_at')
