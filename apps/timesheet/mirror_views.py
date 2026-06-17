@@ -22,7 +22,7 @@ duplicating. Designed for at-least-once delivery from the agent.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
 
 from django.utils.dateparse import parse_datetime
@@ -38,15 +38,31 @@ from .models import TimesheetEvent, BiometricUserMaster
 logger = logging.getLogger(__name__)
 
 
+def _apply_ingest_tz(dt_naive: datetime) -> datetime:
+    """Convert a naive ingest datetime to a UTC-aware datetime.
+
+    Soft-coded via ``TIMESHEET_INGEST_TZ_OFFSET`` (default 0 = treat as UTC).
+    Example: UAE office (UTC+4) → set env var to 4 so an incoming naive
+    timestamp of ``08:31 local`` is stored as ``04:31 UTC`` instead of
+    ``08:31 UTC`` (which was the old, incorrect behaviour).
+
+    Changing the offset only affects NEWLY ingested events; re-run the sync
+    agent with ``--full`` to back-fill existing records with the correct UTC.
+    """
+    offset_hours = ts_config.INGEST_TZ_OFFSET_HOURS
+    utc_dt = dt_naive - timedelta(hours=offset_hours) if offset_hours else dt_naive
+    return timezone.make_aware(utc_dt, dt_timezone.utc)
+
+
 def _parse_event_time(raw: Any):
     if isinstance(raw, datetime):
-        return raw if timezone.is_aware(raw) else timezone.make_aware(raw, dt_timezone.utc)
+        return raw if timezone.is_aware(raw) else _apply_ingest_tz(raw)
     if not raw:
         return None
     parsed = parse_datetime(str(raw))
     if not parsed:
         return None
-    return parsed if timezone.is_aware(parsed) else timezone.make_aware(parsed, dt_timezone.utc)
+    return parsed if timezone.is_aware(parsed) else _apply_ingest_tz(parsed)
 
 
 # Soft-coded list of optional per-event keys that, when present, also seed

@@ -157,7 +157,28 @@ RULES = {
     'late_threshold_min':   _env_first_int(['TIMESHEET_LATE_THRESHOLD_MIN',   'TIMESHEET_LATE_MIN'],        15),
     'full_day_hours':       _env_first_float(['TIMESHEET_FULL_DAY_HOURS',    'TIMESHEET_FULL_DAY'],        8.0),
     'working_days':         _env_csv('TIMESHEET_WORK_DAYS', ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']),
+    # Soft-coded rolling time-window for the Live view (mirror mode).
+    # Replaces the strict `event_time__date=today` filter that breaks when the
+    # office timezone (e.g. UAE UTC+4) and the Railway server (UTC) are on
+    # different calendar dates (midnight–04:00 UAE = previous UTC day).
+    # Default 20 h covers one full office day plus a 4-hour UTC buffer.
+    # Increase for offices further from UTC.  Set via TIMESHEET_LIVE_LOOKBACK_HOURS.
+    'live_lookback_hours':  _env_int('TIMESHEET_LIVE_LOOKBACK_HOURS', 20),
 }
+
+# UTC offset (hours) of naive datetime strings sent by the office sync agent.
+# The Matrix biometric system records times in local office time (e.g. UAE = UTC+4).
+# The sync agent sends them as naive ISO strings ("2026-06-17T08:31:42") —
+# with no timezone indicator — so the ingest endpoint must know the offset
+# to store the correct UTC value.
+#
+# Default 0 = treat incoming naive timestamps as already UTC (backward-
+# compatible for agents that pre-convert, or where the SQL Server is UTC).
+# Set to 4 for UAE/Abu Dhabi office (UTC+4), 3 for KSA (UTC+3), etc.
+#
+# IMPORTANT: changing this value only affects NEWLY ingested events.
+# Re-run the sync agent with --full to back-fill existing records.
+INGEST_TZ_OFFSET_HOURS = _env_int('TIMESHEET_INGEST_TZ_OFFSET', 0)
 
 UI = {
     'polling_seconds': _env_int('TIMESHEET_POLL_SEC', 30),

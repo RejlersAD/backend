@@ -470,8 +470,21 @@ def _resolve_user_aliases_mirror(employee_code: Optional[str],
 # Live status — latest punch per user today
 # ─────────────────────────────────────────────────────────────────────────────
 def live_status() -> dict:
-    today = timezone.localdate()
-    qs = TimesheetEvent.objects.filter(event_time__date=today)
+    # ── Soft-coded rolling time window ───────────────────────────────────────
+    # Replaces the old strict `event_time__date=today (UTC)` filter which
+    # silently dropped punches whenever the office timezone (e.g. UAE UTC+4)
+    # and the Railway/production server (UTC) were on different calendar dates
+    # (i.e. between midnight and 04:00 UAE = previous UTC day), or whenever
+    # the sync agent sent naive local times that were stored as "UTC" (4 h off).
+    #
+    # The rolling window approach is timezone-agnostic: it asks "what happened
+    # in the last N hours?" which is correct regardless of how timestamps are
+    # stored.  TIMESHEET_LIVE_LOOKBACK_HOURS (default 20 h) covers a full UAE
+    # office day plus a 4-hour UTC offset buffer.  Increase for offices further
+    # from UTC (e.g. UTC+8 → set to 24).
+    lookback_hours = int(ts_config.RULES.get('live_lookback_hours', 20))
+    cutoff = timezone.now() - dt.timedelta(hours=lookback_hours)
+    qs = TimesheetEvent.objects.filter(event_time__gte=cutoff)
 
     # Latest punch per employee_code
     latest_by_emp: dict[str, TimesheetEvent] = {}
@@ -514,6 +527,11 @@ def live_status() -> dict:
         'summary': summary,
         'variant': _VARIANT,
         'as_of': dt.datetime.now().isoformat(),
+        # Soft-coded: expose the window so the frontend can show a helpful
+        # diagnostic like "Showing punches from the last 20 h" instead of
+        # a confusing empty table when the sync agent hasn't run yet today.
+        'lookback_hours': lookback_hours,
+        'window_from': cutoff.isoformat(),
     }
 
 
