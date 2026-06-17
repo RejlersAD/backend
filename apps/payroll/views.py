@@ -579,7 +579,7 @@ class PublicHolidayViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         params   = self.request.query_params
-        year     = int(params.get('year', _dt.datetime.now().year))
+        year     = int(params.get('year', datetime.date.today().year))
         region   = params.get('region', None)
         active   = params.get('active_only', 'true').lower() not in ('0', 'false', 'no')
 
