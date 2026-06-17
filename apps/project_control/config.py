@@ -26,6 +26,8 @@ from decouple import config
 # ─────────────────────────────────────────────────────────────────────────────
 _PHASE_DEFAULTS = {
     # Phase 1 — Fastest to Production (ships ON)
+    # Project Dashboard reads from the core Project model — always available.
+    'phase_1_project_dashboard': True,
     'phase_1_cost_dashboard':    True,
     'phase_1_estimate_variance': True,
     'phase_1_finance_sync':      True,
