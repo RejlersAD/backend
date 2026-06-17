@@ -68,3 +68,88 @@ class BiometricUserMaster(models.Model):
 
     def __str__(self):
         return f'{self.employee_code} — {self.full_name or "?"}'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DailyAttendanceSummary — materialised per-employee per-day work-hours record
+#
+# Computed (and upserted) by mirror_services._compute_and_save_day() whenever:
+#   1. New events are ingested via the mirror ingest endpoint.
+#   2. The daily_report() API is called (on-demand recompute for the day).
+#
+# Hours calculation mode is governed by TIMESHEET_HOURS_MODE:
+#   'paired'  — only paired IN→OUT segments count (default, anti-abuse)
+#   'elapsed' — first_in to last_out (legacy)
+#
+# This table is the single source of truth consumed by:
+#   • Payroll Attendance Summary
+#   • Employee Self-Service hours display
+#   • Monthly roll-up (avoids re-pairing for past days on every request)
+# ─────────────────────────────────────────────────────────────────────────────
+class DailyAttendanceSummary(models.Model):
+    employee_code       = models.CharField(max_length=64, db_index=True)
+    date                = models.DateField(db_index=True)
+
+    # ── Paired-hours mode (anti-coffee-break abuse) ──
+    paired_hours        = models.FloatField(
+        default=0.0,
+        help_text='Sum of completed IN→OUT pair durations (hours). '
+                  'Only changes when a matching OUT punch arrives.',
+    )
+    # ── Legacy elapsed mode ──
+    elapsed_hours       = models.FloatField(
+        default=0.0,
+        help_text='first_in to last_out regardless of interim punches.',
+    )
+    # ── Effective hours used by payroll / reports ──
+    # Set to `paired_hours` or `elapsed_hours` depending on TIMESHEET_HOURS_MODE.
+    # Kept as a separate column so the payroll engine reads one field and the
+    # mode can be changed retroactively by re-running the summary recompute.
+    effective_hours     = models.FloatField(
+        default=0.0,
+        db_index=True,
+        help_text='Hours field consumed by payroll and attendance reports. '
+                  'Equals paired_hours when mode=paired, else elapsed_hours.',
+    )
+
+    first_in            = models.DateTimeField(null=True, blank=True)
+    last_out            = models.DateTimeField(null=True, blank=True)
+
+    punch_count_in      = models.PositiveSmallIntegerField(default=0)
+    punch_count_out     = models.PositiveSmallIntegerField(default=0)
+    paired_segments     = models.PositiveSmallIntegerField(
+        default=0,
+        help_text='Number of matched IN→OUT pairs.',
+    )
+
+    # ── Open-shift tracking ──
+    open_shift          = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text='True when the last IN punch has no matching OUT yet.',
+    )
+    open_shift_since    = models.DateTimeField(
+        null=True, blank=True,
+        help_text='Timestamp of the unmatched IN punch, if open_shift=True.',
+    )
+    open_shift_credited = models.FloatField(
+        default=0.0,
+        help_text='Hours credited for the open shift (capped by TIMESHEET_OPEN_SHIFT_MAX_HOURS).',
+    )
+
+    is_late             = models.BooleanField(default=False)
+    is_full_day         = models.BooleanField(default=False)
+
+    # Audit
+    computed_at         = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('employee_code', 'date')]
+        indexes = [
+            models.Index(fields=['employee_code', '-date'], name='ts_daily_sum_code_date'),
+            models.Index(fields=['-date', 'open_shift'],    name='ts_daily_sum_open'),
+        ]
+        ordering = ['-date', 'employee_code']
+
+    def __str__(self):
+        return f'{self.employee_code} {self.date} {self.effective_hours:.2f}h'

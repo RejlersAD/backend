@@ -18,7 +18,7 @@ from django.db.models import Max, Min, Q
 from django.utils import timezone
 
 from . import config as ts_config
-from .models import TimesheetEvent, BiometricUserMaster
+from .models import TimesheetEvent, BiometricUserMaster, DailyAttendanceSummary
 from .services import (
     _enrich_with_rad_users, _backfill_email_from_matrix_name,
     _hours_between, _is_late, _empty_summary,
@@ -467,6 +467,204 @@ def _resolve_user_aliases_mirror(employee_code: Optional[str],
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Paired-hours engine
+# ─────────────────────────────────────────────────────────────────────────────
+# Soft-coded via TIMESHEET_HOURS_MODE and TIMESHEET_OPEN_SHIFT_MAX_HOURS.
+#
+# Algorithm (mode='paired'):
+#   1. Sort all punches for an employee+day chronologically.
+#   2. Walk through events: an IN punch opens a segment; the next OUT punch
+#      closes it and banks the duration.  Back-to-back INs are collapsed
+#      (only the first one opens the segment).  Orphan OUTs (no preceding IN)
+#      are ignored.
+#   3. A trailing unclosed IN is an "open shift".  It credits
+#      min(elapsed_since_in, open_shift_max_hours) additional hours.
+#   4. Return a result dict consumed by both the daily/monthly reports and
+#      the DailyAttendanceSummary upsert.
+#
+# Mode='elapsed' falls back to first_in→last_out (legacy behaviour).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_HOURS_MODE          = ts_config.RULES.get('hours_mode', 'paired')
+_OPEN_SHIFT_MAX_H    = float(ts_config.RULES.get('open_shift_max_hours', 0.0))
+_FULL_DAY_H          = float(ts_config.RULES.get('full_day_hours', 8.0))
+
+
+def _compute_paired_hours(punches: list[dict], *, now: dt.datetime | None = None) -> dict:
+    """Compute accurate worked hours from a list of punch dicts.
+
+    Each dict must have:
+        event_time  — naive or aware datetime
+        event_type  — 'IN' | 'OUT'
+
+    Returns:
+        paired_hours        — only counted IN→OUT segments
+        elapsed_hours       — first_in to last_out
+        effective_hours     — paired or elapsed per TIMESHEET_HOURS_MODE
+        first_in            — earliest punch time (any type)
+        last_out            — latest punch time (any type)
+        punch_count_in
+        punch_count_out
+        paired_segments     — number of completed IN→OUT pairs
+        open_shift          — bool: unclosed IN remaining
+        open_shift_since    — datetime of the unclosed IN
+        open_shift_credited — hours credited for open shift (capped)
+        segments            — list of {in: dt, out: dt, hours: float}
+    """
+    if not punches:
+        return {
+            'paired_hours': 0.0, 'elapsed_hours': 0.0, 'effective_hours': 0.0,
+            'first_in': None, 'last_out': None,
+            'punch_count_in': 0, 'punch_count_out': 0,
+            'paired_segments': 0, 'open_shift': False,
+            'open_shift_since': None, 'open_shift_credited': 0.0,
+            'segments': [],
+        }
+
+    _now = now or dt.datetime.now()
+    sorted_punches = sorted(punches, key=lambda p: p['event_time'])
+
+    count_in  = sum(1 for p in sorted_punches if str(p.get('event_type', '')).upper() == 'IN')
+    count_out = sum(1 for p in sorted_punches if str(p.get('event_type', '')).upper() == 'OUT')
+    first_time = _to_naive(sorted_punches[0]['event_time'])
+    last_time  = _to_naive(sorted_punches[-1]['event_time'])
+    elapsed    = _hours_between(first_time, last_time)
+
+    if _HOURS_MODE != 'paired':
+        # Legacy elapsed mode: first punch → last punch
+        return {
+            'paired_hours': elapsed, 'elapsed_hours': elapsed, 'effective_hours': elapsed,
+            'first_in': first_time, 'last_out': last_time,
+            'punch_count_in': count_in, 'punch_count_out': count_out,
+            'paired_segments': 0, 'open_shift': False,
+            'open_shift_since': None, 'open_shift_credited': 0.0,
+            'segments': [],
+        }
+
+    # ── Paired mode ──────────────────────────────────────────────────────────
+    segments: list[dict] = []
+    pending_in: dt.datetime | None = None
+    paired_total = 0.0
+
+    for p in sorted_punches:
+        etype = str(p.get('event_type', '')).upper()
+        etime = _to_naive(p['event_time'])
+        if etype == 'IN':
+            if pending_in is None:
+                pending_in = etime  # open a new segment; ignore back-to-back INs
+        elif etype == 'OUT':
+            if pending_in is not None:
+                seg_hours = _hours_between(pending_in, etime)
+                segments.append({'in': pending_in, 'out': etime, 'hours': seg_hours})
+                paired_total += seg_hours
+                pending_in = None
+            # OUT with no preceding IN → skip (stale/duplicate)
+
+    # Handle open shift (trailing unclosed IN)
+    open_shift    = pending_in is not None
+    open_credited = 0.0
+    if open_shift and _OPEN_SHIFT_MAX_H > 0:
+        since_in  = _hours_between(pending_in, _now)
+        open_credited = round(min(since_in, _OPEN_SHIFT_MAX_H), 2)
+
+    paired_total  = round(paired_total + open_credited, 2)
+    effective     = paired_total
+
+    return {
+        'paired_hours':        paired_total,
+        'elapsed_hours':       round(elapsed, 2),
+        'effective_hours':     effective,
+        'first_in':            first_time,
+        'last_out':            last_time,
+        'punch_count_in':      count_in,
+        'punch_count_out':     count_out,
+        'paired_segments':     len(segments),
+        'open_shift':          open_shift,
+        'open_shift_since':    pending_in,
+        'open_shift_credited': open_credited,
+        'segments':            segments,
+    }
+
+
+def _compute_and_save_day(employee_code: str, day: dt.date,
+                          *, name: str = '', email: str = '') -> 'DailyAttendanceSummary | None':
+    """Compute paired hours for `employee_code` on `day` from `TimesheetEvent`
+    and upsert a `DailyAttendanceSummary` row.
+
+    Called:
+      • After every ingest batch (for all affected employee+date combos).
+      • On-demand from daily_report() for the requested day.
+
+    Returns the saved summary object, or None if no events exist for that day.
+    """
+    punches = list(
+        TimesheetEvent.objects
+        .filter(employee_code=employee_code, event_time__date=day)
+        .values('event_time', 'event_type')
+        .order_by('event_time')
+    )
+    if not punches:
+        return None
+
+    result = _compute_paired_hours(punches)
+
+    first_in   = result['first_in']
+    is_late    = _is_late({'punch_time': first_in}) if first_in else False
+    is_full    = result['effective_hours'] >= _FULL_DAY_H
+
+    summary, _ = DailyAttendanceSummary.objects.update_or_create(
+        employee_code=employee_code,
+        date=day,
+        defaults={
+            'paired_hours':        result['paired_hours'],
+            'elapsed_hours':       result['elapsed_hours'],
+            'effective_hours':     result['effective_hours'],
+            'first_in':            first_in,
+            'last_out':            result['last_out'],
+            'punch_count_in':      result['punch_count_in'],
+            'punch_count_out':     result['punch_count_out'],
+            'paired_segments':     result['paired_segments'],
+            'open_shift':          result['open_shift'],
+            'open_shift_since':    result['open_shift_since'],
+            'open_shift_credited': result['open_shift_credited'],
+            'is_late':             is_late,
+            'is_full_day':         is_full,
+        },
+    )
+    return summary
+
+
+def recompute_summaries_for_events(events: list[dict]) -> int:
+    """Bulk-recompute DailyAttendanceSummary for all (employee_code, date)
+    combos touched by a batch of ingest events.
+
+    `events` is a list of dicts with keys ``employee_code`` and
+    ``event_time`` (datetime).  Returns the number of summaries written.
+    """
+    affected: set[tuple[str, dt.date]] = set()
+    for ev in events:
+        code = str(ev.get('employee_code') or '').strip()
+        evt  = ev.get('event_time')
+        if code and evt:
+            try:
+                d = evt.date() if hasattr(evt, 'date') else dt.date.fromisoformat(str(evt)[:10])
+                affected.add((code, d))
+            except (ValueError, AttributeError):
+                pass
+    count = 0
+    for code, day in affected:
+        try:
+            if _compute_and_save_day(code, day):
+                count += 1
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                '[timesheet] summary recompute failed for %s %s: %s', code, day, exc
+            )
+    return count
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Live status — latest punch per user today
 # ─────────────────────────────────────────────────────────────────────────────
 def live_status() -> dict:
@@ -540,46 +738,74 @@ def live_status() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 def daily_report(date: Optional[str] = None) -> dict:
     day = _parse_date(date)
-    qs = (
+
+    # Step 1: get all events for the day, grouped by employee
+    events_qs = list(
         TimesheetEvent.objects
         .filter(event_time__date=day)
-        .values('employee_code')
-        .annotate(first_in=Min('event_time'), last_out=Max('event_time'))
+        .values('employee_code', 'employee_name', 'employee_email', 'department', 'event_time', 'event_type')
+        .order_by('employee_code', 'event_time')
     )
+    if not events_qs:
+        return {'date': day.isoformat(), 'rows': [], 'variant': _VARIANT}
 
-    # Need names/departments — fetch once per employee
-    meta = {
-        e['employee_code']: e
-        for e in TimesheetEvent.objects
-        .filter(event_time__date=day)
-        .values('employee_code', 'employee_name', 'employee_email', 'department')
-        .distinct()
-    }
+    # Group by employee
+    from collections import defaultdict
+    emp_punches: dict[str, list] = defaultdict(list)
+    emp_meta: dict[str, dict] = {}
+    for ev in events_qs:
+        code = ev['employee_code']
+        emp_punches[code].append({'event_time': _to_naive(ev['event_time']), 'event_type': ev['event_type']})
+        # Last write wins for meta (name/email/dept can vary; take latest)
+        emp_meta[code] = {
+            'employee_name':  ev.get('employee_name', ''),
+            'employee_email': ev.get('employee_email') or '',
+            'department':     ev.get('department', ''),
+        }
 
     rows = []
-    for r in qs:
-        m = meta.get(r['employee_code'], {})
-        first_in = _to_naive(r['first_in'])
-        last_out = _to_naive(r['last_out'])
-        hours = _hours_between(first_in, last_out) or 0
+    for code, punches in emp_punches.items():
+        m = emp_meta[code]
+        result = _compute_paired_hours(punches)
+
+        # Upsert DailyAttendanceSummary asynchronously (best-effort)
+        try:
+            _compute_and_save_day(code, day)
+        except Exception:
+            pass
+
         rows.append({
-            'employee_code': r['employee_code'],
-            'email': m.get('employee_email') or None,
-            'name': m.get('employee_name', ''),
-            'employee_name': m.get('employee_name', ''),
-            'department': m.get('department', ''),
-            'first_in': first_in,
-            'last_out': last_out,
-            'hours_worked': hours,
-            'is_late': _is_late({'punch_time': first_in}),
-            'is_full_day': hours >= ts_config.RULES['full_day_hours'],
+            'employee_code':       code,
+            'email':               m['employee_email'] or None,
+            'name':                m['employee_name'],
+            'employee_name':       m['employee_name'],
+            'department':          m['department'],
+            'first_in':            result['first_in'],
+            'last_out':            result['last_out'],
+            'hours_worked':        result['effective_hours'],
+            'paired_hours':        result['paired_hours'],
+            'elapsed_hours':       result['elapsed_hours'],
+            'paired_segments':     result['paired_segments'],
+            'open_shift':          result['open_shift'],
+            'open_shift_since':    result['open_shift_since'].isoformat() if result['open_shift_since'] else None,
+            'open_shift_credited': result['open_shift_credited'],
+            'punch_count_in':      result['punch_count_in'],
+            'punch_count_out':     result['punch_count_out'],
+            'is_late':             _is_late({'punch_time': result['first_in']}),
+            'is_full_day':         result['effective_hours'] >= _FULL_DAY_H,
+            'hours_mode':          _HOURS_MODE,
         })
 
     rows = _enrich_from_user_master_mirror(rows)
     rows = _enrich_with_rad_users(rows)
     rows = _backfill_email_from_matrix_name(rows)
     rows.sort(key=lambda r: r.get('first_in') or dt.datetime.min)
-    return {'date': day.isoformat(), 'rows': rows, 'variant': _VARIANT}
+    return {
+        'date': day.isoformat(),
+        'rows': rows,
+        'variant': _VARIANT,
+        'hours_mode': _HOURS_MODE,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -592,13 +818,34 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
     start, end = _month_range(y, m)
     end_exclusive = end + dt.timedelta(days=1)
 
-    qs = (
+    # ── Read from DailyAttendanceSummary for already-computed days ───────────
+    # For today (and any day without a summary), fall back to on-demand compute.
+    existing_summaries: dict[tuple, DailyAttendanceSummary] = {
+        (s.employee_code, s.date): s
+        for s in DailyAttendanceSummary.objects.filter(date__gte=start, date__lt=end_exclusive)
+    }
+
+    # Determine which employee+day combos have events but no summary yet
+    events_agg = list(
         TimesheetEvent.objects
         .filter(event_time__gte=start, event_time__lt=end_exclusive)
         .values('employee_code', 'event_time__date')
-        .annotate(first_in=Min('event_time'), last_out=Max('event_time'))
+        .distinct()
     )
+    needs_compute = [
+        (r['employee_code'], r['event_time__date'])
+        for r in events_agg
+        if (r['employee_code'], r['event_time__date']) not in existing_summaries
+    ]
+    for code, day in needs_compute:
+        try:
+            s = _compute_and_save_day(code, day)
+            if s:
+                existing_summaries[(code, day)] = s
+        except Exception:
+            pass
 
+    # ── Meta (names / emails / departments) ─────────────────────────────────
     meta = {
         e['employee_code']: e
         for e in TimesheetEvent.objects
@@ -607,39 +854,43 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
         .distinct()
     }
 
+    # ── Build per-employee roll-up from DailyAttendanceSummary ──────────────
     by_emp: dict[str, dict] = {}
-    for r in qs:
-        key = r['employee_code']
-        m_ = meta.get(key, {})
-        slot = by_emp.setdefault(key, {
-            'employee_code': key,
-            'email': m_.get('employee_email') or None,
-            'name': m_.get('employee_name', ''),
+    for (code, day_date), s in existing_summaries.items():
+        m_ = meta.get(code, {})
+        slot = by_emp.setdefault(code, {
+            'employee_code': code,
+            'email':         m_.get('employee_email') or None,
+            'name':          m_.get('employee_name', ''),
             'employee_name': m_.get('employee_name', ''),
-            'department': m_.get('department', ''),
-            'days_present': 0,
-            'full_days': 0,
-            'half_days': 0,
+            'department':    m_.get('department', ''),
+            'days_present':  0,
+            'full_days':     0,
+            'half_days':     0,
             'late_arrivals': 0,
-            'total_hours': 0.0,
-            'days_detail': [],
+            'total_hours':   0.0,
+            'open_shifts':   0,
+            'days_detail':   [],
         })
-        first_in = _to_naive(r['first_in'])
-        last_out = _to_naive(r['last_out'])
-        hours = _hours_between(first_in, last_out) or 0
+        h = s.effective_hours or 0.0
         slot['days_present'] += 1
-        slot['total_hours'] += hours
-        if hours >= ts_config.RULES['full_day_hours']:
+        slot['total_hours']  += h
+        if s.is_full_day:
             slot['full_days'] += 1
         else:
             slot['half_days'] += 1
-        if _is_late({'punch_time': first_in}):
+        if s.is_late:
             slot['late_arrivals'] += 1
+        if s.open_shift:
+            slot['open_shifts'] += 1
         slot['days_detail'].append({
-            'date': str(r['event_time__date']),
-            'first_in': str(first_in) if first_in else None,
-            'last_out': str(last_out) if last_out else None,
-            'hours': round(hours, 2),
+            'date':            str(day_date),
+            'first_in':        s.first_in.isoformat() if s.first_in else None,
+            'last_out':        s.last_out.isoformat() if s.last_out else None,
+            'hours':           round(h, 2),
+            'paired_segments': s.paired_segments,
+            'open_shift':      s.open_shift,
+            'hours_mode':      _HOURS_MODE,
         })
 
     rows = list(by_emp.values())
@@ -660,6 +911,7 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
         'working_days_in_month': _working_days(start, end),
         'rows': rows,
         'variant': _VARIANT,
+        'hours_mode': _HOURS_MODE,
     }
 
 

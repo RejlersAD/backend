@@ -158,12 +158,27 @@ RULES = {
     'full_day_hours':       _env_first_float(['TIMESHEET_FULL_DAY_HOURS',    'TIMESHEET_FULL_DAY'],        8.0),
     'working_days':         _env_csv('TIMESHEET_WORK_DAYS', ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']),
     # Soft-coded rolling time-window for the Live view (mirror mode).
-    # Replaces the strict `event_time__date=today` filter that breaks when the
-    # office timezone (e.g. UAE UTC+4) and the Railway server (UTC) are on
-    # different calendar dates (midnight–04:00 UAE = previous UTC day).
-    # Default 20 h covers one full office day plus a 4-hour UTC buffer.
-    # Increase for offices further from UTC.  Set via TIMESHEET_LIVE_LOOKBACK_HOURS.
     'live_lookback_hours':  _env_int('TIMESHEET_LIVE_LOOKBACK_HOURS', 20),
+
+    # ── Hours calculation mode (mirror mode) ─────────────────────────────────
+    # 'paired'  (default) — only count time between matched IN→OUT punch pairs.
+    #   An employee who checks IN, wanders off without checking OUT, then checks
+    #   IN again later only gets credit for completed IN→OUT segments.
+    #   Eliminates inflated "hours" caused by employees forgetting/skipping
+    #   the exit punch.
+    # 'elapsed' (legacy)  — first_in to last_out regardless of interim punches.
+    #   Use this only if your biometric system emits every IN/OUT correctly.
+    # Override via env: TIMESHEET_HOURS_MODE=elapsed
+    'hours_mode': config('TIMESHEET_HOURS_MODE', default='paired').lower().strip(),
+
+    # Maximum hours credited for an open (unclosed) IN punch.
+    # When an employee has punched IN but not yet OUT:
+    #   0   = do NOT credit any hours until they punch out (default, strictest)
+    #   N   = credit min(elapsed_since_in, N) hours (e.g. 10 = cap at 10 h)
+    # Override via env: TIMESHEET_OPEN_SHIFT_MAX_HOURS=10
+    'open_shift_max_hours': _env_first_float(
+        ['TIMESHEET_OPEN_SHIFT_MAX_HOURS', 'TIMESHEET_OPEN_SHIFT_MAX'], 0.0
+    ),
 }
 
 # UTC offset (hours) of naive datetime strings sent by the office sync agent.

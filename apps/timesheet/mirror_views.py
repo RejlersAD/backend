@@ -181,6 +181,28 @@ def ingest_events(request):
         '[timesheet.ingest] %s in, %s updated, %s skipped, %s errors',
         inserted, updated, skipped, len(errors),
     )
+
+    # ── Recompute DailyAttendanceSummary for all touched employee+date combos ──
+    # Best-effort: failures are logged but never bubble up to the agent.
+    # The summary table is the source of truth for paired-hours; keeping it
+    # in sync here means payroll and self-service always see correct hours
+    # without a separate cron job.
+    if inserted + updated > 0:
+        try:
+            from . import mirror_services as _ms
+            saved_events = [
+                {
+                    'employee_code': str(ev.get('employee_code') or '').strip(),
+                    'event_time':    _parse_event_time(ev.get('event_time')),
+                }
+                for ev in events
+                if ev.get('employee_code') and ev.get('event_time')
+            ]
+            n_summaries = _ms.recompute_summaries_for_events(saved_events)
+            logger.info('[timesheet.ingest] recomputed %s daily summaries', n_summaries)
+        except Exception as exc:
+            logger.warning('[timesheet.ingest] summary recompute failed: %s', exc)
+
     return Response({
         'received': len(events),
         'inserted': inserted,
