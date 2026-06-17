@@ -35,6 +35,12 @@ from .models import (
     LeaveType,
     LeaveRequest,
     LeaveRequestStatus,
+    PublicHoliday,
+    AttendanceOverride,
+    SalaryComponent,
+    EmployeeSalaryStructure,
+    SalaryStructureStatus,
+    SalaryHistory,
 )
 from .serializers import (
     PayrollValidationLogSerializer,
@@ -46,6 +52,11 @@ from .serializers import (
     EmployeeLeaveRecordListSerializer,
     LeaveTypeSerializer,
     LeaveRequestSerializer,
+    PublicHolidaySerializer,
+    AttendanceOverrideSerializer,
+    SalaryComponentSerializer,
+    EmployeeSalaryStructureSerializer,
+    SalaryHistorySerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -518,3 +529,431 @@ def leave_calendar(request):
             cur += _dt.timedelta(days=1)
 
     return Response({'year': year, 'month': month, 'calendar': calendar_data})
+
+
+# =============================================================================
+# Helper: is_hr_manager
+# =============================================================================
+def _is_hr_manager(user) -> bool:
+    """Return True if the user holds an HR Manager (or admin) role.
+
+    Soft-coded role codes live in apps.rbac -- we look for any role whose code
+    starts with 'hr' or equals 'admin'/'superadmin'.  This keeps the check
+    forward-compatible: adding a new HR sub-role in the RBAC admin will
+    automatically grant access here without code changes.
+
+    Falls back to user.is_staff / user.is_superuser so Django admin accounts
+    always retain access even if RBAC is not fully configured.
+    """
+    if user.is_superuser or user.is_staff:
+        return True
+    try:
+        from apps.rbac.models import UserProfile
+        profile = UserProfile.objects.filter(user=user, is_deleted=False).first()
+        if profile and profile.role:
+            code = (profile.role.code or '').lower()
+            return code.startswith('hr') or code in ('admin', 'superadmin', 'manager')
+    except Exception:
+        pass
+    return False
+
+
+# =============================================================================
+# 10. PublicHoliday ViewSet
+# =============================================================================
+
+class PublicHolidayViewSet(viewsets.ModelViewSet):
+    """
+    CRUD for public holidays.
+
+    List/Retrieve: any authenticated user (read-only employees can see the calendar).
+    Create/Update/Deactivate: HR Manager or admin only.
+
+    Soft-coded filter params:
+      ?year=2026          filter by year (default: current year)
+      ?region=AE-AZ       filter by region (default: no filter ? return all)
+      ?active_only=true   return only is_active=True entries (default: true)
+    """
+    serializer_class   = PublicHolidaySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        params   = self.request.query_params
+        year     = int(params.get('year', _dt.datetime.now().year))
+        region   = params.get('region', None)
+        active   = params.get('active_only', 'true').lower() not in ('0', 'false', 'no')
+
+        qs = PublicHoliday.objects.filter(date__year=year)
+        if region:
+            qs = qs.filter(region=region)
+        if active:
+            qs = qs.filter(is_active=True)
+        return qs.order_by('date')
+
+    def perform_create(self, serializer):
+        if not _is_hr_manager(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Only HR Managers can create public holidays.')
+        serializer.save(
+            created_by=self.request.user,
+            updated_by=self.request.user,
+            source='hr_added',
+        )
+
+    def perform_update(self, serializer):
+        if not _is_hr_manager(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Only HR Managers can update public holidays.')
+        serializer.save(updated_by=self.request.user)
+
+    def destroy(self, request, *args, **kwargs):
+        """Override destroy to deactivate instead of hard-delete."""
+        if not _is_hr_manager(request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Only HR Managers can deactivate public holidays.')
+        obj = self.get_object()
+        obj.is_active = False
+        obj.updated_by = request.user
+        obj.save(update_fields=['is_active', 'updated_by', 'updated_at'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# =============================================================================
+# 11. AttendanceOverride ViewSet
+# =============================================================================
+
+class AttendanceOverrideViewSet(viewsets.ModelViewSet):
+    """
+    HR Manager manual corrections for Summary pivot cells.
+
+    List: returns all active overrides for a given month.
+        ?year=2026&month=6     filter by year+month (required for Summary tab)
+        ?employee_code=E001    filter by specific employee
+    Retrieve/Create/Update/Deactivate: HR Manager or admin only.
+    Delete is disabled -- overrides are deactivated (is_active=False) instead.
+
+    The frontend applies overrides by building a lookup dict:
+        { 'E001': { '2026-06-15': { override_hours: 8.0, reason: '...', ... } } }
+    so only ONE override per (employee_code, date) is returned -- the most recent
+    active one.  The endpoint returns flat rows; deduplication is in the frontend.
+    """
+    serializer_class   = AttendanceOverrideSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names  = ['get', 'post', 'patch', 'head', 'options']  # no DELETE
+
+    def get_queryset(self):
+        params        = self.request.query_params
+        year          = params.get('year')
+        month         = params.get('month')
+        employee_code = params.get('employee_code')
+
+        qs = AttendanceOverride.objects.filter(is_active=True)
+        if year and month:
+            qs = qs.filter(date__year=int(year), date__month=int(month))
+        if employee_code:
+            qs = qs.filter(employee_code=employee_code)
+        return qs.order_by('employee_code', 'date')
+
+    def _require_hr(self):
+        if not _is_hr_manager(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Only HR Managers can edit attendance overrides.')
+
+    def perform_create(self, serializer):
+        self._require_hr()
+        # Deactivate any previous override for same (employee_code, date) to
+        # ensure only one active record per cell.
+        employee_code = serializer.validated_data.get('employee_code')
+        date          = serializer.validated_data.get('date')
+        if employee_code and date:
+            AttendanceOverride.objects.filter(
+                employee_code=employee_code,
+                date=date,
+                is_active=True,
+            ).update(is_active=False)
+        serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        self._require_hr()
+        serializer.save()
+
+
+# =============================================================================
+# Salary Management helpers
+# =============================================================================
+
+def _is_senior_hr(user) -> bool:
+    """True for superuser, staff, or roles with senior-level HR access."""
+    if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
+        return True
+    try:
+        roles = user.userprofile.roles.all()
+        for role in roles:
+            code = (role.code or '').lower()
+            if code.startswith('senior_hr') or code in ('admin', 'superadmin', 'manager'):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+# =============================================================================
+# 10. SalaryComponent
+# =============================================================================
+
+class SalaryComponentViewSet(viewsets.ModelViewSet):
+    """
+    HR Managers can create/update component types.
+    Senior HR / Admin can deactivate.
+    Read access for all authenticated users.
+    """
+    serializer_class   = SalaryComponentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = SalaryComponent.objects.all()
+        active_only = self.request.query_params.get('active')
+        if active_only and active_only.lower() == 'true':
+            qs = qs.filter(is_active=True)
+        cat = self.request.query_params.get('category')
+        if cat:
+            qs = qs.filter(category=cat)
+        return qs
+
+    def _require_hr(self):
+        if not _is_hr_manager(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('HR Manager role required.')
+
+    def perform_create(self, serializer):
+        self._require_hr()
+        serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        self._require_hr()
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        """Soft-delete (deactivate) instead of hard delete."""
+        if not _is_senior_hr(request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Senior HR role required to deactivate components.')
+        obj = self.get_object()
+        obj.is_active = False
+        obj.save(update_fields=['is_active'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# =============================================================================
+# 11. EmployeeSalaryStructure
+# =============================================================================
+
+class EmployeeSalaryStructureViewSet(viewsets.ModelViewSet):
+    """
+    Workflow: DRAFT -> PENDING_APPROVAL -> APPROVED | REJECTED
+
+    Endpoints:
+      POST   salary-structures/                   create (HR Manager)
+      PATCH  salary-structures/{id}/              update draft
+      POST   salary-structures/{id}/submit/       submit for approval
+      POST   salary-structures/{id}/approve/      approve (Senior HR)
+      POST   salary-structures/{id}/reject/       reject (Senior HR)
+      GET    salary-structures/pending/           list pending (Senior HR)
+      GET    salary-structures/summary/           one active row per employee
+    """
+    serializer_class   = EmployeeSalaryStructureSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = EmployeeSalaryStructure.objects.all()
+        emp = self.request.query_params.get('employee_code')
+        if emp:
+            qs = qs.filter(employee_code=emp)
+        stat = self.request.query_params.get('status')
+        if stat:
+            qs = qs.filter(status=stat)
+        active = self.request.query_params.get('active')
+        if active and active.lower() == 'true':
+            qs = qs.filter(is_active=True)
+        return qs
+
+    def _require_hr(self):
+        if not _is_hr_manager(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('HR Manager role required.')
+
+    def _require_senior_hr(self):
+        if not _is_senior_hr(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Senior HR role required.')
+
+    def perform_create(self, serializer):
+        self._require_hr()
+        serializer.save(
+            created_by=self.request.user,
+            status=SalaryStructureStatus.DRAFT,
+        )
+
+    def perform_update(self, serializer):
+        self._require_hr()
+        obj = self.get_object()
+        if obj.status not in (SalaryStructureStatus.DRAFT, SalaryStructureStatus.REJECTED):
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError('Only DRAFT or REJECTED structures can be edited.')
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        """Soft-delete (deactivate) — no hard deletes."""
+        self._require_hr()
+        obj = self.get_object()
+        if obj.status == SalaryStructureStatus.APPROVED:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError('Cannot delete an APPROVED salary structure.')
+        obj.is_active = False
+        obj.save(update_fields=['is_active', 'updated_at'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['post'], url_path='submit')
+    def submit(self, request, pk=None):
+        """HR Manager submits draft for approval."""
+        self._require_hr()
+        obj = self.get_object()
+        if obj.status != SalaryStructureStatus.DRAFT:
+            return Response(
+                {'detail': 'Only DRAFT structures can be submitted.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        obj.status       = SalaryStructureStatus.PENDING_APPROVAL
+        obj.submitted_by = request.user
+        obj.submitted_at = timezone.now()
+        obj.save(update_fields=['status', 'submitted_by', 'submitted_at', 'updated_at'])
+        return Response(EmployeeSalaryStructureSerializer(obj).data)
+
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve(self, request, pk=None):
+        """Senior HR approves a pending structure and writes SalaryHistory."""
+        self._require_senior_hr()
+        obj = self.get_object()
+        if obj.status != SalaryStructureStatus.PENDING_APPROVAL:
+            return Response(
+                {'detail': 'Only PENDING_APPROVAL structures can be approved.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Deactivate prior active structure
+        prev_qs = EmployeeSalaryStructure.objects.filter(
+            employee_code=obj.employee_code,
+            is_active=True,
+            status=SalaryStructureStatus.APPROVED,
+        ).exclude(pk=obj.pk)
+        prev = prev_qs.first()
+        previous_basic = prev.basic_salary if prev else None
+        previous_net   = prev.net_salary   if prev else None
+        if prev:
+            prev.is_active     = False
+            prev.superseded_by = obj
+            prev.save(update_fields=['is_active', 'superseded_by', 'updated_at'])
+
+        # Approve current
+        obj.status      = SalaryStructureStatus.APPROVED
+        obj.reviewed_by = request.user
+        obj.reviewed_at = timezone.now()
+        obj.reviewer_note = request.data.get('reviewer_note', '')
+        obj.is_active   = True
+        obj.save(update_fields=[
+            'status', 'reviewed_by', 'reviewed_at', 'reviewer_note',
+            'is_active', 'updated_at',
+        ])
+
+        # Compute change_percent
+        change_pct = None
+        if previous_net and previous_net != 0:
+            change_pct = round(
+                ((obj.net_salary - previous_net) / previous_net) * 100,
+                2,
+            )
+
+        # Write audit history
+        SalaryHistory.objects.create(
+            employee_code  = obj.employee_code,
+            employee_name  = obj.employee_name,
+            change_date    = obj.effective_date,
+            previous_basic = previous_basic,
+            new_basic      = obj.basic_salary,
+            previous_net   = previous_net,
+            new_net        = obj.net_salary,
+            change_percent = change_pct,
+            change_reason  = obj.reviewer_note or 'Salary structure approved',
+            structure      = obj,
+            approved_by    = request.user,
+        )
+
+        return Response(EmployeeSalaryStructureSerializer(obj).data)
+
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject(self, request, pk=None):
+        """Senior HR rejects a pending structure."""
+        self._require_senior_hr()
+        obj = self.get_object()
+        if obj.status != SalaryStructureStatus.PENDING_APPROVAL:
+            return Response(
+                {'detail': 'Only PENDING_APPROVAL structures can be rejected.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        obj.status        = SalaryStructureStatus.REJECTED
+        obj.reviewed_by   = request.user
+        obj.reviewed_at   = timezone.now()
+        obj.reviewer_note = request.data.get('reviewer_note', '')
+        obj.save(update_fields=[
+            'status', 'reviewed_by', 'reviewed_at', 'reviewer_note', 'updated_at',
+        ])
+        return Response(EmployeeSalaryStructureSerializer(obj).data)
+
+    @action(detail=False, methods=['get'], url_path='pending')
+    def pending(self, request):
+        """Return all structures awaiting approval (Senior HR only)."""
+        self._require_senior_hr()
+        qs = EmployeeSalaryStructure.objects.filter(
+            status=SalaryStructureStatus.PENDING_APPROVAL,
+        ).order_by('submitted_at')
+        return Response(EmployeeSalaryStructureSerializer(qs, many=True).data)
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        """
+        Return one active APPROVED structure per employee (current salary).
+        Optionally filter by department.
+        """
+        qs = EmployeeSalaryStructure.objects.filter(
+            is_active=True,
+            status=SalaryStructureStatus.APPROVED,
+        ).order_by('employee_name')
+        dept = request.query_params.get('department')
+        if dept:
+            qs = qs.filter(department__icontains=dept)
+        return Response(EmployeeSalaryStructureSerializer(qs, many=True).data)
+
+
+# =============================================================================
+# 12. SalaryHistory
+# =============================================================================
+
+class SalaryHistoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Read-only. Returns the salary change audit trail.
+    Filter by employee_code or date range.
+    """
+    serializer_class   = SalaryHistorySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs  = SalaryHistory.objects.all()
+        emp = self.request.query_params.get('employee_code')
+        if emp:
+            qs = qs.filter(employee_code=emp)
+        date_from = self.request.query_params.get('date_from')
+        date_to   = self.request.query_params.get('date_to')
+        if date_from:
+            qs = qs.filter(change_date__gte=date_from)
+        if date_to:
+            qs = qs.filter(change_date__lte=date_to)
+        return qs

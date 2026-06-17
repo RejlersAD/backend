@@ -23,9 +23,13 @@ urlpatterns = [
     path('lookup-debug/',          views.lookup_debug,     name='lookup-debug'),
 
     # Exports
-    path('export/daily/',          views.export_daily_excel,   name='export-daily'),
-    path('export/monthly/',        views.export_monthly_excel, name='export-monthly'),
-    path('export/monthly/pdf/',    views.export_monthly_pdf,   name='export-monthly-pdf'),
+    path('export/daily/',          views.export_daily_excel,    name='export-daily'),
+    path('export/monthly/',        views.export_monthly_excel,  name='export-monthly'),
+    path('export/monthly/pdf/',    views.export_monthly_pdf,    name='export-monthly-pdf'),
+    path('export/summary/',        views.export_summary_excel,  name='export-summary'),
+    path('export/summary/pdf/',    views.export_summary_pdf,    name='export-summary-pdf'),
+    path('export/yearly/',         views.export_yearly_excel,   name='export-yearly'),
+    path('export/yearly/pdf/',     views.export_yearly_pdf,     name='export-yearly-pdf'),
 
     # Mirror ingest — office-side sync agent POSTs batched events here.
     # Auth via X-Timesheet-Mirror-Key header (TIMESHEET_MIRROR_API_KEY env var).

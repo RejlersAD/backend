@@ -541,3 +541,368 @@ class LeaveRequest(models.Model):
                 cur += _dt.timedelta(days=1)
             self.days_requested = Decimal(str(days))
         super().save(*args, **kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PublicHoliday — Abu Dhabi / UAE calendar (editable by HR Manager)
+# ─────────────────────────────────────────────────────────────────────────────
+# Soft-coded region choices — add new regions without migrations (label-only).
+REGION_CHOICES = [
+    ('AE-AZ', 'Abu Dhabi (UAE)'),
+    ('AE',    'UAE-wide'),
+    ('SA',    'Saudi Arabia'),
+    ('QA',    'Qatar'),
+    ('KW',    'Kuwait'),
+    ('BH',    'Bahrain'),
+    ('OM',    'Oman'),
+    ('COMPANY', 'Company-specific'),
+]
+
+# Source choices — whether the holiday was seeded from official calendar or
+# added manually by HR (important for audit trail).
+HOLIDAY_SOURCE_CHOICES = [
+    ('government',  'Abu Dhabi Government Official Calendar'),
+    ('hr_added',    'Added by HR Manager'),
+]
+
+
+class PublicHoliday(models.Model):
+    """
+    Public holiday calendar entry.
+
+    Seeded with official Abu Dhabi / UAE government holidays for the current
+    and next year.  HR Managers can add, edit, and deactivate individual entries
+    without affecting the seed data (which is re-applied only when the `seed`
+    management command is run with `--force`).
+
+    Displayed on the Summary tab as a colour-coded column overlay so that
+    HR can see at a glance why an employee shows absent on a given day.
+    """
+    date        = models.DateField(db_index=True)
+    name        = models.CharField(
+        max_length=255,
+        help_text='Official name in English, e.g. "UAE National Day".',
+    )
+    name_ar     = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text='Arabic name (optional — for display purposes only).',
+    )
+    region      = models.CharField(
+        max_length=20,
+        choices=REGION_CHOICES,
+        default='AE-AZ',
+        db_index=True,
+        help_text='Geographic scope of this holiday.',
+    )
+    source      = models.CharField(
+        max_length=20,
+        choices=HOLIDAY_SOURCE_CHOICES,
+        default='government',
+        help_text='Whether this entry came from the official calendar or was added by HR.',
+    )
+    # HR-editable note — does not affect logic
+    note        = models.TextField(
+        blank=True,
+        help_text='HR note, e.g. confirmed date, subject to moon sighting, etc.',
+    )
+    is_active   = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text='Deactivate without deleting — keeps audit trail intact.',
+    )
+    created_by  = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_holidays',
+    )
+    updated_by  = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='updated_holidays',
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table   = 'payroll_public_holiday'
+        ordering   = ['date']
+        unique_together = [('date', 'region')]
+        indexes = [
+            models.Index(fields=['date', 'is_active'], name='payroll_ph_date_active_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.date}  {self.name} [{self.region}]'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AttendanceOverride — HR Manager manual correction of a single day cell
+# ─────────────────────────────────────────────────────────────────────────────
+# Reason choices — why the biometric value is being overridden.
+OVERRIDE_REASON_CHOICES = [
+    ('biometric_error',   'Biometric device error'),
+    ('system_outage',     'System / network outage'),
+    ('forgot_punch',      'Employee forgot to punch'),
+    ('site_visit',        'On-site client visit (no biometric access)'),
+    ('wfh',               'Work from home (WFH approved)'),
+    ('travel',            'Business travel'),
+    ('training',          'Approved external training'),
+    ('hr_correction',     'HR administrative correction'),
+    ('other',             'Other (see note)'),
+]
+
+
+class AttendanceOverride(models.Model):
+    """
+    HR Manager manual override for a single employee × date attendance record.
+
+    When a cell in the Summary pivot table has an incorrect biometric value
+    (device error, forgotten punch, WFH day, site visit, etc.) HR can record
+    the corrected hours and reason here.
+
+    The frontend overlay logic: if an override exists for (employee_code, date),
+    display the override_hours instead of the biometric value, and show a
+    visual indicator (pencil icon) so the correction is transparent.
+
+    Overrides are NEVER deleted — they are deactivated to maintain an audit
+    trail.  The `is_active` flag controls which override is currently applied;
+    only the most-recent active record for a given (employee_code, date) is used.
+    """
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee_code = models.CharField(max_length=30, db_index=True)
+    employee_name = models.CharField(max_length=255, blank=True)
+    date          = models.DateField(db_index=True)
+
+    # Original biometric value at the time of override (stored for audit).
+    original_hours = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text='Biometric hours recorded before this correction.',
+    )
+    # HR-corrected value.
+    override_hours = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        help_text='Corrected hours to display instead of the biometric value.',
+    )
+    reason        = models.CharField(
+        max_length=30,
+        choices=OVERRIDE_REASON_CHOICES,
+        default='hr_correction',
+    )
+    note          = models.TextField(
+        blank=True,
+        help_text='Free-text HR note explaining the correction.',
+    )
+    is_active     = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text='Only the most-recent active override for a given (employee_code, date) is applied.',
+    )
+    created_by    = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='attendance_overrides_created',
+    )
+    created_at    = models.DateTimeField(auto_now_add=True)
+    updated_at    = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'payroll_attendance_override'
+        ordering = ['-created_at']
+        indexes  = [
+            models.Index(
+                fields=['employee_code', 'date', 'is_active'],
+                name='payroll_ao_cd_active_idx',
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f'{self.employee_name or self.employee_code}  '
+            f'{self.date}  {self.original_hours}->{self.override_hours}h'
+        )
+
+
+# =============================================================================
+# Salary Management -- TextChoices
+# =============================================================================
+
+class SalaryComponentCategory(models.TextChoices):
+    ALLOWANCE = 'allowance', 'Allowance'
+    DEDUCTION = 'deduction', 'Deduction'
+    GROSS     = 'gross',     'Gross Component'
+
+
+class SalaryStructureStatus(models.TextChoices):
+    DRAFT            = 'DRAFT',            'Draft'
+    PENDING_APPROVAL = 'PENDING_APPROVAL', 'Pending Approval'
+    APPROVED         = 'APPROVED',         'Approved'
+    REJECTED         = 'REJECTED',         'Rejected'
+
+
+CURRENCY_SALARY_CHOICES = [
+    ('AED', 'UAE Dirham (AED)'),
+    ('USD', 'US Dollar (USD)'),
+    ('EUR', 'Euro (EUR)'),
+    ('SAR', 'Saudi Riyal (SAR)'),
+    ('GBP', 'British Pound (GBP)'),
+    ('INR', 'Indian Rupee (INR)'),
+]
+
+
+# =============================================================================
+# 12. SalaryComponent -- master catalogue of reusable salary components
+# =============================================================================
+
+class SalaryComponent(models.Model):
+    id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code        = models.CharField(max_length=30, unique=True, db_index=True)
+    name        = models.CharField(max_length=100)
+    category    = models.CharField(
+        max_length=20,
+        choices=SalaryComponentCategory.choices,
+        default=SalaryComponentCategory.ALLOWANCE,
+    )
+    is_taxable  = models.BooleanField(default=False)
+    description = models.TextField(blank=True)
+    is_active   = models.BooleanField(default=True)
+    created_by  = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='created_salary_components',
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'payroll_salary_component'
+        ordering = ['category', 'code']
+
+    def __str__(self):
+        return f'{self.code} -- {self.name} ({self.category})'
+
+
+# =============================================================================
+# 13. EmployeeSalaryStructure -- per-employee salary with approval workflow
+# =============================================================================
+
+class EmployeeSalaryStructure(models.Model):
+    """
+    DRAFT -> PENDING_APPROVAL -> APPROVED | REJECTED
+
+    components: [{"code":"HRA","name":"Housing Allowance","category":"allowance","amount":"3000.00"}]
+    Approval auto-deactivates the prior active structure and writes a SalaryHistory row.
+    """
+    id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee_code    = models.CharField(max_length=30, db_index=True)
+    employee_name    = models.CharField(max_length=255, db_index=True)
+    department       = models.CharField(max_length=100, blank=True)
+    effective_date   = models.DateField()
+    currency         = models.CharField(max_length=3, choices=CURRENCY_SALARY_CHOICES, default='AED')
+    basic_salary     = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    components       = models.JSONField(default=list, blank=True)
+    total_gross      = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    total_deductions = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    net_salary       = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    status           = models.CharField(
+        max_length=20, choices=SalaryStructureStatus.choices,
+        default=SalaryStructureStatus.DRAFT, db_index=True,
+    )
+    submitted_by     = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='submitted_salary_structures',
+    )
+    submitted_at     = models.DateTimeField(null=True, blank=True)
+    reviewed_by      = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='reviewed_salary_structures',
+    )
+    reviewed_at      = models.DateTimeField(null=True, blank=True)
+    reviewer_note    = models.TextField(blank=True)
+    is_active        = models.BooleanField(default=True, db_index=True)
+    superseded_by    = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='supersedes',
+    )
+    created_by       = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='created_salary_structures',
+    )
+    created_at       = models.DateTimeField(auto_now_add=True)
+    updated_at       = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'payroll_salary_structure'
+        ordering = ['-effective_date', '-created_at']
+        indexes  = [
+            models.Index(fields=['employee_code', 'status'],    name='payroll_ss_code_status'),
+            models.Index(fields=['employee_code', 'is_active'], name='payroll_ss_code_active'),
+        ]
+
+    def _recompute_totals(self):
+        gross      = Decimal(str(self.basic_salary or 0))
+        deductions = Decimal('0')
+        for c in (self.components or []):
+            amt = Decimal(str(c.get('amount', 0) or 0))
+            cat = c.get('category', '')
+            if cat in ('allowance', 'gross'):
+                gross += amt
+            elif cat == 'deduction':
+                deductions += amt
+        self.total_gross      = gross
+        self.total_deductions = deductions
+        self.net_salary       = gross - deductions
+
+    def save(self, *args, **kwargs):
+        self._recompute_totals()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f'{self.employee_name} ({self.employee_code}) eff {self.effective_date} [{self.status}]'
+
+
+# =============================================================================
+# 14. SalaryHistory -- immutable audit trail of every approval
+# =============================================================================
+
+class SalaryHistory(models.Model):
+    id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee_code  = models.CharField(max_length=30, db_index=True)
+    employee_name  = models.CharField(max_length=255)
+    change_date    = models.DateField()
+    previous_basic = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    new_basic      = models.DecimalField(max_digits=14, decimal_places=2)
+    previous_net   = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    new_net        = models.DecimalField(max_digits=14, decimal_places=2)
+    change_percent = models.DecimalField(max_digits=7, decimal_places=2, null=True, blank=True)
+    change_reason  = models.TextField(blank=True)
+    structure      = models.ForeignKey(
+        EmployeeSalaryStructure,
+        on_delete=models.CASCADE,
+        related_name='history_entries',
+    )
+    approved_by    = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='approved_salary_histories',
+    )
+    created_at     = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'payroll_salary_history'
+        ordering = ['-change_date', '-created_at']
+        indexes  = [
+            models.Index(fields=['employee_code', 'change_date'], name='payroll_sh_code_date'),
+        ]
+
+    def __str__(self):
+        return f'{self.employee_name} ({self.employee_code}) {self.change_date} net {self.previous_net}->{self.new_net}'
+

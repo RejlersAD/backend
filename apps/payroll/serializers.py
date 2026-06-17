@@ -10,6 +10,11 @@ from .models import (
     ProjectCostAllocation,
     AIInsightSnapshot,
     ChatbotMessage,
+    PublicHoliday,
+    AttendanceOverride,
+    SalaryComponent,
+    EmployeeSalaryStructure,
+    SalaryHistory,
 )
 
 User = get_user_model()
@@ -208,4 +213,228 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
                 f'{obj.reviewed_by.first_name} {obj.reviewed_by.last_name}'.strip()
                 or obj.reviewed_by.email
             )
+        return None
+
+
+# ---------------------------------------------------------------------------
+# PublicHoliday
+# ---------------------------------------------------------------------------
+
+class PublicHolidaySerializer(serializers.ModelSerializer):
+    """Full read/write serializer for PublicHoliday.
+
+    HR Managers can create, update, and deactivate holidays.
+    The created_by and updated_by fields are set automatically in the
+    ViewSet perform_create / perform_update hooks -- never accepted from the
+    request body (prevents spoofing).
+    """
+    created_by_name = serializers.SerializerMethodField(read_only=True)
+    updated_by_name = serializers.SerializerMethodField(read_only=True)
+    region_display  = serializers.CharField(source='get_region_display', read_only=True)
+    source_display  = serializers.CharField(source='get_source_display', read_only=True)
+
+    class Meta:
+        model  = PublicHoliday
+        fields = [
+            'id', 'date', 'name', 'name_ar', 'region', 'region_display',
+            'source', 'source_display', 'note', 'is_active',
+            'created_by', 'created_by_name', 'updated_by', 'updated_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'created_by', 'updated_by']
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return f'{obj.created_by.first_name} {obj.created_by.last_name}'.strip() or obj.created_by.email
+        return None
+
+    def get_updated_by_name(self, obj):
+        if obj.updated_by:
+            return f'{obj.updated_by.first_name} {obj.updated_by.last_name}'.strip() or obj.updated_by.email
+        return None
+
+
+# ---------------------------------------------------------------------------
+# AttendanceOverride
+# ---------------------------------------------------------------------------
+
+class AttendanceOverrideSerializer(serializers.ModelSerializer):
+    """Full read/write serializer for AttendanceOverride.
+
+    created_by is stamped automatically in the ViewSet -- never accepted
+    from the client.  is_active defaults to True and can only be set to
+    False (deactivation); deletion is intentionally not supported.
+    """
+    created_by_name = serializers.SerializerMethodField(read_only=True)
+    reason_display  = serializers.CharField(source='get_reason_display', read_only=True)
+
+    class Meta:
+        model  = AttendanceOverride
+        fields = [
+            'id', 'employee_code', 'employee_name', 'date',
+            'original_hours', 'override_hours',
+            'reason', 'reason_display', 'note', 'is_active',
+            'created_by', 'created_by_name', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'created_by']
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return f'{obj.created_by.first_name} {obj.created_by.last_name}'.strip() or obj.created_by.email
+        return None
+
+# -----------------------------------------------------------------------------
+# PublicHoliday
+# -----------------------------------------------------------------------------
+
+class PublicHolidaySerializer(serializers.ModelSerializer):
+    """Full read/write serializer for PublicHoliday.
+
+    HR Managers can create, update, and deactivate holidays.
+    The `created_by` and `updated_by` fields are set automatically in the
+    ViewSet's perform_create / perform_update hooks � never accepted from the
+    request body (prevents spoofing).
+    """
+    created_by_name = serializers.SerializerMethodField(read_only=True)
+    updated_by_name = serializers.SerializerMethodField(read_only=True)
+    region_display  = serializers.CharField(source='get_region_display', read_only=True)
+    source_display  = serializers.CharField(source='get_source_display', read_only=True)
+
+    class Meta:
+        model  = PublicHoliday
+        fields = [
+            'id', 'date', 'name', 'name_ar', 'region', 'region_display',
+            'source', 'source_display', 'note', 'is_active',
+            'created_by', 'created_by_name', 'updated_by', 'updated_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'created_by', 'updated_by']
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return f'{obj.created_by.first_name} {obj.created_by.last_name}'.strip() or obj.created_by.email
+        return None
+
+    def get_updated_by_name(self, obj):
+        if obj.updated_by:
+            return f'{obj.updated_by.first_name} {obj.updated_by.last_name}'.strip() or obj.updated_by.email
+        return None
+
+
+# -----------------------------------------------------------------------------
+# SalaryComponent
+# -----------------------------------------------------------------------------
+
+class SalaryComponentSerializer(serializers.ModelSerializer):
+    created_by_name  = serializers.SerializerMethodField(read_only=True)
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+
+    class Meta:
+        model  = SalaryComponent
+        fields = [
+            'id', 'code', 'name', 'category', 'category_display',
+            'is_taxable', 'description', 'is_active',
+            'created_by', 'created_by_name', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'created_by']
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return f'{obj.created_by.first_name} {obj.created_by.last_name}'.strip() or obj.created_by.email
+        return None
+
+
+# -----------------------------------------------------------------------------
+# EmployeeSalaryStructure
+# -----------------------------------------------------------------------------
+
+class EmployeeSalaryStructureSerializer(serializers.ModelSerializer):
+    status_display    = serializers.CharField(source='get_status_display', read_only=True)
+    currency_display  = serializers.CharField(source='get_currency_display', read_only=True)
+    created_by_name   = serializers.SerializerMethodField(read_only=True)
+    submitted_by_name = serializers.SerializerMethodField(read_only=True)
+    reviewed_by_name  = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model  = EmployeeSalaryStructure
+        fields = [
+            'id', 'employee_code', 'employee_name', 'department',
+            'effective_date', 'currency', 'currency_display',
+            'basic_salary', 'components',
+            'total_gross', 'total_deductions', 'net_salary',
+            'status', 'status_display',
+            'submitted_by', 'submitted_by_name', 'submitted_at',
+            'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'reviewer_note',
+            'is_active', 'superseded_by',
+            'created_by', 'created_by_name', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'total_gross', 'total_deductions', 'net_salary',
+            'submitted_by', 'submitted_at',
+            'reviewed_by', 'reviewed_at',
+            'created_by', 'created_at', 'updated_at',
+        ]
+
+    def _user_name(self, user):
+        if not user:
+            return None
+        return f'{user.first_name} {user.last_name}'.strip() or user.email
+
+    def get_created_by_name(self, obj):
+        return self._user_name(obj.created_by)
+
+    def get_submitted_by_name(self, obj):
+        return self._user_name(obj.submitted_by)
+
+    def get_reviewed_by_name(self, obj):
+        return self._user_name(obj.reviewed_by)
+
+
+# -----------------------------------------------------------------------------
+# SalaryHistory
+# -----------------------------------------------------------------------------
+
+class SalaryHistorySerializer(serializers.ModelSerializer):
+    approved_by_name = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model  = SalaryHistory
+        fields = [
+            'id', 'employee_code', 'employee_name', 'change_date',
+            'previous_basic', 'new_basic',
+            'previous_net', 'new_net', 'change_percent',
+            'change_reason',
+            'structure', 'approved_by', 'approved_by_name',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+    def get_approved_by_name(self, obj):
+        if obj.approved_by:
+            return f'{obj.approved_by.first_name} {obj.approved_by.last_name}'.strip() or obj.approved_by.email
+        return None
+
+class AttendanceOverrideSerializer(serializers.ModelSerializer):
+    """Full read/write serializer for AttendanceOverride.
+
+    `created_by` is stamped automatically in the ViewSet � never accepted
+    from the client.  `is_active` defaults to True and can only be set to
+    False (deactivation); deletion is intentionally not supported.
+    """
+    created_by_name = serializers.SerializerMethodField(read_only=True)
+    reason_display  = serializers.CharField(source='get_reason_display', read_only=True)
+
+    class Meta:
+        model  = AttendanceOverride
+        fields = [
+            'id', 'employee_code', 'employee_name', 'date',
+            'original_hours', 'override_hours',
+            'reason', 'reason_display', 'note', 'is_active',
+            'created_by', 'created_by_name', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'created_by']
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return f'{obj.created_by.first_name} {obj.created_by.last_name}'.strip() or obj.created_by.email
         return None

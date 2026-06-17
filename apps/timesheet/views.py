@@ -467,6 +467,66 @@ def export_monthly_pdf(request):
         return _error_response(exc)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_summary_excel(request):
+    """Summary pivot (employee x day grid) as Excel — mirrors the HR Summary tab."""
+    if not ts_config.is_configured():
+        return Response({'error': 'Time sheet not configured'},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    y = request.GET.get('year')
+    m = request.GET.get('month')
+    try:
+        return ts_exports.export_summary_excel(int(y) if y else None,
+                                               int(m) if m else None)
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_summary_pdf(request):
+    """Summary roll-up PDF for the selected month."""
+    if not ts_config.is_configured():
+        return Response({'error': 'Time sheet not configured'},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    y = request.GET.get('year')
+    m = request.GET.get('month')
+    try:
+        return ts_exports.export_summary_pdf(int(y) if y else None,
+                                             int(m) if m else None)
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_yearly_excel(request):
+    """Full-year Excel: one sheet per month + a 12-month summary sheet."""
+    if not ts_config.is_configured():
+        return Response({'error': 'Time sheet not configured'},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    y = request.GET.get('year')
+    try:
+        return ts_exports.export_yearly_excel(int(y) if y else None)
+    except Exception as exc:
+        return _error_response(exc)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_yearly_pdf(request):
+    """Full-year 12-month summary PDF."""
+    if not ts_config.is_configured():
+        return Response({'error': 'Time sheet not configured'},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    y = request.GET.get('year')
+    try:
+        return ts_exports.export_yearly_pdf(int(y) if y else None)
+    except Exception as exc:
+        return _error_response(exc)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 def _error_response(exc: Exception):
     # Connection or missing-driver errors mean the on-prem SQL Server is not

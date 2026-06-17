@@ -16,19 +16,29 @@ from .views import (
     LeaveRequestViewSet,
     leave_calendar,
     branch_employee_codes,
+    PublicHolidayViewSet,
+    AttendanceOverrideViewSet,
+    SalaryComponentViewSet,
+    EmployeeSalaryStructureViewSet,
+    SalaryHistoryViewSet,
 )
 
 app_name = 'payroll'
 
 router = DefaultRouter()
-router.register(r'validation-logs',    PayrollValidationLogViewSet,   basename='validation-log')
-router.register(r'audit-alerts',       PayrollAuditAlertViewSet,      basename='audit-alert')
-router.register(r'project-costs',      ProjectCostAllocationViewSet,  basename='project-cost')
-router.register(r'ai-insights',        AIInsightSnapshotViewSet,      basename='ai-insight')
-router.register(r'chatbot-messages',   ChatbotMessageViewSet,         basename='chatbot-message')
-router.register(r'leave-records',      EmployeeLeaveRecordViewSet,    basename='leave-record')
-router.register(r'leave-types',        LeaveTypeViewSet,              basename='leave-type')
-router.register(r'leave-requests',     LeaveRequestViewSet,           basename='leave-request')
+router.register(r'validation-logs',       PayrollValidationLogViewSet,    basename='validation-log')
+router.register(r'audit-alerts',          PayrollAuditAlertViewSet,       basename='audit-alert')
+router.register(r'project-costs',         ProjectCostAllocationViewSet,   basename='project-cost')
+router.register(r'ai-insights',           AIInsightSnapshotViewSet,       basename='ai-insight')
+router.register(r'chatbot-messages',      ChatbotMessageViewSet,          basename='chatbot-message')
+router.register(r'leave-records',         EmployeeLeaveRecordViewSet,     basename='leave-record')
+router.register(r'leave-types',           LeaveTypeViewSet,               basename='leave-type')
+router.register(r'leave-requests',        LeaveRequestViewSet,            basename='leave-request')
+router.register(r'public-holidays',       PublicHolidayViewSet,              basename='public-holiday')
+router.register(r'attendance-overrides',  AttendanceOverrideViewSet,         basename='attendance-override')
+router.register(r'salary-components',     SalaryComponentViewSet,            basename='salary-component')
+router.register(r'salary-structures',     EmployeeSalaryStructureViewSet,    basename='salary-structure')
+router.register(r'salary-history',        SalaryHistoryViewSet,              basename='salary-history')
 
 urlpatterns = [
     path('dashboard-summary/',       PayrollDashboardSummaryView.as_view(), name='dashboard-summary'),
