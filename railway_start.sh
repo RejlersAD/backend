@@ -104,15 +104,37 @@ fi
 
 echo "🚀 Starting Gunicorn server..."
 echo "================================"
+echo "Workers    : ${GUNICORN_WORKERS:-2}"
+echo "Threads    : ${GUNICORN_THREADS:-4}"
+echo "Worker cls : ${GUNICORN_WORKER_CLASS:-gthread}"
+echo "Timeout    : ${GUNICORN_TIMEOUT:-120}s"
+echo "Keep-alive : ${GUNICORN_KEEPALIVE:-75}s"
+echo "================================"
 
+# SOFT-CODED: All Gunicorn tunables are controlled by Railway env vars.
+#   GUNICORN_WORKERS        — number of worker processes (default: 2)
+#                             On Railway Hobby (512 MB RAM) 2 is the sweet spot.
+#                             Increase to 4 on Pro plan if memory allows.
+#   GUNICORN_THREADS        — threads per worker (default: 4, requires gthread)
+#                             2 workers × 4 threads = 8 concurrent connections.
+#   GUNICORN_WORKER_CLASS   — worker type (default: gthread)
+#                             'gthread' is required for --threads > 1.
+#                             'sync' workers are single-threaded — login timeouts
+#                             happen when the single slot is occupied.
+#   GUNICORN_TIMEOUT        — request timeout in seconds (default: 120)
+#   GUNICORN_KEEPALIVE      — TCP keep-alive seconds (default: 75)
+#                             Must be > Railway load balancer idle timeout (60s)
+#                             to prevent ECONNRESET mid-request.
 exec gunicorn config.wsgi:application \
-    --bind 0.0.0.0:${PORT:-8000} \
-    --workers 1 \
-    --threads 2 \
-    --worker-class sync \
-    --timeout 120 \
-    --graceful-timeout 30 \
-    --keep-alive 5 \
+    --bind "0.0.0.0:${PORT:-8000}" \
+    --workers "${GUNICORN_WORKERS:-2}" \
+    --threads "${GUNICORN_THREADS:-4}" \
+    --worker-class "${GUNICORN_WORKER_CLASS:-gthread}" \
+    --timeout "${GUNICORN_TIMEOUT:-120}" \
+    --graceful-timeout "${GUNICORN_GRACEFUL_TIMEOUT:-30}" \
+    --keep-alive "${GUNICORN_KEEPALIVE:-75}" \
+    --max-requests "${GUNICORN_MAX_REQUESTS:-500}" \
+    --max-requests-jitter "${GUNICORN_MAX_REQUESTS_JITTER:-50}" \
     --log-file - \
     --access-logfile - \
     --error-logfile - \
