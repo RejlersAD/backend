@@ -800,9 +800,11 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
         raw = rows_to_dicts(cur, cur.fetchall())
 
     # Roll up per employee
+    # Soft-coded: strip whitespace from employee_code so the same employee
+    # stored as '22393', '22393 ', ' 22393' all collapse to one row.
     by_emp: dict[str, dict] = {}
     for r in raw:
-        key = str(r.get('employee_code') or '')
+        key = str(r.get('employee_code') or '').strip()  # <- dedup key
         slot = by_emp.setdefault(key, {
             'employee_code': key,
             'email': r.get('email'),

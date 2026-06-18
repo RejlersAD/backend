@@ -199,6 +199,26 @@ UI = {
     'polling_seconds': _env_int('TIMESHEET_POLL_SEC', 30),
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Export deduplication — removes duplicate employee_code rows from reports.
+#
+# Root cause: the biometric source can send the same employee under slightly
+# different code strings (e.g. '22393', '22393 ', ' 22393') due to device or
+# agent inconsistencies. Each variant creates a separate DB entry and then
+# shows as a separate row in Excel / PDF.
+#
+# TIMESHEET_EXPORT_DEDUP  (default: true) — master toggle for dedup in exports.
+# When true, rows are normalised (strip whitespace) and merged before writing.
+# Disable only if you deliberately need raw (un-merged) rows for diagnostics.
+#
+# TIMESHEET_EXPORT_DEDUP_NORM  (default: 'strip') — normalisation applied to
+# employee_code before grouping.  Only 'strip' is supported now; future values
+# could add 'upper' or 'zfill_6' for systems with zero-padded codes.
+# ─────────────────────────────────────────────────────────────────────────────
+EXPORT_DEDUP = config('TIMESHEET_EXPORT_DEDUP', default='true').lower() in ('1', 'true', 'yes', 'on')
+EXPORT_DEDUP_NORM = config('TIMESHEET_EXPORT_DEDUP_NORM', default='strip').lower().strip()
+
+
 # Soft-coded biometric user-details enrichment.
 # Pulls the configured columns (default Card1) from the Matrix user-details
 # view and joins them onto attendance rows by UserID. Disable by setting

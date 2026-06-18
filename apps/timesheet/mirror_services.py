@@ -855,11 +855,14 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
     }
 
     # ── Build per-employee roll-up from DailyAttendanceSummary ──────────────
+    # Soft-coded: normalise employee_code (strip whitespace) so that the same
+    # employee stored under '22393', '22393 ', and ' 22393' all map to one row.
     by_emp: dict[str, dict] = {}
     for (code, day_date), s in existing_summaries.items():
-        m_ = meta.get(code, {})
-        slot = by_emp.setdefault(code, {
-            'employee_code': code,
+        norm_code = str(code or '').strip()   # <- dedup key
+        m_ = meta.get(code, {}) or meta.get(norm_code, {})
+        slot = by_emp.setdefault(norm_norm_code, {
+            'employee_code': norm_code,   # store the normalised code
             'email':         m_.get('employee_email') or None,
             'name':          m_.get('employee_name', ''),
             'employee_name': m_.get('employee_name', ''),

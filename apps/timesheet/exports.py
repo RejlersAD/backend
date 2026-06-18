@@ -26,6 +26,80 @@ def _svc():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Deduplication helper
+# ─────────────────────────────────────────────────────────────────────────────
+def _norm_code(code: str) -> str:
+    """Normalise an employee_code for deduplication.
+
+    Soft-coded via ts_config.EXPORT_DEDUP_NORM.  Currently only 'strip' is
+    supported; adding 'upper' or 'zfill_6' here does not require changes in
+    callers.
+    """
+    s = str(code or '').strip()
+    if ts_config.EXPORT_DEDUP_NORM == 'upper':
+        return s.upper()
+    return s   # default: strip only
+
+
+def _dedup_rows(rows: list[dict]) -> list[dict]:
+    """Merge rows that share the same normalised employee_code.
+
+    Root cause guarded: the biometric source can emit the same employee as
+    '22393', '22393 ' (trailing space) and ' 22393' (leading space).  Each
+    variant creates a separate DB entry and — without this guard — a separate
+    row in every Excel / PDF export.
+
+    When ts_config.EXPORT_DEDUP is False the list is returned unchanged so a
+    developer can inspect raw (un-merged) rows for diagnostics.
+    """
+    if not ts_config.EXPORT_DEDUP or not rows:
+        return rows
+
+    seen: dict[str, dict] = {}
+    for r in rows:
+        key = _norm_code(r.get('employee_code', ''))
+        if key not in seen:
+            # First occurrence — clone the row and store the normalised code.
+            seen[key] = dict(r)
+            seen[key]['employee_code'] = key
+            # Ensure days_detail is a mutable list (might be None from DB).
+            seen[key]['days_detail'] = list(r.get('days_detail') or [])
+        else:
+            # Merge duplicate into the canonical row.
+            canonical = seen[key]
+            # Prefer the row that has a resolved RAD AI name.
+            if r.get('radai_full_name') and not canonical.get('radai_full_name'):
+                for field in ('radai_full_name', 'radai_email', 'radai_department',
+                              'radai_user_id', 'radai_job_title', 'matched_by'):
+                    if r.get(field):
+                        canonical[field] = r[field]
+            # Accumulate numeric attendance counters.
+            for num_field in ('days_present', 'full_days', 'half_days',
+                              'late_arrivals', 'open_shifts', 'total_hours'):
+                canonical[num_field] = (canonical.get(num_field) or 0) + (r.get(num_field) or 0)
+            # Merge days_detail — keep at most one entry per date (highest hours wins).
+            detail_by_date: dict[str, dict] = {
+                d['date']: d for d in canonical['days_detail'] if d.get('date')
+            }
+            for d in (r.get('days_detail') or []):
+                date_key = d.get('date')
+                if not date_key:
+                    continue
+                existing = detail_by_date.get(date_key)
+                if existing is None or (d.get('hours') or 0) > (existing.get('hours') or 0):
+                    detail_by_date[date_key] = d
+            canonical['days_detail'] = sorted(detail_by_date.values(), key=lambda d: d['date'])
+
+    # Recompute derived fields after merge.
+    result = list(seen.values())
+    for r in result:
+        r['total_hours'] = round(r.get('total_hours') or 0, 2)
+        dp = r.get('days_present') or 0
+        r['avg_hours_per_day'] = round(r['total_hours'] / dp, 2) if dp else 0
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Excel
 # ─────────────────────────────────────────────────────────────────────────────
 HEADER_FILL = PatternFill('solid', fgColor='003366')
@@ -34,6 +108,7 @@ HEADER_FONT = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
 
 def export_daily_excel(date: str | None = None) -> HttpResponse:
     payload = _svc().daily_report(date)
+    rows = _dedup_rows(payload['rows'])
     wb = Workbook()
     ws = wb.active
     ws.title = f"Daily {payload['date']}"
@@ -41,7 +116,7 @@ def export_daily_excel(date: str | None = None) -> HttpResponse:
     headers = ['Employee Code', 'Name', 'Email', 'Department',
                'First In', 'Last Out', 'Hours', 'Late?', 'Full Day?', 'Matched']
     _write_header(ws, headers)
-    for r in payload['rows']:
+    for r in rows:
         ws.append([
             r.get('employee_code'),
             r.get('radai_full_name') or r.get('name') or '',
@@ -60,6 +135,7 @@ def export_daily_excel(date: str | None = None) -> HttpResponse:
 
 def export_monthly_excel(year: int | None = None, month: int | None = None) -> HttpResponse:
     payload = _svc().monthly_report(year, month)
+    rows = _dedup_rows(payload['rows'])
     wb = Workbook()
     ws = wb.active
     ws.title = f"Monthly {payload['year']}-{payload['month']:02d}"
@@ -68,7 +144,7 @@ def export_monthly_excel(year: int | None = None, month: int | None = None) -> H
                'Days Present', 'Full Days', 'Half Days', 'Late Arrivals',
                'Total Hours', 'Avg Hours/Day', 'Matched']
     _write_header(ws, headers)
-    for r in payload['rows']:
+    for r in rows:
         ws.append([
             r.get('employee_code'),
             r.get('radai_full_name') or r.get('name') or '',
@@ -87,7 +163,7 @@ def export_monthly_excel(year: int | None = None, month: int | None = None) -> H
     # Per-day drilldown on a second sheet
     ws2 = wb.create_sheet('Per-Day Detail')
     _write_header(ws2, ['Employee Code', 'Name', 'Date', 'First In', 'Last Out', 'Hours'])
-    for r in payload['rows']:
+    for r in rows:
         for d in r.get('days_detail') or []:
             ws2.append([
                 r.get('employee_code'),
@@ -148,6 +224,7 @@ def export_monthly_pdf(year: int | None = None, month: int | None = None) -> Htt
     )
 
     payload = _svc().monthly_report(year, month)
+    rows = _dedup_rows(payload['rows'])   # <- dedup safety net
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
                             leftMargin=12 * mm, rightMargin=12 * mm,
@@ -165,7 +242,7 @@ def export_monthly_pdf(year: int | None = None, month: int | None = None) -> Htt
     elements.append(Paragraph(
         f"Period: {payload['start']} to {payload['end']}<br/>"
         f"Working days in month: {payload['working_days_in_month']}<br/>"
-        f"Total employees with attendance: {len(payload['rows'])}",
+        f"Total employees with attendance: {len(rows)}",
         styles['Normal'],
     ))
     elements.append(Spacer(1, 6 * mm))
@@ -173,7 +250,7 @@ def export_monthly_pdf(year: int | None = None, month: int | None = None) -> Htt
     headers = ['Employee', 'Email', 'Dept', 'Days', 'Full',
                'Half', 'Late', 'Hours', 'Avg/Day']
     data = [headers]
-    for r in payload['rows']:
+    for r in rows:
         data.append([
             (r.get('radai_full_name') or r.get('name') or r.get('employee_code') or '')[:32],
             (r.get('radai_email') or r.get('email') or '')[:36],
@@ -218,13 +295,14 @@ def export_summary_excel(year: int | None = None, month: int | None = None) -> H
     import calendar as _cal
 
     payload = _svc().monthly_report(year, month)
+    rows = _dedup_rows(payload['rows'])   # <- dedup before pivot
     y, m = payload['year'], payload['month']
     days_in_month = _cal.monthrange(y, m)[1]
     day_nums = list(range(1, days_in_month + 1))
 
-    # Build a quick lookup: employee_code -> date_str -> hours
+    # Build a quick lookup: employee_code -> date_str -> hours (use deduped rows)
     emp_day: dict[str, dict[str, float]] = {}
-    for row in payload['rows']:
+    for row in rows:
         code = row.get('employee_code', '')
         emp_day[code] = {
             d['date']: d['hours']
@@ -264,7 +342,7 @@ def export_summary_excel(year: int | None = None, month: int | None = None) -> H
         elif dow == 6:
             cell.fill = PatternFill('solid', fgColor='FCA5A5')  # rose header
 
-    for row in payload['rows']:
+    for row in rows:  # use deduped rows
         code = row.get('employee_code', '')
         name = row.get('radai_full_name') or row.get('name') or code
         dept = row.get('radai_department') or row.get('department') or ''
@@ -309,6 +387,7 @@ def export_summary_pdf(year: int | None = None, month: int | None = None) -> Htt
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
     payload = _svc().monthly_report(year, month)
+    rows = _dedup_rows(payload['rows'])   # <- dedup safety net
     y, m = payload['year'], payload['month']
     std_hours = ts_config.RULES.get('standard_daily_hours', 9)
     working_days = payload['working_days_in_month']
@@ -333,7 +412,7 @@ def export_summary_pdf(year: int | None = None, month: int | None = None) -> Htt
 
     headers = ['Employee', 'Code', 'Dept', 'Total Hrs', 'Days', f'Normal ({working_days}dx{std_hours}h)', 'Difference']
     data = [headers]
-    for r in payload['rows']:
+    for r in rows:
         total = r.get('total_hours') or 0
         diff  = round(float(total) - normal_total, 2)
         data.append([
@@ -400,12 +479,13 @@ def export_yearly_excel(year: int | None = None) -> HttpResponse:
         if not payload['rows']:
             continue
 
-        # Monthly detail sheet
+        # Monthly detail sheet — deduplicate before writing
+        month_rows = _dedup_rows(payload['rows'])
         ws = wb.create_sheet(month_names[m - 1][:4])
         _write_header(ws, ['Employee Code', 'Name', 'Department', 'Email',
                             'Days Present', 'Full Days', 'Half Days', 'Late Arrivals',
                             'Total Hours', 'Avg Hours/Day'])
-        for r in payload['rows']:
+        for r in month_rows:
             ws.append([
                 r.get('employee_code'),
                 r.get('radai_full_name') or r.get('name') or '',
@@ -418,7 +498,7 @@ def export_yearly_excel(year: int | None = None) -> HttpResponse:
                 r.get('total_hours'),
                 r.get('avg_hours_per_day'),
             ])
-            # Accumulate into yearly map
+            # Accumulate into yearly map (use deduped row's normalised code)
             code = r.get('employee_code', '')
             if code not in yearly:
                 yearly[code] = {
@@ -457,11 +537,11 @@ def export_yearly_pdf(year: int | None = None) -> HttpResponse:
     months = list(range(1, 13))
     month_abbr = [_cal.month_abbr[m] for m in months]
 
-    # Collect yearly data (reuse monthly_report for each month)
+    # Collect yearly data (reuse monthly_report for each month) — dedup each month
     yearly: dict[str, dict] = {}
     for m in months:
         payload = _svc().monthly_report(y, m)
-        for r in payload['rows']:
+        for r in _dedup_rows(payload['rows']):
             code = r.get('employee_code', '')
             if code not in yearly:
                 yearly[code] = {
