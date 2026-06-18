@@ -957,3 +957,104 @@ class SalaryHistoryViewSet(viewsets.ReadOnlyModelViewSet):
         if date_to:
             qs = qs.filter(change_date__lte=date_to)
         return qs
+
+
+# =============================================================================
+# Annual Leave Balance Summary
+# =============================================================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def annual_leave_balance(request):
+    """
+    GET /api/v1/payroll/annual-leave-balance/?year=2026&month=6
+
+    Returns the year-to-date leave balance for every employee as of the
+    end of the requested month.  Keyed by employee_code (or employee_name
+    for employees without a code).
+
+    Response shape:
+    {
+      "year": 2026,
+      "month": 6,
+      "balances": {
+        "10954": {
+          "employee_name": "Ananda Piramannage",
+          "joining_date":  "2014-02-11",
+          "carryforward":  10.0,
+          "earned_ytd":    11.0,
+          "taken_ytd":     5.0,
+          "encashed_ytd":  0.0,
+          "balance":       16.0,
+          "annual_entitlement": 22
+        },
+        ...
+      }
+    }
+
+    The balance is the running total up to (and including) *month* so the
+    Summary attendance tab can display each employee's remaining leave quota.
+    The computation uses the accrual service formula (22 days/year, pro-rated
+    for joining month) and the stored taken/encashed from the HR Excel import.
+    """
+    from apps.payroll.models import EmployeeLeaveRecord, EmployeeLeaveMonthly
+    from apps.payroll.services.leave_accrual import (
+        compute_monthly_earned, compute_running_balance, _dec, ANNUAL_LEAVE_DAYS,
+    )
+    from datetime import date as _date
+
+    year  = int(request.GET.get('year',  timezone.now().year))
+    month = int(request.GET.get('month', timezone.now().month))
+
+    qs = (
+        EmployeeLeaveRecord.objects
+        .prefetch_related('monthly_breakdown')
+        .filter(year=year)
+    )
+    branch = request.GET.get('branch')
+    if branch:
+        qs = qs.filter(branch__iexact=branch)
+
+    today  = _date.today()
+    result = {}
+    for rec in qs:
+        # Build monthly data up to the requested month
+        monthly_rows = list(rec.monthly_breakdown.filter(month__lte=month).values(
+            'month', 'earned', 'taken', 'encashed', 'balance'
+        ))
+        # For months with no DB row yet, compute on the fly
+        stored_months = {r['month'] for r in monthly_rows}
+        for m in range(1, month + 1):
+            if m not in stored_months:
+                earned = compute_monthly_earned(
+                    rec.joining_date, year, m,
+                    rec.annual_entitlement or ANNUAL_LEAVE_DAYS, today
+                )
+                monthly_rows.append({'month': m, 'earned': earned, 'taken': _dec(0), 'encashed': _dec(0), 'balance': _dec(0)})
+
+        monthly_rows.sort(key=lambda r: r['month'])
+
+        # Recompute running balance up to requested month
+        balances   = compute_running_balance(_dec(rec.carryforward), monthly_rows, up_to_month=month)
+        balance_at = float(balances.get(month, 0))
+
+        earned_ytd   = sum(
+            float(compute_monthly_earned(rec.joining_date, year, m, rec.annual_entitlement or ANNUAL_LEAVE_DAYS, today))
+            for m in range(1, month + 1)
+        )
+        taken_ytd    = sum(float(r['taken'])    for r in monthly_rows if r['month'] <= month)
+        encashed_ytd = sum(float(r['encashed']) for r in monthly_rows if r['month'] <= month)
+
+        key = str(rec.employee_code) if rec.employee_code else f'name:{rec.employee_name}'
+        result[key] = {
+            'employee_name':      rec.employee_name,
+            'joining_date':       rec.joining_date.isoformat() if rec.joining_date else None,
+            'carryforward':       float(rec.carryforward),
+            'earned_ytd':         round(earned_ytd, 4),
+            'taken_ytd':          round(taken_ytd, 4),
+            'encashed_ytd':       round(encashed_ytd, 4),
+            'balance':            round(balance_at, 4),
+            'annual_entitlement': int(rec.annual_entitlement or ANNUAL_LEAVE_DAYS),
+        }
+
+    return Response({'year': year, 'month': month, 'balances': result})
