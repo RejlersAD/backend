@@ -963,41 +963,34 @@ class SalaryHistoryViewSet(viewsets.ReadOnlyModelViewSet):
 # Annual Leave Balance Summary
 # =============================================================================
 
+def _norm_name(name: str) -> str:
+    """Normalise an employee name to a stable lowercase-stripped key for fuzzy match."""
+    return ' '.join((name or '').lower().split())
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def annual_leave_balance(request):
     """
     GET /api/v1/payroll/annual-leave-balance/?year=2026&month=6
 
-    Returns the year-to-date leave balance for every employee as of the
-    end of the requested month.  Keyed by employee_code (or employee_name
-    for employees without a code).
+    Returns the YTD leave balance for every employee as of end of *month*.
+    The response carries TWO lookup indices so the frontend can match even
+    when biometric employee_code format differs from HR Excel codes:
 
-    Response shape:
-    {
-      "year": 2026,
-      "month": 6,
-      "balances": {
-        "10954": {
-          "employee_name": "Ananda Piramannage",
-          "joining_date":  "2014-02-11",
-          "carryforward":  10.0,
-          "earned_ytd":    11.0,
-          "taken_ytd":     5.0,
-          "encashed_ytd":  0.0,
-          "balance":       16.0,
-          "annual_entitlement": 22
-        },
-        ...
-      }
-    }
+      balances          → keyed by employee_code  (primary lookup)
+      balances_by_name  → keyed by normalised lowercase name (fallback)
 
-    The balance is the running total up to (and including) *month* so the
-    Summary attendance tab can display each employee's remaining leave quota.
-    The computation uses the accrual service formula (22 days/year, pro-rated
-    for joining month) and the stored taken/encashed from the HR Excel import.
+    Each value:
+      { employee_name, joining_date, carryforward,
+        earned_ytd, taken_ytd, encashed_ytd, balance,
+        annual_entitlement }
+
+    Computation: 22 days/year accrual service formula (pro-rated joining month).
+    taken/encashed come from the stored HR-Excel import rows; earned is always
+    recomputed from the formula so it stays accurate even if monthly rows are stale.
     """
-    from apps.payroll.models import EmployeeLeaveRecord, EmployeeLeaveMonthly
+    from apps.payroll.models import EmployeeLeaveRecord
     from apps.payroll.services.leave_accrual import (
         compute_monthly_earned, compute_running_balance, _dec, ANNUAL_LEAVE_DAYS,
     )
@@ -1016,45 +1009,219 @@ def annual_leave_balance(request):
         qs = qs.filter(branch__iexact=branch)
 
     today  = _date.today()
-    result = {}
+    result_by_code = {}
+    result_by_name = {}
+
     for rec in qs:
-        # Build monthly data up to the requested month
-        monthly_rows = list(rec.monthly_breakdown.filter(month__lte=month).values(
-            'month', 'earned', 'taken', 'encashed', 'balance'
-        ))
-        # For months with no DB row yet, compute on the fly
-        stored_months = {r['month'] for r in monthly_rows}
+        # Build monthly taken/encashed from stored import rows (HR source of truth)
+        stored = {
+            r.month: r
+            for r in rec.monthly_breakdown.all()
+        }
+
+        # Always recompute earned from formula; use stored taken/encashed
+        monthly_rows = []
         for m in range(1, month + 1):
-            if m not in stored_months:
-                earned = compute_monthly_earned(
-                    rec.joining_date, year, m,
-                    rec.annual_entitlement or ANNUAL_LEAVE_DAYS, today
-                )
-                monthly_rows.append({'month': m, 'earned': earned, 'taken': _dec(0), 'encashed': _dec(0), 'balance': _dec(0)})
+            earned   = compute_monthly_earned(
+                rec.joining_date, year, m,
+                rec.annual_entitlement or ANNUAL_LEAVE_DAYS, today,
+            )
+            row = stored.get(m)
+            taken    = _dec(row.taken    if row else 0)
+            encashed = _dec(row.encashed if row else 0)
+            monthly_rows.append({'month': m, 'earned': earned, 'taken': taken, 'encashed': encashed})
 
-        monthly_rows.sort(key=lambda r: r['month'])
-
-        # Recompute running balance up to requested month
         balances   = compute_running_balance(_dec(rec.carryforward), monthly_rows, up_to_month=month)
         balance_at = float(balances.get(month, 0))
+        earned_ytd   = round(sum(float(r['earned'])   for r in monthly_rows), 4)
+        taken_ytd    = round(sum(float(r['taken'])    for r in monthly_rows), 4)
+        encashed_ytd = round(sum(float(r['encashed']) for r in monthly_rows), 4)
 
-        earned_ytd   = sum(
-            float(compute_monthly_earned(rec.joining_date, year, m, rec.annual_entitlement or ANNUAL_LEAVE_DAYS, today))
-            for m in range(1, month + 1)
-        )
-        taken_ytd    = sum(float(r['taken'])    for r in monthly_rows if r['month'] <= month)
-        encashed_ytd = sum(float(r['encashed']) for r in monthly_rows if r['month'] <= month)
-
-        key = str(rec.employee_code) if rec.employee_code else f'name:{rec.employee_name}'
-        result[key] = {
+        payload = {
             'employee_name':      rec.employee_name,
             'joining_date':       rec.joining_date.isoformat() if rec.joining_date else None,
             'carryforward':       float(rec.carryforward),
-            'earned_ytd':         round(earned_ytd, 4),
-            'taken_ytd':          round(taken_ytd, 4),
-            'encashed_ytd':       round(encashed_ytd, 4),
+            'earned_ytd':         earned_ytd,
+            'taken_ytd':          taken_ytd,
+            'encashed_ytd':       encashed_ytd,
             'balance':            round(balance_at, 4),
             'annual_entitlement': int(rec.annual_entitlement or ANNUAL_LEAVE_DAYS),
         }
 
-    return Response({'year': year, 'month': month, 'balances': result})
+        # Primary key: employee_code (string)
+        if rec.employee_code:
+            result_by_code[str(rec.employee_code).strip()] = payload
+
+        # Fallback key: normalised name (handles code-format mismatches)
+        norm = _norm_name(rec.employee_name)
+        if norm:
+            result_by_name[norm] = payload
+
+    return Response({
+        'year':             year,
+        'month':            month,
+        'balances':         result_by_code,    # keyed by employee_code
+        'balances_by_name': result_by_name,    # keyed by normalised name
+    })
+
+
+# =============================================================================
+# HR Admin: Upload leave Excel + trigger import+compute (one-shot seed)
+# =============================================================================
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def sync_leave_data(request):
+    """
+    POST /api/v1/payroll/sync-leave-data/
+
+    HR Manager only.  Accepts a multipart Excel upload (field: file) and:
+      1. Saves it to a temp path
+      2. Runs import_leave_excel  (upsert all EmployeeLeaveRecord rows)
+      3. Runs compute_leave_accrual  (recompute earned + balance)
+
+    Returns a summary dict:  { imported, updated, errors, computed, year }
+
+    Allows seeding / refreshing production from the HR Manager's browser
+    without needing Railway CLI access.
+    """
+    import os, tempfile, warnings
+    from decimal import Decimal, InvalidOperation
+    from apps.payroll.models import EmployeeLeaveRecord, EmployeeLeaveMonthly
+    from apps.payroll.management.commands.import_leave_excel import (
+        LEAVE_EXCEL_MAP, BRANCH_OVERRIDES, _to_dec, _to_str,
+        _clean_emp_code, _clean_title,
+    )
+    from apps.payroll.services.leave_accrual import compute_accrual_for_record
+    from django.db import transaction
+
+    if not _is_hr_manager(request.user):
+        raise PermissionDenied('HR Manager role required to sync leave data.')
+
+    upload = request.FILES.get('file')
+    if not upload:
+        return Response({'error': 'No file uploaded. POST with field name "file".'}, status=400)
+
+    year   = int(request.data.get('year',   timezone.now().year))
+    branch = (request.data.get('branch') or 'RAD').upper().strip()
+
+    # Soft-coded column map for RAD branch
+    override = BRANCH_OVERRIDES.get(branch, {})
+    em   = {**LEAVE_EXCEL_MAP, **{k: v for k, v in override.items() if k not in ('default_path',)}}
+    src  = override.get('source_tag', LEAVE_EXCEL_MAP['source_tag'])
+    mmap = em['month_map']
+
+    try:
+        import openpyxl
+    except ImportError:
+        return Response({'error': 'openpyxl not installed on this server.'}, status=500)
+
+    # Save upload to a temp file
+    suffix = os.path.splitext(upload.name)[1] or '.xlsx'
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        for chunk in upload.chunks():
+            tmp.write(chunk)
+        tmp.close()
+
+        warnings.filterwarnings('ignore')
+        wb = openpyxl.load_workbook(tmp.name, data_only=True)
+        sheets = wb.sheetnames
+
+        created = updated = skipped = import_errors = 0
+
+        for sheet_name in sheets:
+            ws = wb[sheet_name]
+            raw_name    = ws.cell(*em['name_cell']).value
+            raw_emp_no  = ws.cell(*em['emp_no_cell']).value
+            raw_dept    = ws.cell(*em['dept_cell']).value
+            raw_title   = ws.cell(*em['title_cell']).value
+            raw_joining = ws.cell(*em['joining_cell']).value
+
+            name = _to_str(raw_name)
+            if not name or name.lower() in ('name', 'employee', ''):
+                skipped += 1
+                continue
+
+            emp_code    = _clean_emp_code(raw_emp_no)
+            job_title   = _clean_title(raw_emp_no, raw_title)
+            department  = _to_str(raw_dept) or None
+            joining_date = raw_joining.date() if hasattr(raw_joining, 'date') else None
+
+            tr  = em['total_row']
+            cfr = em['carryforward_row']
+            total_earned   = _to_dec(ws.cell(tr, em['col_earned']).value)
+            total_taken    = _to_dec(ws.cell(tr, em['col_taken']).value)
+            total_encashed = _to_dec(ws.cell(tr, em['col_encashed']).value)
+            leave_balance  = _to_dec(ws.cell(tr, em['col_balance']).value)
+            carryforward   = _to_dec(ws.cell(cfr, em['col_balance']).value)
+
+            try:
+                with transaction.atomic():
+                    defaults = dict(
+                        employee_name=name, department=department,
+                        job_title=job_title or None, joining_date=joining_date,
+                        year=year, branch=branch,
+                        total_earned=total_earned, total_taken=total_taken,
+                        total_encashed=total_encashed, leave_balance=leave_balance,
+                        carryforward=carryforward, source_file=src,
+                    )
+                    if emp_code:
+                        rec, was_created = EmployeeLeaveRecord.objects.update_or_create(
+                            employee_code=emp_code, year=year, defaults=defaults,
+                        )
+                    else:
+                        rec, was_created = EmployeeLeaveRecord.objects.update_or_create(
+                            employee_name=name, year=year,
+                            defaults={**defaults, 'employee_code': None},
+                        )
+                    if was_created:
+                        created += 1
+                    else:
+                        updated += 1
+
+                    for row_idx in range(em['month_start_row'], em['month_end_row'] + 1):
+                        month_label = _to_str(ws.cell(row_idx, em['col_month']).value).lower()
+                        month_num   = mmap.get(month_label)
+                        if month_num is None:
+                            continue
+                        EmployeeLeaveMonthly.objects.update_or_create(
+                            record=rec, month=month_num,
+                            defaults=dict(
+                                earned   = _to_dec(ws.cell(row_idx, em['col_earned']).value),
+                                taken    = _to_dec(ws.cell(row_idx, em['col_taken']).value),
+                                encashed = _to_dec(ws.cell(row_idx, em['col_encashed']).value),
+                                balance  = _to_dec(ws.cell(row_idx, em['col_balance']).value),
+                            ),
+                        )
+            except Exception as exc:
+                import_errors += 1
+
+        # Now recompute accruals for all imported records
+        recs = (
+            EmployeeLeaveRecord.objects
+            .prefetch_related('monthly_breakdown')
+            .filter(year=year, branch__iexact=branch)
+        )
+        computed = computed_errors = 0
+        for rec in recs:
+            try:
+                compute_accrual_for_record(rec, target_year=year, dry_run=False)
+                computed += 1
+            except Exception:
+                computed_errors += 1
+
+    finally:
+        os.unlink(tmp.name)
+
+    return Response({
+        'year':            year,
+        'branch':          branch,
+        'sheets_found':    len(sheets),
+        'created':         created,
+        'updated':         updated,
+        'skipped':         skipped,
+        'import_errors':   import_errors,
+        'computed':        computed,
+        'compute_errors':  computed_errors,
+    })

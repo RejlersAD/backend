@@ -22,6 +22,7 @@ from .views import (
     EmployeeSalaryStructureViewSet,
     SalaryHistoryViewSet,
     annual_leave_balance,
+    sync_leave_data,
 )
 
 app_name = 'payroll'
@@ -46,5 +47,6 @@ urlpatterns = [
     path('leave-calendar/',          leave_calendar,                        name='leave-calendar'),
     path('branch-employee-codes/',   branch_employee_codes,                 name='branch-employee-codes'),
     path('annual-leave-balance/',    annual_leave_balance,                  name='annual-leave-balance'),
+    path('sync-leave-data/',         sync_leave_data,                       name='sync-leave-data'),
     path('', include(router.urls)),
 ]
