@@ -858,7 +858,7 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
     for (code, day_date), s in existing_summaries.items():
         norm_code = str(code or '').strip()   # <- dedup key
         m_ = meta.get(code, {}) or meta.get(norm_code, {})
-        slot = by_emp.setdefault(norm_norm_code, {
+        slot = by_emp.setdefault(norm_code, {
             'employee_code': norm_code,   # store the normalised code
             'email':         m_.get('employee_email') or None,
             'name':          m_.get('employee_name', ''),
