@@ -322,6 +322,18 @@ class UserProfile(TimeStampedModel):
     
     def __str__(self):
         return f"{self.user.email} - {self.organization.name}"
+
+    def save(self, *args, **kwargs):
+        # Normalise employee_id so it matches the biometric employee_code
+        # stored in TimesheetEvent / DailyAttendanceSummary / EmployeeLeaveRecord.
+        # Prevents lookup misses caused by trailing spaces entered via the UI.
+        if self.employee_id:
+            try:
+                from apps.timesheet.identity import norm_code
+                self.employee_id = norm_code(self.employee_id)
+            except Exception:
+                self.employee_id = str(self.employee_id).strip()
+        super().save(*args, **kwargs)
     
     def has_permission(self, permission_code):
         """Check if user has specific permission through any role"""

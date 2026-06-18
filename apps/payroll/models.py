@@ -13,6 +13,11 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
+# Canonical identity normalisation — same helpers used by the timesheet
+# ingest pipeline so employee_code, name and email are always stored in a
+# consistent format across every table that holds employee identity.
+from apps.timesheet.identity import norm_code, norm_email, norm_name
+
 from django.contrib.auth import get_user_model
 from django.db import models
 
@@ -363,11 +368,16 @@ class EmployeeLeaveRecord(models.Model):
     def __str__(self):
         return f'{self.employee_name} ({self.year}) — bal:{self.leave_balance}'
 
+    def save(self, *args, **kwargs):
+        # Normalise identity fields so lookups against timesheet data match.
+        if self.employee_code is not None:
+            self.employee_code = norm_code(self.employee_code) or None
+        self.employee_name = norm_name(self.employee_name)
+        super().save(*args, **kwargs)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. EmployeeLeaveMonthly  — per-month breakdown
 # ─────────────────────────────────────────────────────────────────────────────
-
 MONTH_CHOICES = [
     (1,'January'),(2,'February'),(3,'March'),(4,'April'),
     (5,'May'),(6,'June'),(7,'July'),(8,'August'),
@@ -511,6 +521,11 @@ class LeaveRequest(models.Model):
 
     def save(self, *args, **kwargs):
         import datetime as _dt
+        # Normalise identity fields so lookups and dedup work cross-table.
+        if self.employee_code:
+            self.employee_code = norm_code(self.employee_code) or None
+        if self.employee_name:
+            self.employee_name = norm_name(self.employee_name)
         # Auto-populate identity fields from the User FK
         if self.employee:
             u = self.employee

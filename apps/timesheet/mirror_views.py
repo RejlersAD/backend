@@ -34,6 +34,7 @@ from rest_framework.response import Response
 
 from . import config as ts_config
 from .models import TimesheetEvent, BiometricUserMaster
+from .identity import norm_code, norm_email, norm_name
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,7 @@ def ingest_events(request):
     for idx, ev in enumerate(events):
         try:
             sid = str(ev.get('source_event_id') or '').strip()
-            emp_code = str(ev.get('employee_code') or '').strip()
+            emp_code   = norm_code(ev.get('employee_code'))
             event_time = _parse_event_time(ev.get('event_time'))
             event_type = str(ev.get('event_type') or '').strip().upper()
             if not (sid and emp_code and event_time and event_type in ('IN', 'OUT')):
@@ -154,9 +155,9 @@ def ingest_events(request):
                 continue
             defaults = {
                 'employee_code':   emp_code,
-                'employee_name':   str(ev.get('employee_name') or '').strip()[:255],
-                'employee_email':  str(ev.get('employee_email') or '').strip()[:255],
-                'department':      str(ev.get('department') or '').strip()[:255],
+                'employee_name':   norm_name(ev.get('employee_name')),
+                'employee_email':  norm_email(ev.get('employee_email')),
+                'department':      norm_name(ev.get('department')),
                 'event_time':      event_time,
                 'event_type':      event_type,
             }
@@ -261,7 +262,7 @@ def ingest_users(request):
 
     for idx, u in enumerate(users):
         try:
-            emp_code = str(u.get('employee_code') or '').strip()
+            emp_code = norm_code(u.get('employee_code'))
             if not emp_code:
                 skipped += 1
                 continue
@@ -270,7 +271,13 @@ def ingest_users(request):
                 val = u.get(payload_key)
                 if val is None:
                     continue
-                defaults[model_field] = str(val).strip()[:255]
+                # Apply identity normalisation per field type
+                s = str(val).strip()[:255]
+                if model_field in ('office_email', 'personal_email'):
+                    s = norm_email(s)
+                elif model_field == 'full_name':
+                    s = norm_name(s)
+                defaults[model_field] = s
             # Bucket anything the agent pushes that isn't in the known map.
             known = set(_USER_MASTER_FIELDS) | {'employee_code', 'extra'}
             extra = {k: v for k, v in u.items() if k not in known}

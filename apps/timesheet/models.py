@@ -11,6 +11,7 @@ to the office LAN.
 event_type) — guarantees idempotent upserts even if the agent re-uploads.
 """
 from django.db import models
+from .identity import norm_code, norm_email, norm_name
 
 
 class TimesheetEvent(models.Model):
@@ -38,6 +39,14 @@ class TimesheetEvent(models.Model):
 
     def __str__(self):
         return f'{self.employee_code} {self.event_type} @ {self.event_time:%Y-%m-%d %H:%M}'
+
+    def save(self, *args, **kwargs):
+        # Normalise identity fields at every write — prevents whitespace/case
+        # variants from creating duplicate logical rows in analytics.
+        self.employee_code  = norm_code(self.employee_code)
+        self.employee_email = norm_email(self.employee_email)
+        self.employee_name  = norm_name(self.employee_name)
+        super().save(*args, **kwargs)
 
 
 class BiometricUserMaster(models.Model):
@@ -68,6 +77,14 @@ class BiometricUserMaster(models.Model):
 
     def __str__(self):
         return f'{self.employee_code} — {self.full_name or "?"}'
+
+    def save(self, *args, **kwargs):
+        # Canonical identity normalization — every write goes through norm_*.
+        self.employee_code  = norm_code(self.employee_code)
+        self.full_name      = norm_name(self.full_name)
+        self.office_email   = norm_email(self.office_email)
+        self.personal_email = norm_email(self.personal_email)
+        super().save(*args, **kwargs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,3 +170,9 @@ class DailyAttendanceSummary(models.Model):
 
     def __str__(self):
         return f'{self.employee_code} {self.date} {self.effective_hours:.2f}h'
+
+    def save(self, *args, **kwargs):
+        # Always store normalised employee_code so the unique_together
+        # constraint on (employee_code, date) matches lookups correctly.
+        self.employee_code = norm_code(self.employee_code)
+        super().save(*args, **kwargs)

@@ -19,6 +19,7 @@ from django.utils import timezone
 
 from . import config as ts_config
 from .models import TimesheetEvent, BiometricUserMaster, DailyAttendanceSummary
+from .identity import norm_code as _norm_emp_code, norm_email as _norm_emp_email, norm_name as _norm_emp_name
 from .services import (
     _enrich_with_rad_users, _backfill_email_from_matrix_name,
     _hours_between, _is_late, _empty_summary,
@@ -163,12 +164,9 @@ def _resolve_biometric_codes_mirror(*, profile=None,
     chosen_tokens: list[str] = []
 
     # Strategy 0 — direct email match against the mirror's `employee_email`
-    # column. The biometric sync agent populates this when the source system
-    # exposes an email; when it does, this is the most reliable signal and
-    # zero-token-dependent (works even if the user's biometric `employee_name`
-    # is mis-spelled, abbreviated, or stored in a non-Latin script).
+    # column. Uses norm_email so 'JOHN@x.com' and 'john@x.com' resolve the same.
     if email:
-        email_norm = _norm_key(email)
+        email_norm = _norm_emp_email(email)
         if email_norm:
             email_hits = list(
                 TimesheetEvent.objects
@@ -189,7 +187,7 @@ def _resolve_biometric_codes_mirror(*, profile=None,
     # operators can extend / reorder the columns checked without changing
     # code.
     if not chosen_hits and email:
-        email_norm = _norm_key(email)
+        email_norm = _norm_emp_email(email)   # canonical form for consistent lookup
         if email_norm:
             master_cond = Q()
             for col in _USER_MASTER_EMAIL_COLUMNS:
@@ -591,12 +589,11 @@ def _compute_and_save_day(employee_code: str, day: dt.date,
     """Compute paired hours for `employee_code` on `day` from `TimesheetEvent`
     and upsert a `DailyAttendanceSummary` row.
 
-    Called:
-      • After every ingest batch (for all affected employee+date combos).
-      • On-demand from daily_report() for the requested day.
-
-    Returns the saved summary object, or None if no events exist for that day.
+    Always normalises `employee_code` (via identity.norm_code) before the
+    DB upsert so the unique_together(code, date) constraint is always evaluated
+    against the canonical form, preventing split-record duplicates.
     """
+    employee_code = _norm_emp_code(employee_code)   # canonical form at write time
     punches = list(
         TimesheetEvent.objects
         .filter(employee_code=employee_code, event_time__date=day)
