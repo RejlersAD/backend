@@ -7,6 +7,7 @@ All endpoints require authentication.
 from __future__ import annotations
 
 import datetime
+import os
 import uuid
 import logging
 
@@ -1417,6 +1418,1068 @@ class DailyWorkLogViewSet(viewsets.ModelViewSet):
             ).exists()
         except Exception:
             return False
+
+
+# =============================================================================
+# Master Payroll Generator — Sympa + ValueFrame + RADAI attendance merge
+# =============================================================================
+#
+# Soft-coded field alias maps: add new column synonyms here without changing
+# any view logic.  All comparisons are case-insensitive and whitespace-trimmed.
+#
+# POST /api/v1/payroll/generate-master-payroll/
+#   multipart fields:  sympa_file (opt), valueframe_file (opt), year, month
+#   query param:       ?format=xlsx  →  returns binary Excel instead of JSON
+#
+# =============================================================================
+
+# ── Soft-coded parser constants ───────────────────────────────────────────────
+_HEADER_SCAN_ROWS = 25   # max rows to probe when auto-detecting the real header row
+_HEADER_MIN_COLS  = 3    # minimum non-empty cells to qualify a row as the header
+# Soft-coded payroll constants — override via env vars without touching code
+_PAYROLL_WORKING_DAYS           = int(os.environ.get('PAYROLL_WORKING_DAYS', 22))
+# Flag a cross-source hours discrepancy when VF vs biometric diverge by more
+# than this percentage of the larger value.
+_BIOMETRIC_HOURS_DISCREPANCY_PCT = float(os.environ.get('BIOMETRIC_HOURS_DISCREPANCY_PCT', 20))
+
+# ── Alias tables (first match wins) ──────────────────────────────────────────
+_SYMPA_ALIASES = {
+    # NOTE: standard Sympa exports have NO employee-code column.
+    # The view falls back to name-based keying when this field is absent.
+    'employee_code':       ['employee no', 'employee id', 'emp no', 'emp id',
+                            'personnel no', 'staff id', 'empno', 'id no',
+                            'employee number', 'employee_number'],
+    # Sympa "Preferred given name" contains the full display name
+    'employee_name':       ['preferred given name', 'preferred name', 'display name',
+                            'full name', 'employee name', 'emp name', 'name',
+                            'staff name', 'employee full name'],
+    # Sympa "Business Area" is the department
+    'department':          ['business area', 'business unit', 'department', 'dept',
+                            'division', 'cost centre', 'cost center', 'team'],
+    'job_title':           ['job title uae', 'job title', 'position', 'title',
+                            'designation', 'role'],
+    'joining_date':        ['joining date', 'join date', 'hire date', 'date of joining',
+                            'doj', 'start date', 'employment date', 'commencement date',
+                            'employment start date'],
+    # Sympa uses "Currently valid …" salary column names
+    'basic_salary':        ['currently valid monthly base salary', 'monthly base salary',
+                            'basic salary', 'basic', 'base salary', 'monthly salary',
+                            'salary', 'basic pay'],
+    'housing_allowance':   ['currently valid housing allowance', 'housing allowance',
+                            'house allowance', 'hra', 'housing', 'home allowance',
+                            'accommodation allowance'],
+    'transport_allowance': ['currently valid transportation allowance',
+                            'currently valid transport allowance',
+                            'transport allowance', 'transport', 'ta',
+                            'travel allowance', 'commute allowance', 'transportation'],
+    # "Home leave allowance" in Sympa maps to other allowances
+    'other_allowances':    ['currently valid home leave allowance', 'home leave allowance',
+                            'other allowances', 'misc allowances', 'miscellaneous',
+                            'additional allowances'],
+    'other_pay':           ['other pay', 'other payment', 'extra pay', 'additional pay',
+                            'other compensation', 'additional compensation', 'bonus pay',
+                            'other emoluments'],
+    'deductions':          ['deductions', 'total deductions', 'deduction', 'monthly deduction',
+                            'salary deduction'],
+    'deduction_details':   ['deduction details', 'deduction remarks', 'deduction notes',
+                            'deduction breakdown', 'salary deduction details',
+                            'deduction description'],
+    'details':             ['details', 'notes', 'remarks', 'additional details',
+                            'employee notes', 'comments', 'employee remarks'],
+    'leave_balance':       ['annual leave balance', 'leave balance', 'remaining leave',
+                            'al balance', 'leave days remaining'],
+    # Sympa "Surname" — used to build a full name when preferred name is first-name-only
+    '_surname':            ['surname', 'last name', 'family name'],
+}
+
+_VF_ALIASES = {
+    # ValueFrame "Employee Number" is the canonical ID (integer in the report)
+    'employee_code':  ['employee number', 'employee no', 'employee id', 'emp no',
+                       'resource id', 'staff id', 'personnel no', 'resource code'],
+    'employee_name':  ['employee name', 'name', 'full name', 'resource', 'resource name'],
+    # VF wage-type report: "Total Hours" is the sum row; "Normal" is regular hours
+    'total_hours':    ['total hours', 'hours', 'normal', 'billed hours', 'worked hours',
+                       'billable hours', 'actual hours', 'logged hours'],
+    'overtime_hours': ['overtime hours', 'ot hours', 'extra hours', 'overtime', 'ot',
+                       'working time flexibility free'],
+    'project_code':   ['project code', 'project no', 'project', 'project id',
+                       'proj code', 'project number'],
+    'project_name':   ['project name', 'proj name', 'project description', 'project title'],
+    'month':          ['month', 'period month', 'billing month', 'period'],
+    'year':           ['year', 'period year', 'billing year'],
+}
+
+# Alias table for the supplementary "other" file.
+# Also handles Sympa annual-leave exports (Employee number + leave days per request).
+_OTHER_ALIASES = {
+    # Annual-leave export: "Employee number" (lowercase n)
+    'employee_code':     ['employee number', 'employee no', 'employee id', 'emp no',
+                          'emp id', 'personnel no', 'staff id', 'empno', 'id no'],
+    # Annual-leave export shares "Preferred given name" with Sympa — used as bridge
+    'employee_name':     ['preferred given name', 'preferred name', 'full name',
+                          'employee name', 'emp name', 'name', 'staff name'],
+    # Annual-leave exports: "Annual leave:\nDuration in days"
+    'leave_days_used':   ['annual leave:\nduration in days', 'duration in days',
+                          'leave duration', 'annual leave duration', 'leave days',
+                          'days taken', 'annual leave days'],
+    'leave_type':        ['annual leave:\ntype of leave', 'type of leave', 'leave type'],
+    'leave_status':      ['annual leave:\napproval', 'approval', 'leave approval',
+                          'annual leave:\nstatus', 'leave status', 'status'],
+    'leave_start':       ['annual leave:\nstart date', 'start date', 'leave start'],
+    'leave_end':         ['annual leave:\nend date', 'end date', 'leave end'],
+    # Generic financial supplementary fields
+    'bonus':             ['bonus', 'performance bonus', 'annual bonus', 'variable pay',
+                          'bonus amount', 'variable bonus'],
+    'gratuity':          ['gratuity', 'end of service', 'eos', 'eos benefit',
+                          'gratuity pay', 'end of service gratuity', 'gratuity amount'],
+    'insurance':         ['insurance', 'health insurance', 'medical insurance',
+                          'insurance deduction', 'medical deduction', 'health deduction'],
+    'commission':        ['commission', 'sales commission', 'incentive commission',
+                          'commission amount'],
+    'incentive':         ['incentive', 'performance incentive', 'kpi incentive',
+                          'target incentive', 'monthly incentive', 'incentive amount'],
+    'special_deduction': ['special deduction', 'loan deduction', 'advance deduction',
+                          'advance recovery', 'salary advance', 'loan recovery',
+                          'other deduction'],
+    'adjustment':        ['adjustment', 'salary adjustment', 'pay adjustment',
+                          'correction', 'retroactive', 'arrears', 'net adjustment'],
+    'notes':             ['notes', 'remarks', 'details', 'comments', 'description',
+                          'employee remarks'],
+}
+
+
+def _detect_columns(df_columns, alias_map):
+    """Return {canonical_field: actual_df_column} by matching headers to aliases."""
+    cols_lower = {c.strip().lower(): c for c in df_columns}
+    mapping = {}
+    for field, aliases in alias_map.items():
+        for alias in aliases:
+            if alias in cols_lower:
+                mapping[field] = cols_lower[alias]
+                break
+    return mapping
+
+
+def _parse_file(upload):
+    """
+    Parse an uploaded file (XLSX, XLS, or CSV) into a pandas DataFrame.
+
+    Smart header detection: scans up to _HEADER_SCAN_ROWS rows to find the
+    actual column-header row.  Handles ValueFrame-style reports where metadata
+    text fills rows 1-11 before the real table starts at row 12.
+    """
+    import pandas as pd
+    import tempfile, os
+
+    suffix = (os.path.splitext(upload.name)[1] or '').lower() or '.xlsx'
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        for chunk in upload.chunks():
+            tmp.write(chunk)
+        tmp.close()
+        if suffix == '.csv':
+            df = pd.read_csv(tmp.name, dtype=str).fillna('')
+        else:
+            # ── Smart header-row detection ────────────────────────────────────
+            # Read a probe slice (no header) and find the first row that has
+            # at least _HEADER_MIN_COLS non-empty / non-nan cells — that row
+            # is the real column header.
+            probe = pd.read_excel(
+                tmp.name, header=None, dtype=str, nrows=_HEADER_SCAN_ROWS
+            ).fillna('')
+            header_row = 0
+            for idx, row_s in probe.iterrows():
+                populated = sum(
+                    1 for v in row_s
+                    if str(v).strip() and str(v).strip().lower() != 'nan'
+                )
+                if populated >= _HEADER_MIN_COLS:
+                    header_row = int(idx)
+                    break
+            df = pd.read_excel(tmp.name, header=header_row, dtype=str).fillna('')
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+    # Normalise column names: strip leading/trailing whitespace
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _safe_dec(v):
+    """Convert a string value to Decimal, returning 0 on failure."""
+    try:
+        return Decimal(str(v).replace(',', '').strip())
+    except Exception:
+        return Decimal('0')
+
+
+def _safe_float(v):
+    """Convert a string value to float, returning 0 on failure."""
+    try:
+        return float(str(v).replace(',', '').strip())
+    except Exception:
+        return 0.0
+
+
+def _norm_name_master(v):
+    """
+    Normalise a full name for cross-source matching in master-payroll generation.
+
+    Steps:
+      1. Lowercase + collapse whitespace
+      2. Deduplicate tokens (removes repeated surname in VF format
+         "Achbani Zakrya Achbani" → ["achbani", "zakrya"])
+      3. Sort tokens alphabetically so "Abbas Anam" and "Anam Abbas"
+         both produce the same canonical key "anam abbas"
+    """
+    import re
+    parts = re.sub(r'\s+', ' ', str(v or '').strip().lower()).split()
+    seen = set()
+    unique = [p for p in parts if not (p in seen or seen.add(p))]
+    return ' '.join(sorted(unique)) if unique else ''
+
+
+def _norm_code(v):
+    """Normalise an employee code for matching: lowercase, stripped."""
+    return str(v or '').strip().lower()
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def generate_master_payroll(request):
+    """
+    POST /api/v1/payroll/generate-master-payroll/
+
+    Accepts optional Sympa and ValueFrame file uploads.
+    Merges with RADAI attendance (EmployeeLeaveMonthly + DailyWorkLog) for
+    the requested period and RADAI salary structures.
+
+    Returns JSON list of master payroll rows or, when ?format=xlsx, an
+    Excel binary response.
+
+    Request multipart fields:
+      sympa_file       — Sympa HR export  (XLSX / XLS / CSV)  — optional
+      valueframe_file  — ValueFrame hours (XLSX / XLS / CSV)  — optional
+      other_file       — Supplementary data: bonuses, gratuity, insurance,
+                         special deductions, adjustments (XLSX / XLS / CSV) — optional
+      year             — int  (defaults to current year)
+      month            — int  (defaults to current month)
+    """
+    import pandas as pd
+    from django.http import HttpResponse
+
+    if not _is_hr_manager(request.user):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied('HR Manager role required.')
+
+    now   = timezone.now()
+    year  = int(request.data.get('year',  now.year))
+    month = int(request.data.get('month', now.month))
+    fmt   = request.query_params.get('format', 'json').lower()
+
+    master  = {}   # employee_code → master row dict
+    stats   = {'sympa_rows': 0, 'vf_employees': 0, 'radai_rows': 0, 'matched': 0}
+    warnings_list = []
+
+    # Bridge lookups built during VF / other-file steps so SYMPA name-keys can
+    # be resolved to real numeric employee codes at the end.
+    # norm_name(full_name) → employee_code
+    _vf_name_to_code    = {}
+    _other_name_to_code = {}
+    # Track which master keys were created with a temporary 'name:…' prefix
+    # (i.e. when SYMPA has no employee-code column).
+    _sympa_name_keys    = {}   # norm_name → name:… key in master
+
+    def _make_skeleton(code, name=''):
+        return {
+            'employee_code':       code,
+            'employee_name':       name or code,
+            'department': '', 'job_title': '', 'joining_date': '',
+            'basic_salary': '0', 'housing_allowance': '0',
+            'transport_allowance': '0', 'other_allowances': '0',
+            'other_pay': '0', 'total_allowances': '0',
+            'total_deductions': '0', 'deduction_details': '',
+            'details': '', 'leave_balance': '0',
+            'total_hours': '0', 'overtime_hours': '0',
+            'project_breakdown': [], 'days_present': None,
+            'days_absent': None, 'sources': [], 'warnings': [],
+        }
+
+    # ── 1. Parse Sympa file ───────────────────────────────────────────────────
+    sympa_file = request.FILES.get('sympa_file')
+    if sympa_file:
+        try:
+            df = _parse_file(sympa_file)
+            col_map    = _detect_columns(df.columns, _SYMPA_ALIASES)
+            has_code   = 'employee_code' in col_map
+            has_name   = 'employee_name' in col_map
+            surname_col = col_map.get('_surname')   # internal alias; not a real field
+
+            if not has_code and not has_name:
+                warnings_list.append(
+                    'Sympa: no employee-code or name column detected. '
+                    'Rows cannot be keyed — check the file format.'
+                )
+            else:
+                for _, row in df.iterrows():
+                    # ── Determine the master key ──────────────────────────────
+                    if has_code:
+                        code = _norm_code(row.get(col_map['employee_code'], ''))
+                        if not code:
+                            continue
+                    else:
+                        # No employee-code column (standard Sympa export).
+                        # Use "Preferred given name" as the display name; combine
+                        # with Surname to build a complete name for bridge lookups.
+                        preferred = str(row.get(col_map['employee_name'], '')).strip()
+                        surname   = str(row.get(surname_col, '')).strip() if surname_col else ''
+                        # If surname is not already contained in preferred name, append it
+                        if surname and surname.lower() not in preferred.lower():
+                            full_name = f'{preferred} {surname}'.strip()
+                        else:
+                            full_name = preferred
+                        if not full_name:
+                            continue
+                        norm = _norm_name_master(full_name)
+                        code = f'name:{norm}'
+                        _sympa_name_keys[norm] = code
+
+                    # ── Parse salary / HR fields ──────────────────────────────
+                    basic     = _safe_dec(row.get(col_map.get('basic_salary', ''), 0))
+                    housing   = _safe_dec(row.get(col_map.get('housing_allowance', ''), 0))
+                    transport = _safe_dec(row.get(col_map.get('transport_allowance', ''), 0))
+                    other     = _safe_dec(row.get(col_map.get('other_allowances', ''), 0))
+                    other_pay = _safe_dec(row.get(col_map.get('other_pay', ''), 0))
+                    deduct    = _safe_dec(row.get(col_map.get('deductions', ''), 0))
+                    total_allow = housing + transport + other
+
+                    # Resolve display name
+                    if has_name:
+                        disp_name = str(row.get(col_map['employee_name'], '')).strip()
+                        if surname_col:
+                            sn = str(row.get(surname_col, '')).strip()
+                            if sn and sn.lower() not in disp_name.lower():
+                                disp_name = f'{disp_name} {sn}'.strip()
+                    else:
+                        disp_name = code
+
+                    master[code] = {
+                        'employee_code':       code,
+                        'employee_name':       disp_name or code,
+                        'department':          str(row.get(col_map.get('department', ''), '')).strip(),
+                        'job_title':           str(row.get(col_map.get('job_title', ''), '')).strip(),
+                        'joining_date':        str(row.get(col_map.get('joining_date', ''), '')).strip(),
+                        'basic_salary':        str(basic),
+                        'housing_allowance':   str(housing),
+                        'transport_allowance': str(transport),
+                        'other_allowances':    str(other),
+                        'other_pay':           str(other_pay),
+                        'total_allowances':    str(total_allow),
+                        'total_deductions':    str(deduct),
+                        'deduction_details':   str(row.get(col_map.get('deduction_details', ''), '')).strip(),
+                        'details':             str(row.get(col_map.get('details', ''), '')).strip(),
+                        'leave_balance':       str(_safe_dec(row.get(col_map.get('leave_balance', ''), 0))),
+                        'total_hours':         '0',
+                        'overtime_hours':      '0',
+                        'project_breakdown':   [],
+                        'days_present':        None,
+                        'days_absent':         None,
+                        'sources':             ['sympa'],
+                        'warnings':            [],
+                    }
+
+                stats['sympa_rows'] = sum(1 for k in master if not str(k).startswith('name:')) + \
+                                      len(_sympa_name_keys)
+        except Exception as e:
+            logger.warning(f'generate_master_payroll: Sympa parse error: {e}')
+            warnings_list.append(f'Sympa file error: {e}')
+
+    # ── 2. Parse ValueFrame file ──────────────────────────────────────────────
+    vf_file = request.FILES.get('valueframe_file')
+    if vf_file:
+        try:
+            df = _parse_file(vf_file)
+            col_map = _detect_columns(df.columns, _VF_ALIASES)
+            if 'employee_code' not in col_map:
+                warnings_list.append('ValueFrame: could not detect employee code column.')
+            else:
+                vf_emp_hours = {}
+                vf_emp_ot    = {}
+                vf_emp_proj  = {}
+                vf_emp_names = {}
+                for _, row in df.iterrows():
+                    raw_code = row.get(col_map['employee_code'], '')
+                    # Skip non-numeric summary rows (e.g. a "Total" footer row)
+                    if not str(raw_code).strip().replace('.', '').isdigit():
+                        continue
+                    code = _norm_code(raw_code)
+                    if not code:
+                        continue
+                    # Month/year filter when those columns are present
+                    if 'month' in col_map and 'year' in col_map:
+                        row_month = _safe_float(row.get(col_map['month'], 0))
+                        row_year  = _safe_float(row.get(col_map['year'], 0))
+                        if row_month and row_year:
+                            if int(row_month) != month or int(row_year) != year:
+                                continue
+                    hours = _safe_float(row.get(col_map.get('total_hours', ''), 0))
+                    ot    = _safe_float(row.get(col_map.get('overtime_hours', ''), 0))
+                    proj_code = str(row.get(col_map.get('project_code', ''), '')).strip()
+                    proj_name = str(row.get(col_map.get('project_name', ''), '')).strip()
+                    vf_emp_hours[code] = vf_emp_hours.get(code, 0) + hours
+                    vf_emp_ot[code]    = vf_emp_ot.get(code, 0) + ot
+                    if proj_code:
+                        vf_emp_proj.setdefault(code, []).append({
+                            'project_code': proj_code,
+                            'project_name': proj_name,
+                            'hours': round(hours, 2),
+                        })
+                    if 'employee_name' in col_map:
+                        raw_name = str(row.get(col_map['employee_name'], '')).strip()
+                        vf_emp_names[code] = raw_name
+                        # Build name→code bridge for SYMPA resolution
+                        if raw_name:
+                            _vf_name_to_code[_norm_name_master(raw_name)] = code
+
+                # Merge VF hours into master
+                for code in vf_emp_hours:
+                    if code not in master:
+                        master[code] = _make_skeleton(code, vf_emp_names.get(code, code))
+                        master[code]['warnings'].append('No Sympa record found for this employee.')
+                    master[code]['total_hours']       = str(round(vf_emp_hours[code], 2))
+                    master[code]['overtime_hours']    = str(round(vf_emp_ot.get(code, 0), 2))
+                    master[code]['project_breakdown'] = vf_emp_proj.get(code, [])
+                    if 'valueframe' not in master[code]['sources']:
+                        master[code]['sources'].append('valueframe')
+                stats['vf_employees'] = len(vf_emp_hours)
+        except Exception as e:
+            logger.warning(f'generate_master_payroll: ValueFrame parse error: {e}')
+            warnings_list.append(f'ValueFrame file error: {e}')
+
+    # ── 2.5. Parse supplementary / other file ────────────────────────────────
+    # When the file is a Sympa annual-leave export it also serves as a
+    # name → employee-code bridge so SYMPA HR rows (which have no code) can
+    # be matched to their VF counterparts.
+    other_file = request.FILES.get('other_file')
+    if other_file:
+        try:
+            df = _parse_file(other_file)
+            col_map = _detect_columns(df.columns, _OTHER_ALIASES)
+
+            has_other_code = 'employee_code' in col_map
+            has_other_name = 'employee_name' in col_map
+
+            # ── Detect annual-leave export ────────────────────────────────────
+            is_leave_export = 'leave_days_used' in col_map
+            # Per-employee aggregated leave days (approved requests only)
+            leave_agg = {}   # employee_code → total leave days
+
+            if not has_other_code and not has_other_name:
+                warnings_list.append(
+                    'Other file: could not detect employee code or name column. '
+                    'Ensure the file has a column like "Employee number" or "Preferred given name".'
+                )
+            else:
+                for _, row in df.iterrows():
+                    # Determine employee code
+                    if has_other_code:
+                        raw_code = row.get(col_map['employee_code'], '')
+                        code = _norm_code(raw_code)
+                    else:
+                        code = ''
+
+                    # Determine display name & build name→code bridge
+                    if has_other_name:
+                        raw_name = str(row.get(col_map['employee_name'], '')).strip()
+                    else:
+                        raw_name = ''
+
+                    # If we have both code and name, register bridge
+                    if code and raw_name:
+                        _other_name_to_code[_norm_name_master(raw_name)] = code
+
+                    # ── Annual-leave export handling ──────────────────────────
+                    if is_leave_export:
+                        # Only count approved leave
+                        status_val = str(row.get(col_map.get('leave_status', ''), '')).strip().lower()
+                        if status_val and status_val not in ('approved', 'new', ''):
+                            continue  # skip rejected / cancelled entries
+                        days = _safe_float(row.get(col_map.get('leave_days_used', ''), 0))
+                        if days and code:
+                            leave_agg[code] = leave_agg.get(code, 0) + days
+                        continue   # leave export rows carry no financial payload
+
+                    if not code:
+                        continue
+
+                    # ── Generic supplementary financial data ──────────────────
+                    if code not in master:
+                        master[code] = _make_skeleton(code, raw_name or code)
+                        master[code]['warnings'].append(
+                            'No Sympa/ValueFrame record — sourced from Other file.'
+                        )
+
+                    mr = master[code]
+                    extra_pay = (
+                        _safe_dec(row.get(col_map.get('bonus', ''), 0)) +
+                        _safe_dec(row.get(col_map.get('commission', ''), 0)) +
+                        _safe_dec(row.get(col_map.get('incentive', ''), 0)) +
+                        _safe_dec(row.get(col_map.get('adjustment', ''), 0))
+                    )
+                    if extra_pay:
+                        mr['other_pay'] = str(_safe_dec(mr.get('other_pay', 0)) + extra_pay)
+                    extra_deduct = (
+                        _safe_dec(row.get(col_map.get('insurance', ''), 0)) +
+                        _safe_dec(row.get(col_map.get('special_deduction', ''), 0))
+                    )
+                    if extra_deduct:
+                        mr['total_deductions'] = str(
+                            _safe_dec(mr.get('total_deductions', 0)) + extra_deduct
+                        )
+                    gratuity = _safe_dec(row.get(col_map.get('gratuity', ''), 0))
+                    if gratuity:
+                        mr.setdefault('raw_data', {})['gratuity'] = str(gratuity)
+                    notes = str(row.get(col_map.get('notes', ''), '')).strip()
+                    if notes:
+                        existing = mr.get('details', '')
+                        mr['details'] = f'{existing}; {notes}'.lstrip('; ') if existing else notes
+                    if 'other' not in mr['sources']:
+                        mr['sources'].append('other')
+
+                # Apply aggregated leave days to master rows
+                for code, days in leave_agg.items():
+                    if code in master:
+                        master[code].setdefault('raw_data', {})['leave_days_taken'] = round(days, 1)
+                        if 'other' not in master[code]['sources']:
+                            master[code]['sources'].append('other')
+
+                stats['other_rows'] = sum(1 for r in master.values() if 'other' in r.get('sources', []))
+        except Exception as e:
+            logger.warning(f'generate_master_payroll: Other file parse error: {e}')
+            warnings_list.append(f'Other file error: {e}')
+
+    # ── 2.6. Bridge resolution: map SYMPA name-keys → real employee codes ─────
+    # When SYMPA has no employee-code column, rows were keyed as 'name:<norm>'.
+    # We now resolve those keys using the name→code maps built from:
+    #   1. VF             (employee_code + Employee Name)
+    #   2. BiometricUserMaster (office access-control, name normalised by RADAI)
+    #   3. annual-leave / other file (Preferred given name + Employee number)
+    if _sympa_name_keys:
+        # ── Third bridge: Biometric User Master ──────────────────────────────
+        _biometric_name_to_code = {}
+        try:
+            from apps.timesheet.models import BiometricUserMaster as _BUM
+            for _bum in _BUM.objects.values('employee_code', 'full_name').iterator():
+                _bcode = _norm_code(_bum['employee_code'])
+                _bname = (_bum['full_name'] or '').strip()
+                if _bcode and _bname:
+                    _biometric_name_to_code[_norm_name_master(_bname)] = _bcode
+        except Exception as _e:
+            logger.info(
+                'generate_master_payroll: BiometricUserMaster bridge skipped (not configured): %s', _e
+            )
+        # LEAVES/other overrides VF overrides biometric (most-specific wins)
+        combined_bridge = {
+            **_biometric_name_to_code,
+            **_vf_name_to_code,
+            **_other_name_to_code,
+        }
+        resolved = 0
+        for norm_name, name_key in list(_sympa_name_keys.items()):
+            if name_key not in master:
+                continue
+            real_code = combined_bridge.get(norm_name)
+            if not real_code:
+                continue  # leave unresolved — will appear in the output with name key
+            sympa_row = master.pop(name_key)
+            sympa_row['employee_code'] = real_code
+            if real_code in master:
+                # Employee already exists from VF — merge Sympa fields in
+                existing = master[real_code]
+                for field in ('basic_salary', 'housing_allowance', 'transport_allowance',
+                              'other_allowances', 'other_pay', 'total_allowances',
+                              'total_deductions', 'department', 'job_title',
+                              'employee_name', 'joining_date', 'leave_balance',
+                              'deduction_details', 'details'):
+                    val = sympa_row.get(field, '')
+                    if (not existing.get(field) or existing[field] in ('', '0')) and val:
+                        existing[field] = val
+                if 'sympa' not in existing['sources']:
+                    existing['sources'].insert(0, 'sympa')
+            else:
+                master[real_code] = sympa_row
+            resolved += 1
+
+        if resolved:
+            logger.info(
+                'generate_master_payroll: resolved %d/%d SYMPA name-keys to employee codes '
+                '(VF bridge: %d, biometric bridge: %d, other bridge: %d)',
+                resolved, len(_sympa_name_keys),
+                len(_vf_name_to_code), len(_biometric_name_to_code), len(_other_name_to_code),
+            )
+        unresolved = len(_sympa_name_keys) - resolved
+        if unresolved:
+            warnings_list.append(
+                f'{unresolved} Sympa employee(s) could not be matched to an employee code. '
+                f'They will appear in the output with a name-based key. '
+                f'Upload the annual-leave file as "Supplementary Data" to enable automatic matching.'
+            )
+
+    # ── 3. Merge RADAI attendance (EmployeeLeaveMonthly + DailyWorkLog) ───────
+    try:
+        # DailyWorkLog: aggregate approved days/hours per employee for the period
+        from django.db.models import Count as DjCount
+        log_agg = (
+            DailyWorkLog.objects
+            .filter(log_date__year=year, log_date__month=month, status='approved')
+            .values('user__rbac_profile__employee_id')
+            .annotate(days=DjCount('id'), hours=Sum('hours'))
+        )
+        for row in log_agg:
+            raw_code = row.get('user__rbac_profile__employee_id') or ''
+            code = _norm_code(raw_code)
+            if not code:
+                continue
+            days  = row.get('days', 0) or 0
+            if code in master:
+                master[code]['days_present'] = days
+                master[code]['days_absent']  = max(0, 22 - days)   # soft-coded working days default
+                if 'radai' not in master[code]['sources']:
+                    master[code]['sources'].append('radai')
+            stats['radai_rows'] = stats.get('radai_rows', 0) + 1
+    except Exception as e:
+        logger.warning(f'generate_master_payroll: RADAI attendance query error: {e}')
+        warnings_list.append(f'RADAI attendance partial: {e}')
+
+    # ── 3b. Biometric attendance cross-verification (DailyAttendanceSummary) ──
+    # Query the materialised biometric attendance rows for the target month and
+    # enrich each master employee with real access-control presence data.
+    # Also cross-verifies VF hours vs. biometric hours and warns on large gaps.
+    try:
+        from apps.timesheet.models import DailyAttendanceSummary as _DAS
+        from django.db.models import Sum as _DjSum, Q as _DjQ, Count as _DjCount
+        _bio_qs = (
+            _DAS.objects
+            .filter(date__year=year, date__month=month)
+            .values('employee_code')
+            .annotate(
+                bio_days=_DjCount('id'),
+                bio_hours=_DjSum('effective_hours'),
+                bio_days_late=_DjCount('id', filter=_DjQ(is_late=True)),
+                bio_days_full=_DjCount('id', filter=_DjQ(is_full_day=True)),
+            )
+        )
+        _biometric_count = 0
+        for _bio_row in _bio_qs:
+            _code = _norm_code(_bio_row['employee_code'])
+            if not _code or _code not in master:
+                continue
+            _mr = master[_code]
+            _bio_days  = int(_bio_row['bio_days'] or 0)
+            _bio_hours = round(float(_bio_row['bio_hours'] or 0), 2)
+            _bio_late  = int(_bio_row['bio_days_late'] or 0)
+            _bio_full  = int(_bio_row['bio_days_full'] or 0)
+
+            # Biometric attendance is the authoritative presence source — always
+            # overrides the DailyWorkLog approximation set in step 3.
+            _mr['days_present'] = _bio_days
+            _mr['days_absent']  = max(0, _PAYROLL_WORKING_DAYS - _bio_days)
+
+            # Cross-verify VF hours vs. biometric effective hours
+            _vf_h = _safe_float(_mr.get('total_hours', 0))
+            if _vf_h and _bio_hours:
+                _diff_pct = abs(_vf_h - _bio_hours) / max(_vf_h, _bio_hours) * 100
+                if _diff_pct > _BIOMETRIC_HOURS_DISCREPANCY_PCT:
+                    _mr.setdefault('warnings', []).append(
+                        f'Hours discrepancy: VF={_vf_h:.1f}h vs biometric={_bio_hours:.1f}h '
+                        f'({_diff_pct:.0f}% gap)'
+                    )
+
+            # Persist biometric breakdown for downstream use (detailed row view)
+            _mr.setdefault('raw_data', {}).update({
+                'bio_days_present': _bio_days,
+                'bio_hours':        _bio_hours,
+                'bio_days_late':    _bio_late,
+                'bio_days_full':    _bio_full,
+            })
+            if 'biometric' not in _mr.get('sources', []):
+                _mr.setdefault('sources', []).append('biometric')
+            _biometric_count += 1
+
+        stats['biometric_rows'] = _biometric_count
+        logger.info(
+            'generate_master_payroll: biometric attendance enriched %d employees for %04d-%02d',
+            _biometric_count, year, month,
+        )
+    except Exception as _e:
+        logger.warning('generate_master_payroll: DailyAttendanceSummary query error: %s', _e)
+        warnings_list.append(f'Biometric attendance partial: {_e}')
+
+    # ── 4. Overlay with existing RADAI salary structures ─────────────────────    try:
+        from .models import EmployeeSalaryStructure, SalaryStructureStatus
+        active_structs = EmployeeSalaryStructure.objects.filter(
+            is_active=True, status=SalaryStructureStatus.APPROVED,
+        ).values('employee_code', 'employee_name', 'department', 'basic_salary',
+                 'net_salary', 'total_gross', 'total_deductions')
+        for s in active_structs:
+            code = _norm_code(s['employee_code'])
+            if code in master:
+                # Prefer Sympa values if already set; use RADAI as fallback
+                if master[code]['basic_salary'] == '0':
+                    master[code]['basic_salary']   = str(s['basic_salary'] or 0)
+                    master[code]['total_deductions']= str(s['total_deductions'] or 0)
+                if not master[code]['department'] and s['department']:
+                    master[code]['department'] = s['department']
+                if not master[code]['employee_name'] or master[code]['employee_name'] == code:
+                    master[code]['employee_name'] = s['employee_name'] or code
+                if 'radai' not in master[code]['sources']:
+                    master[code]['sources'].append('radai')
+    except Exception as e:
+        logger.warning(f'generate_master_payroll: salary structure overlay error: {e}')
+
+    # ── 5. Build final rows ───────────────────────────────────────────────────
+    rows = []
+    for code, r in master.items():
+        # Compute estimated gross / net including other_pay
+        basic      = _safe_dec(r.get('basic_salary', 0))
+        allow      = _safe_dec(r.get('total_allowances', 0))
+        other_pay  = _safe_dec(r.get('other_pay', 0))
+        deduct     = _safe_dec(r.get('total_deductions', 0))
+        gross      = basic + allow + other_pay      # employee_salary
+        final_sal  = max(Decimal('0'), gross - deduct)
+        r['employee_salary'] = str(gross)
+        r['final_salary']    = str(final_sal)
+        # Legacy aliases kept for backward-compat JSON consumers
+        r['gross_salary']    = str(gross)
+        r['net_salary_est']  = str(final_sal)
+        rows.append(r)
+        if r['sources']:
+            stats['matched'] += 1
+
+    rows.sort(key=lambda x: (x.get('department') or '', x.get('employee_name') or ''))
+
+    # ── 6. Persist to DB + trigger async S3 upload ────────────────────────────
+    import_session = None
+    try:
+        from .models import MasterPayrollImport, MasterPayrollRow, MasterPayrollImportStatus
+        from .tasks import upload_master_payroll_to_s3
+
+        sympa_fn = request.FILES['sympa_file'].name      if 'sympa_file'      in request.FILES else ''
+        vf_fn    = request.FILES['valueframe_file'].name if 'valueframe_file' in request.FILES else ''
+        other_fn = request.FILES['other_file'].name      if 'other_file'      in request.FILES else ''
+
+        import_session = MasterPayrollImport.objects.create(
+            year=year,
+            month=month,
+            generated_by=request.user if request.user.is_authenticated else None,
+            sympa_filename=sympa_fn,
+            valueframe_filename=vf_fn,
+            other_filename=other_fn,
+            stats=stats,
+            warnings=warnings_list,
+            total_rows=len(rows),
+            status=MasterPayrollImportStatus.PROCESSING,
+        )
+
+        # Bulk-create rows (ignore conflicts — idempotent on re-generation)
+        row_objs = [
+            MasterPayrollRow(
+                import_session   = import_session,
+                employee_code    = r.get('employee_code', ''),
+                employee_name    = r.get('employee_name', ''),
+                joining_date     = r.get('joining_date', '') or '',
+                total_hours      = Decimal(str(r.get('total_hours', 0) or 0)),
+                employee_salary  = Decimal(str(r.get('employee_salary', 0) or 0)),
+                basic_salary     = Decimal(str(r.get('basic_salary', 0) or 0)),
+                total_allowances     = Decimal(str(r.get('total_allowances', 0) or 0)),
+                transport_allowance  = Decimal(str(r.get('transport_allowance', 0) or 0)),
+                housing_allowance    = Decimal(str(r.get('housing_allowance', 0) or 0)),
+                other_allowances     = Decimal(str(r.get('other_allowances', 0) or 0)),
+                other_pay            = Decimal(str(r.get('other_pay', 0) or 0)),
+                details              = r.get('details', '') or '',
+                total_deductions     = Decimal(str(r.get('total_deductions', 0) or 0)),
+                deduction_details    = r.get('deduction_details', '') or '',
+                final_salary         = Decimal(str(r.get('final_salary', 0) or 0)),
+                sources              = r.get('sources', []),
+                row_warnings         = r.get('warnings', []),
+                raw_data             = {k: v for k, v in r.items()
+                                        if k not in ('sources', 'warnings', 'project_breakdown')},
+            )
+            for r in rows
+        ]
+        MasterPayrollRow.objects.bulk_create(row_objs, ignore_conflicts=True)
+
+        # Mark ready now; Celery will flip to 'uploaded' once S3 upload completes
+        import_session.status = MasterPayrollImportStatus.READY
+        import_session.save(update_fields=['status'])
+
+        # Fire async S3 upload — non-blocking
+        upload_master_payroll_to_s3.delay(str(import_session.id))
+
+        logger.info(
+            'generate_master_payroll: saved import %s (%d rows), S3 upload queued',
+            import_session.id, len(row_objs),
+        )
+    except Exception as persist_err:
+        logger.warning('generate_master_payroll: DB/S3 persist failed: %s', persist_err)
+        # Non-fatal — still return the data to the user even if persistence fails
+
+    # ── 7. Return response ────────────────────────────────────────────────────
+    if fmt == 'xlsx':
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = f'Payroll Master {year}-{month:02d}'
+            hdr_font = Font(bold=True, color='FFFFFF')
+            hdr_fill = PatternFill('solid', fgColor='2563EB')
+            thin = Side(style='thin', color='CCCCCC')
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            headers = [
+                'Employee Code',        # 1
+                'Employee Name',        # 2
+                'Joining Date',         # 3
+                'No. of Working Hours', # 4
+                'Employee Salary',      # 5  (gross = basic + allow + other pay)
+                'Basic',                # 6
+                'Allowance',            # 7  (total allow)
+                'Transportation',       # 8
+                'Home Allowance',       # 9
+                'Other Allowance',      # 10
+                'Other Pay',            # 11
+                'Details',              # 12
+                'Salary Deduction',     # 13
+                'Deduction Details',    # 14
+                'Final Salary',         # 15  (gross – deductions)
+            ]
+            for col_idx, hdr in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col_idx, value=hdr)
+                cell.font = hdr_font
+                cell.fill = hdr_fill
+                cell.alignment = Alignment(horizontal='center')
+                cell.border = border
+                ws.column_dimensions[cell.column_letter].width = max(14, len(hdr) + 4)
+            for r_idx, r in enumerate(rows, 2):
+                vals = [
+                    r.get('employee_code', ''),                           # 1
+                    r.get('employee_name', ''),                           # 2
+                    r.get('joining_date', ''),                            # 3
+                    float(r.get('total_hours') or 0),                    # 4
+                    float(r.get('employee_salary') or 0),                # 5
+                    float(r.get('basic_salary') or 0),                   # 6
+                    float(r.get('total_allowances') or 0),               # 7
+                    float(r.get('transport_allowance') or 0),            # 8
+                    float(r.get('housing_allowance') or 0),              # 9
+                    float(r.get('other_allowances') or 0),               # 10
+                    float(r.get('other_pay') or 0),                      # 11
+                    r.get('details') or r.get('job_title', ''),          # 12
+                    float(r.get('total_deductions') or 0),               # 13
+                    r.get('deduction_details', ''),                       # 14
+                    float(r.get('final_salary') or 0),                   # 15
+                ]
+                for col_idx, val in enumerate(vals, 1):
+                    cell = ws.cell(row=r_idx, column=col_idx, value=val)
+                    cell.border = border
+                    if isinstance(val, float):
+                        cell.number_format = '#,##0.00'
+            # Freeze header row
+            ws.freeze_panes = 'A2'
+            import io
+            buf = io.BytesIO()
+            wb.save(buf)
+            buf.seek(0)
+            filename = f'master_payroll_{year}_{month:02d}.xlsx'
+            response = HttpResponse(
+                buf.read(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            return response
+        except Exception as e:
+            logger.error(f'generate_master_payroll: Excel generation error: {e}')
+            return Response({'error': f'Excel generation failed: {e}'}, status=500)
+
+    return Response({
+        'year':         year,
+        'month':        month,
+        'generated_at': timezone.now().isoformat(),
+        'import_id':    str(import_session.id) if import_session else None,
+        'rows':         rows,
+        'stats':        stats,
+        'warnings':     warnings_list,
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Master Payroll History — list past import sessions
+# GET /api/v1/payroll/master-payroll-history/
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def master_payroll_history(request):
+    """
+    Returns paginated list of past MasterPayrollImport sessions.
+    HR managers see all; regular users only see their own.
+
+    Query params:
+      year, month  — filter by period
+      page         — 1-based page number (default 1)
+      page_size    — results per page (default 20, max 100)
+    """
+    from .models import MasterPayrollImport
+
+    PAGE_SIZE_DEFAULT = 20
+    PAGE_SIZE_MAX     = 100
+
+    qs = MasterPayrollImport.objects.select_related('generated_by').order_by('-year', '-month', '-generated_at')
+
+    if not _is_hr_manager(request.user):
+        qs = qs.filter(generated_by=request.user)
+
+    year  = request.query_params.get('year')
+    month = request.query_params.get('month')
+    if year:
+        qs = qs.filter(year=int(year))
+    if month:
+        qs = qs.filter(month=int(month))
+
+    try:
+        page_size = min(int(request.query_params.get('page_size', PAGE_SIZE_DEFAULT)), PAGE_SIZE_MAX)
+        page      = max(int(request.query_params.get('page', 1)), 1)
+    except (ValueError, TypeError):
+        page_size, page = PAGE_SIZE_DEFAULT, 1
+
+    total  = qs.count()
+    offset = (page - 1) * page_size
+    items  = qs[offset: offset + page_size]
+
+    def _serialize(imp):
+        return {
+            'id':                   str(imp.id),
+            'year':                 imp.year,
+            'month':                imp.month,
+            'generated_at':         imp.generated_at.isoformat(),
+            'generated_by':         imp.generated_by.get_full_name() if imp.generated_by else None,
+            'sympa_filename':       imp.sympa_filename,
+            'valueframe_filename':  imp.valueframe_filename,
+            'status':               imp.status,
+            'total_rows':           imp.total_rows,
+            'stats':                imp.stats,
+            'has_s3':               bool(imp.s3_key),
+        }
+
+    return Response({
+        'count':     total,
+        'page':      page,
+        'page_size': page_size,
+        'results':   [_serialize(i) for i in items],
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Master Payroll Download — presigned S3 URL or on-the-fly Excel
+# GET /api/v1/payroll/master-payroll-history/<import_id>/download/
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def master_payroll_download(request, import_id):
+    """
+    Returns a presigned S3 URL for the stored Excel, or regenerates the
+    Excel on-the-fly from DB rows if the S3 upload is still pending.
+    HR managers only.
+    """
+    from .models import MasterPayrollImport
+    from apps.payroll.storage import PayrollExportStorage, S3_AVAILABLE
+
+    if not _is_hr_manager(request.user):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied('HR Manager role required.')
+
+    try:
+        session = MasterPayrollImport.objects.get(id=import_id)
+    except MasterPayrollImport.DoesNotExist:
+        return Response({'error': 'Import session not found.'}, status=404)
+
+    # ── Case 1: S3 key exists → return presigned URL ──────────────────────────
+    if session.s3_key and S3_AVAILABLE:
+        try:
+            storage = PayrollExportStorage()
+            relative_key = session.s3_key.split(f'{storage.location}/', 1)[-1]
+            url = storage.url(relative_key)
+            return Response({
+                'download_url': url,
+                'source':       's3',
+                'filename':     f'master_payroll_{session.year}_{session.month:02d}.xlsx',
+            })
+        except Exception as e:
+            logger.warning('master_payroll_download: presigned URL failed: %s', e)
+            # Fall through to on-the-fly generation
+
+    # ── Case 2: Generate Excel on-the-fly from DB rows ─────────────────────────
+    try:
+        import io as _io
+        import openpyxl
+        from django.http import HttpResponse as DjangoHttpResponse
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = f'Payroll Master {session.year}-{session.month:02d}'
+
+        hdr_font = Font(bold=True, color='FFFFFF')
+        hdr_fill = PatternFill('solid', fgColor='2563EB')
+        thin     = Side(style='thin', color='CCCCCC')
+        border   = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        headers = [
+            'Employee Code', 'Employee Name', 'Joining Date', 'No. of Working Hours',
+            'Employee Salary', 'Basic', 'Allowance', 'Transportation', 'Home Allowance',
+            'Other Allowance', 'Other Pay', 'Details', 'Salary Deduction',
+            'Deduction Details', 'Final Salary',
+        ]
+        for col_idx, hdr in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=hdr)
+            cell.font = hdr_font; cell.fill = hdr_fill
+            cell.alignment = Alignment(horizontal='center'); cell.border = border
+            ws.column_dimensions[cell.column_letter].width = max(14, len(hdr) + 4)
+
+        for r_idx, row in enumerate(session.rows.all().order_by('employee_name'), 2):
+            vals = [
+                row.employee_code,   row.employee_name,   row.joining_date or '',
+                float(row.total_hours),       float(row.employee_salary),
+                float(row.basic_salary),      float(row.total_allowances),
+                float(row.transport_allowance), float(row.housing_allowance),
+                float(row.other_allowances),  float(row.other_pay),
+                row.details or '',
+                float(row.total_deductions),  row.deduction_details or '',
+                float(row.final_salary),
+            ]
+            for col_idx, val in enumerate(vals, 1):
+                cell = ws.cell(row=r_idx, column=col_idx, value=val)
+                cell.border = border
+                if isinstance(val, float):
+                    cell.number_format = '#,##0.00'
+
+        ws.freeze_panes = 'A2'
+        buf = _io.BytesIO()
+        wb.save(buf); buf.seek(0)
+        filename = f'master_payroll_{session.year}_{session.month:02d}.xlsx'
+        response = DjangoHttpResponse(
+            buf.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+    except Exception as e:
+        logger.error('master_payroll_download: on-the-fly generation failed: %s', e)
+        return Response({'error': f'Download failed: {e}'}, status=500)
+
 
     # ── Approve ───────────────────────────────────────────────────────────
     @action(detail=True, methods=['post'], url_path='approve')

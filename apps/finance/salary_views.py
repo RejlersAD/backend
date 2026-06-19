@@ -271,6 +271,49 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    @action(detail=True, methods=['post'], url_path='bulk-approve')
+    def bulk_approve(self, request, pk=None):
+        """Approve all pending-approval slips in this payroll run in a single DB update."""
+        run = self.get_object()
+        pending_qs = SalarySlip.objects.filter(
+            payroll_run=run,
+            status=SalaryStatus.PENDING_APPROVAL,
+        )
+        count = pending_qs.count()
+        pending_qs.update(
+            status=SalaryStatus.APPROVED,
+            approved_by=request.user,
+            approved_at=timezone.now(),
+        )
+        return Response({'approved': count, 'run_code': run.run_code})
+
+    @action(detail=True, methods=['post'], url_path='bulk-send-approved')
+    def bulk_send_approved(self, request, pk=None):
+        """Queue email delivery for all approved slips in this run."""
+        run = self.get_object()
+        approved_slips = SalarySlip.objects.filter(
+            payroll_run=run,
+            status=SalaryStatus.APPROVED,
+        ).values_list('id', flat=True)
+        slip_ids = list(approved_slips)
+        if not slip_ids:
+            return Response({'sent': 0, 'message': 'No approved slips to send.'})
+        from .salary_email_service import SalarySlipEmailService
+        email_service = SalarySlipEmailService()
+        success = 0
+        failed  = 0
+        for slip_id in slip_ids:
+            try:
+                slip = SalarySlip.objects.get(id=slip_id)
+                email_service.send_salary_slip_email(slip, request.user)
+                slip.status = SalaryStatus.SENT
+                slip.save(update_fields=['status'])
+                success += 1
+            except Exception as e:
+                logger.error(f"bulk_send_approved: slip {slip_id} failed: {e}")
+                failed += 1
+        return Response({'sent': success, 'failed': failed, 'run_code': run.run_code})
+
 
 # ===========================
 # SALARY SLIP VIEWSET

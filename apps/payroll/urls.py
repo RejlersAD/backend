@@ -24,6 +24,9 @@ from .views import (
     annual_leave_balance,
     sync_leave_data,
     DailyWorkLogViewSet,
+    generate_master_payroll,
+    master_payroll_history,
+    master_payroll_download,
 )
 
 app_name = 'payroll'
@@ -50,5 +53,8 @@ urlpatterns = [
     path('branch-employee-codes/',   branch_employee_codes,                 name='branch-employee-codes'),
     path('annual-leave-balance/',    annual_leave_balance,                  name='annual-leave-balance'),
     path('sync-leave-data/',         sync_leave_data,                       name='sync-leave-data'),
+    path('generate-master-payroll/',                                   generate_master_payroll,  name='generate-master-payroll'),
+    path('master-payroll-history/',                                    master_payroll_history,   name='master-payroll-history'),
+    path('master-payroll-history/<uuid:import_id>/download/',          master_payroll_download,  name='master-payroll-download'),
     path('', include(router.urls)),
 ]

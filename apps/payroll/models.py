@@ -1046,3 +1046,139 @@ class DailyWorkLog(models.Model):
     def __str__(self):
         return f'{self.user_id} | {self.log_date} | {self.task_title[:40]} [{self.status}]'
 
+
+# =============================================================================
+# 13. MasterPayrollImport — one record per Sympa+ValueFrame generation session
+#     Stores metadata + aggregate stats.  Individual employee rows are in
+#     MasterPayrollRow.  The generated Excel is uploaded to S3 asynchronously
+#     via a Celery task; s3_key is populated once the upload completes.
+# =============================================================================
+
+class MasterPayrollImportStatus(models.TextChoices):
+    PROCESSING = 'processing', 'Processing'
+    READY      = 'ready',      'Ready'
+    UPLOADED   = 'uploaded',   'Uploaded to S3'
+    FAILED     = 'failed',     'Failed'
+
+
+class MasterPayrollImport(models.Model):
+    """
+    One import session = one HR master payroll generation.
+    Created synchronously when the HR manager clicks 'Generate Master'.
+    S3 upload happens asynchronously (Celery task updates s3_key).
+    """
+    id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    year           = models.PositiveSmallIntegerField(db_index=True)
+    month          = models.PositiveSmallIntegerField(db_index=True)
+    generated_by   = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='master_payroll_imports',
+    )
+    generated_at   = models.DateTimeField(auto_now_add=True)
+
+    # Source file names (informational — actual files are not stored locally)
+    sympa_filename      = models.CharField(max_length=255, blank=True)
+    valueframe_filename = models.CharField(max_length=255, blank=True)
+    other_filename      = models.CharField(max_length=255, blank=True)
+
+    # S3 key for the generated Excel — blank until Celery task completes
+    s3_key         = models.CharField(max_length=500, blank=True)
+    status         = models.CharField(
+        max_length=20, choices=MasterPayrollImportStatus.choices,
+        default=MasterPayrollImportStatus.PROCESSING, db_index=True,
+    )
+
+    # Aggregate stats (sympa_rows, vf_employees, radai_rows, matched)
+    stats          = models.JSONField(default=dict, blank=True)
+    # Any merge warnings generated during processing
+    warnings       = models.JSONField(default=list, blank=True)
+    # Total employee rows saved
+    total_rows     = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = 'payroll_master_import'
+        ordering = ['-year', '-month', '-generated_at']
+        indexes  = [
+            models.Index(fields=['year', 'month'], name='payroll_mi_year_month'),
+            models.Index(fields=['generated_by'],  name='payroll_mi_generated_by'),
+            models.Index(fields=['status'],        name='payroll_mi_status'),
+        ]
+
+    def __str__(self):
+        return f'MasterPayroll {self.year}-{self.month:02d} by {self.generated_by_id} [{self.status}]'
+
+    def s3_url(self):
+        """Return a presigned download URL if the file has been uploaded."""
+        if not self.s3_key:
+            return None
+        try:
+            from apps.payroll.storage import PayrollExportStorage, S3_AVAILABLE
+            if not S3_AVAILABLE:
+                return None
+            storage = PayrollExportStorage()
+            return storage.url(self.s3_key.split(f'{storage.location}/', 1)[-1])
+        except Exception:
+            return None
+
+
+# =============================================================================
+# 14. MasterPayrollRow — one employee row per MasterPayrollImport session
+# =============================================================================
+
+class MasterPayrollRow(models.Model):
+    """
+    One row per employee per MasterPayrollImport session.
+    Mirrors exactly the 15-column master output so the data can be queried,
+    diffed across months, and fed into future automation pipelines.
+    All monetary values use Decimal (never float).
+    """
+    id              = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    import_session  = models.ForeignKey(
+        MasterPayrollImport, on_delete=models.CASCADE, related_name='rows',
+    )
+
+    # ── Identity ──────────────────────────────────────────────────────────────
+    employee_code   = models.CharField(max_length=60, db_index=True)
+    employee_name   = models.CharField(max_length=255)
+    joining_date    = models.CharField(max_length=50, blank=True)   # kept as text; source may vary
+
+    # ── Time & Attendance ─────────────────────────────────────────────────────
+    total_hours     = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal('0'))
+
+    # ── Salary Components ─────────────────────────────────────────────────────
+    employee_salary     = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))   # gross
+    basic_salary        = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    total_allowances    = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    transport_allowance = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    housing_allowance   = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    other_allowances    = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    other_pay           = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+
+    # ── Notes / Details ───────────────────────────────────────────────────────
+    details             = models.TextField(blank=True)
+
+    # ── Deductions ────────────────────────────────────────────────────────────
+    total_deductions    = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    deduction_details   = models.TextField(blank=True)
+
+    # ── Final ─────────────────────────────────────────────────────────────────
+    final_salary        = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+
+    # ── Metadata (for audit / debugging) ─────────────────────────────────────
+    sources     = models.JSONField(default=list, blank=True)   # ['sympa','valueframe','radai']
+    row_warnings= models.JSONField(default=list, blank=True)   # per-employee merge warnings
+    raw_data    = models.JSONField(default=dict, blank=True)   # full original row snapshot
+
+    class Meta:
+        db_table = 'payroll_master_row'
+        ordering = ['import_session', 'employee_name']
+        indexes  = [
+            models.Index(fields=['import_session', 'employee_code'], name='payroll_mr_session_code'),
+            models.Index(fields=['employee_code'],                   name='payroll_mr_emp_code'),
+        ]
+        # Prevent duplicate employee per session
+        unique_together = [('import_session', 'employee_code')]
+
+    def __str__(self):
+        return f'{self.employee_code} — {self.import_session}'
+
