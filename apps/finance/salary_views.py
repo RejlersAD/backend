@@ -73,6 +73,11 @@ class EmployeeSalaryInfoViewSet(viewsets.ModelViewSet):
         if is_active is not None:
             queryset = queryset.filter(is_active=is_active.lower() == 'true')
         
+        # Filter by user UUID — used by the ESS portal (?employee=<User UUID>)
+        employee_uid = self.request.query_params.get('employee')
+        if employee_uid:
+            queryset = queryset.filter(user_id=employee_uid)
+
         # Search by employee ID or name
         search = self.request.query_params.get('search')
         if search:
@@ -302,7 +307,12 @@ class SalarySlipViewSet(viewsets.ModelViewSet):
         if year:
             queryset = queryset.filter(year=year)
         
-        # Filter by employee
+        # Filter by employee (User UUID) — used by the ESS self-service portal
+        employee_uid = self.request.query_params.get('employee')
+        if employee_uid:
+            queryset = queryset.filter(employee_salary_info__user_id=employee_uid)
+
+        # Filter by employee (biometric code)
         employee_id = self.request.query_params.get('employee_id')
         if employee_id:
             queryset = queryset.filter(employee_salary_info__employee_id=employee_id)

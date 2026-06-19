@@ -441,12 +441,31 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class   = LeaveRequestSerializer
 
+    @staticmethod
+    def _user_employee_code(user):
+        """Safely read the biometric employee_id from the user's RBAC profile."""
+        try:
+            return user.rbac_profile.employee_id or None
+        except Exception:
+            return None
+
     def get_queryset(self):
         qs = (
             LeaveRequest.objects
             .select_related('leave_type', 'employee', 'reviewed_by')
             .all()
         )
+        user = self.request.user
+
+        # Non-staff users see only their own leave requests.
+        # Match by User FK *or* by biometric employee_code (handles HR-created requests).
+        if not user.is_staff:
+            emp_code = self._user_employee_code(user)
+            own_q = Q(employee=user)
+            if emp_code:
+                own_q |= Q(employee_code=emp_code)
+            qs = qs.filter(own_q)
+
         params = self.request.query_params
         st      = params.get('status')
         code    = params.get('employee_code')
@@ -468,6 +487,19 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         if search:
             qs = qs.filter(employee_name__icontains=search)
         return qs.order_by('-created_at')
+
+    def perform_create(self, serializer):
+        """Auto-link the leave request to the authenticated user."""
+        user     = self.request.user
+        emp_code = self._user_employee_code(user)
+        emp_name = f'{user.first_name} {user.last_name}'.strip() or user.username
+        extra    = {'employee': user}
+        # Only fill denormalised fields if the caller didn’t supply them
+        if emp_code and not serializer.validated_data.get('employee_code'):
+            extra['employee_code'] = emp_code
+        if not serializer.validated_data.get('employee_name'):
+            extra['employee_name'] = emp_name
+        serializer.save(**extra)
 
     @action(detail=True, methods=['post'], url_path='approve')
     def approve(self, request, pk=None):
