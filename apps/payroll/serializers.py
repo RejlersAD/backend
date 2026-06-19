@@ -438,3 +438,51 @@ class AttendanceOverrideSerializer(serializers.ModelSerializer):
         if obj.created_by:
             return f'{obj.created_by.first_name} {obj.created_by.last_name}'.strip() or obj.created_by.email
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DailyWorkLog
+# ─────────────────────────────────────────────────────────────────────────────
+from .models import DailyWorkLog  # noqa: E402
+
+
+class DailyWorkLogSerializer(serializers.ModelSerializer):
+    user_full_name       = serializers.SerializerMethodField(read_only=True)
+    priority_display     = serializers.CharField(source='get_priority_display',         read_only=True)
+    status_display       = serializers.CharField(source='get_status_display',           read_only=True)
+    approval_status_display = serializers.CharField(source='get_approval_status_display', read_only=True)
+    approved_by_name     = serializers.SerializerMethodField(read_only=True)
+    submitted_to_role_display = serializers.CharField(source='get_submitted_to_role_display', read_only=True)
+
+    class Meta:
+        model  = DailyWorkLog
+        fields = [
+            'id', 'user', 'user_full_name',
+            'log_date', 'task_title', 'project_category',
+            'hours_spent', 'priority', 'priority_display',
+            'status', 'status_display',
+            'notes', 's3_export_key',
+            # approval
+            'approval_status', 'approval_status_display',
+            'approved_by', 'approved_by_name', 'approved_at', 'approval_note',
+            # routing
+            'submitted_to_role', 'submitted_to_role_display',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'user', 'user_full_name',
+            's3_export_key', 'created_at', 'updated_at',
+            'priority_display', 'status_display',
+            'approval_status', 'approval_status_display',
+            'approved_by', 'approved_by_name', 'approved_at', 'approval_note',
+            'submitted_to_role_display',
+        ]
+
+    def get_user_full_name(self, obj):
+        u = obj.user
+        return f'{u.first_name} {u.last_name}'.strip() or u.email
+
+    def get_approved_by_name(self, obj):
+        if obj.approved_by:
+            return f'{obj.approved_by.first_name} {obj.approved_by.last_name}'.strip() or obj.approved_by.email
+        return None

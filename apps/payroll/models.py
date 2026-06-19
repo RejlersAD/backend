@@ -208,6 +208,8 @@ class ProjectCostAllocation(models.Model):
     salary_slip = models.ForeignKey(
         SalarySlip,
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='cost_allocations',
     )
     project_code   = models.CharField(max_length=64)
@@ -920,4 +922,127 @@ class SalaryHistory(models.Model):
 
     def __str__(self):
         return f'{self.employee_name} ({self.employee_code}) {self.change_date} net {self.previous_net}->{self.new_net}'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. DailyWorkLog — individual employee daily activity tracker
+#     Stored in PostgreSQL; optionally exported to AWS S3 as JSON archive.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DailyWorkLogPriority(models.TextChoices):
+    LOW      = 'low',      'Low'
+    MEDIUM   = 'medium',   'Medium'
+    HIGH     = 'high',     'High'
+    CRITICAL = 'critical', 'Critical'
+
+
+class DailyWorkLogStatus(models.TextChoices):
+    IN_PROGRESS = 'in_progress', 'In Progress'
+    DONE        = 'done',        'Done'
+    BLOCKED     = 'blocked',     'Blocked'
+    DEFERRED    = 'deferred',    'Deferred'
+
+
+class DailyWorkLogApprovalStatus(models.TextChoices):
+    PENDING  = 'pending',  'Pending Approval'
+    APPROVED = 'approved', 'Approved'
+    REJECTED = 'rejected', 'Rejected'
+
+
+class DailyWorkLogSubmitTo(models.TextChoices):
+    PROJECT_MANAGER   = 'project_manager',   'Project Manager'
+    REPORTING_MANAGER = 'reporting_manager', 'Reporting Manager'
+
+
+class DailyWorkLog(models.Model):
+    """
+    One work activity entry per user per day.
+
+    Personal scope — each user owns their own entries.  HR/staff users may
+    query other users' logs via the `?user_id=` or `?all=true` params on the
+    ViewSet.  S3 export is user-triggered: the ViewSet action serialises a
+    date range to JSON, uploads to S3 under
+    ``daily-tracker/{user_id}/{YYYY}/{MM}/export_{timestamp}.json`` and
+    returns a 1-hour presigned URL.
+
+    Monetary fields are intentionally absent; ``hours_spent`` is Decimal for
+    precision without floating-point artefacts.
+    """
+    id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    user             = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='daily_work_logs',
+        db_index=True,
+    )
+
+    log_date         = models.DateField(db_index=True)
+    task_title       = models.CharField(max_length=255)
+    project_category = models.CharField(max_length=100, blank=True)
+
+    # Decimal — never float per global coding rules
+    hours_spent      = models.DecimalField(max_digits=4, decimal_places=2)
+
+    priority         = models.CharField(
+        max_length=10,
+        choices=DailyWorkLogPriority.choices,
+        default=DailyWorkLogPriority.MEDIUM,
+        db_index=True,
+    )
+    status           = models.CharField(
+        max_length=15,
+        choices=DailyWorkLogStatus.choices,
+        default=DailyWorkLogStatus.IN_PROGRESS,
+        db_index=True,
+    )
+    notes            = models.TextField(blank=True)
+
+    # Populated once the user exports this entry to S3 — blank until then.
+    s3_export_key    = models.CharField(max_length=500, blank=True)
+
+    # ── Approval workflow ─────────────────────────────────────────────────
+    # New logs start as PENDING; manager or HR staff approves / rejects.
+    # Approved logs feed into project cost allocations and payroll KPIs.
+    approval_status  = models.CharField(
+        max_length=10,
+        choices=DailyWorkLogApprovalStatus.choices,
+        default=DailyWorkLogApprovalStatus.PENDING,
+        db_index=True,
+    )
+    approved_by      = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='approved_work_logs',
+    )
+    approved_at      = models.DateTimeField(null=True, blank=True)
+    approval_note    = models.TextField(blank=True)
+
+    # Which manager role the employee routed this entry to for approval.
+    # Blank = not specified (legacy entries / optional selection).
+    submitted_to_role = models.CharField(
+        max_length=20,
+        choices=DailyWorkLogSubmitTo.choices,
+        blank=True,
+        default='',
+        help_text='Manager role type the employee directed this log to.',
+    )
+
+    created_at       = models.DateTimeField(auto_now_add=True)
+    updated_at       = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'payroll_daily_work_log'
+        ordering = ['-log_date', '-created_at']
+        indexes  = [
+            models.Index(fields=['user', 'log_date'],       name='payroll_dwl_user_date'),
+            models.Index(fields=['log_date'],               name='payroll_dwl_date'),
+            models.Index(fields=['status'],                 name='payroll_dwl_status'),
+            models.Index(fields=['approval_status'],        name='payroll_dwl_approval'),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id} | {self.log_date} | {self.task_title[:40]} [{self.status}]'
 

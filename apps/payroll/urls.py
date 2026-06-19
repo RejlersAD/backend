@@ -23,6 +23,7 @@ from .views import (
     SalaryHistoryViewSet,
     annual_leave_balance,
     sync_leave_data,
+    DailyWorkLogViewSet,
 )
 
 app_name = 'payroll'
@@ -41,6 +42,7 @@ router.register(r'attendance-overrides',  AttendanceOverrideViewSet,         bas
 router.register(r'salary-components',     SalaryComponentViewSet,            basename='salary-component')
 router.register(r'salary-structures',     EmployeeSalaryStructureViewSet,    basename='salary-structure')
 router.register(r'salary-history',        SalaryHistoryViewSet,              basename='salary-history')
+router.register(r'daily-logs',            DailyWorkLogViewSet,               basename='daily-log')
 
 urlpatterns = [
     path('dashboard-summary/',       PayrollDashboardSummaryView.as_view(), name='dashboard-summary'),

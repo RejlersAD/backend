@@ -32,6 +32,7 @@ from .models import (
     ChatbotMessage,
     AlertStatus,
     EmployeeLeaveRecord,
+    EmployeeLeaveMonthly,
     LeaveType,
     LeaveRequest,
     LeaveRequestStatus,
@@ -41,6 +42,8 @@ from .models import (
     EmployeeSalaryStructure,
     SalaryStructureStatus,
     SalaryHistory,
+    DailyWorkLog,
+    DailyWorkLogApprovalStatus,
 )
 from .serializers import (
     PayrollValidationLogSerializer,
@@ -78,7 +81,7 @@ class PayrollDashboardSummaryView(APIView):
         current_month = now.month
         current_year  = now.year
 
-        # Current month gross & net
+        # ── Salary-slip KPIs (current month) ────────────────────────────────
         slip_agg = SalarySlip.objects.filter(
             month=current_month,
             year=current_year,
@@ -98,23 +101,63 @@ class PayrollDashboardSummaryView(APIView):
             status=SalaryStatus.PENDING_APPROVAL
         ).count()
 
-        total_employees = EmployeeSalaryInfo.objects.filter(is_active=True).count()
+        # ── Active employee count ────────────────────────────────────────────
+        # Primary: EmployeeSalaryInfo (set when salary structures are loaded).
+        # Fallback: distinct employee codes from annual leave records.
+        salary_employee_count = EmployeeSalaryInfo.objects.filter(is_active=True).count()
+        leave_employee_count = (
+            EmployeeLeaveRecord.objects
+            .filter(year=current_year)
+            .exclude(employee_code__isnull=True)
+            .values('employee_code')
+            .distinct()
+            .count()
+        )
+        total_employees = salary_employee_count or leave_employee_count
 
         avg_salary = EmployeeSalaryInfo.objects.filter(
             is_active=True
         ).aggregate(avg=Avg('basic_salary'))['avg'] or Decimal('0')
 
-        # Open validation issues
+        # ── Open issues ──────────────────────────────────────────────────────
         open_validations = PayrollValidationLog.objects.filter(is_resolved=False).count()
         open_alerts      = PayrollAuditAlert.objects.filter(status=AlertStatus.OPEN).count()
 
-        # Latest payroll run
+        # Employees with a negative or zero leave balance are an alert
+        leave_critical = (
+            EmployeeLeaveRecord.objects
+            .filter(year=current_year, leave_balance__lte=0)
+            .count()
+        )
+
+        # ── Leave summary (annual aggregates) ───────────────────────────────
+        leave_agg = EmployeeLeaveRecord.objects.filter(year=current_year).aggregate(
+            total_taken=Sum('total_taken'),
+            total_earned=Sum('total_earned'),
+            avg_balance=Avg('leave_balance'),
+        )
+        leave_employees_taken = (
+            EmployeeLeaveRecord.objects.filter(year=current_year, total_taken__gt=0).count()
+        )
+
+        # Current-month leave taken (from monthly breakdown table)
+        current_month_leave_taken = (
+            EmployeeLeaveMonthly.objects
+            .filter(record__year=current_year, month=current_month)
+            .aggregate(taken=Sum('taken'))['taken'] or Decimal('0')
+        )
+
+        # ── Latest payroll run ───────────────────────────────────────────────
         latest_run = PayrollRun.objects.order_by('-year', '-month').first()
 
         return Response({
             'current_month':       current_month,
             'current_year':        current_year,
-            'total_employees':     total_employees,
+            # Employee count — accurate regardless of whether salary runs exist
+            'total_employees':         total_employees,
+            'salary_employees':        salary_employee_count,
+            'leave_employees':         leave_employee_count,
+            # Salary-slip KPIs (zero until payroll runs are processed)
             'current_month_gross': str(slip_agg['total_gross'] or 0),
             'current_month_net':   str(slip_agg['total_net'] or 0),
             'total_deductions':    str(slip_agg['total_deductions'] or 0),
@@ -123,8 +166,31 @@ class PayrollDashboardSummaryView(APIView):
             'ytd_payroll':         str(ytd_agg['ytd_net'] or 0),
             'avg_basic_salary':    str(avg_salary),
             'open_validations':    open_validations,
-            'open_alerts':         open_alerts,
-            'latest_run':          {
+            'open_alerts':         open_alerts + leave_critical,
+            # Leave intelligence — always populated from imported leave data
+            'leave_data_available':        leave_employee_count > 0,
+            'leave_total_taken_ytd':       str(leave_agg['total_taken'] or 0),
+            'leave_total_earned_ytd':      str(leave_agg['total_earned'] or 0),
+            'leave_avg_balance':           str(round(leave_agg['avg_balance'] or 0, 2)),
+            'leave_employees_taken':       leave_employees_taken,
+            'leave_current_month_taken':   str(current_month_leave_taken),
+            'leave_critical_alerts':       leave_critical,
+            # Activity intelligence — approved daily work logs (month-to-date)
+            'approved_activity_hours_mtd':  float(
+                DailyWorkLog.objects
+                .filter(
+                    approval_status=DailyWorkLogApprovalStatus.APPROVED,
+                    log_date__year=current_year,
+                    log_date__month=current_month,
+                )
+                .aggregate(h=Sum('hours_spent'))['h'] or 0
+            ),
+            'approved_activity_count_mtd': DailyWorkLog.objects.filter(
+                approval_status=DailyWorkLogApprovalStatus.APPROVED,
+                log_date__year=current_year,
+                log_date__month=current_month,
+            ).count(),
+            'latest_run': {
                 'id':     str(latest_run.id)     if latest_run else None,
                 'code':   latest_run.run_code    if latest_run else None,
                 'month':  latest_run.month       if latest_run else None,
@@ -1225,3 +1291,318 @@ def sync_leave_data(request):
         'computed':        computed,
         'compute_errors':  computed_errors,
     })
+
+
+# =============================================================================
+# DailyWorkLog ViewSet
+# =============================================================================
+from .models import DailyWorkLog, DailyWorkLogStatus, DailyWorkLogApprovalStatus  # noqa: E402
+from .serializers import DailyWorkLogSerializer  # noqa: E402
+
+
+class DailyWorkLogViewSet(viewsets.ModelViewSet):
+    """
+    CRUD for personal daily work logs.
+
+    Default scope: the requesting user''s own logs.
+    Staff overrides:
+      * ?all=true          -> all users'' logs (staff only)
+      * ?user_id=<uuid>    -> specific user''s logs (staff only)
+
+    Date filters (compatible with above scopes):
+      * ?date=YYYY-MM-DD
+      * ?from=YYYY-MM-DD&to=YYYY-MM-DD
+      * ?status=in_progress|done|blocked|deferred
+
+    Custom actions:
+      GET  /daily-logs/summary/        -> daily totals (hours + task count) per date
+      GET  /daily-logs/export-to-s3/   -> export filtered logs as JSON to S3
+      GET  /daily-logs/team/           -> latest log per user for a date (staff only)
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class   = DailyWorkLogSerializer
+    http_method_names  = ['get', 'post', 'patch', 'delete', 'head', 'options']
+
+    def get_queryset(self):
+        user   = self.request.user
+        params = self.request.query_params
+        qs     = DailyWorkLog.objects.select_related('user')
+
+        # Scope
+        if user.is_staff and params.get('all') == 'true':
+            pass  # no user filter — all logs
+        elif user.is_staff and params.get('user_id'):
+            qs = qs.filter(user_id=params.get('user_id'))
+        else:
+            qs = qs.filter(user=user)
+
+        # Date filters
+        exact_date = params.get('date')
+        from_date  = params.get('from')
+        to_date    = params.get('to')
+        if exact_date:
+            qs = qs.filter(log_date=exact_date)
+        else:
+            if from_date:
+                qs = qs.filter(log_date__gte=from_date)
+            if to_date:
+                qs = qs.filter(log_date__lte=to_date)
+
+        # Status filter
+        status_filter = params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        # Approval status filter
+        approval_filter = params.get('approval_status')
+        if approval_filter:
+            qs = qs.filter(approval_status=approval_filter)
+
+        return qs.order_by('-log_date', '-created_at')
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    # ── Permission helper ──────────────────────────────────────────────────
+    @staticmethod
+    def _can_approve(request_user, log_obj):
+        """
+        Returns True if request_user may approve/reject log_obj.
+        Rules (OR):
+          1. request_user.is_staff or is_superuser
+          2. request_user is the direct manager of log_obj.user
+             (UserProfile.manager FK points to a UserProfile; check if that
+              UserProfile.user == request_user)
+        """
+        if request_user.is_staff or request_user.is_superuser:
+            return True
+        try:
+            from apps.rbac.models import UserProfile  # noqa: F811
+            return UserProfile.objects.filter(
+                user=log_obj.user,
+                manager__user=request_user,
+                is_deleted=False,
+            ).exists()
+        except Exception:
+            return False
+
+    # ── Approve ───────────────────────────────────────────────────────────
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve(self, request, pk=None):
+        log = self.get_object()
+        if not self._can_approve(request.user, log):
+            return Response(
+                {'error': 'You do not have permission to approve this activity.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if log.approval_status == DailyWorkLogApprovalStatus.APPROVED:
+            return Response(
+                {'error': 'Activity is already approved.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        note = request.data.get('note', '')
+        log.approval_status = DailyWorkLogApprovalStatus.APPROVED
+        log.approved_by     = request.user
+        log.approved_at     = timezone.now()
+        log.approval_note   = note
+        log.save(update_fields=['approval_status', 'approved_by', 'approved_at', 'approval_note'])
+
+        # ── Auto-create ProjectCostAllocation if a SalarySlip exists ───
+        try:
+            from apps.finance.salary_models import SalarySlip as _Slip  # noqa
+            slip = _Slip.objects.filter(
+                month=log.log_date.month,
+                year=log.log_date.year,
+            ).filter(
+                # Match by user → EmployeeSalaryInfo → SalarySlip
+                employee_salary_info__user=log.user,
+            ).first()
+            if slip:
+                ProjectCostAllocation.objects.create(
+                    salary_slip=slip,
+                    project_code=log.project_category or 'DAILY-ACTIVITY',
+                    project_name=log.project_category or 'Daily Activity',
+                    allocated_hours=log.hours_spent,
+                    allocation_percent=Decimal('0'),
+                    allocated_cost=Decimal('0'),
+                    month=log.log_date.month,
+                    year=log.log_date.year,
+                )
+        except Exception:
+            pass  # Never block the approval if cost allocation fails
+
+        # ── Notify employee by email ───────────────────────────────────
+        try:
+            from django.core.mail import send_mail
+            from django.conf import settings as _s
+            role_label = (
+                'Project Manager' if log.submitted_to_role == 'project_manager'
+                else 'Reporting Manager' if log.submitted_to_role == 'reporting_manager'
+                else 'Manager'
+            )
+            send_mail(
+                subject=f'[RAD AI] Your activity log has been approved',
+                message=(
+                    f'Hi {log.user.first_name or log.user.email},\n\n'
+                    f'Your activity "{log.task_title}" on {log.log_date} '
+                    f'({log.hours_spent} hrs) has been approved by your {role_label}'
+                    f'{" with note: " + note if note else "."}'
+                    f'\n\nApproved by: {request.user.get_full_name() or request.user.email}\n'
+                ),
+                from_email=getattr(_s, 'DEFAULT_FROM_EMAIL', None),
+                recipient_list=[log.user.email],
+                fail_silently=True,
+            )
+        except Exception:
+            pass
+
+        return Response(DailyWorkLogSerializer(log).data)
+
+    # ── Reject ────────────────────────────────────────────────────────────
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject(self, request, pk=None):
+        log = self.get_object()
+        if not self._can_approve(request.user, log):
+            return Response(
+                {'error': 'You do not have permission to reject this activity.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if log.approval_status == DailyWorkLogApprovalStatus.REJECTED:
+            return Response(
+                {'error': 'Activity is already rejected.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        note = request.data.get('note', '')
+        log.approval_status = DailyWorkLogApprovalStatus.REJECTED
+        log.approved_by     = request.user
+        log.approved_at     = timezone.now()
+        log.approval_note   = note
+        log.save(update_fields=['approval_status', 'approved_by', 'approved_at', 'approval_note'])
+
+        # ── Notify employee by email ───────────────────────────────────
+        try:
+            from django.core.mail import send_mail
+            from django.conf import settings as _s
+            role_label_r = (
+                'Project Manager' if log.submitted_to_role == 'project_manager'
+                else 'Reporting Manager' if log.submitted_to_role == 'reporting_manager'
+                else 'Manager'
+            )
+            send_mail(
+                subject=f'[RAD AI] Your activity log requires revision',
+                message=(
+                    f'Hi {log.user.first_name or log.user.email},\n\n'
+                    f'Your activity "{log.task_title}" on {log.log_date} '
+                    f'({log.hours_spent} hrs) was reviewed by your {role_label_r} and was not approved.\n\n'
+                    f'Reason: {note or "No reason provided."}\n\n'
+                    f'Please update the entry and resubmit for approval.\n\n'
+                    f'Reviewed by: {request.user.get_full_name() or request.user.email}\n'
+                ),
+                from_email=getattr(_s, 'DEFAULT_FROM_EMAIL', None),
+                recipient_list=[log.user.email],
+                fail_silently=True,
+            )
+        except Exception:
+            pass
+
+        return Response(DailyWorkLogSerializer(log).data)
+
+    # -- Summary: daily totals for heatmap + bar chart ---------------------
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        qs = self.get_queryset()
+        from django.db.models import Sum, Count  # noqa: F811
+        rows = (
+            qs
+            .values('log_date')
+            .annotate(total_hours=Sum('hours_spent'), task_count=Count('id'))
+            .order_by('log_date')
+        )
+        data = [
+            {
+                'date':        str(r['log_date']),
+                'total_hours': float(r['total_hours'] or 0),
+                'task_count':  r['task_count'],
+            }
+            for r in rows
+        ]
+        return Response(data)
+
+    # ── Export to S3 ───────────────────────────────────────────────────────
+    @action(detail=False, methods=['get'], url_path='export-to-s3')
+    def export_to_s3(self, request):
+        from django.conf import settings as _settings  # noqa: F811
+        bucket = getattr(_settings, 'AWS_STORAGE_BUCKET_NAME', '')
+        if not bucket:
+            return Response(
+                {'error': 'S3 storage is not configured on this environment.'},
+                status=503,
+            )
+
+        import boto3, json, tempfile  # noqa: E402
+        from datetime import datetime as _dt  # noqa: F811
+
+        qs   = self.get_queryset()
+        data = DailyWorkLogSerializer(qs, many=True).data
+
+        user       = request.user
+        now        = _dt.utcnow()
+        s3_key     = (
+            f'daily-tracker/{user.id}/{now.year:04d}/{now.month:02d}/'
+            f'export_{now.strftime("%Y%m%d_%H%M%S")}.json'
+        )
+
+        payload = json.dumps(list(data), default=str, ensure_ascii=False)
+
+        region   = getattr(_settings, 'AWS_S3_REGION_NAME', 'us-east-1')
+        endpoint = getattr(_settings, 'AWS_S3_ENDPOINT_URL', None)
+        s3 = boto3.client(
+            's3',
+            region_name=region,
+            endpoint_url=endpoint,
+        )
+        s3.put_object(
+            Bucket=bucket,
+            Key=s3_key,
+            Body=payload.encode('utf-8'),
+            ContentType='application/json',
+        )
+
+        # Mark exported logs with their S3 key
+        qs.update(s3_export_key=s3_key)
+
+        presigned_url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket, 'Key': s3_key},
+            ExpiresIn=3600,
+        )
+
+        return Response({'s3_key': s3_key, 'url': presigned_url, 'count': len(data)})
+
+    # ── Team view: latest entries per user for a given date ────────────────
+    @action(detail=False, methods=['get'], url_path='team')
+    def team(self, request):
+        if not request.user.is_staff:
+            return Response({'error': 'Staff access required.'}, status=403)
+
+        params = request.query_params
+        date   = params.get('date', str(datetime.date.today()))
+
+        from django.db.models import Max  # noqa: F811
+        # Subquery: most recent entry per user on target date
+        latest = (
+            DailyWorkLog.objects
+            .filter(log_date=date)
+            .values('user')
+            .annotate(latest=Max('created_at'))
+            .values_list('latest', flat=True)
+        )
+        logs = (
+            DailyWorkLog.objects
+            .filter(log_date=date, created_at__in=latest)
+            .select_related('user')
+            .order_by('user__first_name', 'user__last_name')
+        )
+        return Response(DailyWorkLogSerializer(logs, many=True).data)
