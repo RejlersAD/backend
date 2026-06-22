@@ -453,10 +453,12 @@ class LeaveType(models.Model):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class LeaveRequestStatus(models.TextChoices):
-    PENDING   = 'PENDING',   'Pending'
-    APPROVED  = 'APPROVED',  'Approved'
-    REJECTED  = 'REJECTED',  'Rejected'
-    CANCELLED = 'CANCELLED', 'Cancelled'
+    PENDING     = 'PENDING',     'Pending'           # Waiting for Reporting Manager
+    RM_APPROVED = 'RM_APPROVED', 'Pending HR Approval'  # RM approved → waiting HR
+    RM_REJECTED = 'RM_REJECTED', 'Rejected by Manager'  # RM rejected
+    APPROVED    = 'APPROVED',    'Approved'           # HR final approval
+    REJECTED    = 'REJECTED',    'Rejected'           # HR final rejection
+    CANCELLED   = 'CANCELLED',   'Cancelled'
 
 
 class LeaveRequest(models.Model):
@@ -500,6 +502,14 @@ class LeaveRequest(models.Model):
     )
     reviewed_at      = models.DateTimeField(null=True, blank=True)
     reviewer_note    = models.TextField(blank=True)
+
+    # Reporting Manager (Stage 1) approval
+    rm_reviewed_by   = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='rm_reviewed_leave_requests',
+    )
+    rm_reviewed_at   = models.DateTimeField(null=True, blank=True)
+    rm_note          = models.TextField(blank=True)
 
     created_at       = models.DateTimeField(auto_now_add=True)
     updated_at       = models.DateTimeField(auto_now=True)
@@ -1061,11 +1071,38 @@ class MasterPayrollImportStatus(models.TextChoices):
     FAILED     = 'failed',     'Failed'
 
 
+# Soft-coded workflow stage progression (order matters for guard checks)
+# draft → frozen → hr_approved → finance_review → finance_approved → released
+class MasterPayrollWorkflowStage(models.TextChoices):
+    DRAFT            = 'draft',            'Draft — HR Editing'
+    FROZEN           = 'frozen',           'Frozen — Awaiting HR Approval'
+    HR_APPROVED      = 'hr_approved',      'HR Approved — Finance Review'
+    FINANCE_REVIEW   = 'finance_review',   'Finance Review — In Progress'
+    FINANCE_APPROVED = 'finance_approved', 'Finance Approved — Awaiting Release'
+    RELEASED         = 'released',         'Released — Salary Disbursed'
+
+
+# Ordered list for stage-progression guard
+WORKFLOW_STAGE_ORDER = [
+    MasterPayrollWorkflowStage.DRAFT,
+    MasterPayrollWorkflowStage.FROZEN,
+    MasterPayrollWorkflowStage.HR_APPROVED,
+    MasterPayrollWorkflowStage.FINANCE_REVIEW,
+    MasterPayrollWorkflowStage.FINANCE_APPROVED,
+    MasterPayrollWorkflowStage.RELEASED,
+]
+
+
 class MasterPayrollImport(models.Model):
     """
     One import session = one HR master payroll generation.
     Created synchronously when the HR manager clicks 'Generate Master'.
     S3 upload happens asynchronously (Celery task updates s3_key).
+
+    Workflow: draft → frozen (HR locks) → hr_approved → finance_review
+              → finance_approved → released
+    Only the super-admin email (PAYROLL_WORKFLOW_SUPERADMIN_EMAIL in settings)
+    can unfreeze a frozen/approved record.
     """
     id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     year           = models.PositiveSmallIntegerField(db_index=True)
@@ -1095,6 +1132,41 @@ class MasterPayrollImport(models.Model):
     # Total employee rows saved
     total_rows     = models.PositiveIntegerField(default=0)
 
+    # ── Approval Workflow (soft-coded stage machine) ──────────────────────────
+    workflow_stage = models.CharField(
+        max_length=20,
+        choices=MasterPayrollWorkflowStage.choices,
+        default=MasterPayrollWorkflowStage.DRAFT,
+        db_index=True,
+    )
+    # Freeze metadata
+    frozen_by      = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='frozen_master_payrolls',
+    )
+    frozen_at      = models.DateTimeField(null=True, blank=True)
+    # HR approval
+    hr_approved_by   = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='hr_approved_master_payrolls',
+    )
+    hr_approved_at   = models.DateTimeField(null=True, blank=True)
+    hr_approval_note = models.TextField(blank=True)
+    # Finance approval
+    finance_approved_by   = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='finance_approved_master_payrolls',
+    )
+    finance_approved_at   = models.DateTimeField(null=True, blank=True)
+    finance_approval_note = models.TextField(blank=True)
+    # Salary release
+    released_by   = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='released_master_payrolls',
+    )
+    released_at   = models.DateTimeField(null=True, blank=True)
+    release_note  = models.TextField(blank=True)
+
     class Meta:
         db_table = 'payroll_master_import'
         ordering = ['-year', '-month', '-generated_at']
@@ -1102,10 +1174,16 @@ class MasterPayrollImport(models.Model):
             models.Index(fields=['year', 'month'], name='payroll_mi_year_month'),
             models.Index(fields=['generated_by'],  name='payroll_mi_generated_by'),
             models.Index(fields=['status'],        name='payroll_mi_status'),
+            models.Index(fields=['workflow_stage'], name='payroll_mi_workflow_stage'),
         ]
 
     def __str__(self):
         return f'MasterPayroll {self.year}-{self.month:02d} by {self.generated_by_id} [{self.status}]'
+
+    @property
+    def is_editable_by_hr(self):
+        """HR can only edit rows when in draft stage."""
+        return self.workflow_stage == MasterPayrollWorkflowStage.DRAFT
 
     def s3_url(self):
         """Return a presigned download URL if the file has been uploaded."""
@@ -1181,4 +1259,49 @@ class MasterPayrollRow(models.Model):
 
     def __str__(self):
         return f'{self.employee_code} — {self.import_session}'
+
+
+# =============================================================================
+# MasterPayrollWorkflowLog — immutable audit trail of every workflow transition
+# =============================================================================
+
+class MasterPayrollWorkflowLog(models.Model):
+    """
+    Immutable record of every freeze / approve / release action on a
+    MasterPayrollImport.  Never delete rows from this table.
+
+    Action codes (soft-coded):
+      freeze           HR Manager locks the file
+      unfreeze         Superadmin reverts to draft
+      hr_approve       HR Manager approves → Finance
+      finance_review   Finance opens the file for modification
+      finance_approve  Finance confirms → Accounts
+      release          Accounts marks salary as released
+    """
+    id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    master_import  = models.ForeignKey(
+        MasterPayrollImport, on_delete=models.CASCADE,
+        related_name='workflow_logs',
+    )
+    from_stage     = models.CharField(max_length=20, blank=True)
+    to_stage       = models.CharField(max_length=20)
+    action         = models.CharField(max_length=30)   # freeze | unfreeze | hr_approve | …
+    performed_by   = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='payroll_workflow_actions',
+    )
+    performed_at   = models.DateTimeField(auto_now_add=True, db_index=True)
+    note           = models.TextField(blank=True)
+
+    class Meta:
+        db_table = 'payroll_workflow_log'
+        ordering = ['performed_at']
+        indexes  = [
+            models.Index(fields=['master_import', 'performed_at'], name='payroll_wfl_import_at'),
+        ]
+
+    def __str__(self):
+        actor = self.performed_by.get_full_name() if self.performed_by else 'system'
+        return f'{self.action} by {actor} at {self.performed_at:%Y-%m-%d %H:%M}'
+
 

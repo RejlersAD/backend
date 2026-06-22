@@ -187,9 +187,10 @@ class LeaveTypeSerializer(serializers.ModelSerializer):
 
 
 class LeaveRequestSerializer(serializers.ModelSerializer):
-    leave_type_detail = LeaveTypeSerializer(source='leave_type', read_only=True)
-    status_display    = serializers.CharField(source='get_status_display', read_only=True)
-    reviewed_by_name  = serializers.SerializerMethodField()
+    leave_type_detail    = LeaveTypeSerializer(source='leave_type', read_only=True)
+    status_display       = serializers.CharField(source='get_status_display', read_only=True)
+    reviewed_by_name     = serializers.SerializerMethodField()
+    rm_reviewed_by_name  = serializers.SerializerMethodField()
 
     class Meta:
         model  = LeaveRequest
@@ -199,11 +200,14 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
             'start_date', 'end_date', 'days_requested', 'reason',
             'status', 'status_display',
             'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'reviewer_note',
+            # Stage-1 Reporting Manager fields
+            'rm_reviewed_by', 'rm_reviewed_by_name', 'rm_reviewed_at', 'rm_note',
             'created_at', 'updated_at',
         ]
         read_only_fields = [
             'id', 'days_requested', 'status', 'status_display',
             'reviewed_by', 'reviewed_by_name', 'reviewed_at',
+            'rm_reviewed_by', 'rm_reviewed_by_name', 'rm_reviewed_at',
             'created_at', 'updated_at', 'leave_type_detail',
         ]
 
@@ -212,6 +216,14 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
             return (
                 f'{obj.reviewed_by.first_name} {obj.reviewed_by.last_name}'.strip()
                 or obj.reviewed_by.email
+            )
+        return None
+
+    def get_rm_reviewed_by_name(self, obj):
+        if obj.rm_reviewed_by:
+            return (
+                f'{obj.rm_reviewed_by.first_name} {obj.rm_reviewed_by.last_name}'.strip()
+                or obj.rm_reviewed_by.email
             )
         return None
 

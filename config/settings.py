@@ -1129,6 +1129,16 @@ OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o')
 
 # ==============================================================================
+# PAYROLL WORKFLOW CONFIGURATION (SOFT-CODED)
+# ==============================================================================
+# Super-admin email: this user can unfreeze any master payroll file.
+# Override via PAYROLL_WORKFLOW_SUPERADMIN_EMAIL env var.
+PAYROLL_WORKFLOW_SUPERADMIN_EMAIL = config(
+    'PAYROLL_WORKFLOW_SUPERADMIN_EMAIL',
+    default='tanzeem.agra@rejlers.ae',
+).lower()
+
+# ==============================================================================
 # REPORT GENERATION CONFIGURATION (SOFT-CODED)
 # ==============================================================================
 

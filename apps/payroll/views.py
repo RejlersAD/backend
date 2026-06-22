@@ -45,6 +45,8 @@ from .models import (
     SalaryHistory,
     DailyWorkLog,
     DailyWorkLogApprovalStatus,
+    MasterPayrollWorkflowLog,
+    MasterPayrollWorkflowStage,
 )
 from .serializers import (
     PayrollValidationLogSerializer,
@@ -453,19 +455,26 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = (
             LeaveRequest.objects
-            .select_related('leave_type', 'employee', 'reviewed_by')
+            .select_related('leave_type', 'employee', 'reviewed_by', 'rm_reviewed_by')
             .all()
         )
         user = self.request.user
 
-        # Non-staff users see only their own leave requests.
-        # Match by User FK *or* by biometric employee_code (handles HR-created requests).
         if not user.is_staff:
-            emp_code = self._user_employee_code(user)
-            own_q = Q(employee=user)
-            if emp_code:
-                own_q |= Q(employee_code=emp_code)
-            qs = qs.filter(own_q)
+            if _is_hr_manager(user):
+                # HR Managers see all requests (no filter needed)
+                pass
+            else:
+                # Regular employees: own requests only.
+                # Also include requests where this user is the Reporting Manager
+                # (so they can action Stage-1 approvals for their team).
+                emp_code  = self._user_employee_code(user)
+                own_q     = Q(employee=user)
+                if emp_code:
+                    own_q |= Q(employee_code=emp_code)
+                # Include requests where the employee's RBAC profile manager = this user
+                managed_q = Q(employee__rbac_profile__manager__user=user)
+                qs = qs.filter(own_q | managed_q)
 
         params = self.request.query_params
         st      = params.get('status')
@@ -502,32 +511,79 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             extra['employee_name'] = emp_name
         serializer.save(**extra)
 
-    @action(detail=True, methods=['post'], url_path='approve')
-    def approve(self, request, pk=None):
+    @action(detail=True, methods=['post'], url_path='rm-approve')
+    def rm_approve(self, request, pk=None):
+        """Stage-1: Reporting Manager approves a PENDING request → RM_APPROVED."""
         req = self.get_object()
         if req.status != LeaveRequestStatus.PENDING:
             return Response(
-                {'error': f'Cannot approve a {req.status} request'},
+                {'error': f'Cannot RM-approve a {req.get_status_display()} request. '
+                          f'Only PENDING requests can be approved at this stage.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        req.status       = LeaveRequestStatus.APPROVED
-        req.reviewed_by  = request.user
-        req.reviewed_at  = timezone.now()
+        req.status          = LeaveRequestStatus.RM_APPROVED
+        req.rm_reviewed_by  = request.user
+        req.rm_reviewed_at  = timezone.now()
+        req.rm_note         = request.data.get('note', '')
+        req.save()
+        return Response(LeaveRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'], url_path='rm-reject')
+    def rm_reject(self, request, pk=None):
+        """Stage-1: Reporting Manager rejects a PENDING request → RM_REJECTED."""
+        req = self.get_object()
+        if req.status != LeaveRequestStatus.PENDING:
+            return Response(
+                {'error': f'Cannot RM-reject a {req.get_status_display()} request. '
+                          f'Only PENDING requests can be rejected at this stage.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        req.status          = LeaveRequestStatus.RM_REJECTED
+        req.rm_reviewed_by  = request.user
+        req.rm_reviewed_at  = timezone.now()
+        req.rm_note         = request.data.get('note', '')
+        req.save()
+        return Response(LeaveRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve(self, request, pk=None):
+        """Stage-2: HR Manager gives final approval — only after Reporting Manager approved."""
+        if not _is_hr_manager(request.user):
+            return Response(
+                {'error': 'Only HR Managers can give final approval.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        req = self.get_object()
+        if req.status != LeaveRequestStatus.RM_APPROVED:
+            return Response(
+                {'error': 'Reporting Manager approval is required before HR final approval. '
+                          f'Current status: {req.get_status_display()}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        req.status        = LeaveRequestStatus.APPROVED
+        req.reviewed_by   = request.user
+        req.reviewed_at   = timezone.now()
         req.reviewer_note = request.data.get('note', '')
         req.save()
         return Response(LeaveRequestSerializer(req).data)
 
     @action(detail=True, methods=['post'], url_path='reject')
     def reject(self, request, pk=None):
-        req = self.get_object()
-        if req.status != LeaveRequestStatus.PENDING:
+        """Stage-2: HR Manager rejects — accepts RM_APPROVED or PENDING (HR can override)."""
+        if not _is_hr_manager(request.user):
             return Response(
-                {'error': f'Cannot reject a {req.status} request'},
+                {'error': 'Only HR Managers can reject leave requests at this stage.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        req = self.get_object()
+        if req.status not in (LeaveRequestStatus.RM_APPROVED, LeaveRequestStatus.PENDING):
+            return Response(
+                {'error': f'Cannot reject a {req.get_status_display()} request.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        req.status       = LeaveRequestStatus.REJECTED
-        req.reviewed_by  = request.user
-        req.reviewed_at  = timezone.now()
+        req.status        = LeaveRequestStatus.REJECTED
+        req.reviewed_by   = request.user
+        req.reviewed_at   = timezone.now()
         req.reviewer_note = request.data.get('note', '')
         req.save()
         return Response(LeaveRequestSerializer(req).data)
@@ -2314,6 +2370,122 @@ def generate_master_payroll(request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Export Edited Rows to Excel
+# POST /api/v1/payroll/export-rows-to-excel/
+# Body: { year, month, rows: [...] }
+# Returns Excel binary — used when the user edits the master payroll preview
+# and wants to download the modified data without re-uploading source files.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def export_rows_to_excel(request):
+    """
+    Accepts a JSON body with 'rows', 'year', 'month'.
+    Generates and returns an Excel binary in the same format as
+    generate_master_payroll, but using the caller-supplied rows directly.
+    Any authenticated user may export data they are already viewing.
+    """
+    try:
+        year  = int(request.data.get('year',  timezone.now().year))
+        month = int(request.data.get('month', timezone.now().month))
+    except (TypeError, ValueError):
+        return Response({'error': 'year and month must be integers.'}, status=400)
+
+    rows = request.data.get('rows', [])
+    if not isinstance(rows, list):
+        return Response({'error': 'rows must be a list.'}, status=400)
+
+    def _flt(v):
+        try:
+            return float(str(v).replace(',', '').strip())
+        except Exception:
+            return 0.0
+
+    try:
+        import io
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+        wb       = openpyxl.Workbook()
+        ws       = wb.active
+        ws.title = f'Payroll Master {year}-{month:02d}'
+
+        hdr_font = Font(bold=True, color='FFFFFF')
+        hdr_fill = PatternFill('solid', fgColor='2563EB')
+        thin     = Side(style='thin', color='CCCCCC')
+        border   = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        headers = [
+            'Employee Code',        # 1
+            'Employee Name',        # 2
+            'Joining Date',         # 3
+            'No. of Working Hours', # 4
+            'Employee Salary',      # 5
+            'Basic',                # 6
+            'Allowance',            # 7
+            'Transportation',       # 8
+            'Home Allowance',       # 9
+            'Other Allowance',      # 10
+            'Other Pay',            # 11
+            'Details',              # 12
+            'Salary Deduction',     # 13
+            'Deduction Details',    # 14
+            'Final Salary',         # 15
+        ]
+        for col_idx, hdr in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=hdr)
+            cell.font      = hdr_font
+            cell.fill      = hdr_fill
+            cell.alignment = Alignment(horizontal='center')
+            cell.border    = border
+            ws.column_dimensions[cell.column_letter].width = max(14, len(hdr) + 4)
+
+        for r_idx, r in enumerate(rows, 2):
+            vals = [
+                r.get('employee_code', ''),
+                r.get('employee_name', ''),
+                r.get('joining_date', ''),
+                _flt(r.get('total_hours')),
+                _flt(r.get('employee_salary')),
+                _flt(r.get('basic_salary')),
+                _flt(r.get('total_allowances')),
+                _flt(r.get('transport_allowance')),
+                _flt(r.get('housing_allowance')),
+                _flt(r.get('other_allowances')),
+                _flt(r.get('other_pay')),
+                r.get('details') or r.get('job_title', ''),
+                _flt(r.get('total_deductions')),
+                r.get('deduction_details', ''),
+                _flt(r.get('final_salary')),
+            ]
+            for col_idx, val in enumerate(vals, 1):
+                cell = ws.cell(row=r_idx, column=col_idx, value=val)
+                cell.border = border
+                if isinstance(val, float):
+                    cell.number_format = '#,##0.00'
+
+        ws.freeze_panes = 'A2'
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        filename = f'master_payroll_{year}_{month:02d}.xlsx'
+        response = HttpResponse(
+            buf.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+    except Exception as e:
+        logger.error('export_rows_to_excel: %s', e)
+        return Response({'error': f'Excel generation failed: {e}'}, status=500)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # Master Payroll History — list past import sessions
 # GET /api/v1/payroll/master-payroll-history/
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2370,6 +2542,13 @@ def master_payroll_history(request):
             'total_rows':           imp.total_rows,
             'stats':                imp.stats,
             'has_s3':               bool(imp.s3_key),
+            # Workflow fields
+            'workflow_stage':       imp.workflow_stage,
+            'is_editable_by_hr':    imp.workflow_stage == MasterPayrollWorkflowStage.DRAFT,
+            'frozen_at':            imp.frozen_at.isoformat() if imp.frozen_at else None,
+            'hr_approved_at':       imp.hr_approved_at.isoformat() if imp.hr_approved_at else None,
+            'finance_approved_at':  imp.finance_approved_at.isoformat() if imp.finance_approved_at else None,
+            'released_at':          imp.released_at.isoformat() if imp.released_at else None,
         }
 
     return Response({
@@ -2378,6 +2557,112 @@ def master_payroll_history(request):
         'page_size': page_size,
         'results':   [_serialize(i) for i in items],
     })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Master Payroll Rows — restore preview from DB without re-uploading files
+# GET /api/v1/payroll/master-payroll-history/<import_id>/rows/
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def master_payroll_rows(request, import_id):
+    """
+    Returns all employee rows for a stored master payroll import session as JSON.
+    Used by the frontend "Restore Preview" button so the user can reload the
+    15-column table without re-uploading the original source files.
+    HR managers only.
+    """
+    from .models import MasterPayrollImport
+
+    if not _is_hr_manager(request.user):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied('HR Manager role required.')
+
+    try:
+        session = MasterPayrollImport.objects.prefetch_related('rows').get(id=import_id)
+    except MasterPayrollImport.DoesNotExist:
+        return Response({'error': 'Import session not found.'}, status=404)
+
+    rows = [
+        {
+            'employee_code':       row.employee_code,
+            'employee_name':       row.employee_name,
+            'joining_date':        row.joining_date or '',
+            'total_hours':         float(row.total_hours),
+            'employee_salary':     float(row.employee_salary),
+            'basic_salary':        float(row.basic_salary),
+            'total_allowances':    float(row.total_allowances),
+            'transport_allowance': float(row.transport_allowance),
+            'housing_allowance':   float(row.housing_allowance),
+            'other_allowances':    float(row.other_allowances),
+            'other_pay':           float(row.other_pay),
+            'details':             row.details or '',
+            'total_deductions':    float(row.total_deductions),
+            'deduction_details':   row.deduction_details or '',
+            'final_salary':        float(row.final_salary),
+            'sources':             row.sources or [],
+        }
+        for row in session.rows.order_by('employee_name')
+    ]
+
+    return Response({
+        'id':         str(session.id),
+        'year':       session.year,
+        'month':      session.month,
+        'stats':      session.stats    or {},
+        'warnings':   session.warnings or [],
+        'total_rows': session.total_rows,
+        'rows':       rows,
+        # Include workflow info so the frontend can lock/unlock the edit UI
+        'workflow_stage':      session.workflow_stage,
+        'is_editable_by_hr':   session.workflow_stage == MasterPayrollWorkflowStage.DRAFT,
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Master Payroll Delete — remove an import session + all its rows
+# DELETE /api/v1/payroll/master-payroll-history/<import_id>/delete/
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def master_payroll_delete(request, import_id):
+    """
+    Permanently deletes a master payroll import session and all its employee rows.
+    Also attempts to remove the Excel file from S3 if one was uploaded.
+    HR managers only.
+    """
+    from .models import MasterPayrollImport
+
+    if not _is_hr_manager(request.user):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied('HR Manager role required.')
+
+    try:
+        session = MasterPayrollImport.objects.get(id=import_id)
+    except MasterPayrollImport.DoesNotExist:
+        return Response({'error': 'Import session not found.'}, status=404)
+
+    year  = session.year
+    month = session.month
+
+    # Attempt S3 cleanup — non-fatal if it fails
+    if session.s3_key:
+        try:
+            from apps.payroll.storage import PayrollExportStorage, S3_AVAILABLE
+            if S3_AVAILABLE:
+                storage = PayrollExportStorage()
+                relative = session.s3_key.split(f'{storage.location}/', 1)[-1]
+                storage.delete(relative)
+                logger.info('master_payroll_delete: S3 file removed: %s', session.s3_key)
+        except Exception as e:
+            logger.warning('master_payroll_delete: S3 delete failed (non-fatal): %s', e)
+
+    session.delete()  # CASCADE removes all MasterPayrollRow records
+    logger.info('master_payroll_delete: deleted import %s (%d-%02d) by %s', import_id, year, month, request.user)
+
+    return Response({'detail': f'Master payroll for {year}/{month:02d} deleted successfully.'}, status=200)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2701,3 +2986,495 @@ def master_payroll_download(request, import_id):
             .order_by('user__first_name', 'user__last_name')
         )
         return Response(DailyWorkLogSerializer(logs, many=True).data)
+
+
+# =============================================================================
+# AI ANALYTICS — GPT-4o powered HR intelligence for a payroll run
+# POST /api/v1/payroll/ai-analytics/generate/
+# Body: { run_id }
+# Returns structured HR intelligence: health score, risk items,
+# top recommendations, compliance flags, payroll forecast.
+# =============================================================================
+
+# Soft-coded thresholds for analytics
+_AI_ANALYTICS_SALARY_SPIKE_PCT   = 25   # % change flagged as spike
+_AI_ANALYTICS_MIN_SLIPS_REQUIRED = 1    # minimum slips to run analysis
+_AI_ANALYTICS_CACHE_KEY_TTL      = 3600 # seconds — cache results for 1 hour
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def ai_analytics_generate(request):
+    """
+    Builds an anonymized payroll summary, calls GPT-4o, and returns structured
+    HR intelligence — health score, risk items, recommendations, and forecast.
+
+    Employee data is anonymized before leaving the server: names are replaced
+    with department+index codes and exact salaries are bucketed into ranges.
+    """
+    run_id = request.data.get('run_id')
+    if not run_id:
+        return Response({'error': 'run_id is required.'}, status=400)
+
+    # ── Load payroll run ──────────────────────────────────────────────────────
+    try:
+        from apps.finance.salary_models import PayrollRun, SalarySlip
+        from django.conf import settings as dj_settings
+
+        payroll_run = PayrollRun.objects.get(pk=run_id)
+    except PayrollRun.DoesNotExist:
+        return Response({'error': 'Payroll run not found.'}, status=404)
+
+    # ── Load slips for this run and previous run ──────────────────────────────
+    curr_slips = list(
+        SalarySlip.objects
+        .filter(payroll_run=payroll_run)
+        .select_related('employee_salary_info')
+        .values(
+            'slip_number', 'gross_salary', 'net_salary', 'total_deductions',
+            'total_allowances', 'status',
+            'employee_salary_info__department', 'employee_salary_info__job_title',
+        )
+    )
+
+    # Previous run (same month-1 / year)
+    prev_month = payroll_run.month - 1 if payroll_run.month > 1 else 12
+    prev_year  = payroll_run.year if payroll_run.month > 1 else payroll_run.year - 1
+    prev_slips = list(
+        SalarySlip.objects
+        .filter(payroll_run__month=prev_month, payroll_run__year=prev_year)
+        .values('slip_number', 'net_salary')
+    )
+
+    if len(curr_slips) < _AI_ANALYTICS_MIN_SLIPS_REQUIRED:
+        return Response({'error': 'Not enough payroll data to generate analytics.'}, status=400)
+
+    # ── Build anonymized summary (NO PII sent to OpenAI) ─────────────────────
+    import statistics
+
+    net_values = [float(s['net_salary'] or 0) for s in curr_slips]
+    gross_values = [float(s['gross_salary'] or 0) for s in curr_slips]
+    deduction_values = [float(s['total_deductions'] or 0) for s in curr_slips]
+
+    prev_net_map = {s['slip_number']: float(s['net_salary'] or 0) for s in prev_slips}
+
+    # Department breakdown
+    dept_map = {}
+    for s in curr_slips:
+        dept = s['employee_salary_info__department'] or 'Unassigned'
+        dept_map.setdefault(dept, []).append(float(s['net_salary'] or 0))
+
+    dept_summary = [
+        {
+            'dept': dept,
+            'count': len(vals),
+            'avg_net': round(statistics.mean(vals), 2),
+            'min_net': round(min(vals), 2),
+            'max_net': round(max(vals), 2),
+        }
+        for dept, vals in dept_map.items()
+    ]
+
+    # Status breakdown
+    status_counts = {}
+    for s in curr_slips:
+        status_counts[s['status']] = status_counts.get(s['status'], 0) + 1
+
+    # Month-over-month changes
+    mom_changes = []
+    for s in curr_slips:
+        prev = prev_net_map.get(s['slip_number'])
+        if prev and prev > 0:
+            pct = ((float(s['net_salary'] or 0) - prev) / prev) * 100
+            if abs(pct) >= _AI_ANALYTICS_SALARY_SPIKE_PCT:
+                mom_changes.append({
+                    'emp_code': s['slip_number'],
+                    'dept':     s['employee_salary_info__department'] or 'Unassigned',
+                    'change_pct': round(pct, 1),
+                })
+
+    new_employees   = len([s for s in curr_slips if s['slip_number'] not in prev_net_map and prev_slips])
+    missing_employees = len([s for s in prev_slips if s['slip_number'] not in {c['slip_number'] for c in curr_slips}]) if prev_slips else 0
+
+    summary = {
+        'period':              f'{payroll_run.month:02d}/{payroll_run.year}',
+        'run_code':            payroll_run.run_code,
+        'total_employees':     len(curr_slips),
+        'total_gross':         round(sum(gross_values), 2),
+        'total_net':           round(sum(net_values), 2),
+        'total_deductions':    round(sum(deduction_values), 2),
+        'avg_net_salary':      round(statistics.mean(net_values), 2),
+        'median_net_salary':   round(statistics.median(net_values), 2),
+        'salary_std_dev':      round(statistics.stdev(net_values), 2) if len(net_values) > 1 else 0,
+        'departments':         dept_summary,
+        'status_breakdown':    status_counts,
+        'mom_salary_spikes':   mom_changes,
+        'new_employees':       new_employees,
+        'missing_employees':   missing_employees,
+        'prev_period_available': bool(prev_slips),
+    }
+
+    # ── Call GPT-4o ───────────────────────────────────────────────────────────
+    api_key = getattr(dj_settings, 'OPENAI_API_KEY', '')
+    model   = getattr(dj_settings, 'OPENAI_MODEL', 'gpt-4o')
+
+    if not api_key:
+        return Response({'error': 'OpenAI API key not configured. Set OPENAI_API_KEY in environment.'}, status=503)
+
+    import json as _json
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+
+        system_prompt = (
+            "You are a senior HR analytics AI. You analyse payroll summaries and return "
+            "actionable intelligence in strict JSON format. Be concise but specific. "
+            "Never hallucinate employee names — use only the codes and department names provided. "
+            "Base all insights on the data provided. Salary figures are in the organisation's local currency."
+        )
+
+        user_prompt = f"""Analyse this payroll summary and return ONLY valid JSON (no markdown, no explanation).
+
+PAYROLL SUMMARY:
+{_json.dumps(summary, indent=2)}
+
+Return this exact JSON schema:
+{{
+  "health_score": <integer 0-100 representing overall payroll health>,
+  "health_label": "<Excellent|Good|Fair|Needs Attention|Critical>",
+  "executive_summary": "<2-3 sentence plain-English summary of this payroll run>",
+  "risk_items": [
+    {{
+      "severity": "<critical|high|medium|low>",
+      "category": "<salary|compliance|attendance|forecast|process>",
+      "emp_code": "<employee code or department name>",
+      "issue": "<concise issue title>",
+      "root_cause": "<1 sentence explanation>",
+      "recommendation": "<specific actionable fix>",
+      "priority": <1-10>
+    }}
+  ],
+  "top_recommendations": [
+    {{
+      "priority": <1-5>,
+      "action": "<specific action to take>",
+      "impact": "<expected outcome>",
+      "effort": "<Low|Medium|High>"
+    }}
+  ],
+  "compliance_flags": [
+    {{
+      "type": "<compliance category>",
+      "description": "<what needs attention>",
+      "urgency": "<Immediate|Soon|Monitor>"
+    }}
+  ],
+  "forecast": {{
+    "next_month_estimate": <number>,
+    "trend": "<Increasing|Stable|Decreasing>",
+    "confidence": "<High|Medium|Low>",
+    "rationale": "<1 sentence>"
+  }},
+  "dept_health": [
+    {{
+      "dept": "<dept name>",
+      "status": "<Healthy|Review|Concern>",
+      "insight": "<1 sentence>"
+    }}
+  ]
+}}"""
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user',   'content': user_prompt},
+            ],
+            response_format={'type': 'json_object'},
+            temperature=0.2,
+            max_tokens=2000,
+        )
+
+        ai_result = _json.loads(response.choices[0].message.content)
+
+    except Exception as e:
+        logger.error('ai_analytics_generate: OpenAI call failed: %s', e)
+        return Response({'error': f'AI analysis failed: {str(e)}'}, status=502)
+
+    return Response({
+        'run_code': payroll_run.run_code,
+        'period':   f'{payroll_run.month:02d}/{payroll_run.year}',
+        'summary':  summary,
+        'ai':       ai_result,
+    })
+
+
+# =============================================================================
+# MASTER PAYROLL WORKFLOW — freeze / approve / finance / release
+# =============================================================================
+# Soft-coded role-permission map: each action defines which roles may perform it
+# and what stage the record must be in.  Adding a new role just means editing
+# _WORKFLOW_TRANSITIONS below — no view code changes needed.
+#
+# Super-admin (PAYROLL_WORKFLOW_SUPERADMIN_EMAIL in settings) can always unfreeze.
+# Finance roles are identified by role code containing 'finance'.
+# Accounts roles are identified by role code containing 'account'.
+
+_WORKFLOW_TRANSITIONS = {
+    # action:          (required_from_stage,           resulting_stage,              role_checker_name)
+    'freeze':          (MasterPayrollWorkflowStage.DRAFT,            MasterPayrollWorkflowStage.FROZEN,           '_is_hr_manager'),
+    'hr_approve':      (MasterPayrollWorkflowStage.FROZEN,           MasterPayrollWorkflowStage.HR_APPROVED,      '_is_hr_manager'),
+    'finance_review':  (MasterPayrollWorkflowStage.HR_APPROVED,      MasterPayrollWorkflowStage.FINANCE_REVIEW,   '_is_finance'),
+    'finance_approve': (MasterPayrollWorkflowStage.FINANCE_REVIEW,   MasterPayrollWorkflowStage.FINANCE_APPROVED, '_is_finance'),
+    'release':         (MasterPayrollWorkflowStage.FINANCE_APPROVED, MasterPayrollWorkflowStage.RELEASED,         '_is_accounts'),
+    # Unfreeze is special: superadmin only, can revert from any non-released stage
+    'unfreeze':        (None, MasterPayrollWorkflowStage.DRAFT, '_is_superadmin_payroll'),
+}
+
+
+def _is_finance(user) -> bool:
+    """User holds a Finance role."""
+    if user.is_superuser or user.is_staff:
+        return True
+    try:
+        from apps.rbac.models import UserProfile
+        profile = UserProfile.objects.filter(user=user, is_deleted=False).first()
+        if profile and profile.role:
+            code = (profile.role.code or '').lower()
+            return 'finance' in code or code in ('admin', 'superadmin')
+    except Exception:
+        pass
+    return False
+
+
+def _is_accounts(user) -> bool:
+    """User holds an Accounts / Accounting role."""
+    if user.is_superuser or user.is_staff:
+        return True
+    try:
+        from apps.rbac.models import UserProfile
+        profile = UserProfile.objects.filter(user=user, is_deleted=False).first()
+        if profile and profile.role:
+            code = (profile.role.code or '').lower()
+            return 'account' in code or code in ('admin', 'superadmin')
+    except Exception:
+        pass
+    return False
+
+
+def _is_superadmin_payroll(user) -> bool:
+    """Super-admin with payroll unfreeze permission.
+
+    Matches the email set in PAYROLL_WORKFLOW_SUPERADMIN_EMAIL (settings)
+    OR Django superuser status.
+    """
+    from django.conf import settings as dj_settings
+    superadmin_email = getattr(dj_settings, 'PAYROLL_WORKFLOW_SUPERADMIN_EMAIL', '').lower()
+    if user.is_superuser:
+        return True
+    if superadmin_email and (user.email or '').lower() == superadmin_email:
+        return True
+    return False
+
+
+def _master_payroll_workflow_action(request, import_id: str, action: str):
+    """
+    Generic workflow-transition handler.  Shared logic for all action endpoints.
+
+    - Loads the MasterPayrollImport
+    - Checks permission via _WORKFLOW_TRANSITIONS role checker
+    - Validates the current stage
+    - Advances the stage
+    - Creates an immutable MasterPayrollWorkflowLog entry
+    - Returns updated workflow_info JSON
+    """
+    from django.utils import timezone
+    from .models import MasterPayrollImport
+
+    if action not in _WORKFLOW_TRANSITIONS:
+        return Response({'error': f'Unknown workflow action: {action}'}, status=400)
+
+    required_from, to_stage, checker_name = _WORKFLOW_TRANSITIONS[action]
+
+    # Load record
+    try:
+        record = MasterPayrollImport.objects.get(pk=import_id)
+    except MasterPayrollImport.DoesNotExist:
+        return Response({'error': 'Master payroll import not found.'}, status=404)
+
+    # Permission check
+    checker_fn = {
+        '_is_hr_manager':         _is_hr_manager,
+        '_is_finance':            _is_finance,
+        '_is_accounts':           _is_accounts,
+        '_is_superadmin_payroll': _is_superadmin_payroll,
+    }.get(checker_name)
+
+    if not checker_fn or not checker_fn(request.user):
+        return Response({'error': 'You do not have permission to perform this action.'}, status=403)
+
+    # Stage guard (unfreeze is flexible — can revert from any non-released stage)
+    if action == 'unfreeze':
+        if record.workflow_stage == MasterPayrollWorkflowStage.RELEASED:
+            return Response({'error': 'A released payroll record cannot be unfrozen.'}, status=400)
+        if record.workflow_stage == MasterPayrollWorkflowStage.DRAFT:
+            return Response({'error': 'Record is already in draft stage.'}, status=400)
+    else:
+        if record.workflow_stage != required_from:
+            stage_label = dict(MasterPayrollWorkflowStage.choices).get(record.workflow_stage, record.workflow_stage)
+            return Response({
+                'error': f'Cannot perform "{action}" from current stage: {stage_label}.'
+            }, status=400)
+
+    note = (request.data.get('note') or '').strip()
+    from_stage = record.workflow_stage
+    now = timezone.now()
+
+    # Apply the transition
+    record.workflow_stage = to_stage
+
+    if action == 'freeze':
+        record.frozen_by = request.user
+        record.frozen_at = now
+
+    elif action == 'hr_approve':
+        record.hr_approved_by   = request.user
+        record.hr_approved_at   = now
+        record.hr_approval_note = note
+
+    elif action == 'finance_approve':
+        record.finance_approved_by   = request.user
+        record.finance_approved_at   = now
+        record.finance_approval_note = note
+
+    elif action == 'release':
+        record.released_by  = request.user
+        record.released_at  = now
+        record.release_note = note
+
+    elif action == 'unfreeze':
+        # Revert all downstream tracking fields that came after freeze
+        record.hr_approved_by = None
+        record.hr_approved_at = None
+        record.hr_approval_note = ''
+        record.finance_approved_by = None
+        record.finance_approved_at = None
+        record.finance_approval_note = ''
+        record.released_by = None
+        record.released_at = None
+        record.release_note = ''
+
+    record.save()
+
+    # Immutable log entry
+    MasterPayrollWorkflowLog.objects.create(
+        master_import=record,
+        from_stage=from_stage,
+        to_stage=to_stage,
+        action=action,
+        performed_by=request.user,
+        note=note,
+    )
+
+    logger.info(
+        'Payroll workflow: %s on import %s by user %s (from %s → %s)',
+        action, import_id, request.user.email, from_stage, to_stage,
+    )
+
+    return Response(_build_workflow_info(record))
+
+
+def _build_workflow_info(record):
+    """Build the JSON payload returned after every workflow action."""
+    from .models import MasterPayrollImport  # local to avoid circular
+    logs = record.workflow_logs.order_by('performed_at').values(
+        'action', 'from_stage', 'to_stage',
+        'performed_by__first_name', 'performed_by__last_name',
+        'performed_by__email', 'performed_at', 'note',
+    )
+
+    def _user_name(log):
+        fn = log.get('performed_by__first_name') or ''
+        ln = log.get('performed_by__last_name') or ''
+        return f'{fn} {ln}'.strip() or log.get('performed_by__email') or 'unknown'
+
+    stage_labels = dict(MasterPayrollWorkflowStage.choices)
+
+    return {
+        'id':            str(record.id),
+        'workflow_stage': record.workflow_stage,
+        'stage_label':    stage_labels.get(record.workflow_stage, record.workflow_stage),
+        'is_editable_by_hr': record.workflow_stage == MasterPayrollWorkflowStage.DRAFT,
+        'frozen_at':     record.frozen_at.isoformat() if record.frozen_at else None,
+        'hr_approved_at':record.hr_approved_at.isoformat() if record.hr_approved_at else None,
+        'finance_approved_at': record.finance_approved_at.isoformat() if record.finance_approved_at else None,
+        'released_at':   record.released_at.isoformat() if record.released_at else None,
+        'workflow_log':  [
+            {
+                'action':     log['action'],
+                'from_stage': log['from_stage'],
+                'to_stage':   log['to_stage'],
+                'actor':      _user_name(log),
+                'email':      log.get('performed_by__email', ''),
+                'at':         log['performed_at'].isoformat(),
+                'note':       log['note'],
+            }
+            for log in logs
+        ],
+    }
+
+
+# ── Individual workflow action endpoints ─────────────────────────────────────
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def master_payroll_freeze(request, import_id):
+    """HR Manager freezes the master payroll — one-time lock."""
+    return _master_payroll_workflow_action(request, import_id, 'freeze')
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def master_payroll_unfreeze(request, import_id):
+    """Superadmin only — revert to draft stage."""
+    return _master_payroll_workflow_action(request, import_id, 'unfreeze')
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def master_payroll_hr_approve(request, import_id):
+    """HR Manager approves the frozen payroll and sends to Finance."""
+    return _master_payroll_workflow_action(request, import_id, 'hr_approve')
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def master_payroll_finance_review(request, import_id):
+    """Finance opens the file for review/modification."""
+    return _master_payroll_workflow_action(request, import_id, 'finance_review')
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def master_payroll_finance_approve(request, import_id):
+    """Finance confirms the payroll and sends to Accounts."""
+    return _master_payroll_workflow_action(request, import_id, 'finance_approve')
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def master_payroll_release(request, import_id):
+    """Accounts marks the salary as released."""
+    return _master_payroll_workflow_action(request, import_id, 'release')
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def master_payroll_workflow_status(request, import_id):
+    """Return current workflow stage + full audit log for a master payroll import."""
+    from .models import MasterPayrollImport
+    try:
+        record = MasterPayrollImport.objects.get(pk=import_id)
+    except MasterPayrollImport.DoesNotExist:
+        return Response({'error': 'Not found.'}, status=404)
+    return Response(_build_workflow_info(record))

@@ -27,6 +27,17 @@ from .views import (
     generate_master_payroll,
     master_payroll_history,
     master_payroll_download,
+    master_payroll_rows,
+    master_payroll_delete,
+    export_rows_to_excel,
+    ai_analytics_generate,
+    master_payroll_freeze,
+    master_payroll_unfreeze,
+    master_payroll_hr_approve,
+    master_payroll_finance_review,
+    master_payroll_finance_approve,
+    master_payroll_release,
+    master_payroll_workflow_status,
 )
 
 app_name = 'payroll'
@@ -56,5 +67,17 @@ urlpatterns = [
     path('generate-master-payroll/',                                   generate_master_payroll,  name='generate-master-payroll'),
     path('master-payroll-history/',                                    master_payroll_history,   name='master-payroll-history'),
     path('master-payroll-history/<uuid:import_id>/download/',          master_payroll_download,  name='master-payroll-download'),
+    path('master-payroll-history/<uuid:import_id>/rows/',              master_payroll_rows,      name='master-payroll-rows'),
+    path('master-payroll-history/<uuid:import_id>/delete/',            master_payroll_delete,    name='master-payroll-delete'),
+    path('export-rows-to-excel/',                                      export_rows_to_excel,          name='export-rows-to-excel'),
+    path('ai-analytics/generate/',                                     ai_analytics_generate,         name='ai-analytics-generate'),
+    # Workflow action endpoints
+    path('master-payroll-history/<uuid:import_id>/workflow/',          master_payroll_workflow_status, name='master-payroll-workflow'),
+    path('master-payroll-history/<uuid:import_id>/freeze/',            master_payroll_freeze,          name='master-payroll-freeze'),
+    path('master-payroll-history/<uuid:import_id>/unfreeze/',          master_payroll_unfreeze,        name='master-payroll-unfreeze'),
+    path('master-payroll-history/<uuid:import_id>/hr-approve/',        master_payroll_hr_approve,      name='master-payroll-hr-approve'),
+    path('master-payroll-history/<uuid:import_id>/finance-review/',    master_payroll_finance_review,  name='master-payroll-finance-review'),
+    path('master-payroll-history/<uuid:import_id>/finance-approve/',   master_payroll_finance_approve, name='master-payroll-finance-approve'),
+    path('master-payroll-history/<uuid:import_id>/release/',           master_payroll_release,         name='master-payroll-release'),
     path('', include(router.urls)),
 ]
