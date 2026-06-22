@@ -163,6 +163,9 @@ class SalarySlipSerializer(serializers.ModelSerializer):
     employee_name = serializers.SerializerMethodField()
     employee_email = serializers.EmailField(source='employee_salary_info.user.email', read_only=True)
     employee_id = serializers.CharField(source='employee_salary_info.employee_id', read_only=True)
+    # employee_code is a canonical alias for employee_id so frontend can join
+    # biometric timesheet rows (keyed on employee_code) without namespace confusion
+    employee_code = serializers.CharField(source='employee_salary_info.employee_id', read_only=True)
     department = serializers.CharField(source='employee_salary_info.department', read_only=True)
     designation = serializers.CharField(source='employee_salary_info.designation', read_only=True)
     payroll_run_code = serializers.CharField(source='payroll_run.run_code', read_only=True)
@@ -174,7 +177,7 @@ class SalarySlipSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'slip_number', 'payroll_run', 'payroll_run_code',
             'employee_salary_info', 'employee_name', 'employee_email',
-            'employee_id', 'department', 'designation', 'month', 'year',
+            'employee_id', 'employee_code', 'department', 'designation', 'month', 'year',
             'basic_salary', 'total_allowances', 'gross_salary',
             'total_deductions', 'tax_deduction', 'net_salary', 'currency',
             'allowances_breakdown', 'deductions_breakdown',
@@ -200,13 +203,15 @@ class SalarySlipListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for listing salary slips"""
     employee_name = serializers.SerializerMethodField()
     employee_id = serializers.CharField(source='employee_salary_info.employee_id', read_only=True)
+    # employee_code aliases employee_id so list responses support biometric joins
+    employee_code = serializers.CharField(source='employee_salary_info.employee_id', read_only=True)
     employee_email = serializers.EmailField(source='employee_salary_info.user.email', read_only=True)
     month_year = serializers.SerializerMethodField()
     
     class Meta:
         model = SalarySlip
         fields = [
-            'id', 'slip_number', 'employee_name', 'employee_id', 'employee_email',
+            'id', 'slip_number', 'employee_name', 'employee_id', 'employee_code', 'employee_email',
             'month', 'year', 'month_year', 'gross_salary', 'total_deductions',
             'net_salary', 'currency', 'status', 'created_at'
         ]
