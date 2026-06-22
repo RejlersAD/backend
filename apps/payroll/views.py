@@ -2610,6 +2610,7 @@ def master_payroll_rows(request, import_id):
 
     rows = [
         {
+            'id':                  str(row.id),     # expose UUID so frontend can PATCH individual rows
             'employee_code':       row.employee_code,
             'employee_name':       row.employee_name,
             'joining_date':        row.joining_date or '',
@@ -2648,6 +2649,87 @@ def master_payroll_rows(request, import_id):
 # Master Payroll Delete — remove an import session + all its rows
 # DELETE /api/v1/payroll/master-payroll-history/<import_id>/delete/
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Master Payroll Row Update — edit a single employee row (draft only)
+# PATCH /api/v1/payroll/master-payroll-history/<import_id>/rows/<row_id>/
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Editable fields — computed fields (total_allowances, employee_salary,
+# final_salary) are intentionally excluded; model.save() cascades them.
+_ROW_EDITABLE_FIELDS = [
+    'employee_name', 'joining_date', 'total_hours',
+    'basic_salary', 'transport_allowance', 'housing_allowance',
+    'other_allowances', 'other_pay', 'details',
+    'total_deductions', 'deduction_details',
+]
+_ROW_NUMERIC_FIELDS = {
+    'total_hours', 'basic_salary', 'transport_allowance',
+    'housing_allowance', 'other_allowances', 'other_pay', 'total_deductions',
+}
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def master_payroll_row_update(request, import_id, row_id):
+    """
+    PATCH one employee row in a draft master payroll import.
+    Only HR managers may edit; the import must still be in draft stage.
+    Computed fields (total_allowances, employee_salary, final_salary) are
+    recalculated automatically by MasterPayrollRow.save().
+    """
+    from .models import MasterPayrollImport, MasterPayrollRow, MasterPayrollWorkflowStage
+    from rest_framework.exceptions import PermissionDenied
+
+    if not _is_hr_manager(request.user):
+        raise PermissionDenied('HR Manager role required.')
+
+    try:
+        session = MasterPayrollImport.objects.get(id=import_id)
+    except MasterPayrollImport.DoesNotExist:
+        return Response({'error': 'Import session not found.'}, status=404)
+
+    if session.workflow_stage != MasterPayrollWorkflowStage.DRAFT:
+        return Response(
+            {'error': 'Only payroll files in Draft stage can be edited.'},
+            status=403,
+        )
+
+    try:
+        row = MasterPayrollRow.objects.get(id=row_id, import_session=session)
+    except MasterPayrollRow.DoesNotExist:
+        return Response({'error': 'Employee row not found.'}, status=404)
+
+    for field in _ROW_EDITABLE_FIELDS:
+        if field not in request.data:
+            continue
+        val = request.data[field]
+        if field in _ROW_NUMERIC_FIELDS:
+            setattr(row, field, _safe_dec(val))
+        else:
+            setattr(row, field, str(val).strip())
+
+    # model.save() cascades: total_allowances → employee_salary → final_salary
+    row.save()
+
+    return Response({
+        'id':                  str(row.id),
+        'employee_code':       row.employee_code,
+        'employee_name':       row.employee_name,
+        'joining_date':        row.joining_date or '',
+        'total_hours':         float(row.total_hours),
+        'employee_salary':     float(row.employee_salary),
+        'basic_salary':        float(row.basic_salary),
+        'total_allowances':    float(row.total_allowances),
+        'transport_allowance': float(row.transport_allowance),
+        'housing_allowance':   float(row.housing_allowance),
+        'other_allowances':    float(row.other_allowances),
+        'other_pay':           float(row.other_pay),
+        'details':             row.details or '',
+        'total_deductions':    float(row.total_deductions),
+        'deduction_details':   row.deduction_details or '',
+        'final_salary':        float(row.final_salary),
+        'sources':             row.sources or [],
+    })
 
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated])

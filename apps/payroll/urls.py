@@ -38,6 +38,7 @@ from .views import (
     master_payroll_finance_approve,
     master_payroll_release,
     master_payroll_workflow_status,
+    master_payroll_row_update,
 )
 
 app_name = 'payroll'
@@ -68,6 +69,7 @@ urlpatterns = [
     path('master-payroll-history/',                                    master_payroll_history,   name='master-payroll-history'),
     path('master-payroll-history/<uuid:import_id>/download/',          master_payroll_download,  name='master-payroll-download'),
     path('master-payroll-history/<uuid:import_id>/rows/',              master_payroll_rows,      name='master-payroll-rows'),
+    path('master-payroll-history/<uuid:import_id>/rows/<uuid:row_id>/', master_payroll_row_update, name='master-payroll-row-update'),
     path('master-payroll-history/<uuid:import_id>/delete/',            master_payroll_delete,    name='master-payroll-delete'),
     path('export-rows-to-excel/',                                      export_rows_to_excel,          name='export-rows-to-excel'),
     path('ai-analytics/generate/',                                     ai_analytics_generate,         name='ai-analytics-generate'),
