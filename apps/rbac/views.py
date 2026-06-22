@@ -343,12 +343,22 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         """
-        Custom permissions:
-        - 'me' and 'change_password' actions only require authentication
-        - Other actions require user management permissions
+        Permission matrix:
+        - me / change_password / engineers  → authentication only
+        - create / reset_password / activate / deactivate / soft_delete
+          / assign_role / revoke_role       → Super Admin only
+        - Everything else (list, retrieve, partial_update) → Admin or Super Admin
         """
-        if self.action in ['me', 'change_password', 'engineers']:
+        SUPER_ADMIN_ONLY_ACTIONS = {
+            'create', 'reset_password', 'activate', 'deactivate',
+            'soft_delete', 'assign_role', 'revoke_role',
+        }
+        AUTH_ONLY_ACTIONS = {'me', 'change_password', 'engineers'}
+
+        if self.action in AUTH_ONLY_ACTIONS:
             return [IsAuthenticated()]
+        if self.action in SUPER_ADMIN_ONLY_ACTIONS:
+            return [IsAuthenticated(), IsSuperAdmin()]
         return [IsAuthenticated(), CanManageUsers()]
     
     def get_queryset(self):
@@ -377,9 +387,12 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         except UserProfile.DoesNotExist:
             return UserProfile.objects.none()
         
+        # Optional: filter by role code — used by Role Management UI
+        role_code = self.request.query_params.get('role')
+        if role_code:
+            queryset = queryset.filter(roles__code=role_code, roles__is_active=True)
+
         return queryset
-    
-    def get_serializer_class(self):
         if self.action == 'list':
             return UserProfileListSerializer
         return UserProfileSerializer

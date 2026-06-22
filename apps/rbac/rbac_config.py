@@ -42,6 +42,10 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'file_storage',           'name': 'File Storage',                 'icon': 'Database',    'order': 53, 'description': 'Manage files and documents in S3'},
     {'code': 'reports',                'name': 'Reports & Analytics',          'icon': 'BarChart',    'order': 54, 'description': 'Generate reports and view analytics'},
     {'code': 'api_access',             'name': 'API Access',                   'icon': 'Code',        'order': 55, 'description': 'Access REST APIs programmatically'},
+    # ── HR & Payroll (Sensitive — Super Admin grant only) ─────────────────
+    {'code': 'hr_management',          'name': 'Human Resources',              'icon': 'Users',       'order': 70, 'description': 'HR management — employee records, leave, and workforce planning'},
+    {'code': 'payroll',                'name': 'Payroll Engine',               'icon': 'DollarSign',  'order': 71, 'description': 'Payroll processing, salary slips, and compensation management'},
+    {'code': 'timesheet',              'name': 'Timesheet & Attendance',       'icon': 'Clock',       'order': 72, 'description': 'Employee timesheet tracking and biometric attendance reports'},
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +154,16 @@ SYSTEM_ROLES_CONFIG = [
         'is_system_role': True,
         'badge_color': 'slate',
     },
+    {
+        'code': 'hr_admin',
+        'name': 'HR & Payroll Administrator',
+        'level': 2,
+        'description': 'Full access to HR, Payroll, and Timesheet data. Sensitive role — grant only via Super Administrator.',
+        'is_system_role': True,
+        'badge_color': 'rose',
+        'sensitive': True,
+        'sensitive_modules': ['hr_management', 'payroll', 'timesheet'],
+    },
 ]
 
 # Module Assignment Strategy
@@ -174,6 +188,12 @@ DEFAULT_ROLE_CONFIG = {
 # Admin Role Detection
 ADMIN_ROLE_CODES = ['super_admin', 'admin', 'administrator']
 SUPERADMIN_ROLE_CODES = ['super_admin', 'superadmin']
+
+# Sensitive roles — only Super Admin may grant these
+SENSITIVE_ROLE_CODES = ['hr_admin']
+
+# Sensitive module codes — restricted to hr_admin and super_admin
+SENSITIVE_MODULE_CODES = ['hr_management', 'payroll', 'timesheet']
 
 # Module Access Rules
 MODULE_ACCESS_RULES = {
