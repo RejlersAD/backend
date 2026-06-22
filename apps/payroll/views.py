@@ -1544,6 +1544,12 @@ _SYMPA_ALIASES = {
                             'employee notes', 'comments', 'employee remarks'],
     'leave_balance':       ['annual leave balance', 'leave balance', 'remaining leave',
                             'al balance', 'leave days remaining'],
+    # Combined-allowance fallback: some HR exports provide a single total instead of
+    # individual breakdown columns.  When detected, the value is placed into
+    # other_allowances so the cascade formula runs correctly end-to-end.
+    'total_allowances':    ['total allowances', 'total allowance', 'allowance total',
+                            'gross allowances', 'total benefits', 'allowances',
+                            'total monthly allowances', 'monthly allowances'],
     # Sympa "Surname" — used to build a full name when preferred name is first-name-only
     '_surname':            ['surname', 'last name', 'family name'],
 }
@@ -2198,12 +2204,30 @@ def generate_master_payroll(request):
     # ── 5. Build final rows ───────────────────────────────────────────────────
     rows = []
     for code, r in master.items():
-        # Compute estimated gross / net including other_pay
+        # Always recompute total_allowances from the individual breakdown fields
+        # (transport + housing + other).  This guarantees the cascade is
+        # correct even when a source file had only a combined allowance column.
+        transport_dec = _safe_dec(r.get('transport_allowance', 0))
+        housing_dec   = _safe_dec(r.get('housing_allowance',   0))
+        other_alw_dec = _safe_dec(r.get('other_allowances',    0))
+        total_alw     = transport_dec + housing_dec + other_alw_dec
+
+        # Fallback: source file provided a combined total but no breakdown
+        # columns.  Move the total into other_allowances so it appears in the
+        # UI and is correctly reflected in employee_salary / final_salary.
+        if total_alw == Decimal('0'):
+            direct_total = _safe_dec(r.get('total_allowances', 0))
+            if direct_total:
+                other_alw_dec = direct_total
+                total_alw     = direct_total
+                r['other_allowances'] = str(other_alw_dec)
+
+        r['total_allowances'] = str(total_alw)
+
         basic      = _safe_dec(r.get('basic_salary', 0))
-        allow      = _safe_dec(r.get('total_allowances', 0))
         other_pay  = _safe_dec(r.get('other_pay', 0))
         deduct     = _safe_dec(r.get('total_deductions', 0))
-        gross      = basic + allow + other_pay      # employee_salary
+        gross      = basic + total_alw + other_pay      # employee_salary
         final_sal  = max(Decimal('0'), gross - deduct)
         r['employee_salary'] = str(gross)
         r['final_salary']    = str(final_sal)

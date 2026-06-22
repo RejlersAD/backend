@@ -1257,6 +1257,25 @@ class MasterPayrollRow(models.Model):
         # Prevent duplicate employee per session
         unique_together = [('import_session', 'employee_code')]
 
+    def save(self, *args, **kwargs):
+        """
+        Always cascade the salary formula before persisting.
+        This guarantees total_allowances, employee_salary, and final_salary
+        are always consistent with their source components — even when a row
+        is updated directly via the Django admin or a PATCH endpoint.
+
+        Formula (mirrors frontend recomputeMasterRow):
+          total_allowances = transport + housing + other_allowances
+          employee_salary  = basic + total_allowances + other_pay
+          final_salary     = max(0, employee_salary - total_deductions)
+        """
+        self.total_allowances = (
+            self.transport_allowance + self.housing_allowance + self.other_allowances
+        )
+        self.employee_salary = self.basic_salary + self.total_allowances + self.other_pay
+        self.final_salary    = max(Decimal('0'), self.employee_salary - self.total_deductions)
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f'{self.employee_code} — {self.import_session}'
 
