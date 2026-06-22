@@ -1,9 +1,20 @@
-from apps.users.models import User
+from django.contrib.auth import get_user_model
 from apps.rbac.models import Organization, Role, UserProfile, UserRole, Module, RoleModule
+
+User = get_user_model()
 
 org = Organization.objects.get(code='REJ_UAE')
 super_admin_role = Role.objects.get(code='super_admin')
 user = User.objects.get(email='tanzeem.agra@rejlers.ae')
+
+# Ensure Django-level superuser flags are set
+if not user.is_superuser or not user.is_staff:
+    user.is_superuser = True
+    user.is_staff = True
+    user.save()
+    print('User flags: is_superuser=True, is_staff=True set')
+else:
+    print('User flags: already is_superuser=True, is_staff=True')
 
 # Create / update UserProfile
 profile, created = UserProfile.objects.get_or_create(

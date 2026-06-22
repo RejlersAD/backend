@@ -83,6 +83,16 @@ echo "================================"
 echo "✅ Pre-flight checks passed"
 echo "================================"
 
+# Set up Super Administrator account (idempotent — safe on every deploy)
+echo "=========================================="
+echo "Ensuring Super Administrator account..."
+echo "=========================================="
+python manage.py shell < setup_superadmin.py 2>&1 && {
+    echo "Super Administrator account verified"
+} || {
+    echo "Warning: Super Admin setup completed with warnings — continuing"
+}
+
 # ── SOFT-CODED: Start Celery worker alongside Gunicorn ────────────────────
 # Controlled by CELERY_WORKER_ENABLED env var (default: true)
 # Set CELERY_WORKER_ENABLED=false to disable (e.g. dedicated Celery service)
