@@ -14,6 +14,7 @@ import logging
 from decimal import Decimal
 
 from django.db.models import Sum, Count, Q, Avg
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
@@ -1730,7 +1731,6 @@ def generate_master_payroll(request):
       month            — int  (defaults to current month)
     """
     import pandas as pd
-    from django.http import HttpResponse
 
     if not _is_hr_manager(request.user):
         from rest_framework.exceptions import PermissionDenied
@@ -2733,7 +2733,6 @@ def master_payroll_download(request, import_id):
     try:
         import io as _io
         import openpyxl
-        from django.http import HttpResponse as DjangoHttpResponse
         from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
         wb = openpyxl.Workbook()
@@ -2778,7 +2777,7 @@ def master_payroll_download(request, import_id):
         buf = _io.BytesIO()
         wb.save(buf); buf.seek(0)
         filename = f'master_payroll_{session.year}_{session.month:02d}.xlsx'
-        response = DjangoHttpResponse(
+        response = HttpResponse(
             buf.read(),
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
