@@ -397,6 +397,44 @@ class RoleViewSet(viewsets.ModelViewSet):
             ),
         })
 
+    @action(detail=False, methods=['post'], url_path='flush-module-caches',
+            permission_classes=[IsAuthenticated, CanManageRoles])
+    def flush_module_caches(self, request):
+        """
+        Flush cached module/permission lists for ALL users.
+        Call this after changing role membership, deactivating roles, or deploying
+        RBAC fixes so that every user's next API call rebuilds from fresh DB data.
+        Super-admin only. Idempotent and non-destructive.
+        """
+        from django.core.cache import cache
+
+        profile_ids = UserProfile.objects.values_list('id', flat=True)
+        cleared = 0
+        for pid in profile_ids:
+            cache.delete(f'user_modules_{pid}')
+            cache.delete(f'user_permissions_{pid}')
+            cleared += 1
+
+        create_audit_log(
+            user=request.user,
+            action='flush_module_caches',
+            resource_type='Role',
+            resource_id=None,
+            resource_repr='all-users',
+            metadata={'profiles_cleared': cleared},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+        )
+
+        return Response({
+            'status': 'ok',
+            'profiles_cleared': cleared,
+            'message': (
+                f"Module & permission caches cleared for {cleared} user profile(s). "
+                f"Next login / sidebar load will fetch fresh module data."
+            ),
+        })
+
 
 class UserProfileViewSet(viewsets.ModelViewSet):
     """

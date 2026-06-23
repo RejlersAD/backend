@@ -410,8 +410,8 @@ class UserProfile(TimeStampedModel):
                 # Non-fatal: keep role-based modules if config resolution fails
                 pass
 
-            # Cache for 5 minutes
-            cache.set(cache_key, modules, 300)
+            # Cache for 60 seconds — short TTL so role changes propagate quickly
+            cache.set(cache_key, modules, 60)
         
         return modules
 
