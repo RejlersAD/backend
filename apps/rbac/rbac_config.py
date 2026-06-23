@@ -46,6 +46,12 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'hr_management',          'name': 'Human Resources',              'icon': 'Users',       'order': 70, 'description': 'HR management — employee records, leave, and workforce planning'},
     {'code': 'payroll',                'name': 'Payroll Engine',               'icon': 'DollarSign',  'order': 71, 'description': 'Payroll processing, salary slips, and compensation management'},
     {'code': 'timesheet',              'name': 'Timesheet & Attendance',       'icon': 'Clock',       'order': 72, 'description': 'Employee timesheet tracking and biometric attendance reports'},
+    {'code': 'hr_self_service',        'name': 'HR Self-Service',              'icon': 'User',        'order': 73, 'description': 'Personal leave requests, attendance records and payslip access'},
+    # ── Business Modules ──────────────────────────────────────────────────
+    {'code': 'finance',                'name': 'Finance',                      'icon': 'CreditCard',  'order': 80, 'description': 'Invoice tracking, billing and financial management'},
+    {'code': 'sales',                  'name': 'Sales',                        'icon': 'TrendingUp',  'order': 81, 'description': 'Internal sales pipeline and business development'},
+    {'code': 'project_control',        'name': 'Project Control',              'icon': 'Briefcase',   'order': 82, 'description': 'Project planning, tracking and schedule control'},
+    {'code': 'procurement',            'name': 'Procurement',                  'icon': 'ShoppingCart','order': 83, 'description': 'Vendors, purchase orders, requisitions and goods receipts'},
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -348,13 +354,17 @@ ROLE_MODULE_POLICY = {
     # Viewer: full Engineering section (read-only enforced by UI/view guards)
     'viewer': ENGINEERING_SECTION_MODULES,
 
-    # Admin: full Engineering section + all admin/platform modules
+    # Admin: full Engineering section + all admin/platform + business modules
     'admin': ENGINEERING_SECTION_MODULES + [
         'user_mgmt',
         'org_settings',
         'audit_logs',
         'reports',
         'api_access',
+        'finance',
+        'sales',
+        'project_control',
+        'procurement',
     ],
 
     # Super-admins bypass module checks in the app, but listed for completeness
