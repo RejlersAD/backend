@@ -73,7 +73,7 @@ class EmployeeSalaryInfoViewSet(viewsets.ModelViewSet):
         if is_active is not None:
             queryset = queryset.filter(is_active=is_active.lower() == 'true')
         
-        # Filter by user UUID — used by the ESS portal (?employee=<User UUID>)
+        # Filter by user UUID ' used by the ESS portal (?employee=<User UUID>)
         employee_uid = self.request.query_params.get('employee')
         if employee_uid:
             queryset = queryset.filter(user_id=employee_uid)
@@ -350,7 +350,7 @@ class SalarySlipViewSet(viewsets.ModelViewSet):
         if year:
             queryset = queryset.filter(year=year)
         
-        # Filter by employee (User UUID) — used by the ESS self-service portal
+        # Filter by employee (User UUID) ' used by the ESS self-service portal
         employee_uid = self.request.query_params.get('employee')
         if employee_uid:
             queryset = queryset.filter(employee_salary_info__user_id=employee_uid)
@@ -647,3 +647,152 @@ class SalarySlipAuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(action=action)
         
         return queryset
+
+
+# ===========================
+# PAYROLL SCHEDULE VIEWSET
+# ===========================
+
+class PayrollScheduleViewSet(viewsets.ViewSet):
+    """
+    Singleton endpoint ' GET / PATCH the auto-generate schedule config.
+    Only super-admins can modify; all HR managers can read.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _get_or_create(self):
+        from .salary_models import PayrollSchedule
+        obj = PayrollSchedule.objects.order_by('created_at').first()
+        if obj is None:
+            obj = PayrollSchedule.objects.create()
+        return obj
+
+    def list(self, request):
+        obj = self._get_or_create()
+        return Response({
+            'id':                  str(obj.id),
+            'enabled':             obj.enabled,
+            'day_of_month':        obj.day_of_month,
+            'days_after_month_end':obj.days_after_month_end,
+            'auto_send_emails':    obj.auto_send_emails,
+            'notify_emails':       obj.notify_emails,
+            'last_run_at':         obj.last_run_at,
+            'last_run_status':     obj.last_run_status,
+            'last_run_details':    obj.last_run_details,
+            'updated_at':          obj.updated_at,
+        })
+
+    def partial_update(self, request, pk=None):
+        if not (request.user.is_superuser or request.user.is_staff):
+            return Response({'error': 'Admin only.'}, status=403)
+        obj = self._get_or_create()
+        fields = ['enabled', 'day_of_month', 'days_after_month_end', 'auto_send_emails', 'notify_emails']
+        changed = []
+        for f in fields:
+            if f in request.data:
+                setattr(obj, f, request.data[f])
+                changed.append(f)
+        if changed:
+            obj.updated_by = request.user
+            changed += ['updated_by', 'updated_at']
+            obj.save(update_fields=changed)
+        return Response({'ok': True, 'updated': changed})
+
+    @action(detail=False, methods=['post'], url_path='trigger-now')
+    def trigger_now(self, request):
+        """Manually fire the monthly payroll generation immediately (super-admin)."""
+        if not (request.user.is_superuser or request.user.is_staff):
+            return Response({'error': 'Admin only.'}, status=403)
+        from .tasks import auto_generate_monthly_payroll
+        task = auto_generate_monthly_payroll.delay()
+        return Response({'ok': True, 'task_id': str(task.id)})
+
+
+# ===========================
+# SALARY SLIP ' PDF DOWNLOAD
+# ===========================
+
+def slip_download_pdf(request, slip_id):
+    """
+    GET /api/v1/finance/salary-slips/<slip_id>/download-pdf/
+    Returns a presigned S3 URL (or streams the local PDF) for download.
+    Accessible to: the owning employee (self-service) + HR staff.
+    """
+    from rest_framework.decorators import api_view, permission_classes as pc
+    from rest_framework.permissions import IsAuthenticated as IA
+
+    if not request.user.is_authenticated:
+        return Response({'error': 'Authentication required.'}, status=401)
+
+    try:
+        slip = SalarySlip.objects.select_related('employee_salary_info__user').get(id=slip_id)
+    except SalarySlip.DoesNotExist:
+        return Response({'error': 'Slip not found.'}, status=404)
+
+    # Permission: owner or staff/superuser
+    is_owner = (
+        hasattr(slip.employee_salary_info, 'user') and
+        slip.employee_salary_info.user_id == request.user.id
+    )
+    if not (is_owner or request.user.is_staff or request.user.is_superuser):
+        return Response({'error': 'Access denied.'}, status=403)
+
+    # If we have an S3 key, generate a presigned URL
+    from apps.payroll.storage import PayrollSlipStorage, S3_AVAILABLE
+    if slip.pdf_s3_key and S3_AVAILABLE and PayrollSlipStorage:
+        try:
+            storage = PayrollSlipStorage()
+            url = storage.url(slip.pdf_s3_key)
+            return Response({
+                'url':        url,
+                'filename':   f'{slip.slip_number}.pdf',
+                'source':     's3',
+                'expires_in': 3600,
+            })
+        except Exception as exc:
+            logger.warning('slip_download_pdf: S3 URL generation failed for %s: %s', slip.slip_number, exc)
+
+    # Fallback: trigger on-demand PDF generation + return local file stream
+    if not slip.pdf_file_path:
+        from .salary_pdf_service import SalarySlipPDFService
+        try:
+            svc  = SalarySlipPDFService()
+            path = svc.generate_pdf(slip)
+            slip.pdf_file_path  = path
+            slip.pdf_generated_at = timezone.now()
+            slip.save(update_fields=['pdf_file_path', 'pdf_generated_at'])
+        except Exception as exc:
+            logger.error('slip_download_pdf: on-demand generation failed: %s', exc)
+            return Response({'error': 'PDF not available. Please try again later.'}, status=503)
+
+    # Stream the local PDF file
+    import os
+    from django.conf import settings
+    from django.http import FileResponse
+    full_path = os.path.join(settings.MEDIA_ROOT, slip.pdf_file_path.lstrip('/'))
+    if not os.path.exists(full_path):
+        return Response({'error': 'PDF file missing. Regenerating - please retry.'}, status=404)
+
+    return FileResponse(
+        open(full_path, 'rb'),
+        content_type='application/pdf',
+        as_attachment=True,
+        filename=f'{slip.slip_number}.pdf',
+    )
+
+
+# -- Helper used by the auto-generate task ------------------------------------
+def _queue_bulk_emails_for_run(run, triggered_by):
+    """Queue email for all approved slips in 
+un."""
+    from .salary_email_service import SalarySlipEmailService
+    approved = SalarySlip.objects.filter(payroll_run=run, status=SalaryStatus.APPROVED)
+    svc = SalarySlipEmailService()
+    for slip in approved:
+        try:
+            svc.send_salary_slip_email(slip, triggered_by)
+            slip.status = SalaryStatus.SENT
+            slip.save(update_fields=['status'])
+        except Exception as exc:
+            logger.warning('_queue_bulk_emails_for_run: slip %s -- %s', slip.slip_number, exc)
+

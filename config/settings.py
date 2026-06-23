@@ -949,6 +949,17 @@ if CELERY_RESULT_BACKEND:
 else:
     print(f"[CELERY] Result Backend: None")
 
+# Celery Beat — scheduled tasks
+# Run daily at 02:00 server time; the task self-skips unless PayrollSchedule.enabled
+# and the calendar day matches the configured day_of_month / days_after_month_end.
+from celery.schedules import crontab  # noqa: E402
+CELERY_BEAT_SCHEDULE = {
+    'auto-generate-monthly-payroll': {
+        'task': 'apps.finance.tasks.auto_generate_monthly_payroll',
+        'schedule': crontab(hour=2, minute=0),
+    },
+}
+
 # ==============================================================================
 # End of Celery Configuration
 # ==============================================================================

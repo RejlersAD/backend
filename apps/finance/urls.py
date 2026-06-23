@@ -22,6 +22,8 @@ from .salary_views import (
     SalarySlipApprovalViewSet,
     SalarySlipEmailViewSet,
     SalarySlipAuditLogViewSet,
+    PayrollScheduleViewSet,
+    slip_download_pdf,
 )
 
 app_name = 'finance'
@@ -39,6 +41,7 @@ router.register(r'salary-slips', SalarySlipViewSet, basename='salary-slip')
 router.register(r'salary-approvals', SalarySlipApprovalViewSet, basename='salary-approval')
 router.register(r'salary-emails', SalarySlipEmailViewSet, basename='salary-email')
 router.register(r'salary-audit-logs', SalarySlipAuditLogViewSet, basename='salary-audit-log')
+router.register(r'payroll-schedule', PayrollScheduleViewSet, basename='payroll-schedule')
 
 urlpatterns = [
     # Router URLs
@@ -53,4 +56,7 @@ urlpatterns = [
     
     # Dashboard
     path('dashboard/stats/', dashboard_stats, name='dashboard-stats'),
+
+    # Salary slip PDF download (presigned S3 URL or local stream)
+    path('salary-slips/<uuid:slip_id>/download-pdf/', slip_download_pdf, name='slip-download-pdf'),
 ]
