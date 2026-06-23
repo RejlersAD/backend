@@ -393,10 +393,12 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(roles__code=role_code, roles__is_active=True)
 
         return queryset
+
+    def get_serializer_class(self):
         if self.action == 'list':
             return UserProfileListSerializer
         return UserProfileSerializer
-    
+
     def perform_create(self, serializer):
         profile = serializer.save()
         create_audit_log(
