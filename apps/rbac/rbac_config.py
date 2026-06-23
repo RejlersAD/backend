@@ -41,6 +41,13 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'digitization_datasheet', 'name': 'Digitization Datasheet',       'icon': 'Scan',        'order': 19, 'description': 'AI-powered digitization of legacy datasheets'},
     {'code': 'spec_customization',     'name': 'Spec Customization',           'icon': 'Settings',    'order': 20, 'description': 'Engineering specification customization tools'},
     {'code': 'non_teff_metadata',      'name': 'Non-TEFF Metadata Extractor',  'icon': 'Search',      'order': 21, 'description': 'Extract metadata from Non-TEFF documents (PDF, Excel, Word, AutoCAD)'},
+    # ── Process sub-module codes (granular per sidebar item) ───────────────────
+    {'code': 'pid_line_list',          'name': 'Line List',                    'icon': 'TableCells',  'order': 22, 'description': 'Extract base line list columns from P&ID drawings'},
+    {'code': 'pid_equipment_list',     'name': 'Equipment List',               'icon': 'TableCells',  'order': 23, 'description': 'Extract equipment tags and type classification from P&ID'},
+    # ── Piping sub-module code (moved away from shared designiq code) ───────────
+    {'code': 'piping_critical_line_list', 'name': 'Critical Line List',        'icon': 'GitBranch',   'order': 24, 'description': '5-document critical line list with full 35-column enrichment'},
+    # ── Instrument sub-module code (split from shared instrument_datasheet code) ──
+    {'code': 'instrument_io_list',     'name': 'Instrument IO List',           'icon': 'CircleStack', 'order': 25, 'description': 'Generate or QC an Input/Output list from the instrument register'},
     # ── Admin / Platform ─────────────────────────────────────────────────
     {'code': 'user_mgmt',              'name': 'User Management',              'icon': 'Users',       'order': 50, 'description': 'Manage users, roles, and permissions'},
     {'code': 'org_settings',           'name': 'Organization Settings',        'icon': 'Settings',    'order': 51, 'description': 'Configure organization settings and preferences'},
@@ -299,6 +306,8 @@ ENGINEERING_SECTION_MODULES = [
     'pid_analysis',
     'pfd_to_pid',
     'pfd_quality',
+    'pid_line_list',
+    'pid_equipment_list',
     'crs_documents',
     'designiq',
     'qhse',
@@ -313,10 +322,12 @@ ENGINEERING_SECTION_MODULES = [
     'electrical_sld',
     'instrument_datasheet',
     'instrument_index',
+    'instrument_io_list',
     'mechanical_datasheet',
     'civil_datasheet',
     'piping_datasheet',
     'piping_pms',
+    'piping_critical_line_list',
     # ── Digitization ─────────────────────────────────────────────────
     'digitization_datasheet',
     'spec_customization',
