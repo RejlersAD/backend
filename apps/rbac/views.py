@@ -330,6 +330,73 @@ class RoleViewSet(viewsets.ModelViewSet):
         
         return Response({'status': 'module revoked', 'count': deleted_count})
 
+    @action(detail=False, methods=['post'], url_path='sync-default-role',
+            permission_classes=[IsAuthenticated, CanManageRoles])
+    def sync_default_role(self, request):
+        """
+        Assign the Default role to every active UserProfile that has no active
+        role assignment.  Idempotent — safe to call multiple times.
+
+        Returns:
+            assigned (int)  — profiles that received the Default role now
+            skipped  (int)  — profiles that already had at least one active role
+            total    (int)  — total profiles inspected
+        """
+        from apps.rbac.rbac_config import DEFAULT_ROLE_CONFIG
+
+        default_role_code = DEFAULT_ROLE_CONFIG['code']
+
+        # Resolve the Default role
+        try:
+            default_role = Role.objects.get(code=default_role_code, is_active=True)
+        except Role.DoesNotExist:
+            return Response(
+                {'error': f"Default role (code='{default_role_code}') not found or inactive."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Profiles that already have at least one active role
+        profiles_with_role_ids = set(
+            UserRole.objects.filter(role__is_active=True)
+                            .values_list('user_profile_id', flat=True)
+                            .distinct()
+        )
+        roleless_profiles = UserProfile.objects.exclude(id__in=profiles_with_role_ids)
+
+        assigned = 0
+        skipped  = len(profiles_with_role_ids)
+
+        for profile in roleless_profiles.iterator():
+            _, created = UserRole.objects.get_or_create(
+                user_profile=profile,
+                role=default_role,
+                defaults={'is_primary': True, 'assigned_by': request.user},
+            )
+            if created:
+                assigned += 1
+
+        create_audit_log(
+            user=request.user,
+            action='bulk_assign_default_role',
+            resource_type='Role',
+            resource_id=default_role.id,
+            resource_repr=default_role.name,
+            metadata={'assigned': assigned, 'already_had_role': skipped},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+        )
+
+        return Response({
+            'status': 'ok',
+            'assigned': assigned,
+            'skipped':  skipped,
+            'total':    assigned + skipped,
+            'message':  (
+                f"Assigned Default role to {assigned} user(s). "
+                f"{skipped} user(s) already had a role."
+            ),
+        })
+
 
 class UserProfileViewSet(viewsets.ModelViewSet):
     """
