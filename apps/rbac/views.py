@@ -420,6 +420,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         return UserProfileSerializer
 
     def perform_create(self, serializer):
+        from apps.rbac.rbac_config import DEFAULT_ROLE_CONFIG
         profile = serializer.save()
         create_audit_log(
             user=self.request.user,
@@ -430,6 +431,19 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             ip_address=self.request.META.get('REMOTE_ADDR'),
             user_agent=self.request.META.get('HTTP_USER_AGENT', '')
         )
+        # Auto-assign the Default role when no role has been set yet
+        if not profile.userrole_set.filter(role__is_active=True).exists():
+            try:
+                default_role = Role.objects.get(
+                    code=DEFAULT_ROLE_CONFIG['code'], is_active=True
+                )
+                UserRole.objects.get_or_create(
+                    user_profile=profile,
+                    role=default_role,
+                    defaults={'is_primary': True, 'assigned_by': self.request.user},
+                )
+            except Role.DoesNotExist:
+                pass
     
     def perform_update(self, serializer):
         profile = serializer.save()
@@ -937,6 +951,20 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                                     assigned_by=request.user,
                                     is_primary=(idx == 0)
                                 )
+                        else:
+                            # No role specified — auto-assign the Default role
+                            from apps.rbac.rbac_config import DEFAULT_ROLE_CONFIG
+                            try:
+                                default_role = Role.objects.get(
+                                    code=DEFAULT_ROLE_CONFIG['code'], is_active=True
+                                )
+                                UserRole.objects.get_or_create(
+                                    user_profile=profile,
+                                    role=default_role,
+                                    defaults={'assigned_by': request.user, 'is_primary': True},
+                                )
+                            except Role.DoesNotExist:
+                                pass
                         
                         # Assign modules
                         module_codes = row.get('module_codes', '').strip()

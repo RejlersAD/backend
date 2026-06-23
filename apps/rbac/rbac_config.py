@@ -178,6 +178,18 @@ SYSTEM_ROLES_CONFIG = [
         'badge_color': 'slate',
     },
     {
+        # SOFT-CODED: Default role — auto-assigned to every new user and to any
+        # existing user who has no other active role.  Module list is defined
+        # in ROLE_MODULE_POLICY['default'] below.  Change the module list there
+        # (not here) to update what Default users can access.
+        'code': 'default',
+        'name': 'Default',
+        'level': 4,
+        'description': 'Default access for all users — standard engineering modules plus HR self-service.',
+        'is_system_role': True,
+        'badge_color': 'green',
+    },
+    {
         'code': 'hr_admin',
         'name': 'HR & Payroll Administrator',
         'level': 2,
@@ -201,10 +213,11 @@ MODULE_ASSIGNMENT_CONFIG = {
 }
 
 # Default Role Settings
+# SOFT-CODED: change 'code' here to swap which role is auto-assigned to new users.
 DEFAULT_ROLE_CONFIG = {
-    'code': 'user',
-    'name': 'Regular User',
-    'level': 100,
+    'code': 'default',          # was 'user' — now points to the Default system role
+    'name': 'Default',
+    'level': 4,
     'auto_assign_on_creation': True,
 }
 
@@ -301,6 +314,39 @@ SUCCESS_MESSAGES = {
 # All module codes here correspond to the 1. Engineering section in the frontend.
 # Edit this list (not views/commands) when adding/removing engineering modules.
 # ─────────────────────────────────────────────────────────────────────────────
+# SOFT-CODED: Modules granted to the Default role.
+# Edit this list to change what every ordinary user can access out of the box.
+# Does NOT include QHSE, Finance, Procurement, Sales, Project Control, or
+# HR sub-modules other than hr_self_service.
+DEFAULT_ROLE_MODULES = [
+    # ── Process Engineering ───────────────────────────────────────────
+    'pid_analysis',
+    'pfd_quality',
+    'process_datasheet',
+    'pid_line_list',
+    'pid_equipment_list',
+    # ── Piping Engineering ────────────────────────────────────────────
+    'piping_critical_line_list',
+    'piping_pms',
+    'piping_datasheet',
+    # ── Electrical Engineering ────────────────────────────────────────
+    'electrical_sld',
+    'electrical_datasheet',
+    # ── Civil Engineering ─────────────────────────────────────────────
+    'civil_datasheet',
+    # ── Mechanical Engineering ────────────────────────────────────────
+    'mechanical_datasheet',
+    # ── Digital Transformation ────────────────────────────────────────
+    'spec_customization',
+    'non_teff_metadata',
+    # ── Common & Integration ──────────────────────────────────────────
+    'crs_documents',
+    'pfd_to_pid',
+    'designiq',
+    # ── HR Self-Service ONLY ──────────────────────────────────────────
+    'hr_self_service',
+]
+
 ENGINEERING_SECTION_MODULES = [
     # ── Core P&ID / Process ───────────────────────────────────────────
     'pid_analysis',
@@ -396,6 +442,9 @@ ROLE_MODULE_POLICY = {
         'procurement_orders',
         'procurement_receipts',
     ],
+
+    # Default: standard engineering + common + hr_self_service (see DEFAULT_ROLE_MODULES)
+    'default': DEFAULT_ROLE_MODULES,
 
     # Super-admins bypass module checks in the app, but listed for completeness
     'super_admin': [],
