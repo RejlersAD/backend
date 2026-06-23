@@ -51,7 +51,11 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'finance',                'name': 'Finance',                      'icon': 'CreditCard',  'order': 80, 'description': 'Invoice tracking, billing and financial management'},
     {'code': 'sales',                  'name': 'Sales',                        'icon': 'TrendingUp',  'order': 81, 'description': 'Internal sales pipeline and business development'},
     {'code': 'project_control',        'name': 'Project Control',              'icon': 'Briefcase',   'order': 82, 'description': 'Project planning, tracking and schedule control'},
-    {'code': 'procurement',            'name': 'Procurement',                  'icon': 'ShoppingCart','order': 83, 'description': 'Vendors, purchase orders, requisitions and goods receipts'},
+    {'code': 'procurement',              'name': 'Procurement',                'icon': 'ShoppingCart','order': 83, 'description': 'Procurement overview and dashboard'},
+    {'code': 'procurement_vendors',      'name': 'Vendor Management',          'icon': 'Users',       'order': 84, 'description': 'Manage vendors and supplier records'},
+    {'code': 'procurement_requisitions', 'name': 'Purchase Requisitions',      'icon': 'DocumentText','order': 85, 'description': 'Purchase recommendations and requisitions'},
+    {'code': 'procurement_orders',       'name': 'Purchase Orders',            'icon': 'DocumentPlus','order': 86, 'description': 'Create and manage purchase orders'},
+    {'code': 'procurement_receipts',     'name': 'Goods Receipt',              'icon': 'Folder',      'order': 87, 'description': 'Goods receipt and delivery confirmation'},
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -365,6 +369,10 @@ ROLE_MODULE_POLICY = {
         'sales',
         'project_control',
         'procurement',
+        'procurement_vendors',
+        'procurement_requisitions',
+        'procurement_orders',
+        'procurement_receipts',
     ],
 
     # Super-admins bypass module checks in the app, but listed for completeness
