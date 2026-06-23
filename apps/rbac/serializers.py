@@ -729,6 +729,9 @@ class UserProfileListSerializer(serializers.ModelSerializer):
     # ── Organisation & roles ───────────────────────────────────────────────
     organization_name = serializers.CharField(source='organization.name', read_only=True)
     primary_role = serializers.SerializerMethodField()
+    # SOFT-CODED: all active roles for the user — uses prefetched userrole_set
+    # so no extra DB query.  Format: [{id, name, code, level}]
+    roles = serializers.SerializerMethodField()
     # ── HR-facing fields already loaded on UserProfile — no extra query ────
     profile_photo = serializers.SerializerMethodField()
 
@@ -738,7 +741,7 @@ class UserProfileListSerializer(serializers.ModelSerializer):
             # Identity
             'id', 'user', 'email', 'first_name', 'last_name', 'full_name',
             # Organisation / role
-            'organization_name', 'primary_role',
+            'organization_name', 'primary_role', 'roles',
             # Employment
             'employee_id', 'department', 'job_title',
             # Contact / location
@@ -769,6 +772,24 @@ class UserProfileListSerializer(serializers.ModelSerializer):
                     'name': user_role.role.name
                 }
         return None
+
+    def get_roles(self, obj):
+        """
+        Return all active roles for this user from prefetched userrole_set.
+        Uses cached data — no additional DB query per user.
+        Format: [{id, name, code, level, is_primary}]
+        """
+        result = []
+        for user_role in obj.userrole_set.all():
+            if user_role.role.is_active:
+                result.append({
+                    'id':         str(user_role.role.id),
+                    'name':       user_role.role.name,
+                    'code':       user_role.role.code,
+                    'level':      user_role.role.level,
+                    'is_primary': user_role.is_primary,
+                })
+        return result
 
     def get_profile_photo(self, obj):
         """Return absolute presigned URL for profile photo (same logic as detail serializer)."""
