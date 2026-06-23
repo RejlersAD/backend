@@ -336,9 +336,12 @@ class UserProfile(TimeStampedModel):
         super().save(*args, **kwargs)
     
     def has_permission(self, permission_code):
-        """Check if user has specific permission through any role"""
+        """Check if user has specific permission through any active role"""
         from apps.rbac.models import UserRole
-        user_role_ids = UserRole.objects.filter(user_profile=self).values_list('role_id', flat=True)
+        user_role_ids = UserRole.objects.filter(
+            user_profile=self,
+            role__is_active=True
+        ).values_list('role_id', flat=True)
         return Permission.objects.filter(
             roles__id__in=user_role_ids,
             code=permission_code,
@@ -346,9 +349,12 @@ class UserProfile(TimeStampedModel):
         ).exists()
     
     def has_module_access(self, module_code):
-        """Check if user has access to module through any role"""
+        """Check if user has access to module through any active role"""
         from apps.rbac.models import UserRole
-        user_role_ids = UserRole.objects.filter(user_profile=self).values_list('role_id', flat=True)
+        user_role_ids = UserRole.objects.filter(
+            user_profile=self,
+            role__is_active=True
+        ).values_list('role_id', flat=True)
         return Module.objects.filter(
             roles__id__in=user_role_ids,
             code=module_code,
@@ -363,7 +369,7 @@ class UserProfile(TimeStampedModel):
         
         if permissions is None:
             permissions = list(Permission.objects.filter(
-                roles__in=self.roles.all(),
+                roles__in=self.roles.filter(is_active=True),
                 is_active=True
             ).distinct())
             # Cache for 5 minutes
@@ -378,8 +384,11 @@ class UserProfile(TimeStampedModel):
         modules = cache.get(cache_key)
         
         if modules is None:
-            # Get role IDs through UserRole relationship
-            user_role_ids = UserRole.objects.filter(user_profile=self).values_list('role_id', flat=True)
+            # Get role IDs through UserRole relationship — only active roles
+            user_role_ids = UserRole.objects.filter(
+                user_profile=self,
+                role__is_active=True
+            ).values_list('role_id', flat=True)
             
             # Get modules linked to these roles through RoleModule
             modules = list(Module.objects.filter(
