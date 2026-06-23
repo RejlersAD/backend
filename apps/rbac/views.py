@@ -148,7 +148,7 @@ class RoleViewSet(viewsets.ModelViewSet):
     ViewSet for managing roles
     Only super admin can create/edit roles
     """
-    queryset = Role.objects.prefetch_related('permissions', 'modules').all()
+    queryset = Role.objects.prefetch_related('permissions', 'modules', 'user_profiles').all()
     permission_classes = [IsAuthenticated, CanManageRoles]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['name', 'code']
@@ -156,10 +156,17 @@ class RoleViewSet(viewsets.ModelViewSet):
     filterset_fields = ['level', 'is_active']
     
     def get_serializer_class(self):
-        if self.action == 'list':
-            return RoleListSerializer
+        # Use full serializer for all actions — roles are a small dataset (~10-20 rows)
+        # and the list endpoint needs modules + user_count for the Role Management UI
         return RoleSerializer
-    
+
+    def get_permissions(self):
+        # Admins can read roles; only super admin can create/edit/delete
+        if self.action in ['list', 'retrieve', 'assign_module', 'revoke_module',
+                           'assign_permission', 'revoke_permission']:
+            return [IsAuthenticated(), IsAdmin()]
+        return [IsAuthenticated(), CanManageRoles()]
+
     def perform_create(self, serializer):
         role = serializer.save()
         create_audit_log(
@@ -350,15 +357,19 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         - Everything else (list, retrieve, partial_update) → Admin or Super Admin
         """
         SUPER_ADMIN_ONLY_ACTIONS = {
-            'create', 'reset_password', 'activate', 'deactivate',
-            'soft_delete', 'assign_role', 'revoke_role',
+            'create', 'reset_password', 'activate', 'deactivate', 'soft_delete',
         }
+        # Admin (level 2+) can assign/revoke roles — but the action itself guards
+        # against assigning the super_admin role without super_admin privileges
+        ADMIN_ACTIONS = {'assign_role', 'revoke_role'}
         AUTH_ONLY_ACTIONS = {'me', 'change_password', 'engineers'}
 
         if self.action in AUTH_ONLY_ACTIONS:
             return [IsAuthenticated()]
         if self.action in SUPER_ADMIN_ONLY_ACTIONS:
             return [IsAuthenticated(), IsSuperAdmin()]
+        if self.action in ADMIN_ACTIONS:
+            return [IsAuthenticated(), IsAdmin()]
         return [IsAuthenticated(), CanManageUsers()]
     
     def get_queryset(self):
@@ -605,58 +616,107 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def assign_role(self, request, pk=None):
-        """Assign role to user"""
+        """Assign role to user.
+
+        Super Admins can assign any role including super_admin.
+        Admins can assign any role except super_admin.
+        """
         profile = self.get_object()
         role_id = request.data.get('role_id')
         is_primary = request.data.get('is_primary', False)
-        
+
         if not role_id:
             return Response(
                 {'error': 'role_id is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
             role = Role.objects.get(id=role_id)
-            user_role, created = UserRole.objects.get_or_create(
-                user_profile=profile,
-                role=role,
-                defaults={'assigned_by': request.user, 'is_primary': is_primary}
-            )
-            
-            create_audit_log(
-                user=request.user,
-                action='role_assign',
-                resource_type='UserProfile',
-                resource_id=profile.id,
-                resource_repr=str(profile),
-                metadata={'role': role.name},
-                ip_address=request.META.get('REMOTE_ADDR'),
-                user_agent=request.META.get('HTTP_USER_AGENT', '')
-            )
-            
-            return Response({
-                'status': 'created' if created else 'already_exists',
-                'role': role.name
-            })
         except Role.DoesNotExist:
             return Response(
                 {'error': 'Role not found'},
                 status=status.HTTP_404_NOT_FOUND
             )
-    
+
+        # Guard: only super admin may assign the super_admin role
+        PROTECTED_ROLE_CODES = {'super_admin'}
+        if role.code in PROTECTED_ROLE_CODES:
+            requester_is_super_admin = (
+                request.user.is_superuser
+                or (
+                    hasattr(request.user, 'rbac_profile')
+                    and request.user.rbac_profile.roles.filter(
+                        code='super_admin', is_active=True
+                    ).exists()
+                )
+            )
+            if not requester_is_super_admin:
+                return Response(
+                    {'error': 'Only Super Administrators can assign the Super Admin role.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+        user_role, created = UserRole.objects.get_or_create(
+            user_profile=profile,
+            role=role,
+            defaults={'assigned_by': request.user, 'is_primary': is_primary}
+        )
+
+        create_audit_log(
+            user=request.user,
+            action='role_assign',
+            resource_type='UserProfile',
+            resource_id=profile.id,
+            resource_repr=str(profile),
+            metadata={'role': role.name},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        return Response({
+            'status': 'created' if created else 'already_exists',
+            'role': role.name
+        })
+
     @action(detail=True, methods=['post'])
     def revoke_role(self, request, pk=None):
-        """Revoke role from user"""
+        """Revoke role from user.
+
+        Super Admins can revoke any role including super_admin.
+        Admins can revoke any role except super_admin.
+        """
         profile = self.get_object()
         role_id = request.data.get('role_id')
-        
+
         if not role_id:
             return Response(
                 {'error': 'role_id is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
+        # Guard: only super admin may revoke the super_admin role
+        PROTECTED_ROLE_CODES = {'super_admin'}
+        try:
+            target_role = Role.objects.get(id=role_id)
+            if target_role.code in PROTECTED_ROLE_CODES:
+                requester_is_super_admin = (
+                    request.user.is_superuser
+                    or (
+                        hasattr(request.user, 'rbac_profile')
+                        and request.user.rbac_profile.roles.filter(
+                            code='super_admin', is_active=True
+                        ).exists()
+                    )
+                )
+                if not requester_is_super_admin:
+                    return Response(
+                        {'error': 'Only Super Administrators can revoke the Super Admin role.'},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+        except Role.DoesNotExist:
+            pass  # Role not found — the delete below will simply affect 0 rows
+
         deleted_count = UserRole.objects.filter(
             user_profile=profile,
             role_id=role_id

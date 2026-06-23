@@ -128,7 +128,7 @@ class RoleSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
     
     def get_user_count(self, obj):
-        return obj.user_profiles.filter(userprofile__is_deleted=False).count()
+        return obj.user_profiles.filter(is_deleted=False).count()
     
     def create(self, validated_data):
         permission_ids = validated_data.pop('permission_ids', [])
