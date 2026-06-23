@@ -12,14 +12,15 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import (
     Organization, Module, Permission, Role, RolePermission, RoleModule,
-    UserProfile, UserRole, UserStorage, AuditLog
+    UserProfile, UserRole, UserStorage, AuditLog, AccessRequest
 )
 from .serializers import (
     OrganizationSerializer, ModuleSerializer, PermissionSerializer,
     RoleSerializer, RoleListSerializer, RolePermissionSerializer, RoleModuleSerializer,
     UserProfileSerializer, UserProfileListSerializer, UserRoleSerializer,
     UserStorageSerializer, AuditLogSerializer,
-    UserPermissionCheckSerializer, UserModuleCheckSerializer
+    UserPermissionCheckSerializer, UserModuleCheckSerializer,
+    AccessRequestSerializer,
 )
 from .permissions import (
     IsSuperAdmin, IsAdmin, CanManageUsers, CanManageRoles, SameOrganization
@@ -2435,3 +2436,139 @@ class UserExportView(APIView):
                 writer.writerow(build_row(p))
 
         return response
+
+
+# ---------------------------------------------------------------------------
+# Access Request ViewSet
+# ---------------------------------------------------------------------------
+
+class AccessRequestViewSet(viewsets.ModelViewSet):
+    """
+    Module access requests submitted by regular users.
+
+    - Regular users: create and view their own requests.
+    - Admins / Super Admins: view all requests; approve or deny via custom actions.
+    """
+
+    serializer_class   = AccessRequestSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends    = [filters.OrderingFilter, DjangoFilterBackend]
+    filterset_fields   = ['status', 'module']
+    ordering_fields    = ['created_at']
+    ordering           = ['-created_at']
+
+    # Soft-coded: roles that can see/manage all requests
+    MANAGER_ROLE_CODES = ['super_admin', 'admin']
+
+    def _is_manager(self, user):
+        """Return True if user is superuser or holds a manager-level role."""
+        if user.is_superuser:
+            return True
+        try:
+            return user.rbac_profile.roles.filter(
+                code__in=self.MANAGER_ROLE_CODES, is_active=True
+            ).exists()
+        except UserProfile.DoesNotExist:
+            return False
+
+    def get_queryset(self):
+        user = self.request.user
+        base_qs = AccessRequest.objects.select_related(
+            'user_profile__user', 'module', 'reviewed_by'
+        )
+        if self._is_manager(user):
+            return base_qs.all()
+        try:
+            return base_qs.filter(user_profile=user.rbac_profile)
+        except UserProfile.DoesNotExist:
+            return AccessRequest.objects.none()
+
+    def perform_create(self, serializer):
+        try:
+            profile = self.request.user.rbac_profile
+        except UserProfile.DoesNotExist:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('User profile not found.')
+
+        module_id = self.request.data.get('module')
+        # Guard: prevent duplicate pending requests for the same module
+        if AccessRequest.objects.filter(
+            user_profile=profile,
+            module_id=module_id,
+            status=AccessRequest.STATUS_PENDING,
+        ).exists():
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError(
+                {'detail': 'A pending request for this module already exists.'}
+            )
+        serializer.save(user_profile=profile)
+
+    # ------------------------------------------------------------------
+    # Admin actions: approve / deny
+    # ------------------------------------------------------------------
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        if not self._is_manager(request.user):
+            return Response(
+                {'detail': 'Only admins can approve access requests.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        req = self.get_object()
+        if req.status != AccessRequest.STATUS_PENDING:
+            return Response(
+                {'detail': f'Request is already {req.status}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        req.status      = AccessRequest.STATUS_APPROVED
+        req.reviewed_by = request.user
+        req.reviewed_at = timezone.now()
+        req.admin_note  = request.data.get('admin_note', '')
+        req.save()
+
+        # Grant access: ensure the user's viewer role has the module, then
+        # also assign the module directly to the user's viewer UserRole.
+        try:
+            from django.core.cache import cache
+            viewer_role = Role.objects.get(code='viewer')
+            RoleModule.objects.get_or_create(role=viewer_role, module=req.module)
+            # If the user already has the viewer role, the cache clear is enough
+            UserRole.objects.get_or_create(
+                user_profile=req.user_profile,
+                role=viewer_role,
+                defaults={'is_primary': False},
+            )
+            cache.delete(f'user_modules_{req.user_profile.id}')
+        except Exception:
+            pass  # Non-fatal — approval still recorded
+
+        create_audit_log(
+            user=request.user,
+            action='role_assign',
+            resource_type='AccessRequest',
+            resource_id=req.id,
+            resource_repr=str(req),
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+        )
+        return Response({'status': 'approved'})
+
+    @action(detail=True, methods=['post'])
+    def deny(self, request, pk=None):
+        if not self._is_manager(request.user):
+            return Response(
+                {'detail': 'Only admins can deny access requests.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        req = self.get_object()
+        if req.status != AccessRequest.STATUS_PENDING:
+            return Response(
+                {'detail': f'Request is already {req.status}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        req.status      = AccessRequest.STATUS_DENIED
+        req.reviewed_by = request.user
+        req.reviewed_at = timezone.now()
+        req.admin_note  = request.data.get('admin_note', '')
+        req.save()
+        return Response({'status': 'denied'})

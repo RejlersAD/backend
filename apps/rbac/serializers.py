@@ -8,7 +8,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from .models import (
     Organization, Module, Permission, Role, RolePermission, RoleModule,
-    UserProfile, UserRole, UserStorage, AuditLog
+    UserProfile, UserRole, UserStorage, AuditLog, AccessRequest
 )
 
 User = get_user_model()
@@ -834,3 +834,31 @@ class UserModuleCheckSerializer(serializers.Serializer):
     """Serializer for checking user module access"""
     module_code = serializers.CharField()
     has_access = serializers.BooleanField(read_only=True)
+
+
+class AccessRequestSerializer(serializers.ModelSerializer):
+    """Serializer for module access requests."""
+    user_email = serializers.EmailField(source='user_profile.user.email', read_only=True)
+    user_name = serializers.SerializerMethodField()
+    module_name = serializers.CharField(source='module.name', read_only=True)
+    module_code = serializers.CharField(source='module.code', read_only=True)
+    reviewed_by_email = serializers.EmailField(
+        source='reviewed_by.email', read_only=True, allow_null=True
+    )
+
+    class Meta:
+        model = AccessRequest
+        fields = [
+            'id', 'user_profile', 'user_email', 'user_name',
+            'module', 'module_name', 'module_code',
+            'reason', 'status',
+            'reviewed_by', 'reviewed_by_email', 'reviewed_at', 'admin_note',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id', 'status', 'reviewed_by', 'reviewed_at', 'created_at',
+        ]
+
+    def get_user_name(self, obj):
+        u = obj.user_profile.user
+        return f"{u.first_name} {u.last_name}".strip() or u.email

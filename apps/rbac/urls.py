@@ -6,6 +6,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     OrganizationViewSet, ModuleViewSet, PermissionViewSet,
     RoleViewSet, UserProfileViewSet, AuditLogViewSet, StorageViewSet,
+    AccessRequestViewSet,
     # Analytics ViewSets
     AnalyticsDashboardViewSet, SystemMetricsViewSet, UserActivityAnalyticsViewSet,
     SecurityAlertViewSet, PredictiveInsightViewSet, FeatureUsageAnalyticsViewSet,
@@ -28,6 +29,7 @@ router.register(r'roles', RoleViewSet, basename='role')
 router.register(r'users', UserProfileViewSet, basename='user')
 router.register(r'audit-logs', AuditLogViewSet, basename='audit-log')
 router.register(r'storage', StorageViewSet, basename='storage')
+router.register(r'access-requests', AccessRequestViewSet, basename='access-request')
 
 # AI-Powered Analytics
 router.register(r'analytics/dashboard', AnalyticsDashboardViewSet, basename='analytics-dashboard')
