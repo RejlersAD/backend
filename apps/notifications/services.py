@@ -82,6 +82,21 @@ class NotificationService:
             'action_label': 'View Results',
         },
         
+        # Payroll Templates
+        'PAYROLL_FROZEN': {
+            'title': '\U0001f9ca Payroll File Frozen — Awaiting HR Approval',
+            'message': (
+                'The {period} master payroll file has been frozen by {frozen_by}. '
+                '{total_rows} employee records are locked. '
+                'Please review and proceed with HR approval.'
+            ),
+            'priority': 'HIGH',
+            'category': 'APPROVAL',
+            'send_email': True,
+            'action_label': 'Open Payroll Engine',
+            'action_url': '/hr/payroll',
+        },
+
         # System Templates
         'SYSTEM_MAINTENANCE': {
             'title': '🔧 System Maintenance Scheduled',

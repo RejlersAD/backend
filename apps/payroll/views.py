@@ -3486,7 +3486,259 @@ def _master_payroll_workflow_action(request, import_id: str, action: str):
         action, import_id, request.user.email, from_stage, to_stage,
     )
 
+    # ── Post-freeze notification ─────────────────────────────────────────────
+    # Notify every HR Manager listed in PAYROLL_FREEZE_NOTIFY_EMAILS.
+    # Runs synchronously but is lightweight (DB lookup + async email dispatch).
+    if action == 'freeze':
+        _notify_hr_managers_on_freeze(record, request.user)
+
     return Response(_build_workflow_info(record))
+
+
+CALENDAR_MONTHS = [
+    '', 'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+]
+
+
+def _notify_hr_managers_on_freeze(record, frozen_by_user):
+    """
+    Look up every email in PAYROLL_FREEZE_NOTIFY_EMAILS and create an in-app
+    + email notification for each one using the existing NotificationService.
+    Safe to call even if a recipient account does not exist — errors are
+    logged and silently skipped so the workflow response is never affected.
+    """
+    try:
+        from django.conf import settings as dj_settings
+        from django.contrib.auth import get_user_model
+        from apps.notifications.services import NotificationService
+
+        notify_emails = getattr(dj_settings, 'PAYROLL_FREEZE_NOTIFY_EMAILS', [])
+        if not notify_emails:
+            return
+
+        User = get_user_model()
+        month_name  = CALENDAR_MONTHS[record.month] if 1 <= record.month <= 12 else str(record.month)
+        period      = f'{month_name} {record.year}'
+        frozen_name = (
+            frozen_by_user.get_full_name() or
+            frozen_by_user.email or
+            str(frozen_by_user)
+        )
+
+        recipients = User.objects.filter(
+            email__in=notify_emails,
+            is_active=True,
+        )
+
+        for recipient in recipients:
+            try:
+                NotificationService.create_notification(
+                    recipient=recipient,
+                    template_key='PAYROLL_FROZEN',
+                    sender=frozen_by_user,
+                    period=period,
+                    frozen_by=frozen_name,
+                    total_rows=record.total_rows,
+                    metadata={
+                        'import_id':  str(record.pk),
+                        'year':       record.year,
+                        'month':      record.month,
+                        'frozen_by':  frozen_by_user.email,
+                    },
+                )
+                logger.info(
+                    'Payroll freeze notification sent to %s for import %s',
+                    recipient.email, record.pk,
+                )
+            except Exception as exc:
+                logger.error(
+                    'Failed to notify %s on payroll freeze: %s',
+                    recipient.email, exc,
+                )
+    except Exception as exc:
+        logger.error('_notify_hr_managers_on_freeze error: %s', exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Super-Admin Approval Tracker
+# GET /api/v1/payroll/approval-tracker/
+# Returns every MasterPayrollImport with per-stage actor + SLA status so the
+# super-admin can monitor the entire approval pipeline in one view.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Stage order must match WORKFLOW_STAGE_ORDER in models.py
+_TRACKER_STAGE_ORDER = [
+    'draft', 'frozen', 'hr_approved', 'finance_review', 'finance_approved', 'released',
+]
+
+# Role label for who is expected to act at each stage
+_TRACKER_PENDING_ROLE = {
+    'draft':            'HR Manager',
+    'frozen':           'HR Manager',
+    'hr_approved':      'Finance Team',
+    'finance_review':   'Finance Team',
+    'finance_approved': 'Accounts Team',
+    'released':         None,
+}
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def master_payroll_approval_tracker(request):
+    """
+    Super-admin dashboard — approval progress for every master payroll file.
+
+    Returns:
+      summary   — aggregate counts per stage + overdue count
+      results   — list of imports with per-stage actor/timestamp/SLA info
+    Filters (query params): stage, year, month
+    """
+    from django.conf import settings as dj_settings
+    from django.utils import timezone
+    from .models import MasterPayrollImport
+
+    if not _is_hr_manager(request.user):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied('HR Manager or Super-Admin role required.')
+
+    # Soft-coded SLA thresholds (days) — can be overridden per-stage via env
+    sla_days_cfg = getattr(dj_settings, 'PAYROLL_TRACKER_SLA_DAYS', {
+        'draft': 3, 'frozen': 2, 'hr_approved': 3,
+        'finance_review': 3, 'finance_approved': 2, 'released': None,
+    })
+
+    now = timezone.now()
+
+    qs = (
+        MasterPayrollImport.objects
+        .select_related('generated_by', 'frozen_by', 'hr_approved_by',
+                        'finance_approved_by', 'released_by')
+        .prefetch_related('workflow_logs__performed_by')
+        .order_by('-year', '-month', '-generated_at')
+    )
+
+    # Optional filters
+    for fld, cast in (('year', int), ('month', int)):
+        val = request.query_params.get(fld)
+        if val:
+            try:
+                qs = qs.filter(**{fld: cast(val)})
+            except (ValueError, TypeError):
+                pass
+
+    stage_filter = request.query_params.get('stage', '').strip()
+    if stage_filter and stage_filter in _TRACKER_STAGE_ORDER:
+        qs = qs.filter(workflow_stage=stage_filter)
+
+    def _actor(user):
+        if not user:
+            return None
+        return {
+            'name':  (user.get_full_name() or '').strip() or user.email,
+            'email': user.email,
+        }
+
+    def _sla_status(entry_ts, stage_key):
+        """Return 'ok' | 'warning' | 'overdue' for a stage entry timestamp."""
+        sla = sla_days_cfg.get(stage_key)
+        if not sla or not entry_ts:
+            return 'ok'
+        elapsed = (now - entry_ts).total_seconds() / 86400
+        if elapsed > sla:
+            return 'overdue'
+        if elapsed > sla * 0.7:
+            return 'warning'
+        return 'ok'
+
+    def _stage_entry(stage_key, actor_user, ts):
+        sla = sla_days_cfg.get(stage_key)
+        elapsed = round((now - ts).total_seconds() / 86400, 1) if ts else None
+        return {
+            'actor':        _actor(actor_user),
+            'timestamp':    ts.isoformat() if ts else None,
+            'days_elapsed': elapsed,
+            'sla_days':     sla,
+            'sla_status':   _sla_status(ts, stage_key) if ts else 'ok',
+        }
+
+    def _serialize(imp):
+        month_name = CALENDAR_MONTHS[imp.month] if 1 <= imp.month <= 12 else str(imp.month)
+
+        # Derive finance_review actor from immutable workflow logs
+        finance_review_actor  = None
+        finance_review_ts     = None
+        for log in imp.workflow_logs.all():
+            if log.action == 'finance_review':
+                finance_review_actor = log.performed_by
+                finance_review_ts    = log.performed_at
+                break
+
+        stages = {
+            'draft':            _stage_entry('draft',            imp.generated_by,        imp.generated_at),
+            'frozen':           _stage_entry('frozen',           imp.frozen_by,           imp.frozen_at),
+            'hr_approved':      _stage_entry('hr_approved',      imp.hr_approved_by,      imp.hr_approved_at),
+            'finance_review':   _stage_entry('finance_review',   finance_review_actor,    finance_review_ts),
+            'finance_approved': _stage_entry('finance_approved', imp.finance_approved_by, imp.finance_approved_at),
+            'released':         _stage_entry('released',         imp.released_by,         imp.released_at),
+        }
+
+        # Determine when the current stage was entered (for live SLA clock)
+        current_stage_entry_ts_map = {
+            'draft':            imp.generated_at,
+            'frozen':           imp.frozen_at,
+            'hr_approved':      imp.hr_approved_at,
+            'finance_review':   finance_review_ts or imp.hr_approved_at,
+            'finance_approved': imp.finance_approved_at,
+            'released':         imp.released_at,
+        }
+        current_ts  = current_stage_entry_ts_map.get(imp.workflow_stage)
+        current_sla = sla_days_cfg.get(imp.workflow_stage)
+        days_in_stage = round((now - current_ts).total_seconds() / 86400, 1) if current_ts else None
+
+        try:
+            stage_idx = _TRACKER_STAGE_ORDER.index(imp.workflow_stage)
+        except ValueError:
+            stage_idx = 0
+
+        return {
+            'id':                    str(imp.id),
+            'period':                f'{month_name} {imp.year}',
+            'year':                  imp.year,
+            'month':                 imp.month,
+            'total_rows':            imp.total_rows,
+            'generated_by':          _actor(imp.generated_by),
+            'generated_at':          imp.generated_at.isoformat(),
+            'workflow_stage':        imp.workflow_stage,
+            'stage_index':           stage_idx,
+            'pending_role':          _TRACKER_PENDING_ROLE.get(imp.workflow_stage),
+            'days_in_current_stage': days_in_stage,
+            'current_sla_days':      current_sla,
+            'current_sla_status':    _sla_status(current_ts, imp.workflow_stage),
+            'stages':                stages,
+        }
+
+    all_items  = list(qs)
+    serialized = [_serialize(i) for i in all_items]
+
+    # Aggregate counts per stage (unfiltered for the KPI bar)
+    unfiltered_qs = MasterPayrollImport.objects.values('workflow_stage')
+    stage_counts  = {}
+    for row in unfiltered_qs:
+        stage_counts[row['workflow_stage']] = stage_counts.get(row['workflow_stage'], 0) + 1
+
+    overdue_count = sum(1 for s in serialized if s['current_sla_status'] == 'overdue')
+    warning_count = sum(1 for s in serialized if s['current_sla_status'] == 'warning')
+
+    return Response({
+        'summary': {
+            'total':         len(serialized),
+            'by_stage':      stage_counts,
+            'overdue_count': overdue_count,
+            'warning_count': warning_count,
+        },
+        'results': serialized,
+    })
 
 
 def _build_workflow_info(record):

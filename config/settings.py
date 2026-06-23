@@ -1138,6 +1138,30 @@ PAYROLL_WORKFLOW_SUPERADMIN_EMAIL = config(
     default='tanzeem.agra@rejlers.ae',
 ).lower()
 
+# Comma-separated list of HR Manager emails that receive an in-app + email
+# notification whenever a master payroll file is frozen.
+# Add more recipients by updating this env var (no code change needed).
+PAYROLL_FREEZE_NOTIFY_EMAILS = [
+    e.strip().lower()
+    for e in config(
+        'PAYROLL_FREEZE_NOTIFY_EMAILS',
+        default='sanglin.samuel@rejlers.ae',
+    ).split(',')
+    if e.strip()
+]
+
+# SLA thresholds (working days) per workflow stage.
+# Approval Tracker highlights files exceeding these limits.
+# Override any value via environment without a code change.
+PAYROLL_TRACKER_SLA_DAYS = {
+    'draft':            int(config('PAYROLL_SLA_DRAFT',            default=3)),
+    'frozen':           int(config('PAYROLL_SLA_FROZEN',           default=2)),
+    'hr_approved':      int(config('PAYROLL_SLA_HR_APPROVED',      default=3)),
+    'finance_review':   int(config('PAYROLL_SLA_FINANCE_REVIEW',   default=3)),
+    'finance_approved': int(config('PAYROLL_SLA_FINANCE_APPROVED', default=2)),
+    'released':         None,   # terminal stage — no SLA
+}
+
 # ==============================================================================
 # REPORT GENERATION CONFIGURATION (SOFT-CODED)
 # ==============================================================================

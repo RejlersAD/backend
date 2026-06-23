@@ -39,6 +39,7 @@ from .views import (
     master_payroll_release,
     master_payroll_workflow_status,
     master_payroll_row_update,
+    master_payroll_approval_tracker,
 )
 
 app_name = 'payroll'
@@ -73,6 +74,8 @@ urlpatterns = [
     path('master-payroll-history/<uuid:import_id>/delete/',            master_payroll_delete,    name='master-payroll-delete'),
     path('export-rows-to-excel/',                                      export_rows_to_excel,          name='export-rows-to-excel'),
     path('ai-analytics/generate/',                                     ai_analytics_generate,         name='ai-analytics-generate'),
+    # Super-admin approval tracker — overview of all payroll files + SLA status
+    path('approval-tracker/',                                              master_payroll_approval_tracker,        name='approval-tracker'),
     # Workflow action endpoints
     path('master-payroll-history/<uuid:import_id>/workflow/',          master_payroll_workflow_status, name='master-payroll-workflow'),
     path('master-payroll-history/<uuid:import_id>/freeze/',            master_payroll_freeze,          name='master-payroll-freeze'),
