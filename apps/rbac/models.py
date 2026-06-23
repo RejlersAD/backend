@@ -139,7 +139,7 @@ class Role(TimeStampedModel):
     User roles with hierarchical structure
     """
     ROLE_LEVEL_CHOICES = [
-        (1, 'Super Admin'),
+        (1, 'Super Administrator'),
         (2, 'Admin'),
         (3, 'Manager'),
         (4, 'Engineer'),

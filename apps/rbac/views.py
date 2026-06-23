@@ -149,7 +149,14 @@ class RoleViewSet(viewsets.ModelViewSet):
     ViewSet for managing roles
     Only super admin can create/edit roles
     """
-    queryset = Role.objects.prefetch_related('permissions', 'modules', 'user_profiles').all()
+    # SOFT-CODED: custom_role_prefix from rbac_config — roles with this prefix are
+    # per-user auto-generated roles and must not appear in the Role Management UI.
+    # Change the prefix constant in rbac_config.py if the naming scheme ever changes.
+    from apps.rbac.rbac_config import MODULE_ASSIGNMENT_CONFIG as _mac
+    _CUSTOM_PREFIX = _mac.get('custom_role_prefix', 'custom_')
+
+    queryset = Role.objects.prefetch_related('permissions', 'modules', 'user_profiles') \
+                           .exclude(code__startswith=_CUSTOM_PREFIX)
     permission_classes = [IsAuthenticated, CanManageRoles]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['name', 'code']
