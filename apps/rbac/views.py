@@ -156,6 +156,7 @@ class RoleViewSet(viewsets.ModelViewSet):
     _CUSTOM_PREFIX = _mac.get('custom_role_prefix', 'custom_')
 
     queryset = Role.objects.prefetch_related('permissions', 'modules', 'user_profiles') \
+                           .filter(is_active=True) \
                            .exclude(code__startswith=_CUSTOM_PREFIX)
     permission_classes = [IsAuthenticated, CanManageRoles]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
