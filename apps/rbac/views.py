@@ -744,9 +744,58 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             )
         
         return Response({'status': 'role revoked', 'count': deleted_count})
-    
-    @action(detail=False, methods=['post'])
-    def bulk_upload(self, request):
+
+    @action(detail=True, methods=['post'])
+    def set_primary_role(self, request, pk=None):
+        """Mark a specific role as the primary role for this user.
+
+        Sets the given role's UserRole.is_primary = True and all other
+        UserRole entries for this user to is_primary = False.
+        """
+        profile = self.get_object()
+        role_id = request.data.get('role_id')
+
+        if not role_id:
+            return Response(
+                {'error': 'role_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            role = Role.objects.get(id=role_id, is_active=True)
+        except Role.DoesNotExist:
+            return Response(
+                {'error': 'Role not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        try:
+            user_role = UserRole.objects.get(user_profile=profile, role=role)
+        except UserRole.DoesNotExist:
+            return Response(
+                {'error': 'This role is not assigned to the user'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Demote all other roles for this user, then promote the target
+        UserRole.objects.filter(user_profile=profile).update(is_primary=False)
+        user_role.is_primary = True
+        user_role.save(update_fields=['is_primary'])
+
+        create_audit_log(
+            user=request.user,
+            action='role_set_primary',
+            resource_type='UserProfile',
+            resource_id=profile.id,
+            resource_repr=str(profile),
+            metadata={'role': role.name, 'role_id': str(role.id)},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')
+        )
+
+        return Response({'status': 'primary role updated', 'role': role.name})
+
+
         """
         Bulk upload users from CSV/Excel with Email Notifications
         Expected CSV format: email,first_name,last_name,password,department,job_title,phone,role_codes,module_codes
