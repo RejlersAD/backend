@@ -200,6 +200,67 @@ UI = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PERFORMANCE OPTIMIZATION — Intelligent Caching & Query Limits
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-tier caching dramatically reduces load on the SQL Server and speeds
+# up live data synchronization. All settings are soft-coded via env vars.
+
+PERFORMANCE = {
+    # Query result limit (safety cap for memory/network)
+    # Live view typically returns ~200-500 rows (one per active employee)
+    # Daily typically returns ~200-500 rows (one per employee who punched today)
+    # Monthly typically returns ~200-500 rows (one per employee with activity)
+    # Set lower if your org has 5K+ employees and you see memory issues.
+    'max_result_rows': _env_int('TIMESHEET_MAX_RESULT_ROWS', 10000),
+    
+    # SQL query timeout (seconds) — independent from connection timeout
+    # Protects against slow queries when SQL Server is under load
+    'query_timeout_sec': _env_int('TIMESHEET_QUERY_TIMEOUT', 30),
+    
+    # Enable query result pagination for large datasets
+    # When True, queries use SQL Server's OFFSET/FETCH for memory efficiency
+    'enable_pagination': config('TIMESHEET_ENABLE_PAGINATION', default='false', cast=bool),
+    'page_size': _env_int('TIMESHEET_PAGE_SIZE', 1000),
+    
+    # Connection pool settings (for high-concurrency environments)
+    'connection_pool_size': _env_int('TIMESHEET_POOL_SIZE', 5),
+    'connection_pool_overflow': _env_int('TIMESHEET_POOL_OVERFLOW', 10),
+    
+    # Intelligent query optimization
+    # When True, queries against large tables (1M+ rows) add optimized WHERE
+    # clauses (e.g. EventDateTime > GETDATE()-7 for live view) to reduce scan
+    'optimize_large_tables': config('TIMESHEET_OPTIMIZE_LARGE_TABLES', default='true', cast=bool),
+    
+    # Parallel query execution for monthly reports (when mirror mode is active)
+    # Splits month into weeks and queries in parallel, then merges results
+    'parallel_monthly_queries': config('TIMESHEET_PARALLEL_MONTHLY', default='false', cast=bool),
+    'parallel_workers': _env_int('TIMESHEET_PARALLEL_WORKERS', 4),
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INTELLIGENT FALLBACK CHAIN
+# ─────────────────────────────────────────────────────────────────────────────
+# Production-safe degradation strategy when SQL Server is unreachable.
+# Order matters — each fallback is tried in sequence until one succeeds.
+
+FALLBACK_CHAIN = {
+    'enabled': config('TIMESHEET_FALLBACK_ENABLED', default='true', cast=bool),
+    
+    # 1. Try cache first (Redis) — fastest, stale data acceptable for live view
+    'try_cache_first': config('TIMESHEET_TRY_CACHE_FIRST', default='true', cast=bool),
+    
+    # 2. Try mirror table (Postgres) — if sync agent has populated it
+    'try_mirror_fallback': config('TIMESHEET_TRY_MIRROR_FALLBACK', default='true', cast=bool),
+    
+    # 3. Serve empty response with configured=False (graceful degradation)
+    'graceful_empty': config('TIMESHEET_GRACEFUL_EMPTY', default='true', cast=bool),
+    
+    # Maximum age of stale cache data to serve (seconds)
+    # 300 = 5 minutes (show 5-minute-old data rather than fail)
+    'max_stale_age': _env_int('TIMESHEET_MAX_STALE_AGE', 300),
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Export deduplication — removes duplicate employee_code rows from reports.
 #
 # Root cause: the biometric source can send the same employee under slightly

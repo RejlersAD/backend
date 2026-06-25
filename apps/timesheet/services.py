@@ -25,6 +25,13 @@ from decouple import config as _env
 from . import config as ts_config
 from .sqlserver import connect, rows_to_dicts
 
+# Import intelligent caching layer
+try:
+    from . import cache_service
+    _CACHE_AVAILABLE = True
+except ImportError:
+    _CACHE_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
@@ -608,8 +615,13 @@ def _enrich_with_rad_users(rows: list[dict]) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Live status — who's currently in the office
 # ─────────────────────────────────────────────────────────────────────────────
+@cache_service.cached_timesheet_query('live', cache_service.CACHE_LIVE_TTL) if _CACHE_AVAILABLE else lambda f: f
 def live_status() -> dict:
-    """Return last-known punch per user for today + a roll-up of who's IN/OUT."""
+    """Return last-known punch per user for today + a roll-up of who's IN/OUT.
+    
+    CACHED: 15 seconds (default) via Redis + background refresh.
+    Stale data served if SQL Server unreachable (circuit breaker).
+    """
     today = dt.date.today()
     variant = _variant()
     if variant == 'unknown':
@@ -707,7 +719,13 @@ def _is_late(row: dict) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # Daily report — per user hours for a single date
 # ─────────────────────────────────────────────────────────────────────────────
+@cache_service.cached_timesheet_query('daily', cache_service.CACHE_DAILY_TTL) if _CACHE_AVAILABLE else lambda f: f
 def daily_report(date: Optional[str] = None) -> dict:
+    """Return per-user hours for a single date.
+    
+    CACHED: 5 minutes (default) via Redis + background refresh.
+    Historical dates cached longer as they don't change.
+    """
     day = _parse_date(date)
     variant = _variant()
     if variant == 'unknown':
@@ -758,7 +776,13 @@ def daily_report(date: Optional[str] = None) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Monthly report — per user rollup for a month
 # ─────────────────────────────────────────────────────────────────────────────
+@cache_service.cached_timesheet_query('monthly', cache_service.CACHE_MONTHLY_TTL) if _CACHE_AVAILABLE else lambda f: f
 def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> dict:
+    """Return per-user monthly rollup with days/hours/late stats.
+    
+    CACHED: 1 hour (default) via Redis + background refresh.
+    Current month refreshed more frequently, historical months cached longer.
+    """
     today = dt.date.today()
     y = int(year or today.year)
     m = int(month or today.month)
