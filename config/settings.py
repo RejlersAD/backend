@@ -493,7 +493,9 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Internationalization
 LANGUAGE_CODE = 'en-us'
-TIME_ZONE = 'UTC'
+# Soft-coded: Application timezone for display (default UTC for safety)
+# Set to 'Asia/Dubai' for UAE (UTC+4) or your office timezone
+TIME_ZONE = config('DJANGO_TIME_ZONE', default='UTC')
 USE_I18N = True
 USE_TZ = True
 
@@ -1017,9 +1019,10 @@ if USE_S3:
     # 2. IAM Role (EC2, ECS, Lambda) - PREFERRED for production
     # 3. AWS credentials file (~/.aws/credentials)
     
-    # DO NOT SET THESE IN CODE - Use environment variables or IAM roles
-    # AWS_ACCESS_KEY_ID = 'NEVER_HARDCODE_THIS'  ERROR WRONG
-    # AWS_SECRET_ACCESS_KEY = 'NEVER_HARDCODE_THIS'  ERROR WRONG
+    # Expose credentials as settings for explicit boto3 usage (soft-coded)
+    # These are read from environment variables, NEVER hardcoded
+    AWS_ACCESS_KEY_ID = config('AWS_ACCESS_KEY_ID', default='')
+    AWS_SECRET_ACCESS_KEY = config('AWS_SECRET_ACCESS_KEY', default='')
     
     # WARNING CRITICAL: S3 bucket must exist before deployment
     # Railway Env Var: AWS_STORAGE_BUCKET_NAME=user-management-rejlers (production bucket)
@@ -1138,6 +1141,34 @@ WRENCH_S3_MIRROR_MODE = config('WRENCH_S3_MIRROR_MODE', default='flat')
 # OpenAI Configuration (existing)
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 OPENAI_MODEL = config('OPENAI_MODEL', default='gpt-4o')
+
+# ==============================================================================
+# PROCUREMENT DOCUMENT EXTRACTION CONFIGURATION (SOFT-CODED)
+# ==============================================================================
+# Extraction method for PO/PR documents:
+#   'tesseract' - Free OCR with regex pattern matching (recommended for cost)
+#   'openai'    - GPT-4o structured extraction (better accuracy, costs $)
+# Override via PROCUREMENT_EXTRACTION_METHOD env var
+PROCUREMENT_EXTRACTION_METHOD = config(
+    'PROCUREMENT_EXTRACTION_METHOD',
+    default='tesseract',
+).lower()
+
+# Tesseract OCR language (for multi-language support)
+PROCUREMENT_OCR_LANG = config('PROCUREMENT_OCR_LANG', default='eng')
+
+# Maximum PDF file size for extraction (bytes) - soft-coded for easy tuning
+PROCUREMENT_MAX_PDF_SIZE = int(config(
+    'PROCUREMENT_MAX_PDF_SIZE',
+    default=10 * 1024 * 1024,  # 10MB default
+))
+
+# Confidence threshold for auto-mapping vendors (0.0 - 1.0)
+# Lower = more lenient matching, Higher = stricter matching
+PROCUREMENT_VENDOR_MATCH_THRESHOLD = float(config(
+    'PROCUREMENT_VENDOR_MATCH_THRESHOLD',
+    default=0.7,  # 70% similarity required
+))
 
 # ==============================================================================
 # PAYROLL WORKFLOW CONFIGURATION (SOFT-CODED)
