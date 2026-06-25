@@ -621,8 +621,13 @@ def live_status() -> dict:
     
     CACHED: 15 seconds (default) via Redis + background refresh.
     Stale data served if SQL Server unreachable (circuit breaker).
+    
+    Uses soft-coded rolling time window (TIMESHEET_LIVE_LOOKBACK_HOURS) instead
+    of strict today-only filter to handle timezone differences gracefully.
     """
-    today = dt.date.today()
+    # Soft-coded rolling window (default 20h covers UAE office day + UTC offset)
+    lookback_hours = int(ts_config.RULES.get('live_lookback_hours', 20))
+    
     variant = _variant()
     if variant == 'unknown':
         return {'rows': [], 'summary': _empty_summary(), 'variant': variant}
@@ -639,14 +644,15 @@ def live_status() -> dict:
             f"INNER JOIN ("
             f"    SELECT {_col('employee_code')} AS ec, MAX({_col('punch_time')}) AS mx "
             f"    FROM {_table()} "
-            f"    WHERE CAST({_col('punch_time')} AS DATE) = %s "
+            f"    WHERE {_col('punch_time')} >= DATEADD(HOUR, %s, GETDATE()) "
             f"    GROUP BY {_col('employee_code')}"
             f") last ON a.{_col('employee_code')} = last.ec "
             f"      AND a.{_col('punch_time')} = last.mx "
             f"ORDER BY a.{_col('punch_time')} DESC"
         )
-        params = (today,)
+        params = (-lookback_hours,)
     else:  # two_column
+        today = dt.date.today()
         sql = (
             f"SELECT {_col('employee_code')} AS employee_code, "
             f"       {_opt_select('employee_email', 'email')}"
@@ -687,7 +693,21 @@ def live_status() -> dict:
             summary['late_today'] += 1
     summary['total_seen_today'] = len(rows)
     summary['matched_to_radai'] = sum(1 for r in rows if r.get('radai_user_id'))
-    return {'rows': rows, 'summary': summary, 'variant': variant, 'as_of': dt.datetime.now().isoformat()}
+    
+    # Calculate window cutoff for frontend diagnostic display
+    cutoff = dt.datetime.now() - dt.timedelta(hours=lookback_hours)
+    
+    return {
+        'rows': rows,
+        'summary': summary,
+        'variant': variant,
+        'as_of': dt.datetime.now().isoformat(),
+        # Soft-coded: expose the window so the frontend can show a helpful
+        # diagnostic like "Showing punches from the last N h" instead of
+        # a confusing empty table when no data is in the rolling window.
+        'lookback_hours': lookback_hours,
+        'window_from': cutoff.isoformat(),
+    }
 
 
 def _empty_summary() -> dict:
