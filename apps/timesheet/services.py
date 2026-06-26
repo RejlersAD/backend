@@ -1225,3 +1225,145 @@ def _hours_between(start, end) -> float:
             return 0.0
     delta = end - start
     return max(0.0, round(delta.total_seconds() / 3600, 2))
+
+
+def _calculate_live_metrics(employee_code: str) -> dict:
+    """Calculate detailed live metrics for a single employee.
+    
+    Returns first IN punch, last punch, hours today, punch counts (IN/OUT).
+    Used by my_live_attendance self-service endpoint.
+    
+    Args:
+        employee_code: Employee ID to query
+        
+    Returns:
+        {
+            'first_in': datetime,      # First IN punch time
+            'last_punch': datetime,    # Absolute last punch time
+            'hours_today': float,      # Total hours worked
+            'punch_in_count': int,     # Number of IN punches
+            'punch_out_count': int,    # Number of OUT punches
+            'is_in': bool,             # Whether currently checked IN
+            'is_late': bool,           # Late arrival detection
+        }
+    """
+    variant = _variant()
+    if variant != 'event_stream':
+        # two_column variant: simpler logic
+        today = dt.date.today()
+        sql = (
+            f"SELECT {_col('login_time')} AS first_in, "
+            f"       {_col('logout_time')} AS last_out "
+            f"FROM {_table()} "
+            f"WHERE CAST({_col('date')} AS DATE) = %s "
+            f"  AND {_col('employee_code')} = %s"
+        )
+        with connect() as cur:
+            cur.execute(sql, (today, employee_code))
+            row = rows_to_dicts(cur, cur.fetchone() or [])
+        
+        if not row:
+            return {
+                'first_in': None,
+                'last_punch': None,
+                'hours_today': 0.0,
+                'punch_in_count': 0,
+                'punch_out_count': 0,
+                'is_in': False,
+                'is_late': False,
+            }
+        
+        first_in = row.get('first_in')
+        last_out = row.get('last_out')
+        hours = _hours_between(first_in, last_out) if first_in and last_out else 0.0
+        
+        return {
+            'first_in': first_in,
+            'last_punch': last_out or first_in,
+            'hours_today': hours,
+            'punch_in_count': 1 if first_in else 0,
+            'punch_out_count': 1 if last_out else 0,
+            'is_in': bool(first_in and not last_out),
+            'is_late': _is_late({'punch_time': first_in}),
+        }
+    
+    # event_stream variant: query all punches within rolling window
+    lookback_hours = int(ts_config.RULES.get('live_lookback_hours', 20))
+    in_value = (ts_config.SCHEMA['columns']['in_value'] or 'IN').upper()
+    out_value = (ts_config.SCHEMA['columns']['out_value'] or 'OUT').upper()
+    
+    sql = (
+        f"SELECT {_col('punch_time')} AS punch_time, "
+        f"       {_col('punch_type')} AS punch_type "
+        f"FROM {_table()} "
+        f"WHERE {_col('employee_code')} = %s "
+        f"  AND {_col('punch_time')} >= DATEADD(HOUR, %s, GETDATE()) "
+        f"ORDER BY {_col('punch_time')} ASC"
+    )
+    
+    with connect() as cur:
+        cur.execute(sql, (employee_code, -lookback_hours))
+        punches = rows_to_dicts(cur, cur.fetchall())
+    
+    if not punches:
+        return {
+            'first_in': None,
+            'last_punch': None,
+            'hours_today': 0.0,
+            'punch_in_count': 0,
+            'punch_out_count': 0,
+            'is_in': False,
+            'is_late': False,
+        }
+    
+    # Find first IN punch
+    first_in = None
+    for p in punches:
+        if str(p.get('punch_type', '')).upper() == in_value:
+            first_in = p.get('punch_time')
+            break
+    
+    # Count IN/OUT punches
+    punch_in_count = sum(1 for p in punches if str(p.get('punch_type', '')).upper() == in_value)
+    punch_out_count = sum(1 for p in punches if str(p.get('punch_type', '')).upper() == out_value)
+    
+    # Last punch (absolute)
+    last_punch = punches[-1].get('punch_time')
+    last_type = str(punches[-1].get('punch_type', '')).upper()
+    is_in = (last_type == in_value)
+    
+    # Calculate hours worked (pair IN/OUT punches)
+    # Simple algorithm: sum all (OUT[i] - IN[i]) durations
+    hours_today = 0.0
+    i = 0
+    while i < len(punches):
+        p = punches[i]
+        if str(p.get('punch_type', '')).upper() == in_value:
+            # Find next OUT
+            next_out = None
+            for j in range(i + 1, len(punches)):
+                if str(punches[j].get('punch_type', '')).upper() == out_value:
+                    next_out = punches[j].get('punch_time')
+                    i = j  # Skip to the OUT punch
+                    break
+            
+            if next_out:
+                hours_today += _hours_between(p.get('punch_time'), next_out)
+            else:
+                # Still IN, calculate up to now
+                hours_today += _hours_between(p.get('punch_time'), dt.datetime.now())
+        i += 1
+    
+    # Apply max_daily_hours cap
+    max_daily_hrs = float(ts_config.RULES.get('max_daily_hours', 9.0))
+    hours_today = min(hours_today, max_daily_hrs)
+    
+    return {
+        'first_in': first_in,
+        'last_punch': last_punch,
+        'hours_today': round(hours_today, 2),
+        'punch_in_count': punch_in_count,
+        'punch_out_count': punch_out_count,
+        'is_in': is_in,
+        'is_late': _is_late({'punch_time': first_in}) if first_in else False,
+    }

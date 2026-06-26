@@ -21,6 +21,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 
 from rest_framework import status
@@ -327,7 +328,15 @@ def my_live_attendance(request):
             'configured': bool,
             'employee_code': str,
             'email': str,
-            'data': {...}  // user's live status (is_in, last_punch, hours_today, etc.)
+            'data': {
+                'first_in': datetime,       // First IN punch time today
+                'last_punch': datetime,     // Absolute last punch time
+                'hours_today': float,       // Total hours worked (capped at max)
+                'punch_in_count': int,      // Number of IN punches
+                'punch_out_count': int,     // Number of OUT punches
+                'is_in': bool,              // Whether currently checked IN
+                'is_late': bool,            // Late arrival detection
+            }
         }
     """
     if not ts_config.is_configured():
@@ -342,44 +351,22 @@ def my_live_attendance(request):
         employee_code = str(p.employee_id) if p and p.employee_id else None
         email = request.user.email if request.user else None
         
-        if not employee_code and not email:
+        if not employee_code:
             return Response({
                 'configured': True,
                 'error': 'Your profile does not have an employee_id linked. Please contact HR.',
                 'data': None,
             })
         
-        # Fetch live status for all employees
-        live_data = _svc().live_status()
-        rows = live_data.get('rows', [])
-        
-        # Find current user's row
-        user_data = None
-        if employee_code:
-            code_lower = employee_code.lower()
-            user_data = next(
-                (r for r in rows 
-                 if str(r.get('employee_code', '')).lower() == code_lower or
-                    str(r.get('code', '')).lower() == code_lower),
-                None
-            )
-        
-        # Fallback to email match
-        if not user_data and email:
-            email_lower = email.lower()
-            user_data = next(
-                (r for r in rows 
-                 if str(r.get('employee_email', '')).lower() == email_lower or
-                    str(r.get('email', '')).lower() == email_lower),
-                None
-            )
+        # Calculate detailed live metrics for current user
+        metrics = _svc()._calculate_live_metrics(employee_code)
         
         return Response({
             'configured': True,
             'employee_code': employee_code,
             'email': email,
-            'as_of': live_data.get('as_of'),  # timestamp of the live snapshot
-            'data': user_data,
+            'as_of': dt.datetime.now().isoformat(),
+            'data': metrics,
         })
         
     except (TimesheetConnectionError, TimesheetDriverError) as exc:
