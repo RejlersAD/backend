@@ -414,8 +414,14 @@ class EmployeeLeaveRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 profile = UserProfile.objects.select_related('user').get(user=self.request.user)
                 employee_id = profile.employee_id
                 
-                # Validate employee_id (not empty, not email format, not placeholder)
-                if employee_id and employee_id.strip() and '@' not in employee_id and not employee_id.startswith('EMP'):
+                # Define invalid/marker employee_id values (soft-coded list)
+                invalid_markers = ['DELETED', 'TEST_ACCOUNT', 'EXTERNAL']
+                
+                # Validate employee_id (not empty, not email format, not placeholder, not marker)
+                if (employee_id and employee_id.strip() and 
+                    '@' not in employee_id and 
+                    not employee_id.startswith('EMP') and 
+                    employee_id not in invalid_markers):
                     # Valid employee_id → filter by it
                     code = employee_id
                 else:
