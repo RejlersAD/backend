@@ -156,6 +156,13 @@ RULES = {
     'expected_logout_hour': _env_first_int(['TIMESHEET_EXPECTED_LOGOUT_HOUR', 'TIMESHEET_EXPECTED_LOGOUT'], 18),
     'late_threshold_min':   _env_first_int(['TIMESHEET_LATE_THRESHOLD_MIN',   'TIMESHEET_LATE_MIN'],        15),
     'full_day_hours':       _env_first_float(['TIMESHEET_FULL_DAY_HOURS',    'TIMESHEET_FULL_DAY'],        8.0),
+    
+    # ── Maximum daily hours enforcement (user-approved 2026-06-26) ──────────
+    # Caps ALL daily hours calculations to this value. Hours exceeding this
+    # limit are truncated to enforce company policy (standard: 9 hours max).
+    # Override via env: TIMESHEET_MAX_DAILY_HOURS=9
+    'max_daily_hours':      _env_first_float(['TIMESHEET_MAX_DAILY_HOURS'], 9.0),
+    
     'working_days':         _env_csv('TIMESHEET_WORK_DAYS', ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']),
     # Soft-coded rolling time-window for the Live view (mirror mode).
     'live_lookback_hours':  _env_int('TIMESHEET_LIVE_LOOKBACK_HOURS', 20),

@@ -1026,8 +1026,11 @@ def user_history(employee_code: Optional[str] = None,
 
     # Per-day rows (same shape as before)
     rows = []
+    max_daily_hours = float(ts_config.RULES.get('max_daily_hours', 9.0))
     for d, slot in sorted(per_day.items()):
-        hours = _hours_between(slot['first_in'], slot['last_out']) or 0
+        raw_hours = _hours_between(slot['first_in'], slot['last_out']) or 0
+        # Cap hours at configured maximum (default: 9 hours)
+        hours = min(raw_hours, max_daily_hours)
         rows.append({
             'date':         d,
             'first_in':     str(slot['first_in']) if slot['first_in'] else None,

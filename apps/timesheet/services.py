@@ -1102,7 +1102,9 @@ def user_history(employee_code: Optional[str] = None,
                 'date': d,
                 'first_in': v['first_in'].isoformat() if v['first_in'] else None,
                 'last_out': v['last_out'].isoformat() if v['last_out'] else None,
-                'hours': _hours_between(v['first_in'], v['last_out']) or 0,
+                # Cap hours at configured maximum (default: 9 hours)
+                'hours': min(_hours_between(v['first_in'], v['last_out']) or 0, 
+                            float(ts_config.RULES.get('max_daily_hours', 9.0))),
                 'punches': v['punches'],
             }
             for d, v in sorted(per_day.items())
@@ -1113,7 +1115,9 @@ def user_history(employee_code: Optional[str] = None,
                 'date': str(r.get('work_date')),
                 'first_in': str(r.get('first_in')) if r.get('first_in') else None,
                 'last_out': str(r.get('last_out')) if r.get('last_out') else None,
-                'hours': _hours_between(r.get('first_in'), r.get('last_out')) or 0,
+                # Cap hours at configured maximum (default: 9 hours)
+                'hours': min(_hours_between(r.get('first_in'), r.get('last_out')) or 0,
+                            float(ts_config.RULES.get('max_daily_hours', 9.0))),
                 'punches': None,
             }
             for r in rows
