@@ -83,17 +83,22 @@ class Command(BaseCommand):
             
             with connect() as cursor:
                 # Get unique employees from biometric system
-                table = ts_config.SQLSERVER['table']
-                col_emp_code = ts_config.SQLSERVER['columns']['emp_code']
-                col_emp_name = ts_config.SQLSERVER['columns']['emp_name']
-                col_department = ts_config.SQLSERVER['columns']['department']
+                table = ts_config.SCHEMA['table']
+                col_emp_code = ts_config.SCHEMA['columns']['employee_code']
+                col_emp_name = ts_config.SCHEMA['columns']['employee_name']
+                col_department = ts_config.SCHEMA['columns']['department']
+                
+                # Build query - handle empty department column gracefully
+                dept_col = col_department if col_department else "''"
                 
                 query = f"""
-                    SELECT DISTINCT {col_emp_code}, {col_emp_name}, {col_department}
+                    SELECT DISTINCT {col_emp_code}, {col_emp_name}, {dept_col} AS dept
                     FROM {table}
                     WHERE {col_emp_code} IS NOT NULL 
                       AND {col_emp_name} IS NOT NULL
                       AND LTRIM(RTRIM({col_emp_name})) != ''
+                      AND {col_emp_code} != 'UserID'
+                      AND {col_emp_name} NOT IN ('UserName', 'FullName')
                     ORDER BY {col_emp_code}
                 """
                 cursor.execute(query)
@@ -105,7 +110,7 @@ class Command(BaseCommand):
                 for emp_id, emp_name, dept in biometric_employees:
                     bio_lookup[str(emp_id).strip()] = {
                         'name': emp_name.strip() if emp_name else '',
-                        'dept': dept.strip() if dept else ''
+                        'dept': (dept.strip() if dept else '') if dept is not None else ''
                     }
 
         except Exception as e:
