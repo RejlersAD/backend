@@ -389,15 +389,49 @@ class EmployeeLeaveRecordViewSet(viewsets.ReadOnlyModelViewSet):
     Read-only API for employee leave records imported from the HR Excel.
     Supports filtering by year, department, employee_code, and name search.
     Detail view includes the full monthly breakdown.
+    
+    SOFT-CODED AUTO-SCOPING (2026-06-26):
+    - If no explicit employee_code/search filter → auto-scope to current user's employee_id
+    - Fallback to name search if user has no employee_id configured
+    - HR/Admin can still query all records by providing explicit filters
     """
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        from apps.rbac.models import UserProfile
+        
         qs = EmployeeLeaveRecord.objects.prefetch_related('monthly_breakdown').all()
         year   = self.request.query_params.get('year')
         dept   = self.request.query_params.get('department')
         code   = self.request.query_params.get('employee_code')
         search = self.request.query_params.get('search')
+        branch = self.request.query_params.get('branch')
+        
+        # Soft-coded auto-scoping: if no explicit employee_code/search filter provided,
+        # automatically scope to current user's employee_id from RBAC profile
+        if not code and not search:
+            try:
+                profile = UserProfile.objects.select_related('user').get(user=self.request.user)
+                employee_id = profile.employee_id
+                
+                # Validate employee_id (not empty, not email format, not placeholder)
+                if employee_id and employee_id.strip() and '@' not in employee_id and not employee_id.startswith('EMP'):
+                    # Valid employee_id → filter by it
+                    code = employee_id
+                else:
+                    # Invalid/missing employee_id → fallback to name search
+                    user_first = profile.user.first_name or ''
+                    user_last = profile.user.last_name or ''
+                    if user_first or user_last:
+                        search = f"{user_first} {user_last}".strip()
+                    elif profile.user.username:
+                        search = profile.user.username
+            except UserProfile.DoesNotExist:
+                # User has no RBAC profile → try username fallback
+                if self.request.user.username:
+                    search = self.request.user.username
+        
+        # Apply filters using soft-coded values or explicit query params
         if year:
             qs = qs.filter(year=year)
         if dept:
@@ -406,9 +440,9 @@ class EmployeeLeaveRecordViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(employee_code=code)
         if search:
             qs = qs.filter(employee_name__icontains=search)
-        branch = self.request.query_params.get('branch')
         if branch:
             qs = qs.filter(branch__iexact=branch)
+        
         return qs.order_by('employee_name')
 
     def get_serializer_class(self):
