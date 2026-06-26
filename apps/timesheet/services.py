@@ -861,7 +861,11 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             'total_hours': 0.0,
             'days_detail': [],
         })
-        hours = _hours_between(r.get('first_in'), r.get('last_out')) or 0
+        # Apply max_daily_hours cap (soft-coded, default 9.0h)
+        raw_hours = _hours_between(r.get('first_in'), r.get('last_out')) or 0
+        max_daily_hrs = float(ts_config.RULES.get('max_daily_hours', 9.0))
+        hours = min(raw_hours, max_daily_hrs)
+        
         slot['days_present'] += 1
         slot['total_hours'] += hours
         if hours >= ts_config.RULES['full_day_hours']:
