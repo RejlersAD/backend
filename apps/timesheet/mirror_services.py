@@ -731,6 +731,106 @@ def live_status() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Calculate detailed live metrics for a single employee (ESS self-service)
+# ─────────────────────────────────────────────────────────────────────────────
+def _calculate_live_metrics(employee_code: str) -> dict:
+    """Calculate detailed live metrics for a single employee (mirror mode).
+    
+    Returns first IN punch, last punch, hours today, punch counts (IN/OUT).
+    Used by my_live_attendance self-service endpoint.
+    
+    Args:
+        employee_code: Employee ID to query
+        
+    Returns:
+        {
+            'first_in': datetime,      # First IN punch time
+            'last_punch': datetime,    # Absolute last punch time
+            'hours_today': float,      # Total hours worked
+            'punch_in_count': int,     # Number of IN punches
+            'punch_out_count': int,    # Number of OUT punches
+            'is_in': bool,             # Whether currently checked IN
+            'is_late': bool,           # Late arrival detection
+        }
+    """
+    # Soft-coded rolling time window (same as live_status)
+    lookback_hours = int(ts_config.RULES.get('live_lookback_hours', 20))
+    cutoff = timezone.now() - dt.timedelta(hours=lookback_hours)
+    
+    # Query all punches for this employee within the rolling window
+    punches = list(
+        TimesheetEvent.objects
+        .filter(employee_code=employee_code, event_time__gte=cutoff)
+        .order_by('event_time')
+        .values('event_time', 'event_type')
+    )
+    
+    if not punches:
+        return {
+            'first_in': None,
+            'last_punch': None,
+            'hours_today': 0.0,
+            'punch_in_count': 0,
+            'punch_out_count': 0,
+            'is_in': False,
+            'is_late': False,
+        }
+    
+    # Find first IN punch
+    first_in = None
+    for p in punches:
+        if p['event_type'] == TimesheetEvent.EVENT_IN:
+            first_in = _to_naive(p['event_time'])
+            break
+    
+    # Count IN/OUT punches
+    punch_in_count = sum(1 for p in punches if p['event_type'] == TimesheetEvent.EVENT_IN)
+    punch_out_count = sum(1 for p in punches if p['event_type'] == TimesheetEvent.EVENT_OUT)
+    
+    # Last punch (absolute)
+    last_punch = _to_naive(punches[-1]['event_time'])
+    last_type = punches[-1]['event_type']
+    is_in = (last_type == TimesheetEvent.EVENT_IN)
+    
+    # Calculate hours worked (pair IN/OUT punches)
+    # Simple algorithm: sum all (OUT[i] - IN[i]) durations
+    hours_today = 0.0
+    i = 0
+    while i < len(punches):
+        p = punches[i]
+        if p['event_type'] == TimesheetEvent.EVENT_IN:
+            # Find next OUT
+            next_out = None
+            for j in range(i + 1, len(punches)):
+                if punches[j]['event_type'] == TimesheetEvent.EVENT_OUT:
+                    next_out = _to_naive(punches[j]['event_time'])
+                    i = j  # Skip to the OUT punch
+                    break
+            
+            in_time = _to_naive(p['event_time'])
+            if next_out:
+                hours_today += _hours_between(in_time, next_out)
+            else:
+                # Still IN, calculate up to now
+                hours_today += _hours_between(in_time, dt.datetime.now())
+        i += 1
+    
+    # Apply max_daily_hours cap (soft-coded)
+    max_daily_hrs = float(ts_config.RULES.get('max_daily_hours', 9.0))
+    hours_today = min(hours_today, max_daily_hrs)
+    
+    return {
+        'first_in': first_in,
+        'last_punch': last_punch,
+        'hours_today': round(hours_today, 2),
+        'punch_in_count': punch_in_count,
+        'punch_out_count': punch_out_count,
+        'is_in': is_in,
+        'is_late': _is_late({'punch_time': first_in}) if first_in else False,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Daily report
 # ─────────────────────────────────────────────────────────────────────────────
 def daily_report(date: Optional[str] = None) -> dict:
