@@ -23,6 +23,7 @@ urlpatterns = [
     path('lookup-debug/',          views.lookup_debug,     name='lookup-debug'),
     
     # Self-Service (role-based, auto-scoped to current user)
+    path('my-attendance/live/',    views.my_live_attendance,    name='my-live-attendance'),
     path('my-attendance/monthly/', views.my_monthly_attendance, name='my-monthly-attendance'),
     path('my-attendance/daily/',   views.my_daily_attendance,   name='my-daily-attendance'),
 

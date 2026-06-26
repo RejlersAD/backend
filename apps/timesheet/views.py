@@ -318,6 +318,79 @@ def user_drill(request):
 # ─────────────────────────────────────────────────────────────────────────────
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+def my_live_attendance(request):
+    """Role-based self-service endpoint: returns ONLY the current user's live
+    attendance status (IN/OUT, current punch time, hours today).
+    
+    Returns:
+        {
+            'configured': bool,
+            'employee_code': str,
+            'email': str,
+            'data': {...}  // user's live status (is_in, last_punch, hours_today, etc.)
+        }
+    """
+    if not ts_config.is_configured():
+        return Response({'configured': False, 'data': None})
+    
+    try:
+        from apps.rbac.models import UserProfile
+        p = UserProfile.objects.select_related('user').filter(
+            user=request.user, is_deleted=False
+        ).first()
+        
+        employee_code = str(p.employee_id) if p and p.employee_id else None
+        email = request.user.email if request.user else None
+        
+        if not employee_code and not email:
+            return Response({
+                'configured': True,
+                'error': 'Your profile does not have an employee_id linked. Please contact HR.',
+                'data': None,
+            })
+        
+        # Fetch live status for all employees
+        live_data = _svc().live_status()
+        rows = live_data.get('rows', [])
+        
+        # Find current user's row
+        user_data = None
+        if employee_code:
+            code_lower = employee_code.lower()
+            user_data = next(
+                (r for r in rows 
+                 if str(r.get('employee_code', '')).lower() == code_lower or
+                    str(r.get('code', '')).lower() == code_lower),
+                None
+            )
+        
+        # Fallback to email match
+        if not user_data and email:
+            email_lower = email.lower()
+            user_data = next(
+                (r for r in rows 
+                 if str(r.get('employee_email', '')).lower() == email_lower or
+                    str(r.get('email', '')).lower() == email_lower),
+                None
+            )
+        
+        return Response({
+            'configured': True,
+            'employee_code': employee_code,
+            'email': email,
+            'as_of': live_data.get('as_of'),  # timestamp of the live snapshot
+            'data': user_data,
+        })
+        
+    except (TimesheetConnectionError, TimesheetDriverError) as exc:
+        return _graceful_unavailable(exc)
+    except Exception as exc:
+        logger.exception('[timesheet.my_live_attendance] failed: %s', exc)
+        return _error_response(exc)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def my_monthly_attendance(request):
     """Role-based self-service endpoint: returns ONLY the current user's monthly
     attendance data. Automatically resolves the user's employee_code from their
