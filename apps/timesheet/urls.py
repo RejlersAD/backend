@@ -21,6 +21,10 @@ urlpatterns = [
     path('user/',                  views.user_drill,       name='user'),
     path('lookup-by-code/',        views.lookup_by_code,   name='lookup-by-code'),
     path('lookup-debug/',          views.lookup_debug,     name='lookup-debug'),
+    
+    # Self-Service (role-based, auto-scoped to current user)
+    path('my-attendance/monthly/', views.my_monthly_attendance, name='my-monthly-attendance'),
+    path('my-attendance/daily/',   views.my_daily_attendance,   name='my-daily-attendance'),
 
     # Exports
     path('export/daily/',          views.export_daily_excel,    name='export-daily'),

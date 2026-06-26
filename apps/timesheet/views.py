@@ -314,6 +314,191 @@ def user_drill(request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Self-Service: My Attendance (auto-scoped to current user)
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def my_monthly_attendance(request):
+    """Role-based self-service endpoint: returns ONLY the current user's monthly
+    attendance data. Automatically resolves the user's employee_code from their
+    RBAC profile and filters the timesheet data accordingly.
+    
+    Query params:
+        year  (optional) — defaults to current year
+        month (optional) — defaults to current month
+    
+    Returns:
+        {
+            'configured': bool,
+            'employee_code': str,
+            'email': str,
+            'data': {
+                'employee_code': str,
+                'employee_name': str,
+                'total_hours': float,
+                'total_overtime': float,
+                'days_present': int,
+                'working_days': int,
+                'days_detail': [...]  // day-by-day breakdown
+            }
+        }
+    """
+    if not ts_config.is_configured():
+        return Response({'configured': False, 'data': None})
+    
+    # Auto-resolve from request.user (JWT-authenticated)
+    try:
+        from apps.rbac.models import UserProfile
+        p = UserProfile.objects.select_related('user').filter(
+            user=request.user, is_deleted=False
+        ).first()
+        
+        employee_code = str(p.employee_id) if p and p.employee_id else None
+        email = request.user.email if request.user else None
+        
+        if not employee_code and not email:
+            return Response({
+                'configured': True,
+                'error': 'Your profile does not have an employee_id linked. Please contact HR.',
+                'data': None,
+            })
+        
+        # Get year/month from query params or default to current
+        y = request.GET.get('year')
+        m = request.GET.get('month')
+        import datetime as dt
+        now = dt.datetime.now()
+        year = int(y) if y else now.year
+        month = int(m) if m else now.month
+        
+        # Fetch monthly report for all employees, then filter to current user
+        monthly_data = _svc().monthly_report(year, month)
+        rows = monthly_data.get('rows', [])
+        working_days = monthly_data.get('working_days_in_month')
+        
+        # Find current user's row
+        user_data = None
+        if employee_code:
+            code_lower = employee_code.lower()
+            user_data = next(
+                (r for r in rows 
+                 if str(r.get('employee_code', '')).lower() == code_lower or
+                    str(r.get('code', '')).lower() == code_lower),
+                None
+            )
+        
+        # Fallback to email match if code didn't work
+        if not user_data and email:
+            email_lower = email.lower()
+            user_data = next(
+                (r for r in rows 
+                 if str(r.get('email', '')).lower() == email_lower),
+                None
+            )
+        
+        # Enrich with working_days if found
+        if user_data and working_days:
+            user_data['working_days'] = working_days
+        
+        return Response({
+            'configured': True,
+            'employee_code': employee_code,
+            'email': email,
+            'year': year,
+            'month': month,
+            'data': user_data,
+        })
+        
+    except (TimesheetConnectionError, TimesheetDriverError) as exc:
+        return _graceful_unavailable(exc)
+    except Exception as exc:
+        logger.exception('[timesheet.my_monthly_attendance] failed: %s', exc)
+        return _error_response(exc)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def my_daily_attendance(request):
+    """Role-based self-service endpoint: returns ONLY the current user's daily
+    attendance data.
+    
+    Query params:
+        date (optional) — YYYY-MM-DD, defaults to today
+    
+    Returns:
+        {
+            'configured': bool,
+            'employee_code': str,
+            'email': str,
+            'date': str,
+            'data': {...}  // user's attendance record for that day
+        }
+    """
+    if not ts_config.is_configured():
+        return Response({'configured': False, 'data': None})
+    
+    try:
+        from apps.rbac.models import UserProfile
+        p = UserProfile.objects.select_related('user').filter(
+            user=request.user, is_deleted=False
+        ).first()
+        
+        employee_code = str(p.employee_id) if p and p.employee_id else None
+        email = request.user.email if request.user else None
+        
+        if not employee_code and not email:
+            return Response({
+                'configured': True,
+                'error': 'Your profile does not have an employee_id linked. Please contact HR.',
+                'data': None,
+            })
+        
+        # Get date from query params or default to today
+        import datetime as dt
+        date_str = request.GET.get('date')
+        if not date_str:
+            date_str = dt.datetime.now().strftime('%Y-%m-%d')
+        
+        # Fetch daily report
+        daily_data = _svc().daily_report(date_str)
+        rows = daily_data.get('rows', [])
+        
+        # Find current user's row
+        user_data = None
+        if employee_code:
+            code_lower = employee_code.lower()
+            user_data = next(
+                (r for r in rows 
+                 if str(r.get('employee_code', '')).lower() == code_lower or
+                    str(r.get('code', '')).lower() == code_lower),
+                None
+            )
+        
+        # Fallback to email match
+        if not user_data and email:
+            email_lower = email.lower()
+            user_data = next(
+                (r for r in rows 
+                 if str(r.get('email', '')).lower() == email_lower),
+                None
+            )
+        
+        return Response({
+            'configured': True,
+            'employee_code': employee_code,
+            'email': email,
+            'date': date_str,
+            'data': user_data,
+        })
+        
+    except (TimesheetConnectionError, TimesheetDriverError) as exc:
+        return _graceful_unavailable(exc)
+    except Exception as exc:
+        logger.exception('[timesheet.my_daily_attendance] failed: %s', exc)
+        return _error_response(exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Reverse lookup: biometric code → {name, email}
 # Used by /hr/employees search box so HR can type a badge number (e.g. 22972)
 # and the page jumps to the matching RAD AI user. Works against whichever

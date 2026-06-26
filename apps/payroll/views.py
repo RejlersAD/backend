@@ -666,6 +666,9 @@ def leave_calendar(request):
     for req in requests:
         if not req.employee_code:
             continue
+        # Safety: skip requests with missing leave_type (data integrity issue)
+        if not req.leave_type:
+            continue
         emp = req.employee_code
         if emp not in calendar_data:
             calendar_data[emp] = {}
