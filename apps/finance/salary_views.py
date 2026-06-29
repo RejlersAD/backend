@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import Q, Sum, Count
 from django.utils import timezone
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -36,7 +37,9 @@ from .salary_serializers import (
     PayrollRunListSerializer,
     SalarySlipSerializer,
     SalarySlipListSerializer,
+    SalarySlipDetailSerializer,
     SalarySlipCreateSerializer,
+    SalarySlipUpdateSerializer,
     SalarySlipApprovalSerializer,
     ApprovalDecisionSerializer,
     SalarySlipEmailSerializer,
@@ -332,6 +335,10 @@ class SalarySlipViewSet(viewsets.ModelViewSet):
     def get_serializer_class(self):
         if self.action == 'list':
             return SalarySlipListSerializer
+        elif self.action == 'retrieve':
+            return SalarySlipDetailSerializer
+        elif self.action in ['update', 'partial_update']:
+            return SalarySlipUpdateSerializer
         return SalarySlipSerializer
     
     def get_queryset(self):
@@ -558,6 +565,187 @@ class SalarySlipViewSet(viewsets.ModelViewSet):
         )
         
         return Response({'message': 'Salary slip rejected'})
+    
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        """
+        Update salary slip with intelligent recalculation
+        Automatically updates payroll run totals
+        SOFT-CODED: Uses breakdown dictionaries for flexibility
+        """
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        old_values = self._capture_old_values(instance)
+        
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        
+        # Perform update with auto-calculation
+        updated_slip = self._perform_update_with_calculation(
+            instance, 
+            serializer.validated_data,
+            request.user
+        )
+        
+        # Update payroll run totals
+        self._update_payroll_run_totals(updated_slip.payroll_run)
+        
+        # Create audit log
+        self._create_audit_log(updated_slip, old_values, request.user)
+        
+        # Return updated data
+        response_serializer = self.get_serializer(updated_slip)
+        return Response(response_serializer.data)
+    
+    @transaction.atomic
+    def partial_update(self, request, *args, **kwargs):
+        """Partial update (PATCH) with auto-calculation"""
+        kwargs['partial'] = True
+        return self.update(request, *args, **kwargs)
+    
+    @action(detail=True, methods=['post'])
+    def recalculate(self, request, pk=None):
+        """
+        Force recalculation of salary slip totals
+        Useful after manual component updates
+        """
+        slip = self.get_object()
+        
+        # Recalculate from scratch
+        recalculated_slip = self._recalculate_slip(slip)
+        recalculated_slip.save()
+        
+        # Update payroll run
+        self._update_payroll_run_totals(slip.payroll_run)
+        
+        # Log action
+        SalarySlipAuditLog.objects.create(
+            salary_slip=slip,
+            action='recalculated',
+            performed_by=request.user,
+            description='Salary slip recalculated'
+        )
+        
+        serializer = self.get_serializer(recalculated_slip)
+        return Response({
+            'message': 'Salary slip recalculated successfully',
+            'slip': serializer.data
+        })
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # PRIVATE HELPER METHODS - Intelligent Calculation Engine
+    # ═══════════════════════════════════════════════════════════════════════
+    
+    def _capture_old_values(self, slip):
+        """Capture current values for audit trail"""
+        return {
+            'basic_salary': slip.basic_salary,
+            'total_allowances': slip.total_allowances,
+            'gross_salary': slip.gross_salary,
+            'total_deductions': slip.total_deductions,
+            'net_salary': slip.net_salary,
+            'allowances_breakdown': slip.allowances_breakdown.copy() if slip.allowances_breakdown else {},
+            'deductions_breakdown': slip.deductions_breakdown.copy() if slip.deductions_breakdown else {},
+            'working_days': slip.working_days,
+            'present_days': slip.present_days,
+            'absent_days': slip.absent_days,
+            'status': slip.status,
+        }
+    
+    def _perform_update_with_calculation(self, slip, validated_data, user):
+        """
+        Update slip with intelligent auto-calculation
+        Recalculates all derived fields
+        """
+        # Update direct fields
+        for field in ['basic_salary', 'working_days', 'present_days', 'absent_days', 
+                      'allowances_breakdown', 'deductions_breakdown', 'tax_deduction',
+                      'status', 'remarks', 'internal_notes']:
+            if field in validated_data:
+                setattr(slip, field, validated_data[field])
+        
+        # Recalculate derived fields
+        slip = self._recalculate_slip(slip)
+        
+        return slip
+    
+    def _recalculate_slip(self, slip):
+        """
+        Intelligent recalculation of all salary components
+        SOFT-CODED: Uses breakdown dictionaries for flexibility
+        """
+        # Calculate total allowances from breakdown
+        total_allowances = Decimal('0.00')
+        if slip.allowances_breakdown:
+            for key, value in slip.allowances_breakdown.items():
+                total_allowances += Decimal(str(value))
+        slip.total_allowances = total_allowances
+        
+        # Calculate gross salary
+        slip.gross_salary = slip.basic_salary + slip.total_allowances
+        
+        # Calculate total deductions from breakdown
+        total_deductions = Decimal('0.00')
+        if slip.deductions_breakdown:
+            for key, value in slip.deductions_breakdown.items():
+                total_deductions += Decimal(str(value))
+        
+        # Add tax deduction
+        total_deductions += slip.tax_deduction
+        slip.total_deductions = total_deductions
+        
+        # Calculate net salary
+        slip.net_salary = slip.gross_salary - slip.total_deductions
+        
+        # Calculate absent days if not explicitly set
+        if slip.working_days and slip.present_days is not None:
+            slip.absent_days = max(0, slip.working_days - slip.present_days)
+        
+        return slip
+    
+    def _update_payroll_run_totals(self, payroll_run):
+        """
+        Update payroll run aggregate totals
+        Recalculates from all slips in the run
+        """
+        slips = SalarySlip.objects.filter(payroll_run=payroll_run)
+        
+        payroll_run.total_employees = slips.count()
+        payroll_run.processed_employees = slips.count()
+        payroll_run.total_gross_salary = sum(slip.gross_salary for slip in slips)
+        payroll_run.total_deductions = sum(slip.total_deductions for slip in slips)
+        payroll_run.total_net_salary = sum(slip.net_salary for slip in slips)
+        
+        payroll_run.save()
+    
+    def _create_audit_log(self, slip, old_values, user):
+        """
+        Create audit trail entry
+        Tracks what changed and who changed it
+        """
+        changes = []
+        
+        # Track numeric field changes
+        for field in ['basic_salary', 'total_allowances', 'gross_salary', 
+                      'total_deductions', 'net_salary', 'working_days', 
+                      'present_days', 'absent_days']:
+            old_val = old_values.get(field)
+            new_val = getattr(slip, field)
+            if old_val != new_val:
+                changes.append(f"{field}: {old_val} → {new_val}")
+        
+        # Track status changes
+        if old_values.get('status') != slip.status:
+            changes.append(f"status: {old_values.get('status')} → {slip.status}")
+        
+        if changes:
+            SalarySlipAuditLog.objects.create(
+                salary_slip=slip,
+                action='updated',
+                performed_by=user,
+                changes_made='; '.join(changes),
+                timestamp=timezone.now()
+            )
 
 
 # ===========================
