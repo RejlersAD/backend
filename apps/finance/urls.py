@@ -26,6 +26,9 @@ from .salary_views import (
     slip_download_pdf,
 )
 
+# Import workflow views
+from .workflow_views import PayrollWorkflowViewSet
+
 app_name = 'finance'
 
 router = DefaultRouter()
@@ -42,6 +45,9 @@ router.register(r'salary-approvals', SalarySlipApprovalViewSet, basename='salary
 router.register(r'salary-emails', SalarySlipEmailViewSet, basename='salary-email')
 router.register(r'salary-audit-logs', SalarySlipAuditLogViewSet, basename='salary-audit-log')
 router.register(r'payroll-schedule', PayrollScheduleViewSet, basename='payroll-schedule')
+
+# Payroll workflow routes
+router.register(r'payroll-workflows', PayrollWorkflowViewSet, basename='payroll-workflow')
 
 urlpatterns = [
     # Router URLs
