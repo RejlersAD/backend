@@ -2222,7 +2222,8 @@ def generate_master_payroll(request):
         logger.warning('generate_master_payroll: DailyAttendanceSummary query error: %s', _e)
         warnings_list.append(f'Biometric attendance partial: {_e}')
 
-    # ── 4. Overlay with existing RADAI salary structures ─────────────────────    try:
+    # ── 4. Overlay with existing RADAI salary structures ─────────────────────
+    try:
         from .models import EmployeeSalaryStructure, SalaryStructureStatus
         active_structs = EmployeeSalaryStructure.objects.filter(
             is_active=True, status=SalaryStructureStatus.APPROVED,
@@ -2243,6 +2244,52 @@ def generate_master_payroll(request):
                     master[code]['sources'].append('radai')
     except Exception as e:
         logger.warning(f'generate_master_payroll: salary structure overlay error: {e}')
+    
+    # ── 4b. Overlay with EmployeeSalaryInfo (join_date, designation) ─────────
+    try:
+        from .models import EmployeeSalaryInfo
+        # Fetch active employees with their join_date and other missing fields
+        salary_infos = EmployeeSalaryInfo.objects.filter(
+            is_active=True
+        ).values('employee_id', 'user__first_name', 'user__last_name', 
+                 'join_date', 'designation', 'department')
+        
+        for info in salary_infos:
+            code = _norm_code(info['employee_id'])
+            if not code:
+                continue
+                
+            # Create entry if doesn't exist (employee in RADAI but not in uploaded files)
+            if code not in master:
+                full_name = f"{info.get('user__first_name', '')} {info.get('user__last_name', '')}".strip()
+                master[code] = _make_skeleton(code, full_name or code)
+                master[code]['sources'] = ['radai']
+            
+            # Overlay joining_date if not already set from Sympa
+            if not master[code].get('joining_date') and info.get('join_date'):
+                master[code]['joining_date'] = str(info['join_date'])
+            
+            # Overlay department if missing
+            if not master[code].get('department') and info.get('department'):
+                master[code]['department'] = info['department']
+            
+            # Overlay designation/job_title if missing
+            if not master[code].get('job_title') and info.get('designation'):
+                master[code]['job_title'] = info['designation']
+            
+            # Ensure employee name is set
+            if not master[code].get('employee_name') or master[code]['employee_name'] == code:
+                full_name = f"{info.get('user__first_name', '')} {info.get('user__last_name', '')}".strip()
+                if full_name:
+                    master[code]['employee_name'] = full_name
+            
+            if 'radai' not in master[code]['sources']:
+                master[code]['sources'].append('radai')
+                
+        logger.info('generate_master_payroll: enriched %d employees from EmployeeSalaryInfo', len(salary_infos))
+    except Exception as e:
+        logger.warning(f'generate_master_payroll: EmployeeSalaryInfo overlay error: {e}')
+        warnings_list.append(f'RADAI employee info partial: {e}')
 
     # ── 5. Build final rows ───────────────────────────────────────────────────
     rows = []
