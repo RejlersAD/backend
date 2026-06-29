@@ -37,9 +37,6 @@ from .salary_serializers import (
     PayrollRunListSerializer,
     SalarySlipSerializer,
     SalarySlipListSerializer,
-    SalarySlipDetailSerializer,
-    SalarySlipCreateSerializer,
-    SalarySlipUpdateSerializer,
     SalarySlipApprovalSerializer,
     ApprovalDecisionSerializer,
     SalarySlipEmailSerializer,
@@ -47,6 +44,11 @@ from .salary_serializers import (
     SalarySlipAuditLogSerializer,
     SalarySlipStatsSerializer,
     PayrollSummarySerializer,
+)
+# Import enhanced serializers for individual salary editing
+from .salary_slip_serializers import (
+    SalarySlipDetailSerializer,
+    SalarySlipUpdateSerializer,
 )
 
 logger = logging.getLogger(__name__)
