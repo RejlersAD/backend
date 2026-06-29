@@ -568,6 +568,139 @@ class SalarySlipViewSet(viewsets.ModelViewSet):
         
         return Response({'message': 'Salary slip rejected'})
     
+    @action(detail=True, methods=['post'], url_path='apply-deduction')
+    @transaction.atomic
+    def apply_deduction(self, request, pk=None):
+        """
+        Apply percentage-based deduction to allowances
+        INTELLIGENT: AI-driven recommendations based on salary range
+        SOFT-CODED: Uses DEDUCTIBLE_ALLOWANCE_COMPONENTS configuration
+        
+        Request body:
+        {
+            "percentage": 15.5,  # 0-100
+            "preview": false,     # if true, returns preview without saving
+            "reason": "Salary adjustment for Q2"
+        }
+        """
+        from .deduction_config import (
+            validate_deduction_request,
+            calculate_deduction_breakdown,
+            get_ai_recommendation,
+            DEDUCTION_ALLOWED_STATUSES,
+            DEDUCTION_AMOUNT_KEY,
+            DEDUCTION_METADATA_KEY,
+        )
+        
+        salary_slip = self.get_object()
+        percentage = request.data.get('percentage')
+        preview_only = request.data.get('preview', False)
+        reason = request.data.get('reason', 'Percentage-based allowance deduction')
+        
+        # Validate percentage
+        if percentage is None:
+            return Response(
+                {'error': 'Percentage is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            percentage = Decimal(str(percentage))
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'Invalid percentage value'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate deduction request
+        validation = validate_deduction_request(salary_slip, percentage)
+        if not validation['valid']:
+            return Response(
+                {'error': validation['error']},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get AI recommendation for this salary
+        ai_recommendation = get_ai_recommendation(salary_slip.net_salary)
+        
+        # Calculate deduction breakdown
+        deduction_calc = calculate_deduction_breakdown(
+            salary_slip.allowances_breakdown or {},
+            percentage
+        )
+        
+        # Preview mode - return calculation without saving
+        if preview_only:
+            new_net_salary = salary_slip.net_salary - Decimal(str(deduction_calc['total_deduction']))
+            
+            return Response({
+                'preview': True,
+                'current_net_salary': str(salary_slip.net_salary),
+                'deduction_percentage': str(percentage),
+                'component_deductions': deduction_calc['component_deductions'],
+                'total_deduction_amount': deduction_calc['total_deduction'],
+                'new_net_salary': str(new_net_salary),
+                'affected_components': deduction_calc['affected_components'],
+                'ai_recommendation': ai_recommendation,
+            })
+        
+        # Capture old values for audit
+        old_values = self._capture_old_values(salary_slip)
+        
+        # Apply deduction to deductions_breakdown
+        if not salary_slip.deductions_breakdown:
+            salary_slip.deductions_breakdown = {}
+        
+        # Add/update percentage deduction
+        salary_slip.deductions_breakdown[DEDUCTION_AMOUNT_KEY] = deduction_calc['total_deduction']
+        
+        # Store metadata for transparency
+        salary_slip.deductions_breakdown[DEDUCTION_METADATA_KEY] = {
+            'percentage': str(percentage),
+            'applied_at': timezone.now().isoformat(),
+            'applied_by': request.user.email,
+            'reason': reason,
+            'component_breakdown': deduction_calc['component_deductions'],
+            'affected_components': deduction_calc['affected_components'],
+        }
+        
+        # Recalculate slip totals
+        salary_slip = self._recalculate_slip(salary_slip)
+        salary_slip.save()
+        
+        # Update payroll run totals
+        self._update_payroll_run_totals(salary_slip.payroll_run)
+        
+        # Create audit log
+        audit_description = (
+            f"Applied {percentage}% deduction from allowances. "
+            f"Total deduction: AED {deduction_calc['total_deduction']}. "
+            f"Reason: {reason}"
+        )
+        SalarySlipAuditLog.objects.create(
+            salary_slip=salary_slip,
+            action='deduction_applied',
+            performed_by=request.user,
+            description=audit_description,
+            old_values=old_values,
+            new_values=self._capture_old_values(salary_slip),
+        )
+        
+        # Return success with details
+        serializer = self.get_serializer(salary_slip)
+        return Response({
+            'message': 'Deduction applied successfully',
+            'slip': serializer.data,
+            'deduction_details': {
+                'percentage': str(percentage),
+                'total_amount': deduction_calc['total_deduction'],
+                'component_breakdown': deduction_calc['component_deductions'],
+                'affected_components': deduction_calc['affected_components'],
+                'new_net_salary': str(salary_slip.net_salary),
+            },
+            'ai_recommendation': ai_recommendation,
+        })
+    
     @transaction.atomic
     def update(self, request, *args, **kwargs):
         """
