@@ -19,15 +19,17 @@ from .config import (
 )
 from .models import (
     PayrollAdjustment, PayrollEmployee, PayrollRun, Payslip, PayslipLineItem,
-    PayrollWorkflowLog,
+    PayrollWorkflowLog, PayrollComparison, PayrollComparisonRow,
 )
 from .serializers import (
     CatalogSerializer, PayrollAdjustmentSerializer, PayrollEmployeeSerializer,
     PayrollRunSerializer, PayslipLineItemSerializer, PayslipSerializer,
     PayrollWorkflowLogSerializer,
+    PayrollComparisonSerializer, PayrollComparisonDetailSerializer,
+    PayrollComparisonRowSerializer,
 )
 from .services import excel_export, excel_import, run_generator, workflow
-from .services import bulk_deduction
+from .services import bulk_deduction, comparison as comparison_service
 from .services.calculator import recompute_payslip_totals, recompute_run_totals
 
 
@@ -872,3 +874,194 @@ class PayrollWorkflowLogViewSet(viewsets.ReadOnlyModelViewSet):
         if run:
             qs = qs.filter(run_id=run)
         return qs.order_by('-at')
+
+
+# ── Comparison (reconcile a run vs an external HR file) ─────────
+class PayrollComparisonViewSet(viewsets.ModelViewSet):
+    """Upload an external XLSX/CSV (ValueFrame, Sympa, generic) and diff
+    it against the selected PayrollRun.
+    """
+    queryset = PayrollComparison.objects.select_related('run', 'uploaded_by')
+    serializer_class = PayrollComparisonSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'post', 'delete']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        run = self.request.query_params.get('run')
+        if run:
+            qs = qs.filter(run_id=run)
+        profile = self.request.query_params.get('profile')
+        if profile:
+            qs = qs.filter(source_profile=profile)
+        return qs.order_by('-created_at')
+
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return PayrollComparisonDetailSerializer
+        return PayrollComparisonSerializer
+
+    def create(self, request, *args, **kwargs):
+        run_id = request.data.get('run')
+        if not run_id:
+            return Response({'error': '`run` (PayrollRun id) is required.'}, status=400)
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'error': "Missing 'file' upload."}, status=400)
+        if upload.size > EXCEL_MAX_UPLOAD_MB * 1024 * 1024:
+            return Response({'error': f'File exceeds {EXCEL_MAX_UPLOAD_MB} MB.'}, status=400)
+        try:
+            run = PayrollRun.objects.get(pk=run_id)
+        except PayrollRun.DoesNotExist:
+            return Response({'error': f'PayrollRun {run_id} not found.'}, status=404)
+        source_profile = request.data.get('source_profile') or 'auto'
+        source_label = request.data.get('source_label') or \
+            catalog.comparison_profile(source_profile).get('label', source_profile)
+        try:
+            comparison = comparison_service.run_comparison(
+                run=run,
+                file_obj=upload,
+                source_label=source_label,
+                source_profile=source_profile,
+                uploaded_by=request.user if request.user.is_authenticated else None,
+                source_filename=upload.name,
+            )
+        except Exception as exc:
+            return Response(
+                {'error': f'Comparison failed: {exc.__class__.__name__}: {exc}'},
+                status=400,
+            )
+        return Response(
+            PayrollComparisonDetailSerializer(comparison, context={'request': request}).data,
+            status=201,
+        )
+
+    @action(detail=True, methods=['get'], url_path='rows')
+    def rows(self, request, pk=None):
+        comparison = self.get_object()
+        rows_qs = comparison.rows.select_related('payroll_employee').all()
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            rows_qs = rows_qs.filter(status=status_filter)
+        search = request.query_params.get('search')
+        if search:
+            rows_qs = rows_qs.filter(
+                Q(external_name__icontains=search)
+                | Q(external_employee_no__icontains=search)
+                | Q(payroll_employee__full_name__icontains=search)
+                | Q(payroll_employee__employee_no__icontains=search)
+            )
+        page = self.paginate_queryset(rows_qs)
+        ser = PayrollComparisonRowSerializer
+        if page is not None:
+            return self.get_paginated_response(ser(page, many=True).data)
+        return Response(ser(rows_qs, many=True).data)
+
+    @action(detail=True, methods=['get'], url_path='export-xlsx')
+    def export_xlsx(self, request, pk=None):
+        comparison = self.get_object()
+        from io import BytesIO
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = 'Summary'
+
+        s = comparison.summary or {}
+        ws.cell(1, 1, value='Payroll Comparison Report').font = Font(bold=True, size=14)
+        ws.cell(2, 1, value='Run');               ws.cell(2, 2, value=comparison.run.cycle_code)
+        ws.cell(3, 1, value='External source');   ws.cell(3, 2, value=comparison.source_label)
+        ws.cell(4, 1, value='Profile');           ws.cell(4, 2, value=comparison.source_profile)
+        ws.cell(5, 1, value='Uploaded file');     ws.cell(5, 2, value=comparison.source_filename)
+        ws.cell(6, 1, value='Generated at');      ws.cell(6, 2, value=comparison.created_at.strftime('%Y-%m-%d %H:%M'))
+        ws.cell(8, 1, value='Matches');           ws.cell(8, 2, value=s.get('matched', 0))
+        ws.cell(9, 1, value='Variances');         ws.cell(9, 2, value=s.get('variance', 0))
+        ws.cell(10, 1, value='External-only');    ws.cell(10, 2, value=s.get('external_only', 0))
+        ws.cell(11, 1, value='Missing from external'); ws.cell(11, 2, value=s.get('payroll_only', 0))
+
+        # Per-field breakdown
+        ws.cell(13, 1, value='Field').font = Font(bold=True)
+        ws.cell(13, 2, value='Variances').font = Font(bold=True)
+        ws.cell(13, 3, value='Critical').font = Font(bold=True)
+        ws.cell(13, 4, value='Warning').font = Font(bold=True)
+        by_field = s.get('by_field') or {}
+        r = 14
+        for fmeta in catalog.COMPARISON_FIELDS:
+            f = fmeta['field']
+            stats = by_field.get(f, {})
+            ws.cell(r, 1, value=fmeta['label'])
+            ws.cell(r, 2, value=stats.get('variances', 0))
+            ws.cell(r, 3, value=stats.get('critical', 0))
+            ws.cell(r, 4, value=stats.get('warning', 0))
+            r += 1
+
+        # Variance detail sheet
+        ws2 = wb.create_sheet('Variances')
+        headers = [
+            'Employee No', 'Name', 'Status', 'Matched By', 'Field',
+            'Our Value', 'External Value', 'Diff', 'Diff %', 'Severity',
+            'Recommendation',
+        ]
+        for c, h in enumerate(headers, start=1):
+            ws2.cell(1, c, value=h).font = Font(bold=True)
+        sev_fill = {
+            'critical': PatternFill('solid', fgColor='FFE4E6'),
+            'warning':  PatternFill('solid', fgColor='FEF3C7'),
+            'info':     PatternFill('solid', fgColor='E0F2FE'),
+        }
+        r = 2
+        for row in comparison.rows.select_related('payroll_employee').order_by('status', 'external_name'):
+            emp_no = (row.payroll_employee.employee_no if row.payroll_employee
+                      else row.external_employee_no)
+            emp_name = (row.payroll_employee.full_name if row.payroll_employee
+                        else row.external_name)
+            variances = row.variances or []
+            if not variances:
+                ws2.cell(r, 1, value=emp_no)
+                ws2.cell(r, 2, value=emp_name)
+                ws2.cell(r, 3, value=catalog.COMPARISON_STATUS_LABELS.get(row.status, {}).get('label', row.status))
+                ws2.cell(r, 4, value=row.matched_by)
+                r += 1
+                continue
+            for v in variances:
+                ws2.cell(r, 1, value=emp_no)
+                ws2.cell(r, 2, value=emp_name)
+                ws2.cell(r, 3, value=catalog.COMPARISON_STATUS_LABELS.get(row.status, {}).get('label', row.status))
+                ws2.cell(r, 4, value=row.matched_by)
+                ws2.cell(r, 5, value=catalog.comparison_field_meta(v.get('field', '')).get('label', v.get('field', '')))
+                ws2.cell(r, 6, value=v.get('our'))
+                ws2.cell(r, 7, value=v.get('external'))
+                ws2.cell(r, 8, value=v.get('diff'))
+                ws2.cell(r, 9, value=v.get('pct'))
+                sev = v.get('severity', '')
+                ws2.cell(r, 10, value=sev)
+                ws2.cell(r, 11, value=v.get('recommendation', ''))
+                fill = sev_fill.get(sev)
+                if fill:
+                    for c in range(1, 12):
+                        ws2.cell(r, c).fill = fill
+                r += 1
+
+        # Column widths
+        for col_letter, width in zip('ABCDEFGHIJK',
+                                     [14, 28, 22, 14, 18, 12, 12, 12, 10, 10, 60]):
+            ws2.column_dimensions[col_letter].width = width
+
+        buf = BytesIO()
+        wb.save(buf)
+        resp = HttpResponse(
+            buf.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        fname = f'comparison_{comparison.run.cycle_code}_{comparison.source_profile}_{comparison.id}.xlsx'
+        resp['Content-Disposition'] = f'attachment; filename="{fname}"'
+        return resp
+
+    @action(detail=False, methods=['get'], url_path='profiles')
+    def profiles(self, request):
+        """Return the list of available comparison profiles for the dropdown."""
+        return Response([
+            {'code': code, 'label': p['label']}
+            for code, p in catalog.COMPARISON_PROFILES.items()
+        ])

@@ -5,7 +5,7 @@ from rest_framework import serializers
 from . import catalog
 from .models import (
     PayrollAdjustment, PayrollEmployee, PayrollRun, Payslip, PayslipLineItem,
-    PayrollWorkflowLog,
+    PayrollWorkflowLog, PayrollComparison, PayrollComparisonRow,
 )
 
 
@@ -124,6 +124,73 @@ class PayrollWorkflowLogSerializer(serializers.ModelSerializer):
         if not obj.actor:
             return ''
         return getattr(obj.actor, 'get_full_name', lambda: '')() or getattr(obj.actor, 'username', '')
+
+
+# ── Comparison ───────────────────────────────────────────────────────────────────
+class PayrollComparisonRowSerializer(serializers.ModelSerializer):
+    payroll_employee_no = serializers.SerializerMethodField()
+    payroll_employee_name = serializers.SerializerMethodField()
+    status_label = serializers.SerializerMethodField()
+    variance_count = serializers.SerializerMethodField()
+    max_severity = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PayrollComparisonRow
+        fields = [
+            'id', 'comparison', 'payroll_employee', 'payroll_employee_no',
+            'payroll_employee_name', 'external_employee_no', 'external_name',
+            'matched_by', 'our_values', 'external_values', 'variances',
+            'status', 'status_label', 'variance_count', 'max_severity',
+        ]
+        read_only_fields = fields
+
+    def get_payroll_employee_no(self, obj):
+        return obj.payroll_employee.employee_no if obj.payroll_employee else ''
+
+    def get_payroll_employee_name(self, obj):
+        return obj.payroll_employee.full_name if obj.payroll_employee else ''
+
+    def get_status_label(self, obj):
+        return catalog.COMPARISON_STATUS_LABELS.get(obj.status, {}).get('label', obj.status)
+
+    def get_variance_count(self, obj):
+        return sum(1 for v in (obj.variances or []) if v.get('field') != '__match__')
+
+    def get_max_severity(self, obj):
+        order = {'critical': 3, 'warning': 2, 'info': 1}
+        severities = [v.get('severity') for v in (obj.variances or [])]
+        if not severities:
+            return ''
+        return max(severities, key=lambda s: order.get(s, 0))
+
+
+class PayrollComparisonSerializer(serializers.ModelSerializer):
+    uploaded_by_name = serializers.SerializerMethodField()
+    run_cycle_code = serializers.CharField(source='run.cycle_code', read_only=True)
+    run_status = serializers.CharField(source='run.status', read_only=True)
+
+    class Meta:
+        model = PayrollComparison
+        fields = [
+            'id', 'run', 'run_cycle_code', 'run_status', 'source_label',
+            'source_profile', 'source_filename', 'column_mapping', 'summary',
+            'uploaded_by', 'uploaded_by_name', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_uploaded_by_name(self, obj):
+        if not obj.uploaded_by:
+            return ''
+        return getattr(obj.uploaded_by, 'get_full_name', lambda: '')() \
+            or getattr(obj.uploaded_by, 'username', '')
+
+
+class PayrollComparisonDetailSerializer(PayrollComparisonSerializer):
+    """Detail view embeds rows inline (capped — use the rows endpoint for paginated access)."""
+    rows = PayrollComparisonRowSerializer(many=True, read_only=True)
+
+    class Meta(PayrollComparisonSerializer.Meta):
+        fields = PayrollComparisonSerializer.Meta.fields + ['rows']
 
 
 # ── Catalog serializer (one big read-only blob for the frontend) ────

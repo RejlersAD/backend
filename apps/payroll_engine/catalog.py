@@ -324,3 +324,138 @@ BULK_DEDUCTION_DEFAULT_LABEL  = 'Bulk Salary Deduction'
 BULK_DEDUCTION_MIN_PCT = '0.01'
 BULK_DEDUCTION_MAX_PCT = '100.00'
 
+
+# ── Comparison module — external file profiles ─────────────────────
+# Each profile drives how an uploaded vendor file is parsed:
+#   * header_row     : 1-based row where canonical headers live (None ⇒ auto-scan)
+#   * header_scan_max: how far down to look when header_row is None
+#   * field_aliases  : per-canonical-field list of header strings the parser
+#                      will match (case-insensitive, whitespace-collapsed).
+#                      The first non-empty match wins.
+#   * compose        : optional rules that combine multiple cells into one
+#                      canonical field, e.g. SYMPA splits the name across
+#                      "Surname" + "Preferred given name".
+# Add a new vendor by appending another dict — no service edits needed.
+class ComparisonStatus:
+    MATCH = 'match'
+    VARIANCE = 'variance'
+    EXTERNAL_ONLY = 'external_only'   # row in external file, not in our payroll
+    PAYROLL_ONLY = 'payroll_only'     # employee on our payroll, missing from file
+
+
+COMPARISON_STATUS_LABELS = {
+    ComparisonStatus.MATCH:         {'label': 'Match',                 'tone': 'green'},
+    ComparisonStatus.VARIANCE:      {'label': 'Variance',              'tone': 'amber'},
+    ComparisonStatus.EXTERNAL_ONLY: {'label': 'External-only',         'tone': 'sky'},
+    ComparisonStatus.PAYROLL_ONLY:  {'label': 'Missing from external', 'tone': 'rose'},
+}
+
+
+# Canonical fields we know how to compare. Order = display order.
+COMPARISON_FIELDS: List[Dict] = [
+    {'field': 'hours',            'label': 'Hours',            'kind': 'hours'},
+    {'field': 'basic',            'label': 'Basic',            'kind': 'currency'},
+    {'field': 'housing',          'label': 'Housing',          'kind': 'currency'},
+    {'field': 'transport',        'label': 'Transport',        'kind': 'currency'},
+    {'field': 'home_leave',       'label': 'Home Leave',       'kind': 'currency'},
+    {'field': 'other_earnings',   'label': 'Other Earnings',   'kind': 'currency'},
+    {'field': 'total_deductions', 'label': 'Total Deductions', 'kind': 'currency'},
+    {'field': 'gross_earnings',   'label': 'Gross Earnings',   'kind': 'currency'},
+    {'field': 'net_payable',      'label': 'Net Payable',      'kind': 'currency'},
+    {'field': 'leave_days',       'label': 'Leave Days',       'kind': 'days'},
+]
+
+
+# Universal header aliases — checked by every profile (case + whitespace
+# insensitive). Profile-specific aliases extend these.
+COMPARISON_FIELD_ALIASES: Dict[str, List[str]] = {
+    'employee_no':      ['employee number', 'employee no', 'employee #', 'emp no',
+                         'emp #', 'staff id', 'staff no', 'staff #', 'badge', 'badge no',
+                         'employee id'],
+    'full_name':        ['employee name', 'full name', 'name', 'staff name'],
+    'hours':            ['total hours', 'working hours', 'invoicing hours',
+                         'hours worked', 'normal', 'attended hours'],
+    'basic':            ['basic', 'basic salary', 'base salary',
+                         'currently valid monthly base salary', 'monthly base salary'],
+    'housing':          ['housing', 'housing allowance',
+                         'currently valid housing allowance'],
+    'transport':        ['transport', 'transpo', 'transportation',
+                         'transport allowance', 'transportation allowance',
+                         'currently valid transportation allowance'],
+    'home_leave':       ['home leave', 'home leave allowance',
+                         'currently valid home leave allowance'],
+    'other_earnings':   ['other allowance', 'other pay', 'others',
+                         'other earnings', 'overtime', 'bonus'],
+    'total_deductions': ['deduction', 'deductions', 'total deductions',
+                         'salary deduction', 'absence deduction'],
+    'gross_earnings':   ['gross', 'gross salary', 'monthly gross salary',
+                         'gross earnings', 'total earnings'],
+    'net_payable':      ['net', 'net payable', 'net salary', 'take home',
+                         'final remuneration'],
+    'leave_days':       ['annual vacation', 'leave', 'leave days', 'sick leave'],
+}
+
+
+# Per-vendor profiles. 'auto' = use generic aliases + header auto-scan.
+COMPARISON_PROFILES: Dict[str, Dict] = {
+    'auto': {
+        'label': 'Auto-detect (smart fuzzy match)',
+        'header_row': None,
+        'header_scan_max': 20,
+        'field_aliases': {},
+        'compose': {},
+    },
+    'valueframe': {
+        'label': 'ValueFrame — Wage Type Report (hours)',
+        'header_row': None,        # ValueFrame puts the table at row 12 but row may shift
+        'header_scan_max': 20,     # so scan
+        'field_aliases': {
+            'employee_no':  ['employee number'],
+            'full_name':    ['employee name'],
+            'hours':        ['total hours'],
+            'leave_days':   ['annual vacation', 'sick leave, medical certificate',
+                             'paternity leave, paid', 'other paid leave'],
+        },
+        'compose': {},
+    },
+    'sympa': {
+        'label': 'Sympa — Salary Master (basic + allowances)',
+        'header_row': 1,
+        'header_scan_max': 1,
+        'field_aliases': {
+            'basic':         ['currently valid monthly base salary'],
+            'housing':       ['currently valid housing allowance'],
+            'transport':     ['currently valid transportation allowance'],
+            'home_leave':    ['currently valid home leave allowance'],
+            'gross_earnings':['monthly gross salary'],
+        },
+        # SYMPA has no single full-name column; compose from 2 columns.
+        'compose': {
+            'full_name': {
+                'parts':     ['preferred given name', 'surname'],
+                'separator': ' ',
+            },
+        },
+    },
+    'generic': {
+        'label': 'Generic XLSX/CSV (header in row 1)',
+        'header_row': 1,
+        'header_scan_max': 1,
+        'field_aliases': {},
+        'compose': {},
+    },
+}
+
+
+def comparison_profile(code: str) -> Dict:
+    """Return profile dict by code; falls back to 'auto'."""
+    return COMPARISON_PROFILES.get(code) or COMPARISON_PROFILES['auto']
+
+
+def comparison_field_codes() -> List[str]:
+    return [f['field'] for f in COMPARISON_FIELDS]
+
+
+def comparison_field_meta(field: str) -> Dict:
+    return next((f for f in COMPARISON_FIELDS if f['field'] == field), {})
+

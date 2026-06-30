@@ -366,3 +366,97 @@ class PayrollWorkflowLog(models.Model):
 
     def __str__(self) -> str:
         return f'{self.run.cycle_code} {self.from_status}→{self.to_status} @ {self.at:%Y-%m-%d %H:%M}'
+
+
+# ════════════════════════════════════════════════════════════════════
+# Comparison — reconcile a Run against an external HR file
+# (e.g. ValueFrame timesheet, Sympa salary master)
+# ════════════════════════════════════════════════════════════════════
+class PayrollComparison(models.Model):
+    """One upload = one comparison job. Diff rows live in the related
+    ``rows`` reverse relation so the summary can stay tabular while the
+    individual variances are paginated.
+    """
+    run = models.ForeignKey(
+        PayrollRun, on_delete=models.CASCADE, related_name='comparisons',
+    )
+    source_label = models.CharField(
+        max_length=64,
+        help_text='Human-readable source name e.g. "ValueFrame", "Sympa".',
+    )
+    source_profile = models.CharField(
+        max_length=32, default='auto',
+        help_text='Parser profile key from catalog.COMPARISON_PROFILES.',
+    )
+    source_filename = models.CharField(max_length=255, blank=True, default='')
+
+    # Resolved {canonical_field: external_header_string} chosen by the parser.
+    column_mapping = models.JSONField(default=dict, blank=True)
+
+    # Aggregates: counts + per-field totals + per-status counts.
+    summary = models.JSONField(default=dict, blank=True)
+
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='payroll_comparisons',
+    )
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        db_table = 'payroll_engine_comparison'
+        verbose_name = 'Payroll Comparison'
+        ordering = ('-created_at',)
+        indexes = [
+            models.Index(fields=['run', '-created_at']),
+        ]
+
+    def __str__(self) -> str:
+        return f'Cmp {self.run.cycle_code} ← {self.source_label} ({self.created_at:%Y-%m-%d})'
+
+
+class PayrollComparisonRow(models.Model):
+    """One row per matched/unmatched employee in a comparison."""
+
+    STATUS_CHOICES = [
+        (catalog.ComparisonStatus.MATCH,         'Match'),
+        (catalog.ComparisonStatus.VARIANCE,      'Variance'),
+        (catalog.ComparisonStatus.EXTERNAL_ONLY, 'External-only'),
+        (catalog.ComparisonStatus.PAYROLL_ONLY,  'Missing from external'),
+    ]
+
+    comparison = models.ForeignKey(
+        PayrollComparison, on_delete=models.CASCADE, related_name='rows',
+    )
+    payroll_employee = models.ForeignKey(
+        PayrollEmployee, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='+',
+    )
+
+    # Echoes from the external row (kept even when matched, for traceability).
+    external_employee_no = models.CharField(max_length=64, blank=True, default='')
+    external_name = models.CharField(max_length=255, blank=True, default='')
+
+    # 'employee_no', 'name', 'fuzzy:0.92', or '' when status is *_only.
+    matched_by = models.CharField(max_length=32, blank=True, default='')
+
+    our_values = models.JSONField(default=dict, blank=True)
+    external_values = models.JSONField(default=dict, blank=True)
+    # [{field, our, external, diff, pct, severity, recommendation}]
+    variances = models.JSONField(default=list, blank=True)
+
+    status = models.CharField(
+        max_length=32, choices=STATUS_CHOICES,
+        default=catalog.ComparisonStatus.MATCH, db_index=True,
+    )
+
+    class Meta:
+        db_table = 'payroll_engine_comparison_row'
+        verbose_name = 'Payroll Comparison Row'
+        ordering = ('status', 'external_name')
+        indexes = [
+            models.Index(fields=['comparison', 'status']),
+        ]
+
+    def __str__(self) -> str:
+        who = self.external_name or self.external_employee_no or 'unknown'
+        return f'{who} [{self.status}]'

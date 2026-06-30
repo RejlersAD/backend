@@ -8,6 +8,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     PayrollAdjustmentViewSet, PayrollEmployeeViewSet, PayrollRunViewSet,
     PayslipLineItemViewSet, PayslipViewSet, PayrollWorkflowLogViewSet,
+    PayrollComparisonViewSet,
     catalog_view, engine_dashboard_summary,
 )
 
@@ -17,6 +18,7 @@ router.register(r'runs',         PayrollRunViewSet,         basename='payroll-ru
 router.register(r'payslips',     PayslipViewSet,            basename='payroll-payslip')
 router.register(r'line-items',   PayslipLineItemViewSet,    basename='payroll-line-item')
 router.register(r'adjustments',  PayrollAdjustmentViewSet,  basename='payroll-adjustment')
+router.register(r'comparisons',  PayrollComparisonViewSet,  basename='payroll-comparison')
 router.register(r'workflow-log', PayrollWorkflowLogViewSet, basename='payroll-workflow-log')
 
 urlpatterns = [

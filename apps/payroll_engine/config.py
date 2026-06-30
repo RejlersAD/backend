@@ -114,3 +114,26 @@ RUN_FORCE_OVERRIDE_ROLE_CODES = [
     ).split(',')
     if code.strip()
 ]
+
+# ── Comparison module (ValueFrame / Sympa / external HR systems) ───
+# Tolerances control when a field-level diff is flagged as a "variance"
+# rather than treated as a match. Both absolute AND percentage thresholds
+# must be exceeded for currency fields. Hours use a dedicated absolute
+# threshold (since 2h ≈ a quarter day, not 2 AED).
+COMPARISON_TOL_ABS = _env_decimal('PAYROLL_COMPARISON_TOL_ABS', '1.00')
+COMPARISON_TOL_PCT = _env_decimal('PAYROLL_COMPARISON_TOL_PCT', '0.5')   # %
+COMPARISON_HOURS_TOL_ABS = _env_decimal('PAYROLL_COMPARISON_HOURS_TOL', '2.00')
+
+# Two-tier severity: variances above the warning threshold are flagged
+# "warning"; above the critical threshold are flagged "critical" (red).
+COMPARISON_SEVERITY_WARN_PCT = _env_decimal('PAYROLL_COMPARISON_WARN_PCT', '2.0')
+COMPARISON_SEVERITY_CRIT_PCT = _env_decimal('PAYROLL_COMPARISON_CRIT_PCT', '10.0')
+
+# Employee matching strategy when external file lacks employee_no.
+# Try exact name first, then fuzzy if MATCH_FUZZY=true.
+COMPARISON_MATCH_FUZZY = _env_bool('PAYROLL_COMPARISON_MATCH_FUZZY', True)
+COMPARISON_MATCH_THRESHOLD = float(os.environ.get(
+    'PAYROLL_COMPARISON_MATCH_THRESHOLD', '0.85'))
+
+# Max comparison rows kept per upload (safety cap — typical run has ~300).
+COMPARISON_MAX_ROWS = _env_int('PAYROLL_COMPARISON_MAX_ROWS', 5000)
