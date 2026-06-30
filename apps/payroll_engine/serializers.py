@@ -48,7 +48,7 @@ class PayslipSerializer(serializers.ModelSerializer):
         model = Payslip
         fields = [
             'id', 'run', 'run_cycle', 'run_status', 'employee', 'employee_no',
-            'hours',
+            'hours', 'days',
             'basic', 'housing', 'transport', 'home_leave',
             'other_earnings', 'gross_earnings', 'total_deductions', 'net_payable',
             'payment_mode',
@@ -60,6 +60,7 @@ class PayslipSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'run_cycle', 'run_status', 'employee_no', 'other_earnings',
             'gross_earnings', 'total_deductions', 'net_payable',
+            'days',
             'snapshot_full_name', 'snapshot_department', 'snapshot_designation',
             'snapshot_iban', 'snapshot_joining_date',
             'created_at', 'updated_at',
@@ -75,6 +76,7 @@ class PayrollRunSerializer(serializers.ModelSerializer):
             'id', 'year', 'month', 'cycle_code',
             'status', 'status_label',
             'employee_count', 'total_gross', 'total_deductions', 'total_net',
+            'total_hours', 'total_days',
             'generated_at', 'hr_approved_at', 'finance_approved_at', 'released_at',
             'hr_approved_by', 'finance_approved_by', 'released_by',
             'notes', 'created_at', 'updated_at', 'created_by',
@@ -82,6 +84,7 @@ class PayrollRunSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'cycle_code', 'status', 'status_label',
             'employee_count', 'total_gross', 'total_deductions', 'total_net',
+            'total_hours', 'total_days',
             'generated_at', 'hr_approved_at', 'finance_approved_at', 'released_at',
             'hr_approved_by', 'finance_approved_by', 'released_by',
             'created_at', 'updated_at', 'created_by',

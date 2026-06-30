@@ -126,6 +126,10 @@ class PayrollRun(models.Model):
     total_gross = models.DecimalField(max_digits=14, decimal_places=2, default=ZERO)
     total_deductions = models.DecimalField(max_digits=14, decimal_places=2, default=ZERO)
     total_net = models.DecimalField(max_digits=14, decimal_places=2, default=ZERO)
+    # Sum of live biometric hours across every payslip in this run, and
+    # the same expressed as days (hours ÷ HOURS_PER_WORKDAY, default 9).
+    total_hours = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    total_days = models.DecimalField(max_digits=10, decimal_places=2, default=ZERO)
 
     # Timestamps for each transition
     generated_at = models.DateTimeField(null=True, blank=True)
@@ -193,6 +197,9 @@ class Payslip(models.Model):
 
     # Snapshot of contracted hours at run time
     hours = models.DecimalField(max_digits=8, decimal_places=2, default=DEFAULT_EMPLOYEE_HOURS)
+    # Live work-days derived from hours (hours ÷ HOURS_PER_WORKDAY).
+    # Recomputed whenever ``hours`` changes via the calculator service.
+    days = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal('0.00'))
 
     # Fixed earnings (4 standard columns)
     basic = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)

@@ -40,6 +40,29 @@ QUANTUM = Decimal(10) ** -DECIMAL_PLACES  # e.g. Decimal('0.01')
 STANDARD_WORKDAYS_PER_MONTH = _env_int('PAYROLL_STANDARD_WORKDAYS', 22)
 STANDARD_HOURS_PER_DAY = _env_int('PAYROLL_STANDARD_HOURS_PER_DAY', 8)
 
+# Business-defined "one work day equals N hours" used for converting the
+# live biometric hours total on a Payslip / PayrollRun into days. Rejlers
+# Abu Dhabi runs a 9-hour workday, so default = 9. Override per-environment
+# via env without code changes.
+HOURS_PER_WORKDAY = _env_decimal('PAYROLL_HOURS_PER_WORKDAY', '9')
+
+
+def hours_to_days(hours) -> Decimal:
+    """Convert any hours value (int / float / Decimal / str) into days.
+
+    Days are quantised to two decimals (≈ 7-minute precision). Returns
+    Decimal('0.00') for ``None`` or unparsable input, never raises.
+    """
+    if hours is None:
+        return Decimal('0.00')
+    if HOURS_PER_WORKDAY <= 0:
+        return Decimal('0.00')
+    try:
+        h = hours if isinstance(hours, Decimal) else Decimal(str(hours))
+    except Exception:
+        return Decimal('0.00')
+    return (h / HOURS_PER_WORKDAY).quantize(Decimal('0.01'), rounding=ROUNDING)
+
 # Default contracted hours per month for a new employee. Defaults to
 # workdays × hours/day. Override per environment with PAYROLL_DEFAULT_HOURS.
 DEFAULT_EMPLOYEE_HOURS = _env_decimal(

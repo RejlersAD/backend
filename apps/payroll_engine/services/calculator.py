@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
-from ..config import QUANTUM, ROUNDING, STANDARD_WORKDAYS_PER_MONTH
+from ..config import QUANTUM, ROUNDING, STANDARD_WORKDAYS_PER_MONTH, hours_to_days
 from ..catalog import LineItemKind
 
 ZERO = Decimal('0.00')
@@ -84,19 +84,24 @@ def recompute_payslip_totals(payslip) -> None:
     payslip.gross_earnings = quantize(fixed + other)
     payslip.total_deductions = deductions
     payslip.net_payable = compute_net(payslip.gross_earnings, deductions)
+    # Keep `days` in lock-step with `hours` so the UI never drifts.
+    payslip.days = hours_to_days(payslip.hours)
 
 
 def recompute_run_totals(run) -> None:
     """Mutate a PayrollRun's aggregate fields in place. Caller saves."""
-    agg = {'gross': ZERO, 'deductions': ZERO, 'net': ZERO, 'count': 0}
+    agg = {'gross': ZERO, 'deductions': ZERO, 'net': ZERO, 'hours': ZERO, 'count': 0}
     for slip in run.payslips.all():
         agg['gross'] += to_decimal(slip.gross_earnings)
         agg['deductions'] += to_decimal(slip.total_deductions)
         agg['net'] += to_decimal(slip.net_payable)
+        agg['hours'] += to_decimal(slip.hours)
         agg['count'] += 1
     run.total_gross = quantize(agg['gross'])
     run.total_deductions = quantize(agg['deductions'])
     run.total_net = quantize(agg['net'])
+    run.total_hours = quantize(agg['hours'])
+    run.total_days = hours_to_days(agg['hours'])
     run.employee_count = agg['count']
 
 

@@ -194,6 +194,8 @@ def refresh_run_hours_from_timesheet(run: PayrollRun) -> dict:
     Caller is responsible for gating to DRAFT runs.
     """
     from decimal import Decimal
+    from ..config import hours_to_days
+    from .calculator import recompute_run_totals
 
     hours_map = compute_monthly_hours(run.year, run.month)
     updated = 0
@@ -210,6 +212,15 @@ def refresh_run_hours_from_timesheet(run: PayrollRun) -> dict:
             unchanged += 1
             continue
         slip.hours = live_dec
-        slip.save(update_fields=['hours', 'updated_at'])
+        slip.days = hours_to_days(live_dec)
+        slip.save(update_fields=['hours', 'days', 'updated_at'])
         updated += 1
+    # Roll the new hours/days totals up to the run aggregates so the
+    # Monthly Runs table reflects the refresh immediately.
+    if updated:
+        recompute_run_totals(run)
+        run.save(update_fields=[
+            'total_gross', 'total_deductions', 'total_net',
+            'total_hours', 'total_days', 'employee_count', 'updated_at',
+        ])
     return {'updated': updated, 'unchanged': unchanged, 'missing': missing}
