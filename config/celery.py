@@ -37,6 +37,18 @@ try:
 except Exception:
     pass
 
+try:
+    from apps.finance.config import BEAT_SCHEDULE as _finance_beat
+    _beat_schedule.update(_finance_beat)
+except Exception:
+    pass
+
+try:
+    from apps.dashboard.config import BEAT_SCHEDULE as _dashboard_beat
+    _beat_schedule.update(_dashboard_beat)
+except Exception:
+    pass
+
 if _beat_schedule:
     app.conf.beat_schedule = _beat_schedule
 

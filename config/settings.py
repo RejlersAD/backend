@@ -173,6 +173,7 @@ INSTALLED_APPS = [
     'apps.payroll',              # Payroll Intelligence Platform — validation, audit alerts, project costing, AI insights, chatbot
     'apps.payroll_engine',       # Payroll Engine — fresh monthly payroll automation (Draft → HR → Finance → Released)
     'apps.site_visits',          # Site Visit Tracking — GPS-based attendance for off-site engineers
+    'apps.dashboard',             # Personal Dashboard — role-scoped data bundles + AI insights
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
