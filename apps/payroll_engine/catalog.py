@@ -191,7 +191,11 @@ EXCEL_MASTER_COLUMN_MAP: Dict[int, str] = {
     22: 'deduction_details',        # description for deduction_amount
     23: 'final_remuneration',       # net (computed; used for validation)
     24: 'payment_mode',
+    25: 'hours',                    # appended — monthly working hours (live biometric)
 }
+
+# Header label for the Hours column (kept here so header row + map stay in sync).
+EXCEL_MASTER_HOURS_HEADER = 'Hours'
 
 
 # ── Excel I/O — Per-employee payslip sheet ──────────────────────────
@@ -210,6 +214,11 @@ EXCEL_PAYSLIP_LAYOUT: Dict[str, tuple] = {
 
     'title_label':          (10, 1),
     'title_value':          (10, 2),
+
+    # Hours / Month — single-cell block above the SALARY header so the
+    # biometric figure is visible at the top of every payslip.
+    'hours_label':          (11, 1),
+    'hours_value':          (11, 2),
 
     'salary_header':        (13, 1),  # "SALARY"
     'deductions_header':    (13, 3),  # "DEDUCTIONS"

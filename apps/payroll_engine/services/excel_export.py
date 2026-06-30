@@ -53,6 +53,7 @@ def _write_master_sheet(ws, run: PayrollRun) -> None:
         21: 'Salary Deduction', 22: 'Salary Deduction Details',
         23: f'FINAL Remuneration {_period_label(run)}',
         24: 'Payment Method',
+        25: catalog.EXCEL_MASTER_HOURS_HEADER,
     }
     for col, label in header_labels.items():
         ws.cell(catalog.EXCEL_MASTER_HEADER_ROW, col, value=label)
@@ -107,6 +108,7 @@ def _write_master_sheet(ws, run: PayrollRun) -> None:
         ws.cell(row_idx, 22, value=deduct_desc or None)
         ws.cell(row_idx, 23, value=float(slip.net_payable))
         ws.cell(row_idx, 24, value=slip.payment_mode)
+        ws.cell(row_idx, 25, value=float(slip.hours) if slip.hours is not None else None)
 
         grand_total += float(slip.net_payable)
         row_idx += 1
@@ -131,6 +133,11 @@ def _write_payslip_sheet(ws, slip: Payslip, period_label: str) -> None:
 
     ws.cell(*L['title_label'], value='Title')
     ws.cell(*L['title_value'], value=slip.snapshot_designation)
+
+    # Hours / Month (biometric “Total” hours, with HR overrides overlaid)
+    if 'hours_label' in L:
+        ws.cell(*L['hours_label'], value='Hours / Month')
+        ws.cell(*L['hours_value'], value=float(slip.hours) if slip.hours is not None else None)
 
     ws.cell(*L['salary_header'], value='SALARY')
     ws.cell(*L['deductions_header'], value='DEDUCTIONS')

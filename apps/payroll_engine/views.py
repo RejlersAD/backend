@@ -223,7 +223,7 @@ class PayrollEmployeeViewSet(viewsets.ModelViewSet):
         headers = [
             'Employee No', 'Name', 'MOL', 'IBAN', 'Bank', 'Department',
             'Discipline', 'Designation', 'Grade', 'Nationality',
-            'Joining Date', 'Basic', 'Housing', 'Transport', 'Home Leave',
+            'Joining Date', 'Hours', 'Basic', 'Housing', 'Transport', 'Home Leave',
             'Payment Mode', 'Active',
         ]
         for col, h in enumerate(headers, start=1):
@@ -240,12 +240,13 @@ class PayrollEmployeeViewSet(viewsets.ModelViewSet):
             ws.cell(i, 9, emp.grade)
             ws.cell(i, 10, emp.nationality_group)
             ws.cell(i, 11, emp.joining_date)
-            ws.cell(i, 12, float(emp.basic))
-            ws.cell(i, 13, float(emp.housing))
-            ws.cell(i, 14, float(emp.transport))
-            ws.cell(i, 15, float(emp.home_leave))
-            ws.cell(i, 16, emp.default_payment_mode)
-            ws.cell(i, 17, emp.is_active)
+            ws.cell(i, 12, float(emp.hours) if emp.hours is not None else None)
+            ws.cell(i, 13, float(emp.basic))
+            ws.cell(i, 14, float(emp.housing))
+            ws.cell(i, 15, float(emp.transport))
+            ws.cell(i, 16, float(emp.home_leave))
+            ws.cell(i, 17, emp.default_payment_mode)
+            ws.cell(i, 18, emp.is_active)
         buf = BytesIO()
         wb.save(buf)
         response = HttpResponse(
