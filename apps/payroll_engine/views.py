@@ -449,9 +449,25 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         Approved / Finance-approved / Released runs: Super-Admin only,
         requires `?force=true` (mirrors the force-delete / force-revert
         pattern so the override is intentional and audit-logged).
+
+        Query/body params:
+          force          — bool, allow overriding non-draft runs (Super-Admin only).
+          zero_missing   — bool, set hours=0 for employees with no biometric
+                           data this month so payroll mirrors Attendance Total
+                           exactly. Defaults to PAYROLL_REFRESH_ZERO_MISSING.
         """
         run = self.get_object()
         force = str(request.query_params.get('force', '')).lower() in ('1', 'true', 'yes')
+
+        # zero_missing may come from query string or body; None ⇒ use config default.
+        zm_raw = request.query_params.get('zero_missing')
+        if zm_raw is None:
+            zm_raw = request.data.get('zero_missing') if hasattr(request, 'data') else None
+        zero_missing: bool | None
+        if zm_raw is None or zm_raw == '':
+            zero_missing = None
+        else:
+            zero_missing = str(zm_raw).lower() in ('1', 'true', 'yes')
 
         if run.status != catalog.Status.DRAFT:
             if not force:
@@ -465,7 +481,7 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
                     status=403,
                 )
 
-        result = run_generator.refresh_run_hours_from_timesheet(run)
+        result = run_generator.refresh_run_hours_from_timesheet(run, zero_missing=zero_missing)
         return Response({
             'run': self.get_serializer(run).data,
             'forced': force and run.status != catalog.Status.DRAFT,

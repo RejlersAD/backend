@@ -186,26 +186,45 @@ def refresh_run_totals(run: PayrollRun) -> PayrollRun:
 
 
 @transaction.atomic
-def refresh_run_hours_from_timesheet(run: PayrollRun) -> dict:
+def refresh_run_hours_from_timesheet(run: PayrollRun, *, zero_missing: bool | None = None) -> dict:
     """Re-pull the live "Total" hours from the Time Sheet Summary and
     update every Payslip on this run.
 
-    Returns ``{'updated': n, 'unchanged': n, 'missing': [...]}``.
+    Args:
+        run: The PayrollRun whose payslips should be refreshed.
+        zero_missing: When True, employees absent from the attendance map
+            (no biometric punches and no HR overrides) have their hours
+            set to 0 so the run mirrors the Attendance ▸ Summary "Total"
+            column exactly. When False the previous snapshot is kept.
+            When ``None`` (default), the soft-coded
+            ``REFRESH_ZERO_MISSING_HOURS`` config flag decides.
+
+    Returns ``{'updated': n, 'unchanged': n, 'missing': [...], 'zeroed': n}``.
     Caller is responsible for gating to DRAFT runs.
     """
     from decimal import Decimal
-    from ..config import hours_to_days
+    from ..config import hours_to_days, REFRESH_ZERO_MISSING_HOURS
     from .calculator import recompute_run_totals
+
+    if zero_missing is None:
+        zero_missing = REFRESH_ZERO_MISSING_HOURS
 
     hours_map = compute_monthly_hours(run.year, run.month)
     updated = 0
     unchanged = 0
+    zeroed = 0
     missing: list[str] = []
+    zero_dec = Decimal('0')
     for slip in run.payslips.select_related('employee'):
         emp_code = str(slip.employee.employee_no).strip()
         live = hours_map.get(emp_code)
         if live is None:
             missing.append(emp_code)
+            if zero_missing and slip.hours != zero_dec:
+                slip.hours = zero_dec
+                slip.days = hours_to_days(zero_dec)
+                slip.save(update_fields=['hours', 'days', 'updated_at'])
+                zeroed += 1
             continue
         live_dec = live if isinstance(live, Decimal) else Decimal(str(live))
         if slip.hours == live_dec:
@@ -217,10 +236,15 @@ def refresh_run_hours_from_timesheet(run: PayrollRun) -> dict:
         updated += 1
     # Roll the new hours/days totals up to the run aggregates so the
     # Monthly Runs table reflects the refresh immediately.
-    if updated:
+    if updated or zeroed:
         recompute_run_totals(run)
         run.save(update_fields=[
             'total_gross', 'total_deductions', 'total_net',
             'total_hours', 'total_days', 'employee_count', 'updated_at',
         ])
-    return {'updated': updated, 'unchanged': unchanged, 'missing': missing}
+    return {
+        'updated': updated,
+        'unchanged': unchanged,
+        'missing': missing,
+        'zeroed': zeroed,
+    }

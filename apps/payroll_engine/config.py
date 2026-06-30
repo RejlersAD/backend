@@ -83,6 +83,13 @@ HOURS_FROM_TIMESHEET = _env_bool('PAYROLL_HOURS_FROM_TIMESHEET', True)
 # False → set hours to zero so HR notices missing punches.
 HOURS_FALLBACK_TO_EMPLOYEE = _env_bool('PAYROLL_HOURS_FALLBACK_TO_EMPLOYEE', True)
 
+# When `refresh_hours_from_timesheet` runs on an existing payroll run and an
+# employee has no biometric rows / overrides for the month, set their hours
+# to 0 (so the Payroll table mirrors the Attendance ▸ Summary "Total" column
+# byte-for-byte). When False, the previous snapshot is kept — useful if you
+# want remote / new-hire defaults preserved.
+REFRESH_ZERO_MISSING_HOURS = _env_bool('PAYROLL_REFRESH_ZERO_MISSING', True)
+
 # ── Workflow ────────────────────────────────────────────────────────
 # Allow re-opening an approved run back to draft (HR can revoke).
 ALLOW_REVERT_TO_DRAFT = _env_bool('PAYROLL_ALLOW_REVERT', True)
