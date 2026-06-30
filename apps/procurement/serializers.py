@@ -68,6 +68,11 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True)
     approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True)
     
+    # Project linkage fields (soft-coded relationship)
+    project_name = serializers.CharField(source='project.project_name', read_only=True, allow_null=True)
+    project_display = serializers.SerializerMethodField()
+    budget_allocation_display = serializers.CharField(source='budget_allocation.description', read_only=True, allow_null=True)
+    
     class Meta:
         model = PurchaseOrder
         fields = [
@@ -76,13 +81,20 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'category', 'category_display',
             'total_amount', 'currency', 'tax_amount', 'discount_amount', 'items',
             'po_date', 'start_date', 'end_date', 'expected_delivery', 'actual_delivery',
-            'project_number', 'project_manager', 'budget',
+            'project', 'project_name', 'project_display', 'project_number', 'project_manager', 
+            'budget_allocation', 'budget_allocation_display', 'budget',
             'payment_terms', 'delivery_terms', 'payment_milestones',
             'created_by', 'created_by_name', 'approved_by', 'approved_by_name', 
             'terms_and_conditions', 'notes', 'attachments', 
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'po_date', 'created_at', 'updated_at']
+    
+    def get_project_display(self, obj):
+        """Get formatted project display string"""
+        if obj.project:
+            return f"{obj.project.project_number} - {obj.project.project_name}"
+        return None
     
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
