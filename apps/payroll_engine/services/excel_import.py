@@ -26,6 +26,7 @@ from typing import Iterable
 from django.db import transaction
 
 from .. import catalog
+from ..config import DEFAULT_EMPLOYEE_HOURS
 from ..models import PayrollAdjustment, PayrollEmployee
 from .calculator import to_decimal
 
@@ -106,6 +107,7 @@ def _upsert_employee(row: dict, summary: ImportSummary) -> PayrollEmployee:
         'grade':             _normalise_str(row.get('grade'), 128),
         'nationality_group': _normalise_str(row.get('nationality_group'), 64),
         'joining_date':      _normalise_date(row.get('joining_date')),
+        'hours':             to_decimal(row.get('hours')) or DEFAULT_EMPLOYEE_HOURS,
         'basic':             to_decimal(row.get('basic')),
         'housing':           to_decimal(row.get('housing')),
         'transport':         to_decimal(row.get('transport')),

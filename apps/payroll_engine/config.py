@@ -40,6 +40,26 @@ QUANTUM = Decimal(10) ** -DECIMAL_PLACES  # e.g. Decimal('0.01')
 STANDARD_WORKDAYS_PER_MONTH = _env_int('PAYROLL_STANDARD_WORKDAYS', 22)
 STANDARD_HOURS_PER_DAY = _env_int('PAYROLL_STANDARD_HOURS_PER_DAY', 8)
 
+# Default contracted hours per month for a new employee. Defaults to
+# workdays × hours/day. Override per environment with PAYROLL_DEFAULT_HOURS.
+DEFAULT_EMPLOYEE_HOURS = _env_decimal(
+    'PAYROLL_DEFAULT_HOURS',
+    str(STANDARD_WORKDAYS_PER_MONTH * STANDARD_HOURS_PER_DAY),
+)
+
+# ── Hours sourcing (biometric / timesheet integration) ─────────────
+# When True (default), the Payroll Engine populates Payslip.hours from
+# the live Time Sheet Summary "Total" column at run-generation time and
+# whenever HR calls the `refresh_hours_from_timesheet` action.
+# Set to False to fall back to each employee's static `PayrollEmployee.hours`
+# value (useful in environments where the biometric DB is unreachable).
+HOURS_FROM_TIMESHEET = _env_bool('PAYROLL_HOURS_FROM_TIMESHEET', True)
+
+# If the timesheet has no biometric data for an employee in a given month,
+# True → use that employee's PayrollEmployee.hours (avoids zeroing them out);
+# False → set hours to zero so HR notices missing punches.
+HOURS_FALLBACK_TO_EMPLOYEE = _env_bool('PAYROLL_HOURS_FALLBACK_TO_EMPLOYEE', True)
+
 # ── Workflow ────────────────────────────────────────────────────────
 # Allow re-opening an approved run back to draft (HR can revoke).
 ALLOW_REVERT_TO_DRAFT = _env_bool('PAYROLL_ALLOW_REVERT', True)

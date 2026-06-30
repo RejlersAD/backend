@@ -18,10 +18,11 @@ from django.utils import timezone
 from ..catalog import (
     AdjustmentStatus, LineItemSource, Status,
 )
-from ..config import CARRY_FORWARD_LINE_ITEMS
+from ..config import CARRY_FORWARD_LINE_ITEMS, HOURS_FROM_TIMESHEET
 from ..models import (
     PayrollAdjustment, PayrollEmployee, PayrollRun, Payslip, PayslipLineItem,
 )
+from .attendance import compute_monthly_hours
 from .calculator import recompute_payslip_totals, recompute_run_totals
 
 
@@ -84,6 +85,10 @@ def generate_monthly_run(
     # Active employees only
     employees = PayrollEmployee.objects.filter(is_active=True).order_by('full_name')
 
+    # Pull live "Total Hours" from the biometric Time Sheet Summary.
+    # Keyed by employee_code which matches PayrollEmployee.employee_no.
+    hours_map = compute_monthly_hours(year, month) if HOURS_FROM_TIMESHEET else {}
+
     # Carry-forward source = previous month's payslips keyed by employee_id
     carry_map = {}
     if CARRY_FORWARD_LINE_ITEMS:
@@ -105,9 +110,15 @@ def generate_monthly_run(
 
     created_slips: list[Payslip] = []
     for emp in employees:
+        # Use live biometric total when available; fall back to the
+        # employee's contracted hours (or the engine default) otherwise.
+        live_hours = hours_map.get(str(emp.employee_no).strip())
+        resolved_hours = live_hours if live_hours is not None else emp.hours
+
         slip = Payslip(
             run=run,
             employee=emp,
+            hours=resolved_hours,
             basic=emp.basic,
             housing=emp.housing,
             transport=emp.transport,
@@ -172,3 +183,33 @@ def refresh_run_totals(run: PayrollRun) -> PayrollRun:
     recompute_run_totals(run)
     run.save()
     return run
+
+
+@transaction.atomic
+def refresh_run_hours_from_timesheet(run: PayrollRun) -> dict:
+    """Re-pull the live "Total" hours from the Time Sheet Summary and
+    update every Payslip on this run.
+
+    Returns ``{'updated': n, 'unchanged': n, 'missing': [...]}``.
+    Caller is responsible for gating to DRAFT runs.
+    """
+    from decimal import Decimal
+
+    hours_map = compute_monthly_hours(run.year, run.month)
+    updated = 0
+    unchanged = 0
+    missing: list[str] = []
+    for slip in run.payslips.select_related('employee'):
+        emp_code = str(slip.employee.employee_no).strip()
+        live = hours_map.get(emp_code)
+        if live is None:
+            missing.append(emp_code)
+            continue
+        live_dec = live if isinstance(live, Decimal) else Decimal(str(live))
+        if slip.hours == live_dec:
+            unchanged += 1
+            continue
+        slip.hours = live_dec
+        slip.save(update_fields=['hours', 'updated_at'])
+        updated += 1
+    return {'updated': updated, 'unchanged': unchanged, 'missing': missing}

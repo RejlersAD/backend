@@ -19,6 +19,7 @@ class PayrollEmployeeSerializer(serializers.ModelSerializer):
             'iban', 'bank_name', 'routing_code',
             'department', 'discipline', 'designation', 'grade', 'nationality_group',
             'joining_date', 'leaving_date',
+            'hours',
             'basic', 'housing', 'transport', 'home_leave', 'default_gross',
             'default_payment_mode',
             'is_active', 'effective_from', 'effective_to',
@@ -47,6 +48,7 @@ class PayslipSerializer(serializers.ModelSerializer):
         model = Payslip
         fields = [
             'id', 'run', 'run_cycle', 'run_status', 'employee', 'employee_no',
+            'hours',
             'basic', 'housing', 'transport', 'home_leave',
             'other_earnings', 'gross_earnings', 'total_deductions', 'net_payable',
             'payment_mode',

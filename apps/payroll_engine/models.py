@@ -12,6 +12,7 @@ from django.db import models
 from django.utils import timezone
 
 from . import catalog
+from .config import DEFAULT_EMPLOYEE_HOURS
 
 
 def _choices_from(catalog_list, code_key='code', label_key='label'):
@@ -56,6 +57,9 @@ class PayrollEmployee(models.Model):
 
     joining_date = models.DateField(null=True, blank=True)
     leaving_date = models.DateField(null=True, blank=True)
+
+    # Contracted hours per month (soft-coded default in config.DEFAULT_EMPLOYEE_HOURS)
+    hours = models.DecimalField(max_digits=8, decimal_places=2, default=DEFAULT_EMPLOYEE_HOURS)
 
     # Fixed earnings (monthly defaults)
     basic = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
@@ -186,6 +190,9 @@ class Payslip(models.Model):
     employee = models.ForeignKey(
         PayrollEmployee, on_delete=models.PROTECT, related_name='payslips',
     )
+
+    # Snapshot of contracted hours at run time
+    hours = models.DecimalField(max_digits=8, decimal_places=2, default=DEFAULT_EMPLOYEE_HOURS)
 
     # Fixed earnings (4 standard columns)
     basic = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)

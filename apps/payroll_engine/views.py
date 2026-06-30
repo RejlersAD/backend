@@ -437,6 +437,38 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         run_generator.refresh_run_totals(run)
         return Response(self.get_serializer(run).data)
 
+    @action(detail=True, methods=['post'], url_path='refresh-hours-from-timesheet')
+    def refresh_hours_from_timesheet(self, request, pk=None):
+        """Pull each payslip's `hours` from the live Time Sheet Summary
+        ("Total" column = biometric punches with HR overrides overlaid).
+
+        Draft runs: any authenticated user with write access.
+        Approved / Finance-approved / Released runs: Super-Admin only,
+        requires `?force=true` (mirrors the force-delete / force-revert
+        pattern so the override is intentional and audit-logged).
+        """
+        run = self.get_object()
+        force = str(request.query_params.get('force', '')).lower() in ('1', 'true', 'yes')
+
+        if run.status != catalog.Status.DRAFT:
+            if not force:
+                return Response(
+                    {'error': f'Run is {run.status}. Pass ?force=true to refresh hours on an approved run.'},
+                    status=409,
+                )
+            if not _user_can_force_payroll_run(request.user):
+                return Response(
+                    {'error': 'Only Super Administrators can force-refresh hours on approved runs.'},
+                    status=403,
+                )
+
+        result = run_generator.refresh_run_hours_from_timesheet(run)
+        return Response({
+            'run': self.get_serializer(run).data,
+            'forced': force and run.status != catalog.Status.DRAFT,
+            **result,
+        })
+
     # Workflow transitions
     def _transition_action(self, request, pk, fn):
         run = self.get_object()
