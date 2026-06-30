@@ -10,7 +10,6 @@ from .views import (
     PayrollAuditAlertViewSet,
     ProjectCostAllocationViewSet,
     AIInsightSnapshotViewSet,
-    ChatbotMessageViewSet,
     EmployeeLeaveRecordViewSet,
     LeaveTypeViewSet,
     LeaveRequestViewSet,
@@ -49,7 +48,6 @@ router.register(r'validation-logs',       PayrollValidationLogViewSet,    basena
 router.register(r'audit-alerts',          PayrollAuditAlertViewSet,       basename='audit-alert')
 router.register(r'project-costs',         ProjectCostAllocationViewSet,   basename='project-cost')
 router.register(r'ai-insights',           AIInsightSnapshotViewSet,       basename='ai-insight')
-router.register(r'chatbot-messages',      ChatbotMessageViewSet,          basename='chatbot-message')
 router.register(r'leave-records',         EmployeeLeaveRecordViewSet,     basename='leave-record')
 router.register(r'leave-types',           LeaveTypeViewSet,               basename='leave-type')
 router.register(r'leave-requests',        LeaveRequestViewSet,            basename='leave-request')
@@ -84,5 +82,6 @@ urlpatterns = [
     path('master-payroll-history/<uuid:import_id>/finance-review/',    master_payroll_finance_review,  name='master-payroll-finance-review'),
     path('master-payroll-history/<uuid:import_id>/finance-approve/',   master_payroll_finance_approve, name='master-payroll-finance-approve'),
     path('master-payroll-history/<uuid:import_id>/release/',           master_payroll_release,         name='master-payroll-release'),
+
     path('', include(router.urls)),
 ]

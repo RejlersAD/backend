@@ -1,0 +1,361 @@
+"""Payroll Engine models.
+
+Fresh schema, independent of apps.finance.salary_models. All choice
+strings are sourced from apps.payroll_engine.catalog so they stay
+soft-coded.
+"""
+from __future__ import annotations
+from decimal import Decimal
+
+from django.conf import settings
+from django.db import models
+from django.utils import timezone
+
+from . import catalog
+
+
+def _choices_from(catalog_list, code_key='code', label_key='label'):
+    """Convert a catalog list-of-dicts into Django choices tuple."""
+    return [(item[code_key], item[label_key]) for item in catalog_list]
+
+
+ZERO = Decimal('0.00')
+
+
+# ════════════════════════════════════════════════════════════════════
+# Employee master roster
+# ════════════════════════════════════════════════════════════════════
+class PayrollEmployee(models.Model):
+    """One row per employee on the payroll. Source of truth for the
+    monthly run generator. Decoupled from auth.User so contractors and
+    historical employees can also be tracked.
+    """
+    employee_no = models.CharField(max_length=32, unique=True, db_index=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name='payroll_profile',
+    )
+
+    full_name = models.CharField(max_length=255, db_index=True)
+    emirates_id = models.CharField(max_length=32, blank=True, default='')
+    mol_no = models.CharField(max_length=32, blank=True, default='')
+
+    # Banking
+    iban = models.CharField(max_length=64, blank=True, default='')
+    bank_name = models.CharField(max_length=128, blank=True, default='')
+    routing_code = models.CharField(max_length=64, blank=True, default='')
+
+    # Org
+    department = models.CharField(max_length=128, blank=True, default='', db_index=True)
+    discipline = models.CharField(max_length=128, blank=True, default='')
+    designation = models.CharField(max_length=128, blank=True, default='')
+    grade = models.CharField(max_length=128, blank=True, default='')
+    nationality_group = models.CharField(max_length=64, blank=True, default='')
+
+    joining_date = models.DateField(null=True, blank=True)
+    leaving_date = models.DateField(null=True, blank=True)
+
+    # Fixed earnings (monthly defaults)
+    basic = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    housing = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    transport = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    home_leave = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    default_payment_mode = models.CharField(
+        max_length=32,
+        choices=_choices_from(catalog.PAYMENT_MODES),
+        default=catalog.DEFAULT_PAYMENT_MODE,
+    )
+
+    is_active = models.BooleanField(default=True, db_index=True)
+    effective_from = models.DateField(null=True, blank=True)
+    effective_to = models.DateField(null=True, blank=True)
+
+    notes = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name='payroll_employees_created',
+    )
+
+    class Meta:
+        db_table = 'payroll_engine_employee'
+        verbose_name = 'Payroll Employee'
+        ordering = ('full_name',)
+        indexes = [
+            models.Index(fields=['department', 'is_active']),
+            models.Index(fields=['is_active', 'employee_no']),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.employee_no} — {self.full_name}'
+
+    @property
+    def default_gross(self) -> Decimal:
+        return (self.basic + self.housing + self.transport + self.home_leave)
+
+
+# ════════════════════════════════════════════════════════════════════
+# PayrollRun (one per month)
+# ════════════════════════════════════════════════════════════════════
+class PayrollRun(models.Model):
+    """One PayrollRun per (year, month). Aggregates Payslip rows."""
+    year = models.PositiveSmallIntegerField(db_index=True)
+    month = models.PositiveSmallIntegerField(db_index=True)
+    cycle_code = models.CharField(max_length=10, db_index=True)  # 'YYYY-MM'
+
+    status = models.CharField(
+        max_length=32,
+        choices=_choices_from(catalog.WORKFLOW_STATUSES),
+        default=catalog.Status.DRAFT,
+        db_index=True,
+    )
+
+    # Aggregated totals (denormalised for fast dashboards)
+    employee_count = models.PositiveIntegerField(default=0)
+    total_gross = models.DecimalField(max_digits=14, decimal_places=2, default=ZERO)
+    total_deductions = models.DecimalField(max_digits=14, decimal_places=2, default=ZERO)
+    total_net = models.DecimalField(max_digits=14, decimal_places=2, default=ZERO)
+
+    # Timestamps for each transition
+    generated_at = models.DateTimeField(null=True, blank=True)
+    hr_approved_at = models.DateTimeField(null=True, blank=True)
+    finance_approved_at = models.DateTimeField(null=True, blank=True)
+    released_at = models.DateTimeField(null=True, blank=True)
+
+    hr_approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='payroll_runs_hr_approved',
+    )
+    finance_approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='payroll_runs_finance_approved',
+    )
+    released_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='payroll_runs_released',
+    )
+
+    notes = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='payroll_runs_created',
+    )
+
+    class Meta:
+        db_table = 'payroll_engine_run'
+        verbose_name = 'Payroll Run'
+        ordering = ('-year', '-month')
+        constraints = [
+            models.UniqueConstraint(fields=['year', 'month'], name='uq_payroll_run_year_month'),
+        ]
+
+    def __str__(self) -> str:
+        return f'PayrollRun {self.cycle_code} [{self.status}]'
+
+    def save(self, *args, **kwargs):
+        if not self.cycle_code:
+            self.cycle_code = f'{self.year:04d}-{self.month:02d}'
+        super().save(*args, **kwargs)
+
+    @property
+    def is_editable(self) -> bool:
+        return self.status == catalog.Status.DRAFT
+
+    @property
+    def is_terminal(self) -> bool:
+        return catalog.is_terminal(self.status)
+
+
+# ════════════════════════════════════════════════════════════════════
+# Payslip (one per run × employee)
+# ════════════════════════════════════════════════════════════════════
+class Payslip(models.Model):
+    run = models.ForeignKey(
+        PayrollRun, on_delete=models.CASCADE, related_name='payslips',
+    )
+    employee = models.ForeignKey(
+        PayrollEmployee, on_delete=models.PROTECT, related_name='payslips',
+    )
+
+    # Fixed earnings (4 standard columns)
+    basic = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    housing = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    transport = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    home_leave = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    # Aggregates (recomputed on save / by calculator)
+    other_earnings = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    gross_earnings = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    total_deductions = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+    net_payable = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    payment_mode = models.CharField(
+        max_length=32,
+        choices=_choices_from(catalog.PAYMENT_MODES),
+        default=catalog.DEFAULT_PAYMENT_MODE,
+    )
+
+    # Snapshot fields (preserve employee state at run time)
+    snapshot_full_name = models.CharField(max_length=255, blank=True, default='')
+    snapshot_department = models.CharField(max_length=128, blank=True, default='')
+    snapshot_designation = models.CharField(max_length=128, blank=True, default='')
+    snapshot_iban = models.CharField(max_length=64, blank=True, default='')
+    snapshot_joining_date = models.DateField(null=True, blank=True)
+
+    status = models.CharField(
+        max_length=32,
+        choices=_choices_from(catalog.WORKFLOW_STATUSES),
+        default=catalog.Status.DRAFT,
+        db_index=True,
+    )
+
+    notes = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'payroll_engine_payslip'
+        verbose_name = 'Payslip'
+        ordering = ('snapshot_full_name',)
+        constraints = [
+            models.UniqueConstraint(fields=['run', 'employee'], name='uq_payslip_run_employee'),
+        ]
+        indexes = [
+            models.Index(fields=['run', 'status']),
+        ]
+
+    def __str__(self) -> str:
+        return f'Payslip {self.run.cycle_code} — {self.snapshot_full_name}'
+
+
+# ════════════════════════════════════════════════════════════════════
+# PayslipLineItem (free-form earning / deduction rows)
+# ════════════════════════════════════════════════════════════════════
+class PayslipLineItem(models.Model):
+    payslip = models.ForeignKey(
+        Payslip, on_delete=models.CASCADE, related_name='line_items',
+    )
+
+    kind = models.CharField(
+        max_length=16,
+        choices=_choices_from(catalog.LINE_ITEM_KINDS),
+        db_index=True,
+    )
+    component_code = models.CharField(max_length=64, db_index=True)
+    label = models.CharField(max_length=128)
+    description = models.TextField(blank=True, default='')
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    source = models.CharField(
+        max_length=16,
+        choices=_choices_from(catalog.LINE_ITEM_SOURCES),
+        default=catalog.LineItemSource.MANUAL,
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='payroll_line_items_created',
+    )
+
+    class Meta:
+        db_table = 'payroll_engine_line_item'
+        verbose_name = 'Payslip Line Item'
+        ordering = ('kind', 'component_code')
+        indexes = [
+            models.Index(fields=['payslip', 'kind']),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.kind}:{self.component_code} {self.amount}'
+
+
+# ════════════════════════════════════════════════════════════════════
+# PayrollAdjustment (pre-staged for an upcoming run)
+# ════════════════════════════════════════════════════════════════════
+class PayrollAdjustment(models.Model):
+    """Pending earning/deduction queued for a future PayrollRun.
+    Materialised into PayslipLineItem by run_generator.
+    """
+    employee = models.ForeignKey(
+        PayrollEmployee, on_delete=models.CASCADE, related_name='adjustments',
+    )
+    target_year = models.PositiveSmallIntegerField(db_index=True)
+    target_month = models.PositiveSmallIntegerField(db_index=True)
+
+    kind = models.CharField(
+        max_length=16,
+        choices=_choices_from(catalog.LINE_ITEM_KINDS),
+    )
+    component_code = models.CharField(max_length=64)
+    label = models.CharField(max_length=128)
+    description = models.TextField(blank=True, default='')
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)
+
+    status = models.CharField(
+        max_length=16,
+        choices=_choices_from(catalog.ADJUSTMENT_STATUSES),
+        default=catalog.AdjustmentStatus.PENDING,
+        db_index=True,
+    )
+    applied_to = models.ForeignKey(
+        Payslip, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='applied_adjustments',
+    )
+    applied_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='payroll_adjustments_created',
+    )
+
+    class Meta:
+        db_table = 'payroll_engine_adjustment'
+        verbose_name = 'Payroll Adjustment'
+        ordering = ('-target_year', '-target_month', 'employee')
+        indexes = [
+            models.Index(fields=['target_year', 'target_month', 'status']),
+            models.Index(fields=['employee', 'status']),
+        ]
+
+    def __str__(self) -> str:
+        return f'Adj {self.employee.employee_no} {self.target_year}-{self.target_month:02d} {self.kind} {self.amount}'
+
+
+# ════════════════════════════════════════════════════════════════════
+# WorkflowLog (immutable audit trail)
+# ════════════════════════════════════════════════════════════════════
+class PayrollWorkflowLog(models.Model):
+    run = models.ForeignKey(
+        PayrollRun, on_delete=models.CASCADE, related_name='workflow_logs',
+    )
+    from_status = models.CharField(max_length=32, blank=True, default='')
+    to_status = models.CharField(max_length=32)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='payroll_engine_workflow_actions',
+    )
+    note = models.TextField(blank=True, default='')
+    at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        db_table = 'payroll_engine_workflow_log'
+        verbose_name = 'Payroll Workflow Log'
+        ordering = ('-at',)
+
+    def __str__(self) -> str:
+        return f'{self.run.cycle_code} {self.from_status}→{self.to_status} @ {self.at:%Y-%m-%d %H:%M}'

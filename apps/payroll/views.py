@@ -31,7 +31,6 @@ from .models import (
     PayrollAuditAlert,
     ProjectCostAllocation,
     AIInsightSnapshot,
-    ChatbotMessage,
     AlertStatus,
     EmployeeLeaveRecord,
     EmployeeLeaveMonthly,
@@ -54,7 +53,6 @@ from .serializers import (
     PayrollAuditAlertSerializer,
     ProjectCostAllocationSerializer,
     AIInsightSnapshotSerializer,
-    ChatbotMessageSerializer,
     EmployeeLeaveRecordSerializer,
     EmployeeLeaveRecordListSerializer,
     LeaveTypeSerializer,
@@ -357,27 +355,6 @@ class AIInsightSnapshotViewSet(viewsets.ModelViewSet):
     def clear_expired(self, request):
         deleted, _ = AIInsightSnapshot.objects.filter(expires_at__lt=timezone.now()).delete()
         return Response({'deleted': deleted})
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. ChatbotMessage
-# ─────────────────────────────────────────────────────────────────────────────
-
-class ChatbotMessageViewSet(viewsets.ModelViewSet):
-    queryset           = ChatbotMessage.objects.select_related('user').all()
-    serializer_class   = ChatbotMessageSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        # Users can only see their own messages
-        qs = super().get_queryset().filter(user=self.request.user)
-        session_id = self.request.query_params.get('session_id')
-        if session_id:
-            qs = qs.filter(session_id=session_id)
-        return qs
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
