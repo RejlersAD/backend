@@ -162,3 +162,7 @@ _sample.xlsx
 eq_sample.pdf
 eq_test.pdf
 
+
+# Local RBAC audit scratch + preview CSVs (contain employee PII)
+_audit_rbac_current_state.py
+role_alignment_preview_*.csv
