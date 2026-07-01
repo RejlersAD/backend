@@ -10,17 +10,48 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveConstraint(
-            model_name='dailyattendancesummary',
-            name='ts_daily_sum_unique_code_date',
+        # Conditional constraint / index drops \u2014 safe when not present in production.
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.RemoveConstraint(
+                    model_name='dailyattendancesummary',
+                    name='ts_daily_sum_unique_code_date',
+                ),
+            ],
+            database_operations=[
+                migrations.RunSQL(
+                    sql='ALTER TABLE timesheet_dailyattendancesummary DROP CONSTRAINT IF EXISTS ts_daily_sum_unique_code_date;',
+                    reverse_sql=migrations.RunSQL.noop,
+                ),
+            ],
         ),
-        migrations.RemoveIndex(
-            model_name='timesheetevent',
-            name='ts_event_emp_name_idx',
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.RemoveIndex(
+                    model_name='timesheetevent',
+                    name='ts_event_emp_name_idx',
+                ),
+            ],
+            database_operations=[
+                migrations.RunSQL(
+                    sql='DROP INDEX IF EXISTS ts_event_emp_name_idx;',
+                    reverse_sql=migrations.RunSQL.noop,
+                ),
+            ],
         ),
-        migrations.RemoveIndex(
-            model_name='timesheetevent',
-            name='ts_event_emp_email_idx',
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.RemoveIndex(
+                    model_name='timesheetevent',
+                    name='ts_event_emp_email_idx',
+                ),
+            ],
+            database_operations=[
+                migrations.RunSQL(
+                    sql='DROP INDEX IF EXISTS ts_event_emp_email_idx;',
+                    reverse_sql=migrations.RunSQL.noop,
+                ),
+            ],
         ),
         migrations.AlterField(
             model_name='dailyattendancesummary',

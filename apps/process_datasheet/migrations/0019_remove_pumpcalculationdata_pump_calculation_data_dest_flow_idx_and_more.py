@@ -78,9 +78,36 @@ class Migration(migrations.Migration):
 
         # ── Field operations: unchanged (standard Django operations) ──
 
-        migrations.RemoveField(
-            model_name='pumpcalculationdata',
-            name='site_utility',
+        # Conditional column drops \u2014 safe if column already removed in production.
+        # SeparateDatabaseAndState keeps Django's model state in sync while making
+        # the actual SQL idempotent via DROP COLUMN IF EXISTS.
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.RemoveField(
+                    model_name='pumpcalculationdata',
+                    name='material_design',
+                ),
+            ],
+            database_operations=[
+                migrations.RunSQL(
+                    sql='ALTER TABLE pump_calculation_data DROP COLUMN IF EXISTS material_design;',
+                    reverse_sql=migrations.RunSQL.noop,
+                ),
+            ],
+        ),
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.RemoveField(
+                    model_name='pumpcalculationdata',
+                    name='site_utility',
+                ),
+            ],
+            database_operations=[
+                migrations.RunSQL(
+                    sql='ALTER TABLE pump_calculation_data DROP COLUMN IF EXISTS site_utility;',
+                    reverse_sql=migrations.RunSQL.noop,
+                ),
+            ],
         ),
         migrations.AlterField(
             model_name='pumpcalculationdata',
