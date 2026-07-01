@@ -24,6 +24,7 @@ MODULES_LAST_USED_DAYS = 30       # Days to look back for last-used module stats
 USAGE_CHART_DAYS = 30             # Days for usage sparkline
 TEAM_ACTIVE_HOURS = 8             # Hours window for "active today" team count
 PENDING_ACTIONS_LIMIT = 10        # Max pending actions to return
+APPROVAL_CATEGORY_NAME = 'APPROVAL'   # Notification category name for approval requests
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -89,7 +90,12 @@ def _get_notifications_summary(user):
         from apps.notifications.models import Notification
         unread_qs = Notification.objects.filter(recipient=user, is_read=False)
         unread_count = unread_qs.count()
-        recent = Notification.objects.filter(recipient=user).order_by('-created_at')[:NOTIFICATION_PREVIEW_LIMIT]
+        recent = (
+            Notification.objects
+            .filter(recipient=user)
+            .select_related('category')
+            .order_by('-created_at')[:NOTIFICATION_PREVIEW_LIMIT]
+        )
         return {
             'unread_count': unread_count,
             'recent': [
@@ -98,7 +104,7 @@ def _get_notifications_summary(user):
                     'title': n.title,
                     'message': n.message[:120],
                     'priority': n.priority,
-                    'category': n.category,
+                    'category': n.category.name if n.category_id else None,
                     'is_read': n.is_read,
                     'created_at': n.created_at.isoformat(),
                 }
@@ -198,7 +204,7 @@ def _get_pending_actions(user):
         approvals = Notification.objects.filter(
             recipient=user,
             is_read=False,
-            category='APPROVAL',
+            category__name=APPROVAL_CATEGORY_NAME,
         ).order_by('-created_at')[:PENDING_ACTIONS_LIMIT]
         for n in approvals:
             actions.append({
