@@ -158,6 +158,7 @@ INSTALLED_APPS = [
     'apps.electrical_datasheet',  # Electrical Datasheet - Transformer & Switchgear Technical Data Sheets
     'apps.usage_tracking',  # Usage Tracking & Metering - Internal Analytics Dashboard
     'apps.wrench_integration',  # Wrench Project Platform Integration
+    'apps.data_mining',  # Data Mining Platform - AI-Powered Data Integration & Transformation (Tableau Prep-style)
     'apps.pid_verification',   # P&ID Quality Checker — deterministic rule engine
     'apps.sld_verification',   # SLD Quality Checker — electrical single line diagram verification
     'apps.pfd_quality',          # PFD Quality Checker — deterministic rule engine

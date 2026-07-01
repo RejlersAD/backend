@@ -189,6 +189,11 @@ if is_app_installed('apps.wrench_integration'):
     urlpatterns.append(path('api/v1/wrench/', include('apps.wrench_integration.urls')))
     print("[URL] ✅ Wrench Integration URLs registered")
 
+# Data Mining Platform — AI-powered data integration with Wrench
+if is_app_installed('apps.data_mining'):
+    urlpatterns.append(path('api/v1/data-mining/', include('apps.data_mining.urls')))
+    print("[URL] ✅ Data Mining Platform URLs registered")
+
 # P&ID Verification — deterministic quality checker
 if is_app_installed('apps.pid_verification'):
     urlpatterns.append(path('api/v1/pid-verification/', include('apps.pid_verification.urls')))
