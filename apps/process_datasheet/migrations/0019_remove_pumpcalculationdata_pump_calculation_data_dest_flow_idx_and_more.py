@@ -7,6 +7,12 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
 
+    # Non-atomic: the NULL-backfill UPDATE queues PostgreSQL AFTER-triggers that
+    # only fire at commit. A subsequent ALTER TABLE in the same transaction
+    # raises ObjectInUse ("pending trigger events"). Committing per operation
+    # avoids that while keeping each individual op transactional.
+    atomic = False
+
     dependencies = [
         ('process_datasheet', '0018_pump_hydraulic_snapshot'),
     ]
