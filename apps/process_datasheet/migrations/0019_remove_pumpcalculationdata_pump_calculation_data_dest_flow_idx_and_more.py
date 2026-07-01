@@ -109,6 +109,39 @@ class Migration(migrations.Migration):
                 ),
             ],
         ),
+
+        # ── Backfill NULLs to '' on all CharField targets that will become NOT NULL ──
+        # AlterField on CharField(blank=True) without null=True implies SET NOT NULL.
+        # Production may hold NULL rows created before this migration; backfill first.
+        # Uses information_schema check so it is safe if any column is absent.
+        migrations.RunSQL(
+            sql=r"""
+                DO $$
+                DECLARE
+                    col text;
+                    cols text[] := ARRAY[
+                        'casing', 'company_name', 'driver_type', 'impeller',
+                        'liquid_type', 'manufacturer', 'mechanical_seal', 'model',
+                        'shaft', 'site', 'unit'
+                    ];
+                BEGIN
+                    FOREACH col IN ARRAY cols LOOP
+                        IF EXISTS (
+                            SELECT 1 FROM information_schema.columns
+                            WHERE table_name = 'pump_calculation_data'
+                              AND column_name = col
+                        ) THEN
+                            EXECUTE format(
+                                'UPDATE pump_calculation_data SET %I = %L WHERE %I IS NULL',
+                                col, '', col
+                            );
+                        END IF;
+                    END LOOP;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
+        ),
+
         migrations.AlterField(
             model_name='pumpcalculationdata',
             name='bearings',
