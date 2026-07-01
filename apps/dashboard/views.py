@@ -25,7 +25,62 @@ USAGE_CHART_DAYS = 30             # Days for usage sparkline
 TEAM_ACTIVE_HOURS = 8             # Hours window for "active today" team count
 PENDING_ACTIONS_LIMIT = 10        # Max pending actions to return
 APPROVAL_CATEGORY_NAME = 'APPROVAL'   # Notification category name for approval requests
+
+# ─── Persona detection (drives frontend widget selection) ────────────────────
+# Departments (case-insensitive substring match) → persona code.
+# Add new personas here and mirror them in frontend/src/config/personalDashboardPersona.config.js
+PERSONA_DEPARTMENT_MAP = [
+    ('project management',  'project_control'),
+    ('project controls',    'project_control'),
+    ('planning',            'project_control'),
+    ('cost control',        'project_control'),
+    ('engineering',         'engineer'),
+    ('electrical',          'engineer'),
+    ('instrument',          'engineer'),
+    ('mechanical',          'engineer'),
+    ('piping',              'engineer'),
+    ('process',             'engineer'),
+    ('civil',               'engineer'),
+    ('procurement',         'procurement'),
+    ('finance',             'finance'),
+    ('accounts',            'finance'),
+    ('quality',             'qhse'),
+    ('qhse',                'qhse'),
+    ('hse',                 'qhse'),
+    ('safety',              'qhse'),
+    ('hr',                  'hr'),
+    ('human resource',      'hr'),
+]
+DEFAULT_PERSONA = 'default'
+
+# Job-title fallback if department doesn't match
+PERSONA_JOB_TITLE_MAP = [
+    ('project control',     'project_control'),
+    ('planner',             'project_control'),
+    ('cost engineer',       'project_control'),
+    ('scheduler',           'project_control'),
+]
+
+# Project-control bundle limits (soft-coded)
+PC_PROJECT_LIMIT = 12
+PC_MILESTONE_LIMIT = 8
+PC_MILESTONE_WINDOW_DAYS = 60
+PC_TASK_LIMIT = 8
+PC_CHANGE_LIMIT = 6
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _detect_persona(department, job_title):
+    """Match department / job_title to a persona code. Case-insensitive substring match."""
+    dep = (department or '').lower().strip()
+    for keyword, persona in PERSONA_DEPARTMENT_MAP:
+        if keyword in dep:
+            return persona
+    jt = (job_title or '').lower().strip()
+    for keyword, persona in PERSONA_JOB_TITLE_MAP:
+        if keyword in jt:
+            return persona
+    return DEFAULT_PERSONA
 
 
 def _get_primary_role_code(user):
@@ -344,12 +399,15 @@ class PersonalDashboardView(APIView):
             department = ''
             job_title = ''
 
+        persona = _detect_persona(department, job_title)
+
         payload = {
             'user_context': {
                 'id': user.id,
                 'name': user.get_full_name() or user.username,
                 'email': user.email,
                 'role_code': role_code,
+                'persona': persona,
                 'department': department,
                 'job_title': job_title,
                 'avatar_url': avatar_url,
@@ -402,3 +460,257 @@ class PersonalInsightsView(APIView):
             data = []
 
         return Response({'insights': data, 'count': len(data)})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Project Control persona bundle
+# ─────────────────────────────────────────────────────────────────────────────
+def _project_health(project, snapshot):
+    """Compute health traffic light from CPI/SPI + schedule progress vs elapsed."""
+    # CPI/SPI take precedence when available (1.0 = on target)
+    if snapshot and snapshot.cpi is not None and snapshot.spi is not None:
+        worst = min(snapshot.cpi, snapshot.spi)
+        if worst >= 0.95:
+            return 'green'
+        if worst >= 0.85:
+            return 'amber'
+        return 'red'
+    # Fallback: compare progress to elapsed time
+    if project.start_date and project.end_date and project.progress is not None:
+        total = (project.end_date - project.start_date).days or 1
+        elapsed = (timezone.now().date() - project.start_date).days
+        elapsed_pct = max(0, min(100, (elapsed / total) * 100))
+        gap = (project.progress or 0) - elapsed_pct
+        if gap >= -5:
+            return 'green'
+        if gap >= -15:
+            return 'amber'
+        return 'red'
+    return 'grey'
+
+
+def _days_between(d1, d2):
+    if not d1 or not d2:
+        return None
+    return (d1 - d2).days
+
+
+def _serialise_project(project, latest_snapshot):
+    today = timezone.now().date()
+    budget = float(project.budget or 0)
+    spent = float(project.spent or 0)
+    contract = float(project.contract_value or 0)
+    return {
+        'id':               project.id,
+        'code':             project.code,
+        'name':             project.name,
+        'status':           project.status,
+        'priority':         project.priority,
+        'progress':         project.progress or 0,
+        'client_name':      project.client_name or '',
+        'start_date':       project.start_date.isoformat() if project.start_date else None,
+        'end_date':         project.end_date.isoformat() if project.end_date else None,
+        'days_remaining':   _days_between(project.end_date, today) if project.end_date else None,
+        'is_overdue':       project.is_overdue,
+        'budget':           budget,
+        'spent':            spent,
+        'contract_value':   contract,
+        'currency':         project.currency or 'AED',
+        'budget_utilisation': round(project.budget_utilization, 1) if budget else 0,
+        'cpi':              round(latest_snapshot.cpi, 2) if latest_snapshot and latest_snapshot.cpi is not None else None,
+        'spi':              round(latest_snapshot.spi, 2) if latest_snapshot and latest_snapshot.spi is not None else None,
+        'eac':              float(latest_snapshot.eac) if latest_snapshot and latest_snapshot.eac is not None else None,
+        'health':           _project_health(project, latest_snapshot),
+    }
+
+
+def _get_user_projects(user):
+    """Projects where user is owner OR team member (active)."""
+    try:
+        from apps.core.project_models import Project
+        from django.db.models import Q
+        qs = (
+            Project.objects
+            .filter(is_deleted=False)
+            .filter(Q(owner=user) | Q(memberships__user=user, memberships__is_active=True))
+            .distinct()
+            .order_by('-updated_at')[:PC_PROJECT_LIMIT]
+        )
+        return list(qs)
+    except Exception as e:
+        logger.warning('project fetch error: %s', e)
+        return []
+
+
+def _get_latest_snapshots(projects):
+    """Return dict {project_id: latest CostSnapshot} for the given projects."""
+    if not projects:
+        return {}
+    try:
+        from apps.project_control.models import CostSnapshot
+        result = {}
+        for snap in (
+            CostSnapshot.objects
+            .filter(project__in=projects, is_deleted=False)
+            .order_by('project_id', '-period_end')
+        ):
+            result.setdefault(snap.project_id, snap)
+        return result
+    except Exception as e:
+        logger.warning('cost snapshot fetch error: %s', e)
+        return {}
+
+
+def _get_upcoming_milestones(projects):
+    """Upcoming (not completed) milestones for user's projects."""
+    if not projects:
+        return []
+    try:
+        from apps.core.project_models import ProjectMilestone
+        today = timezone.now().date()
+        horizon = today + timedelta(days=PC_MILESTONE_WINDOW_DAYS)
+        qs = (
+            ProjectMilestone.objects
+            .filter(
+                project__in=projects,
+                is_completed=False,
+                is_deleted=False,
+                target_date__gte=today - timedelta(days=7),  # include just-overdue
+                target_date__lte=horizon,
+            )
+            .select_related('project')
+            .order_by('target_date')[:PC_MILESTONE_LIMIT]
+        )
+        return [
+            {
+                'id':            m.id,
+                'name':          m.name,
+                'project_code':  m.project.code,
+                'project_name':  m.project.name,
+                'target_date':   m.target_date.isoformat(),
+                'days_out':      (m.target_date - today).days,
+                'is_overdue':    m.target_date < today,
+            }
+            for m in qs
+        ]
+    except Exception as e:
+        logger.warning('milestone fetch error: %s', e)
+        return []
+
+
+def _get_my_tasks(user):
+    """Tasks assigned to this user (not completed), ordered by due date."""
+    try:
+        from apps.core.project_models import ProjectTask
+        today = timezone.now().date()
+        qs = (
+            ProjectTask.objects
+            .filter(assigned_to=user, is_deleted=False)
+            .exclude(status='completed')
+            .select_related('project')
+            .order_by('due_date', '-created_at')[:PC_TASK_LIMIT]
+        )
+        return [
+            {
+                'id':           t.id,
+                'title':        t.title,
+                'project_code': t.project.code,
+                'status':       t.status,
+                'priority':     t.priority,
+                'due_date':     t.due_date.isoformat() if t.due_date else None,
+                'days_out':     (t.due_date - today).days if t.due_date else None,
+                'is_overdue':   bool(t.due_date and t.due_date < today and t.status != 'completed'),
+            }
+            for t in qs
+        ]
+    except Exception as e:
+        logger.warning('task fetch error: %s', e)
+        return []
+
+
+def _get_recent_changes(projects):
+    if not projects:
+        return []
+    try:
+        from apps.project_control.models import ChangeEvent
+        qs = (
+            ChangeEvent.objects
+            .filter(project__in=projects, is_deleted=False)
+            .select_related('project')
+            .order_by('-detected_at')[:PC_CHANGE_LIMIT]
+        )
+        return [
+            {
+                'id':            c.id,
+                'summary':       c.summary,
+                'severity':      c.severity,
+                'status':        c.status,
+                'project_code':  c.project.code,
+                'delta_amount':  float(c.delta_amount) if c.delta_amount is not None else None,
+                'currency':      c.delta_currency,
+                'detected_at':   c.detected_at.isoformat(),
+            }
+            for c in qs
+        ]
+    except Exception as e:
+        logger.warning('change event fetch error: %s', e)
+        return []
+
+
+def _portfolio_summary(projects_data):
+    """Aggregate portfolio KPIs across the user's projects."""
+    total_budget = sum(p['budget'] for p in projects_data)
+    total_spent = sum(p['spent'] for p in projects_data)
+    total_contract = sum(p['contract_value'] for p in projects_data)
+
+    cpis = [p['cpi'] for p in projects_data if p['cpi'] is not None]
+    spis = [p['spi'] for p in projects_data if p['spi'] is not None]
+
+    health_counts = {'green': 0, 'amber': 0, 'red': 0, 'grey': 0}
+    for p in projects_data:
+        health_counts[p['health']] = health_counts.get(p['health'], 0) + 1
+
+    active = sum(1 for p in projects_data if p['status'] == 'active')
+    at_risk = health_counts['red'] + health_counts['amber']
+    overdue = sum(1 for p in projects_data if p['is_overdue'])
+
+    return {
+        'project_count':    len(projects_data),
+        'active_count':     active,
+        'at_risk_count':    at_risk,
+        'overdue_count':    overdue,
+        'health_counts':    health_counts,
+        'total_budget':     round(total_budget, 2),
+        'total_spent':      round(total_spent, 2),
+        'total_contract':   round(total_contract, 2),
+        'budget_utilisation': round((total_spent / total_budget) * 100, 1) if total_budget else 0,
+        'avg_cpi':          round(sum(cpis) / len(cpis), 2) if cpis else None,
+        'avg_spi':          round(sum(spis) / len(spis), 2) if spis else None,
+    }
+
+
+class ProjectControlBundleView(APIView):
+    """
+    GET /api/v1/dashboard/personal/project-control/
+    Returns project-portfolio bundle for the Project Control Engineer persona.
+    Any authenticated user may call this; the bundle is filtered to the user's projects.
+    Missing tables / apps → empty bundle (no error).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        projects = _get_user_projects(user)
+        snapshots = _get_latest_snapshots(projects) if projects else {}
+        projects_data = [_serialise_project(p, snapshots.get(p.id)) for p in projects]
+
+        payload = {
+            'portfolio':          _portfolio_summary(projects_data),
+            'projects':           projects_data,
+            'upcoming_milestones': _get_upcoming_milestones(projects),
+            'my_tasks':           _get_my_tasks(user),
+            'recent_changes':     _get_recent_changes(projects),
+            'generated_at':       timezone.now().isoformat(),
+        }
+        return Response(payload)
