@@ -10,14 +10,24 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameIndex(
-            model_name='customerinvoice',
-            new_name='invoice_tra_account_55b104_idx',
-            old_name='invoice_tra_account_dab1bb_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'invoice_tra_account_dab1bb_idx') THEN
+                        ALTER INDEX invoice_tra_account_dab1bb_idx RENAME TO invoice_tra_account_55b104_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        migrations.RenameIndex(
-            model_name='customerinvoice',
-            new_name='invoice_tra_rad_pro_21a969_idx',
-            old_name='invoice_tra_rad_pro_71f8b9_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'invoice_tra_rad_pro_71f8b9_idx') THEN
+                        ALTER INDEX invoice_tra_rad_pro_71f8b9_idx RENAME TO invoice_tra_rad_pro_21a969_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
     ]

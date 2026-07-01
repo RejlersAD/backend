@@ -10,44 +10,12 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameIndex(
-            model_name='clientsite',
-            new_name='site_visit__client__eb6632_idx',
-            old_name='site_visit__client__8d4e85_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='clientsite',
-            new_name='site_visit__is_acti_685e85_idx',
-            old_name='site_visit__is_acti_8a90f0_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='sitevisitcheckin',
-            new_name='site_visit__employe_a42731_idx',
-            old_name='site_visit__employe_7a9e3b_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='sitevisitcheckin',
-            new_name='site_visit__site_id_1bc7ef_idx',
-            old_name='site_visit__site_id_2c7f4a_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='sitevisitcheckin',
-            new_name='site_visit__check_i_b3b837_idx',
-            old_name='site_visit__check_i_5e8b9c_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='sitevisitrequest',
-            new_name='site_visit__employe_9398a8_idx',
-            old_name='site_visit__employe_9e4e8c_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='sitevisitrequest',
-            new_name='site_visit__status_ff8f81_idx',
-            old_name='site_visit__status_4c1e9f_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='sitevisitrequest',
-            new_name='site_visit__site_id_c1fcf0_idx',
-            old_name='site_visit__site_id_3f8e1d_idx',
-        ),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'site_visit__client__8d4e85_idx') THEN ALTER INDEX site_visit__client__8d4e85_idx RENAME TO site_visit__client__eb6632_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'site_visit__is_acti_8a90f0_idx') THEN ALTER INDEX site_visit__is_acti_8a90f0_idx RENAME TO site_visit__is_acti_685e85_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'site_visit__employe_7a9e3b_idx') THEN ALTER INDEX site_visit__employe_7a9e3b_idx RENAME TO site_visit__employe_a42731_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'site_visit__site_id_2c7f4a_idx') THEN ALTER INDEX site_visit__site_id_2c7f4a_idx RENAME TO site_visit__site_id_1bc7ef_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'site_visit__check_i_5e8b9c_idx') THEN ALTER INDEX site_visit__check_i_5e8b9c_idx RENAME TO site_visit__check_i_b3b837_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'site_visit__employe_9e4e8c_idx') THEN ALTER INDEX site_visit__employe_9e4e8c_idx RENAME TO site_visit__employe_9398a8_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'site_visit__status_4c1e9f_idx') THEN ALTER INDEX site_visit__status_4c1e9f_idx RENAME TO site_visit__status_ff8f81_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'site_visit__site_id_3f8e1d_idx') THEN ALTER INDEX site_visit__site_id_3f8e1d_idx RENAME TO site_visit__site_id_c1fcf0_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
     ]

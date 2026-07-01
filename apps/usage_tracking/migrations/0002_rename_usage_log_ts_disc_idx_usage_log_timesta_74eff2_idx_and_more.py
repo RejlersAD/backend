@@ -10,14 +10,24 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameIndex(
-            model_name='usagelog',
-            new_name='usage_log_timesta_74eff2_idx',
-            old_name='usage_log_ts_disc_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'usage_log_ts_disc_idx') THEN
+                        ALTER INDEX usage_log_ts_disc_idx RENAME TO usage_log_timesta_74eff2_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        migrations.RenameIndex(
-            model_name='usagelog',
-            new_name='usage_log_user_em_75b9a8_idx',
-            old_name='usage_log_email_ts_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'usage_log_email_ts_idx') THEN
+                        ALTER INDEX usage_log_email_ts_idx RENAME TO usage_log_user_em_75b9a8_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
     ]

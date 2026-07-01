@@ -10,24 +10,45 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameIndex(
-            model_name='crossrecommendationlink',
-            new_name='cross_recom_source__fedb83_idx',
-            old_name='cross_recom_source__e59eca_idx',
+        # Conditional rename: safe if index does not exist in production
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'cross_recom_source__e59eca_idx') THEN
+                        ALTER INDEX cross_recom_source__e59eca_idx RENAME TO cross_recom_source__fedb83_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        migrations.RenameIndex(
-            model_name='crossrecommendationlink',
-            new_name='cross_recom_target__4d2a9e_idx',
-            old_name='cross_recom_target__7d77b4_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'cross_recom_target__7d77b4_idx') THEN
+                        ALTER INDEX cross_recom_target__7d77b4_idx RENAME TO cross_recom_target__4d2a9e_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        migrations.RenameIndex(
-            model_name='crossrecommendationlink',
-            new_name='cross_recom_project_ed1a64_idx',
-            old_name='cross_recom_project_6d8f4f_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'cross_recom_project_6d8f4f_idx') THEN
+                        ALTER INDEX cross_recom_project_6d8f4f_idx RENAME TO cross_recom_project_ed1a64_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        migrations.RenameIndex(
-            model_name='crossrecommendationlink',
-            new_name='cross_recom_decisio_e81fbf_idx',
-            old_name='cross_recom_decisio_2e9d00_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'cross_recom_decisio_2e9d00_idx') THEN
+                        ALTER INDEX cross_recom_decisio_2e9d00_idx RENAME TO cross_recom_decisio_e81fbf_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
     ]

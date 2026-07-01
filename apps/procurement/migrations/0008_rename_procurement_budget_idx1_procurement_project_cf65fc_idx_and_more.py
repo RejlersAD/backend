@@ -10,46 +10,15 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameIndex(
-            model_name='budget',
-            new_name='procurement_project_cf65fc_idx',
-            old_name='procurement_budget_idx1',
-        ),
-        migrations.RenameIndex(
-            model_name='budget',
-            new_name='procurement_fiscal__0de50e_idx',
-            old_name='procurement_budget_idx2',
-        ),
-        migrations.RenameIndex(
-            model_name='costcenter',
-            new_name='procurement_code_f170f4_idx',
-            old_name='procurement_costcenter_idx1',
-        ),
-        migrations.RenameIndex(
-            model_name='costcenter',
-            new_name='procurement_departm_ea9b87_idx',
-            old_name='procurement_costcenter_idx2',
-        ),
-        migrations.RenameIndex(
-            model_name='project',
-            new_name='procurement_project_3cb8c1_idx',
-            old_name='procurement_project_idx1',
-        ),
-        migrations.RenameIndex(
-            model_name='project',
-            new_name='procurement_status_5adfc7_idx',
-            old_name='procurement_project_idx2',
-        ),
-        migrations.RenameIndex(
-            model_name='project',
-            new_name='procurement_client__88c69c_idx',
-            old_name='procurement_project_idx3',
-        ),
-        migrations.RenameIndex(
-            model_name='project',
-            new_name='procurement_start_d_19f6a3_idx',
-            old_name='procurement_project_idx4',
-        ),
+        # Conditional index renames — safe when index does not exist in production
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'procurement_budget_idx1') THEN ALTER INDEX procurement_budget_idx1 RENAME TO procurement_project_cf65fc_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'procurement_budget_idx2') THEN ALTER INDEX procurement_budget_idx2 RENAME TO procurement_fiscal__0de50e_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'procurement_costcenter_idx1') THEN ALTER INDEX procurement_costcenter_idx1 RENAME TO procurement_code_f170f4_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'procurement_costcenter_idx2') THEN ALTER INDEX procurement_costcenter_idx2 RENAME TO procurement_departm_ea9b87_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'procurement_project_idx1') THEN ALTER INDEX procurement_project_idx1 RENAME TO procurement_project_3cb8c1_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'procurement_project_idx2') THEN ALTER INDEX procurement_project_idx2 RENAME TO procurement_status_5adfc7_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'procurement_project_idx3') THEN ALTER INDEX procurement_project_idx3 RENAME TO procurement_client__88c69c_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'procurement_project_idx4') THEN ALTER INDEX procurement_project_idx4 RENAME TO procurement_start_d_19f6a3_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
         migrations.AddField(
             model_name='purchaseorder',
             name='payment_terms',

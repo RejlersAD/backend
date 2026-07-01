@@ -10,19 +10,34 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameIndex(
-            model_name='nonteffbatchitem',
-            new_name='non_teff_me_batch_i_2cd8f0_idx',
-            old_name='non_teff_ba_batch_i_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'non_teff_ba_batch_i_idx') THEN
+                        ALTER INDEX non_teff_ba_batch_i_idx RENAME TO non_teff_me_batch_i_2cd8f0_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        migrations.RenameIndex(
-            model_name='nonteffproject',
-            new_name='non_teff_me_status_7815c8_idx',
-            old_name='ntm_proj_status_upd_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'ntm_proj_status_upd_idx') THEN
+                        ALTER INDEX ntm_proj_status_upd_idx RENAME TO non_teff_me_status_7815c8_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        migrations.RenameIndex(
-            model_name='nonteffproject',
-            new_name='non_teff_me_created_06767f_idx',
-            old_name='ntm_proj_creator_upd_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'ntm_proj_creator_upd_idx') THEN
+                        ALTER INDEX ntm_proj_creator_upd_idx RENAME TO non_teff_me_created_06767f_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
     ]

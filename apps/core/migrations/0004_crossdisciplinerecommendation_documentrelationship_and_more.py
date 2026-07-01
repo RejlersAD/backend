@@ -125,15 +125,25 @@ class Migration(migrations.Migration):
                 'db_table': 'core_smart_project_documents',
             },
         ),
-        migrations.RenameIndex(
-            model_name='enquiry',
-            new_name='core_enquir_created_8e0bcb_idx',
-            old_name='core_enquir_created_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'core_enquir_created_idx') THEN
+                        ALTER INDEX core_enquir_created_idx RENAME TO core_enquir_created_8e0bcb_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        migrations.RenameIndex(
-            model_name='enquiry',
-            new_name='core_enquir_status_2f25e5_idx',
-            old_name='core_enquir_status_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'core_enquir_status_idx') THEN
+                        ALTER INDEX core_enquir_status_idx RENAME TO core_enquir_status_2f25e5_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
         migrations.AddField(
             model_name='crossdisciplinerecommendation',

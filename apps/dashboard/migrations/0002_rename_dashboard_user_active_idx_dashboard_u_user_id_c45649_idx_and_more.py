@@ -10,14 +10,24 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameIndex(
-            model_name='userdashboardinsight',
-            new_name='dashboard_u_user_id_c45649_idx',
-            old_name='dashboard_user_active_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'dashboard_user_active_idx') THEN
+                        ALTER INDEX dashboard_user_active_idx RENAME TO dashboard_u_user_id_c45649_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
-        migrations.RenameIndex(
-            model_name='userdashboardinsight',
-            new_name='dashboard_u_user_id_2f4ce5_idx',
-            old_name='dashboard_user_expires_idx',
+        migrations.RunSQL(
+            sql="""
+                DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'dashboard_user_expires_idx') THEN
+                        ALTER INDEX dashboard_user_expires_idx RENAME TO dashboard_u_user_id_2f4ce5_idx;
+                    END IF;
+                END $$;
+            """,
+            reverse_sql=migrations.RunSQL.noop,
         ),
     ]
