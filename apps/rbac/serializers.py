@@ -525,94 +525,107 @@ class UserProfileSerializer(serializers.ModelSerializer):
                 )
         
         # Assign roles based on modules (feature-based access)
+        # SECURITY: Direct per-user module assignment is disabled by default.
+        # When MODULE_ASSIGNMENT_CONFIG['create_custom_roles'] is False the
+        # incoming module_ids are ignored — modules must be granted via a
+        # shared Role. Flip the flag in backend/apps/rbac/rbac_config.py to
+        # re-enable the legacy per-user "custom_<email>" role hack.
         if module_ids:
-            request_user = self.context['request'].user
-            from django.db import transaction
             from apps.rbac.rbac_config import MODULE_ASSIGNMENT_CONFIG, get_custom_role_code, get_custom_role_name
-            
-            logger.info(f"[UserProfile] Processing module assignment for {email}: {len(module_ids)} modules")
-            
-            with transaction.atomic():
-                # Create a unique custom role for this user based on email
-                user_role_code = get_custom_role_code(email)
-                custom_role_name = get_custom_role_name(first_name, last_name)
-                
-                custom_role, created = Role.objects.get_or_create(
-                    code=user_role_code,
-                    defaults={
-                        'name': custom_role_name,
-                        'description': f'Custom role for {email} with selected modules',
-                        'level': MODULE_ASSIGNMENT_CONFIG['custom_role_level'],
-                        'is_active': True
-                    }
+
+            if not MODULE_ASSIGNMENT_CONFIG.get('create_custom_roles', False):
+                logger.warning(
+                    "[UserProfile] Ignoring module_ids for %s — create_custom_roles is disabled. "
+                    "Assign modules via a Role instead.",
+                    email,
                 )
-                
-                if created:
-                    logger.info(f"[UserProfile] Created custom role: {custom_role.name} ({custom_role.code})")
-                else:
-                    logger.info(f"[UserProfile] Using existing custom role: {custom_role.name} ({custom_role.code})")
-                    # Update role name if user name changed
-                    custom_role.name = custom_role_name
-                    custom_role.description = f'Custom role for {email} with selected modules'
-                    custom_role.save()
-                
-                # Assign the custom role to the user
-                user_role, user_role_created = UserRole.objects.get_or_create(
-                    user_profile=profile,
-                    role=custom_role,
-                    defaults={
-                        'assigned_by': request_user,
-                        'is_primary': not role_ids  # Primary if no other roles
-                    }
-                )
-                
-                if user_role_created:
-                    logger.info(f"[UserProfile] Assigned custom role to user (primary: {user_role.is_primary})")
-                
-                # Clear existing module assignments if configured
-                if MODULE_ASSIGNMENT_CONFIG['clear_existing_on_update']:
-                    deleted_modules = RoleModule.objects.filter(role=custom_role).count()
-                    deleted_perms = RolePermission.objects.filter(role=custom_role).count()
-                    RoleModule.objects.filter(role=custom_role).delete()
-                    RolePermission.objects.filter(role=custom_role).delete()
-                    logger.info(f"[UserProfile] Cleared {deleted_modules} existing modules and {deleted_perms} permissions from custom role")
-                
-                # Assign modules to the role
-                modules_assigned = 0
-                for module_id in module_ids:
-                    try:
-                        module = Module.objects.get(id=module_id, is_active=True)
-                        role_module, rm_created = RoleModule.objects.get_or_create(
-                            role=custom_role,
-                            module=module,
-                            defaults={'granted_by': request_user}
-                        )
-                        if rm_created:
-                            modules_assigned += 1
-                            logger.info(f"[UserProfile] Linked module '{module.code}' to role '{custom_role.name}'")
-                    except Module.DoesNotExist:
-                        logger.error(f"[UserProfile] Module with ID {module_id} not found or inactive")
-                
-                logger.info(f"[UserProfile] Total modules assigned: {modules_assigned}/{len(module_ids)}")
-                
-                # Get all permissions for the selected modules and assign them
-                if MODULE_ASSIGNMENT_CONFIG['assign_permissions_automatically']:
-                    permissions = Permission.objects.filter(
-                        module_id__in=module_ids,
-                        is_active=True
+            else:
+                request_user = self.context['request'].user
+                from django.db import transaction
+
+                logger.info(f"[UserProfile] Processing module assignment for {email}: {len(module_ids)} modules")
+
+                with transaction.atomic():
+                    # Create a unique custom role for this user based on email
+                    user_role_code = get_custom_role_code(email)
+                    custom_role_name = get_custom_role_name(first_name, last_name)
+
+                    custom_role, created = Role.objects.get_or_create(
+                        code=user_role_code,
+                        defaults={
+                            'name': custom_role_name,
+                            'description': f'Custom role for {email} with selected modules',
+                            'level': MODULE_ASSIGNMENT_CONFIG['custom_role_level'],
+                            'is_active': True
+                        }
                     )
-                    
-                    permissions_assigned = 0
-                    for permission in permissions:
-                        role_perm, rp_created = RolePermission.objects.get_or_create(
-                            role=custom_role,
-                            permission=permission,
-                            defaults={'granted_by': request_user}
+
+                    if created:
+                        logger.info(f"[UserProfile] Created custom role: {custom_role.name} ({custom_role.code})")
+                    else:
+                        logger.info(f"[UserProfile] Using existing custom role: {custom_role.name} ({custom_role.code})")
+                        # Update role name if user name changed
+                        custom_role.name = custom_role_name
+                        custom_role.description = f'Custom role for {email} with selected modules'
+                        custom_role.save()
+
+                    # Assign the custom role to the user
+                    user_role, user_role_created = UserRole.objects.get_or_create(
+                        user_profile=profile,
+                        role=custom_role,
+                        defaults={
+                            'assigned_by': request_user,
+                            'is_primary': not role_ids  # Primary if no other roles
+                        }
+                    )
+
+                    if user_role_created:
+                        logger.info(f"[UserProfile] Assigned custom role to user (primary: {user_role.is_primary})")
+
+                    # Clear existing module assignments if configured
+                    if MODULE_ASSIGNMENT_CONFIG['clear_existing_on_update']:
+                        deleted_modules = RoleModule.objects.filter(role=custom_role).count()
+                        deleted_perms = RolePermission.objects.filter(role=custom_role).count()
+                        RoleModule.objects.filter(role=custom_role).delete()
+                        RolePermission.objects.filter(role=custom_role).delete()
+                        logger.info(f"[UserProfile] Cleared {deleted_modules} existing modules and {deleted_perms} permissions from custom role")
+
+                    # Assign modules to the role
+                    modules_assigned = 0
+                    for module_id in module_ids:
+                        try:
+                            module = Module.objects.get(id=module_id, is_active=True)
+                            role_module, rm_created = RoleModule.objects.get_or_create(
+                                role=custom_role,
+                                module=module,
+                                defaults={'granted_by': request_user}
+                            )
+                            if rm_created:
+                                modules_assigned += 1
+                                logger.info(f"[UserProfile] Linked module '{module.code}' to role '{custom_role.name}'")
+                        except Module.DoesNotExist:
+                            logger.error(f"[UserProfile] Module with ID {module_id} not found or inactive")
+
+                    logger.info(f"[UserProfile] Total modules assigned: {modules_assigned}/{len(module_ids)}")
+
+                    # Get all permissions for the selected modules and assign them
+                    if MODULE_ASSIGNMENT_CONFIG['assign_permissions_automatically']:
+                        permissions = Permission.objects.filter(
+                            module_id__in=module_ids,
+                            is_active=True
                         )
-                        if rp_created:
-                            permissions_assigned += 1
-                    
-                    logger.info(f"[UserProfile] Assigned {permissions_assigned} permissions to custom role")
+
+                        permissions_assigned = 0
+                        for permission in permissions:
+                            role_perm, rp_created = RolePermission.objects.get_or_create(
+                                role=custom_role,
+                                permission=permission,
+                                defaults={'granted_by': request_user}
+                            )
+                            if rp_created:
+                                permissions_assigned += 1
+
+                        logger.info(f"[UserProfile] Assigned {permissions_assigned} permissions to custom role")
         
         # Send email verification if enabled (fail gracefully - don't block user creation)
         from django.conf import settings

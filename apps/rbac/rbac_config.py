@@ -202,9 +202,14 @@ SYSTEM_ROLES_CONFIG = [
 ]
 
 # Module Assignment Strategy
+# SECURITY: We enforce strictly role-based access. Module assignment happens
+# through Roles only; direct per-user module assignment is disabled by
+# default. Flip `create_custom_roles` to True (and the matching frontend flag
+# ALLOW_PER_USER_MODULE_ASSIGNMENT in rbacAccess.config.js) to re-enable the
+# legacy per-user "custom_<email>" role hack.
 MODULE_ASSIGNMENT_CONFIG = {
     'strategy': 'role_based',  # 'role_based' or 'direct'
-    'create_custom_roles': True,  # Create custom roles for module-based assignments
+    'create_custom_roles': False,  # Legacy behaviour; disabled for role-only access.
     'custom_role_prefix': 'custom_',
     'custom_role_level': 10,  # Level for custom roles
     'clear_existing_on_update': True,  # Clear existing module assignments when updating
