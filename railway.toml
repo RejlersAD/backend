@@ -4,5 +4,7 @@ builder = "nixpacks"
 [deploy]
 # Files are executable in git repo (100755 permissions)
 # No chmod needed - scripts can run directly
+# Run migrations automatically on every deployment to ensure DB is up to date
+startCommand = "python manage.py migrate && gunicorn backend.wsgi:application --bind 0.0.0.0:$PORT --workers 4 --timeout 120"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
