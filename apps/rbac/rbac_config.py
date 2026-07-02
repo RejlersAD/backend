@@ -20,14 +20,15 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'pfd_to_pid',             'name': 'PFD to P&ID Converter',        'icon': 'RefreshCw',   'order': 2,  'description': 'AI-powered conversion of PFD to P&ID drawings'},
     {'code': 'pfd_quality',            'name': 'PFD Quality Check',            'icon': 'CheckSquare', 'order': 3,  'description': 'AI-powered quality verification of PFD documents'},
     {'code': 'crs_documents',          'name': 'CRS Document Management',      'icon': 'FolderOpen',  'order': 4,  'description': 'Upload and manage CRS documents with AI analysis'},
-    {'code': 'designiq',               'name': 'DesignIQ',                     'icon': 'Cpu',         'order': 5,  'description': 'AI-powered design intelligence and PFD verification'},
-    {'code': 'qhse',                   'name': 'QHSE Overview',                'icon': 'Shield',      'order': 6,  'description': 'QHSE project quality overview dashboard'},
+    {'code': 'designiq',               'name': 'DesignIQ - AI Design Intelligence', 'icon': 'Cpu',    'order': 5,  'description': 'AI-powered engineering design optimization and analysis'},
+    {'code': 'data_mining',            'name': 'Data Mining Platform',         'icon': 'TableCells',  'order': 6,  'description': 'Tableau Prep-style data transformation and master file generation'},
+    {'code': 'qhse',                   'name': 'QHSE Overview',                'icon': 'Shield',      'order': 7,  'description': 'QHSE project quality overview dashboard'},
     # ── QHSE Sub-Modules (each sidebar item has its own module code) ─────
-    {'code': 'qhse_detailed',          'name': 'QHSE Project Details',         'icon': 'TableCells',  'order': 61, 'description': 'Detailed project quality view and drill-down'},
-    {'code': 'qhse_quality',           'name': 'Quality Management',           'icon': 'ChartBar',    'order': 62, 'description': 'Quality metrics, audits and non-conformance tracking'},
-    {'code': 'qhse_health_safety',     'name': 'Health & Safety',              'icon': 'Shield',      'order': 63, 'description': 'Health and safety incident management'},
-    {'code': 'qhse_environmental',     'name': 'Environmental',                'icon': 'DocumentText','order': 64, 'description': 'Environmental compliance and impact management'},
-    {'code': 'qhse_energy',            'name': 'Energy Management',            'icon': 'ChartBar',    'order': 65, 'description': 'Energy consumption tracking and efficiency reporting'},
+    {'code': 'qhse_detailed',          'name': 'QHSE Project Details',         'icon': 'TableCells',  'order': 71, 'description': 'Detailed project quality view and drill-down'},
+    {'code': 'qhse_quality',           'name': 'Quality Management',           'icon': 'ChartBar',    'order': 72, 'description': 'Quality metrics, audits and non-conformance tracking'},
+    {'code': 'qhse_health_safety',     'name': 'Health & Safety',              'icon': 'Shield',      'order': 73, 'description': 'Health and safety incident management'},
+    {'code': 'qhse_environmental',     'name': 'Environmental',                'icon': 'DocumentText','order': 74, 'description': 'Environmental compliance and impact management'},
+    {'code': 'qhse_energy',            'name': 'Energy Management',            'icon': 'ChartBar',    'order': 75, 'description': 'Energy consumption tracking and efficiency reporting'},
     # ── Discipline Datasheets ─────────────────────────────────────────────
     {'code': 'process_datasheet',      'name': 'Process Datasheet',            'icon': 'FileText',    'order': 10, 'description': 'Process equipment datasheets — MOV, SDV, pumps, pressure instruments'},
     {'code': 'electrical_datasheet',   'name': 'Electrical Datasheet',         'icon': 'Zap',         'order': 11, 'description': 'Electrical equipment and SLD-based datasheet generation'},
@@ -348,6 +349,7 @@ DEFAULT_ROLE_MODULES = [
     'crs_documents',
     'pfd_to_pid',
     'designiq',
+    'data_mining',
     # ── HR Self-Service ONLY ──────────────────────────────────────────
     'hr_self_service',
 ]
@@ -361,6 +363,7 @@ ENGINEERING_SECTION_MODULES = [
     'pid_equipment_list',
     'crs_documents',
     'designiq',
+    'data_mining',
     'qhse',
     'qhse_detailed',
     'qhse_quality',
