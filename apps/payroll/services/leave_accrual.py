@@ -37,6 +37,11 @@ from typing import Optional
 # UAE Labour Law art.75 mandates 22 days; update if policy changes.
 ANNUAL_LEAVE_DAYS: int = 22
 
+# Monthly leave accrual — derived from annual entitlement.
+# Standard accrual: ANNUAL_LEAVE_DAYS / 12 = 1.8333... days per month.
+# This is the exact value earned each full month of service.
+MONTHLY_LEAVE_ACCRUAL: float = ANNUAL_LEAVE_DAYS / 12  # 1.8333... ≈ 1.83 days
+
 # Decimal precision for leave day calculations (4 dp matches the DB field).
 ACCRUAL_PRECISION: str = '0.0001'
 

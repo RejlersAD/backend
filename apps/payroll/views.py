@@ -1403,6 +1403,132 @@ def sync_leave_data(request):
     })
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def initialize_current_month_leave(request):
+    """
+    POST /api/v1/payroll/initialize-current-month-leave/
+    
+    Initialize current month leave balance for all employees.
+    Sets the earned value for the current month to the standard monthly accrual (1.83 days)
+    for all active leave records in the current year.
+    
+    Soft-coded values:
+      - Monthly accrual = ANNUAL_LEAVE_DAYS / 12 (from leave_accrual.py)
+      - Year and month default to current date, or can be overridden via query params
+    
+    Query Parameters:
+      - year (optional): Target year (default: current year)
+      - month (optional): Target month 1-12 (default: current month)
+      - branch (optional): Filter by branch code (e.g., 'RAD')
+      - dry_run (optional): If 'true', preview changes without saving
+    
+    Returns:
+      {
+        'year': int,
+        'month': int,
+        'monthly_accrual': float,  // Standard monthly accrual amount
+        'records_processed': int,
+        'records_updated': int,
+        'records_created': int,
+        'dry_run': bool,
+        'preview': [...] (if dry_run=true)
+      }
+    
+    Requires: HR Manager role
+    """
+    from apps.payroll.models import EmployeeLeaveRecord, EmployeeLeaveMonthly
+    from apps.payroll.services.leave_accrual import (
+        MONTHLY_LEAVE_ACCRUAL, ANNUAL_LEAVE_DAYS, compute_monthly_earned, _dec
+    )
+    from django.db import transaction
+    from datetime import date
+    
+    if not _is_hr_manager(request.user):
+        raise PermissionDenied('HR Manager role required to initialize leave balances.')
+    
+    # Parse parameters (soft-coded defaults)
+    today = date.today()
+    year = int(request.data.get('year') or request.GET.get('year') or today.year)
+    month = int(request.data.get('month') or request.GET.get('month') or today.month)
+    branch = (request.data.get('branch') or request.GET.get('branch') or '').strip().upper()
+    dry_run = str(request.data.get('dry_run') or request.GET.get('dry_run') or 'false').lower() == 'true'
+    
+    # Validate month
+    if not (1 <= month <= 12):
+        return Response({'error': 'month must be between 1 and 12.'}, status=400)
+    
+    # Get all leave records for the target year
+    qs = EmployeeLeaveRecord.objects.filter(year=year)
+    if branch:
+        qs = qs.filter(branch__iexact=branch)
+    
+    records_processed = 0
+    records_updated = 0
+    records_created = 0
+    preview_data = []
+    
+    for record in qs:
+        records_processed += 1
+        
+        # Compute earned leave for this month using soft-coded formula
+        earned = compute_monthly_earned(
+            record.joining_date,
+            year,
+            month,
+            record.annual_entitlement or ANNUAL_LEAVE_DAYS,
+            reference_date=today
+        )
+        
+        # Get or create monthly record
+        monthly, was_created = EmployeeLeaveMonthly.objects.get_or_create(
+            record=record,
+            month=month,
+            defaults={
+                'earned': earned,
+                'taken': _dec(0),
+                'encashed': _dec(0),
+                'balance': _dec(0),
+            }
+        )
+        
+        if dry_run:
+            preview_data.append({
+                'employee_code': record.employee_code,
+                'employee_name': record.employee_name,
+                'earned': float(earned),
+                'action': 'create' if was_created else 'update',
+                'previous_earned': float(monthly.earned) if not was_created else 0,
+            })
+        else:
+            # Update earned value if not newly created
+            if not was_created and monthly.earned != earned:
+                monthly.earned = earned
+                monthly.save(update_fields=['earned'])
+                records_updated += 1
+            elif was_created:
+                records_created += 1
+    
+    response_data = {
+        'year': year,
+        'month': month,
+        'monthly_accrual': float(MONTHLY_LEAVE_ACCRUAL),
+        'annual_entitlement': ANNUAL_LEAVE_DAYS,
+        'records_processed': records_processed,
+        'dry_run': dry_run,
+    }
+    
+    if dry_run:
+        response_data['preview'] = preview_data
+        response_data['records_would_create'] = sum(1 for p in preview_data if p['action'] == 'create')
+        response_data['records_would_update'] = sum(1 for p in preview_data if p['action'] == 'update')
+    else:
+        response_data['records_updated'] = records_updated
+        response_data['records_created'] = records_created
+    
+    return Response(response_data)
+
+
 # =============================================================================
 # DailyWorkLog ViewSet
 # =============================================================================
