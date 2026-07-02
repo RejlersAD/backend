@@ -49,6 +49,12 @@ try:
 except Exception:
     pass
 
+try:
+    from apps.payroll.config import BEAT_SCHEDULE as _payroll_beat
+    _beat_schedule.update(_payroll_beat)
+except Exception:
+    pass
+
 if _beat_schedule:
     app.conf.beat_schedule = _beat_schedule
 

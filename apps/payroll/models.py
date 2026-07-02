@@ -413,6 +413,83 @@ class EmployeeLeaveMonthly(models.Model):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 7.1 MonthlyLeaveAccrualLog  — execution history for automated accruals
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MonthlyLeaveAccrualLog(models.Model):
+    """
+    Tracks automated monthly leave accrual executions.
+    One record per successful run — prevents duplicate processing.
+    
+    The scheduled task runs on the 1st of each month at 00:05 AM and:
+      • Creates EmployeeLeaveMonthly records with earned=1.83 days
+      • Updates existing records if needed
+      • Logs execution here to prevent re-running
+    
+    Soft-coded values from leave_accrual.py:
+      • MONTHLY_LEAVE_ACCRUAL (1.8333... days)
+      • ANNUAL_LEAVE_DAYS (22 days)
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    # Target period
+    year = models.PositiveIntegerField(help_text='Year processed (e.g., 2026)')
+    month = models.PositiveSmallIntegerField(
+        choices=MONTH_CHOICES,
+        help_text='Month processed (1=January, 12=December)'
+    )
+    
+    # Execution metadata
+    executed_at = models.DateTimeField(auto_now_add=True, help_text='Timestamp of execution')
+    triggered_by = models.CharField(
+        max_length=50,
+        default='celery_beat',
+        help_text='Source: celery_beat (auto) | manual (admin) | api (HR Manager)'
+    )
+    
+    # Results
+    records_processed = models.PositiveIntegerField(default=0, help_text='Total employee records examined')
+    records_created = models.PositiveIntegerField(default=0, help_text='New monthly records created')
+    records_updated = models.PositiveIntegerField(default=0, help_text='Existing records updated')
+    
+    # Config snapshot (for audit trail)
+    monthly_accrual_used = models.DecimalField(
+        max_digits=8, decimal_places=4, default=Decimal('1.8333'),
+        help_text='Monthly accrual value used for this run'
+    )
+    branch_filter = models.CharField(
+        max_length=10, blank=True, null=True,
+        help_text='Branch code filter (null = all branches)'
+    )
+    
+    # Status tracking
+    status = models.CharField(
+        max_length=20,
+        default='success',
+        choices=[
+            ('success', 'Success'),
+            ('partial', 'Partial Success'),
+            ('failed', 'Failed'),
+        ],
+        help_text='Execution outcome'
+    )
+    error_message = models.TextField(blank=True, help_text='Error details if status=failed')
+    
+    class Meta:
+        db_table = 'payroll_monthly_leave_accrual_log'
+        ordering = ['-executed_at']
+        indexes = [
+            models.Index(fields=['year', 'month']),
+            models.Index(fields=['executed_at']),
+        ]
+        # Prevent duplicate runs for same month (soft constraint - checked in task)
+        unique_together = ('year', 'month', 'triggered_by')
+    
+    def __str__(self):
+        return f'{MONTH_CHOICES[self.month-1][1]} {self.year} — {self.status} ({self.records_created} created)'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 8. LeaveType  — master list of leave type codes
 # ─────────────────────────────────────────────────────────────────────────────
 
