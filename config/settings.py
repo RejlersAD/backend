@@ -173,6 +173,7 @@ INSTALLED_APPS = [
     'apps.invoice_tracker',      # Invoice Tracker — Accounts Receivable register (external + internal) + Excel import + S3 attachments
     'apps.payroll',              # Payroll Intelligence Platform — validation, audit alerts, project costing, AI insights, chatbot
     'apps.payroll_engine',       # Payroll Engine — fresh monthly payroll automation (Draft → HR → Finance → Released)
+    'apps.onboarding',           # Onboarding & Offboarding — employee lifecycle management (joining, exit, equipment, documents)
     'apps.site_visits',          # Site Visit Tracking — GPS-based attendance for off-site engineers
     'apps.dashboard',             # Personal Dashboard — role-scoped data bundles + AI insights
 ]

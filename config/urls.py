@@ -150,6 +150,7 @@ urlpatterns = [
     path('api/v1/finance/', include('apps.finance.urls')),  # Finance Invoice Automation
     path('api/v1/payroll/', include('apps.payroll.urls')),  # Payroll Intelligence Platform
     path('api/v1/payroll-engine/', include('apps.payroll_engine.urls')),  # Payroll Engine — monthly automation
+    path('api/v1/onboarding/', include('apps.onboarding.urls')),  # Onboarding & Offboarding — employee lifecycle management
     path('api/v1/site-visits/', include('apps.site_visits.urls')),  # Site Visit Tracking — GPS attendance for off-site engineers
     path('api/v1/invoice-tracker/', include('apps.invoice_tracker.urls')),  # Invoice Tracker (A/R) — Excel-driven + S3 attachments
     path('api/v1/designiq/', include('apps.designiq.urls')),  # DesignIQ - AI Design Intelligence
