@@ -84,6 +84,7 @@ class MonthlyLeaveAccrualLogAdmin(admin.ModelAdmin):
     list_filter = ('status', 'triggered_by', 'year', 'month')
     search_fields = ('year', 'month')
     readonly_fields = (
+        'id',
         'year',
         'month',
         'executed_at',
@@ -92,9 +93,9 @@ class MonthlyLeaveAccrualLogAdmin(admin.ModelAdmin):
         'records_created',
         'records_updated',
         'monthly_accrual_used',
+        'branch_filter',
         'status',
         'error_message',
-        'processing_time_seconds',
     )
     ordering = ('-year', '-month', '-executed_at')
     date_hierarchy = 'executed_at'
