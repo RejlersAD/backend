@@ -7,6 +7,7 @@ from .models import (
     ChatbotMessage,
     LeaveType,
     LeaveRequest,
+    MonthlyLeaveAccrualLog,
 )
 
 
@@ -64,3 +65,44 @@ class LeaveRequestAdmin(admin.ModelAdmin):
     raw_id_fields  = ('employee', 'reviewed_by')
     date_hierarchy = 'start_date'
     readonly_fields = ('days_requested', 'created_at', 'updated_at')
+
+
+@admin.register(MonthlyLeaveAccrualLog)
+class MonthlyLeaveAccrualLogAdmin(admin.ModelAdmin):
+    """Admin interface for monthly leave accrual execution logs"""
+    list_display = (
+        'year',
+        'month',
+        'executed_at',
+        'triggered_by',
+        'records_processed',
+        'records_created',
+        'records_updated',
+        'monthly_accrual_used',
+        'status',
+    )
+    list_filter = ('status', 'triggered_by', 'year', 'month')
+    search_fields = ('year', 'month')
+    readonly_fields = (
+        'year',
+        'month',
+        'executed_at',
+        'triggered_by',
+        'records_processed',
+        'records_created',
+        'records_updated',
+        'monthly_accrual_used',
+        'status',
+        'error_message',
+        'processing_time_seconds',
+    )
+    ordering = ('-year', '-month', '-executed_at')
+    date_hierarchy = 'executed_at'
+    
+    def has_add_permission(self, request):
+        """Prevent manual creation - logs created automatically by task"""
+        return False
+    
+    def has_delete_permission(self, request, obj=None):
+        """Prevent deletion - audit trail must be preserved"""
+        return False
