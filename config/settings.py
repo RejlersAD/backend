@@ -142,6 +142,7 @@ INSTALLED_APPS = [
     'apps.users',
     'apps.api',
     'apps.rbac',
+    'apps.hr_core',  # HR Core - Unified Employee Master System (Phase 1: Parallel to existing tables)
     
     # Local apps - Features (Plugin Architecture)
     'apps.pid_analysis',

@@ -69,8 +69,11 @@ EQUIPMENT_TYPES = [
 # Document Types
 DOCUMENT_TYPES = [
     ('passport', 'Passport Copy'),
-    ('visa', 'Visa/Emirates ID'),
+    ('visa', 'Visa'),
+    ('emirates_id', 'Emirates ID'),
+    ('driving_license', 'Driving License'),
     ('degree', 'Educational Certificates'),
+    ('certificate', 'Professional Certificate'),
     ('experience', 'Experience Letters'),
     ('offer_letter', 'Signed Offer Letter'),
     ('contract', 'Employment Contract'),
@@ -79,6 +82,8 @@ DOCUMENT_TYPES = [
     ('bank_details', 'Bank Account Details'),
     ('emergency_contact', 'Emergency Contact Form'),
     ('medical', 'Medical/Insurance Forms'),
+    ('vaccination', 'Vaccination Certificate'),
+    ('police_clearance', 'Police Clearance Certificate'),
     ('resignation', 'Resignation Letter'),
     ('clearance', 'Exit Clearance Form'),
     ('other', 'Other'),
@@ -126,6 +131,13 @@ class OnboardingRecord(models.Model):
     employee_email = models.EmailField(unique=True)
     employee_id = models.CharField(max_length=100, blank=True, null=True)
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='onboarding_records')
+    
+    # Passport Photo (stored in S3)
+    photo_file_path = models.CharField(max_length=500, blank=True, null=True, help_text='S3 key for passport photo')
+    photo_url = models.URLField(max_length=1000, blank=True, null=True, help_text='Presigned S3 URL for photo')
+    photo_file_size = models.IntegerField(null=True, blank=True, help_text='Photo file size in bytes')
+    photo_mime_type = models.CharField(max_length=100, blank=True, null=True, help_text='Photo MIME type')
+    photo_original_filename = models.CharField(max_length=255, blank=True, null=True, help_text='Original photo filename')
     
     # Position Info
     position = models.CharField(max_length=255)
@@ -261,13 +273,20 @@ class Equipment(models.Model):
 class Document(models.Model):
     """
     Documents collected during onboarding or offboarding
+    Supports file uploads to AWS S3 (certificates, Emirates ID, driving license, etc.)
     """
     onboarding_record = models.ForeignKey(OnboardingRecord, on_delete=models.CASCADE, null=True, blank=True, related_name='documents')
     offboarding_record = models.ForeignKey(OffboardingRecord, on_delete=models.CASCADE, null=True, blank=True, related_name='documents')
     
     document_type = models.CharField(max_length=50, choices=DOCUMENT_TYPES)
     document_name = models.CharField(max_length=255)
-    file_path = models.CharField(max_length=500, blank=True, null=True)
+    
+    # S3 storage fields
+    file_path = models.CharField(max_length=500, blank=True, null=True, help_text="S3 key path for the uploaded file")
+    file_url = models.URLField(max_length=1000, blank=True, null=True, help_text="Presigned URL or public URL")
+    file_size = models.IntegerField(null=True, blank=True, help_text="File size in bytes")
+    file_mime_type = models.CharField(max_length=100, blank=True, null=True)
+    original_filename = models.CharField(max_length=255, blank=True, null=True)
     
     submitted = models.BooleanField(default=False)
     verified = models.BooleanField(default=False)

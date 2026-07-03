@@ -22,16 +22,19 @@ class EquipmentSerializer(serializers.ModelSerializer):
 
 
 class DocumentSerializer(serializers.ModelSerializer):
-    """Document collection tracking"""
+    """Document collection tracking with file upload support"""
     verified_by_name = serializers.CharField(source='verified_by.get_full_name', read_only=True)
+    file = serializers.FileField(write_only=True, required=False)
     
     class Meta:
         model = Document
         fields = [
-            'id', 'document_type', 'document_name', 'file_path',
+            'id', 'document_type', 'document_name', 'file_path', 'file_url',
+            'file_size', 'file_mime_type', 'original_filename',
             'submitted', 'verified', 'verified_by', 'verified_by_name', 'verified_date',
-            'notes', 'created_at', 'updated_at'
+            'notes', 'created_at', 'updated_at', 'file'
         ]
+        read_only_fields = ['file_path', 'file_url', 'file_size', 'file_mime_type', 'original_filename']
 
 
 class AccessProvisioningSerializer(serializers.ModelSerializer):
@@ -64,6 +67,7 @@ class ChecklistSerializer(serializers.ModelSerializer):
 class OnboardingRecordSerializer(serializers.ModelSerializer):
     """
     Onboarding record with nested equipment, documents, access, and checklist
+    Includes passport photo upload support
     """
     equipment = EquipmentSerializer(many=True, read_only=True)
     documents = DocumentSerializer(many=True, read_only=True)
@@ -73,8 +77,14 @@ class OnboardingRecordSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
     assigned_to_name = serializers.CharField(source='assigned_to.get_full_name', read_only=True)
     
+    # Passport photo upload
+    photo = serializers.ImageField(write_only=True, required=False, help_text='Passport size photo (JPG/PNG, max 5MB)')
+    
     days_until_joining = serializers.SerializerMethodField()
     days_since_initiated = serializers.SerializerMethodField()
+    
+    # ✅ Engineer profile from EmployeeMaster (read-only for HR visibility)
+    engineer_profile = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = OnboardingRecord
@@ -86,8 +96,11 @@ class OnboardingRecordSerializer(serializers.ModelSerializer):
             'created_by', 'created_by_name', 'assigned_to', 'assigned_to_name',
             'notes', 'created_at', 'updated_at',
             'equipment', 'documents', 'access_records', 'checklist_items',
-            'days_until_joining', 'days_since_initiated'
+            'days_until_joining', 'days_since_initiated',
+            'photo', 'photo_file_path', 'photo_url', 'photo_file_size', 'photo_mime_type', 'photo_original_filename',
+            'engineer_profile'
         ]
+        read_only_fields = ['photo_file_path', 'photo_url', 'photo_file_size', 'photo_mime_type', 'photo_original_filename']
     
     def get_days_until_joining(self, obj):
         """Calculate days until joining date"""
@@ -100,6 +113,18 @@ class OnboardingRecordSerializer(serializers.ModelSerializer):
         from datetime import date
         delta = date.today() - obj.initiated_date.date()
         return delta.days
+    
+    def get_engineer_profile(self, obj):
+        """Fetch engineer_profile from EmployeeMaster for HR visibility"""
+        if obj.user:
+            try:
+                from apps.hr_core.models import EmployeeMaster
+                employee = EmployeeMaster.objects.filter(user=obj.user).first()
+                if employee and employee.engineer_profile:
+                    return employee.engineer_profile
+            except Exception as e:
+                print(f"[WARNING] Failed to fetch engineer_profile: {str(e)}")
+        return {}
 
 
 class OnboardingRecordListSerializer(serializers.ModelSerializer):
@@ -128,7 +153,8 @@ class OnboardingRecordListSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
             'days_until_joining',
             'equipment_count', 'documents_count', 'access_count',
-            'checklist_count', 'checklist_completed_count'
+            'checklist_count', 'checklist_completed_count',
+            'photo_url', 'photo_original_filename'
         ]
     
     def get_days_until_joining(self, obj):
