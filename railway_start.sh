@@ -132,7 +132,8 @@ echo ""
 #   GUNICORN_KEEPALIVE (default: 75) - TCP keep-alive seconds
 
 # Use exec to replace shell with Gunicorn (proper signal handling)
-exec gunicorn config.wsgi:application \
+# BULLETPROOF: Use wsgi_bulletproof which ALWAYS responds (even if Django fails)
+exec gunicorn config.wsgi_bulletproof:application \
     --bind "0.0.0.0:${PORT}" \
     --workers "${GUNICORN_WORKERS:-2}" \
     --threads "${GUNICORN_THREADS:-4}" \
