@@ -36,6 +36,55 @@ ENQUIRY_CONFIG = {
     'save_to_database': True  # Future: save enquiries to database
 }
 
+# Services for which the `phone` field is not required. Password reset
+# requests originate from /forgot-password where the user typically only
+# knows their email.
+ENQUIRY_SERVICES_WITHOUT_PHONE = {'password-reset'}
+
+# Notification config — which services generate an admin notification, and
+# which notification template to use. Extend when new critical services
+# need admin attention.
+ENQUIRY_NOTIFICATION_TEMPLATE = {
+    'password-reset': 'ENQUIRY_PASSWORD_RESET_REQUEST',
+}
+
+
+def _notify_admins_of_enquiry(enquiry_obj, service, user_email, user_name):
+    """
+    Send an in-app notification to all admin users when a critical enquiry
+    (e.g. password-reset) arrives. Silent no-op for services not listed in
+    ENQUIRY_NOTIFICATION_TEMPLATE.
+    """
+    template_key = ENQUIRY_NOTIFICATION_TEMPLATE.get(service)
+    if not template_key or not enquiry_obj:
+        return
+
+    from django.contrib.auth import get_user_model
+    from apps.notifications.services import NotificationService
+
+    User = get_user_model()
+    admins = User.objects.filter(
+        is_active=True,
+    ).filter(
+        # Django admins OR RBAC admin/super_admin roles
+        # We use is_staff/is_superuser as the widest safe net; role-based
+        # filtering happens in the RBAC layer for finer control if needed.
+        Q(is_superuser=True) | Q(is_staff=True)
+    ).distinct()
+
+    NotificationService.bulk_notify(
+        recipients=admins,
+        template_key=template_key,
+        user_email=user_email,
+        user_name=user_name,
+        action_url=f'/admin/enquiries?enquiry={enquiry_obj.pk}',
+        metadata={
+            'enquiry_id': enquiry_obj.pk,
+            'service':    service,
+            'user_email': user_email,
+        },
+    )
+
 
 @api_view(['POST'])
 @permission_classes([AllowAny])  # Public endpoint - no authentication required
@@ -75,7 +124,7 @@ def submit_enquiry(request):
             errors['email'] = 'Email is required'
         elif '@' not in email or '.' not in email:
             errors['email'] = 'Invalid email format'
-        if not phone:
+        if not phone and service not in ENQUIRY_SERVICES_WITHOUT_PHONE:
             errors['phone'] = 'Phone number is required'
         if not subject:
             errors['subject'] = 'Subject is required'
@@ -109,6 +158,14 @@ def submit_enquiry(request):
                 )
             except Exception as db_err:
                 logger.error(f'Enquiry DB persist failed (continuing with email): {db_err}')
+
+        # Notify administrators via in-app notification (soft-coded per service)
+        # For password-reset requests this is critical since SMTP may be down;
+        # the notification bell alerts admins so they can action from 9.6 Enquiry.
+        try:
+            _notify_admins_of_enquiry(enquiry_obj, service, email, name)
+        except Exception as notif_err:
+            logger.error(f'Enquiry admin notification failed (continuing): {notif_err}')
 
         # Service name mapping
         service_names = {

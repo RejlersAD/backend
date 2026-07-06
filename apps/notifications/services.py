@@ -114,7 +114,20 @@ class NotificationService:
             'category': 'USER',
             'send_email': True,
             'action_label': 'Update Profile',
-        }
+        },
+
+        # Enquiry / Password Reset Templates
+        'ENQUIRY_PASSWORD_RESET_REQUEST': {
+            'title': '🔐 Password Reset Request',
+            'message': (
+                '{user_email} has requested a password reset. '
+                'Please verify identity and reset via User Management.'
+            ),
+            'priority': 'HIGH',
+            'category': 'USER',
+            'action_label': 'Open Enquiries',
+            'action_url': '/admin/enquiries',
+        },
     }
     
     @classmethod
