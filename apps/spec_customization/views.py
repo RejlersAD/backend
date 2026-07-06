@@ -603,3 +603,198 @@ def workbook_cell(request, job_id):
         },
         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Enhanced workbook operations — batch save & row-level delete
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def workbook_batch_save(request, job_id):
+    """
+    Batch save multiple cell overrides at once.
+    
+    Body (JSON):
+        {
+            "cells": [
+                {
+                    "workbook": "spec",
+                    "sheet_name": "PipingMaterialsClassData",
+                    "row_key": "cls:<uuid>:b0:0",
+                    "column_name": "MaterialGrade",
+                    "value": "A106 Gr B"
+                },
+                ...
+            ]
+        }
+    
+    Response:
+        {
+            "saved_count": 123,
+            "created": 45,
+            "updated": 78,
+            "s3_snapshot": {...} or null
+        }
+    """
+    from .workbook_storage_service import batch_save_cells
+    
+    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    cells = request.data.get('cells', [])
+    
+    if not cells or not isinstance(cells, list):
+        return Response(
+            {"error": "cells array is required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Validate each cell
+    for i, cell in enumerate(cells):
+        if not all(k in cell for k in ['workbook', 'sheet_name', 'row_key', 'column_name']):
+            return Response(
+                {"error": f"Cell at index {i} is missing required fields"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if cell['workbook'] not in _VALID_WORKBOOKS:
+            return Response(
+                {"error": f"Invalid workbook at index {i}: {cell['workbook']}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    try:
+        result = batch_save_cells(
+            job=job,
+            cells=cells,
+            user=request.user if request.user.is_authenticated else None
+        )
+        
+        return Response(result, status=status.HTTP_200_OK)
+    
+    except Exception as e:
+        logger.exception(f"[WorkbookBatchSave] Failed for job {job_id}")
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def workbook_delete_row(request, job_id):
+    """
+    Delete all cell overrides for a specific row.
+    
+    Body (JSON):
+        {
+            "workbook": "spec",
+            "sheet_name": "PipingMaterialsClassData",
+            "row_key": "cls:<uuid>:b0:0"
+        }
+    
+    Response:
+        {
+            "deleted_count": 12,
+            "row_key": "cls:<uuid>:b0:0",
+            "columns_deleted": ["MaterialGrade", "Class", ...]
+        }
+    """
+    from .workbook_storage_service import delete_row
+    
+    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    payload = request.data or {}
+    
+    workbook = (payload.get('workbook') or '').lower().strip()
+    sheet_name = (payload.get('sheet_name') or '').strip()
+    row_key = (payload.get('row_key') or '').strip()
+    
+    if workbook not in _VALID_WORKBOOKS or not sheet_name or not row_key:
+        return Response(
+            {"error": "workbook, sheet_name, and row_key are required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        result = delete_row(
+            job=job,
+            workbook=workbook,
+            sheet_name=sheet_name,
+            row_key=row_key
+        )
+        
+        return Response(result, status=status.HTTP_200_OK)
+    
+    except ValueError as e:
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    except Exception as e:
+        logger.exception(f"[WorkbookDeleteRow] Failed for job {job_id}")
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def workbook_bulk_delete_rows(request, job_id):
+    """
+    Delete multiple rows at once.
+    
+    Body (JSON):
+        {
+            "workbook": "spec",
+            "sheet_name": "PipingMaterialsClassData",
+            "row_keys": ["cls:<uuid1>:b0:0", "cls:<uuid2>:b0:0", ...]
+        }
+    
+    Response:
+        {
+            "deleted_rows": 45,
+            "deleted_cells": 234,
+            "row_keys": [...]
+        }
+    """
+    from .workbook_storage_service import bulk_delete_rows
+    
+    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    payload = request.data or {}
+    
+    workbook = (payload.get('workbook') or '').lower().strip()
+    sheet_name = (payload.get('sheet_name') or '').strip()
+    row_keys = payload.get('row_keys', [])
+    
+    if workbook not in _VALID_WORKBOOKS or not sheet_name or not row_keys:
+        return Response(
+            {"error": "workbook, sheet_name, and row_keys array are required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    if not isinstance(row_keys, list):
+        return Response(
+            {"error": "row_keys must be an array"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        result = bulk_delete_rows(
+            job=job,
+            workbook=workbook,
+            sheet_name=sheet_name,
+            row_keys=row_keys
+        )
+        
+        return Response(result, status=status.HTTP_200_OK)
+    
+    except ValueError as e:
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    except Exception as e:
+        logger.exception(f"[WorkbookBulkDeleteRows] Failed for job {job_id}")
+        return Response(
+            {"error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

@@ -1,7 +1,7 @@
 """Spec Customization — URL routing."""
 from django.urls import path
 
-from . import views, project_views
+from . import views, project_views, matching_views
 
 app_name = 'spec_customization'
 
@@ -25,7 +25,20 @@ urlpatterns = [
     path('paper-spec/jobs/<uuid:job_id>/export-cat/',  views.export_smartplant_cat,  name='job-export-cat'),
     path('paper-spec/jobs/<uuid:job_id>/workbook/',      views.workbook_preview, name='job-workbook-preview'),
     path('paper-spec/jobs/<uuid:job_id>/workbook/cell/', views.workbook_cell,    name='job-workbook-cell'),
+    path('paper-spec/jobs/<uuid:job_id>/workbook/batch-save/', views.workbook_batch_save, name='job-workbook-batch-save'),
+    path('paper-spec/jobs/<uuid:job_id>/workbook/delete-row/', views.workbook_delete_row, name='job-workbook-delete-row'),
+    path('paper-spec/jobs/<uuid:job_id>/workbook/bulk-delete/', views.workbook_bulk_delete_rows, name='job-workbook-bulk-delete'),
     path('paper-spec/classes/<uuid:class_id>/',    views.class_detail,  name='class-detail'),
+
+    # Component Matching (Match/SPEC/CAT workbooks)
+    path('matching/upload/',                                      matching_views.upload_matching_workbooks,      name='matching-upload'),
+    path('matching/sets/',                                        matching_views.list_matching_workbook_sets,    name='matching-sets'),
+    path('matching/sets/<uuid:set_id>/',                          matching_views.matching_workbook_set_detail,   name='matching-set-detail'),
+    path('matching/sets/<uuid:set_id>/activate/',                 matching_views.activate_matching_workbook_set, name='matching-set-activate'),
+    path('matching/sets/<uuid:set_id>/parse/',                    matching_views.parse_matching_workbook,        name='matching-set-parse'),
+    path('matching/sets/<uuid:set_id>/rules/',                    matching_views.list_matching_rules,            name='matching-rules'),
+    path('matching/match/',                                       matching_views.match_component_endpoint,       name='matching-match'),
+    path('matching/results/',                                     matching_views.list_matching_results,          name='matching-results'),
 
     # Config
     path('config/', views.config_view, name='config'),

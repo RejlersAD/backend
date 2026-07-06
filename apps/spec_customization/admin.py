@@ -7,6 +7,12 @@ from .models import (
     PipingClass,
     PipingClassComponent,
 )
+from .project_models import SpecProject
+from .matching_models import (
+    MatchingWorkbookSet,
+    MatchingRule,
+    ComponentMatchingResult,
+)
 
 
 @admin.register(PaperSpecDocument)
@@ -42,3 +48,53 @@ class PipingClassComponentAdmin(admin.ModelAdmin):
     list_display = ('piping_class', 'component_type', 'sub_type', 'size_from', 'size_to', 'material_standard')
     list_filter = ('component_type',)
     search_fields = ('description', 'material_standard', 'sub_type')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Matching Workbook Admin
+# ─────────────────────────────────────────────────────────────────────────────
+class MatchingRuleInline(admin.TabularInline):
+    model = MatchingRule
+    extra = 0
+    fields = ('pdf_component_name', 'catalog_component_name', 'cat_sheet_name', 'row_number')
+    readonly_fields = ('row_number', 'created_at')
+
+
+@admin.register(MatchingWorkbookSet)
+class MatchingWorkbookSetAdmin(admin.ModelAdmin):
+    list_display = ('project', 'version_label', 'is_active', 'is_parsed', 'rules_count', 'uploaded_by', 'created_at')
+    list_filter = ('is_active', 'is_parsed', 'created_at')
+    search_fields = ('project__name', 'version_label', 'match_file_name', 'spec_file_name', 'cat_file_name')
+    readonly_fields = ('created_at', 'updated_at', 'rules_count', 'spec_sheets_count', 'cat_sheets_count')
+    inlines = [MatchingRuleInline]
+    
+    fieldsets = (
+        ('Project', {
+            'fields': ('project', 'version_label', 'is_active')
+        }),
+        ('Workbook Files', {
+            'fields': ('match_file', 'match_file_name', 'spec_file', 'spec_file_name', 'cat_file', 'cat_file_name')
+        }),
+        ('Parsing Status', {
+            'fields': ('is_parsed', 'parse_error', 'rules_count', 'spec_sheets_count', 'cat_sheets_count')
+        }),
+        ('Audit', {
+            'fields': ('uploaded_by', 'created_at', 'updated_at')
+        }),
+    )
+
+
+@admin.register(MatchingRule)
+class MatchingRuleAdmin(admin.ModelAdmin):
+    list_display = ('pdf_component_name', 'catalog_component_name', 'cat_sheet_name', 'workbook_set', 'row_number')
+    list_filter = ('workbook_set', 'created_at')
+    search_fields = ('pdf_component_name', 'catalog_component_name', 'cat_sheet_name')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(ComponentMatchingResult)
+class ComponentMatchingResultAdmin(admin.ModelAdmin):
+    list_display = ('pdf_component_name', 'matched_commodity_code', 'match_score', 'match_method', 'workbook_set', 'created_at')
+    list_filter = ('match_method', 'created_at')
+    search_fields = ('pdf_component_name', 'matched_commodity_code', 'matched_description')
+    readonly_fields = ('created_at', 'result_data')
