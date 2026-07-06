@@ -618,7 +618,33 @@ FRONTEND_URL = sanitize_cors_origin(
     config('FRONTEND_URL', default='http://localhost:5173')
 ) or 'http://localhost:5173'  # For email links
 
-# WARNING CRITICAL: DO NOT CHANGE - CORS_ALLOW_ALL_ORIGINS MUST BE FALSE
+# ==============================================================================
+# RAILWAY PRODUCTION SAFETY CHECK
+# ==============================================================================
+# CRITICAL: Detect if we're on Railway production and ensure core domains are set
+IS_RAILWAY = config('RAILWAY_ENVIRONMENT', default='') != ''
+RAILWAY_ENV_NAME = config('RAILWAY_ENVIRONMENT', default='local')
+
+if IS_RAILWAY:
+    print(f"\n[RAILWAY] 🚂 Detected Railway environment: {RAILWAY_ENV_NAME}")
+    print(f"[RAILWAY] Frontend URL: {PRODUCTION_FRONTEND}")
+    print(f"[RAILWAY] Backend URL: {PRODUCTION_BACKEND}")
+    
+    # Ensure production URLs are set correctly for Railway
+    if 'radai.ae' not in PRODUCTION_FRONTEND:
+        print("[RAILWAY] ⚠️  WARNING: FRONTEND_URL does not contain radai.ae")
+        print("[RAILWAY] ⚠️  Using fallback: https://www.radai.ae")
+        PRODUCTION_FRONTEND = 'https://www.radai.ae'
+    
+    if 'railway.app' not in PRODUCTION_BACKEND:
+        print("[RAILWAY] ⚠️  WARNING: BACKEND_URL does not contain railway.app")
+        print("[RAILWAY] ⚠️  Using fallback: https://aiflowbackend-production.up.railway.app")
+        PRODUCTION_BACKEND = 'https://aiflowbackend-production.up.railway.app'
+    
+    print(f"[RAILWAY] ✅ Production URLs validated\n")
+
+# ==============================================================================
+# CORS CONFIGURATION (SOFT-CODED with Railway Safety)
 # Setting this to True will break JWT authentication with credentials
 # Railway Env Var: CORS_ALLOW_ALL_ORIGINS=False (or omit to use default)
 CORS_ALLOW_ALL_ORIGINS = safe_cast_bool(config('CORS_ALLOW_ALL_ORIGINS', default='False'), False)
@@ -727,18 +753,26 @@ else:
 CORS_ALLOW_PRIVATE_NETWORK = True
 
 print("\n" + "="*70)
-# print("[CORS] ====== CORS CONFIGURATION ======")
+print("[CORS] ====== CORS CONFIGURATION ======")
+if IS_RAILWAY:
+    print(f"[CORS] 🚂 Railway Environment: {RAILWAY_ENV_NAME}")
 print("="*70)
 print(f"[CORS] Allow All Origins: {CORS_ALLOW_ALL_ORIGINS}")
 if not CORS_ALLOW_ALL_ORIGINS:
     print(f"[CORS] Allowed Origins Count: {len(CORS_ALLOWED_ORIGINS)}")
     print(f"[CORS] Allowed Origins:")
     for origin in CORS_ALLOWED_ORIGINS:
-        print(f"  - {origin}")
+        # Highlight production domains
+        if 'radai.ae' in origin or 'railway.app' in origin:
+            print(f"  ✅ {origin}  <-- PRODUCTION")
+        else:
+            print(f"  - {origin}")
 print(f"[CORS] Allow Credentials: {CORS_ALLOW_CREDENTIALS}")
 print(f"[CORS] Preflight Max Age: {CORS_PREFLIGHT_MAX_AGE}s")
 print(f"[CORS] Frontend URL: {PRODUCTION_FRONTEND}")
 print(f"[CORS] Backend URL: {PRODUCTION_BACKEND}")
+if IS_RAILWAY:
+    print(f"[CORS] Railway Health Check: {PRODUCTION_BACKEND}/api/v1/health/")
 print("="*70 + "\n")
 
 # ==============================================================================
