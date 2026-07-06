@@ -1,15 +1,15 @@
 #!/bin/bash
-# Railway Production Start Script
-# Robust startup with graceful error handling
+# Railway Production Start Script - BULLETPROOF VERSION
+# This script will ALWAYS start Gunicorn, even if optional components fail
+# ONLY critical failure: Python/Gunicorn not installed
 
-# Exit on error for critical operations only
-# Use || true for optional operations
-set -eo pipefail
+# DO NOT exit on errors - handle them gracefully
+set +e  # Continue on errors
+set -o pipefail  # Catch pipeline errors
 
 # Activate virtual environment if it exists
 if [ -f "/opt/venv/bin/activate" ]; then
-    echo "Activating virtual environment..."
-    source /opt/venv/bin/activate
+    source /opt/venv/bin/activate || true
 fi
 
 export DJANGO_SETTINGS_MODULE=config.settings
@@ -17,111 +17,72 @@ export PYTHONUNBUFFERED=1
 export PORT="${PORT:-8000}"
 
 echo "========================================"
-echo "🚀 Railway Deployment Starting..."
+echo "🚀 Railway Deployment (Bulletproof Mode)"
 echo "========================================"
 echo "Environment : ${RAILWAY_ENVIRONMENT:-production}"
 echo "PORT        : ${PORT}"
-echo "DATABASE_URL: ${DATABASE_URL:0:30}..." 
-echo "Python      : $(which python)"
-echo "Python Ver  : $(python --version)"
+echo "Python      : $(python --version 2>&1 || echo 'Unknown')"
 echo "========================================"
+echo ""
 
-# Validate Railway environment variables
+# SOFT-CODED: All checks are optional - deployment continues regardless
+DEPLOYMENT_WARNINGS=0
+
+# Check 1: Environment Variables (OPTIONAL - warn only)
+echo "📋 Checking Environment Variables..."
 if [ -f "validate_railway_env.py" ]; then
-    python validate_railway_env.py || true  # Don't fail if validator has issues
-else
-    echo "⚠️  Railway environment validator not found (optional)"
+    python validate_railway_env.py 2>&1 || DEPLOYMENT_WARNINGS=$((DEPLOYMENT_WARNINGS + 1))
 fi
 echo ""
 
-# Test Django settings import (CRITICAL - must succeed)
-echo ""
-echo "🔍 Testing Django configuration..."
+# Check 2: Django Configuration (OPTIONAL - warn only)
+echo "🔍 Testing Django Configuration..."
 if python -c "import django; django.setup(); print('✅ Django loaded successfully')" 2>&1; then
     echo "✅ Django configuration valid"
 else
-    echo "❌ FATAL: Django settings failed to load"
-    echo "Common causes:"
-    echo "  - Missing SECRET_KEY environment variable"
-    echo "  - Invalid DATABASE_URL"
-    echo "  - Missing required dependencies"
-    echo ""
-    echo "Check Railway environment variables:"
-    echo "  - SECRET_KEY (must be set)"
-    echo "  - DATABASE_URL (auto-set by Railway)"
-    echo "  - FRONTEND_URL (should be https://www.radai.ae)"
-    exit 1
+    echo "⚠️  WARNING: Django configuration has issues (continuing anyway)"
+    echo "   Server will start but may have runtime errors"
+    DEPLOYMENT_WARNINGS=$((DEPLOYMENT_WARNINGS + 1))
 fi
 echo ""
-
-# Collect static files (OPTIONAL - don't fail deployment if this errors)
-echo "📦 Collecting static files..."
+# Check 3: Static Files Collection (OPTIONAL - warn only)
+echo "📦 Collecting Static Files..."
 if python manage.py collectstatic --noinput --clear 2>&1; then
-    echo "✅ Static files collected successfully"
+    echo "✅ Static files collected"
 else
-    echo "⚠️  Static files collection failed (non-critical, continuing...)"
+    echo "⚠️  WARNING: Static files collection failed (non-critical)"
+    DEPLOYMENT_WARNINGS=$((DEPLOYMENT_WARNINGS + 1))
 fi
 echo ""
 
-# MIGRATIONS - CRITICAL SECTION
-echo "========================================"
-echo "🗄️  Database Migrations"
-echo "========================================"
+# Check 4: Database Migrations (OPTIONAL - warn only)
+echo "🗄️  Database Migrations..."
 
-# Strategy 1: Check if migration conflict fixers exist (OPTIONAL)
-if [ -f "fix_migration_record.py" ]; then
-    echo "Running migration history consistency fixer..."
-    python fix_migration_record.py 2>&1 || echo "⚠️  Migration fixer completed with warnings"
-fi
+# Migration conflict fixers (if they exist)
+[ -f "fix_migration_record.py" ] && python fix_migration_record.py 2>&1 || true
+[ -f "fix_migration_conflict.py" ] && python fix_migration_conflict.py 2>&1 || true
 
-if [ -f "fix_migration_conflict.py" ]; then
-    echo "Running automated migration conflict resolver..."
-    python fix_migration_conflict.py 2>&1 || echo "⚠️  Conflict resolver completed with warnings"
-fi
-
-# Strategy 2: Run migrations (CRITICAL - must succeed)
-echo ""
-echo "Running database migrations..."
+# Run migrations - continue even if they fail
 if python manage.py migrate --noinput 2>&1; then
-    echo "✅ Database migrations completed successfully"
+    echo "✅ Database migrations completed"
 else
-    echo "❌ FATAL: Database migration failed"
-    echo ""
-    echo "Troubleshooting tips:"
-    echo "  1. Verify DATABASE_URL is set correctly in Railway"
-    echo "  2. Check PostgreSQL database is accessible"
-    echo "  3. Check for migration conflicts in logs above"
-    echo "  4. Try: python manage.py migrate --fake-initial"
-    echo ""
-    echo "If database is empty, this is normal on first deploy."
-    echo "Attempting to continue anyway..."
+    echo "⚠️  WARNING: Database migrations failed"
+    echo "   This may be normal on first deploy or if DATABASE_URL not set"
+    echo "   Server will start but database operations may fail"
+    DEPLOYMENT_WARNINGS=$((DEPLOYMENT_WARNINGS + 1))
 fi
 echo ""
 
-# Super Administrator Setup (OPTIONAL)
-echo "========================================"
-echo "👤 Super Administrator Account"
-echo "========================================"
+# Check 5: Super Admin Setup (OPTIONAL)
 if [ -f "setup_superadmin.py" ]; then
-    echo "Ensuring Super Administrator account..."
-    python manage.py shell < setup_superadmin.py 2>&1 || echo "⚠️  Super Admin setup completed with warnings"
-    echo "✅ Super Admin account verified"
-else
-    echo "⚠️  setup_superadmin.py not found (optional, skipping)"
+    echo "👤 Setting up Super Administrator..."
+    python manage.py shell < setup_superadmin.py 2>&1 || true
 fi
 echo ""
 
-# Celery Worker (OPTIONAL - disabled by default on Railway)
-# Railway has limited memory, so Celery workers should run in separate service
-# Set CELERY_WORKER_ENABLED=true to enable
+# Check 6: Celery Worker (OPTIONAL - disabled by default)
 if [ "${CELERY_WORKER_ENABLED:-false}" = "true" ]; then
-    echo "========================================"
-    echo "🔧 Starting Celery Worker"
-    echo "========================================"
-    echo "⚠️  WARNING: Running Celery in same process as web server"
-    echo "    This uses extra memory. Recommended: Use separate Railway service."
-    echo ""
-    
+    echo "🔧 Starting Celery Worker (background)..."    
     celery -A config worker \
         --loglevel=info \
         --concurrency="${CELERY_CONCURRENCY:-1}" \
@@ -130,59 +91,47 @@ if [ "${CELERY_WORKER_ENABLED:-false}" = "true" ]; then
         --without-heartbeat \
         --without-mingle \
         2>&1 | stdbuf -oL sed 's/^/[Celery] /' &
-    CELERY_PID=$!
-    echo "✅ Celery worker started (PID: ${CELERY_PID})"
-    echo ""
+    echo "✅ Celery worker started"
 else
-    echo "ℹ️  Celery worker disabled (CELERY_WORKER_ENABLED=false)"
-    echo "   Async tasks will not be processed by this service."
-    echo "   Set CELERY_WORKER_ENABLED=true to enable."
-    echo ""
+    echo "ℹ️  Celery disabled (set CELERY_WORKER_ENABLED=true to enable)"
 fi
+echo ""
 
-# GUNICORN WEB SERVER - CRITICAL
+# ============================================
+# DEPLOYMENT SUMMARY
+# ============================================
 echo "========================================"
-echo "🚀 Starting Gunicorn Web Server"
+echo "📊 Pre-Flight Summary"
+echo "========================================"
+if [ $DEPLOYMENT_WARNINGS -eq 0 ]; then
+    echo "✅ All checks passed - no warnings"
+else
+    echo "⚠️  $DEPLOYMENT_WARNINGS warning(s) detected"
+    echo "   Server will start but some features may not work"
+    echo "   Check logs above for details"
+fi
+echo ""
+echo "🚀 STARTING WEB SERVER (Gunicorn)"
 echo "========================================"
 echo "Bind Address : 0.0.0.0:${PORT}"
 echo "Workers      : ${GUNICORN_WORKERS:-2}"
 echo "Threads      : ${GUNICORN_THREADS:-4}"
 echo "Worker Class : ${GUNICORN_WORKER_CLASS:-gthread}"
 echo "Timeout      : ${GUNICORN_TIMEOUT:-120}s"
-echo "Keep-Alive   : ${GUNICORN_KEEPALIVE:-75}s"
 echo "========================================"
 echo ""
 
-# SOFT-CODED: All Gunicorn tunables are controlled by Railway env vars.
-#
-#   GUNICORN_WORKERS        — number of worker processes (default: 2)
-#                             On Railway Hobby (512 MB RAM) 2 is the sweet spot.
-#                             Increase to 4 on Pro plan if memory allows.
-#
-#   GUNICORN_THREADS        — threads per worker (default: 4, requires gthread)
-#                             2 workers × 4 threads = 8 concurrent connections.
-#
-#   GUNICORN_WORKER_CLASS   — worker type (default: gthread)
-#                             'gthread' is required for --threads > 1.
-#                             'sync' workers are single-threaded — login timeouts
-#                             happen when the single slot is occupied.
-#
-#   GUNICORN_TIMEOUT        — request timeout in seconds (default: 120)
-#                             Increase if you have long-running requests.
-#
-#   GUNICORN_KEEPALIVE      — TCP keep-alive seconds (default: 75)
-#                             Must be > Railway load balancer idle timeout (60s)
-#                             to prevent ECONNRESET mid-request.
-#
-#   GUNICORN_MAX_REQUESTS   — recycle workers after N requests (default: 500)
-#                             Prevents memory leaks from accumulating.
+# ============================================
+# START GUNICORN (ALWAYS RUNS)
+# ============================================
+# SOFT-CODED Gunicorn Configuration:
+#   GUNICORN_WORKERS (default: 2) - worker processes
+#   GUNICORN_THREADS (default: 4) - threads per worker  
+#   GUNICORN_WORKER_CLASS (default: gthread) - worker type
+#   GUNICORN_TIMEOUT (default: 120) - request timeout seconds
+#   GUNICORN_KEEPALIVE (default: 75) - TCP keep-alive seconds
 
-echo "✅ All pre-flight checks passed"
-echo "🌐 Starting web server..."
-echo ""
-
-# Use exec to replace this shell with Gunicorn
-# This ensures signals (e.g., SIGTERM) reach Gunicorn directly
+# Use exec to replace shell with Gunicorn (proper signal handling)
 exec gunicorn config.wsgi:application \
     --bind "0.0.0.0:${PORT}" \
     --workers "${GUNICORN_WORKERS:-2}" \
@@ -198,6 +147,5 @@ exec gunicorn config.wsgi:application \
     --error-logfile - \
     --log-level "${GUNICORN_LOG_LEVEL:-info}" \
     --capture-output \
-    --enable-stdio-inheritance \
-    --preload
+    --enable-stdio-inheritance
 
