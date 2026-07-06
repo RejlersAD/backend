@@ -61,6 +61,7 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'payroll',                'name': 'Payroll Engine',               'icon': 'DollarSign',  'order': 71, 'description': 'Payroll processing, salary slips, and compensation management'},
     {'code': 'timesheet',              'name': 'Timesheet & Attendance',       'icon': 'Clock',       'order': 72, 'description': 'Employee timesheet tracking and biometric attendance reports'},
     {'code': 'hr_self_service',        'name': 'HR Self-Service',              'icon': 'User',        'order': 73, 'description': 'Personal leave requests, attendance records and payslip access'},
+    {'code': 'hr_onboarding',          'name': 'Onboarding | Offboarding',     'icon': 'UserPlus',    'order': 74, 'description': 'Employee lifecycle management — onboarding pipeline and offboarding exits'},
     # ── Business Modules ──────────────────────────────────────────────────
     {'code': 'finance',                'name': 'Finance',                      'icon': 'CreditCard',  'order': 80, 'description': 'Invoice tracking, billing and financial management'},
     {'code': 'sales',                  'name': 'Sales',                        'icon': 'TrendingUp',  'order': 81, 'description': 'Internal sales pipeline and business development'},
@@ -198,7 +199,7 @@ SYSTEM_ROLES_CONFIG = [
         'is_system_role': True,
         'badge_color': 'rose',
         'sensitive': True,
-        'sensitive_modules': ['hr_management', 'payroll', 'timesheet'],
+        'sensitive_modules': ['hr_management', 'payroll', 'timesheet', 'hr_onboarding'],
     },
 ]
 
@@ -235,7 +236,7 @@ SUPERADMIN_ROLE_CODES = ['super_admin', 'superadmin']
 SENSITIVE_ROLE_CODES = ['hr_admin']
 
 # Sensitive module codes — restricted to hr_admin and super_admin
-SENSITIVE_MODULE_CODES = ['hr_management', 'payroll', 'timesheet']
+SENSITIVE_MODULE_CODES = ['hr_management', 'payroll', 'timesheet', 'hr_onboarding']
 
 # Module Access Rules
 MODULE_ACCESS_RULES = {
