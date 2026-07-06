@@ -80,6 +80,21 @@ def app_exists(app_path):
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-change-this-in-production')
 
+# Validate SECRET_KEY in production
+if not DEBUG and SECRET_KEY == 'django-insecure-change-this-in-production':
+    print("\n" + "="*70)
+    print("🚨 SECURITY WARNING: Using default SECRET_KEY in production!")
+    print("="*70)
+    print("Set SECRET_KEY environment variable in Railway:")
+    print("  1. Go to Railway → aiflowbackend-production → Variables")
+    print("  2. Add: SECRET_KEY = <random-50-character-string>")
+    print("")
+    print("Generate a secure key with:")
+    print("  python -c \"from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())\"")
+    print("="*70 + "\n")
+    # Don't exit - allow deployment to continue but with warning
+    # In a real production environment, you might want to exit here
+
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = safe_cast_bool(config('DEBUG', default='False'), False)
 
