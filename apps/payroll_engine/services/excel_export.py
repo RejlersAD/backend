@@ -42,6 +42,9 @@ def _write_master_sheet(ws, run: PayrollRun) -> None:
     # Title row
     ws.cell(1, 1, value='Payroll for the month of')
     ws.cell(1, 7, value=_period_label(run))
+    # Working days — shown beside the period so reviewers can verify at a glance
+    ws.cell(1, 9,  value='Working Days:')
+    ws.cell(1, 10, value=int(run.working_days_in_month))
 
     # Header row (row 4 — matches source)
     header_labels = {

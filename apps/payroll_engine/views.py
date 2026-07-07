@@ -119,6 +119,23 @@ class PayrollAdjustmentWritePermission(IsAuthenticated):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def catalog_view(request):
+    # Dynamic lists — computed from live PayrollEmployee data so new values
+    # appear in dropdowns automatically without any config change.
+    from .models import PayrollEmployee as _PE
+    _depts = list(
+        _PE.objects.filter(is_active=True)
+        .values_list('department', flat=True)
+        .exclude(department='')
+        .distinct()
+        .order_by('department')
+    )
+    _desigs = list(
+        _PE.objects.filter(is_active=True)
+        .values_list('designation', flat=True)
+        .exclude(designation='')
+        .distinct()
+        .order_by('designation')
+    )
     payload = {
         'currency': CURRENCY,
         'workflow_statuses': catalog.WORKFLOW_STATUSES,
@@ -132,6 +149,9 @@ def catalog_view(request):
         'adjustment_statuses': catalog.ADJUSTMENT_STATUSES,
         'grade_options': catalog.GRADE_OPTIONS,
         'nationality_groups': catalog.NATIONALITY_GROUPS,
+        # Dynamic options derived from live employee roster
+        'departments': _depts,
+        'designations': _desigs,
     }
     return Response(CatalogSerializer(payload).data)
 
@@ -180,6 +200,15 @@ def engine_dashboard_summary(request):
 
 
 # ── Employee CRUD ───────────────────────────────────────────────────
+# Soft-coded: PayrollEmployee fields that sync to Draft payslip snapshots.
+# Extend here when a new field needs two-way sync.
+_EMPLOYEE_TO_SNAPSHOT_SYNC: dict = {
+    'department':  'snapshot_department',
+    'designation': 'snapshot_designation',
+    'joining_date': 'snapshot_joining_date',
+}
+
+
 class PayrollEmployeeViewSet(viewsets.ModelViewSet):
     queryset = PayrollEmployee.objects.all()
     serializer_class = PayrollEmployeeSerializer
@@ -188,6 +217,34 @@ class PayrollEmployeeViewSet(viewsets.ModelViewSet):
     search_fields = ['employee_no', 'full_name', 'department', 'designation', 'iban']
     ordering_fields = ['full_name', 'employee_no', 'department', 'basic']
     ordering = ['full_name']
+
+    def _sync_to_draft_payslips(self, employee, request_data: dict) -> None:
+        """
+        When an employee's org/identity fields change, cascade the update to
+        all Draft payslip snapshots for this employee so Monthly Runs and
+        the Employees tab stay aligned.
+        """
+        snap_updates = {
+            snap_field: request_data[emp_field]
+            for emp_field, snap_field in _EMPLOYEE_TO_SNAPSHOT_SYNC.items()
+            if emp_field in request_data
+        }
+        if snap_updates:
+            (Payslip.objects
+             .filter(employee=employee, run__status=catalog.Status.DRAFT)
+             .update(**snap_updates))
+
+    def update(self, request, *args, **kwargs):
+        employee = self.get_object()
+        response = super().update(request, *args, **kwargs)
+        self._sync_to_draft_payslips(employee, request.data)
+        return response
+
+    def partial_update(self, request, *args, **kwargs):
+        employee = self.get_object()
+        response = super().partial_update(request, *args, **kwargs)
+        self._sync_to_draft_payslips(employee, request.data)
+        return response
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -280,17 +337,26 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         return qs
 
     def create(self, request, *args, **kwargs):
-        """POST { year, month, overwrite? } → generates the run."""
+        """POST { year, month, overwrite?, working_days? } → generates the run."""
         year = int(request.data.get('year') or 0)
         month = int(request.data.get('month') or 0)
         if not (year and 1 <= month <= 12):
             return Response({'error': 'year and month (1-12) required.'}, status=400)
         overwrite = str(request.data.get('overwrite') or '').lower() in ('true', '1', 'yes')
         note = request.data.get('note') or ''
+        # working_days: HR-supplied, defaults to catalog constant
+        from .catalog import DEFAULT_WORKING_DAYS_PER_MONTH
+        try:
+            working_days = int(request.data.get('working_days') or DEFAULT_WORKING_DAYS_PER_MONTH)
+            if not (1 <= working_days <= 31):
+                return Response({'error': 'working_days must be between 1 and 31.'}, status=400)
+        except (ValueError, TypeError):
+            working_days = DEFAULT_WORKING_DAYS_PER_MONTH
         try:
             run = run_generator.generate_monthly_run(
                 year, month,
                 user=request.user, overwrite=overwrite, note=note,
+                working_days=working_days,
             )
         except run_generator.GenerationError as exc:
             return Response({'error': str(exc)}, status=409)
@@ -488,6 +554,64 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             **result,
         })
 
+    @action(detail=True, methods=['post'], url_path='upload-external',
+            parser_classes=None)
+    def upload_external(self, request, pk=None):
+        """
+        POST /api/v1/payroll-engine/runs/{id}/upload-external/
+
+        Upload a ValueFrame or Sympa XLSX and apply the data directly to
+        the run's Draft payslips.
+
+        Multipart fields:
+          file       — the XLSX file
+          file_type  — 'valueframe' | 'sympa' | 'generic'  (default: 'valueframe')
+
+        Run must be in DRAFT status.
+        Returns upload summary: rows_matched, rows_updated, unmatched, updated_fields, s3_key.
+        """
+        from rest_framework.parsers import MultiPartParser
+        run = self.get_object()
+        if run.status != catalog.Status.DRAFT:
+            return Response(
+                {'error': f'Run {run.cycle_code} is "{run.status}". Only Draft runs accept external imports.'},
+                status=409,
+            )
+        file_obj  = request.FILES.get('file')
+        file_type = (request.data.get('file_type') or 'valueframe').lower()
+        if not file_obj:
+            return Response({'error': "Missing 'file' upload."}, status=400)
+        if file_type not in ('valueframe', 'sympa', 'generic'):
+            return Response({'error': f"Unknown file_type '{file_type}'. Use valueframe, sympa, or generic."}, status=400)
+
+        from .services import external_import
+        try:
+            result = external_import.apply_external_file(
+                run=run,
+                file_bytes=file_obj.read(),
+                original_filename=file_obj.name,
+                file_type=file_type,
+                user=request.user,
+            )
+            return Response(result, status=201)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=400)
+        except Exception as exc:
+            logger.exception('upload_external failed for run %s: %s', run.cycle_code, exc)
+            return Response({'error': 'Import failed. Check server logs.'}, status=500)
+
+    @action(detail=True, methods=['get'], url_path='uploads')
+    def list_uploads(self, request, pk=None):
+        """
+        GET /api/v1/payroll-engine/runs/{id}/uploads/
+        Returns all external file uploads for this run, newest first.
+        """
+        from .models import PayrollRunUpload
+        from .serializers import PayrollRunUploadSerializer
+        run = self.get_object()
+        qs  = PayrollRunUpload.objects.filter(run=run).order_by('-uploaded_at')
+        return Response({'results': PayrollRunUploadSerializer(qs, many=True).data})
+
     # Workflow transitions
     def _transition_action(self, request, pk, fn):
         run = self.get_object()
@@ -628,6 +752,16 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
 
 
 # ── Payslip CRUD ────────────────────────────────────────────────────
+# Soft-coded mapping: Payslip snapshot field → PayrollEmployee field.
+# Edit a payslip snapshot → the linked employee record also updates, and vice versa.
+# Add an entry here to extend the sync to additional fields.
+_PAYSLIP_SNAPSHOT_SYNC: dict = {
+    'snapshot_department':  'department',
+    'snapshot_designation': 'designation',
+    'snapshot_joining_date': 'joining_date',
+}
+
+
 class PayslipViewSet(viewsets.ModelViewSet):
     queryset = Payslip.objects.select_related('employee', 'run').prefetch_related('line_items')
     serializer_class = PayslipSerializer
@@ -659,10 +793,23 @@ class PayslipViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Run is not editable.'}, status=409)
         resp = super().update(request, *args, **kwargs)
         slip.refresh_from_db()
+        # If hours were updated, recompute days (hours ÷ HOURS_PER_WORKDAY)
+        if 'hours' in request.data:
+            from .config import hours_to_days
+            slip.days = hours_to_days(slip.hours)
+            slip.save(update_fields=['days'])
         recompute_payslip_totals(slip)
         slip.save()
         recompute_run_totals(slip.run)
         slip.run.save()
+        # ── Two-way sync: snapshot changes → update the source PayrollEmployee ──
+        emp_updates = {
+            emp_field: request.data[snap_field]
+            for snap_field, emp_field in _PAYSLIP_SNAPSHOT_SYNC.items()
+            if snap_field in request.data
+        }
+        if emp_updates and slip.employee_id:
+            PayrollEmployee.objects.filter(id=slip.employee_id).update(**emp_updates)
         return Response(self.get_serializer(slip).data)
 
     def destroy(self, request, *args, **kwargs):

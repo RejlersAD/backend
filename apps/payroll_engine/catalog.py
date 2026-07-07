@@ -197,6 +197,48 @@ EXCEL_MASTER_COLUMN_MAP: Dict[int, str] = {
 # Header label for the Hours column (kept here so header row + map stay in sync).
 EXCEL_MASTER_HOURS_HEADER = 'Hours'
 
+# ── Working-days policy ─────────────────────────────────────────────
+# Default number of working days assumed per calendar month (UAE standard).
+# HR can override this at the run level when generating a payroll run.
+# Must stay in sync with LEAVE_ENCASHMENT_WORKING_DAYS in
+# frontend/src/config/hrLeave.config.js and ENCASHMENT_WORKING_DAYS in
+# backend/apps/payroll/services/leave_encashment.py.
+DEFAULT_WORKING_DAYS_PER_MONTH: int = 22
+
+# ── Public-holiday region filter ────────────────────────────────────────────
+# Region codes to count when computing public_holidays_in_month at run
+# generation. Must match PublicHoliday.region choices in apps.payroll.models.
+# 'AE' = UAE national holidays; 'COMPANY' = company-wide days off.
+# Change here — nowhere else in the codebase uses this filter directly.
+DEFAULT_PH_REGIONS: list = ['AE', 'COMPANY']
+
+# ── Leave categories surfaced in the payslip table ───────────────────────
+# Maps Payslip field name → LeaveType.category value (from apps.payroll).
+# Adding a new leave type here automatically surfaces it in run generation
+# and the serializer — also add the DB field + migration + config column.
+LEAVE_CATEGORIES_FOR_PAYROLL: dict = {
+    'annual_leave_days': 'annual',
+    'unpaid_leave_days': 'unpaid',
+}
+
+# ── External import field map ───────────────────────────────────────
+# Maps (file_type, comparison_field) → Payslip field to update.
+# Add a new entry here when a file profile introduces a new field.
+# Must stay in sync with EXTERNAL_UPLOAD_FILE_TYPES in payrollEngine.config.js.
+EXTERNAL_IMPORT_FIELD_MAP: dict = {
+    'valueframe': {
+        'hours':      'hours',            # VF Total Hours → payslip.hours
+        'leave_days': 'annual_leave_days', # VF Annual Vacation → payslip.annual_leave_days
+    },
+    'sympa': {
+        'basic':     'basic',
+        'housing':   'housing',
+        'transport': 'transport',
+        'home_leave': 'home_leave',
+    },
+    'generic': {},  # user must configure column mapping (future)
+}
+
 
 # ── Excel I/O — Per-employee payslip sheet ──────────────────────────
 # Cell coordinates ARE the layout (matches Excel template exactly).

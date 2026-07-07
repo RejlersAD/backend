@@ -180,6 +180,7 @@ class LeaveTypeSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'code', 'name', 'color_hex',
             'badge_bg', 'badge_text', 'badge_border',
+            'category',
             'is_paid', 'requires_approval', 'requires_document',
             'is_active', 'display_order',
         ]

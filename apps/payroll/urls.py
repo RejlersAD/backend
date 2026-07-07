@@ -40,6 +40,10 @@ from .views import (
     master_payroll_workflow_status,
     master_payroll_row_update,
     master_payroll_approval_tracker,
+    leave_encashment_status,
+    leave_encashment_preview,
+    leave_encashment_run,
+    leave_encashment_list,
 )
 
 app_name = 'payroll'
@@ -76,6 +80,11 @@ urlpatterns = [
     path('ai-analytics/generate/',                                     ai_analytics_generate,         name='ai-analytics-generate'),
     # Super-admin approval tracker — overview of all payroll files + SLA status
     path('approval-tracker/',                                              master_payroll_approval_tracker,        name='approval-tracker'),
+    # Leave Encashment
+    path('leave-encashment/',                 leave_encashment_list,    name='leave-encashment-list'),
+    path('leave-encashment/status/',          leave_encashment_status,  name='leave-encashment-status'),
+    path('leave-encashment/preview/',         leave_encashment_preview, name='leave-encashment-preview'),
+    path('leave-encashment/run/',             leave_encashment_run,     name='leave-encashment-run'),
     # Workflow action endpoints
     path('master-payroll-history/<uuid:import_id>/workflow/',          master_payroll_workflow_status, name='master-payroll-workflow'),
     path('master-payroll-history/<uuid:import_id>/freeze/',            master_payroll_freeze,          name='master-payroll-freeze'),

@@ -5,7 +5,7 @@ from rest_framework import serializers
 from . import catalog
 from .models import (
     PayrollAdjustment, PayrollEmployee, PayrollRun, Payslip, PayslipLineItem,
-    PayrollWorkflowLog, PayrollComparison, PayrollComparisonRow,
+    PayrollWorkflowLog, PayrollComparison, PayrollComparisonRow, PayrollRunUpload,
 )
 
 
@@ -49,6 +49,7 @@ class PayslipSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'run', 'run_cycle', 'run_status', 'employee', 'employee_no',
             'hours', 'days',
+            'public_holiday_days', 'annual_leave_days', 'unpaid_leave_days',
             'basic', 'housing', 'transport', 'home_leave',
             'other_earnings', 'gross_earnings', 'total_deductions', 'net_payable',
             'payment_mode',
@@ -58,11 +59,10 @@ class PayslipSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = [
-            'id', 'run_cycle', 'run_status', 'employee_no', 'other_earnings',
-            'gross_earnings', 'total_deductions', 'net_payable',
+            'id', 'run_cycle', 'run_status', 'employee_no',
+            'other_earnings', 'gross_earnings', 'total_deductions', 'net_payable',
             'days',
-            'snapshot_full_name', 'snapshot_department', 'snapshot_designation',
-            'snapshot_iban', 'snapshot_joining_date',
+            'snapshot_full_name', 'snapshot_iban',
             'created_at', 'updated_at',
         ]
 
@@ -75,8 +75,10 @@ class PayrollRunSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'year', 'month', 'cycle_code',
             'status', 'status_label',
+            'source_type',
             'employee_count', 'total_gross', 'total_deductions', 'total_net',
             'total_hours', 'total_days',
+            'working_days_in_month', 'public_holidays_in_month',
             'generated_at', 'hr_approved_at', 'finance_approved_at', 'released_at',
             'hr_approved_by', 'finance_approved_by', 'released_by',
             'notes', 'created_at', 'updated_at', 'created_by',
@@ -85,6 +87,7 @@ class PayrollRunSerializer(serializers.ModelSerializer):
             'id', 'cycle_code', 'status', 'status_label',
             'employee_count', 'total_gross', 'total_deductions', 'total_net',
             'total_hours', 'total_days',
+            'public_holidays_in_month',
             'generated_at', 'hr_approved_at', 'finance_approved_at', 'released_at',
             'hr_approved_by', 'finance_approved_by', 'released_by',
             'created_at', 'updated_at', 'created_by',
@@ -210,3 +213,26 @@ class CatalogSerializer(serializers.Serializer):
     adjustment_statuses = serializers.ListField()
     grade_options = serializers.ListField()
     nationality_groups = serializers.ListField()
+    # Dynamic options (departments/designations derived from live employee data)
+    departments  = serializers.ListField(child=serializers.CharField(), default=list)
+    designations = serializers.ListField(child=serializers.CharField(), default=list)
+
+
+class PayrollRunUploadSerializer(serializers.ModelSerializer):
+    uploaded_by_name = serializers.SerializerMethodField()
+    file_type_label  = serializers.CharField(source='get_file_type_display', read_only=True)
+
+    class Meta:
+        model  = PayrollRunUpload
+        fields = [
+            'id', 'run', 'file_type', 'file_type_label', 'original_filename',
+            's3_key', 'uploaded_by', 'uploaded_by_name', 'uploaded_at',
+            'rows_matched', 'rows_updated', 'unmatched', 'updated_fields',
+            'status', 'error_message',
+        ]
+        read_only_fields = fields
+
+    def get_uploaded_by_name(self, obj):
+        if not obj.uploaded_by:
+            return 'System'
+        return obj.uploaded_by.get_full_name() or obj.uploaded_by.username

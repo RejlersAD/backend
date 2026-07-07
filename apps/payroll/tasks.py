@@ -86,6 +86,8 @@ def upload_master_payroll_to_s3(self, import_id: str) -> dict:
             'Salary Deduction',     # 13
             'Deduction Details',    # 14
             'Final Salary',         # 15
+            'Leave Enc. Days',      # 16 — encashed leave days for this period
+            'Leave Enc. Pay',       # 17 — monetary encashment amount (AED)
         ]
         for col_idx, hdr in enumerate(headers, 1):
             cell = ws.cell(row=1, column=col_idx, value=hdr)
@@ -113,6 +115,8 @@ def upload_master_payroll_to_s3(self, import_id: str) -> dict:
                 float(row.total_deductions),
                 row.deduction_details or '',
                 float(row.final_salary),
+                float(row.leave_encashment_days),   # col 16
+                float(row.leave_encashment_pay),    # col 17
             ]
             for col_idx, val in enumerate(vals, 1):
                 cell = ws.cell(row=r_idx, column=col_idx, value=val)

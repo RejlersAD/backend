@@ -397,11 +397,13 @@ class EmployeeLeaveMonthly(models.Model):
         on_delete=models.CASCADE,
         related_name='monthly_breakdown',
     )
-    month    = models.PositiveSmallIntegerField(choices=MONTH_CHOICES)
-    earned   = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('0'))
-    taken    = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('0'))
-    encashed = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('0'))
-    balance  = models.DecimalField(max_digits=8, decimal_places=4, default=Decimal('0'))
+    month           = models.PositiveSmallIntegerField(choices=MONTH_CHOICES)
+    earned          = models.DecimalField(max_digits=8,  decimal_places=4, default=Decimal('0'))
+    taken           = models.DecimalField(max_digits=8,  decimal_places=4, default=Decimal('0'))
+    encashed        = models.DecimalField(max_digits=8,  decimal_places=4, default=Decimal('0'))
+    encashment_pay  = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0'),
+                          help_text='Monetary value of encashed days (days × daily_rate)')
+    balance         = models.DecimalField(max_digits=8,  decimal_places=4, default=Decimal('0'))
 
     class Meta:
         db_table        = 'payroll_employee_leave_monthly'
@@ -490,8 +492,71 @@ class MonthlyLeaveAccrualLog(models.Model):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 7.2 LeaveEncashmentRun  — audit log for HR-triggered monthly encashment runs
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LeaveEncashmentRun(models.Model):
+    """
+    One record per HR-triggered encashment run for a given (year, month).
+    Unique on (year, month) — only one encashment run allowed per period.
+
+    Encashment formula (soft-coded in services/leave_encashment.py):
+      encashment_pay = days_encashed × (monthly_salary ÷ ENCASHMENT_WORKING_DAYS)
+    """
+    id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    year             = models.PositiveIntegerField()
+    month            = models.PositiveSmallIntegerField(choices=MONTH_CHOICES)
+    triggered_by     = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='encashment_runs',
+        help_text='HR Manager who triggered this run',
+    )
+    executed_at      = models.DateTimeField(auto_now_add=True)
+    status           = models.CharField(
+        max_length=20, default='success',
+        choices=[('success','Success'),('partial','Partial'),('failed','Failed')],
+    )
+    records_processed    = models.PositiveIntegerField(default=0)
+    total_days_encashed  = models.DecimalField(max_digits=10, decimal_places=4, default=Decimal('0'),
+                               help_text='Sum of all encashed days across all employees')
+    total_pay            = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'),
+                               help_text='Sum of all encashment pay amounts (AED)')
+    missing_salaries     = models.JSONField(default=list, blank=True,
+                               help_text='employee_codes with no salary on record (encashment_pay=0)')
+    branch_filter        = models.CharField(max_length=10, blank=True, null=True)
+    notes                = models.TextField(blank=True)
+
+    class Meta:
+        db_table        = 'payroll_leave_encashment_run'
+        ordering        = ['-year', '-month']
+        unique_together = ('year', 'month')
+        indexes         = [models.Index(fields=['year', 'month'])]
+
+    def __str__(self):
+        return f'Encashment {MONTH_CHOICES[self.month-1][1]} {self.year} — {self.status}'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 8. LeaveType  — master list of leave type codes
 # ─────────────────────────────────────────────────────────────────────────────
+
+class LeaveCategory(models.TextChoices):
+    """
+    Canonical category keys — must match ESS_LEAVE_TYPE_CONFIG keys in
+    frontend/src/config/hrLeave.config.js so the ESS portal can filter
+    enabled leave types without hardcoded code comparisons.
+    """
+    ANNUAL         = 'annual',         'Annual Leave'
+    SICK           = 'sick',           'Sick Leave'
+    EMERGENCY      = 'emergency',      'Emergency Leave'
+    UNPAID         = 'unpaid',         'Unpaid Leave'
+    MATERNITY      = 'maternity',      'Maternity Leave'
+    PATERNITY      = 'paternity',      'Paternity Leave'
+    COMPENSATORY   = 'compensatory',   'Compensatory Leave'
+    PUBLIC_HOLIDAY = 'public_holiday', 'Public Holiday'
+    WORK_OFF       = 'work_off',       'Work Off'
+    OTHER          = 'other',          'Other'
+
 
 class LeaveType(models.Model):
     """
@@ -510,6 +575,12 @@ class LeaveType(models.Model):
     badge_bg          = models.CharField(max_length=60, blank=True, default='bg-slate-100')
     badge_text        = models.CharField(max_length=60, blank=True, default='text-slate-700')
     badge_border      = models.CharField(max_length=60, blank=True, default='border-slate-300')
+    # Category — maps to ESS_LEAVE_TYPE_CONFIG keys in hrLeave.config.js
+    category          = models.CharField(
+        max_length=20, choices=LeaveCategory.choices,
+        default=LeaveCategory.OTHER, blank=True, db_index=True,
+        help_text='Canonical category key — must match ESS_LEAVE_TYPE_CONFIG key in hrLeave.config.js',
+    )
     # Policy flags
     is_paid           = models.BooleanField(default=True)
     requires_approval = models.BooleanField(default=True)
@@ -1317,7 +1388,13 @@ class MasterPayrollRow(models.Model):
     deduction_details   = models.TextField(blank=True)
 
     # ── Final ─────────────────────────────────────────────────────────────────
-    final_salary        = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+    final_salary            = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'))
+
+    # ── Leave Encashment (populated when HR runs monthly encashment) ──────────
+    leave_encashment_days   = models.DecimalField(max_digits=6,  decimal_places=2, default=Decimal('0'),
+                                  help_text='Encashed leave days for this payroll period')
+    leave_encashment_pay    = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0'),
+                                  help_text='Monetary value of encashed leave (AED)')
 
     # ── Metadata (for audit / debugging) ─────────────────────────────────────
     sources     = models.JSONField(default=list, blank=True)   # ['sympa','valueframe','radai']

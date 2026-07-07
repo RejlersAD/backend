@@ -1501,13 +1501,26 @@ def initialize_current_month_leave(request):
                 'previous_earned': float(monthly.earned) if not was_created else 0,
             })
         else:
-            # Update earned value if not newly created
             if not was_created and monthly.earned != earned:
                 monthly.earned = earned
                 monthly.save(update_fields=['earned'])
                 records_updated += 1
             elif was_created:
                 records_created += 1
+
+            # Sync EmployeeLeaveRecord.leave_balance from the sum of all monthly
+            # earned − taken − encashed for this year (soft-coded: recomputed on every run).
+            from django.db.models import Sum as _Sum
+            totals = EmployeeLeaveMonthly.objects.filter(record=record).aggregate(
+                e=_Sum('earned'), t=_Sum('taken'), enc=_Sum('encashed')
+            )
+            new_balance = max(
+                _dec(0),
+                _dec(totals['e'] or 0) - _dec(totals['t'] or 0) - _dec(totals['enc'] or 0),
+            )
+            if record.leave_balance != new_balance:
+                record.leave_balance = new_balance
+                record.save(update_fields=['leave_balance'])
     
     response_data = {
         'year': year,
@@ -2456,6 +2469,18 @@ def generate_master_payroll(request):
             status=MasterPayrollImportStatus.PROCESSING,
         )
 
+        # Build encashment lookup: employee_code → (days, pay) for this period
+        # Populated only if HR has run the monthly encashment before generating payroll
+        from .models import EmployeeLeaveMonthly
+        _enc_qs = (EmployeeLeaveMonthly.objects
+                   .filter(record__year=year, month=month)
+                   .select_related('record')
+                   .values('record__employee_code', 'encashed', 'encashment_pay'))
+        _enc_map = {
+            row['record__employee_code']: (row['encashed'], row['encashment_pay'])
+            for row in _enc_qs
+        }
+
         # Bulk-create rows (ignore conflicts — idempotent on re-generation)
         row_objs = [
             MasterPayrollRow(
@@ -2475,6 +2500,8 @@ def generate_master_payroll(request):
                 total_deductions     = Decimal(str(r.get('total_deductions', 0) or 0)),
                 deduction_details    = r.get('deduction_details', '') or '',
                 final_salary         = Decimal(str(r.get('final_salary', 0) or 0)),
+                leave_encashment_days = Decimal(str(_enc_map.get(r.get('employee_code', ''), (0, 0))[0] or 0)),
+                leave_encashment_pay  = Decimal(str(_enc_map.get(r.get('employee_code', ''), (0, 0))[1] or 0)),
                 sources              = r.get('sources', []),
                 row_warnings         = r.get('warnings', []),
                 raw_data             = {k: v for k, v in r.items()
@@ -4028,3 +4055,111 @@ def master_payroll_workflow_status(request, import_id):
     except MasterPayrollImport.DoesNotExist:
         return Response({'error': 'Not found.'}, status=404)
     return Response(_build_workflow_info(record))
+
+
+# =============================================================================
+# Leave Encashment Views
+# =============================================================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def leave_encashment_status(request):
+    """
+    GET /api/v1/payroll/leave-encashment/status/?year=&month=
+    Returns the LeaveEncashmentRun for the given period, or 404 if not run yet.
+    """
+    if not _is_hr_manager(request.user):
+        return Response({'error': 'HR Manager role required.'}, status=403)
+
+    from django.utils import timezone as tz
+    now = tz.now()
+    year  = int(request.query_params.get('year',  now.year))
+    month = int(request.query_params.get('month', now.month))
+
+    from apps.payroll.services.leave_encashment import get_encashment_status
+    result = get_encashment_status(year=year, month=month)
+    if result is None:
+        return Response({'status': 'not_run', 'year': year, 'month': month}, status=404)
+    return Response(result)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def leave_encashment_preview(request):
+    """
+    GET /api/v1/payroll/leave-encashment/preview/?year=&month=
+    Dry-run: compute per-employee encashment without writing to DB.
+    """
+    if not _is_hr_manager(request.user):
+        return Response({'error': 'HR Manager role required.'}, status=403)
+
+    from django.utils import timezone as tz
+    now = tz.now()
+    year  = int(request.query_params.get('year',  now.year))
+    month = int(request.query_params.get('month', now.month))
+
+    from apps.payroll.services.leave_encashment import run_leave_encashment
+    result = run_leave_encashment(year=year, month=month, triggered_by_user=request.user, dry_run=True)
+    return Response(result)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def leave_encashment_run(request):
+    """
+    POST /api/v1/payroll/leave-encashment/run/
+    Body: { year: int, month: int }
+    Triggers the leave encashment for the specified period.
+    Idempotent guard: raises 409 if already run successfully.
+    """
+    if not _is_hr_manager(request.user):
+        return Response({'error': 'HR Manager role required.'}, status=403)
+
+    from django.utils import timezone as tz
+    now = tz.now()
+    year  = int(request.data.get('year',  now.year))
+    month = int(request.data.get('month', now.month))
+
+    from apps.payroll.services.leave_encashment import (
+        run_leave_encashment,
+        EncashmentAlreadyRunError,
+    )
+    try:
+        result = run_leave_encashment(year=year, month=month, triggered_by_user=request.user)
+        return Response(result, status=201)
+    except EncashmentAlreadyRunError as exc:
+        return Response({'error': str(exc)}, status=409)
+    except Exception as exc:
+        logger.exception('leave_encashment_run failed: %s', exc)
+        return Response({'error': 'Encashment run failed. Check server logs.'}, status=500)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def leave_encashment_list(request):
+    """
+    GET /api/v1/payroll/leave-encashment/
+    List all LeaveEncashmentRun records (HR-only).
+    """
+    if not _is_hr_manager(request.user):
+        return Response({'error': 'HR Manager role required.'}, status=403)
+
+    from apps.payroll.models import LeaveEncashmentRun
+    runs = LeaveEncashmentRun.objects.select_related('triggered_by').order_by('-year', '-month')
+    data = [
+        {
+            'id':                   str(r.id),
+            'year':                 r.year,
+            'month':                r.month,
+            'month_name':           r.get_month_display(),
+            'status':               r.status,
+            'executed_at':          r.executed_at.isoformat(),
+            'triggered_by':         r.triggered_by.get_full_name() if r.triggered_by else 'System',
+            'records_processed':    r.records_processed,
+            'total_days_encashed':  float(r.total_days_encashed),
+            'total_pay':            float(r.total_pay),
+            'missing_salaries':     r.missing_salaries,
+        }
+        for r in runs
+    ]
+    return Response({'results': data, 'count': len(data)})
