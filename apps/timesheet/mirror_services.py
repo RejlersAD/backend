@@ -740,7 +740,12 @@ def live_status() -> dict:
     summary['matched_to_radai'] = sum(1 for r in rows if r.get('radai_user_id'))
 
     rows.sort(key=lambda r: r.get('punch_time') or dt.datetime.min, reverse=True)
-    return {
+    
+    # ── Soft-coded stale data metadata for frontend diagnostics ─────────────────
+    # When rolling window is empty but DB has events, expose the sync age so
+    # the frontend can show actionable error messages like "Last sync: 3 days
+    # ago" instead of a generic "No events" message.
+    result = {
         'rows': rows,
         'summary': summary,
         'variant': _VARIANT,
@@ -751,6 +756,18 @@ def live_status() -> dict:
         'lookback_hours': lookback_hours,
         'window_from': cutoff.isoformat(),
     }
+    
+    # Add stale data diagnostics when needed
+    if total_events > 0:
+        result['mirror_total_events'] = total_events
+        if latest_event_time:
+            result['mirror_latest_event'] = latest_event_time.isoformat()
+            if sync_age_hours and sync_age_hours > lookback_hours:
+                result['sync_stale'] = True
+                result['sync_age_hours'] = round(sync_age_hours, 1)
+                result['sync_age_days'] = round(sync_age_hours / 24, 1)
+    
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
