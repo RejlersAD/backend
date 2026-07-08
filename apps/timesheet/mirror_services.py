@@ -683,25 +683,37 @@ def live_status() -> dict:
     lookback_hours = int(ts_config.RULES.get('live_lookback_hours', 20))
     cutoff = timezone.now() - dt.timedelta(hours=lookback_hours)
     
-    # ── Production diagnostic logging ────────────────────────────────────────
-    # Log query parameters to diagnose "No punch events" issue
+    # ── Production diagnostic logging + stale data detection ────────────────
+    # Log query parameters AND check for stale data (sync agent not running)
     total_events = TimesheetEvent.objects.count()
+    latest_event = TimesheetEvent.objects.order_by('-event_time').first() if total_events > 0 else None
+    latest_event_time = latest_event.event_time if latest_event else None
+    
     logger.info(
         '[mirror_services.live_status] Query params: lookback_hours=%d, '
-        'cutoff=%s, now=%s, total_events_in_db=%d',
+        'cutoff=%s, now=%s, total_events_in_db=%d, latest_event=%s',
         lookback_hours,
         cutoff.isoformat(),
         timezone.now().isoformat(),
-        total_events
+        total_events,
+        latest_event_time.isoformat() if latest_event_time else 'NONE'
     )
     
     qs = TimesheetEvent.objects.filter(event_time__gte=cutoff)
     windowed_count = qs.count()
     
+    # Soft-coded stale data detection: if DB has events but rolling window is
+    # empty, calculate sync age to help diagnose sync agent failures
+    sync_age_hours = None
+    if total_events > 0 and windowed_count == 0 and latest_event_time:
+        sync_age_hours = (timezone.now() - latest_event_time).total_seconds() / 3600
+    
     logger.info(
-        '[mirror_services.live_status] Events in time window: %d (total in DB: %d)',
+        '[mirror_services.live_status] Events in time window: %d (total in DB: %d), '
+        'sync_age_hours: %s',
         windowed_count,
-        total_events
+        total_events,
+        f'{sync_age_hours:.1f}' if sync_age_hours else 'N/A'
     )
 
     # Latest punch per employee_code
