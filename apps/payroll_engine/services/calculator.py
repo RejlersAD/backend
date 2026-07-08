@@ -7,6 +7,12 @@ from typing import Iterable
 
 from ..config import QUANTUM, ROUNDING, STANDARD_WORKDAYS_PER_MONTH, hours_to_days
 from ..catalog import LineItemKind
+from ..calculation_config import (
+    get_employee_hours_per_day,
+    calculate_total_worked_days,
+    calculate_unpaid_leave_deduction,
+    calculate_net_payable,
+)
 
 ZERO = Decimal('0.00')
 
@@ -73,18 +79,65 @@ def compute_net(gross: Decimal, deductions: Decimal) -> Decimal:
 
 
 def recompute_payslip_totals(payslip) -> None:
-    """Mutate a Payslip's aggregate fields in place. Caller saves."""
+    """Mutate a Payslip's aggregate fields in place. Caller saves.
+    
+    Now includes intelligent calculations:
+    - Detects Emirates vs Expatriate (8h vs 9h working day)
+    - Calculates Total Worked Days = (Hours ÷ Hours/Day) + PH + AL
+    - Applies unpaid leave deduction automatically
+    """
     items = list(payslip.line_items.all()) if payslip.pk else []
+    
+    # Fixed earnings (Basic + Housing + Transport + Home Leave)
     fixed = compute_fixed_earnings(
         payslip.basic, payslip.housing, payslip.transport, payslip.home_leave,
     )
     other = compute_other_earnings(items)
-    deductions = compute_total_deductions(items)
+    
+    # Gross = Fixed + Other Earnings
     payslip.other_earnings = other
     payslip.gross_earnings = quantize(fixed + other)
-    payslip.total_deductions = deductions
-    payslip.net_payable = compute_net(payslip.gross_earnings, deductions)
-    # Keep `days` in lock-step with `hours` so the UI never drifts.
+    
+    # Determine hours per day based on salary structure
+    # Emirates (basic only) = 8h, Others (with allowances) = 9h
+    hours_per_day = get_employee_hours_per_day(
+        payslip.basic,
+        payslip.housing,
+        payslip.transport,
+        payslip.home_leave
+    )
+    
+    # Calculate Total Worked Days intelligently
+    # Formula: (Hours ÷ Hours/Day) + Public Holidays + Annual Leave
+    payslip.total_worked_days = calculate_total_worked_days(
+        hours_present=to_decimal(payslip.hours),
+        hours_per_day=hours_per_day,
+        public_holiday_days=to_decimal(payslip.public_holiday_days),
+        annual_leave_days=to_decimal(payslip.annual_leave_days),
+    )
+    
+    # Calculate unpaid leave deduction
+    unpaid_leave_deduction = calculate_unpaid_leave_deduction(
+        unpaid_days=to_decimal(payslip.unpaid_leave_days),
+        monthly_gross=payslip.gross_earnings,
+    )
+    
+    # Other deductions from line items
+    other_deductions = compute_total_deductions(items)
+    
+    # Total deductions = Unpaid Leave + Other Deductions
+    # Note: We add unpaid leave deduction to other_deductions for total
+    payslip.total_deductions = quantize(unpaid_leave_deduction + other_deductions)
+    
+    # Net Payable = Gross - Total Deductions
+    payslip.net_payable = calculate_net_payable(
+        gross_earnings=payslip.gross_earnings,
+        unpaid_leave_deduction=unpaid_leave_deduction,
+        other_deductions=other_deductions,
+    )
+    
+    # Keep `days` in lock-step with `hours` for backward compatibility
+    # This uses the standard HOURS_PER_WORKDAY from config (9 hours default)
     payslip.days = hours_to_days(payslip.hours)
 
 

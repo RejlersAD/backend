@@ -248,6 +248,15 @@ class Payslip(models.Model):
         max_digits=8, decimal_places=2, default=Decimal('0.00'),
         help_text='Public holiday days for this employee in this payroll month.',
     )
+    
+    # Total worked days (for payroll calculation) — auto-computed from formula:
+    # Total Worked Days = (Hours ÷ Hours per Day) + Public Holidays + Annual Leave
+    # Hours per Day depends on nationality: Emirates (basic only) = 8h, Others = 9h
+    # This represents total credited days for salary purposes (excludes unpaid leave)
+    total_worked_days = models.DecimalField(
+        max_digits=8, decimal_places=2, default=Decimal('0.00'),
+        help_text='Total worked days = (Hours ÷ Hours/Day) + Public Holidays + Annual Leave. Auto-calculated.',
+    )
 
     # Fixed earnings (4 standard columns)
     basic = models.DecimalField(max_digits=12, decimal_places=2, default=ZERO)

@@ -43,12 +43,17 @@ class PayslipSerializer(serializers.ModelSerializer):
     employee_no = serializers.CharField(source='employee.employee_no', read_only=True)
     run_cycle = serializers.CharField(source='run.cycle_code', read_only=True)
     run_status = serializers.CharField(source='run.status', read_only=True)
+    
+    # Computed field: Employee category (Emirates vs Expatriate)
+    employee_category = serializers.SerializerMethodField()
+    hours_per_day = serializers.SerializerMethodField()
 
     class Meta:
         model = Payslip
         fields = [
             'id', 'run', 'run_cycle', 'run_status', 'employee', 'employee_no',
-            'hours', 'days',
+            'hours', 'days', 'total_worked_days',
+            'employee_category', 'hours_per_day',
             'public_holiday_days', 'annual_leave_days', 'unpaid_leave_days',
             'basic', 'housing', 'transport', 'home_leave',
             'other_earnings', 'gross_earnings', 'total_deductions', 'net_payable',
@@ -60,11 +65,38 @@ class PayslipSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'run_cycle', 'run_status', 'employee_no',
+            'employee_category', 'hours_per_day',
             'other_earnings', 'gross_earnings', 'total_deductions', 'net_payable',
-            'days',
+            'days', 'total_worked_days',
             'snapshot_full_name', 'snapshot_iban',
             'created_at', 'updated_at',
         ]
+    
+    def get_employee_category(self, obj) -> str:
+        """Return 'Emirates' if employee has only basic salary, else 'Expatriate'."""
+        from .calculation_config import EMIRATES_DETECTION_THRESHOLD
+        from decimal import Decimal
+        
+        total_allowances = (
+            Decimal(str(obj.housing or 0)) + 
+            Decimal(str(obj.transport or 0)) + 
+            Decimal(str(obj.home_leave or 0))
+        )
+        
+        return 'Emirates' if total_allowances < EMIRATES_DETECTION_THRESHOLD else 'Expatriate'
+    
+    def get_hours_per_day(self, obj) -> float:
+        """Return working hours per day (8 for Emirates, 9 for Expatriates)."""
+        from .calculation_config import get_employee_hours_per_day
+        from decimal import Decimal
+        
+        hours = get_employee_hours_per_day(
+            Decimal(str(obj.basic or 0)),
+            Decimal(str(obj.housing or 0)),
+            Decimal(str(obj.transport or 0)),
+            Decimal(str(obj.home_leave or 0))
+        )
+        return float(hours)
 
 
 class PayrollRunSerializer(serializers.ModelSerializer):
