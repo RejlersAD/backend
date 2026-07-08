@@ -227,7 +227,32 @@ def live(request):
     if not ts_config.is_configured():
         return Response({'configured': False, 'rows': [], 'summary': {}})
     try:
-        return Response({'configured': True, **_svc().live_status()})
+        # ── Production diagnostic logging (soft-coded via DATA_SOURCE check) ──
+        # Helps diagnose "No punch events" issue on Railway while preserving
+        # all existing functionality. Logs only when using mirror mode to avoid
+        # noise from local SQL Server queries.
+        if ts_config.DATA_SOURCE == 'mirror':
+            from .models import TimesheetEvent
+            event_count = TimesheetEvent.objects.count()
+            logger.info(
+                '[timesheet.live] Production diagnostic: DATA_SOURCE=%s, '
+                'TimesheetEvent.count=%d, lookback_hours=%d',
+                ts_config.DATA_SOURCE,
+                event_count,
+                ts_config.RULES.get('live_lookback_hours', 20)
+            )
+        
+        result = _svc().live_status()
+        
+        # Log result summary for production debugging (mirror mode only)
+        if ts_config.DATA_SOURCE == 'mirror':
+            logger.info(
+                '[timesheet.live] Result: rows=%d, summary=%s',
+                len(result.get('rows', [])),
+                result.get('summary', {})
+            )
+        
+        return Response({'configured': True, **result})
     except (TimesheetConnectionError, TimesheetDriverError) as exc:
         return _graceful_unavailable(exc)
     except Exception as exc:

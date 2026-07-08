@@ -677,9 +677,32 @@ def live_status() -> dict:
     # stored.  TIMESHEET_LIVE_LOOKBACK_HOURS (default 20 h) covers a full UAE
     # office day plus a 4-hour UTC offset buffer.  Increase for offices further
     # from UTC (e.g. UTC+8 → set to 24).
+    import logging
+    logger = logging.getLogger(__name__)
+    
     lookback_hours = int(ts_config.RULES.get('live_lookback_hours', 20))
     cutoff = timezone.now() - dt.timedelta(hours=lookback_hours)
+    
+    # ── Production diagnostic logging ────────────────────────────────────────
+    # Log query parameters to diagnose "No punch events" issue
+    total_events = TimesheetEvent.objects.count()
+    logger.info(
+        '[mirror_services.live_status] Query params: lookback_hours=%d, '
+        'cutoff=%s, now=%s, total_events_in_db=%d',
+        lookback_hours,
+        cutoff.isoformat(),
+        timezone.now().isoformat(),
+        total_events
+    )
+    
     qs = TimesheetEvent.objects.filter(event_time__gte=cutoff)
+    windowed_count = qs.count()
+    
+    logger.info(
+        '[mirror_services.live_status] Events in time window: %d (total in DB: %d)',
+        windowed_count,
+        total_events
+    )
 
     # Latest punch per employee_code
     latest_by_emp: dict[str, TimesheetEvent] = {}
