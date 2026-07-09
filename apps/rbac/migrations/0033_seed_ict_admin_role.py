@@ -30,7 +30,7 @@ def seed_ict_admin_role(apps, schema_editor):
         code=ict_admin_config['code'],
         defaults={
             'name': ict_admin_config['name'],
-            'hierarchy_level': ict_admin_config['level'],
+            'level': ict_admin_config['level'],
             'description': ict_admin_config['description'],
             'is_system_role': ict_admin_config.get('is_system_role', True),
             'is_active': True,
@@ -38,7 +38,7 @@ def seed_ict_admin_role(apps, schema_editor):
     )
     
     if created:
-        print(f"✅ Created role: {ict_admin_role.name} (code: {ict_admin_role.code}, level: {ict_admin_role.hierarchy_level})")
+        print(f"✅ Created role: {ict_admin_role.name} (code: {ict_admin_role.code}, level: {ict_admin_role.level})")
     else:
         print(f"✅ Updated role: {ict_admin_role.name}")
     
