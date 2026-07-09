@@ -32,7 +32,7 @@ class IsSuperAdmin(permissions.BasePermission):
 class IsAdmin(permissions.BasePermission):
     """
     Permission class to check if user is admin (includes super admin)
-    Also allows Django staff/superuser as fallback
+    SECURITY: Only is_superuser bypasses (emergency access), is_staff does NOT bypass
     """
     message = "You must be an admin to perform this action."
     
@@ -40,11 +40,12 @@ class IsAdmin(permissions.BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         
-        # Allow Django superuser/staff as fallback
-        if request.user.is_superuser or request.user.is_staff:
+        # ONLY Django superuser bypasses (emergency access)
+        # is_staff does NOT bypass - it only grants Django admin panel access
+        if request.user.is_superuser:
             return True
         
-        # Check RBAC roles
+        # Check RBAC roles (soft-coded)
         try:
             profile = request.user.rbac_profile
             return profile.roles.filter(
@@ -165,7 +166,7 @@ class SameOrganization(permissions.BasePermission):
 class CanManageUsers(permissions.BasePermission):
     """
     Permission class for user management operations
-    Allows Django superuser/staff as fallback
+    SECURITY: Only is_superuser bypasses, is_staff requires user_mgmt module
     """
     message = "You don't have permission to manage users."
     
@@ -173,8 +174,8 @@ class CanManageUsers(permissions.BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         
-        # Allow Django superuser/staff as fallback
-        if request.user.is_superuser or request.user.is_staff:
+        # ONLY Django superuser bypasses (emergency access)
+        if request.user.is_superuser:
             return True
         
         try:
@@ -185,6 +186,10 @@ class CanManageUsers(permissions.BasePermission):
                 code__in=['super_admin', 'admin'],
                 is_active=True
             ).exists():
+                return True
+            
+            # Check if user has user_mgmt module access (soft-coded)
+            if profile.has_module_access('user_mgmt'):
                 return True
             
             # Check specific permission
