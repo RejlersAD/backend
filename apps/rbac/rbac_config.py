@@ -50,12 +50,17 @@ ALL_MODULES_CATALOGUE = [
     # ── Instrument sub-module code (split from shared instrument_datasheet code) ──
     {'code': 'instrument_io_list',     'name': 'Instrument IO List',           'icon': 'CircleStack', 'order': 25, 'description': 'Generate or QC an Input/Output list from the instrument register'},
     # ── Admin / Platform ─────────────────────────────────────────────────
-    {'code': 'user_mgmt',              'name': 'User Management',              'icon': 'Users',       'order': 50, 'description': 'Manage users, roles, and permissions'},
-    {'code': 'org_settings',           'name': 'Organization Settings',        'icon': 'Settings',    'order': 51, 'description': 'Configure organization settings and preferences'},
-    {'code': 'audit_logs',             'name': 'Audit Logs',                   'icon': 'FileSearch',  'order': 52, 'description': 'View system audit logs and activity (append-only per data-management spec)'},
-    {'code': 'file_storage',           'name': 'File Storage',                 'icon': 'Database',    'order': 53, 'description': 'Manage files and documents in S3'},
-    {'code': 'reports',                'name': 'Reports & Analytics',          'icon': 'BarChart',    'order': 54, 'description': 'Generate reports and view analytics'},
-    {'code': 'api_access',             'name': 'API Access',                   'icon': 'Code',        'order': 55, 'description': 'Access REST APIs programmatically'},
+    {'code': 'admin_dashboard',        'name': 'Admin Dashboard',              'icon': 'ChartBar',    'order': 50, 'description': 'System overview & analytics dashboard for administrators'},
+    {'code': 'user_mgmt',              'name': 'User Management',              'icon': 'Users',       'order': 51, 'description': 'Manage users, roles, and permissions'},
+    {'code': 'role_access_mgmt',       'name': 'Role & Access Management',     'icon': 'ShieldCheck', 'order': 52, 'description': 'Roles, module permissions & access request approvals'},
+    {'code': 'wrench_integration',     'name': 'Wrench Integration',           'icon': 'Wrench',      'order': 53, 'description': 'Wrench Smart Project Platform integration and sync'},
+    {'code': 'ai_champion',            'name': 'AI Champion',                  'icon': 'Trophy',      'order': 54, 'description': 'AI Champion leaderboard, badges and engagement analytics'},
+    {'code': 'enquiry_management',     'name': 'Enquiry Management',           'icon': 'Envelope',    'order': 55, 'description': 'Customer enquiries from public contact form'},
+    {'code': 'org_settings',           'name': 'Organization Settings',        'icon': 'Settings',    'order': 56, 'description': 'Configure organization settings and preferences'},
+    {'code': 'audit_logs',             'name': 'Audit Logs',                   'icon': 'FileSearch',  'order': 57, 'description': 'View system audit logs and activity (append-only per data-management spec)'},
+    {'code': 'file_storage',           'name': 'File Storage',                 'icon': 'Database',    'order': 58, 'description': 'Manage files and documents in S3'},
+    {'code': 'reports',                'name': 'Reports & Analytics',          'icon': 'BarChart',    'order': 59, 'description': 'Generate reports and view analytics'},
+    {'code': 'api_access',             'name': 'API Access',                   'icon': 'Code',        'order': 60, 'description': 'Access REST APIs programmatically'},
     # ── HR & Payroll (Sensitive — Super Admin grant only) ─────────────────
     {'code': 'hr_management',          'name': 'Human Resources',              'icon': 'Users',       'order': 70, 'description': 'HR management — employee records, leave, and workforce planning'},
     {'code': 'payroll',                'name': 'Payroll Engine',               'icon': 'DollarSign',  'order': 71, 'description': 'Payroll processing, salary slips, and compensation management'},
