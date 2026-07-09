@@ -105,6 +105,15 @@ SYSTEM_ROLES_CONFIG = [
         'badge_color': 'orange',
     },
     {
+        'code': 'ict_admin',
+        'name': 'ICT Administrator',
+        'level': 2,
+        'description': 'ICT & System Administrator — full access to admin section only (Dashboard, Users, Roles, Wrench, AI Champion, Enquiries). No access to Engineering, HR, or Finance modules.',
+        'is_system_role': True,
+        'badge_color': 'indigo',
+        'department_restricted': 'ICT',  # Soft-coded department restriction
+    },
+    {
         'code': 'process_engineer',
         'name': 'Process Engineer',
         'level': 4,
@@ -234,7 +243,7 @@ DEFAULT_ROLE_CONFIG = {
 }
 
 # Admin Role Detection
-ADMIN_ROLE_CODES = ['super_admin', 'admin', 'administrator']
+ADMIN_ROLE_CODES = ['super_admin', 'admin', 'ict_admin', 'administrator']
 SUPERADMIN_ROLE_CODES = ['super_admin', 'superadmin']
 
 # Sensitive roles — only Super Admin may grant these
@@ -455,6 +464,17 @@ ROLE_MODULE_POLICY = {
         'procurement_requisitions',
         'procurement_orders',
         'procurement_receipts',
+    ],
+
+    # ICT Admin: ONLY admin section modules (9. Admin) - NO engineering, HR, or finance access
+    # SOFT-CODED: Single source of truth for ICT admin access
+    'ict_admin': [
+        'admin_dashboard',       # 9.1 Dashboard
+        'user_mgmt',             # 9.2 User Management
+        'role_access_mgmt',      # 9.3 Role & Access Management
+        'wrench_integration',    # 9.4 Wrench Integration
+        'ai_champion',           # 9.5 AI Champion
+        'enquiry_management',    # 9.6 Enquiry Management
     ],
 
     # Default: standard engineering + common + hr_self_service (see DEFAULT_ROLE_MODULES)

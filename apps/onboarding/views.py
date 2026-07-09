@@ -282,6 +282,19 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                     created_by=request.user,
                     notes=data.get('notes', '')
                 )
+
+                # ── Sync Reporting Manager → UserProfile.manager ──────────────
+                # When a new employee is created via Onboarding with a manager,
+                # also set UserProfile.manager so the Profile page stays aligned.
+                if manager_id and manager_employee:
+                    try:
+                        from apps.rbac.models import UserProfile as _UP
+                        mgr_profile = _UP.objects.filter(
+                            user=manager_employee.user, is_deleted=False
+                        ).first()
+                        _UP.objects.filter(user=user).update(manager=mgr_profile)
+                    except Exception:
+                        pass  # non-fatal — manager field is still on EmployeeMaster
                 
                 # Handle passport photo upload to S3
                 photo = request.FILES.get('photo')

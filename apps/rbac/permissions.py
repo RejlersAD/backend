@@ -31,7 +31,7 @@ class IsSuperAdmin(permissions.BasePermission):
 
 class IsAdmin(permissions.BasePermission):
     """
-    Permission class to check if user is admin (includes super admin)
+    Permission class to check if user is admin (includes super admin and ICT admin)
     SECURITY: Only is_superuser bypasses (emergency access), is_staff does NOT bypass
     """
     message = "You must be an admin to perform this action."
@@ -45,11 +45,11 @@ class IsAdmin(permissions.BasePermission):
         if request.user.is_superuser:
             return True
         
-        # Check RBAC roles (soft-coded)
+        # Check RBAC roles (soft-coded from rbac_config.py)
         try:
             profile = request.user.rbac_profile
             return profile.roles.filter(
-                code__in=['super_admin', 'admin'],
+                code__in=['super_admin', 'admin', 'ict_admin'],  # ICT Admin added
                 is_active=True
             ).exists()
         except UserProfile.DoesNotExist:
@@ -181,9 +181,9 @@ class CanManageUsers(permissions.BasePermission):
         try:
             profile = request.user.rbac_profile
             
-            # Super admin and admin can manage users
+            # Super admin, admin, and ICT admin can manage users (soft-coded)
             if profile.roles.filter(
-                code__in=['super_admin', 'admin'],
+                code__in=['super_admin', 'admin', 'ict_admin'],
                 is_active=True
             ).exists():
                 return True

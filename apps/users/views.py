@@ -347,14 +347,24 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                 'manager_employee_number': employee.manager.employee_number if employee.manager else None,
                 'photo_url': employee.photo_url,
                 'is_active': user.is_active,
+                'branch': employee.branch or '',
+                'join_date': employee.join_date.isoformat() if employee.join_date else '',
                 'created_at': employee.created_at.isoformat() if employee.created_at else None,
                 'updated_at': employee.updated_at.isoformat() if employee.updated_at else None,
                 'engineer_profile': employee.engineer_profile or {},
             }
-            
+
+            # Soft-coded branch choices from EmployeeMaster model
+            from apps.hr_core.models import EmployeeMaster as _EM
+            branch_choices = [
+                {'value': v, 'label': l}
+                for v, l in getattr(_EM, 'BRANCH_CHOICES', [('RAD', 'Rejlers Abu Dhabi (RAD)'), ('RIN', 'Rejlers India (RIN)')])
+            ]
+
             return Response({
                 'employee': employee_data,
                 'field_groups': PROFILE_FIELD_GROUPS,
+                'branch_choices': branch_choices,
             })
         
         elif request.method == 'PATCH':
@@ -385,6 +395,7 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                 'preferred_given_name', 'phone_number', 'initials', 'account_name',
                 'employment_id', 'candidate_id', 'business_unit', 'division',
                 'business_area', 'office', 'address', 'city', 'postal_code', 'country',
+                'branch', 'join_date',
                 'is_test_person', 'not_signed', 'implementation_test', 'hrm_test', 'process_testing'
             ]
             
@@ -451,6 +462,10 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                     # Sync position if job title changed
                     if 'job_title_uae' in request.data:
                         onboarding_sync_fields['position'] = request.data['job_title_uae']
+
+                    # Sync branch if changed
+                    if 'branch' in request.data:
+                        onboarding_sync_fields['branch'] = request.data['branch']
                     
                     # Apply synced fields
                     if onboarding_sync_fields:

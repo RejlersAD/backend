@@ -258,6 +258,36 @@ class UserProfileSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(write_only=True, required=False)
     last_name = serializers.CharField(write_only=True, required=False)
 
+    # Reporting Manager — single source of truth for both Profile and Onboarding pages.
+    # manager_id  : writable UUID → sets UserProfile.manager FK
+    # manager_name: read-only display name for the current manager
+    # manager_detail: read-only dict used by the frontend dropdown to pre-select
+    manager_id = serializers.PrimaryKeyRelatedField(
+        source='manager',
+        queryset=UserProfile.objects.filter(is_deleted=False),
+        required=False,
+        allow_null=True,
+        write_only=True,
+    )
+    manager_name = serializers.SerializerMethodField()
+    manager_detail = serializers.SerializerMethodField()
+
+    def get_manager_name(self, obj):
+        if not obj.manager:
+            return None
+        return obj.manager.user.get_full_name() or obj.manager.user.username
+
+    def get_manager_detail(self, obj):
+        if not obj.manager:
+            return None
+        return {
+            'id':        str(obj.manager.id),
+            'name':      obj.manager.user.get_full_name() or obj.manager.user.username,
+            'email':     obj.manager.user.email,
+            'job_title': obj.manager.job_title or '',
+            'department': obj.manager.department or '',
+        }
+
     def validate(self, attrs):
         """Validate required fields for creation"""
         import logging
@@ -346,17 +376,18 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'id', 'user', 'organization', 'organization_id', 'organization_name', 'status', 'is_mfa_enabled',
             'roles', 'role_ids', 'module_ids', 'permissions', 'modules',
             'employee_id', 'department', 'job_title', 'manager',
+            'manager_id', 'manager_name', 'manager_detail',
             'last_login_ip', 'last_login_at', 'failed_login_attempts',
-            'must_change_password',  # Password policy field
-            'profile_photo', 'phone', 'bio', 'location', 'engineer_profile',  # Profile customization
+            'must_change_password',
+            'profile_photo', 'phone', 'bio', 'location', 'engineer_profile',
             'is_deleted', 'deleted_at', 'deleted_by',
             'created_at', 'updated_at',
-            # Write-only fields for user creation
             'username', 'email', 'password', 'first_name', 'last_name', 'phone'
         ]
         read_only_fields = [
             'id', 'user', 'last_login_ip', 'last_login_at', 'failed_login_attempts',
-            'is_deleted', 'deleted_at', 'deleted_by', 'created_at', 'updated_at'
+            'is_deleted', 'deleted_at', 'deleted_by', 'created_at', 'updated_at',
+            'manager_name', 'manager_detail',
         ]
     
     def get_permissions(self, obj):
