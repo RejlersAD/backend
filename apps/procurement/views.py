@@ -7,11 +7,12 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q, Count, Sum, Avg
 from django.utils import timezone
 from datetime import timedelta
 
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db import models as django_models
 
 from .models import (
@@ -41,12 +42,24 @@ from .serializers import (
 )
 
 
+# Soft-coded pagination for vendor list - supports large page_size
+class VendorPagination(PageNumberPagination):
+    """
+    Custom pagination for vendors allowing larger page sizes
+    Supports page_size query parameter up to 10000 records
+    """
+    page_size = 100  # Default page size
+    page_size_query_param = 'page_size'  # Allow client to set page_size via query param
+    max_page_size = 10000  # Maximum allowed page_size
+
+
 class VendorViewSet(viewsets.ModelViewSet):
     """ViewSet for Vendor management"""
     
     queryset = Vendor.objects.all().order_by('-created_at')
     serializer_class = VendorSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = VendorPagination  # Use custom pagination
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -105,11 +118,20 @@ class VendorViewSet(viewsets.ModelViewSet):
 
 
 class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
-    """ViewSet for Purchase Requisition management"""
+    """
+    ViewSet for Purchase Requisition management
+    
+    Features:
+    - Multi-part file upload to S3
+    - Two-tier approval workflow (PM → VP)
+    - Advanced filtering and search
+    - PDF generation aligned with template
+    """
     
     queryset = PurchaseRequisition.objects.all().order_by('-created_at')
     serializer_class = PurchaseRequisitionSerializer
     permission_classes = [IsAuthenticated]
+    parser_classes = [FormParser, MultiPartParser, JSONParser]
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -129,35 +151,239 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         if department:
             queryset = queryset.filter(department=department)
         
-        # Search
+        # Filter by project
+        project_filter = self.request.query_params.get('project', None)
+        if project_filter:
+            queryset = queryset.filter(project__icontains=project_filter)
+        
+        # Filter by approval status
+        pm_approval = self.request.query_params.get('pm_approval_status', None)
+        if pm_approval:
+            queryset = queryset.filter(pm_approval_status=pm_approval)
+        
+        vp_approval = self.request.query_params.get('vp_op_approval_status', None)
+        if vp_approval:
+            queryset = queryset.filter(vp_op_approval_status=vp_approval)
+        
+        # Search across multiple fields
         search = self.request.query_params.get('search', None)
         if search:
             queryset = queryset.filter(
                 Q(pr_number__icontains=search) |
                 Q(title__icontains=search) |
-                Q(description__icontains=search)
+                Q(product_service__icontains=search) |
+                Q(description_reason__icontains=search) |
+                Q(supplier_name__icontains=search) |
+                Q(project_department__icontains=search)
             )
         
         return queryset
     
+    def create(self, request, *args, **kwargs):
+        """Create PR with file upload support"""
+        # Handle file uploads from request.FILES
+        files = request.FILES.getlist('attachments_files', [])
+        
+        # Add files to serializer context
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Add files to validated data
+        if files:
+            serializer.validated_data['attachments_files'] = files
+        
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+    
     @action(detail=True, methods=['post'])
-    def approve(self, request, pk=None):
-        """Approve a purchase requisition"""
+    def pm_approve(self, request, pk=None):
+        """
+        Project Manager approval (first tier)
+        Requires: signature (optional)
+        """
         pr = self.get_object()
         
-        if pr.status != 'submitted':
+        # Validate PR can be approved
+        if pr.pm_approval_status == 'approved':
             return Response(
-                {'error': 'Only submitted requisitions can be approved'},
+                {'error': 'PR already approved by PM'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        pr.status = 'approved'
-        pr.approved_by = request.user
-        pr.approved_at = timezone.now()
+        # Update PM approval
+        pr.pm_name = request.user
+        pr.pm_signature = request.data.get('signature', '')
+        pr.pm_approval_status = 'approved'
+        pr.pm_approved_at = timezone.now()
+        
+        # Update overall status
+        if pr.status == 'submitted' or pr.status == 'draft':
+            pr.status = 'pm_approved'
+        
         pr.save()
         
         serializer = self.get_serializer(pr)
         return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def pm_reject(self, request, pk=None):
+        """Project Manager rejection"""
+        pr = self.get_object()
+        
+        pr.pm_approval_status = 'not_approved'
+        pr.status = 'rejected'
+        pr.rejection_reason = request.data.get('reason', 'Rejected by PM')
+        pr.save()
+        
+        serializer = self.get_serializer(pr)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def vp_approve(self, request, pk=None):
+        """
+        VP Operations approval (second tier)
+        Requires: PM approval first, signature (optional)
+        """
+        pr = self.get_object()
+        
+        # Validate PM has approved first
+        if pr.pm_approval_status != 'approved':
+            return Response(
+                {'error': 'PM must approve before VP approval'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate VP hasn't already approved
+        if pr.vp_op_approval_status == 'approved':
+            return Response(
+                {'error': 'PR already approved by VP'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Update VP approval
+        pr.vp_op_name = request.user
+        pr.vp_op_signature = request.data.get('signature', '')
+        pr.vp_op_approval_status = 'approved'
+        pr.vp_op_approved_at = timezone.now()
+        
+        # Update overall status to fully approved
+        pr.status = 'fully_approved'
+        pr.approved_by = request.user
+        pr.approved_at = timezone.now()
+        
+        pr.save()
+        
+        serializer = self.get_serializer(pr)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def vp_reject(self, request, pk=None):
+        """VP Operations rejection"""
+        pr = self.get_object()
+        
+        pr.vp_op_approval_status = 'not_approved'
+        pr.status = 'rejected'
+        pr.rejection_reason = request.data.get('reason', 'Rejected by VP Operations')
+        pr.save()
+        
+        serializer = self.get_serializer(pr)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def submit(self, request, pk=None):
+        """Submit PR for approval (move from draft to submitted)"""
+        pr = self.get_object()
+        
+        if pr.status != 'draft':
+            return Response(
+                {'error': 'Only draft PRs can be submitted'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        pr.status = 'submitted'
+        pr.save()
+        
+        serializer = self.get_serializer(pr)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def upload_attachment(self, request, pk=None):
+        """Upload additional attachment to existing PR"""
+        pr = self.get_object()
+        files = request.FILES.getlist('files', [])
+        
+        if not files:
+            return Response(
+                {'error': 'No files provided'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Use serializer's upload method
+        serializer = self.get_serializer(pr)
+        serializer._upload_attachments(pr, files)
+        
+        return Response({
+            'message': f'{len(files)} file(s) uploaded successfully',
+            'attachments': pr.attachments
+        })
+    
+    @action(detail=False, methods=['get'])
+    def dashboard(self, request):
+        """Get PR dashboard statistics"""
+        queryset = self.get_queryset()
+        
+        total = queryset.count()
+        draft = queryset.filter(status='draft').count()
+        submitted = queryset.filter(status='submitted').count()
+        pm_approved = queryset.filter(status='pm_approved').count()
+        fully_approved = queryset.filter(status='fully_approved').count()
+        rejected = queryset.filter(status='rejected').count()
+        converted = queryset.filter(status='converted').count()
+        
+        # Approval pending counts
+        pending_pm_approval = queryset.filter(
+            status='submitted', pm_approval_status='pending'
+        ).count()
+        
+        pending_vp_approval = queryset.filter(
+            status='pm_approved', vp_op_approval_status='pending'
+        ).count()
+        
+        by_priority = queryset.values('priority').annotate(
+            count=Count('id')
+        )
+        
+        recent = queryset[:10]
+        recent_serializer = self.get_serializer(recent, many=True)
+        
+        return Response({
+            'totals': {
+                'total': total,
+                'draft': draft,
+                'submitted': submitted,
+                'pm_approved': pm_approved,
+                'fully_approved': fully_approved,
+                'rejected': rejected,
+                'converted': converted,
+                'pending_pm_approval': pending_pm_approval,
+                'pending_vp_approval': pending_vp_approval,
+            },
+            'by_priority': list(by_priority),
+            'recent': recent_serializer.data
+        })
+    
+    # Legacy approve/reject endpoints (kept for backward compatibility)
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        """Legacy approve endpoint - redirects to VP approve"""
+        return self.vp_approve(request, pk)
+    
+    # Legacy approve/reject endpoints (kept for backward compatibility)
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        """Legacy approve endpoint - redirects to VP approve"""
+        return self.vp_approve(request, pk)
     
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):

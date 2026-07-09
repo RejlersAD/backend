@@ -106,6 +106,8 @@ class Vendor(TimeStampedModel):
     
     # Financial
     tax_id = models.CharField(max_length=100, blank=True)
+    trade_license_number = models.CharField(max_length=100, blank=True, help_text="Trade License Number")
+    vat_number = models.CharField(max_length=100, blank=True, help_text="VAT Registration Number")
     payment_terms = models.CharField(max_length=200, blank=True)
     credit_limit = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
     
@@ -136,6 +138,10 @@ class Vendor(TimeStampedModel):
     icv_issuing_authority = models.CharField(max_length=200, blank=True, default="ADDED", help_text="ICV Issuing Authority (e.g., ADDED)")
     is_icv_certified = models.BooleanField(default=False, help_text="ICV Certification Status")
     
+    # ADNOC & Industry Compliance
+    adnoc_approved = models.BooleanField(default=False, help_text="ADNOC Vendor Approval Status")
+    vendor_tenure_years = models.IntegerField(null=True, blank=True, help_text="Years of business relationship with Rejlers")
+    
     # Metadata
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='vendors_created')
     notes = models.TextField(blank=True)
@@ -157,6 +163,9 @@ class Vendor(TimeStampedModel):
 class PurchaseRequisition(TimeStampedModel):
     """
     Purchase Requisition (PR) - Internal request for procurement
+    
+    Aligned with RAD-OM-PRC-0001 FRM -1 Rev 0 template
+    Total 23 fields extracted from company standard template
     """
     
     TYPE_CHOICES = [
@@ -167,7 +176,9 @@ class PurchaseRequisition(TimeStampedModel):
     STATUS_CHOICES = [
         ('draft', 'Draft'),
         ('submitted', 'Submitted'),
-        ('approved', 'Approved'),
+        ('pm_approved', 'PM Approved'),
+        ('vp_approved', 'VP Approved'),
+        ('fully_approved', 'Fully Approved'),
         ('rejected', 'Rejected'),
         ('cancelled', 'Cancelled'),
         ('converted', 'Converted to PO'),
@@ -180,36 +191,84 @@ class PurchaseRequisition(TimeStampedModel):
         ('low', 'Low'),
     ]
     
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    pr_number = models.CharField(max_length=50, unique=True, db_index=True)
-    requisition_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='general')
-    title = models.CharField(max_length=300)
-    description = models.TextField(blank=True)
-    category = models.CharField(max_length=50)  # From PROCUREMENT_CATEGORIES
+    APPROVAL_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('not_approved', 'Not Approved'),
+    ]
     
-    # Requestor info
-    requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='prs_requested')
+    # === HEADER SECTION (Fields 1-3) ===
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    pr_number = models.CharField(max_length=50, unique=True, db_index=True, help_text='Auto-generated PR No (e.g., RAD-PRJ-PR-0021_2025)')
+    issued_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='prs_issued', help_text='Person who issued the PR')
+    issued_date = models.DateField(null=True, blank=True, help_text='Date when PR was issued')
+    
+    # === SUPPLIER SECTION (Fields 4-5) ===
+    supplier_name = models.CharField(max_length=300, blank=True, help_text='Preferred supplier name (e.g., Velimor Middle East Consultancy LLC)')
+    supplier_business_id = models.CharField(max_length=100, blank=True, help_text='Supplier Business ID No (e.g., CN-3362215)')
+    
+    # === PROJECT/PRODUCT SECTION (Fields 6-7) ===
+    product_service = models.TextField(blank=True, help_text='Product or Service being purchased')
+    project_department = models.TextField(blank=True, help_text='Project name and department details')
+    
+    # === DESCRIPTION SECTION (Field 8) ===
+    description_reason = models.TextField(blank=True, help_text='Description and Reason for Purchase')
+    
+    # === PREFERRED SUPPLIER SECTION (Field 9) ===
+    preferred_supplier_if_any = models.CharField(max_length=300, blank=True, help_text='Preferred Supplier (if any)')
+    
+    # === PRICING SECTION (Fields 10-13) ===
+    price_description = models.TextField(blank=True, help_text='Item/Service description for pricing')
+    total_price = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True, help_text='Total Price (e.g., USD 4,000.00)')
+    currency = models.CharField(max_length=3, default='USD', help_text='Currency code (USD, AED, EUR, etc.)')
+    price_remarks = models.TextField(blank=True, help_text='Pricing remarks (e.g., Included in HSE budget)')
+    net_total_excl_vat = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True, help_text='Net Total, excluding VAT')
+    
+    # === REFERENCE SECTION (Field 14) ===
+    po_number_reference = models.CharField(max_length=100, blank=True, help_text='Related PO number (e.g., RAD-PRJ-PUR-0014_JAN2025)')
+    
+    # === SPECIAL NOTES SECTION (Field 15) ===
+    special_notes = models.TextField(blank=True, help_text='Special Notes (if any)')
+    
+    # === APPROVALS SECTION (Fields 16-21) ===
+    # Project Manager (PM) Approval
+    pm_name = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_pm_approved', help_text='Project Manager name')
+    pm_signature = models.CharField(max_length=500, blank=True, help_text='PM signature (base64 or S3 URL)')
+    pm_approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default='pending', help_text='PM Approval Status')
+    pm_approved_at = models.DateTimeField(null=True, blank=True, help_text='PM approval timestamp')
+    
+    # VP Operations (Vp, Op) Approval
+    vp_op_name = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_vp_approved', help_text='VP Operations name')
+    vp_op_signature = models.CharField(max_length=500, blank=True, help_text='VP signature (base64 or S3 URL)')
+    vp_op_approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default='pending', help_text='VP Approval Status')
+    vp_op_approved_at = models.DateTimeField(null=True, blank=True, help_text='VP approval timestamp')
+    
+    # === FOOTER/METADATA (Fields 22-23) ===
+    form_reference = models.CharField(max_length=100, default='RAD-OM-PRC-0001 FRM -1 Rev 0', help_text='Form template reference')
+    page_number = models.CharField(max_length=20, default='Page 1 of 1', help_text='Page number')
+    
+    # === LEGACY FIELDS (keep for backward compatibility) ===
+    requisition_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='project')
+    title = models.CharField(max_length=300, blank=True, help_text='Short title (auto-generated from product_service)')
+    category = models.CharField(max_length=50, blank=True)  # From PROCUREMENT_CATEGORIES
     department = models.CharField(max_length=200, blank=True)
     project = models.CharField(max_length=200, blank=True)
-    
-    # Details
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default='normal')
     required_date = models.DateField(null=True, blank=True)
     estimated_budget = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
-    
-    # Items (JSON field for flexibility)
     items = models.JSONField(default=list, blank=True)
-    # Example: [{'item': 'Laptop', 'qty': 2, 'unit': 'ea', 'estimated_price': 1500}]
-    
-    # Approval workflow
-    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_approved')
-    approved_at = models.DateTimeField(null=True, blank=True)
     rejection_reason = models.TextField(blank=True)
-    
-    # Metadata
     notes = models.TextField(blank=True)
-    attachments = models.JSONField(default=list, blank=True)
+    
+    # File attachments stored in S3
+    attachments = models.JSONField(default=list, blank=True, help_text='List of S3 file URLs')
+    # Example: [{'filename': 'quote.pdf', 's3_url': 'https://...', 'uploaded_at': '...'}]
+    
+    # Legacy approval fields (deprecated, use pm_* and vp_op_* instead)
+    requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_requested_legacy')
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_approved_legacy')
+    approved_at = models.DateTimeField(null=True, blank=True)
     
     class Meta:
         db_table = 'procurement_requisitions'
@@ -251,23 +310,44 @@ class PurchaseOrder(TimeStampedModel):
     # Vendor info
     vendor = models.ForeignKey(Vendor, on_delete=models.PROTECT, related_name='purchase_orders')
     
+    # ═══ SELLER/VENDOR CONTACT DETAILS (Template Section: Seller) ═══
+    seller_reference = models.CharField(max_length=300, blank=True, help_text='Attn: Contact person at vendor (e.g., Mr. Abdul Muneem)')
+    quote_ref = models.CharField(max_length=300, blank=True, help_text='Quote reference (e.g., E-mail dt 27.12.2024)')
+    seller_license_no = models.CharField(max_length=100, blank=True, help_text='Seller business license/CN number (e.g., CN-3362215)')
+    
+    # ═══ BUYER/INVOICING CONTACT DETAILS (Template Section: Invoicing Address) ═══
+    invoicing_attn = models.CharField(max_length=300, blank=True, help_text='Invoice recipient (e.g., Attn. Mr. Aneef Thadikkarantavida)')
+    invoicing_emails = models.JSONField(default=list, blank=True, help_text='Email addresses for invoice submission')
+    # Example: ['aneef@rejlers.ae', 'uae.procurement@rejlers.ae', 'richa@rejlers.ae']
+    company_fax = models.CharField(max_length=50, blank=True, help_text='Company fax number')
+    
+    # ═══ BUYER REFERENCE CONTACTS (Template Section: Buyer Reference) ═══
+    buyer_reference_pm = models.CharField(max_length=300, blank=True, help_text='Procurement Manager (e.g., Ms.Richa Thomas)')
+    buyer_reference_pe = models.CharField(max_length=300, blank=True, help_text='Procurement Engineer (e.g., Ms.Sukanya Ravichandran)')
+    
     # Details
     title = models.CharField(max_length=300)
     description = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     category = models.CharField(max_length=50)
+    form_note = models.CharField(max_length=200, default='(PO no. to be used in all documents)', help_text='Form usage note')
     
     # Financial (soft-coded for AI extraction)
     total_amount = models.DecimalField(max_digits=15, decimal_places=2)
     currency = models.CharField(max_length=10, default='USD')
     tax_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    vat_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=5.00, help_text='VAT/Tax percentage (e.g., 5% for UAE)')
     discount_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     
     # Payment Terms (soft-coded for extraction from PO documents)
-    payment_terms = models.CharField(max_length=300, blank=True, help_text='e.g., Net 30, 50% advance / 50% completion')
-    delivery_terms = models.CharField(max_length=200, blank=True, help_text='e.g., FOB, CIF, DAP, DDP')
+    payment_terms = models.CharField(max_length=300, blank=True, help_text='e.g., 45 days net for agreed payment milestones')
+    payment_mode = models.CharField(max_length=100, blank=True, default='Bank Transfer', help_text='Payment method (Bank Transfer, LC, etc.)')
+    delivery_terms = models.CharField(max_length=200, blank=True, help_text='e.g., Services completed and accepted, FOB, CIF')
+    marking = models.CharField(max_length=100, blank=True, help_text='Shipment marking (e.g., RAD-PRJ-PUR-0014)')
     payment_milestones = models.JSONField(default=list, blank=True, help_text='Payment schedule milestones')
-    # Example: [{'milestone': 'Advance', 'percentage': 30, 'amount': 10000, 'due_date': '2026-07-01'}]
+    # Example: [{'milestone': 'Draft Report', 'percentage': 60, 'amount': 2400, 'due_date': '2026-02-15'}]
+    workshop_rates = models.JSONField(default=dict, blank=True, help_text='Workshop day rates for services')
+    # Example: {'chairman': 1200, 'scribe': 400, 'currency': 'USD'}
     
     # ═══ PROJECT LINKAGE (Master Database Integration) ═══
     # Professional project-based procurement with master database
@@ -294,6 +374,13 @@ class PurchaseOrder(TimeStampedModel):
         max_digits=15, decimal_places=2, null=True, blank=True,
         help_text='Allocated budget for this PO (deprecated, use budget_allocation FK)'
     )
+    
+    # ═══ DETAILED PROJECT INFORMATION (Template Page 2) ═══
+    end_client = models.CharField(max_length=300, blank=True, help_text='End client name (e.g., ADNOC Gas)')
+    contractor = models.CharField(max_length=300, blank=True, help_text='Main contractor (e.g., REJLERS INTERNATIONAL ENGINEERING SOLUTIONS AB)')
+    subcontractor = models.CharField(max_length=300, blank=True, help_text='Subcontractor name (e.g., VELIMOR MIDDLE EAST CONSULTANCY LLC)')
+    company_agreement_no = models.CharField(max_length=100, blank=True, help_text='Company agreement number (e.g., 4700024202)')
+    rad_project_no = models.CharField(max_length=100, blank=True, help_text='RAD Project number (e.g., 5900927)')
     
     # Items
     items = models.JSONField(default=list, blank=True)
@@ -344,6 +431,34 @@ class PurchaseOrder(TimeStampedModel):
         max_digits=15, decimal_places=2, default=0,
         help_text='Sum of all related invoice amounts'
     )
+    
+    # ═══ APPROVAL SECTION (Template: Approved by) ═══
+    approved_by_name = models.CharField(max_length=300, blank=True, help_text='Approver name (soft-coded string, e.g., Jarmo Suominen)')
+    approved_by_title = models.CharField(max_length=300, blank=True, help_text='Approver title (e.g., Senior VP, Middle East, CEO)')
+    approved_date = models.DateField(null=True, blank=True, help_text='Date when PO was approved')
+    approval_signature = models.CharField(max_length=500, blank=True, help_text='Digital signature (base64 or S3 URL)')
+    approval_stamp = models.CharField(max_length=500, blank=True, help_text='Company stamp image (S3 URL)')
+    
+    # ═══ ORDER CONFIRMATION (Template: Vendor Response Section) ═══
+    confirmation_date = models.DateField(null=True, blank=True, help_text='Date vendor confirmed the order')
+    seller_contact_person = models.CharField(max_length=300, blank=True, help_text='Seller contact person name')
+    seller_phone = models.CharField(max_length=50, blank=True, help_text='Seller phone number')
+    seller_fax = models.CharField(max_length=50, blank=True, help_text='Seller fax number')
+    seller_email = models.CharField(max_length=200, blank=True, help_text='Seller email address')
+    
+    # ═══ CONTRACT SECTIONS (Template: Detailed requirements) ═══
+    scope_of_services = models.TextField(blank=True, help_text='Detailed scope of work/services')
+    safety_requirements = models.TextField(blank=True, help_text='HSEQ regulations and safety requirements')
+    variations_clause = models.TextField(blank=True, help_text='Contract variation and change management terms')
+    time_schedule = models.TextField(blank=True, help_text='Time schedule and milestones')
+    reporting_meetings = models.TextField(blank=True, help_text='Reporting and meeting requirements')
+    performance_requirements = models.TextField(blank=True, help_text='Performance of services requirements')
+    contact_persons = models.JSONField(default=dict, blank=True, help_text='Contact persons by role')
+    # Example: {
+    #   'technical': [{'name': 'Saad Majid', 'email': 'saad.majid@rejlers.ae'}],
+    #   'project_team': [{'name': 'Pravin Kumar', 'email': 'pravin.kumar@rejlers.ae'}],
+    #   'commercial': [{'name': 'Richa Hannah Thomas', 'email': 'richa@rejlers.ae'}]
+    # }
     
     # People
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='pos_created')

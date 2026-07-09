@@ -17,10 +17,33 @@ class VendorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Vendor
         fields = [
+            # Core Information
             'id', 'vendor_code', 'name', 'contact_person', 'email', 'phone', 'address',
-            'country', 'tax_id', 'payment_terms', 'credit_limit', 'status', 'status_display',
-            'rating', 'rating_display', 'performance_notes', 'categories', 'created_by',
-            'created_by_name', 'notes', 'attachments', 'created_at', 'updated_at'
+            'country',
+            
+            # Financial & Legal
+            'tax_id', 'trade_license_number', 'vat_number', 'payment_terms', 'credit_limit',
+            
+            # Status & Performance
+            'status', 'status_display', 'rating', 'rating_display', 'performance_notes',
+            
+            # Categories & Services
+            'categories',
+            
+            # Oil & Gas Specific
+            'certifications', 'quality_standards', 'approved_materials', 'inspection_authority',
+            
+            # HSE Compliance
+            'hse_rating', 'safety_certifications', 'last_audit_date', 'audit_status',
+            
+            # ICV (In-Country Value) - Abu Dhabi Market
+            'icv_percentage', 'icv_certificate', 'icv_expiry_date', 'icv_issuing_authority', 'is_icv_certified',
+            
+            # ADNOC & Industry
+            'adnoc_approved', 'vendor_tenure_years',
+            
+            # Metadata
+            'created_by', 'created_by_name', 'notes', 'attachments', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
     
@@ -30,33 +53,204 @@ class VendorSerializer(serializers.ModelSerializer):
 
 
 class PurchaseRequisitionSerializer(serializers.ModelSerializer):
-    """Serializer for Purchase Requisition"""
+    """
+    Serializer for Purchase Requisition
+    Aligned with RAD-OM-PRC-0001 FRM -1 Rev 0 template (23 fields)
+    """
     
+    # Display fields
     requisition_type_display = serializers.CharField(source='get_requisition_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
+    pm_approval_status_display = serializers.CharField(source='get_pm_approval_status_display', read_only=True)
+    vp_op_approval_status_display = serializers.CharField(source='get_vp_op_approval_status_display', read_only=True)
+    
+    # User relationship fields
+    issued_by_name = serializers.CharField(source='issued_by.get_full_name', read_only=True, allow_null=True)
+    pm_name_display = serializers.CharField(source='pm_name.get_full_name', read_only=True, allow_null=True)
+    vp_op_name_display = serializers.CharField(source='vp_op_name.get_full_name', read_only=True, allow_null=True)
+    
+    # Legacy fields
     requested_by_name = serializers.CharField(source='requested_by.get_full_name', read_only=True, allow_null=True)
     approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True)
     category_display = serializers.SerializerMethodField()
     
+    # File upload fields
+    attachments_files = serializers.ListField(
+        child=serializers.FileField(),
+        write_only=True,
+        required=False,
+        help_text='Upload multiple files (will be stored in S3)'
+    )
+    
     class Meta:
         model = PurchaseRequisition
         fields = [
-            'id', 'pr_number', 'requisition_type', 'requisition_type_display', 'title', 'description', 'category', 'category_display',
+            # Header Section (Fields 1-3)
+            'id', 'pr_number', 'issued_by', 'issued_by_name', 'issued_date',
+            
+            # Supplier Section (Fields 4-5)
+            'supplier_name', 'supplier_business_id',
+            
+            # Project/Product Section (Fields 6-7)
+            'product_service', 'project_department',
+            
+            # Description Section (Field 8)
+            'description_reason',
+            
+            # Preferred Supplier Section (Field 9)
+            'preferred_supplier_if_any',
+            
+            # Pricing Section (Fields 10-13)
+            'price_description', 'total_price', 'currency', 'price_remarks', 'net_total_excl_vat',
+            
+            # Reference Section (Field 14)
+            'po_number_reference',
+            
+            # Special Notes Section (Field 15)
+            'special_notes',
+            
+            # Approvals Section (Fields 16-21)
+            'pm_name', 'pm_name_display', 'pm_signature', 'pm_approval_status', 'pm_approval_status_display', 'pm_approved_at',
+            'vp_op_name', 'vp_op_name_display', 'vp_op_signature', 'vp_op_approval_status', 'vp_op_approval_status_display', 'vp_op_approved_at',
+            
+            # Footer/Metadata (Fields 22-23)
+            'form_reference', 'page_number',
+            
+            # Legacy fields (backward compatibility)
+            'requisition_type', 'requisition_type_display', 'title', 'category', 'category_display',
             'requested_by', 'requested_by_name', 'department', 'project', 'status',
             'status_display', 'priority', 'priority_display', 'required_date',
             'estimated_budget', 'items', 'approved_by', 'approved_by_name',
-            'approved_at', 'rejection_reason', 'notes', 'attachments',
+            'approved_at', 'rejection_reason', 'notes', 
+            
+            # Attachments
+            'attachments', 'attachments_files',
+            
+            # Timestamps
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'pr_number', 'created_at', 'updated_at', 'attachments']
     
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
     
     def create(self, validated_data):
-        validated_data['requested_by'] = self.context['request'].user
-        return super().create(validated_data)
+        # Extract files if present
+        files = validated_data.pop('attachments_files', [])
+        
+        # Set issued_by to current user if not provided
+        if not validated_data.get('issued_by'):
+            validated_data['issued_by'] = self.context['request'].user
+        
+        # Set issued_date to today if not provided
+        if not validated_data.get('issued_date'):
+            from datetime import date
+            validated_data['issued_date'] = date.today()
+        
+        # Auto-generate PR number if not provided
+        if not validated_data.get('pr_number'):
+            validated_data['pr_number'] = self._generate_pr_number()
+        
+        # Auto-generate title from product_service if not provided
+        if not validated_data.get('title') and validated_data.get('product_service'):
+            validated_data['title'] = validated_data['product_service'][:300]
+        
+        # Create the PR instance
+        instance = super().create(validated_data)
+        
+        # Upload files to S3 if any
+        if files:
+            self._upload_attachments(instance, files)
+        
+        return instance
+    
+    def update(self, instance, validated_data):
+        # Extract files if present
+        files = validated_data.pop('attachments_files', [])
+        
+        # Update the instance
+        instance = super().update(instance, validated_data)
+        
+        # Upload files to S3 if any
+        if files:
+            self._upload_attachments(instance, files)
+        
+        return instance
+    
+    def _generate_pr_number(self):
+        """Generate unique PR number in format: RAD-PRJ-PR-XXXX_YYYY"""
+        from datetime import datetime
+        from django.db.models import Max
+        
+        # Get current year
+        year = datetime.now().year
+        
+        # Get latest PR number for this year
+        latest_pr = PurchaseRequisition.objects.filter(
+            pr_number__endswith=f'_{year}'
+        ).aggregate(Max('pr_number'))
+        
+        if latest_pr['pr_number__max']:
+            # Extract number and increment
+            last_num = int(latest_pr['pr_number__max'].split('-')[3].split('_')[0])
+            new_num = last_num + 1
+        else:
+            new_num = 1
+        
+        return f"RAD-PRJ-PR-{new_num:04d}_{year}"
+    
+    def _upload_attachments(self, instance, files):
+        """Upload files to S3 and update attachments field"""
+        from apps.core.s3_utils import S3Client
+        from datetime import datetime
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        s3_client = S3Client()
+        
+        attachments = instance.attachments or []
+        
+        for file in files:
+            try:
+                # Generate S3 key
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                s3_key = f"procurement/requisitions/{instance.pr_number}/{timestamp}_{file.name}"
+                
+                # Upload to S3
+                success = s3_client.upload_file(
+                    file_obj=file,
+                    s3_key=s3_key,
+                    metadata={
+                        'pr_number': instance.pr_number,
+                        'uploaded_by': self.context['request'].user.email,
+                        'original_filename': file.name
+                    }
+                )
+                
+                if success:
+                    # Get S3 URL
+                    s3_url = f"https://{s3_client.bucket_name}.s3.{s3_client.s3_client.meta.region_name}.amazonaws.com/{s3_key}"
+                    
+                    # Add to attachments
+                    attachments.append({
+                        'filename': file.name,
+                        's3_key': s3_key,
+                        's3_url': s3_url,
+                        'uploaded_at': datetime.now().isoformat(),
+                        'uploaded_by': self.context['request'].user.email,
+                        'file_size': file.size,
+                        'content_type': file.content_type
+                    })
+                    logger.info(f"Uploaded {file.name} to S3: {s3_key}")
+                else:
+                    logger.error(f"Failed to upload {file.name} to S3")
+            except Exception as e:
+                logger.error(f"Error uploading {file.name}: {str(e)}")
+        
+        # Save updated attachments
+        instance.attachments = attachments
+        instance.save(update_fields=['attachments'])
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
@@ -66,7 +260,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     vendor_name = serializers.CharField(source='vendor.name', read_only=True)
     category_display = serializers.SerializerMethodField()
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True)
-    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True)
+    approved_by_user_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True)
     
     # Project linkage fields (soft-coded relationship)
     project_name = serializers.CharField(source='project.project_name', read_only=True, allow_null=True)
@@ -76,16 +270,55 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = PurchaseOrder
         fields = [
+            # Core PO fields
             'id', 'po_number', 'pr_reference', 'pr_requester_name',
             'vendor', 'vendor_name', 'title', 'description', 
-            'status', 'status_display', 'category', 'category_display',
-            'total_amount', 'currency', 'tax_amount', 'discount_amount', 'items',
+            'status', 'status_display', 'category', 'category_display', 'form_note',
+            
+            # Seller/Vendor contact details
+            'seller_reference', 'quote_ref', 'seller_license_no',
+            
+            # Buyer/Invoicing contact details
+            'invoicing_attn', 'invoicing_emails', 'company_fax',
+            
+            # Buyer reference contacts
+            'buyer_reference_pm', 'buyer_reference_pe',
+            
+            # Financial
+            'total_amount', 'currency', 'tax_amount', 'vat_percentage', 'discount_amount', 
+            
+            # Payment & delivery
+            'payment_terms', 'payment_mode', 'delivery_terms', 'marking', 
+            'payment_milestones', 'workshop_rates',
+            
+            # Items & pricing
+            'items',
+            
+            # Dates
             'po_date', 'start_date', 'end_date', 'expected_delivery', 'actual_delivery',
+            
+            # Project linkage
             'project', 'project_name', 'project_display', 'project_number', 'project_manager', 
             'budget_allocation', 'budget_allocation_display', 'budget',
-            'payment_terms', 'delivery_terms', 'payment_milestones',
-            'created_by', 'created_by_name', 'approved_by', 'approved_by_name', 
-            'terms_and_conditions', 'notes', 'attachments', 
+            
+            # Detailed project information
+            'end_client', 'contractor', 'subcontractor', 'company_agreement_no', 'rad_project_no',
+            
+            # Approval section
+            'approved_by', 'approved_by_user_name', 'approved_by_name', 'approved_by_title', 'approved_date',
+            'approval_signature', 'approval_stamp',
+            
+            # Order confirmation (vendor response)
+            'confirmation_date', 'seller_contact_person', 'seller_phone', 'seller_fax', 'seller_email',
+            
+            # Contract sections
+            'scope_of_services', 'safety_requirements', 'variations_clause', 
+            'time_schedule', 'reporting_meetings', 'performance_requirements', 'contact_persons',
+            
+            # People & metadata
+            'created_by', 'created_by_name', 'terms_and_conditions', 'notes', 'attachments', 
+            
+            # Timestamps
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'po_date', 'created_at', 'updated_at']
