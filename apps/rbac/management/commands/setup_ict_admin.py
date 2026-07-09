@@ -157,7 +157,7 @@ class Command(BaseCommand):
         user_roles = profile.roles.all()
         self.stdout.write("👤 User Roles:")
         for role in user_roles:
-            self.stdout.write(f"  • {role.name:<30} ({role.code:<15}) Level {role.hierarchy_level}")
+            self.stdout.write(f"  • {role.name:<30} ({role.code:<15}) Level {role.level}")
         
         # Show Django flags
         self.stdout.write("")
