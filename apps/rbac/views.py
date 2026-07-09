@@ -561,7 +561,32 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             ip_address=self.request.META.get('REMOTE_ADDR'),
             user_agent=self.request.META.get('HTTP_USER_AGENT', '')
         )
-    
+        # ── Two-way sync: when Reporting Manager changes on the Profile page,
+        # propagate the name to the linked OnboardingRecord (if any) and the
+        # EmployeeMaster record so all three systems stay aligned. ─────────────
+        if 'manager_id' in self.request.data or 'manager' in self.request.data:
+            manager_name = profile.manager.user.get_full_name() if profile.manager else ''
+            try:
+                from apps.onboarding.models import OnboardingRecord
+                OnboardingRecord.objects.filter(user=profile.user).update(
+                    reporting_manager=manager_name
+                )
+            except Exception:
+                pass
+            try:
+                from apps.hr_core.models import EmployeeMaster
+                if profile.manager:
+                    mgr_employee = EmployeeMaster.objects.filter(
+                        user=profile.manager.user
+                    ).first()
+                    EmployeeMaster.objects.filter(user=profile.user).update(
+                        manager=mgr_employee
+                    )
+                else:
+                    EmployeeMaster.objects.filter(user=profile.user).update(manager=None)
+            except Exception:
+                pass
+
     @action(detail=True, methods=['post'])
     def deactivate(self, request, pk=None):
         """Deactivate user"""
@@ -791,6 +816,15 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             defaults={'assigned_by': request.user, 'is_primary': is_primary}
         )
 
+        # ── SOFT-CODED CACHE INVALIDATION ─────────────────────────────────────
+        # Clear the user's cached modules and permissions so they immediately
+        # see their new role's access rights without waiting for the 60s TTL.
+        from django.core.cache import cache
+        cache.delete(f'user_modules_{profile.id}')
+        cache.delete(f'user_permissions_{profile.id}')
+        print(f"[RBAC] ✅ Cleared module/permission cache for user {profile.user.email}")
+        # ───────────────────────────────────────────────────────────────────────
+
         create_audit_log(
             user=request.user,
             action='role_assign',
@@ -851,6 +885,15 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         ).delete()[0]
         
         if deleted_count > 0:
+            # ── SOFT-CODED CACHE INVALIDATION ─────────────────────────────────────
+            # Clear the user's cached modules and permissions so they immediately
+            # lose access to revoked role's permissions without waiting for the 60s TTL.
+            from django.core.cache import cache
+            cache.delete(f'user_modules_{profile.id}')
+            cache.delete(f'user_permissions_{profile.id}')
+            print(f"[RBAC] ✅ Cleared module/permission cache for user {profile.user.email}")
+            # ───────────────────────────────────────────────────────────────────────
+            
             create_audit_log(
                 user=request.user,
                 action='role_revoke',
@@ -1367,6 +1410,21 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 changes['job_title'] = request.data['job_title']
                 profile.job_title = request.data['job_title']
             
+            # Handle reporting manager assignment
+            if 'manager_id' in request.data:
+                manager_id = request.data['manager_id']
+                if manager_id:
+                    try:
+                        manager_profile = UserProfile.objects.get(id=manager_id, is_deleted=False)
+                        profile.manager = manager_profile
+                        changes['manager'] = f"{manager_profile.user.get_full_name() or manager_profile.user.username} ({manager_id})"
+                    except UserProfile.DoesNotExist:
+                        pass  # Silently ignore invalid manager_id
+                else:
+                    # Empty string or null = clear the manager
+                    profile.manager = None
+                    changes['manager'] = 'cleared'
+            
             # Handle profile photo upload
             if 'profile_photo' in request.FILES:
                 profile.profile_photo = request.FILES['profile_photo']
@@ -1443,6 +1501,18 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         }
         
         return Response(stats)
+    
+    @action(detail=False, methods=['get'], url_path='department-choices')
+    def department_choices(self, request):
+        """
+        Get list of department choices for dropdown
+        Soft-coded constants for Oil & Gas engineering organization
+        """
+        from .constants import get_department_choices
+        return Response({
+            'departments': get_department_choices(),
+            'count': len(get_department_choices())
+        })
     
     @action(detail=False, methods=['get'])
     def my_features(self, request):
