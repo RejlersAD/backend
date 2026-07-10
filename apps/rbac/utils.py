@@ -2,6 +2,7 @@
 RBAC Utility Functions
 """
 from .models import AuditLog
+from .rbac_config import is_module_enabled
 
 
 def create_audit_log(user, action, resource_type, resource_id=None, resource_repr='',
@@ -43,11 +44,14 @@ def get_user_modules(user):
     """
     Get all accessible modules for a user
     Returns list of module codes
+    SOFT-CODED: Filters out modules disabled by MODULE_FEATURE_FLAGS in rbac_config.py
     """
     try:
         profile = user.rbac_profile
         modules = profile.get_all_modules()
-        return [m.code for m in modules]
+        # Filter out disabled modules
+        enabled_modules = [m.code for m in modules if is_module_enabled(m.code)]
+        return enabled_modules
     except:
         return []
 
@@ -55,7 +59,12 @@ def get_user_modules(user):
 def check_user_has_module_access(user, module_code):
     """
     Check if user has access to a specific module
+    SOFT-CODED: Returns False if module is disabled by feature flag
     """
+    # Check if module is globally disabled
+    if not is_module_enabled(module_code):
+        return False
+    
     if user.is_superuser:
         return True
     

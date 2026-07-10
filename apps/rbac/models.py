@@ -349,7 +349,16 @@ class UserProfile(TimeStampedModel):
         ).exists()
     
     def has_module_access(self, module_code):
-        """Check if user has access to module through any active role"""
+        """
+        Check if user has access to module through any active role
+        SOFT-CODED: Returns False if module is disabled by MODULE_FEATURE_FLAGS
+        """
+        from apps.rbac.rbac_config import is_module_enabled
+        
+        # Check if module is globally disabled
+        if not is_module_enabled(module_code):
+            return False
+        
         from apps.rbac.models import UserRole
         user_role_ids = UserRole.objects.filter(
             user_profile=self,
@@ -378,8 +387,13 @@ class UserProfile(TimeStampedModel):
         return permissions
     
     def get_all_modules(self):
-        """Get all accessible modules from all assigned roles (with caching)"""
+        """
+        Get all accessible modules from all assigned roles (with caching)
+        SOFT-CODED: Filters out modules disabled by MODULE_FEATURE_FLAGS
+        """
         from django.core.cache import cache
+        from apps.rbac.rbac_config import is_module_enabled
+        
         cache_key = f'user_modules_{self.id}'
         modules = cache.get(cache_key)
         
@@ -409,6 +423,9 @@ class UserProfile(TimeStampedModel):
             except Exception:
                 # Non-fatal: keep role-based modules if config resolution fails
                 pass
+            
+            # Filter out disabled modules based on feature flags
+            modules = [m for m in modules if is_module_enabled(m.code)]
 
             # Cache for 60 seconds — short TTL so role changes propagate quickly
             cache.set(cache_key, modules, 60)

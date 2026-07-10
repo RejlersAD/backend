@@ -252,6 +252,34 @@ SENSITIVE_ROLE_CODES = ['hr_admin']
 # Sensitive module codes — restricted to hr_admin and super_admin
 SENSITIVE_MODULE_CODES = ['hr_management', 'payroll', 'timesheet', 'hr_onboarding']
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FEATURE FLAGS — Module Visibility Control
+# Set a module to False to globally disable it for ALL users (including super_admin)
+# Environment variable override: RADAI_ENABLE_HR_MODULE=true (default: false)
+# ─────────────────────────────────────────────────────────────────────────────
+import os
+
+MODULE_FEATURE_FLAGS = {
+    # ⚠️ HR Module Suite — DISABLED by default
+    # Controls visibility and access to all HR-related features
+    # Set RADAI_ENABLE_HR_MODULE=true in environment to re-enable
+    'hr_management':  os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
+    'payroll':        os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
+    'timesheet':      os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
+    'hr_self_service': os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
+    'hr_onboarding':  os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
+}
+
+def is_module_enabled(module_code):
+    """
+    Check if a module is enabled via feature flags.
+    Returns True if not in MODULE_FEATURE_FLAGS (default enabled)
+    or if explicitly set to True.
+    """
+    return MODULE_FEATURE_FLAGS.get(module_code, True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Module Access Rules
 MODULE_ACCESS_RULES = {
     'check_role_first': True,  # Check role-based access first
