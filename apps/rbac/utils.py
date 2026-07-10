@@ -45,9 +45,21 @@ def get_user_modules(user):
     Get all accessible modules for a user
     Returns list of module codes
     SOFT-CODED: Filters out modules disabled by MODULE_FEATURE_FLAGS in rbac_config.py
+    
+    Args:
+        user: Can be either User or UserProfile object
+    
+    Returns:
+        list: List of module codes the user has access to
     """
     try:
-        profile = user.rbac_profile
+        # Handle both User and UserProfile objects
+        from apps.rbac.models import UserProfile
+        if isinstance(user, UserProfile):
+            profile = user
+        else:
+            profile = user.rbac_profile
+        
         modules = profile.get_all_modules()
         # Filter out disabled modules
         enabled_modules = [m.code for m in modules if is_module_enabled(m.code)]
@@ -60,16 +72,42 @@ def check_user_has_module_access(user, module_code):
     """
     Check if user has access to a specific module
     SOFT-CODED: Returns False if module is disabled by feature flag
+    
+    Args:
+        user: Can be either User or UserProfile object
+        module_code: Module code to check access for
+    
+    Returns:
+        bool: True if user has access, False otherwise
     """
     # Check if module is globally disabled
     if not is_module_enabled(module_code):
         return False
     
-    if user.is_superuser:
-        return True
+    # Handle both User and UserProfile objects
+    from apps.rbac.models import UserProfile
+    if isinstance(user, UserProfile):
+        # It's a UserProfile - check the linked User's is_superuser
+        if hasattr(user, 'user') and user.user.is_superuser:
+            return True
+        profile = user
+    else:
+        # It's a User object
+        if user.is_superuser:
+            return True
+        # Get the profile
+        try:
+            profile = user.rbac_profile
+        except:
+            return False
     
-    user_modules = get_user_modules(user)
-    return module_code in user_modules
+    # Get modules for the profile
+    try:
+        modules = profile.get_all_modules()
+        enabled_modules = [m.code for m in modules if is_module_enabled(m.code)]
+        return module_code in enabled_modules
+    except:
+        return False
 
 
 def get_user_accessible_features(user):

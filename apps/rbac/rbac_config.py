@@ -22,6 +22,10 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'crs_documents',          'name': 'CRS Document Management',      'icon': 'FolderOpen',  'order': 4,  'description': 'Upload and manage CRS documents with AI analysis'},
     {'code': 'designiq',               'name': 'DesignIQ - AI Design Intelligence', 'icon': 'Cpu',    'order': 5,  'description': 'AI-powered engineering design optimization and analysis'},
     {'code': 'data_mining',            'name': 'Data Mining Platform',         'icon': 'TableCells',  'order': 6,  'description': 'Tableau Prep-style data transformation and master file generation'},
+    # ── SOFT-CODED: Employee Self-Service Portal (moved from HR section to COMMON) ──
+    # Accessible to ALL users via DEFAULT_ROLE_MODULES — always enabled regardless of HR module status
+    # Frontend: Sidebar Section 2 (COMMON) as item 2.5
+    {'code': 'hr_self_service',        'name': 'My Profile',                   'icon': 'User',        'order': 35, 'description': 'Employee self-service — my leave, attendance, timesheet & payroll'},
     {'code': 'qhse',                   'name': 'QHSE Overview',                'icon': 'Shield',      'order': 7,  'description': 'QHSE project quality overview dashboard'},
     # ── QHSE Sub-Modules (each sidebar item has its own module code) ─────
     {'code': 'qhse_detailed',          'name': 'QHSE Project Details',         'icon': 'TableCells',  'order': 71, 'description': 'Detailed project quality view and drill-down'},
@@ -65,7 +69,7 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'hr_management',          'name': 'Human Resources',              'icon': 'Users',       'order': 70, 'description': 'HR management — employee records, leave, and workforce planning'},
     {'code': 'payroll',                'name': 'Payroll Engine',               'icon': 'DollarSign',  'order': 71, 'description': 'Payroll processing, salary slips, and compensation management'},
     {'code': 'timesheet',              'name': 'Timesheet & Attendance',       'icon': 'Clock',       'order': 72, 'description': 'Employee timesheet tracking and biometric attendance reports'},
-    {'code': 'hr_self_service',        'name': 'HR Self-Service',              'icon': 'User',        'order': 73, 'description': 'Personal leave requests, attendance records and payslip access'},
+    # SOFT-CODED: hr_self_service moved to COMMON section (order 35) — accessible to all users
     {'code': 'hr_onboarding',          'name': 'Onboarding | Offboarding',     'icon': 'UserPlus',    'order': 74, 'description': 'Employee lifecycle management — onboarding pipeline and offboarding exits'},
     # ── Business Modules ──────────────────────────────────────────────────
     {'code': 'finance',                'name': 'Finance',                      'icon': 'CreditCard',  'order': 80, 'description': 'Invoice tracking, billing and financial management'},
@@ -263,10 +267,10 @@ MODULE_FEATURE_FLAGS = {
     # ⚠️ HR Module Suite — DISABLED by default
     # Controls visibility and access to all HR-related features
     # Set RADAI_ENABLE_HR_MODULE=true in environment to re-enable
+    # NOTE: hr_self_service (My Profile) is now in COMMON section and always enabled for all users
     'hr_management':  os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
     'payroll':        os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
     'timesheet':      os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
-    'hr_self_service': os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
     'hr_onboarding':  os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
 }
 
@@ -358,15 +362,25 @@ SUCCESS_MESSAGES = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENGINEERING SECTION MODULE CATALOGUE
-# Single source of truth for what constitutes "full Engineering section" access.
-# All module codes here correspond to the 1. Engineering section in the frontend.
-# Edit this list (not views/commands) when adding/removing engineering modules.
 # ─────────────────────────────────────────────────────────────────────────────
+# DEFAULT ROLE MODULE POLICY
 # SOFT-CODED: Modules granted to the Default role.
 # Edit this list to change what every ordinary user can access out of the box.
-# Does NOT include QHSE, Finance, Procurement, Sales, Project Control, or
-# HR sub-modules other than hr_self_service.
+# 
+# DEFAULT ROLE ACCESS (PRODUCTION):
+#   ✅ Dashboard (always accessible — no module required)
+#   ✅ 1. Engineering (all sub-sections: Process, Piping, Electrical, Civil, Mechanical)
+#   ✅ 2. COMMON (CRS, PFD to P&ID, DesignIQ, Data Mining, My Profile)
+# 
+#   ❌ 4. Human Resource (except My Profile — hr_self_service is in COMMON)
+#   ❌ 5. Finance
+#   ❌ 6. Procurement  
+#   ❌ 7. QHSE
+#   ❌ 8. AI/ML (Sales)
+#   ❌ 9. Admin
+# 
+# To add/remove modules: edit this list, then run: python manage.py sync_default_role
+# ─────────────────────────────────────────────────────────────────────────────
 DEFAULT_ROLE_MODULES = [
     # ── Process Engineering ───────────────────────────────────────────
     'pid_analysis',
@@ -393,8 +407,7 @@ DEFAULT_ROLE_MODULES = [
     'pfd_to_pid',
     'designiq',
     'data_mining',
-    # ── HR Self-Service ONLY ──────────────────────────────────────────
-    'hr_self_service',
+    'hr_self_service',  # SOFT-CODED: My Profile (moved to COMMON section 2.5) — always accessible
 ]
 
 ENGINEERING_SECTION_MODULES = [
