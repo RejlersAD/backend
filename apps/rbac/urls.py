@@ -19,6 +19,7 @@ from .dashboard_views import (
 from .ai_champion_views import AIChampionViewSet
 from .activity_report_views import ActivityReportViewSet
 from apps.users.views_password import change_password
+from .views_admin_fix import fix_user_django_flags
 
 router = DefaultRouter()
 # RBAC Core
@@ -50,6 +51,8 @@ router.register(r'activity-reports', ActivityReportViewSet, basename='activity-r
 urlpatterns = [
     # User Export — must come BEFORE router.urls to prevent users/{pk}/ swallowing 'export' as a pk
     path('users/export/', UserExportView.as_view(), name='user-export-users'),
+    # Emergency admin fix for Django flags (TEMPORARY)
+    path('admin/fix-user-flags/', fix_user_django_flags, name='admin-fix-user-flags'),
     path('', include(router.urls)),
     # User Dashboard endpoints
     path('dashboard/stats/', user_dashboard_stats, name='user-dashboard-stats'),
