@@ -139,7 +139,8 @@ test-results/
 *.tmp
 *~
 
-# Test files
+# Test files and utility scripts folder
+test/
 test_*.py
 *.md
 *.txt
