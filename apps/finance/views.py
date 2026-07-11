@@ -6,6 +6,9 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+
+# RBAC - Module-level access control (soft-coded)
+from apps.rbac.permissions import HasModuleAccess
 from django.core.files.storage import default_storage
 from django.shortcuts import get_object_or_404
 from django.views.decorators.clickjacking import xframe_options_exempt
@@ -39,13 +42,16 @@ class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     - Finance team members (with finance module) see all invoices for collaboration
     - Users without finance module have no access
     - Admins see everything
+    
+    🔐 SECURITY: Requires 'finance' module access (soft-coded from rbac_config.py)
     """
     # Data visibility configuration
     visibility_module_code = 'finance'
     visibility_owner_field = 'created_by'
     
     queryset = Invoice.objects.all().order_by('-created_at')
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'finance'
     parser_classes = [MultiPartParser, FormParser]
     
     def get_serializer_class(self):
@@ -358,10 +364,13 @@ class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
 class ApprovalRouteViewSet(viewsets.ModelViewSet):
     """
     Approval route configuration API
+    
+    🔐 SECURITY: Requires 'finance' module access (soft-coded from rbac_config.py)
     """
     queryset = ApprovalRoute.objects.all().order_by('-priority', 'invoice_type')
     serializer_class = ApprovalRouteSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'finance'
 
 
 @api_view(['GET'])

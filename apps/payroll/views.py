@@ -22,6 +22,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+# RBAC - Module-level access control (soft-coded)
+from apps.rbac.permissions import HasModuleAccess
+
 from apps.finance.salary_models import (
     PayrollRun, SalarySlip, EmployeeSalaryInfo, SalaryStatus,
 )
@@ -75,8 +78,11 @@ class PayrollDashboardSummaryView(APIView):
     """
     Single endpoint that aggregates all KPI data for the Payroll Dashboard.
     Returns a flat dict consumed directly by the frontend KPI tiles.
+    
+    🔐 SECURITY: Requires 'payroll' module access (soft-coded from rbac_config.py)
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'payroll'  # SOFT-CODED: matches rbac_config.py SENSITIVE_MODULE_CODES
 
     def get(self, request):
         now = timezone.now()
@@ -207,11 +213,15 @@ class PayrollDashboardSummaryView(APIView):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PayrollValidationLogViewSet(viewsets.ModelViewSet):
+    """
+    🔐 SECURITY: Requires 'payroll' module access (soft-coded from rbac_config.py)
+    """
     queryset           = PayrollValidationLog.objects.select_related(
         'payroll_run', 'employee_salary_info__user', 'resolved_by'
     ).all()
     serializer_class   = PayrollValidationLogSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'payroll'
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -253,11 +263,15 @@ class PayrollValidationLogViewSet(viewsets.ModelViewSet):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PayrollAuditAlertViewSet(viewsets.ModelViewSet):
+    """
+    🔐 SECURITY: Requires 'payroll' module access (soft-coded from rbac_config.py)
+    """
     queryset           = PayrollAuditAlert.objects.select_related(
         'payroll_run', 'compared_to_run', 'employee_salary_info__user', 'acknowledged_by'
     ).all()
     serializer_class   = PayrollAuditAlertSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'payroll'
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -294,9 +308,13 @@ class PayrollAuditAlertViewSet(viewsets.ModelViewSet):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ProjectCostAllocationViewSet(viewsets.ModelViewSet):
+    """
+    🔐 SECURITY: Requires 'payroll' module access (soft-coded from rbac_config.py)
+    """
     queryset           = ProjectCostAllocation.objects.select_related('salary_slip').all()
     serializer_class   = ProjectCostAllocationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'payroll'
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -334,9 +352,13 @@ class ProjectCostAllocationViewSet(viewsets.ModelViewSet):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class AIInsightSnapshotViewSet(viewsets.ModelViewSet):
+    """
+    🔐 SECURITY: Requires 'payroll' module access (soft-coded from rbac_config.py)
+    """
     queryset           = AIInsightSnapshot.objects.select_related('employee_salary_info__user').all()
     serializer_class   = AIInsightSnapshotSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'payroll'
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -371,8 +393,11 @@ class EmployeeLeaveRecordViewSet(viewsets.ReadOnlyModelViewSet):
     - If no explicit employee_code/search filter → auto-scope to current user's employee_id
     - Fallback to name search if user has no employee_id configured
     - HR/Admin can still query all records by providing explicit filters
+    
+    🔐 SECURITY: Accessible to ALL users via 'hr_self_service' module (in DEFAULT_ROLE_MODULES)
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'hr_self_service'
 
     def get_queryset(self):
         from apps.rbac.models import UserProfile
@@ -443,8 +468,11 @@ class LeaveTypeViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Read-only list of active leave types.
     Admins can create/edit types in the Django admin; they appear here immediately.
+    
+    🔐 SECURITY: Accessible to ALL users via 'hr_self_service' module
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'hr_self_service'
     serializer_class   = LeaveTypeSerializer
     queryset           = LeaveType.objects.filter(is_active=True)
 
@@ -458,8 +486,11 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     Full CRUD for leave requests.
     POST to create (any auth user / HR on behalf of employee).
     Custom actions: /approve/, /reject/, /cancel/
+    
+    🔐 SECURITY: Accessible to ALL users via 'hr_self_service' module
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'hr_self_service'
     serializer_class   = LeaveRequestSerializer
 
     @staticmethod
@@ -749,9 +780,12 @@ class PublicHolidayViewSet(viewsets.ModelViewSet):
       ?year=2026          filter by year (default: current year)
       ?region=AE-AZ       filter by region (default: no filter ? return all)
       ?active_only=true   return only is_active=True entries (default: true)
+    
+    🔐 SECURITY: Requires 'payroll' module access (soft-coded from rbac_config.py)
     """
     serializer_class   = PublicHolidaySerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'payroll'
 
     def get_queryset(self):
         params   = self.request.query_params
@@ -812,9 +846,12 @@ class AttendanceOverrideViewSet(viewsets.ModelViewSet):
         { 'E001': { '2026-06-15': { override_hours: 8.0, reason: '...', ... } } }
     so only ONE override per (employee_code, date) is returned -- the most recent
     active one.  The endpoint returns flat rows; deduplication is in the frontend.
+    
+    🔐 SECURITY: Requires 'timesheet' module access (soft-coded from rbac_config.py)
     """
     serializer_class   = AttendanceOverrideSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'timesheet'
     http_method_names  = ['get', 'post', 'patch', 'head', 'options']  # no DELETE
 
     def get_queryset(self):
@@ -882,9 +919,12 @@ class SalaryComponentViewSet(viewsets.ModelViewSet):
     HR Managers can create/update component types.
     Senior HR / Admin can deactivate.
     Read access for all authenticated users.
+    
+    🔐 SECURITY: Requires 'payroll' module access (soft-coded from rbac_config.py)
     """
     serializer_class   = SalaryComponentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'payroll'
 
     def get_queryset(self):
         qs = SalaryComponent.objects.all()
@@ -936,9 +976,12 @@ class EmployeeSalaryStructureViewSet(viewsets.ModelViewSet):
       POST   salary-structures/{id}/reject/       reject (Senior HR)
       GET    salary-structures/pending/           list pending (Senior HR)
       GET    salary-structures/summary/           one active row per employee
+    
+    🔐 SECURITY: Requires 'payroll' module access (soft-coded from rbac_config.py)
     """
     serializer_class   = EmployeeSalaryStructureSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'payroll'
 
     def get_queryset(self):
         qs = EmployeeSalaryStructure.objects.all()
@@ -1117,9 +1160,12 @@ class SalaryHistoryViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Read-only. Returns the salary change audit trail.
     Filter by employee_code or date range.
+    
+    🔐 SECURITY: Requires 'payroll' module access (soft-coded from rbac_config.py)
     """
     serializer_class   = SalaryHistorySerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'payroll'
 
     def get_queryset(self):
         qs  = SalaryHistory.objects.all()
@@ -1567,8 +1613,11 @@ class DailyWorkLogViewSet(viewsets.ModelViewSet):
       GET  /daily-logs/summary/        -> daily totals (hours + task count) per date
       GET  /daily-logs/export-to-s3/   -> export filtered logs as JSON to S3
       GET  /daily-logs/team/           -> latest log per user for a date (staff only)
+    
+    🔐 SECURITY: Requires 'timesheet' module access (soft-coded from rbac_config.py)
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'timesheet'
     serializer_class   = DailyWorkLogSerializer
     http_method_names  = ['get', 'post', 'patch', 'delete', 'head', 'options']
 

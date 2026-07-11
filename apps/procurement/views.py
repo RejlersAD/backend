@@ -8,6 +8,9 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
+
+# RBAC - Module-level access control (soft-coded)
+from apps.rbac.permissions import HasModuleAccess
 from django.db.models import Q, Count, Sum, Avg
 from django.utils import timezone
 from datetime import timedelta
@@ -54,11 +57,16 @@ class VendorPagination(PageNumberPagination):
 
 
 class VendorViewSet(viewsets.ModelViewSet):
-    """ViewSet for Vendor management"""
+    """
+    ViewSet for Vendor management
+    
+    🔐 SECURITY: Requires 'procurement_vendors' module access (soft-coded from rbac_config.py)
+    """
     
     queryset = Vendor.objects.all().order_by('-created_at')
     serializer_class = VendorSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'procurement_vendors'
     pagination_class = VendorPagination  # Use custom pagination
     
     def get_queryset(self):
@@ -126,11 +134,14 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     - Two-tier approval workflow (PM → VP)
     - Advanced filtering and search
     - PDF generation aligned with template
+    
+    🔐 SECURITY: Requires 'procurement_requisitions' module access (soft-coded from rbac_config.py)
     """
     
     queryset = PurchaseRequisition.objects.all().order_by('-created_at')
     serializer_class = PurchaseRequisitionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'procurement_requisitions'
     parser_classes = [FormParser, MultiPartParser, JSONParser]
     
     def get_queryset(self):
@@ -432,11 +443,16 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
 
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
-    """ViewSet for Purchase Order management"""
+    """
+    ViewSet for Purchase Order management
+    
+    🔐 SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
+    """
     
     queryset = PurchaseOrder.objects.all().select_related('vendor').order_by('-created_at')
     serializer_class = PurchaseOrderSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'procurement_orders'
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -532,11 +548,16 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 
 
 class ReceiptViewSet(viewsets.ModelViewSet):
-    """ViewSet for Goods Receipt management"""
+    """
+    ViewSet for Goods Receipt management
+    
+    🔐 SECURITY: Requires 'procurement_receipts' module access (soft-coded from rbac_config.py)
+    """
     
     queryset = Receipt.objects.all().select_related('purchase_order').order_by('-created_at')
     serializer_class = ReceiptSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'procurement_receipts'
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -652,11 +673,14 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
     ViewSet for PODocument — read-only list/detail plus the AI extraction action.
     The `extract_from_pdf` action is the primary entry point: it accepts a PDF
     upload, stores it in S3, runs the AI extractor, and returns the result.
+    
+    🔐 SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
     """
 
     queryset = PODocument.objects.all().order_by('-created_at')
     serializer_class = PODocumentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'procurement_orders'
     parser_classes = [MultiPartParser, FormParser]
 
     def get_queryset(self):
@@ -785,10 +809,13 @@ class CostCenterViewSet(viewsets.ModelViewSet):
     """
     Cost Center API - Master organizational cost center registry.
     Soft-coded for departmental budget tracking and financial reporting.
+    
+    🔐 SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
     """
     queryset = CostCenter.objects.all()
     serializer_class = CostCenterSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'procurement'
     filterset_fields = ['department', 'division', 'is_active']
     search_fields = ['code', 'name', 'department', 'division']
     ordering_fields = ['code', 'name', 'department', 'created_at']
@@ -813,10 +840,13 @@ class BudgetViewSet(viewsets.ModelViewSet):
     """
     Budget Allocation API - Project budget lines with spend tracking.
     Soft-coded for professional financial control and variance analysis.
+    
+    🔐 SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
     """
     queryset = Budget.objects.all()
     serializer_class = BudgetSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'procurement'
     filterset_fields = ['project', 'category', 'fiscal_year', 'is_approved']
     search_fields = ['project__project_number', 'project__project_name', 'description']
     ordering_fields = ['category', 'allocated_amount', 'fiscal_year', 'created_at']
@@ -864,9 +894,12 @@ class ProjectViewSet(viewsets.ModelViewSet):
       - Budget tracking and variance analysis
       - Invoice reconciliation (A/P + A/R)
       - Soft-coded filtering and search
+    
+    🔐 SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
     """
     queryset = Project.objects.all()
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'procurement'
     filterset_fields = ['status', 'project_type', 'is_active', 'is_billable', 'health_status']
     search_fields = ['project_number', 'project_name', 'client_name', 'description']
     ordering_fields = ['project_number', 'project_name', 'start_date', 'created_at', 'status']

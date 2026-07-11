@@ -7,6 +7,9 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+
+# RBAC - Module-level access control (soft-coded)
+from apps.rbac.permissions import HasModuleAccess
 from django.db.models import Q, Count, Sum, Avg, F
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -41,14 +44,17 @@ class ClientViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     - AI-powered health scoring
     - Churn prediction
     - Client insights
+    
+    🔐 SECURITY: Requires 'sales' module access (soft-coded from rbac_config.py)
     """
     
     # Data visibility configuration
-    visibility_module_code = 'finance'  # Sales under finance module
+    visibility_module_code = 'sales'
     visibility_owner_field = 'account_manager'
     
     queryset = Client.objects.all()
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'industry_type', 'client_tier', 'account_manager']
     search_fields = ['client_code', 'company_name', 'email', 'phone']
@@ -153,11 +159,14 @@ class ContactViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Contact Management
     Individual contacts within client organizations
+    
+    🔐 SECURITY: Requires 'sales' module access (soft-coded from rbac_config.py)
     """
     
     queryset = Contact.objects.all()
     serializer_class = ContactSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['client', 'role_type', 'is_primary', 'is_active']
     search_fields = ['first_name', 'last_name', 'email', 'job_title']
@@ -197,14 +206,17 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     - AI win probability
     - Lead scoring
     - Next best action recommendations
+    
+    🔐 SECURITY: Requires 'sales' module access (soft-coded from rbac_config.py)
     """
     
     # Data visibility configuration
-    visibility_module_code = 'finance'
+    visibility_module_code = 'sales'
     visibility_owner_field = 'owner'
     
     queryset = Deal.objects.select_related('client', 'owner').prefetch_related('team_members')
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['stage', 'priority', 'client', 'owner']
     search_fields = ['deal_code', 'deal_name', 'client__company_name']
@@ -371,10 +383,13 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
 class QuoteViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Quote/Proposal Management
+    
+    🔐 SECURITY: Requires 'sales' module access (soft-coded from rbac_config.py)
     """
     
     queryset = Quote.objects.select_related('client', 'deal', 'prepared_by')
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['status', 'client', 'deal']
     search_fields = ['quote_number', 'client__company_name', 'deal__deal_name']
@@ -436,10 +451,13 @@ class QuoteViewSet(viewsets.ModelViewSet):
 class SalesActivityViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Sales Activity Tracking
+    
+    🔐 SECURITY: Requires 'sales' module access (soft-coded from rbac_config.py)
     """
     
     queryset = SalesActivity.objects.select_related('client', 'deal', 'contact', 'performed_by')
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['activity_type', 'client', 'deal', 'performed_by']
     search_fields = ['subject', 'description', 'outcome']
@@ -504,11 +522,14 @@ class SalesForecastViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Sales Forecasting
     AI-powered revenue predictions
+    
+    🔐 SECURITY: Requires 'sales' module access (soft-coded from rbac_config.py)
     """
     
     queryset = SalesForecast.objects.all()
     serializer_class = SalesForecastSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
     ordering = ['-forecast_date']
     
     @action(detail=False, methods=['post'])
@@ -596,9 +617,12 @@ class SalesDashboardViewSet(viewsets.ViewSet):
     """
     Sales Dashboard Analytics
     Comprehensive sales metrics and insights
+    
+    🔐 SECURITY: Requires 'sales' module access (soft-coded from rbac_config.py)
     """
     
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
     
     @action(detail=False, methods=['get'])
     def summary(self, request):
