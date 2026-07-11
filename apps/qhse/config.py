@@ -26,8 +26,8 @@ QHSE_CONFIG = {
         'spot_check_register': True,  # Note: Currently disabled per QHSE Manager
         'quality_management': True,
         'health_safety': True,
-        'environmental': True,
-        'energy': True,
+        'environmental': False,  # DISABLED: 2026-07-11 - Not related to project quality
+        'energy': False,  # DISABLED: 2026-07-11 - Not related to project quality
     },
     
     # Access control
