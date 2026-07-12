@@ -14,12 +14,29 @@ from apps.rbac.models import UserProfile, UserRole
 User = get_user_model()
 
 emails = [
-    'Suraj.Dnyandev@rejlers.ae',
-    'Priyesh.Dharmadhikari@rejlers.ae',
-    'saravanan.subramanian@rejlers.ae',
-    'reba.sur@rejlers.ae',
-    'sahaya.jawaher@rejlers.ae',
-    'dhula.gorad@rejlers.ae'
+    'saadiya.akhtar@rejlers.ae',
+    'sohail.ahmad@rejlers.ae',
+    'hamad.alfalasi@rejlers.ae',
+    'zakrya.achbani@rejlers.ae',
+    'zillur.rahman@rejlers.ae',
+    'zeeshan.ahmad@rejlers.ae',
+    'nezar.attourah@rejlers.ae',
+    'sridhar.balasubramaniam@rejlers.ae',
+    'srushti.borkar@rejlers.ae',
+    'mary.bobier@rejlers.ae',
+    'ahmed.aljefri@rejlers.ae',
+    'khaled.almheiri@rejlers.ae',
+    'chilimuri.chaitanya@rejlers.ae',
+    'nirmal.gunaraj@rejlers.ae',
+    'dhanesh.devkule@rejlers.ae',
+    'musthafa.cp@rejlers.ae',
+    'sushilkumar.jaiswar@rejlers.ae',
+    'jaganathan.jagadeesan@rejlers.ae',
+    'binshad.basheer@rejlers.ae',
+    'neeta.jadhav@rejlers.ae',
+    'alsiddique.majgaonkar@rejlers.ae',
+    'mohammad.masih@rejlers.ae',
+    'bhupendra.hire@rejlers.ae'
 ]
 
 print("\n" + "=" * 80)
