@@ -40,14 +40,24 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS("  PRODUCTION RBAC FIX"))
         self.stdout.write("=" * 80)
         
-        # Step 1: Find affected users
+        # Step 1: Find affected users (including inactive if --reactivate)
         self.stdout.write("\n[STEP 1] Finding affected users...")
         
-        affected_users = User.objects.filter(
-            models.Q(is_superuser=True) | models.Q(is_staff=True)
-        ).exclude(
-            email__in=self.PROTECTED_ADMINS
-        ).select_related('rbac_profile')
+        if reactivate:
+            # Check ALL users (including inactive) when --reactivate is used
+            affected_users = User.objects.filter(
+                models.Q(is_superuser=True) | models.Q(is_staff=True)
+            ).exclude(
+                email__in=self.PROTECTED_ADMINS
+            ).select_related('rbac_profile')
+        else:
+            # Check only active users when --reactivate is NOT used
+            affected_users = User.objects.filter(
+                models.Q(is_superuser=True) | models.Q(is_staff=True),
+                is_active=True
+            ).exclude(
+                email__in=self.PROTECTED_ADMINS
+            ).select_related('rbac_profile')
         
         affected_list = []
         for user in affected_users:
