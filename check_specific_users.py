@@ -14,9 +14,12 @@ from apps.rbac.models import UserProfile, UserRole
 User = get_user_model()
 
 emails = [
-    'kiran.ingale@rejlers.ae',
-    'ravikumar.naickar@rejlers.ae',
-    'sanket.kondare@rejlers.ae'
+    'Suraj.Dnyandev@rejlers.ae',
+    'Priyesh.Dharmadhikari@rejlers.ae',
+    'saravanan.subramanian@rejlers.ae',
+    'reba.sur@rejlers.ae',
+    'sahaya.jawaher@rejlers.ae',
+    'dhula.gorad@rejlers.ae'
 ]
 
 print("\n" + "=" * 80)
