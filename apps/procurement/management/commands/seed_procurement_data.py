@@ -54,10 +54,14 @@ SEED_CONFIG = {
     'purchase_orders': {
         'count': 10,
         'status_distribution': {
-            'draft': 0.2,
-            'approved': 0.3,
-            'issued': 0.3,
-            'completed': 0.2,
+            # SOFT-CODED: Status values aligned with PurchaseOrder.STATUS_CHOICES
+            # Valid choices: draft, sent, acknowledged, in_progress, partially_received, completed, cancelled
+            'draft': 0.15,
+            'sent': 0.15,
+            'acknowledged': 0.15,
+            'in_progress': 0.25,
+            'completed': 0.20,
+            'partially_received': 0.10,
         },
         'price_range': (5000, 100000),
     },
@@ -249,6 +253,14 @@ class Command(BaseCommand):
         config = SEED_CONFIG['purchase_orders']
         statuses = list(config['status_distribution'].keys())
         
+        # SOFT-CODED: PO field mapping aligned with actual PurchaseOrder model
+        # Never hardcode field names - use dynamic mapping for maintainability
+        CATEGORY_OPTIONS = [
+            'rotating_equipment', 'static_equipment', 'instrumentation',
+            'valves_fittings', 'piping_materials', 'electrical_materials',
+            'spare_parts', 'chemicals', 'maintenance_services'
+        ]
+        
         created_count = 0
         for i in range(count):
             # Generate PO number
@@ -258,29 +270,46 @@ class Command(BaseCommand):
             if PurchaseOrder.objects.filter(po_number=po_number).exists():
                 continue
             
+            # Select vendor
+            vendor = random.choice(vendors) if vendors else None
+            if not vendor:
+                self.stdout.write(self.style.WARNING(f"  ⚠ Skipping PO {po_number} - No vendors available"))
+                continue
+            
             # Select status based on distribution
             status = random.choices(statuses, weights=list(config['status_distribution'].values()))[0]
             
             # Random price
             price = Decimal(str(random.uniform(*config['price_range']))).quantize(Decimal('0.01'))
             
-            # Select vendor
-            vendor = random.choice(vendors) if vendors else None
+            # Random category from vendor's categories or default list
+            if vendor.categories:
+                category = random.choice(vendor.categories)
+            else:
+                category = random.choice(CATEGORY_OPTIONS)
             
-            # Create PO
-            po = PurchaseOrder.objects.create(
-                po_number=po_number,
-                vendor=vendor,
-                buyer=user,
-                status=status,
-                total_amount=price,
-                currency='USD',
-                description=f"Sample purchase order for testing - Order {i+1}",
-                delivery_address=f"{random.randint(100, 999)} Industrial Area, UAE",
-                payment_terms=random.choice(['Net 30', 'Net 45', 'Net 60']),
-            )
+            # SOFT-CODED: Build PO data using only valid model fields
+            # This prevents TypeError from non-existent fields
+            po_data = {
+                'po_number': po_number,
+                'vendor': vendor,
+                'status': status,
+                'total_amount': price,
+                'currency': 'USD',
+                'title': f"Purchase Order - {vendor.name[:50]}",  # Required field
+                'category': category,  # Required field
+                'description': f"Sample purchase order for testing - Order {i+1}",
+                'payment_terms': random.choice(['Net 30', 'Net 45', 'Net 60', '45 days net for agreed payment milestones']),
+                'delivery_terms': random.choice(['FOB', 'CIF', 'Services completed and accepted']),
+            }
             
-            created_count += 1
-            self.stdout.write(f"  ✓ Created PO {po.po_number} | {po.status} | ${po.total_amount}")
+            # Create PO using validated field mapping
+            try:
+                po = PurchaseOrder.objects.create(**po_data)
+                created_count += 1
+                self.stdout.write(f"  ✓ Created PO {po.po_number} | {po.status} | {po.category} | ${po.total_amount}")
+            except Exception as e:
+                self.stdout.write(self.style.ERROR(f"  ✗ Failed to create PO {po_number}: {str(e)}"))
+                continue
         
         self.stdout.write(self.style.SUCCESS(f"✓ Seeded {created_count} purchase orders"))
