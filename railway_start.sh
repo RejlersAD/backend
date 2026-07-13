@@ -62,6 +62,13 @@ echo "🗄️  Database Migrations..."
 [ -f "fix_migration_record.py" ] && python fix_migration_record.py 2>&1 || true
 [ -f "fix_migration_conflict.py" ] && python fix_migration_conflict.py 2>&1 || true
 
+# Fix cross_recommendation migration issues (missing indexes)
+if python manage.py fix_migration_cross_recommendation 2>&1; then
+    echo "✅ Cross recommendation migrations fixed"
+else
+    echo "⚠️  WARNING: Could not fix cross_recommendation migrations (continuing anyway)"
+fi
+
 # Fix procurement migration 0012 issue (missing index)
 if python manage.py fix_migration_0012 2>&1; then
     echo "✅ Procurement migration 0012 fixed"

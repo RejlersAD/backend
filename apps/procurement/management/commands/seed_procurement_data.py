@@ -234,7 +234,7 @@ class Command(BaseCommand):
                 currency='USD',
                 status=status,
                 priority=priority,
-                type=random.choice(['general', 'project']),
+                requisition_type=random.choice(['general', 'project']),
             )
             
             created_count += 1
