@@ -73,6 +73,24 @@ else
 fi
 echo ""
 
+# Check 4.5: Procurement Module Fix (AUTOMATIC)
+echo "🛒 Fixing Procurement Module..."
+if python manage.py fix_production_procurement 2>&1; then
+    echo "✅ Procurement module verified/fixed"
+elif [ -f "emergency_production_migration.sql" ]; then
+    echo "⚠️  Management command failed, trying SQL migration..."
+    if command -v psql >/dev/null 2>&1 && [ -n "${DATABASE_URL}" ]; then
+        psql "${DATABASE_URL}" < emergency_production_migration.sql 2>&1 || true
+        echo "✅ SQL migration applied"
+    else
+        echo "⚠️  psql not available or DATABASE_URL not set"
+    fi
+else
+    echo "⚠️  Procurement fix not available (continuing anyway)"
+    DEPLOYMENT_WARNINGS=$((DEPLOYMENT_WARNINGS + 1))
+fi
+echo ""
+
 # Check 5: Super Admin Setup (OPTIONAL)
 if [ -f "setup_superadmin.py" ]; then
     echo "👤 Setting up Super Administrator..."

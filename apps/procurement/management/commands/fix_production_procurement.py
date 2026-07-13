@@ -67,14 +67,21 @@ class Command(BaseCommand):
         self.stdout.write(f"  Purchase Orders: {data_counts['po']}")
         self.stdout.write(f"  Vendors: {data_counts['vendor']}")
         
-        # Step 4: Seed if requested
-        if seed and not check_only:
-            self.stdout.write("\n[4/4] Seeding data...")
-            self._seed_data()
-        elif check_only:
+        # Step 4: Smart data seeding
+        has_no_data = (data_counts['pr'] == 0 and data_counts['po'] == 0 and data_counts['vendor'] == 0)
+        
+        if check_only:
             self.stdout.write("\n[4/4] Skipping data seeding (check-only mode)")
+        elif seed:
+            self.stdout.write("\n[4/4] Seeding data (explicit --seed flag)...")
+            self._seed_data()
+        elif has_no_data:
+            self.stdout.write("\n[4/4] Auto-seeding sample data (no data found)...")
+            self.stdout.write("  ℹ️  Creating minimal sample data for testing")
+            self._seed_data(minimal=True)
         else:
-            self.stdout.write("\n[4/4] Skipping data seeding (use --seed to enable)")
+            self.stdout.write("\n[4/4] Data already exists - skipping seeding")
+            self.stdout.write(f"  ℹ️  Use --seed to force reseed")
         
         self.stdout.write("\n" + "=" * 80)
         self.stdout.write(self.style.SUCCESS("COMPLETE"))
@@ -216,11 +223,17 @@ class Command(BaseCommand):
             'vendor': Vendor.objects.count(),
         }
 
-    def _seed_data(self):
+    def _seed_data(self, minimal=False):
         """Seed sample data"""
         from django.core.management import call_command
         try:
-            call_command('seed_procurement_data', '--vendors=10', '--prs=15', '--pos=10', verbosity=0)
-            self.stdout.write(self.style.SUCCESS("  Sample data seeded"))
+            if minimal:
+                # Minimal seed: just enough to show the pages work
+                call_command('seed_procurement_data', '--vendors=5', '--prs=5', '--pos=5', verbosity=0)
+                self.stdout.write(self.style.SUCCESS("  Minimal sample data seeded (5 vendors, 5 PRs, 5 POs)"))
+            else:
+                # Full seed: good demo data
+                call_command('seed_procurement_data', '--vendors=10', '--prs=15', '--pos=10', verbosity=0)
+                self.stdout.write(self.style.SUCCESS("  Full sample data seeded (10 vendors, 15 PRs, 10 POs)"))
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"  Seeding failed: {e}"))
