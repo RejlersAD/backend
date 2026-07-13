@@ -139,20 +139,36 @@ class Command(BaseCommand):
         with connection.cursor() as cursor:
             try:
                 with transaction.atomic():
-                    # Add vendor_id
+                    # Add vendor_id column and foreign key constraint (TWO separate statements)
                     cursor.execute("""
                         DO $$ 
                         BEGIN
+                            -- Add column if not exists
                             IF NOT EXISTS (
                                 SELECT 1 FROM information_schema.columns 
                                 WHERE table_name = 'procurement_purchaserequisition' 
                                 AND column_name = 'vendor_id'
                             ) THEN
                                 ALTER TABLE procurement_purchaserequisition 
-                                ADD COLUMN vendor_id uuid NULL
-                                REFERENCES procurement_vendor(id) ON DELETE SET NULL;
-                                
-                                CREATE INDEX IF NOT EXISTS procurement_purchas_vendor_id_idx 
+                                ADD COLUMN vendor_id uuid NULL;
+                            END IF;
+                            
+                            -- Add foreign key constraint if not exists
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.table_constraints 
+                                WHERE constraint_name = 'procurement_purchas_vendor_id_fk'
+                            ) THEN
+                                ALTER TABLE procurement_purchaserequisition 
+                                ADD CONSTRAINT procurement_purchas_vendor_id_fk 
+                                FOREIGN KEY (vendor_id) REFERENCES procurement_vendor(id) ON DELETE SET NULL;
+                            END IF;
+                            
+                            -- Add index if not exists
+                            IF NOT EXISTS (
+                                SELECT 1 FROM pg_indexes 
+                                WHERE indexname = 'procurement_purchas_vendor_id_idx'
+                            ) THEN
+                                CREATE INDEX procurement_purchas_vendor_id_idx 
                                 ON procurement_purchaserequisition(vendor_id);
                             END IF;
                         END $$;
