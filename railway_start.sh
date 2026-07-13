@@ -59,57 +59,37 @@ echo ""
 echo "🗄️  Database Migrations..."
 
 # Migration conflict fixers (if they exist)
-[ -f "fix_migration_record.py" ] && python fix_migration_record.py 2>&1 || true
-[ -f "fix_migration_conflict.py" ] && python fix_migration_conflict.py 2>&1 || true
+[ -f "fix_migration_record.py" ] && timeout 30 python fix_migration_record.py 2>&1 || true
+[ -f "fix_migration_conflict.py" ] && timeout 30 python fix_migration_conflict.py 2>&1 || true
 
-# Fix cross_recommendation migration issues (missing indexes)
-if python manage.py fix_migration_cross_recommendation 2>&1; then
-    echo "✅ Cross recommendation migrations fixed"
-else
-    echo "⚠️  WARNING: Could not fix cross_recommendation migrations (continuing anyway)"
-fi
+# Fix cross_recommendation migration issues (missing indexes) - with timeout
+echo "Fixing cross_recommendation migrations..."
+timeout 30 python manage.py fix_migration_cross_recommendation 2>&1 || echo "⚠️  Skipped (timeout or error)"
 
-# Fix procurement migration 0012 issue (missing index)
-if python manage.py fix_migration_0012 2>&1; then
-    echo "✅ Procurement migration 0012 fixed"
-else
-    echo "⚠️  WARNING: Could not fix migration 0012 (continuing anyway)"
-fi
+# Fix procurement migration 0012 issue (missing index) - with timeout
+echo "Fixing procurement migration 0012..."
+timeout 30 python manage.py fix_migration_0012 2>&1 || echo "⚠️  Skipped (timeout or error)"
 
 # Run migrations - continue even if they fail
-if python manage.py migrate --noinput 2>&1; then
+if timeout 120 python manage.py migrate --noinput 2>&1; then
     echo "✅ Database migrations completed"
 else
-    echo "⚠️  WARNING: Database migrations failed"
+    echo "⚠️  WARNING: Database migrations failed or timed out"
     echo "   This may be normal on first deploy or if DATABASE_URL not set"
     echo "   Server will start but database operations may fail"
     DEPLOYMENT_WARNINGS=$((DEPLOYMENT_WARNINGS + 1))
 fi
 echo ""
 
-# Check 4.5: Procurement Module Fix (AUTOMATIC)
+# Check 4.5: Procurement Module Fix (AUTOMATIC) - with timeout
 echo "🛒 Fixing Procurement Module..."
-if python manage.py fix_production_procurement 2>&1; then
-    echo "✅ Procurement module verified/fixed"
-elif [ -f "emergency_production_migration.sql" ]; then
-    echo "⚠️  Management command failed, trying SQL migration..."
-    if command -v psql >/dev/null 2>&1 && [ -n "${DATABASE_URL}" ]; then
-        psql "${DATABASE_URL}" < emergency_production_migration.sql 2>&1 || true
-        echo "✅ SQL migration applied"
-    else
-        echo "⚠️  psql not available or DATABASE_URL not set"
-    fi
-else
-    echo "⚠️  Procurement fix not available (continuing anyway)"
-    DEPLOYMENT_WARNINGS=$((DEPLOYMENT_WARNINGS + 1))
-fi
+timeout 60 python manage.py fix_production_procurement 2>&1 || echo "⚠️  Skipped (timeout or error)"
+echo ""
+
 # Check 4.6: Grant Procurement Module Access to Admin Roles (AUTOMATIC)
 echo "🔐 Granting Procurement Module Access..."
-if python manage.py grant_procurement_access 2>&1; then
-    echo "✅ Procurement access granted to admin roles"
-else
-    echo "⚠️  WARNING: Could not grant procurement access (continuing anyway)"
-fiecho ""
+timeout 30 python manage.py grant_procurement_access 2>&1 || echo "⚠️  Skipped (timeout or error)"
+echo ""
 
 # Check 5: Super Admin Setup (OPTIONAL)
 if [ -f "setup_superadmin.py" ]; then
