@@ -179,10 +179,10 @@ class Command(BaseCommand):
                     'phone': f"+971-50-{random.randint(1000000, 9999999)}",
                     'address': f"{random.randint(100, 999)} Business District, {template['country']}",
                     'country': template['country'],
-                    'category': template['category'],
+                    'categories': [template['category']],  # JSONField expects list
                     'payment_terms': random.choice(['Net 30', 'Net 45', 'Net 60', 'COD']),
-                    'is_active': True,
-                    'rating': Decimal(str(random.uniform(3.5, 5.0))),
+                    'status': 'active',  # Use correct field name
+                    'rating': random.choice([3, 4, 5]),  # Integer rating (3-5)
                 }
             )
             
