@@ -288,8 +288,8 @@ def is_module_enabled(module_code):
 MODULE_ACCESS_RULES = {
     'check_role_first': True,  # Check role-based access first
     'check_direct_assignment': True,  # Then check direct module assignment
-    'admin_has_all_access': True,  # Admins bypass module checks
-    'superadmin_has_all_access': True,  # Super admins bypass all checks
+    'admin_has_all_access': False,  # ✅ SECURITY FIX: Admins must follow role policy (only super_admin bypasses)
+    'superadmin_has_all_access': True,  # Super admins bypass all checks (emergency access)
 }
 
 # Audit Logging
