@@ -822,10 +822,16 @@ class UserProfileListSerializer(serializers.ModelSerializer):
         Return all active roles for this user from prefetched userrole_set.
         Uses cached data — no additional DB query per user.
         Format: [{id, name, code, level, is_primary}]
+        
+        SOFT-CODED: Filters out custom_* roles (per-user legacy roles that should not
+        appear in UI). Custom role prefix is defined in rbac_config.MODULE_ASSIGNMENT_CONFIG.
         """
+        from apps.rbac.rbac_config import MODULE_ASSIGNMENT_CONFIG
+        custom_role_prefix = MODULE_ASSIGNMENT_CONFIG.get('custom_role_prefix', 'custom_')
+        
         result = []
         for user_role in obj.userrole_set.all():
-            if user_role.role.is_active:
+            if user_role.role.is_active and not user_role.role.code.startswith(custom_role_prefix):
                 result.append({
                     'id':         str(user_role.role.id),
                     'name':       user_role.role.name,

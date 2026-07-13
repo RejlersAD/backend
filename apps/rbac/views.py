@@ -773,10 +773,18 @@ class UserProfileViewSet(viewsets.ModelViewSet):
 
         Super Admins can assign any role including super_admin.
         Admins can assign any role except super_admin.
+        
+        SOFT-CODED BEHAVIOR (from rbac_config.py):
+        - Automatically removes ALL custom_* roles before assignment
+        - Sets new role as primary if is_primary=True (default)
+        - Clears cached modules/permissions for immediate effect
+        - Follows ROLE_MODULE_POLICY for module access
         """
+        from apps.rbac.rbac_config import MODULE_ASSIGNMENT_CONFIG
+        
         profile = self.get_object()
         role_id = request.data.get('role_id')
-        is_primary = request.data.get('is_primary', False)
+        is_primary = request.data.get('is_primary', True)  # Default to primary
 
         if not role_id:
             return Response(
@@ -810,11 +818,39 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_403_FORBIDDEN
                 )
 
+        # ── CRITICAL FIX: Remove all custom_* roles first ──────────────────────
+        # Prevents stale per-user custom roles from giving unintended access
+        # after admin assigns a proper system role.
+        # SOFT-CODED: custom role prefix from MODULE_ASSIGNMENT_CONFIG
+        custom_role_prefix = MODULE_ASSIGNMENT_CONFIG.get('custom_role_prefix', 'custom_')
+        custom_roles_removed = profile.roles.filter(
+            code__startswith=custom_role_prefix,
+            is_active=True
+        )
+        removed_count = custom_roles_removed.count()
+        removed_names = list(custom_roles_removed.values_list('name', flat=True))
+        
+        # Remove custom roles through the many-to-many relationship
+        for custom_role in custom_roles_removed:
+            profile.roles.remove(custom_role)
+        
+        if removed_count > 0:
+            print(f"[RBAC] 🗑️  Removed {removed_count} custom role(s) for {profile.user.email}: {removed_names}")
+        
+        # ── Assign new role ─────────────────────────────────────────────────────
         user_role, created = UserRole.objects.get_or_create(
             user_profile=profile,
             role=role,
             defaults={'assigned_by': request.user, 'is_primary': is_primary}
         )
+        
+        # If role already existed, update is_primary if requested
+        if not created and is_primary:
+            # Demote all other roles to non-primary
+            UserRole.objects.filter(user_profile=profile).exclude(id=user_role.id).update(is_primary=False)
+            if not user_role.is_primary:
+                user_role.is_primary = True
+                user_role.save(update_fields=['is_primary'])
 
         # ── SOFT-CODED CACHE INVALIDATION ─────────────────────────────────────
         # Clear the user's cached modules and permissions so they immediately
@@ -831,14 +867,18 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             resource_type='UserProfile',
             resource_id=profile.id,
             resource_repr=str(profile),
-            metadata={'role': role.name},
+            metadata={
+                'role': role.name,
+                'removed_custom_roles': removed_names if removed_count > 0 else None
+            },
             ip_address=request.META.get('REMOTE_ADDR'),
             user_agent=request.META.get('HTTP_USER_AGENT', '')
         )
 
         return Response({
             'status': 'created' if created else 'already_exists',
-            'role': role.name
+            'role': role.name,
+            'removed_custom_roles': removed_count
         })
 
     @action(detail=True, methods=['post'])
