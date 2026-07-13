@@ -67,21 +67,11 @@ def check_all_flags():
                 elif role.code == 'hr_admin':
                     print(f"      • {role.code}: HR/Payroll/Finance access")
         
-        # Check 3: Direct Module Assignments
-        print(f"\n3️⃣  DIRECT MODULE ASSIGNMENTS (rbac_userprofile_modules):")
-        direct_modules = profile.modules.filter(is_active=True)
+        # Note: UserProfile does NOT have direct module assignments in this architecture
+        # Modules are accessed ONLY through roles (UserProfile -> Role -> Module)
         
-        if direct_modules.exists():
-            print(f"   ⚠️  {direct_modules.count()} module(s) directly assigned:")
-            for mod in direct_modules[:10]:
-                print(f"      • {mod.code}: {mod.name}")
-            if direct_modules.count() > 10:
-                print(f"      ... and {direct_modules.count() - 10} more")
-        else:
-            print(f"   ✅ No direct module assignments (good)")
-        
-        # Check 4: Effective Module Access
-        print(f"\n4️⃣  EFFECTIVE MODULE ACCESS (computed):")
+        # Check 3: Effective Module Access
+        print(f"\n3️⃣  EFFECTIVE MODULE ACCESS (computed):")
         all_modules = profile.get_all_modules()
         
         finance_mods = [m for m in all_modules if 'finance' in m.code.lower()]
@@ -148,14 +138,7 @@ def check_all_flags():
                     'fix': 'Remove admin roles if user should only have default access'
                 })
         
-        if direct_modules.exists():
-            causes.append({
-                'level': 'MEDIUM',
-                'cause': f'{direct_modules.count()} modules directly assigned',
-                'detail': 'Direct assignments bypass role-based access',
-                'impact': 'User gets these modules regardless of roles',
-                'fix': 'Clear direct assignments, rely on ROLE_MODULE_POLICY'
-            })
+        # Note: Direct module assignments removed - not supported in this architecture
         
         if not causes:
             print(f"\n✅ NO ISSUES FOUND")
@@ -179,10 +162,6 @@ def check_all_flags():
         if admin_roles and not any(r.code == 'super_admin' for r in admin_roles):
             print(f"\n🔧 Remove admin roles")
             print(f"   Run: python fix_kiran_production.py")
-        
-        if direct_modules.exists():
-            print(f"\n🔧 Clear direct module assignments")
-            print(f"   Included in: python fix_kiran_production.py")
         
         print(f"\n💡 After running fixes:")
         print(f"   1. User must logout from https://www.radai.ae")

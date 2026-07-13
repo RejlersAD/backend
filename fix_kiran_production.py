@@ -57,8 +57,8 @@ def fix_user_access():
             else:
                 print(f"   • {role.name} (code: {role.code}, level: {role.level})")
         
-        # Check direct module assignments BEFORE checking if has_admin
-        direct_modules = profile.modules.filter(is_active=True)
+        # Note: UserProfile does NOT have direct module assignments in this architecture
+        # Modules are accessed ONLY through roles (UserProfile -> Role -> Module)
         
         if not has_admin:
             # Check if Django flags are the issue
@@ -68,9 +68,6 @@ def fix_user_access():
                 print(f"   is_superuser: {user.is_superuser}")
                 print(f"   These flags cause FRONTEND to bypass RBAC!")
                 print(f"   Will fix below...")
-            elif direct_modules.filter(code__in=['finance', 'qhse', 'hr_management', 'admin']).exists():
-                print(f"\n⚠️  USER HAS DIRECT MODULE ASSIGNMENTS")
-                print(f"   Will clear below...")
             else:
                 print(f"\n✅ USER ALREADY FIXED - No admin role found")
                 print(f"   If user still sees Finance/QHSE, tell them to:")
@@ -112,17 +109,13 @@ def fix_user_access():
                 profile.roles.add(default_role)
                 print(f"   ✅ Added: default (Default)")
             
-            # Step 3: Clear all direct module assignments (already defined above)
-            if direct_modules.exists():
-                profile.modules.clear()
-                print(f"   🧹 Cleared {direct_modules.count()} direct module assignments")
-            else:
-                print(f"   ✅ No direct module assignments to clear")
+            # Note: No Step 3 (direct module assignments) - not supported in this architecture
+            # Modules are assigned ONLY through roles
             
-            # Step 4: Clear cache
+            # Step 3: Clear cache
             cache.delete(f'user_modules_{profile.id}')
             cache.delete(f'user_permissions_{profile.id}')
-            print(f"   🗑️  Cleared module cache")
+            print(f"   🗑️  Cleared cache for user modules and permissions")
             
             print(f"\n✅ FIX APPLIED SUCCESSFULLY")
         
