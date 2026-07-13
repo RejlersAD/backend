@@ -239,12 +239,22 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def pm_reject(self, request, pk=None):
-        """Project Manager rejection"""
+        """Project Manager rejection with mandatory reason validation"""
         pr = self.get_object()
+        
+        # Validate rejection reason (soft-coded validation)
+        reason = request.data.get('reason', '')
+        is_valid, error_message = validate_rejection_reason(reason)
+        
+        if not is_valid:
+            return Response(
+                {'error': error_message},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         pr.pm_approval_status = 'not_approved'
         pr.status = 'rejected'
-        pr.rejection_reason = request.data.get('reason', 'Rejected by PM')
+        pr.rejection_reason = reason.strip()
         pr.save()
         
         serializer = self.get_serializer(pr)
@@ -290,16 +300,503 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def vp_reject(self, request, pk=None):
-        """VP Operations rejection"""
+        """VP Operations rejection with mandatory reason validation"""
         pr = self.get_object()
+        
+        # Validate rejection reason (soft-coded validation)
+        reason = request.data.get('reason', '')
+        is_valid, error_message = validate_rejection_reason(reason)
+        
+        if not is_valid:
+            return Response(
+                {'error': error_message},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         pr.vp_op_approval_status = 'not_approved'
         pr.status = 'rejected'
-        pr.rejection_reason = request.data.get('reason', 'Rejected by VP Operations')
+        pr.rejection_reason = reason.strip()
         pr.save()
         
         serializer = self.get_serializer(pr)
         return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def eng_manager_approve(self, request, pk=None):
+        """
+        Engineering Manager approval (new dynamic workflow tier)
+        """
+        pr = self.get_object()
+        
+        if pr.eng_manager_approval_status == 'approved':
+            return Response(
+                {'error': 'PR already approved by Engineering Manager'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        pr.eng_manager_name = request.user
+        pr.eng_manager_signature = request.data.get('signature', '')
+        pr.eng_manager_approval_status = 'approved'
+        pr.eng_manager_approved_at = timezone.now()
+        pr.save()
+        
+        serializer = self.get_serializer(pr)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def eng_manager_reject(self, request, pk=None):
+        """Engineering Manager rejection with mandatory reason validation"""
+        pr = self.get_object()
+        
+        # Validate rejection reason (soft-coded validation)
+        reason = request.data.get('reason', '')
+        is_valid, error_message = validate_rejection_reason(reason)
+        
+        if not is_valid:
+            return Response(
+                {'error': error_message},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        pr.eng_manager_approval_status = 'not_approved'
+        pr.status = 'rejected'
+        pr.rejection_reason = reason.strip()
+        pr.save()
+        
+        serializer = self.get_serializer(pr)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def manager_projects_approve(self, request, pk=None):
+        """
+        Manager of Projects approval (new dynamic workflow tier)
+        """
+        pr = self.get_object()
+        
+        if pr.manager_projects_approval_status == 'approved':
+            return Response(
+                {'error': 'PR already approved by Manager of Projects'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        pr.manager_projects_name = request.user
+        pr.manager_projects_signature = request.data.get('signature', '')
+        pr.manager_projects_approval_status = 'approved'
+        pr.manager_projects_approved_at = timezone.now()
+        pr.save()
+        
+        serializer = self.get_serializer(pr)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def manager_projects_reject(self, request, pk=None):
+        """Manager of Projects rejection with mandatory reason validation"""
+        pr = self.get_object()
+        
+        # Validate rejection reason (soft-coded validation)
+        reason = request.data.get('reason', '')
+        is_valid, error_message = validate_rejection_reason(reason)
+        
+        if not is_valid:
+            return Response(
+                {'error': error_message},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        pr.manager_projects_approval_status = 'not_approved'
+        pr.status = 'rejected'
+        pr.rejection_reason = reason.strip()
+        pr.save()
+        
+        serializer = self.get_serializer(pr)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def process_dynamic_approval(self, request, pk=None):
+        """
+        Process approval based on dynamic workflow configuration
+        Advances to next step in approval_workflow_config
+        """
+        pr = self.get_object()
+        current_step = pr.current_approval_step
+        workflow = pr.approval_workflow_config
+        
+        if not workflow or len(workflow) == 0:
+            return Response(
+                {'error': 'No approval workflow configured'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if current_step >= len(workflow):
+            return Response(
+                {'error': 'All approval steps completed'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get current step
+        step_config = workflow[current_step]
+        
+        # Mark current step as approved
+        step_config['status'] = 'approved'
+        step_config['approved_at'] = timezone.now().isoformat()
+        step_config['approved_by_id'] = str(request.user.id)
+        step_config['approved_by_name'] = request.user.get_full_name()
+        
+        # Move to next step
+        pr.current_approval_step = current_step + 1
+        
+        # If all steps completed, mark as fully approved
+        if pr.current_approval_step >= len(workflow):
+            pr.status = 'fully_approved'
+            pr.approved_by = request.user
+            pr.approved_at = timezone.now()
+        
+        pr.save()
+        
+        serializer = self.get_serializer(pr)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def recommend_vendors(self, request, pk=None):
+        """
+        AI-powered vendor recommendation based on PR details and historical data
+        """
+        pr = self.get_object()
+        
+        # Get all active vendors
+        from .models import Vendor
+        vendors = Vendor.objects.filter(status='active', rating__gte=3)
+        
+        # Get historical POs/PRs for vendor performance analysis
+        recommendations = []
+        
+        for vendor in vendors:
+            # Calculate vendor score based on multiple factors (soft-coded scoring)
+            score = 0.0
+            reasons = []
+            
+            # Factor 1: Rating (40% weight)
+            if vendor.rating:
+                score += (vendor.rating / 5.0) * 0.4
+                reasons.append(f"Rating: {vendor.rating}/5")
+            
+            # Factor 2: Past orders count (30% weight)
+            past_orders = vendor.purchase_orders.count() + vendor.purchase_requisitions.count()
+            if past_orders > 0:
+                score += min(past_orders / 10.0, 1.0) * 0.3
+                reasons.append(f"{past_orders} past orders")
+            
+            # Factor 3: ICV certification for Abu Dhabi market (15% weight)
+            if vendor.is_icv_certified:
+                score += 0.15
+                reasons.append(f"ICV certified: {vendor.icv_percentage}%")
+            
+            # Factor 4: ADNOC approval (15% weight)
+            if vendor.adnoc_approved:
+                score += 0.15
+                reasons.append("ADNOC approved")
+            
+            # Only recommend vendors with score > 0.5
+            if score > 0.5:
+                recommendations.append({
+                    'vendor_id': str(vendor.id),
+                    'vendor_code': vendor.vendor_code,
+                    'vendor_name': vendor.name,
+                    'score': round(score, 2),
+                    'rating': vendor.rating,
+                    'past_orders': past_orders,
+                    'icv_certified': vendor.is_icv_certified,
+                    'icv_percentage': float(vendor.icv_percentage) if vendor.icv_percentage else None,
+                    'adnoc_approved': vendor.adnoc_approved,
+                    'reasons': reasons,
+                })
+        
+        # Sort by score descending
+        recommendations.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Update PR with recommendations
+        pr.ai_vendor_recommendations = recommendations[:5]  # Top 5
+        pr.save()
+        
+        return Response({
+            'message': f'Generated {len(recommendations)} vendor recommendations',
+            'recommendations': recommendations[:5]
+        })
+    
+    @action(detail=False, methods=['get'])
+    def get_approvers(self, request):
+        """
+        Get list of users available for approval workflow by role/job title
+        Soft-coded: searches by job_title in RBAC UserProfile
+        
+        Query params:
+        - role: 'project_manager', 'engineering_manager', 'manager_projects', 'vp_operations'
+        """
+        from apps.rbac.models import UserProfile
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        
+        role = request.query_params.get('role', '').lower()
+        
+        # Soft-coded role-to-title mapping (flexible for different organizations)
+        role_title_mapping = {
+            'project_manager': ['Project Manager', 'PM', 'Manager - Projects'],
+            'engineering_manager': ['Engineering Manager', 'Manager - Engineering', 'Eng Manager'],
+            'manager_projects': ['Manager of Projects', 'Manager - Projects', 'Projects Manager'],
+            'vp_operations': ['VP Operations', 'Vice President Operations', 'VP - Operations', 'Vice President of Operation'],
+        }
+        
+        if role and role in role_title_mapping:
+            job_titles = role_title_mapping[role]
+            
+            # Query users with matching job titles
+            profiles = UserProfile.objects.filter(
+                status='active',
+                is_deleted=False,
+                job_title__in=job_titles
+            ).select_related('user')
+            
+            # Also try partial match if no exact match found
+            if profiles.count() == 0:
+                from django.db.models import Q
+                q_objects = Q()
+                for title in job_titles:
+                    q_objects |= Q(job_title__icontains=title)
+                
+                profiles = UserProfile.objects.filter(
+                    q_objects,
+                    status='active',
+                    is_deleted=False
+                ).select_related('user')
+        else:
+            # Return all active users if no role specified
+            profiles = UserProfile.objects.filter(
+                status='active',
+                is_deleted=False
+            ).select_related('user')
+        
+        # Format response
+        users_list = []
+        for profile in profiles:
+            users_list.append({
+                'id': str(profile.user.id),
+                'email': profile.user.email,
+                'full_name': profile.user.get_full_name(),
+                'first_name': profile.user.first_name,
+                'last_name': profile.user.last_name,
+                'job_title': profile.job_title,
+                'department': profile.department,
+                'employee_id': profile.employee_id,
+            })
+        
+        return Response({
+            'role': role,
+            'count': len(users_list),
+            'users': users_list
+        })
+    
+    @action(detail=False, methods=['get'])
+    def get_product_services(self, request):
+        """
+        Get autocomplete suggestions for Product/Service field
+        Returns distinct values from existing PRs
+        Soft-coded: no hardcoded product list, learns from historical data
+        
+        Query params:
+        - q: search query (optional)
+        - limit: max results (default 50)
+        """
+        search_query = request.query_params.get('q', '').strip()
+        limit = int(request.query_params.get('limit', 50))
+        
+        # Get distinct products from existing PRs
+        products_qs = PurchaseRequisition.objects.filter(
+            product_service__isnull=False
+        ).exclude(
+            product_service__exact=''
+        ).values_list('product_service', flat=True).distinct()
+        
+        # Apply search filter if provided
+        if search_query:
+            products_qs = PurchaseRequisition.objects.filter(
+                product_service__icontains=search_query
+            ).values_list('product_service', flat=True).distinct()
+        
+        products_list = list(products_qs[:limit])
+        
+        return Response({
+            'count': len(products_list),
+            'suggestions': products_list
+        })
+    
+    @action(detail=False, methods=['get'])
+    def get_projects_departments(self, request):
+        """
+        Get autocomplete suggestions for Project/Department field
+        Returns distinct values from existing PRs and Project master table
+        
+        Query params:
+        - q: search query (optional)
+        - limit: max results (default 50)
+        """
+        search_query = request.query_params.get('q', '').strip()
+        limit = int(request.query_params.get('limit', 50))
+        
+        suggestions = []
+        
+        # Source 1: Project master table
+        try:
+            projects = Project.objects.filter(status='active')
+            if search_query:
+                projects = projects.filter(
+                    Q(project_name__icontains=search_query) |
+                    Q(project_code__icontains=search_query) |
+                    Q(department__icontains=search_query)
+                )
+            
+            for project in projects[:limit]:
+                suggestions.append({
+                    'value': project.project_name,
+                    'label': f"{project.project_code} - {project.project_name}",
+                    'department': project.department,
+                    'source': 'master'
+                })
+        except Exception:
+            pass  # Project table may not exist in all environments
+        
+        # Source 2: Historical PRs
+        pr_projects = PurchaseRequisition.objects.filter(
+            project_department__isnull=False
+        ).exclude(
+            project_department__exact=''
+        )
+        
+        if search_query:
+            pr_projects = pr_projects.filter(project_department__icontains=search_query)
+        
+        pr_projects = pr_projects.values_list('project_department', flat=True).distinct()[:limit]
+        
+        for project in pr_projects:
+            if project not in [s['value'] for s in suggestions]:
+                suggestions.append({
+                    'value': project,
+                    'label': project,
+                    'source': 'historical'
+                })
+        
+        return Response({
+            'count': len(suggestions),
+            'suggestions': suggestions[:limit]
+        })
+    
+    @action(detail=False, methods=['get'])
+    def get_suppliers(self, request):
+        """
+        Get autocomplete suggestions for Supplier Name and Business ID
+        Returns distinct values from existing PRs and Vendor master table
+        
+        Query params:
+        - q: search query (optional)
+        - limit: max results (default 50)
+        """
+        search_query = request.query_params.get('q', '').strip()
+        limit = int(request.query_params.get('limit', 50))
+        
+        suggestions = []
+        
+        # Source 1: Vendor master table
+        vendors = Vendor.objects.filter(status='active')
+        if search_query:
+            vendors = vendors.filter(
+                Q(name__icontains=search_query) |
+                Q(vendor_code__icontains=search_query) |
+                Q(trade_license_number__icontains=search_query)
+            )
+        
+        for vendor in vendors[:limit]:
+            suggestions.append({
+                'supplier_name': vendor.name,
+                'supplier_business_id': vendor.trade_license_number or vendor.tax_registration_number,
+                'vendor_code': vendor.vendor_code,
+                'rating': vendor.rating,
+                'source': 'master'
+            })
+        
+        # Source 2: Historical PRs (if not in vendor master)
+        if len(suggestions) < limit:
+            pr_suppliers = PurchaseRequisition.objects.filter(
+                supplier_name__isnull=False
+            ).exclude(
+                supplier_name__exact=''
+            )
+            
+            if search_query:
+                pr_suppliers = pr_suppliers.filter(
+                    Q(supplier_name__icontains=search_query) |
+                    Q(supplier_business_id__icontains=search_query)
+                )
+            
+            # Get distinct combinations
+            pr_suppliers = pr_suppliers.values('supplier_name', 'supplier_business_id').distinct()[:limit]
+            
+            for supplier in pr_suppliers:
+                if supplier['supplier_name'] not in [s['supplier_name'] for s in suggestions]:
+                    suggestions.append({
+                        'supplier_name': supplier['supplier_name'],
+                        'supplier_business_id': supplier['supplier_business_id'],
+                        'source': 'historical'
+                    })
+        
+        return Response({
+            'count': len(suggestions),
+            'suggestions': suggestions[:limit]
+        })
+    
+    @action(detail=False, methods=['get'])
+    def get_po_numbers(self, request):
+        """
+        Get autocomplete suggestions for PO Number reference field
+        Returns existing PO numbers from PurchaseOrder table
+        
+        Query params:
+        - q: search query (optional)
+        - limit: max results (default 50)
+        - status: filter by PO status (optional)
+        """
+        search_query = request.query_params.get('q', '').strip()
+        limit = int(request.query_params.get('limit', 50))
+        status_filter = request.query_params.get('status', None)
+        
+        suggestions = []
+        
+        # Get PO numbers from PurchaseOrder table
+        pos = PurchaseOrder.objects.all()
+        
+        if status_filter:
+            pos = pos.filter(status=status_filter)
+        
+        if search_query:
+            pos = pos.filter(
+                Q(po_number__icontains=search_query) |
+                Q(supplier_name__icontains=search_query) |
+                Q(description__icontains=search_query)
+            )
+        
+        pos = pos.values('po_number', 'supplier_name', 'total_amount', 'currency', 'status').distinct()[:limit]
+        
+        for po in pos:
+            suggestions.append({
+                'po_number': po['po_number'],
+                'supplier_name': po['supplier_name'],
+                'total_amount': str(po['total_amount']) if po['total_amount'] else None,
+                'currency': po['currency'],
+                'status': po['status']
+            })
+        
+        return Response({
+            'count': len(suggestions),
+            'suggestions': suggestions
+        })
     
     @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):

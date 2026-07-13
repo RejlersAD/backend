@@ -68,7 +68,13 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     # User relationship fields
     issued_by_name = serializers.CharField(source='issued_by.get_full_name', read_only=True, allow_null=True)
     pm_name_display = serializers.CharField(source='pm_name.get_full_name', read_only=True, allow_null=True)
+    eng_manager_name_display = serializers.CharField(source='eng_manager_name.get_full_name', read_only=True, allow_null=True)
+    manager_projects_name_display = serializers.CharField(source='manager_projects_name.get_full_name', read_only=True, allow_null=True)
     vp_op_name_display = serializers.CharField(source='vp_op_name.get_full_name', read_only=True, allow_null=True)
+    
+    # Vendor relationship fields
+    vendor_details = VendorSerializer(source='vendor', read_only=True)
+    vendor_name = serializers.CharField(source='vendor.name', read_only=True, allow_null=True)
     
     # Legacy fields
     requested_by_name = serializers.CharField(source='requested_by.get_full_name', read_only=True, allow_null=True)
@@ -92,6 +98,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             # Supplier Section (Fields 4-5)
             'supplier_name', 'supplier_business_id',
             
+            # Vendor Integration (Smart linking)
+            'vendor', 'vendor_details', 'vendor_name', 'vendor_selection_reason', 'ai_vendor_recommendations',
+            
             # Project/Product Section (Fields 6-7)
             'product_service', 'project_department',
             
@@ -102,16 +111,21 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'preferred_supplier_if_any',
             
             # Pricing Section (Fields 10-13)
-            'price_description', 'total_price', 'currency', 'price_remarks', 'net_total_excl_vat',
+            'price_description', 'total_price', 'currency', 'price_remarks', 'net_total_excl_vat', 'price_remarks_data',
             
             # Reference Section (Field 14)
             'po_number_reference',
             
-            # Special Notes Section (Field 15)
-            'special_notes',
+            # Purchase Recommendation Section (Field 15) - RENAMED from special_notes
+            'purchase_recommendation',
             
-            # Approvals Section (Fields 16-21)
+            # Dynamic Approval Workflow
+            'approval_workflow_config', 'current_approval_step',
+            
+            # Approvals Section (Fields 16-21) - Enhanced with new tiers
             'pm_name', 'pm_name_display', 'pm_signature', 'pm_approval_status', 'pm_approval_status_display', 'pm_approved_at',
+            'eng_manager_name', 'eng_manager_name_display', 'eng_manager_signature', 'eng_manager_approval_status', 'eng_manager_approved_at',
+            'manager_projects_name', 'manager_projects_name_display', 'manager_projects_signature', 'manager_projects_approval_status', 'manager_projects_approved_at',
             'vp_op_name', 'vp_op_name_display', 'vp_op_signature', 'vp_op_approval_status', 'vp_op_approval_status_display', 'vp_op_approved_at',
             
             # Footer/Metadata (Fields 22-23)

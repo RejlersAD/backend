@@ -207,6 +207,22 @@ class PurchaseRequisition(TimeStampedModel):
     supplier_name = models.CharField(max_length=300, blank=True, help_text='Preferred supplier name (e.g., Velimor Middle East Consultancy LLC)')
     supplier_business_id = models.CharField(max_length=100, blank=True, help_text='Supplier Business ID No (e.g., CN-3362215)')
     
+    # === VENDOR INTEGRATION (Smart linking to Vendor Master Database) ===
+    vendor = models.ForeignKey(
+        'Vendor',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='purchase_requisitions',
+        help_text='Linked vendor from vendor master database (auto-populated from supplier_name or manual selection)'
+    )
+    vendor_selection_reason = models.TextField(blank=True, help_text='Reason for selecting this vendor (AI recommendation or manual)')
+    ai_vendor_recommendations = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='AI-generated vendor recommendations based on historical data: [{"vendor_id": "uuid", "vendor_name": "...", "score": 0.95, "reason": "High performance in similar projects", "past_orders": 15, "avg_rating": 4.8}]'
+    )
+    
     # === PROJECT/PRODUCT SECTION (Fields 6-7) ===
     product_service = models.TextField(blank=True, help_text='Product or Service being purchased')
     project_department = models.TextField(blank=True, help_text='Project name and department details')
@@ -224,11 +240,30 @@ class PurchaseRequisition(TimeStampedModel):
     price_remarks = models.TextField(blank=True, help_text='Pricing remarks (e.g., Included in HSE budget)')
     net_total_excl_vat = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True, help_text='Net Total, excluding VAT')
     
+    # === ADVANCED PRICE REMARKS DATA (Dynamic) ===
+    price_remarks_data = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Advanced pricing data: {"budget_allocation": "HSE", "cost_center": "CC-001", "payment_terms": "Net 45", "discount_percentage": 10, "discount_amount": 400, "comparative_prices": [{"vendor": "Vendor A", "price": 4200}, ...], "price_history": [...]}'
+    )
+    
     # === REFERENCE SECTION (Field 14) ===
     po_number_reference = models.CharField(max_length=100, blank=True, help_text='Related PO number (e.g., RAD-PRJ-PUR-0014_JAN2025)')
     
-    # === SPECIAL NOTES SECTION (Field 15) ===
-    special_notes = models.TextField(blank=True, help_text='Special Notes (if any)')
+    # === PURCHASE RECOMMENDATION SECTION (Field 15) - RENAMED from special_notes ===
+    purchase_recommendation = models.TextField(blank=True, help_text='Purchase Recommendation (previously Special Notes)')
+    
+    # === DYNAMIC APPROVAL WORKFLOW ===
+    # Soft-coded approval workflow allowing Project Manager to select approvers dynamically
+    approval_workflow_config = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Dynamic approval workflow: [{"step": 1, "role": "Project Manager", "user_id": "uuid", "user_name": "John Doe", "status": "pending", "approved_at": null}]'
+    )
+    current_approval_step = models.IntegerField(
+        default=0,
+        help_text='Current step in approval workflow (0 = not started, 1+ = step number)'
+    )
     
     # === APPROVALS SECTION (Fields 16-21) ===
     # Project Manager (PM) Approval
@@ -236,6 +271,18 @@ class PurchaseRequisition(TimeStampedModel):
     pm_signature = models.CharField(max_length=500, blank=True, help_text='PM signature (base64 or S3 URL)')
     pm_approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default='pending', help_text='PM Approval Status')
     pm_approved_at = models.DateTimeField(null=True, blank=True, help_text='PM approval timestamp')
+    
+    # Engineering Manager Approval (NEW - dynamic workflow tier)
+    eng_manager_name = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_eng_manager_approved', help_text='Engineering Manager name')
+    eng_manager_signature = models.CharField(max_length=500, blank=True, help_text='Engineering Manager signature (base64 or S3 URL)')
+    eng_manager_approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default='pending', help_text='Engineering Manager Approval Status')
+    eng_manager_approved_at = models.DateTimeField(null=True, blank=True, help_text='Engineering Manager approval timestamp')
+    
+    # Manager of Projects Approval (NEW - dynamic workflow tier)
+    manager_projects_name = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_manager_projects_approved', help_text='Manager of Projects name')
+    manager_projects_signature = models.CharField(max_length=500, blank=True, help_text='Manager of Projects signature (base64 or S3 URL)')
+    manager_projects_approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default='pending', help_text='Manager of Projects Approval Status')
+    manager_projects_approved_at = models.DateTimeField(null=True, blank=True, help_text='Manager of Projects approval timestamp')
     
     # VP Operations (Vp, Op) Approval
     vp_op_name = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_vp_approved', help_text='VP Operations name')
@@ -278,6 +325,8 @@ class PurchaseRequisition(TimeStampedModel):
             models.Index(fields=['status', 'priority']),
             models.Index(fields=['requested_by', 'status']),
             models.Index(fields=['-created_at']),
+            models.Index(fields=['vendor', 'status'], name='proc_pr_vend_stat_idx'),
+            models.Index(fields=['current_approval_step', 'status'], name='proc_pr_appr_step_idx'),
         ]
     
     def __str__(self):
