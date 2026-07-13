@@ -103,7 +103,13 @@ else
     echo "⚠️  Procurement fix not available (continuing anyway)"
     DEPLOYMENT_WARNINGS=$((DEPLOYMENT_WARNINGS + 1))
 fi
-echo ""
+# Check 4.6: Grant Procurement Module Access to Admin Roles (AUTOMATIC)
+echo "🔐 Granting Procurement Module Access..."
+if python manage.py grant_procurement_access 2>&1; then
+    echo "✅ Procurement access granted to admin roles"
+else
+    echo "⚠️  WARNING: Could not grant procurement access (continuing anyway)"
+fiecho ""
 
 # Check 5: Super Admin Setup (OPTIONAL)
 if [ -f "setup_superadmin.py" ]; then
