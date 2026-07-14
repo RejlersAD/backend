@@ -12,7 +12,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import (
     Organization, Module, Permission, Role, RolePermission, RoleModule,
-    UserProfile, UserRole, UserStorage, AuditLog, AccessRequest
+    UserProfile, UserRole, UserStorage, AuditLog, AccessRequest,
+    Achievement, WorkExperience, SocialMediaLink,
 )
 from .serializers import (
     OrganizationSerializer, ModuleSerializer, PermissionSerializer,
@@ -2872,3 +2873,365 @@ class AccessRequestViewSet(viewsets.ModelViewSet):
         req.admin_note  = request.data.get('admin_note', '')
         req.save()
         return Response({'status': 'denied'})
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Enhanced Profile ViewSets — Achievements, Experience, Social Media
+# ═════════════════════════════════════════════════════════════════════════════
+
+class AchievementViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for user achievements and milestones.
+    
+    Users can manage their own achievements. Admins can view all achievements.
+    Soft-coded achievement categories defined in rbac.profile_config
+    """
+    permission_classes = [IsAuthenticated]
+    filter_backends = [filters.OrderingFilter, filters.SearchFilter, DjangoFilterBackend]
+    filterset_fields = ['category', 'level', 'is_public', 'is_verified']
+    search_fields = ['title', 'description', 'organization']
+    ordering_fields = ['achieved_date', 'created_at', 'display_order']
+    ordering = ['-achieved_date', '-created_at']
+    
+    def get_serializer_class(self):
+        from .serializers import AchievementSerializer
+        return AchievementSerializer
+    
+    def get_queryset(self):
+        """Return user's own achievements, or all if admin."""
+        from .models import Achievement
+        user = self.request.user
+        
+        # Admins can see all achievements
+        if user.is_superuser or user.is_staff:
+            return Achievement.objects.select_related('user_profile__user').all()
+        
+        # Regular users see only their own
+        try:
+            return Achievement.objects.filter(user_profile=user.rbac_profile)
+        except:
+            return Achievement.objects.none()
+    
+    def perform_create(self, serializer):
+        """Auto-assign current user's profile."""
+        try:
+            profile = self.request.user.rbac_profile
+            serializer.save(user_profile=profile)
+        except:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('User profile not found.')
+    
+    @action(detail=False, methods=['get'])
+    def categories(self, request):
+        """Return available achievement categories."""
+        from apps.rbac.profile_config import ACHIEVEMENT_CATEGORIES
+        categories = [
+            {
+                'value': code,
+                'label': config['label'],
+                'icon': config['icon'],
+                'color': config['color'],
+                'description': config['description'],
+            }
+            for code, config in ACHIEVEMENT_CATEGORIES.items()
+        ]
+        return Response(categories)
+    
+    @action(detail=False, methods=['get'])
+    def levels(self, request):
+        """Return achievement levels for gamification."""
+        from apps.rbac.profile_config import ACHIEVEMENT_LEVELS
+        return Response(ACHIEVEMENT_LEVELS)
+
+
+class WorkExperienceViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for work experience entries.
+    
+    Users manage their own experience timeline. Admins can view all.
+    """
+    permission_classes = [IsAuthenticated]
+    filter_backends = [filters.OrderingFilter, filters.SearchFilter, DjangoFilterBackend]
+    filterset_fields = ['employment_type', 'industry', 'is_current', 'is_public']
+    search_fields = ['company_name', 'job_title', 'description', 'industry']
+    ordering_fields = ['start_date', 'end_date', 'created_at', 'display_order']
+    ordering = ['-is_current', '-start_date']
+    
+    def get_serializer_class(self):
+        from .serializers import WorkExperienceSerializer
+        return WorkExperienceSerializer
+    
+    def get_queryset(self):
+        """Return user's own experience, or all if admin."""
+        from .models import WorkExperience
+        user = self.request.user
+        
+        # Admins can see all
+        if user.is_superuser or user.is_staff:
+            return WorkExperience.objects.select_related('user_profile__user').all()
+        
+        # Regular users see only their own
+        try:
+            return WorkExperience.objects.filter(user_profile=user.rbac_profile)
+        except:
+            return WorkExperience.objects.none()
+    
+    def perform_create(self, serializer):
+        """Auto-assign current user's profile."""
+        try:
+            profile = self.request.user.rbac_profile
+            serializer.save(user_profile=profile)
+        except:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('User profile not found.')
+    
+    @action(detail=False, methods=['get'])
+    def employment_types(self, request):
+        """Return available employment types."""
+        from apps.rbac.profile_config import EMPLOYMENT_TYPES
+        return Response(EMPLOYMENT_TYPES)
+    
+    @action(detail=False, methods=['get'])
+    def industries(self, request):
+        """Return industry sectors."""
+        from apps.rbac.profile_config import INDUSTRY_SECTORS
+        return Response([{'value': ind, 'label': ind} for ind in INDUSTRY_SECTORS])
+
+
+class SocialMediaLinkViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for social media and professional network links.
+    
+    Users manage their own social links. Admins can view all.
+    Platform codes soft-coded in rbac.profile_config
+    """
+    permission_classes = [IsAuthenticated]
+    filter_backends = [filters.OrderingFilter, DjangoFilterBackend]
+    filterset_fields = ['platform', 'is_public', 'is_verified']
+    ordering_fields = ['platform', 'display_order', 'created_at']
+    ordering = ['display_order', 'platform']
+    
+    def get_serializer_class(self):
+        from .serializers import SocialMediaLinkSerializer
+        return SocialMediaLinkSerializer
+    
+    def get_queryset(self):
+        """Return user's own social links, or all if admin."""
+        from .models import SocialMediaLink
+        user = self.request.user
+        
+        # Admins can see all
+        if user.is_superuser or user.is_staff:
+            return SocialMediaLink.objects.select_related('user_profile__user').all()
+        
+        # Regular users see only their own
+        try:
+            return SocialMediaLink.objects.filter(user_profile=user.rbac_profile)
+        except:
+            return SocialMediaLink.objects.none()
+    
+    def perform_create(self, serializer):
+        """Auto-assign current user's profile."""
+        try:
+            profile = self.request.user.rbac_profile
+            serializer.save(user_profile=profile)
+        except:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('User profile not found.')
+    
+    @action(detail=False, methods=['get'])
+    def platforms(self, request):
+        """Return available social media platforms."""
+        from apps.rbac.profile_config import SOCIAL_MEDIA_PLATFORMS
+        platforms = [
+            {
+                'value': code,
+                'label': config['label'],
+                'icon': config['icon'],
+                'color': config['color'],
+                'placeholder': config['placeholder'],
+            }
+            for code, config in SOCIAL_MEDIA_PLATFORMS.items()
+        ]
+        return Response(platforms)
+
+
+class ProfileDocumentViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for profile documents (Emirates ID, Driving License, Country ID, etc.)
+    
+    Users manage their own documents. Admins can view and verify all.
+    Document types soft-coded in rbac.profile_config.DOCUMENT_TYPES
+    Files stored in AWS S3 bucket.
+    """
+    permission_classes = [IsAuthenticated]
+    filter_backends = [filters.OrderingFilter, DjangoFilterBackend]
+    filterset_fields = ['document_type', 'verification_status', 'is_active']
+    ordering_fields = ['document_type', 'created_at', 'expiry_date']
+    ordering = ['-created_at']
+    
+    def get_serializer_class(self):
+        from .serializers import ProfileDocumentSerializer
+        return ProfileDocumentSerializer
+    
+    def get_queryset(self):
+        """Return user's own documents, or all if admin."""
+        from .models import ProfileDocument
+        user = self.request.user
+        
+        # Admins can see all documents
+        if user.is_superuser or user.is_staff:
+            return ProfileDocument.objects.select_related(
+                'user_profile__user', 'verified_by'
+            ).all()
+        
+        # Regular users see only their own active documents
+        try:
+            return ProfileDocument.objects.filter(
+                user_profile=user.rbac_profile,
+                is_active=True
+            )
+        except:
+            return ProfileDocument.objects.none()
+    
+    def perform_create(self, serializer):
+        """Auto-assign current user's profile and handle file upload."""
+        try:
+            profile = self.request.user.rbac_profile
+            
+            # Mark existing documents of same type as inactive (replaced)
+            from .models import ProfileDocument
+            ProfileDocument.objects.filter(
+                user_profile=profile,
+                document_type=serializer.validated_data.get('document_type'),
+                is_active=True
+            ).update(is_active=False)
+            
+            # Save new document
+            serializer.save(user_profile=profile, is_active=True)
+        except Exception as e:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(f'Failed to create document: {str(e)}')
+    
+    def perform_update(self, serializer):
+        """Update document, auto-expire if expiry_date is past."""
+        from django.utils import timezone
+        
+        expiry_date = serializer.validated_data.get('expiry_date')
+        if expiry_date and expiry_date < timezone.now().date():
+            serializer.save(verification_status='expired')
+        else:
+            serializer.save()
+    
+    @action(detail=False, methods=['get'])
+    def document_types(self, request):
+        """Return available document types from soft-coded config."""
+        from apps.rbac.profile_config import get_all_document_types
+        return Response(get_all_document_types())
+    
+    @action(detail=False, methods=['get'], url_path='document-types/profile')
+    def document_types_profile(self, request):
+        """Return document types for profile page only (identity + health docs)."""
+        from apps.rbac.profile_config import get_document_types_for_profile
+        return Response(get_document_types_for_profile())
+    
+    @action(detail=False, methods=['get'], url_path='document-types/onboarding')
+    def document_types_onboarding(self, request):
+        """Return document types for onboarding page (all employment docs)."""
+        from apps.rbac.profile_config import get_document_types_for_onboarding
+        return Response(get_document_types_for_onboarding())
+    
+    @action(detail=False, methods=['get'], url_path='document-types/category/(?P<category>[^/.]+)')
+    def document_types_by_category(self, request, category=None):
+        """Return document types filtered by category."""
+        from apps.rbac.profile_config import get_document_types_by_category
+        return Response(get_document_types_by_category(category))
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def verify(self, request, pk=None):
+        """Admin-only: Verify a document."""
+        document = self.get_object()
+        
+        # Check admin permission
+        if not (request.user.is_superuser or request.user.is_staff):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Only admins can verify documents.')
+        
+        from django.utils import timezone
+        
+        # Update verification status
+        document.verification_status = 'verified'
+        document.verified_by = request.user
+        document.verified_at = timezone.now()
+        document.rejection_reason = ''
+        document.save()
+        
+        serializer = self.get_serializer(document)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    def reject(self, request, pk=None):
+        """Admin-only: Reject a document."""
+        document = self.get_object()
+        
+        # Check admin permission
+        if not (request.user.is_superuser or request.user.is_staff):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Only admins can reject documents.')
+        
+        reason = request.data.get('reason', 'Document rejected by admin')
+        
+        # Update rejection
+        document.verification_status = 'rejected'
+        document.rejection_reason = reason
+        document.save()
+        
+        serializer = self.get_serializer(document)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def expiring_soon(self, request):
+        """Get documents expiring within specified days (default 30)."""
+        from django.utils import timezone
+        from datetime import timedelta
+        from .models import ProfileDocument
+        
+        days = int(request.query_params.get('days', 30))
+        threshold_date = timezone.now().date() + timedelta(days=days)
+        
+        queryset = self.get_queryset().filter(
+            expiry_date__lte=threshold_date,
+            expiry_date__gte=timezone.now().date(),
+            verification_status='verified',
+            is_active=True
+        )
+        
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def my_documents(self, request):
+        """Get current user's active documents grouped by type."""
+        try:
+            profile = request.user.rbac_profile
+            from .models import ProfileDocument
+            from apps.rbac.profile_config import DOCUMENT_TYPES
+            
+            documents_by_type = {}
+            for doc_code in DOCUMENT_TYPES.keys():
+                doc = ProfileDocument.objects.filter(
+                    user_profile=profile,
+                    document_type=doc_code,
+                    is_active=True
+                ).first()
+                
+                if doc:
+                    serializer = self.get_serializer(doc)
+                    documents_by_type[doc_code] = serializer.data
+                else:
+                    documents_by_type[doc_code] = None
+            
+            return Response(documents_by_type)
+        except:
+            return Response({})
+

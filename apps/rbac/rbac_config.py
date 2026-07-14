@@ -250,6 +250,12 @@ DEFAULT_ROLE_CONFIG = {
 ADMIN_ROLE_CODES = ['super_admin', 'admin', 'ict_admin', 'administrator']
 SUPERADMIN_ROLE_CODES = ['super_admin', 'superadmin']
 
+# HR Manager role codes — SOFT-CODED
+# Only these roles have full HR approval access (leave, payroll final approval)
+# Super admins and regular admins do NOT automatically get HR Manager privileges
+# Add new HR roles here to grant them full HR approval access
+HR_MANAGER_ROLE_CODES = ['hr_admin', 'hr_manager']
+
 # Sensitive roles — only Super Admin may grant these
 SENSITIVE_ROLE_CODES = ['hr_admin']
 

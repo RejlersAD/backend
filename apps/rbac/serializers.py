@@ -8,7 +8,8 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from .models import (
     Organization, Module, Permission, Role, RolePermission, RoleModule,
-    UserProfile, UserRole, UserStorage, AuditLog, AccessRequest
+    UserProfile, UserRole, UserStorage, AuditLog, AccessRequest,
+    Achievement, WorkExperience, SocialMediaLink, ProfileDocument,
 )
 
 User = get_user_model()
@@ -387,7 +388,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id', 'user', 'last_login_ip', 'last_login_at', 'failed_login_attempts',
             'is_deleted', 'deleted_at', 'deleted_by', 'created_at', 'updated_at',
-            'manager_name', 'manager_detail',
+            'manager', 'manager_name', 'manager_detail',
         ]
     
     def get_permissions(self, obj):
@@ -933,3 +934,357 @@ class AccessRequestSerializer(serializers.ModelSerializer):
     def get_user_name(self, obj):
         u = obj.user_profile.user
         return f"{u.first_name} {u.last_name}".strip() or u.email
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Enhanced Profile Serializers — Achievements, Experience, Social Media
+# ═════════════════════════════════════════════════════════════════════════════
+
+class AchievementSerializer(serializers.ModelSerializer):
+    """Serializer for user achievements — sports, academics, professional, genius records."""
+    
+    # Read-only computed fields
+    category_label = serializers.SerializerMethodField()
+    category_icon = serializers.SerializerMethodField()
+    category_color = serializers.SerializerMethodField()
+    level_label = serializers.SerializerMethodField()
+    level_icon = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Achievement
+        fields = [
+            'id', 'user_profile',
+            'title', 'category', 'category_label', 'category_icon', 'category_color',
+            'description', 'level', 'level_label', 'level_icon',
+            'achieved_date', 'location', 'organization',
+            'certificate_url', 'media_url',
+            'is_public', 'is_verified', 'display_order',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'is_verified']
+    
+    def get_category_label(self, obj):
+        """Return human-readable category label."""
+        from apps.rbac.profile_config import get_achievement_category
+        cat_config = get_achievement_category(obj.category)
+        return cat_config.get('label', obj.category.title())
+    
+    def get_category_icon(self, obj):
+        """Return category emoji icon."""
+        from apps.rbac.profile_config import get_achievement_category
+        cat_config = get_achievement_category(obj.category)
+        return cat_config.get('icon', '🏆')
+    
+    def get_category_color(self, obj):
+        """Return category color for UI."""
+        from apps.rbac.profile_config import get_achievement_category
+        cat_config = get_achievement_category(obj.category)
+        return cat_config.get('color', 'blue')
+    
+    def get_level_label(self, obj):
+        """Return human-readable level label."""
+        if not obj.level:
+            return None
+        from apps.rbac.profile_config import ACHIEVEMENT_LEVELS
+        for level in ACHIEVEMENT_LEVELS:
+            if level['value'] == obj.level:
+                return level['label']
+        return obj.level.title()
+    
+    def get_level_icon(self, obj):
+        """Return level emoji icon."""
+        if not obj.level:
+            return None
+        from apps.rbac.profile_config import ACHIEVEMENT_LEVELS
+        for level in ACHIEVEMENT_LEVELS:
+            if level['value'] == obj.level:
+                return level['icon']
+        return '🏅'
+
+
+class WorkExperienceSerializer(serializers.ModelSerializer):
+    """Serializer for work experience entries."""
+    
+    # Read-only computed fields
+    duration_text = serializers.SerializerMethodField()
+    employment_type_label = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = WorkExperience
+        fields = [
+            'id', 'user_profile',
+            'company_name', 'company_logo_url',
+            'job_title', 'employment_type', 'employment_type_label',
+            'industry', 'location',
+            'start_date', 'end_date', 'is_current', 'duration_text',
+            'description', 'achievements_text', 'skills_used',
+            'is_public', 'display_order',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def get_duration_text(self, obj):
+        """Calculate and return human-readable duration."""
+        from datetime import date
+        from dateutil.relativedelta import relativedelta
+        
+        end = obj.end_date if obj.end_date else date.today()
+        delta = relativedelta(end, obj.start_date)
+        
+        years = delta.years
+        months = delta.months
+        
+        if years > 0 and months > 0:
+            return f"{years} yr{'' if years == 1 else 's'} {months} mo"
+        elif years > 0:
+            return f"{years} year{'' if years == 1 else 's'}"
+        elif months > 0:
+            return f"{months} month{'' if months == 1 else 's'}"
+        else:
+            return "< 1 month"
+    
+    def get_employment_type_label(self, obj):
+        """Return human-readable employment type label."""
+        if not obj.employment_type:
+            return None
+        from apps.rbac.profile_config import EMPLOYMENT_TYPES
+        for emp_type in EMPLOYMENT_TYPES:
+            if emp_type['value'] == obj.employment_type:
+                return emp_type['label']
+        return obj.employment_type.replace('_', ' ').title()
+    
+    def validate(self, data):
+        """Validate that end_date is after start_date."""
+        start = data.get('start_date')
+        end = data.get('end_date')
+        is_current = data.get('is_current', False)
+        
+        # If marked as current, end_date should be None
+        if is_current and end is not None:
+            raise serializers.ValidationError({
+                'end_date': 'Cannot set end_date for current employment'
+            })
+        
+        # If not current, validate date range
+        if not is_current and end and start and end < start:
+            raise serializers.ValidationError({
+                'end_date': 'End date must be after start date'
+            })
+        
+        return data
+
+
+class SocialMediaLinkSerializer(serializers.ModelSerializer):
+    """Serializer for social media and professional network links."""
+    
+    # Read-only computed fields
+    platform_label = serializers.SerializerMethodField()
+    platform_icon = serializers.SerializerMethodField()
+    platform_color = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = SocialMediaLink
+        fields = [
+            'id', 'user_profile',
+            'platform', 'platform_label', 'platform_icon', 'platform_color',
+            'url', 'username',
+            'is_verified', 'is_public', 'display_order',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'is_verified']
+    
+    def get_platform_label(self, obj):
+        """Return human-readable platform name."""
+        from apps.rbac.profile_config import get_social_platform
+        platform_config = get_social_platform(obj.platform)
+        return platform_config.get('label', obj.platform.title())
+    
+    def get_platform_icon(self, obj):
+        """Return platform icon name (for frontend icon library)."""
+        from apps.rbac.profile_config import get_social_platform
+        platform_config = get_social_platform(obj.platform)
+        return platform_config.get('icon', 'globe')
+    
+    def get_platform_color(self, obj):
+        """Return platform brand color."""
+        from apps.rbac.profile_config import get_social_platform
+        platform_config = get_social_platform(obj.platform)
+        return platform_config.get('color', '#6B7280')
+    
+    def validate_url(self, value):
+        """Validate URL format for the specific platform."""
+        import re
+        from apps.rbac.profile_config import get_social_platform
+        
+        # Get platform from initial data
+        platform = self.initial_data.get('platform')
+        if not platform:
+            return value
+        
+        platform_config = get_social_platform(platform)
+        pattern = platform_config.get('validation_pattern')
+        
+        if pattern:
+            if not re.match(pattern, value):
+                raise serializers.ValidationError(
+                    f"Invalid URL format for {platform_config.get('label')}. "
+                    f"Expected format: {platform_config.get('placeholder')}"
+                )
+        
+        return value
+
+
+class ProfileDocumentSerializer(serializers.ModelSerializer):
+    """
+    Serializer for profile documents (Emirates ID, Driving License, etc.)
+    Handles S3 file uploads and soft-coded document type metadata.
+    """
+    
+    # Read-only computed fields from soft-coded config
+    document_type_label = serializers.SerializerMethodField()
+    document_type_icon = serializers.SerializerMethodField()
+    document_type_color = serializers.SerializerMethodField()
+    document_file_url = serializers.SerializerMethodField()
+    document_file_name = serializers.SerializerMethodField()
+    is_expired = serializers.ReadOnlyField()
+    expires_soon = serializers.ReadOnlyField()
+    
+    # User details for admin view
+    user_email = serializers.SerializerMethodField()
+    user_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = ProfileDocument
+        fields = [
+            'id', 'user_profile', 'user_email', 'user_name',
+            'document_type', 'document_type_label', 'document_type_icon', 'document_type_color',
+            'document_file', 'document_file_url', 'document_file_name',
+            'document_number', 'issue_date', 'expiry_date', 'issuing_authority',
+            'verification_status', 'verified_by', 'verified_at', 'rejection_reason',
+            'notes', 'is_active', 'is_expired', 'expires_soon',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'created_at', 'updated_at',
+            'verified_by', 'verified_at', 'is_expired', 'expires_soon',
+            'document_file_url', 'document_file_name',
+        ]
+    
+    def get_document_type_label(self, obj):
+        """Return human-readable document type name."""
+        from apps.rbac.profile_config import get_document_type
+        doc_config = get_document_type(obj.document_type)
+        if doc_config:
+            return doc_config.get('label', obj.document_type.replace('_', ' ').title())
+        return obj.document_type.replace('_', ' ').title()
+    
+    def get_document_type_icon(self, obj):
+        """Return document type icon emoji."""
+        from apps.rbac.profile_config import get_document_type
+        doc_config = get_document_type(obj.document_type)
+        if doc_config:
+            return doc_config.get('icon', '📄')
+        return '📄'
+    
+    def get_document_type_color(self, obj):
+        """Return document type color scheme."""
+        from apps.rbac.profile_config import get_document_type
+        doc_config = get_document_type(obj.document_type)
+        if doc_config:
+            return {
+                'badge_color': doc_config.get('badge_color', 'bg-gray-500'),
+                'bg_color': doc_config.get('bg_color', 'bg-gray-50'),
+                'text_color': doc_config.get('text_color', 'text-gray-700'),
+                'border_color': doc_config.get('border_color', 'border-gray-300'),
+            }
+        return {
+            'badge_color': 'bg-gray-500',
+            'bg_color': 'bg-gray-50',
+            'text_color': 'text-gray-700',
+            'border_color': 'border-gray-300',
+        }
+    
+    def get_document_file_url(self, obj):
+        """Return presigned S3 URL or absolute URL for document file."""
+        if not obj.document_file:
+            return None
+        try:
+            url = obj.document_file.url
+            # S3 presigned URLs are already absolute
+            if url.startswith('http'):
+                return url
+            # Local dev: build absolute URL
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(url)
+            return url
+        except Exception:
+            return None
+    
+    def get_document_file_name(self, obj):
+        """Return original filename from S3 path."""
+        if not obj.document_file:
+            return None
+        try:
+            import os
+            return os.path.basename(obj.document_file.name)
+        except Exception:
+            return None
+    
+    def get_user_email(self, obj):
+        """Return user email for admin view."""
+        return obj.user_profile.user.email if obj.user_profile else None
+    
+    def get_user_name(self, obj):
+        """Return user full name for admin view."""
+        if not obj.user_profile:
+            return None
+        user = obj.user_profile.user
+        full_name = f"{user.first_name} {user.last_name}".strip()
+        return full_name or user.email
+    
+    def validate_document_file(self, value):
+        """Validate document file size and format."""
+        import os
+        from apps.rbac.profile_config import get_document_type
+        
+        # Get document type from initial data
+        doc_type = self.initial_data.get('document_type')
+        if not doc_type:
+            # If updating existing document, use current type
+            if self.instance:
+                doc_type = self.instance.document_type
+            else:
+                raise serializers.ValidationError("Document type is required")
+        
+        doc_config = get_document_type(doc_type)
+        if not doc_config:
+            raise serializers.ValidationError(f"Invalid document type: {doc_type}")
+        
+        # Check file size
+        max_size_mb = doc_config.get('max_file_size_mb', 5)
+        max_size_bytes = max_size_mb * 1024 * 1024
+        if value.size > max_size_bytes:
+            raise serializers.ValidationError(
+                f"File size must be less than {max_size_mb}MB. Current size: {value.size / (1024 * 1024):.2f}MB"
+            )
+        
+        # Check file format
+        allowed_formats = doc_config.get('allowed_formats', ['pdf', 'jpg', 'jpeg', 'png'])
+        file_ext = os.path.splitext(value.name)[1][1:].lower()  # Remove leading dot
+        if file_ext not in allowed_formats:
+            raise serializers.ValidationError(
+                f"Invalid file format. Allowed: {', '.join(allowed_formats).upper()}. Got: {file_ext.upper()}"
+            )
+        
+        return value
+    
+    def validate_expiry_date(self, value):
+        """Validate expiry date is not in the past."""
+        if value:
+            from django.utils import timezone
+            if value < timezone.now().date():
+                # Allow past dates but auto-mark as expired
+                pass
+        return value
+

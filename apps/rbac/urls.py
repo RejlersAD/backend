@@ -12,6 +12,8 @@ from .views import (
     SecurityAlertViewSet, PredictiveInsightViewSet, FeatureUsageAnalyticsViewSet,
     ErrorLogAnalyticsViewSet, SystemHealthCheckViewSet,
     UserExportView,
+    # Enhanced Profile ViewSets
+    AchievementViewSet, WorkExperienceViewSet, SocialMediaLinkViewSet, ProfileDocumentViewSet,
 )
 from .dashboard_views import (
     user_dashboard_stats, user_files_list, user_activity_timeline
@@ -47,6 +49,12 @@ router.register(r'ai-champion', AIChampionViewSet, basename='ai-champion')
 
 # Activity Reports — admin-only engagement analytics (weekly, monthly, by-user, by-feature)
 router.register(r'activity-reports', ActivityReportViewSet, basename='activity-reports')
+
+# Enhanced User Profile — Achievements, Experience, Social Media Links, Documents
+router.register(r'achievements', AchievementViewSet, basename='achievement')
+router.register(r'work-experience', WorkExperienceViewSet, basename='work-experience')
+router.register(r'social-links', SocialMediaLinkViewSet, basename='social-link')
+router.register(r'profile-documents', ProfileDocumentViewSet, basename='profile-document')
 
 urlpatterns = [
     # User Export — must come BEFORE router.urls to prevent users/{pk}/ swallowing 'export' as a pk

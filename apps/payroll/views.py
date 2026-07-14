@@ -483,9 +483,16 @@ class LeaveTypeViewSet(viewsets.ReadOnlyModelViewSet):
 
 class LeaveRequestViewSet(viewsets.ModelViewSet):
     """
-    Full CRUD for leave requests.
-    POST to create (any auth user / HR on behalf of employee).
-    Custom actions: /approve/, /reject/, /cancel/
+    Full CRUD for leave requests with two-stage approval workflow:
+    
+    Stage 1: Direct Reporting Manager (PENDING → RM_APPROVED/RM_REJECTED)
+    Stage 2: HR Manager (RM_APPROVED → APPROVED/REJECTED)
+    
+    IMPORTANT SECURITY: Only DIRECT reporting managers see Stage-1 requests.
+    Managers higher in the chain (e.g., manager's manager) do NOT see requests
+    unless they are HR Managers. This ensures strict two-way approval:
+    
+      Employee → Direct Manager → HR Manager (FINAL)
     
     🔐 SECURITY: Accessible to ALL users via 'hr_self_service' module
     """
@@ -509,21 +516,22 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         )
         user = self.request.user
 
-        if not user.is_staff:
-            if _is_hr_manager(user):
-                # HR Managers see all requests (no filter needed)
-                pass
-            else:
-                # Regular employees: own requests only.
-                # Also include requests where this user is the Reporting Manager
-                # (so they can action Stage-1 approvals for their team).
-                emp_code  = self._user_employee_code(user)
-                own_q     = Q(employee=user)
-                if emp_code:
-                    own_q |= Q(employee_code=emp_code)
-                # Include requests where the employee's RBAC profile manager = this user
-                managed_q = Q(employee__rbac_profile__manager__user=user)
-                qs = qs.filter(own_q | managed_q)
+        # HR Managers see all requests (for final approval stage)
+        if _is_hr_manager(user):
+            # No filtering - HR sees all requests
+            pass
+        else:
+            # All other users (including staff): own requests + direct reports ONLY
+            # This ensures two-way approval: Employee → Direct Manager → HR Manager
+            # Managers higher in the chain do NOT see indirect reports
+            emp_code  = self._user_employee_code(user)
+            own_q     = Q(employee=user)
+            if emp_code:
+                own_q |= Q(employee_code=emp_code)
+            # Include requests where the employee's DIRECT RBAC manager = this user
+            # NOTE: This does NOT include indirect reports (manager's manager)
+            managed_q = Q(employee__rbac_profile__manager__user=user)
+            qs = qs.filter(own_q | managed_q)
 
         params = self.request.query_params
         st      = params.get('status')
@@ -742,27 +750,50 @@ def leave_calendar(request):
 # Helper: is_hr_manager
 # =============================================================================
 def _is_hr_manager(user) -> bool:
-    """Return True if the user holds an HR Manager (or admin) role.
+    """Return True ONLY if the user holds a specific HR Manager role.
 
-    Soft-coded role codes live in apps.rbac -- we look for any role whose code
-    starts with 'hr' or equals 'admin'/'superadmin'.  This keeps the check
-    forward-compatible: adding a new HR sub-role in the RBAC admin will
-    automatically grant access here without code changes.
-
-    Falls back to user.is_staff / user.is_superuser so Django admin accounts
-    always retain access even if RBAC is not fully configured.
+    SECURITY: This function enforces strict HR approval access.
+    
+    ✓ HR Managers (hr_admin, hr_manager) → Full leave approval access
+    ✗ Super Administrators → NO automatic HR access (must have HR role)
+    ✗ Regular Administrators → NO automatic HR access (must have HR role)
+    ✗ Department Managers → NO automatic HR access (see only direct reports)
+    
+    This ensures only designated HR personnel can see all leave requests.
+    All other users (including admins) see only their direct reports.
+    
+    Role codes are SOFT-CODED in apps.rbac.rbac_config.HR_MANAGER_ROLE_CODES
+    To add a new HR role, add the role code to that list — no code changes needed here.
     """
-    if user.is_superuser or user.is_staff:
-        return True
     try:
-        from apps.rbac.models import UserProfile
+        from apps.rbac.rbac_config import HR_MANAGER_ROLE_CODES
+        from apps.rbac.models import UserProfile, UserRole
+        
+        # Get user's RBAC profile
         profile = UserProfile.objects.filter(user=user, is_deleted=False).first()
-        if profile and profile.role:
-            code = (profile.role.code or '').lower()
-            return code.startswith('hr') or code in ('admin', 'superadmin', 'manager')
-    except Exception:
-        pass
-    return False
+        if not profile:
+            logger.debug(f"No RBAC profile found for user {user.email}")
+            return False
+        
+        # Get all active roles for this user
+        user_roles = UserRole.objects.filter(
+            user_profile=profile,
+            role__is_active=True
+        ).select_related('role')
+        
+        # Check if any of the user's roles match HR_MANAGER_ROLE_CODES
+        for ur in user_roles:
+            role_code = (ur.role.code or '').lower()
+            if role_code in [code.lower() for code in HR_MANAGER_ROLE_CODES]:
+                logger.debug(f"User {user.email} has HR Manager role: {role_code}")
+                return True
+        
+        logger.debug(f"User {user.email} has no HR Manager role. Roles: {[ur.role.code for ur in user_roles]}")
+        return False
+                
+    except Exception as e:
+        logger.warning(f"Error checking HR manager role for {user.email}: {e}")
+        return False
 
 
 # =============================================================================

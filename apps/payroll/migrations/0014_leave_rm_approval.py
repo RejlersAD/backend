@@ -2,8 +2,12 @@
 Migration: Add Reporting Manager (Stage 1) approval fields to LeaveRequest.
 
 Two-stage leave approval workflow:
-  Stage 1 — Reporting Manager: PENDING → RM_APPROVED | RM_REJECTED
-  Stage 2 — HR Manager:        RM_APPROVED → APPROVED | REJECTED
+  Stage 1 — Direct Reporting Manager: PENDING → RM_APPROVED | RM_REJECTED
+  Stage 2 — HR Manager (final):       RM_APPROVED → APPROVED | REJECTED
+
+IMPORTANT: Only DIRECT reporting managers can approve Stage 1.
+Managers higher in the chain (manager's manager) do NOT see the requests.
+This ensures a two-way approval path: Employee → Direct Manager → HR Manager.
 """
 
 from django.conf import settings

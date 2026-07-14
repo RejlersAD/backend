@@ -290,7 +290,7 @@ class Document(models.Model):
     
     submitted = models.BooleanField(default=False)
     verified = models.BooleanField(default=False)
-    verified_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='verified_documents')
+    verified_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='onboarding_documents_verified')
     verified_date = models.DateTimeField(null=True, blank=True)
     
     notes = models.TextField(blank=True, null=True)

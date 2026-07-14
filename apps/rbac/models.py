@@ -726,6 +726,276 @@ class AccessRequest(TimeStampedModel):
     def __str__(self):
         return f"{self.user_profile.user.email} → {self.module.name} ({self.status})"
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Enhanced Profile Models — Achievements, Experience, Social Media
+# ═════════════════════════════════════════════════════════════════════════════
+
+class Achievement(TimeStampedModel):
+    """
+    User achievements and milestones — sports, academic, professional, genius records.
+    Soft-coded categories defined in rbac.profile_config.ACHIEVEMENT_CATEGORIES
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user_profile = models.ForeignKey(
+        UserProfile,
+        on_delete=models.CASCADE,
+        related_name='achievements'
+    )
+    
+    # Achievement details
+    title = models.CharField(max_length=200, help_text="Achievement title or award name")
+    category = models.CharField(
+        max_length=50,
+        help_text="Category code from profile_config.ACHIEVEMENT_CATEGORIES (sports, academic, professional, etc.)"
+    )
+    description = models.TextField(blank=True, help_text="Detailed description of the achievement")
+    
+    # Achievement level (bronze, silver, gold, platinum, legendary)
+    level = models.CharField(max_length=20, blank=True, help_text="Achievement level/tier")
+    
+    # Date & location
+    achieved_date = models.DateField(null=True, blank=True, help_text="Date when achievement was earned")
+    location = models.CharField(max_length=200, blank=True, help_text="Location or event where achieved")
+    organization = models.CharField(max_length=200, blank=True, help_text="Issuing organization or institution")
+    
+    # Supporting data
+    certificate_url = models.URLField(blank=True, max_length=500, help_text="Link to certificate or evidence")
+    media_url = models.URLField(blank=True, max_length=500, help_text="Link to photo/video evidence")
+    
+    # Visibility
+    is_public = models.BooleanField(default=True, help_text="Show on public profile")
+    is_verified = models.BooleanField(default=False, help_text="Verified by admin/system")
+    
+    # Display order
+    display_order = models.IntegerField(default=0, help_text="Order for displaying achievements")
+    
+    class Meta:
+        db_table = 'rbac_user_achievements'
+        ordering = ['-achieved_date', '-created_at']
+        verbose_name = 'User Achievement'
+        verbose_name_plural = 'User Achievements'
+        indexes = [
+            models.Index(fields=['user_profile', 'category']),
+            models.Index(fields=['user_profile', 'is_public']),
+            models.Index(fields=['category', '-achieved_date']),
+        ]
+    
+    def __str__(self):
+        return f"{self.user_profile.user.email} - {self.title} ({self.category})"
+
+
+class WorkExperience(TimeStampedModel):
+    """
+    Professional work experience entries for user timeline.
+    Shows career progression and previous roles.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user_profile = models.ForeignKey(
+        UserProfile,
+        on_delete=models.CASCADE,
+        related_name='work_experience'
+    )
+    
+    # Company details
+    company_name = models.CharField(max_length=200, help_text="Company or organization name")
+    company_logo_url = models.URLField(blank=True, max_length=500, help_text="URL to company logo")
+    
+    # Role details
+    job_title = models.CharField(max_length=200, help_text="Job title or position held")
+    employment_type = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text="Employment type from profile_config.EMPLOYMENT_TYPES (full_time, contract, etc.)"
+    )
+    
+    # Industry & location
+    industry = models.CharField(max_length=200, blank=True, help_text="Industry sector")
+    location = models.CharField(max_length=200, blank=True, help_text="Work location (city, country)")
+    
+    # Duration
+    start_date = models.DateField(help_text="Employment start date")
+    end_date = models.DateField(null=True, blank=True, help_text="Employment end date (null = current)")
+    is_current = models.BooleanField(default=False, help_text="Currently working here")
+    
+    # Description
+    description = models.TextField(blank=True, help_text="Role description and responsibilities")
+    achievements_text = models.TextField(
+        blank=True,
+        help_text="Key achievements and accomplishments in this role"
+    )
+    
+    # Skills used (JSON array)
+    skills_used = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of technical skills/tools used in this role"
+    )
+    
+    # Visibility
+    is_public = models.BooleanField(default=True, help_text="Show on public profile")
+    
+    # Display order
+    display_order = models.IntegerField(default=0, help_text="Order for displaying experience")
+    
+    class Meta:
+        db_table = 'rbac_work_experience'
+        ordering = ['-is_current', '-start_date']
+        verbose_name = 'Work Experience'
+        verbose_name_plural = 'Work Experience Entries'
+        indexes = [
+            models.Index(fields=['user_profile', '-start_date']),
+            models.Index(fields=['user_profile', 'is_current']),
+            models.Index(fields=['industry']),
+        ]
+    
+    def __str__(self):
+        current = " (Current)" if self.is_current else ""
+        return f"{self.user_profile.user.email} - {self.job_title} at {self.company_name}{current}"
+    
+    @property
+    def duration_years(self):
+        """Calculate duration in years."""
+        from datetime import date
+        end = self.end_date if self.end_date else date.today()
+        delta = end - self.start_date
+        return round(delta.days / 365.25, 1)
+
+
+class SocialMediaLink(TimeStampedModel):
+    """
+    User social media and professional network links.
+    Platform codes defined in rbac.profile_config.SOCIAL_MEDIA_PLATFORMS
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user_profile = models.ForeignKey(
+        UserProfile,
+        on_delete=models.CASCADE,
+        related_name='social_links'
+    )
+    
+    # Platform & URL
+    platform = models.CharField(
+        max_length=50,
+        help_text="Platform code from profile_config.SOCIAL_MEDIA_PLATFORMS (linkedin, github, twitter, etc.)"
+    )
+    url = models.URLField(max_length=500, help_text="Full URL to the user's profile on this platform")
+    
+    # Display metadata
+    username = models.CharField(max_length=200, blank=True, help_text="Username or handle on the platform")
+    is_verified = models.BooleanField(default=False, help_text="Link has been verified")
+    
+    # Visibility
+    is_public = models.BooleanField(default=True, help_text="Show on public profile")
+    
+    # Display order
+    display_order = models.IntegerField(default=0, help_text="Order for displaying social links")
+    
+    class Meta:
+        db_table = 'rbac_social_media_links'
+        ordering = ['display_order', 'platform']
+        verbose_name = 'Social Media Link'
+        verbose_name_plural = 'Social Media Links'
+        unique_together = ['user_profile', 'platform']
+        indexes = [
+            models.Index(fields=['user_profile', 'is_public']),
+            models.Index(fields=['platform']),
+        ]
+    
+    def __str__(self):
+        return f"{self.user_profile.user.email} - {self.platform}"
+
+
+class ProfileDocument(TimeStampedModel):
+    """
+    User profile documents (Emirates ID, Driving License, Country ID, etc.)
+    Soft-coded document types defined in rbac.profile_config.DOCUMENT_TYPES
+    Files stored in AWS S3 bucket.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user_profile = models.ForeignKey(
+        UserProfile,
+        on_delete=models.CASCADE,
+        related_name='documents'
+    )
+    
+    # Document type & file
+    document_type = models.CharField(
+        max_length=50,
+        help_text="Document type code from profile_config.DOCUMENT_TYPES (emirates_id, driving_license, country_id, passport, visa)"
+    )
+    document_file = models.FileField(
+        upload_to='profile_documents/',
+        max_length=500,
+        help_text="Uploaded document file (stored in S3)"
+    )
+    
+    # Document metadata
+    document_number = models.CharField(max_length=100, blank=True, help_text="ID/License/Passport number")
+    issue_date = models.DateField(null=True, blank=True, help_text="Date of issue")
+    expiry_date = models.DateField(null=True, blank=True, help_text="Expiry date")
+    issuing_authority = models.CharField(max_length=200, blank=True, help_text="Issuing authority/country")
+    
+    # Verification
+    verification_status = models.CharField(
+        max_length=20,
+        choices=[
+            ('pending', 'Pending Review'),
+            ('verified', 'Verified'),
+            ('rejected', 'Rejected'),
+            ('expired', 'Expired'),
+        ],
+        default='pending',
+        help_text="Document verification status"
+    )
+    verified_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='profile_documents_verified',
+        help_text="Admin who verified this document"
+    )
+    verified_at = models.DateTimeField(null=True, blank=True, help_text="Verification timestamp")
+    rejection_reason = models.TextField(blank=True, help_text="Reason if rejected")
+    
+    # Notes
+    notes = models.TextField(blank=True, help_text="Additional notes or comments")
+    
+    # Visibility
+    is_active = models.BooleanField(default=True, help_text="Document is active (not replaced)")
+    
+    class Meta:
+        db_table = 'rbac_profile_documents'
+        ordering = ['-created_at']
+        verbose_name = 'Profile Document'
+        verbose_name_plural = 'Profile Documents'
+        indexes = [
+            models.Index(fields=['user_profile', 'document_type', 'is_active']),
+            models.Index(fields=['verification_status']),
+            models.Index(fields=['expiry_date']),
+        ]
+    
+    def __str__(self):
+        return f"{self.user_profile.user.email} - {self.document_type}"
+    
+    @property
+    def is_expired(self):
+        """Check if document has expired."""
+        if not self.expiry_date:
+            return False
+        from django.utils import timezone
+        return self.expiry_date < timezone.now().date()
+    
+    @property
+    def expires_soon(self, days=30):
+        """Check if document expires within specified days."""
+        if not self.expiry_date:
+            return False
+        from django.utils import timezone
+        from datetime import timedelta
+        threshold = timezone.now().date() + timedelta(days=days)
+        return self.expiry_date <= threshold and not self.is_expired
+
 
 # Re-export models from sibling modules so Django auto-discovery picks them up
 # (analytics_models is already discovered via admin.py import on startup, but explicit is safer)
