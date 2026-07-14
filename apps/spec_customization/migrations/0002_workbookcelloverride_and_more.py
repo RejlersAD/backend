@@ -27,36 +27,12 @@ class Migration(migrations.Migration):
                 ('updated_at', models.DateTimeField(auto_now=True)),
             ],
         ),
-        migrations.RenameIndex(
-            model_name='paperspecdocument',
-            new_name='spec_custom_sha256__ce399b_idx',
-            old_name='spec_cust_pa_sha256__idx',
-        ),
-        migrations.RenameIndex(
-            model_name='paperspecdocument',
-            new_name='spec_custom_created_e3e559_idx',
-            old_name='spec_cust_pa_created_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='paperspecextractionjob',
-            new_name='spec_custom_status_cc7b14_idx',
-            old_name='spec_cust_jo_status_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='paperspecextractionjob',
-            new_name='spec_custom_celery__66a838_idx',
-            old_name='spec_cust_jo_celery_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='pipingclass',
-            new_name='spec_custom_job_id_752a66_idx',
-            old_name='spec_cust_pc_job_code_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='pipingclasscomponent',
-            new_name='spec_custom_piping__35b7ee_idx',
-            old_name='spec_cust_pcc_pc_type_idx',
-        ),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'spec_cust_pa_sha256__idx') THEN ALTER INDEX spec_cust_pa_sha256__idx RENAME TO spec_custom_sha256__ce399b_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'spec_cust_pa_created_idx') THEN ALTER INDEX spec_cust_pa_created_idx RENAME TO spec_custom_created_e3e559_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'spec_cust_jo_status_idx') THEN ALTER INDEX spec_cust_jo_status_idx RENAME TO spec_custom_status_cc7b14_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'spec_cust_jo_celery_idx') THEN ALTER INDEX spec_cust_jo_celery_idx RENAME TO spec_custom_celery__66a838_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'spec_cust_pc_job_code_idx') THEN ALTER INDEX spec_cust_pc_job_code_idx RENAME TO spec_custom_job_id_752a66_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'spec_cust_pcc_pc_type_idx') THEN ALTER INDEX spec_cust_pcc_pc_type_idx RENAME TO spec_custom_piping__35b7ee_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
         migrations.AddField(
             model_name='workbookcelloverride',
             name='edited_by',

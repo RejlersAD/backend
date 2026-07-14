@@ -34,16 +34,8 @@ class Migration(migrations.Migration):
             model_name='pidequipmentitem',
             name='pid_equip_item_upload_tag_uniq',
         ),
-        migrations.RenameIndex(
-            model_name='pidequipmentitem',
-            new_name='pid_equipme_drawing_897b8a_idx',
-            old_name='pid_equip_item_drw_tag_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='pidequipmentitem',
-            new_name='pid_equipme_upload__6df543_idx',
-            old_name='pid_equip_item_upload_idx',
-        ),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'pid_equip_item_drw_tag_idx') THEN ALTER INDEX pid_equip_item_drw_tag_idx RENAME TO pid_equipme_drawing_897b8a_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
+        migrations.RunSQL(sql="""DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'pid_equip_item_upload_idx') THEN ALTER INDEX pid_equip_item_upload_idx RENAME TO pid_equipme_upload__6df543_idx; END IF; END $$;""", reverse_sql=migrations.RunSQL.noop),
         migrations.AddField(
             model_name='piddrawing',
             name='area',
