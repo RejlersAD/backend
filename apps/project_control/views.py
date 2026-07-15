@@ -7,6 +7,7 @@ URL roots (wired in apps.project_control.urls):
     /api/v1/project-control/documents/
     /api/v1/project-control/cost-snapshots/
     /api/v1/project-control/change-events/
+    /api/v1/project-control/planning-packages/
     /api/v1/project-control/analytics/...
     /api/v1/project-control/phase-flags/
 """
@@ -28,11 +29,12 @@ from .config import (
 )
 from .models import (
     ChangeEvent, CostSnapshot, Estimate, EstimateLineItem,
-    ProjectDocument, WBSNode,
+    PlanningPackage, ProjectDocument, WBSNode,
 )
 from .serializers import (
     ChangeEventSerializer, CostSnapshotSerializer,
     EstimateLineItemSerializer, EstimateListSerializer, EstimateSerializer,
+    PlanningPackageListSerializer, PlanningPackageSerializer,
     ProjectDocumentSerializer, WBSNodeSerializer,
 )
 from .services.excel_import import import_boq_excel
@@ -226,6 +228,98 @@ class ChangeEventViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = ChangeEventSerializer
     queryset = ChangeEvent.objects.all()
+
+
+class PlanningPackageViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+    """
+    SOFT-CODED: Planning Package ViewSet
+    
+    Endpoints:
+        GET    /api/v1/project-control/planning-packages/        - List packages
+        POST   /api/v1/project-control/planning-packages/        - Create package
+        GET    /api/v1/project-control/planning-packages/{id}/   - Get detail
+        PUT    /api/v1/project-control/planning-packages/{id}/   - Update
+        PATCH  /api/v1/project-control/planning-packages/{id}/   - Partial update
+        DELETE /api/v1/project-control/planning-packages/{id}/   - Soft delete
+        
+    Query params:
+        ?project={id}   - Filter by project
+        ?status={value} - Filter by status
+        ?priority={value} - Filter by priority
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = PlanningPackage.objects.all().select_related(
+        'project', 'package_manager', 'wbs_node'
+    )
+    
+    def get_serializer_class(self):
+        """Use lightweight serializer for list view"""
+        if self.action == 'list':
+            return PlanningPackageListSerializer
+        return PlanningPackageSerializer
+    
+    def get_queryset(self):
+        """Override to add status/priority filtering"""
+        qs = super().get_queryset()
+        
+        # Filter by status
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        
+        # Filter by priority
+        priority_filter = self.request.query_params.get('priority')
+        if priority_filter:
+            qs = qs.filter(priority=priority_filter)
+        
+        return qs
+    
+    @action(detail=False, methods=['get'], url_path='statistics')
+    def statistics(self, request):
+        """
+        Get statistics for planning packages
+        Query params: ?project={id}
+        """
+        project_id = request.query_params.get('project')
+        if not project_id:
+            return Response(
+                {'error': 'project parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        packages = PlanningPackage.objects.filter(
+            project_id=project_id,
+            is_deleted=False
+        )
+        
+        from django.db.models import Sum, Count, Avg
+        
+        stats = {
+            'total_packages': packages.count(),
+            'by_status': {
+                'draft': packages.filter(status='draft').count(),
+                'active': packages.filter(status='active').count(),
+                'completed': packages.filter(status='completed').count(),
+                'on_hold': packages.filter(status='on_hold').count(),
+                'cancelled': packages.filter(status='cancelled').count(),
+            },
+            'by_priority': {
+                'low': packages.filter(priority='low').count(),
+                'medium': packages.filter(priority='medium').count(),
+                'high': packages.filter(priority='high').count(),
+                'critical': packages.filter(priority='critical').count(),
+            },
+            'financial': {
+                'total_budget': packages.aggregate(Sum('budget'))['budget__sum'] or 0,
+                'total_actual_cost': packages.aggregate(Sum('actual_cost'))['actual_cost__sum'] or 0,
+            },
+            'progress': {
+                'average_progress': packages.aggregate(Avg('progress_percentage'))['progress_percentage__avg'] or 0,
+                'completed_count': packages.filter(progress_percentage=100).count(),
+            }
+        }
+        
+        return Response(stats)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

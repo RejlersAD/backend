@@ -253,3 +253,173 @@ class ChangeEvent(BaseModel):
 
     def __str__(self):
         return f'{self.project.code} · {self.summary[:60]}'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Planning Package — Phase-agnostic feature for work package planning
+# ─────────────────────────────────────────────────────────────────────────────
+PLANNING_PACKAGE_STATUS_CHOICES = [
+    ('draft', 'Draft'),
+    ('active', 'Active'),
+    ('completed', 'Completed'),
+    ('on_hold', 'On Hold'),
+    ('cancelled', 'Cancelled'),
+]
+
+PLANNING_PACKAGE_PRIORITY_CHOICES = [
+    ('low', 'Low'),
+    ('medium', 'Medium'),
+    ('high', 'High'),
+    ('critical', 'Critical'),
+]
+
+
+class PlanningPackage(BaseModel):
+    """
+    Planning Package — work package for project planning and tracking.
+    Enables project managers to break down projects into manageable packages
+    with budgets, timelines, and deliverables.
+    
+    SOFT-CODED: All choice fields use configurable enums above
+    """
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name='planning_packages',
+        help_text='Parent project this package belongs to'
+    )
+    package_code = models.CharField(
+        max_length=64,
+        help_text='Unique package identifier (e.g., PP-001, PKG-FEED-01)'
+    )
+    name = models.CharField(
+        max_length=255,
+        help_text='Package name/title'
+    )
+    description = models.TextField(
+        blank=True,
+        help_text='Detailed description of package scope'
+    )
+    
+    # Status & Priority (SOFT-CODED via enums)
+    status = models.CharField(
+        max_length=20,
+        choices=PLANNING_PACKAGE_STATUS_CHOICES,
+        default='draft'
+    )
+    priority = models.CharField(
+        max_length=20,
+        choices=PLANNING_PACKAGE_PRIORITY_CHOICES,
+        default='medium'
+    )
+    
+    # Financial tracking
+    budget = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text='Allocated budget for this package'
+    )
+    currency = models.CharField(max_length=8, default='AED')
+    actual_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=0,
+        help_text='Actual cost spent to date'
+    )
+    
+    # Schedule tracking
+    planned_start = models.DateField(
+        null=True,
+        blank=True,
+        help_text='Planned start date'
+    )
+    planned_end = models.DateField(
+        null=True,
+        blank=True,
+        help_text='Planned completion date'
+    )
+    actual_start = models.DateField(
+        null=True,
+        blank=True,
+        help_text='Actual start date'
+    )
+    actual_end = models.DateField(
+        null=True,
+        blank=True,
+        help_text='Actual completion date'
+    )
+    
+    # Progress tracking
+    progress_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=0,
+        help_text='Completion percentage (0-100)'
+    )
+    
+    # Ownership & team
+    package_manager = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='managed_planning_packages',
+        help_text='User responsible for this package'
+    )
+    
+    # Relationships
+    wbs_node = models.ForeignKey(
+        WBSNode,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='planning_packages',
+        help_text='Optional link to WBS structure'
+    )
+    
+    # Deliverables & notes
+    deliverables = models.TextField(
+        blank=True,
+        help_text='Key deliverables (one per line or JSON)'
+    )
+    notes = models.TextField(
+        blank=True,
+        help_text='Additional notes, risks, assumptions'
+    )
+    
+    class Meta:
+        ordering = ['project', 'package_code']
+        unique_together = [('project', 'package_code')]
+        indexes = [
+            models.Index(fields=['project', 'status']),
+            models.Index(fields=['project', 'priority']),
+            models.Index(fields=['project', '-created_at']),
+            models.Index(fields=['package_manager']),
+        ]
+
+    def __str__(self):
+        return f'{self.project.code} · {self.package_code} {self.name}'
+    
+    @property
+    def budget_variance(self):
+        """Calculate budget variance (negative = over budget)"""
+        if self.budget:
+            return self.budget - self.actual_cost
+        return None
+    
+    @property
+    def is_over_budget(self):
+        """Check if package is over budget"""
+        variance = self.budget_variance
+        return variance is not None and variance < 0
+    
+    @property
+    def days_remaining(self):
+        """Calculate days until planned end date"""
+        if self.planned_end:
+            from datetime import date
+            delta = self.planned_end - date.today()
+            return delta.days
+        return None

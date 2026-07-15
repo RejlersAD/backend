@@ -384,6 +384,75 @@ class FeatureRegistry:
             is_new=True,
             version="1.0.0"
         ))
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # PROJECT CONTROL FEATURES (Category: project_control)
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Project Control 6.1 - Project Management
+        self.register(FeatureConfig(
+            id="project_management",
+            name="Project Management",
+            description="Create and manage engineering projects with cost tracking, timelines, and milestones",
+            icon="📊",
+            category=FeatureCategory.PROJECT_CONTROL,
+            status=FeatureStatus.ACTIVE,
+            frontend_route="/projects",
+            backend_url_pattern="api/v1/projects/",
+            color_scheme={
+                "primary": "indigo",
+                "secondary": "blue",
+                "gradient": "from-indigo-500 to-blue-600"
+            },
+            capabilities=[
+                "Project creation & management",
+                "Cost dashboard & KPIs",
+                "Budget tracking",
+                "Timeline & milestones",
+                "Estimate variance analysis",
+                "Document management",
+                "WBS structure"
+            ],
+            keywords=["project", "management", "cost", "budget", "estimate", "milestone", "timeline"],
+            app_name="project_control",
+            has_dashboard=True,
+            has_export=True,
+            order=5,
+            is_new=False,
+            version="1.0.0"
+        ))
+        
+        # Project Control 6.2 - Planning Package
+        self.register(FeatureConfig(
+            id="planning_package",
+            name="Planning Package",
+            description="Work package planning and tracking with budgets, timelines, and deliverables",
+            icon="📦",
+            category=FeatureCategory.PROJECT_CONTROL,
+            status=FeatureStatus.ACTIVE,
+            frontend_route="/planning-packages",
+            backend_url_pattern="api/v1/project-control/planning-packages/",
+            color_scheme={
+                "primary": "indigo",
+                "secondary": "violet",
+                "gradient": "from-indigo-500 to-violet-600"
+            },
+            capabilities=[
+                "Package creation & management",
+                "Budget allocation & tracking",
+                "Schedule planning",
+                "Progress monitoring",
+                "WBS integration",
+                "Deliverable tracking"
+            ],
+            keywords=["planning", "package", "work package", "project", "control", "budget", "schedule"],
+            app_name="project_control",
+            has_dashboard=True,
+            has_export=True,
+            order=6,
+            is_new=True,
+            version="1.0.0"
+        ))
     
     def register(self, feature: FeatureConfig):
         """Register a new feature"""

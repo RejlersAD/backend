@@ -7,6 +7,7 @@ from .views import (
     CostSnapshotViewSet,
     EstimateLineItemViewSet,
     EstimateViewSet,
+    PlanningPackageViewSet,
     ProjectAnalyticsViewSet,
     ProjectDocumentViewSet,
     WBSNodeViewSet,
@@ -20,6 +21,7 @@ router.register(r'wbs-nodes', WBSNodeViewSet, basename='project-control-wbs')
 router.register(r'documents', ProjectDocumentViewSet, basename='project-control-document')
 router.register(r'cost-snapshots', CostSnapshotViewSet, basename='project-control-snapshot')
 router.register(r'change-events', ChangeEventViewSet, basename='project-control-change')
+router.register(r'planning-packages', PlanningPackageViewSet, basename='project-control-planning-package')
 router.register(r'analytics', ProjectAnalyticsViewSet, basename='project-control-analytics')
 
 urlpatterns = [

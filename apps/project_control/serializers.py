@@ -5,6 +5,7 @@ from .models import (
     CostSnapshot,
     Estimate,
     EstimateLineItem,
+    PlanningPackage,
     ProjectDocument,
     WBSNode,
 )
@@ -132,3 +133,58 @@ class ChangeEventSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = ('created_at', 'updated_at', 'detected_at', 'ai_confidence')
+
+
+class PlanningPackageSerializer(serializers.ModelSerializer):
+    """
+    SOFT-CODED: Planning Package serializer with computed fields
+    All display fields come from model choice enums
+    """
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    priority_display = serializers.CharField(source='get_priority_display', read_only=True)
+    package_manager_name = serializers.SerializerMethodField()
+    wbs_node_display = serializers.SerializerMethodField()
+    budget_variance = serializers.DecimalField(
+        max_digits=14, decimal_places=2, read_only=True
+    )
+    is_over_budget = serializers.BooleanField(read_only=True)
+    days_remaining = serializers.IntegerField(read_only=True)
+    
+    class Meta:
+        model = PlanningPackage
+        fields = [
+            'id', 'project', 'package_code', 'name', 'description',
+            'status', 'status_display', 'priority', 'priority_display',
+            'budget', 'currency', 'actual_cost', 'budget_variance', 'is_over_budget',
+            'planned_start', 'planned_end', 'actual_start', 'actual_end', 'days_remaining',
+            'progress_percentage', 'package_manager', 'package_manager_name',
+            'wbs_node', 'wbs_node_display', 'deliverables', 'notes',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ('created_at', 'updated_at', 'budget_variance', 'is_over_budget', 'days_remaining')
+    
+    def get_package_manager_name(self, obj):
+        if obj.package_manager:
+            return f"{obj.package_manager.first_name} {obj.package_manager.last_name}".strip() or obj.package_manager.email
+        return None
+    
+    def get_wbs_node_display(self, obj):
+        if obj.wbs_node:
+            return f"{obj.wbs_node.code} - {obj.wbs_node.name}"
+        return None
+
+
+class PlanningPackageListSerializer(serializers.ModelSerializer):
+    """Lightweight list serializer for Planning Packages"""
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    priority_display = serializers.CharField(source='get_priority_display', read_only=True)
+    progress_percentage = serializers.DecimalField(max_digits=5, decimal_places=2)
+    
+    class Meta:
+        model = PlanningPackage
+        fields = [
+            'id', 'package_code', 'name', 'status', 'status_display',
+            'priority', 'priority_display', 'budget', 'actual_cost',
+            'planned_start', 'planned_end', 'progress_percentage',
+            'created_at', 'updated_at',
+        ]
