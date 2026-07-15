@@ -42,4 +42,7 @@ urlpatterns = [
 
     # Config
     path('config/', views.config_view, name='config'),
+    
+    # Diagnostics (soft-coded configuration inspection)
+    path('diagnostics/config/', views.extraction_config_diagnostics, name='diagnostics-config'),
 ]

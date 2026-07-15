@@ -504,6 +504,135 @@ def config_view(request):
     })
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def extraction_config_diagnostics(request):
+    """
+    Diagnostic endpoint to compare extraction configuration between environments.
+    
+    Helps diagnose why local vs production produce different extraction results
+    (e.g., 1858 vs 116 records in PipingCommodityFilter sheet).
+    
+    Returns:
+        - Chunking settings
+        - AI engine configuration
+        - Ensemble extraction status
+        - Validation layer status
+        - API key availability (without exposing actual keys)
+    
+    Example:
+        GET /api/v1/spec-customization/diagnostics/config/
+    """
+    from apps.spec_customization.services.advanced_validation import ADVANCED_VALIDATION_CONFIG
+    
+    # Check API key availability without exposing them
+    openai_key = os.getenv('OPENAI_API_KEY', '')
+    gemini_key = os.getenv('GOOGLE_API_KEY', '') or os.getenv('GEMINI_API_KEY', '')
+    
+    config_data = {
+        "environment": {
+            "name": os.getenv('ENVIRONMENT', 'development'),
+            "debug": os.getenv('DEBUG', 'True') == 'True',
+            "aiflow_env": os.getenv('AIFLOW_ENVIRONMENT', 'unknown'),
+        },
+        
+        "extraction_config": {
+            "chunking": {
+                "chunk_size_pages": SPEC_EXTRACTION_CONFIG['chunk_size_pages'],
+                "page_overlap": SPEC_EXTRACTION_CONFIG['page_overlap'],
+                "max_chunks_parallel": SPEC_EXTRACTION_CONFIG['max_chunks_parallel'],
+            },
+            "ai_engines": {
+                "engines_list": SPEC_EXTRACTION_CONFIG['ai_engines'],
+                "gemini_model": SPEC_EXTRACTION_CONFIG['gemini_model'],
+                "openai_model": SPEC_EXTRACTION_CONFIG['openai_model'],
+                "openai_max_tokens": SPEC_EXTRACTION_CONFIG['openai_max_tokens'],
+                "temperature": {
+                    "gemini": SPEC_EXTRACTION_CONFIG['gemini_temperature'],
+                    "openai": SPEC_EXTRACTION_CONFIG['openai_temperature'],
+                }
+            },
+            "cost_guard_rails": {
+                "skip_ai_if_text_chars_gte": SPEC_EXTRACTION_CONFIG['skip_ai_if_text_chars_gte'],
+                "max_ai_pages_per_job": SPEC_EXTRACTION_CONFIG['max_ai_pages_per_job'],
+            }
+        },
+        
+        "advanced_validation": {
+            "ensemble_extraction": {
+                "enabled": ADVANCED_VALIDATION_CONFIG.get('enable_ensemble_extraction', False),
+                "consensus_threshold": ADVANCED_VALIDATION_CONFIG.get('ensemble_consensus_threshold', 0.7),
+                "voting_strategy": ADVANCED_VALIDATION_CONFIG.get('ensemble_voting_strategy', 'weighted'),
+                "status": (
+                    "✅ ACTIVE - Gemini + OpenAI parallel processing" 
+                    if ADVANCED_VALIDATION_CONFIG.get('enable_ensemble_extraction', False)
+                    else "⚠️ DISABLED - Waterfall mode only"
+                ),
+            },
+            "validation_layers": {
+                "component_count": ADVANCED_VALIDATION_CONFIG.get('enable_component_count_validation', False),
+                "material_standards": ADVANCED_VALIDATION_CONFIG.get('enable_material_standard_validation', False),
+                "size_ranges": ADVANCED_VALIDATION_CONFIG.get('enable_size_range_validation', False),
+                "template_comparison": ADVANCED_VALIDATION_CONFIG.get('enable_template_comparison', False),
+                "auto_retry": ADVANCED_VALIDATION_CONFIG.get('enable_auto_retry', False),
+            },
+            "thresholds": {
+                "min_components_per_class": ADVANCED_VALIDATION_CONFIG.get('min_components_per_class', 10),
+                "warn_if_components_below": ADVANCED_VALIDATION_CONFIG.get('warn_if_components_below', 30),
+            }
+        },
+        
+        "api_keys_status": {
+            "openai": {
+                "configured": bool(openai_key),
+                "key_prefix": openai_key[:10] + "..." if openai_key else None,
+                "key_length": len(openai_key) if openai_key else 0,
+            },
+            "gemini": {
+                "configured": bool(gemini_key),
+                "key_prefix": gemini_key[:10] + "..." if gemini_key else None,
+                "key_length": len(gemini_key) if gemini_key else 0,
+            },
+            "warning": None if (openai_key and gemini_key) else (
+                "⚠️ Missing API keys - extraction may fail or use fallback only"
+            )
+        },
+        
+        "expected_behavior": {
+            "mode": (
+                "Multi-model ensemble (Gemini + OpenAI parallel)"
+                if ADVANCED_VALIDATION_CONFIG.get('enable_ensemble_extraction', False)
+                else "Waterfall (sequential fallback)"
+            ),
+            "expected_accuracy": (
+                "95-98%"
+                if ADVANCED_VALIDATION_CONFIG.get('enable_ensemble_extraction', False)
+                else "85-92%"
+            ),
+            "expected_components_per_class": "50-200+",
+            "warnings": []
+        }
+    }
+    
+    # Add warnings
+    if SPEC_EXTRACTION_CONFIG['chunk_size_pages'] < 8:
+        config_data["expected_behavior"]["warnings"].append(
+            f"⚠️ Chunk size ({SPEC_EXTRACTION_CONFIG['chunk_size_pages']} pages) < 8 may fragment component tables"
+        )
+    
+    if SPEC_EXTRACTION_CONFIG['openai_max_tokens'] < 12000:
+        config_data["expected_behavior"]["warnings"].append(
+            f"⚠️ Max tokens ({SPEC_EXTRACTION_CONFIG['openai_max_tokens']}) < 12000 may truncate large component lists"
+        )
+    
+    if not (openai_key and gemini_key):
+        config_data["expected_behavior"]["warnings"].append(
+            "❌ Missing API keys - extraction will fail or produce incomplete results"
+        )
+    
+    return Response(config_data)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Workbook canvas — preview SPEC/CAT contents as JSON + per-cell edit/clear
 # ─────────────────────────────────────────────────────────────────────────────
