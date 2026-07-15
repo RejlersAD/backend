@@ -2863,22 +2863,29 @@ PCF_SHORT_CODE_RULES = [
     ('fitting', 'reducer',         'Concentric Reducer'),
     ('fitting', 'swage',           'Concentric Swage'),
     ('fitting', 'cap',             'Cap'),
+    # Branch connections - CRITICAL for S3D (reference LS1E-A3 has 255+ rows)
+    # Order matters: specific keywords first, generic 'olet' last
     ('fitting', 'weldolet',        'Weldolet'),
-    ('fitting', 'sockolet',        'Weldolet'),
-    ('fitting', 'thredolet',       'Weldolet'),
-    ('fitting', 'olet',            'Weldolet'),
+    ('fitting', 'elbolet',         'Elbolet'),
+    ('fitting', 'latrolet',        'Latrolet'),
+    ('fitting', 'sockolet',        'Sockolet'),
+    ('fitting', 'thredolet',       'Thredolet'),
+    ('fitting', 'threadolet',      'Thredolet'),
+    ('fitting', 'sweepolet',       'Sweepolet'),
+    ('fitting', 'nipolet',         'Nipolet'),
+    ('fitting', 'olet',            'Weldolet'),      # Generic fallback for unrecognized olet types
     ('fitting', 'coupling',        'Coupling'),
     ('fitting', 'nipple',          'Nipple'),
     ('fitting', 'paddle',          'Paddle'),
     ('fitting', 'spec blind',      'Paddle'),
     ('fitting', 'spectacle',       'Paddle'),
-    ('fitting', '',                'Pipe Fitting'),
+    ('fitting', '',                'Pipe Fitting'),  # Generic fitting fallback
     ('valve',   'gate',            'Gate Valve'),
     ('valve',   'globe',           'Globe Valve'),
-    ('valve',   'needle',          'Globe Valve'),
+    ('valve',   'needle',          'Globe Valve'),  # Needle valves are often treated as globe type in S3D
     ('valve',   'check',           'Check Valve'),
     ('valve',   'nrv',             'Check Valve'),
-    ('valve',   '',                'Valve'),
+    ('valve',   '',                'Valve'),         # Generic valve fallback
     ('gasket',  '',                'Gasket'),
     ('bolt',    '',                'Stud Bolt'),
 ]

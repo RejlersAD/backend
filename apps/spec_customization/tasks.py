@@ -28,6 +28,15 @@ from .services.config import (
     PROGRESS_CACHE_TIMEOUT,
 )
 from .services.extraction_service import PaperSpecExtractionService
+from .services.data_quality import process_extracted_classes
+from .services.advanced_validation import (
+    validate_extracted_classes,
+    ADVANCED_VALIDATION_CONFIG,
+)
+from .services.advanced_validation import (
+    validate_extracted_classes,
+    ADVANCED_VALIDATION_CONFIG,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,10 +148,16 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
     )
 
     all_results: List[List[Dict[str, Any]]] = []
+    ensemble_metrics_list: List[Dict[str, Any]] = []
     classes_found = 0
     cprog_start = cfg["chunk_progress_start"]
     cprog_end = cfg["chunk_progress_end"]
     band = max(1, cprog_end - cprog_start)
+    
+    # Enable ensemble extraction for better accuracy (98% target)
+    enable_ensemble = ADVANCED_VALIDATION_CONFIG.get("enable_ensemble_extraction", False)
+    if enable_ensemble:
+        logger.info("[SpecExtraction] Ensemble mode enabled for job %s", job_id)
 
     for idx, (start_page, end_page) in enumerate(chunks):
         # Cancellation check.
@@ -152,12 +167,21 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             return {"success": False, "cancelled": True}
 
         try:
-            chunk_result = service.extract_chunk(pdf_path, start_page, end_page)
+            chunk_result = service.extract_chunk(
+                pdf_path, start_page, end_page,
+                enable_ensemble=enable_ensemble,
+                retry_attempt=0
+            )
         except Exception as e:
             logger.exception("[SpecExtraction] chunk %d-%d failed: %s", start_page, end_page, e)
             chunk_result = {"piping_classes": [], "engine_used": "error"}
 
         all_results.append(chunk_result.get("piping_classes", []))
+        
+        # Track ensemble metrics if available
+        if "ensemble_metrics" in chunk_result:
+            ensemble_metrics_list.append(chunk_result["ensemble_metrics"])
+        
         classes_found = len({
             (c.get("class_code") or "").upper()
             for lst in all_results for c in lst
@@ -194,14 +218,65 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
             timeout=PROGRESS_CACHE_TIMEOUT,
         )
 
-    # ── Merge + persist ─────────────────────────────────────────────────
+    # ── Merge + Advanced Validation + Data Quality + Persist ──────────
+    _write_progress(
+        str(job.id),
+        state="PROGRESS",
+        status="Merging chunks & running AI-powered validation...",
+        percent=cprog_end + 5,
+    )
+    
     merged = service.merge_classes(all_results)
-    saved = _persist_classes(job, merged)
+    
+    # ── ADVANCED VALIDATION (NEW: 98% accuracy target) ────────────────
+    validation_report = validate_extracted_classes(
+        merged,
+        context={
+            "job_id": str(job.id),
+            "document_id": str(job.document.id),
+            "total_pages": total_pages,
+            "ensemble_enabled": enable_ensemble,
+        }
+    )
+    
+    # Log validation results
+    logger.info(
+        "[SpecExtraction] Job %s validation: %s, %d classes, %d warnings, accuracy %.1f%%",
+        job_id,
+        validation_report["overall_status"],
+        validation_report["classes_validated"],
+        validation_report["warnings_total"],
+        validation_report.get("template_comparison", {}).get("accuracy_estimate", 0)
+    )
+    
+    # Run data quality pipeline (deduplication, validation, normalization)
+    cleaned_classes, quality_report = process_extracted_classes(
+        classes=merged,
+        project_id=job.document.project_id,
+        project_title=job.document.title,
+        document_number=job.document.document_number,
+    )
+    
+    logger.info(
+        "[SpecExtraction] Data quality report for job %s: %s",
+        job_id,
+        quality_report
+    )
+    
+    saved = _persist_classes(job, cleaned_classes)
 
+    # Calculate final accuracy estimate
+    accuracy_pct = validation_report.get("template_comparison", {}).get("accuracy_estimate", 0)
+    total_components = sum(len(cls.get("components", [])) for cls in cleaned_classes)
+    
     job.status = PaperSpecExtractionJob.STATUS_COMPLETED
     job.progress_percent = 100
     job.completed_at = timezone.now()
-    job.current_phase = f"Completed · {saved} piping classes persisted"
+    job.current_phase = (
+        f"Completed · {saved} classes · {total_components} components · "
+        f"{accuracy_pct:.1f}% accuracy · "
+        f"{quality_report['duplicates_removed']} dupes removed"
+    )
     job.save(update_fields=["status", "progress_percent", "completed_at", "current_phase"])
 
     _write_progress(
@@ -212,6 +287,19 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         chunks_total=len(chunks),
         chunks_done=len(chunks),
         classes_found=saved,
+        total_components=total_components,
+        accuracy_estimate=accuracy_pct,
+        quality_report=quality_report,
+        validation_report=validation_report,
+        ensemble_enabled=enable_ensemble,
     )
 
-    return {"success": True, "job_id": str(job.id), "classes": saved}
+    return {
+        "success": True,
+        "job_id": str(job.id),
+        "classes": saved,
+        "total_components": total_components,
+        "accuracy_estimate": accuracy_pct,
+        "quality_report": quality_report,
+        "validation_report": validation_report,
+    }

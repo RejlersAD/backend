@@ -34,13 +34,15 @@ def _env_int(name: str, default: int, *, lo: int = 1, hi: int | None = None) -> 
 # ─────────────────────────────────────────────────────────────────────────────
 SPEC_EXTRACTION_CONFIG = {
     # ── Chunking ────────────────────────────────────────────────────────
-    # Smaller chunks = more accurate per-page AI extraction & finer progress
-    # granularity (better visibility for the user).  Larger chunks = fewer
-    # Celery round-trips.  Default 5 pages/chunk; override via env var
-    # `SPEC_CHUNK_SIZE_PAGES` (1..50) without redeploying.
-    "chunk_size_pages":      _env_int("SPEC_CHUNK_SIZE_PAGES", 5, lo=1, hi=50),
+    # Chunk size MUST be large enough to capture complete component tables.
+    # Most piping spec component tables span 3-10 pages. Increased from 5 to 10
+    # to reduce table fragmentation and ensure comprehensive extraction.
+    # Override via env var `SPEC_CHUNK_SIZE_PAGES` (1..50) without redeploying.
+    "chunk_size_pages":      _env_int("SPEC_CHUNK_SIZE_PAGES", 10, lo=1, hi=50),
     "max_chunks_parallel":   _env_int("SPEC_MAX_CHUNKS_PARALLEL", 4, lo=1, hi=32),
-    "page_overlap":          _env_int("SPEC_PAGE_OVERLAP", 0, lo=0, hi=10),
+    # Page overlap ensures component tables split across chunk boundaries are
+    # captured in both chunks. Increased from 0 to 2 for table continuity.
+    "page_overlap":          _env_int("SPEC_PAGE_OVERLAP", 2, lo=0, hi=10),
 
     # ── AI engine waterfall (first non-failed engine wins per chunk) ────
     # Supported: 'pymupdf_text', 'gemini_vision', 'openai_vision', 'tesseract'
@@ -54,7 +56,10 @@ SPEC_EXTRACTION_CONFIG = {
     # ── Model identifiers ───────────────────────────────────────────────
     "gemini_model":            "gemini-2.0-flash",
     "openai_model":            "gpt-4o",
-    "openai_max_tokens":        8000,
+    # Increased from 8000 to 16000 to support comprehensive component extraction.
+    # A typical piping spec has 50-200+ components; the AI needs sufficient tokens
+    # to output complete JSON arrays without truncation.
+    "openai_max_tokens":        16000,
     "openai_temperature":       0.1,
     "gemini_temperature":       0.1,
 

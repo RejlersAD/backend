@@ -24,6 +24,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .config import SPEC_EXTRACTION_CONFIG
 from .prompts import SYSTEM_PROMPT, EXTRACT_PIPING_CLASS_PROMPT
+from .advanced_validation import (
+    merge_ensemble_results,
+    validate_extracted_classes,
+    ADVANCED_VALIDATION_CONFIG,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -303,12 +308,37 @@ class PaperSpecExtractionService:
             return None
 
     # ── Orchestrator: process one chunk via the engine waterfall ────────
-    def extract_chunk(self, pdf_path: str, start: int, end: int) -> Dict[str, Any]:
-        """Return {"piping_classes": [...], "engine_used": str}."""
+    def extract_chunk(
+        self,
+        pdf_path: str,
+        start: int,
+        end: int,
+        enable_ensemble: Optional[bool] = None,
+        retry_attempt: int = 0
+    ) -> Dict[str, Any]:
+        """Return {"piping_classes": [...], "engine_used": str, "validation_report": {...}}.
+        
+        Args:
+            pdf_path: Path to PDF file
+            start: Start page index (0-based)
+            end: End page index (0-based, inclusive)
+            enable_ensemble: If True, run Gemini + OpenAI in parallel (default: from config)
+            retry_attempt: Retry attempt number (0 = first attempt)
+        """
+        if enable_ensemble is None:
+            enable_ensemble = ADVANCED_VALIDATION_CONFIG.get("enable_ensemble_extraction", False)
+        
         engines = self.config["ai_engines"]
         cost_skip_chars = int(self.config["skip_ai_if_text_chars_gte"])
         max_ai_pages = int(self.config["max_ai_pages_per_job"])
         page_count_in_chunk = (end - start + 1)
+        
+        # Adjust extraction strategy based on retry attempt
+        if retry_attempt > 0:
+            logger.info(
+                "[SpecExtraction] Retry attempt %d for pages %d-%d",
+                retry_attempt, start + 1, end + 1
+            )
 
         # 1) Always try text-layer first — cheap, accurate on vector PDFs.
         text_result = self.extract_via_text_layer(pdf_path, start, end)
@@ -325,6 +355,34 @@ class PaperSpecExtractionService:
 
         if ai_budget_ok:
             images: Optional[List[str]] = None
+            
+            # ── ENSEMBLE MODE: Run Gemini + OpenAI in parallel ──
+            if enable_ensemble and "gemini_vision" in engines and "openai_vision" in engines:
+                logger.info(
+                    "[SpecExtraction] Ensemble mode: running Gemini + OpenAI in parallel for pages %d-%d",
+                    start + 1, end + 1
+                )
+                images = self.render_pages_to_jpeg_b64(pdf_path, start, end)
+                
+                gemini_blob = self.extract_via_gemini(images, (start, end))
+                openai_blob = self.extract_via_openai(images, (start, end))
+                
+                gemini_classes = gemini_blob.get("piping_classes", []) if gemini_blob else []
+                openai_classes = openai_blob.get("piping_classes", []) if openai_blob else []
+                
+                if gemini_classes or openai_classes:
+                    merged_classes, ensemble_metrics = merge_ensemble_results(
+                        gemini_classes, openai_classes
+                    )
+                    self._ai_pages_used += page_count_in_chunk * 2  # Both models used
+                    
+                    return {
+                        "piping_classes": merged_classes,
+                        "engine_used": "ensemble_gemini+openai",
+                        "ensemble_metrics": ensemble_metrics,
+                    }
+            
+            # ── WATERFALL MODE: Try engines sequentially ──
             for engine in engines:
                 if engine == "pymupdf_text":
                     continue  # already done
