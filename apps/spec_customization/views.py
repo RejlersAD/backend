@@ -19,6 +19,7 @@ import json
 import logging
 from typing import Any, Dict
 
+from django.conf import settings
 from django.core.cache import cache
 from django.db.models import Count
 from django.http import HttpResponse
@@ -157,18 +158,39 @@ def _ingest_paper_spec_file(
         created_by=request_user if getattr(request_user, 'is_authenticated', False) else None,
     )
 
-    try:
-        async_result = extract_paper_spec.delay(str(job.id))
-        job.celery_task_id = async_result.id or ''
-        job.save(update_fields=['celery_task_id'])
-    except Exception as e:
-        logger.exception("[SpecExtraction] failed to queue task: %s", e)
+    # SOFT-CODED: Check if Celery is in EAGER mode to avoid connection errors
+    # In EAGER mode, tasks run synchronously and don't need a broker connection.
+    # Calling .delay() in EAGER mode can still try to connect to broker (Celery quirk),
+    # causing "Connection refused" errors that crash the endpoint before CORS headers
+    # can be sent. Fix: call task directly in EAGER mode, use .delay() only when
+    # broker is available.
+    celery_eager_mode = getattr(settings, 'CELERY_TASK_ALWAYS_EAGER', False)
+    
+    if celery_eager_mode:
+        # EAGER mode: Run task synchronously without broker connection
+        logger.info("[SpecExtraction] Running task in EAGER mode (synchronous)")
         try:
             extract_paper_spec(str(job.id))
-        except Exception as run_err:
+        except Exception as e:
+            logger.exception("[SpecExtraction] Synchronous task failed: %s", e)
             job.status = PaperSpecExtractionJob.STATUS_FAILED
-            job.error_message = f"Queue failed: {e}; inline failed: {run_err}"
+            job.error_message = f"Extraction failed: {e}"
             job.save(update_fields=['status', 'error_message'])
+    else:
+        # Normal mode: Queue task asynchronously via Celery
+        try:
+            async_result = extract_paper_spec.delay(str(job.id))
+            job.celery_task_id = async_result.id or ''
+            job.save(update_fields=['celery_task_id'])
+        except Exception as e:
+            logger.exception("[SpecExtraction] failed to queue task: %s", e)
+            # Fallback to synchronous execution
+            try:
+                extract_paper_spec(str(job.id))
+            except Exception as run_err:
+                job.status = PaperSpecExtractionJob.STATUS_FAILED
+                job.error_message = f"Queue failed: {e}; inline failed: {run_err}"
+                job.save(update_fields=['status', 'error_message'])
 
     return Response({
         "deduped": False,
