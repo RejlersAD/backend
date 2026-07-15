@@ -481,7 +481,6 @@ def _serialize_enquiry(e: Enquiry) -> dict:
 @permission_classes([IsAuthenticated, HasModuleAccess])
 def list_enquiries(request):
     """List enquiries with optional filters: ?status=&urgency=&service=&search=&page=&page_size="""  
-list_enquiries.module_required = ENQUIRY_MODULE_CODE
     qs = Enquiry.objects.all()
 
     f_status  = request.query_params.get('status')
@@ -522,12 +521,13 @@ list_enquiries.module_required = ENQUIRY_MODULE_CODE
         'results':   items,
     })
 
+list_enquiries.module_required = ENQUIRY_MODULE_CODE
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, HasModuleAccess])
 def enquiry_stats(request):
     """Aggregate counts for dashboard widgets at the top of the admin page."""
-enquiry_stats.module_required = ENQUIRY_MODULE_CODE
     by_status_qs  = Enquiry.objects.values('status').annotate(c=Count('id'))
     by_urgency_qs = Enquiry.objects.values('urgency').annotate(c=Count('id'))
     return Response({
@@ -538,12 +538,13 @@ enquiry_stats.module_required = ENQUIRY_MODULE_CODE
         'by_urgency':{row['urgency']: row['c'] for row in by_urgency_qs},
     })
 
+enquiry_stats.module_required = ENQUIRY_MODULE_CODE
+
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated, HasModuleAccess])
 def enquiry_detail(request, pk: int):
     """Retrieve, update (status / admin_notes), or delete a single enquiry."""
-enquiry_detail.module_required = ENQUIRY_MODULE_CODE
     enquiry = get_object_or_404(Enquiry, pk=pk)
 
     if request.method == 'GET':
@@ -567,4 +568,6 @@ enquiry_detail.module_required = ENQUIRY_MODULE_CODE
     enquiry.save(update_fields=list(payload.keys()) + ['updated_at'])
 
     return Response({'success': True, 'enquiry': _serialize_enquiry(enquiry)})
+
+enquiry_detail.module_required = ENQUIRY_MODULE_CODE
 
