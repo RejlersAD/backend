@@ -10,7 +10,7 @@ Features:
 - Error handling
 """
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny, IsAdminUser
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from django.core.mail import EmailMultiAlternatives
@@ -22,11 +22,14 @@ from django.db.models import Count, Q
 import logging
 
 from apps.core.models import Enquiry
+from apps.rbac.permissions import HasModuleAccess
 
 logger = logging.getLogger(__name__)
 
 
 # Soft-coded Configuration
+# RBAC module code for enquiry management access (defined in rbac_config.py)
+ENQUIRY_MODULE_CODE = 'enquiry_management'
 ENQUIRY_CONFIG = {
     'recipient_email': 'tanzeem.agra@rejlers.ae',
     'cc_emails': [],  # Add CC recipients here if needed
@@ -475,9 +478,10 @@ def _serialize_enquiry(e: Enquiry) -> dict:
 
 
 @api_view(['GET'])
-@permission_classes([IsAdminUser])
+@permission_classes([IsAuthenticated, HasModuleAccess])
 def list_enquiries(request):
-    """List enquiries with optional filters: ?status=&urgency=&service=&search=&page=&page_size="""
+    """List enquiries with optional filters: ?status=&urgency=&service=&search=&page=&page_size="""  
+list_enquiries.module_required = ENQUIRY_MODULE_CODE
     qs = Enquiry.objects.all()
 
     f_status  = request.query_params.get('status')
@@ -520,9 +524,10 @@ def list_enquiries(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAdminUser])
+@permission_classes([IsAuthenticated, HasModuleAccess])
 def enquiry_stats(request):
     """Aggregate counts for dashboard widgets at the top of the admin page."""
+enquiry_stats.module_required = ENQUIRY_MODULE_CODE
     by_status_qs  = Enquiry.objects.values('status').annotate(c=Count('id'))
     by_urgency_qs = Enquiry.objects.values('urgency').annotate(c=Count('id'))
     return Response({
@@ -535,9 +540,10 @@ def enquiry_stats(request):
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])
-@permission_classes([IsAdminUser])
+@permission_classes([IsAuthenticated, HasModuleAccess])
 def enquiry_detail(request, pk: int):
     """Retrieve, update (status / admin_notes), or delete a single enquiry."""
+enquiry_detail.module_required = ENQUIRY_MODULE_CODE
     enquiry = get_object_or_404(Enquiry, pk=pk)
 
     if request.method == 'GET':

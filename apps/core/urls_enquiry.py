@@ -14,7 +14,7 @@ urlpatterns = [
     # Public
     path('submit/', submit_enquiry, name='submit-enquiry'),
 
-    # Admin (IsAdminUser)
+    # Admin (HasModuleAccess: enquiry_management)
     path('',             list_enquiries, name='list-enquiries'),
     path('stats/',       enquiry_stats,  name='enquiry-stats'),
     path('<int:pk>/',    enquiry_detail, name='enquiry-detail'),
