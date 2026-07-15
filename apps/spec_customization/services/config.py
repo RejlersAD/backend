@@ -122,7 +122,9 @@ SPEC_EXTRACTION_CONFIG = {
     ],
 
     # ── Dedupe ──────────────────────────────────────────────────────────
-    "dedupe_by_sha256":      True,
+    # TEMPORARILY DISABLED to force fresh extraction with new AI code (2026-07-15)
+    # TODO: Re-enable after testing new extraction pipeline
+    "dedupe_by_sha256":      False,
 
     # ── Progress band reserved for chunk loop (0-100) ───────────────────
     # 0-10  → upload + page count
