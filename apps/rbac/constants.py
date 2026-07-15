@@ -26,6 +26,7 @@ DEPARTMENTS = [
     ('it', 'Information Technology'),
     ('admin', 'Administration'),
     ('management', 'Management'),
+    ('radai', 'RadAI'),  # SOFT-CODED: AI/ML department
 ]
 
 # Helper function to get department choices as dict for API responses
