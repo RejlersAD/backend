@@ -37,17 +37,19 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'process_datasheet',      'name': 'Process Datasheet',            'icon': 'FileText',    'order': 10, 'description': 'Process equipment datasheets — MOV, SDV, pumps, pressure instruments'},
     {'code': 'electrical_datasheet',   'name': 'Electrical Datasheet',         'icon': 'Zap',         'order': 11, 'description': 'Electrical equipment and SLD-based datasheet generation'},
     {'code': 'electrical_sld',         'name': 'Electrical SLD',               'icon': 'Zap',         'order': 12, 'description': 'Single Line Diagram analysis and tagging'},
-    {'code': 'instrument_datasheet',   'name': 'Instrument Datasheet',         'icon': 'Activity',    'order': 13, 'description': 'Instrument equipment datasheets and tag lists'},
-    {'code': 'instrument_index',       'name': 'Instrument Index',             'icon': 'List',        'order': 14, 'description': 'AI extraction of instrument index from P&ID drawings'},
-    {'code': 'mechanical_datasheet',   'name': 'Mechanical Datasheet',         'icon': 'Tool',        'order': 15, 'description': 'Mechanical equipment datasheets and inspection records'},
-    {'code': 'civil_datasheet',        'name': 'Civil Datasheet',              'icon': 'Home',        'order': 16, 'description': 'Civil and structural engineering datasheets'},
-    {'code': 'piping_datasheet',       'name': 'Piping Datasheet',             'icon': 'GitBranch',   'order': 17, 'description': 'Piping material specifications and critical line list'},
-    {'code': 'piping_pms',             'name': 'Piping Material Specification', 'icon': 'Database',   'order': 18, 'description': 'Piping material specification management'},
-    {'code': 'digitization_datasheet', 'name': 'Digitization Datasheet',       'icon': 'Scan',        'order': 19, 'description': 'AI-powered digitization of legacy datasheets'},
-    {'code': 'spec_customization',     'name': 'Spec Customization',           'icon': 'Settings',    'order': 20, 'description': 'Engineering specification customization tools'},
-    {'code': 'non_teff_metadata',      'name': 'Non-TEFF Metadata Extractor',  'icon': 'Search',      'order': 21, 'description': 'Extract metadata from Non-TEFF documents (PDF, Excel, Word, AutoCAD)'},
+    # SOFT-CODED: Electrical Check List - NEW FEATURE
+    {'code': 'electrical_checklist',   'name': 'Electrical Check List',        'icon': 'CheckSquare', 'order': 13, 'description': 'Electrical engineering quality check lists and compliance verification'},
+    {'code': 'instrument_datasheet',   'name': 'Instrument Datasheet',         'icon': 'Activity',    'order': 14, 'description': 'Instrument equipment datasheets and tag lists'},
+    {'code': 'instrument_index',       'name': 'Instrument Index',             'icon': 'List',        'order': 15, 'description': 'AI extraction of instrument index from P&ID drawings'},
+    {'code': 'mechanical_datasheet',   'name': 'Mechanical Datasheet',         'icon': 'Tool',        'order': 16, 'description': 'Mechanical equipment datasheets and inspection records'},
+    {'code': 'civil_datasheet',        'name': 'Civil Datasheet',              'icon': 'Home',        'order': 17, 'description': 'Civil and structural engineering datasheets'},
+    {'code': 'piping_datasheet',       'name': 'Piping Datasheet',             'icon': 'GitBranch',   'order': 18, 'description': 'Piping material specifications and critical line list'},
+    {'code': 'piping_pms',             'name': 'Piping Material Specification', 'icon': 'Database',   'order': 19, 'description': 'Piping material specification management'},
+    {'code': 'digitization_datasheet', 'name': 'Digitization Datasheet',       'icon': 'Scan',        'order': 20, 'description': 'AI-powered digitization of legacy datasheets'},
+    {'code': 'spec_customization',     'name': 'Spec Customization',           'icon': 'Settings',    'order': 21, 'description': 'Engineering specification customization tools'},
+    {'code': 'non_teff_metadata',      'name': 'Non-TEFF Metadata Extractor',  'icon': 'Search',      'order': 22, 'description': 'Extract metadata from Non-TEFF documents (PDF, Excel, Word, AutoCAD)'},
     # ── Process sub-module codes (granular per sidebar item) ───────────────────
-    {'code': 'pid_line_list',          'name': 'Line List',                    'icon': 'TableCells',  'order': 22, 'description': 'Extract base line list columns from P&ID drawings'},
+    {'code': 'pid_line_list',          'name': 'Line List',                    'icon': 'TableCells',  'order': 23, 'description': 'Extract base line list columns from P&ID drawings'},
     {'code': 'pid_equipment_list',     'name': 'Equipment List',               'icon': 'TableCells',  'order': 23, 'description': 'Extract equipment tags and type classification from P&ID'},
     # ── Piping sub-module code (moved away from shared designiq code) ───────────
     {'code': 'piping_critical_line_list', 'name': 'Critical Line List',        'icon': 'GitBranch',   'order': 24, 'description': '5-document critical line list with full 35-column enrichment'},
@@ -400,6 +402,7 @@ DEFAULT_ROLE_MODULES = [
     'piping_datasheet',
     # ── Electrical Engineering ────────────────────────────────────────
     'electrical_sld',
+    'electrical_checklist',  # SOFT-CODED: NEW FEATURE - Electrical Check List
     'electrical_datasheet',
     # ── Civil Engineering ─────────────────────────────────────────────
     'civil_datasheet',
@@ -436,6 +439,7 @@ ENGINEERING_SECTION_MODULES = [
     'process_datasheet',
     'electrical_datasheet',
     'electrical_sld',
+    'electrical_checklist',  # SOFT-CODED: NEW FEATURE - Electrical Check List
     'instrument_datasheet',
     'instrument_index',
     'instrument_io_list',
@@ -548,6 +552,7 @@ MODULE_DISCIPLINE_MAP = {
     'designiq':          'DesignIQ',
     'electrical_datasheet': 'Electrical',
     'electrical_sld':    'Electrical',
+    'electrical_checklist': 'Electrical',  # SOFT-CODED: NEW FEATURE - Electrical Check List
     'instrument_datasheet': 'Instrument',
     'instrument_index':  'Instrument',
     'mechanical_datasheet': 'Mechanical',

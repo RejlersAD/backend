@@ -170,6 +170,7 @@ INSTALLED_APPS = [
     'apps.process_datasheet',  # Process Datasheet - AI-Powered Equipment Datasheet Generation
     # SOFT-CODED: Electrical Datasheet - RE-ENABLED
     'apps.electrical_datasheet',  # Electrical Datasheet - Transformer & Switchgear Technical Data Sheets
+    'apps.electrical_checklist',  # Electrical Checklist - OCR-Powered Inspection Checklist Extraction (FREE: Tesseract/EasyOCR)
     'apps.usage_tracking',  # Usage Tracking & Metering - Internal Analytics Dashboard
     'apps.wrench_integration',  # Wrench Project Platform Integration
     'apps.data_mining',  # Data Mining Platform - AI-Powered Data Integration & Transformation (Tableau Prep-style)

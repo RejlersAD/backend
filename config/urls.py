@@ -156,6 +156,7 @@ urlpatterns = [
     path('api/v1/designiq/', include('apps.designiq.urls')),  # DesignIQ - AI Design Intelligence
     path('api/v1/process-datasheet/', include('apps.process_datasheet.urls')),  # Process Datasheet
     path('api/v1/electrical-datasheet/', include('apps.electrical_datasheet.urls')),  # Electrical Datasheet with Transformer & Switchgear
+    path('api/v1/electrical-checklist/', include('apps.electrical_checklist.urls')),  # Electrical Checklist - OCR Extraction (Tesseract/EasyOCR)
     path('api/v1/usage/', include('apps.usage_tracking.urls')),  # Usage Tracking & Internal Analytics
     path('api/v1/instrument-tools/', include('apps.instrument_tools.urls')),  # Instrument Tools — IO List / Cable Block / Cable Schedule
     path('api/v1/instrument-io-workflow/', include('apps.instrument_io_workflow.urls')),  # CRS-style multi-revision IO List documents
