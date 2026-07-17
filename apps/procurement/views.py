@@ -545,36 +545,55 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'manager_projects': ['Manager of Projects', 'Manager - Projects', 'Projects Manager'],
             'vp_operations': ['VP Operations', 'Vice President Operations', 'VP - Operations', 'Vice President of Operation'],
         }
-        
+        # Soft-coded: the dropdown must always let the requester pick ANY active
+        # user as the approver — job_title is only used to surface the most
+        # relevant users FIRST, never to hide the rest of the user base.
+        matched_user_ids = set()
+
         if role and role in role_title_mapping:
             job_titles = role_title_mapping[role]
-            
-            # Query users with matching job titles
-            profiles = UserProfile.objects.filter(
+            from django.db.models import Q
+
+            # Exact match first
+            matched_qs = UserProfile.objects.filter(
                 status='active',
                 is_deleted=False,
                 job_title__in=job_titles
             ).select_related('user')
-            
-            # Also try partial match if no exact match found
-            if profiles.count() == 0:
-                from django.db.models import Q
+
+            # Fall back to partial/contains match if no exact match found
+            if matched_qs.count() == 0:
                 q_objects = Q()
                 for title in job_titles:
                     q_objects |= Q(job_title__icontains=title)
-                
-                profiles = UserProfile.objects.filter(
+                matched_qs = UserProfile.objects.filter(
                     q_objects,
                     status='active',
                     is_deleted=False
                 ).select_related('user')
-        else:
-            # Return all active users if no role specified
-            profiles = UserProfile.objects.filter(
-                status='active',
-                is_deleted=False
-            ).select_related('user')
-        
+
+            matched_user_ids = set(matched_qs.values_list('user_id', flat=True))
+
+        matched_by_job_title = len(matched_user_ids) > 0
+
+        # Always return the full active user list so the field lets the
+        # requester choose/select any user, with job-title matches (if any)
+        # surfaced first for convenience.
+        profiles = UserProfile.objects.filter(
+            status='active',
+            is_deleted=False
+        ).select_related('user')
+
+        # Sort so job-title matches appear first, then alphabetically
+        profiles = sorted(
+            profiles,
+            key=lambda p: (
+                p.user_id not in matched_user_ids,
+                (p.user.first_name or '').lower(),
+                (p.user.last_name or '').lower(),
+            )
+        )
+
         # Format response
         users_list = []
         for profile in profiles:
@@ -587,11 +606,13 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 'job_title': profile.job_title,
                 'department': profile.department,
                 'employee_id': profile.employee_id,
+                'job_title_match': profile.user_id in matched_user_ids,
             })
         
         return Response({
             'role': role,
             'count': len(users_list),
+            'matched_by_job_title': matched_by_job_title,
             'users': users_list
         })
     
