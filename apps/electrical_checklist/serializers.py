@@ -13,6 +13,11 @@ User = get_user_model()
 # module-level format string avoids hardcoding the label wherever jobs are listed.
 DEFAULT_CHECKLIST_NAME_FORMAT = "Checklist #{id} — {date}"
 
+# Soft-coded project name length constraints (kept in sync with the frontend
+# PROJECT_NAME_MIN_LENGTH / MAX_LENGTH constants in electricalChecklist.config.js).
+PROJECT_NAME_MIN_LENGTH = 3
+PROJECT_NAME_MAX_LENGTH = 200
+
 
 class UserBriefSerializer(serializers.ModelSerializer):
     """Brief user info for project members"""
@@ -133,10 +138,15 @@ class ChecklistProjectCreateSerializer(serializers.ModelSerializer):
         
     def validate_project_name(self, value):
         """Validate project name length and characters"""
-        if len(value) < 3:
-            raise serializers.ValidationError("Project name must be at least 3 characters long")
-        if len(value) > 200:
-            raise serializers.ValidationError("Project name cannot exceed 200 characters")
+        value = value.strip()
+        if len(value) < PROJECT_NAME_MIN_LENGTH:
+            raise serializers.ValidationError(
+                f"Project name must be at least {PROJECT_NAME_MIN_LENGTH} characters long"
+            )
+        if len(value) > PROJECT_NAME_MAX_LENGTH:
+            raise serializers.ValidationError(
+                f"Project name cannot exceed {PROJECT_NAME_MAX_LENGTH} characters"
+            )
         return value
     
     def validate_settings(self, value):
