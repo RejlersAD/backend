@@ -93,11 +93,22 @@ class PaperSpecExtractionJobBriefSerializer(serializers.ModelSerializer):
     """
     Brief serializer for job history list view.
     Mirrors electrical_checklist.ChecklistExtractionJobBriefSerializer pattern.
+    
+    BACKWARD COMPATIBILITY: Uses SerializerMethodField for cost tracking fields
+    to gracefully handle cases where migrations 0005/0006 haven't been applied yet.
+    This prevents 500 errors in production during deployment transitions.
     """
     user_name = serializers.SerializerMethodField()
     document_name = serializers.SerializerMethodField()
     components_count = serializers.SerializerMethodField()
     classes_count = serializers.SerializerMethodField()
+    
+    # Cost tracking fields - use SerializerMethodField for backward compatibility
+    gemini_prompt_tokens = serializers.SerializerMethodField()
+    gemini_completion_tokens = serializers.SerializerMethodField()
+    openai_prompt_tokens = serializers.SerializerMethodField()
+    openai_completion_tokens = serializers.SerializerMethodField()
+    cost_usd = serializers.SerializerMethodField()
 
     class Meta:
         model = PaperSpecExtractionJob
@@ -127,3 +138,25 @@ class PaperSpecExtractionJobBriefSerializer(serializers.ModelSerializer):
     def get_classes_count(self, obj):
         # Prefetch via annotation in the view (classes_count)
         return getattr(obj, 'classes_count', 0)
+    
+    # Backward-compatible getters for cost tracking fields (migration 0005)
+    def get_gemini_prompt_tokens(self, obj):
+        """Return 0 if migration 0005 not applied yet."""
+        return getattr(obj, 'gemini_prompt_tokens', 0)
+    
+    def get_gemini_completion_tokens(self, obj):
+        """Return 0 if migration 0005 not applied yet."""
+        return getattr(obj, 'gemini_completion_tokens', 0)
+    
+    def get_openai_prompt_tokens(self, obj):
+        """Return 0 if migration 0005 not applied yet."""
+        return getattr(obj, 'openai_prompt_tokens', 0)
+    
+    def get_openai_completion_tokens(self, obj):
+        """Return 0 if migration 0005 not applied yet."""
+        return getattr(obj, 'openai_completion_tokens', 0)
+    
+    def get_cost_usd(self, obj):
+        """Return 0.00 if migration 0005 not applied yet."""
+        from decimal import Decimal
+        return getattr(obj, 'cost_usd', Decimal('0.000000'))

@@ -92,6 +92,24 @@ def _page_count(django_file_path: str) -> int:
             return 0
 
 
+def _model_has_field(model_class, field_name: str) -> bool:
+    """
+    Soft-coded helper: Check if a Django model has a specific field.
+    
+    Used for backward compatibility during migrations - allows code to gracefully
+    handle cases where schema changes haven't been applied yet (e.g., during
+    Railway deployment when migrations might not run immediately).
+    
+    Returns:
+        True if field exists, False otherwise
+    """
+    try:
+        model_class._meta.get_field(field_name)
+        return True
+    except Exception:
+        return False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared ingest pipeline — used by both legacy multipart upload AND the new
 # direct-to-S3 presigned-upload "complete" endpoint. Centralised so both paths
@@ -154,13 +172,21 @@ def _ingest_paper_spec_file(
     doc.total_pages = _page_count(doc.file.path)
     doc.save(update_fields=['total_pages'])
 
-    job = PaperSpecExtractionJob.objects.create(
-        document=doc,
-        status=PaperSpecExtractionJob.STATUS_QUEUED,
-        engineer_name=engineer_name,
-        user_openai_api_key=user_api_key,  # Stored temporarily; wiped after extraction completes
-        created_by=request_user if getattr(request_user, 'is_authenticated', False) else None,
-    )
+    # BACKWARD COMPATIBILITY: Build job creation kwargs conditionally
+    # Only set BYOK fields (migration 0006) if they exist in the schema
+    job_kwargs = {
+        'document': doc,
+        'status': PaperSpecExtractionJob.STATUS_QUEUED,
+        'created_by': request_user if getattr(request_user, 'is_authenticated', False) else None,
+    }
+    
+    # Add BYOK fields only if migration 0006 has been applied (soft-coded check)
+    if _model_has_field(PaperSpecExtractionJob, 'engineer_name'):
+        job_kwargs['engineer_name'] = engineer_name
+    if _model_has_field(PaperSpecExtractionJob, 'user_openai_api_key'):
+        job_kwargs['user_openai_api_key'] = user_api_key  # Stored temporarily; wiped after extraction completes
+    
+    job = PaperSpecExtractionJob.objects.create(**job_kwargs)
 
     # SOFT-CODED: Check if Celery is in EAGER mode to avoid connection errors
     # In EAGER mode, tasks run synchronously and don't need a broker connection.

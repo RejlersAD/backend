@@ -269,13 +269,27 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
     accuracy_pct = validation_report.get("template_comparison", {}).get("accuracy_estimate", 0)
     total_components = sum(len(cls.get("components", [])) for cls in cleaned_classes)
     
-    # Extract token usage and cost from service
+    # Extract token usage and cost from service (BACKWARD COMPATIBLE)
+    # Only set these fields if migration 0005 has been applied
     usage_data = service.get_usage_and_cost()
-    job.gemini_prompt_tokens = usage_data["gemini_prompt_tokens"]
-    job.gemini_completion_tokens = usage_data["gemini_completion_tokens"]
-    job.openai_prompt_tokens = usage_data["openai_prompt_tokens"]
-    job.openai_completion_tokens = usage_data["openai_completion_tokens"]
-    job.cost_usd = usage_data["cost_usd"]
+    update_fields = ["status", "progress_percent", "completed_at", "current_phase"]
+    
+    # Conditionally set cost tracking fields (soft-coded for migration 0005)
+    if hasattr(job, 'gemini_prompt_tokens'):
+        job.gemini_prompt_tokens = usage_data["gemini_prompt_tokens"]
+        update_fields.append("gemini_prompt_tokens")
+    if hasattr(job, 'gemini_completion_tokens'):
+        job.gemini_completion_tokens = usage_data["gemini_completion_tokens"]
+        update_fields.append("gemini_completion_tokens")
+    if hasattr(job, 'openai_prompt_tokens'):
+        job.openai_prompt_tokens = usage_data["openai_prompt_tokens"]
+        update_fields.append("openai_prompt_tokens")
+    if hasattr(job, 'openai_completion_tokens'):
+        job.openai_completion_tokens = usage_data["openai_completion_tokens"]
+        update_fields.append("openai_completion_tokens")
+    if hasattr(job, 'cost_usd'):
+        job.cost_usd = usage_data["cost_usd"]
+        update_fields.append("cost_usd")
     
     job.status = PaperSpecExtractionJob.STATUS_COMPLETED
     job.progress_percent = 100
@@ -285,11 +299,7 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         f"{accuracy_pct:.1f}% accuracy · "
         f"{quality_report['duplicates_removed']} dupes removed"
     )
-    job.save(update_fields=[
-        "status", "progress_percent", "completed_at", "current_phase",
-        "gemini_prompt_tokens", "gemini_completion_tokens",
-        "openai_prompt_tokens", "openai_completion_tokens", "cost_usd"
-    ])
+    job.save(update_fields=update_fields)
 
     _write_progress(
         str(job.id),
