@@ -236,20 +236,37 @@ def _ingest_paper_spec_file(
 @parser_classes([MultiPartParser, FormParser])
 @permission_classes([IsAuthenticated])
 def upload_paper_spec(request):
-    src = request.FILES.get('file') or request.FILES.get('pdf_file')
-    if not src:
-        return Response({"error": "No file uploaded (expected field: 'file' or 'pdf_file')"},
-                        status=status.HTTP_400_BAD_REQUEST)
+    """
+    Legacy multipart upload endpoint.
+    
+    DEFENSIVE CODING: Wrapped in try-except to catch any errors before
+    they bubble up as generic 500 HTML responses.
+    """
+    try:
+        src = request.FILES.get('file') or request.FILES.get('pdf_file')
+        if not src:
+            return Response({"error": "No file uploaded (expected field: 'file' or 'pdf_file')"},
+                            status=status.HTTP_400_BAD_REQUEST)
 
-    return _ingest_paper_spec_file(
-        src=src,
-        project_id=request.data.get('project_id') or None,
-        title=request.data.get('title') or '',
-        document_number=request.data.get('document_number') or '',
-        engineer_name=request.data.get('engineer_name') or '',          # BYOK attribution
-        user_api_key=request.data.get('user_openai_api_key') or '',     # BYOK user API key
-        request_user=request.user,
-    )
+        return _ingest_paper_spec_file(
+            src=src,
+            project_id=request.data.get('project_id') or None,
+            title=request.data.get('title') or '',
+            document_number=request.data.get('document_number') or '',
+            engineer_name=request.data.get('engineer_name') or '',          # BYOK attribution
+            user_api_key=request.data.get('user_openai_api_key') or '',     # BYOK user API key
+            request_user=request.user,
+        )
+    except Exception as e:
+        logger.exception("[SpecCustomization] upload_paper_spec failed: %s", e)
+        return Response(
+            {
+                'error': 'Internal server error during file upload.',
+                'detail': str(e) if logger.isEnabledFor(logging.DEBUG) else 'Check server logs.',
+                'success': False,
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

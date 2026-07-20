@@ -286,61 +286,91 @@ def list_project_jobs(request, project_id):
       - status: filter by job status (optional)
       - page: page number (default 1)
       - page_size: items per page (default 25, max 100)
+    
+    DEFENSIVE CODING: Wrapped in try-except to prevent 500 errors during
+    deployment transitions when migrations may not be fully applied.
     """
     try:
-        p = SpecProject.objects.get(project_id=project_id)
-    except SpecProject.DoesNotExist:
-        return Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Project access check
+        try:
+            p = SpecProject.objects.get(project_id=project_id)
+        except SpecProject.DoesNotExist:
+            return Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    if not _is_admin(request.user) and p.created_by_id != getattr(request.user, 'id', None):
-        return Response({'error': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
+        if not _is_admin(request.user) and p.created_by_id != getattr(request.user, 'id', None):
+            return Response({'error': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
 
-    # Base queryset: jobs linked to documents belonging to this project
-    pid_str = str(p.project_id)
-    jobs_qs = (
-        PaperSpecExtractionJob.objects
-        .filter(document__project_id=pid_str)
-        .select_related('document', 'created_by')
-    )
+        # Base queryset: jobs linked to documents belonging to this project
+        pid_str = str(p.project_id)
+        jobs_qs = (
+            PaperSpecExtractionJob.objects
+            .filter(document__project_id=pid_str)
+            .select_related('document', 'created_by')
+        )
 
-    # Optional status filter
-    status_filter = request.GET.get('status', '').strip()
-    if status_filter:
-        jobs_qs = jobs_qs.filter(status=status_filter)
+        # Optional status filter
+        status_filter = request.GET.get('status', '').strip()
+        if status_filter:
+            jobs_qs = jobs_qs.filter(status=status_filter)
 
-    # Annotate with counts (for serializer efficiency)
-    from django.db.models import Count as DjangoCount
-    jobs_qs = jobs_qs.annotate(
-        classes_count=DjangoCount('piping_classes', distinct=True),
-        components_count=DjangoCount('piping_classes__components', distinct=True),
-    )
+        # Annotate with counts (for serializer efficiency)
+        # DEFENSIVE: Try annotation, but proceed without it if it fails (e.g., migration pending)
+        try:
+            from django.db.models import Count as DjangoCount
+            jobs_qs = jobs_qs.annotate(
+                classes_count=DjangoCount('piping_classes', distinct=True),
+                components_count=DjangoCount('piping_classes__components', distinct=True),
+            )
+        except Exception as annotation_err:
+            logger.warning(
+                "[SpecCustomization] Annotation failed (likely migration pending): %s. "
+                "Proceeding without annotations - serializer will use fallback.",
+                annotation_err
+            )
+            # Continue without annotations - serializer will handle missing values
 
-    # Order by most recent first
-    jobs_qs = jobs_qs.order_by('-created_at')
+        # Order by most recent first
+        jobs_qs = jobs_qs.order_by('-created_at')
 
-    # Pagination
-    try:
-        page = int(request.GET.get('page', 1))
-        page_size = min(int(request.GET.get('page_size', 25)), 100)
-    except (TypeError, ValueError):
-        page = 1
-        page_size = 25
+        # Pagination
+        try:
+            page = int(request.GET.get('page', 1))
+            page_size = min(int(request.GET.get('page_size', 25)), 100)
+        except (TypeError, ValueError):
+            page = 1
+            page_size = 25
 
-    total = jobs_qs.count()
-    start = (page - 1) * page_size
-    end = start + page_size
-    jobs = list(jobs_qs[start:end])
+        total = jobs_qs.count()
+        start = (page - 1) * page_size
+        end = start + page_size
+        jobs = list(jobs_qs[start:end])
 
-    # Serialize
-    from .serializers import PaperSpecExtractionJobBriefSerializer
-    serializer = PaperSpecExtractionJobBriefSerializer(jobs, many=True)
+        # Serialize
+        from .serializers import PaperSpecExtractionJobBriefSerializer
+        serializer = PaperSpecExtractionJobBriefSerializer(jobs, many=True)
 
-    return Response({
-        'success': True,
-        'jobs': serializer.data,
-        'pagination': {
-            'total': total,
-            'page': page,
-            'page_size': page_size,
-        },
-    })
+        return Response({
+            'success': True,
+            'jobs': serializer.data,
+            'pagination': {
+                'total': total,
+                'page': page,
+                'page_size': page_size,
+            },
+        })
+    
+    except Exception as e:
+        # CRITICAL ERROR HANDLER: Log detailed error and return clean JSON response
+        # instead of letting Django render a generic 500 HTML page
+        logger.exception(
+            "[SpecCustomization] list_project_jobs failed for project %s: %s",
+            project_id, e
+        )
+        return Response(
+            {
+                'error': 'Internal server error while fetching job history.',
+                'detail': str(e) if logger.isEnabledFor(logging.DEBUG) else 'Check server logs.',
+                'success': False,
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
