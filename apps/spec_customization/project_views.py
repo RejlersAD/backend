@@ -366,10 +366,34 @@ def list_project_jobs(request, project_id):
             "[SpecCustomization] list_project_jobs failed for project %s: %s",
             project_id, e
         )
+        
+        # Determine error type for better client-side handling
+        error_type = type(e).__name__
+        error_msg = str(e)
+        
+        # Check for common errors and provide helpful messages
+        from django.conf import settings
+        detail_msg = error_msg if settings.DEBUG else None
+        
+        # Migration hints
+        if 'column' in error_msg.lower() and 'does not exist' in error_msg.lower():
+            hint = "Database schema mismatch. Run migrations: python manage.py migrate spec_customization"
+            if not settings.DEBUG:
+                detail_msg = f"Schema error. Contact administrator. ({error_type})"
+        elif 'relation' in error_msg.lower() and 'does not exist' in error_msg.lower():
+            hint = "Database table missing. Run migrations."
+            if not settings.DEBUG:
+                detail_msg = f"Table missing. ({error_type})"
+        else:
+            hint = "Check server logs for details."
+            if not settings.DEBUG:
+                detail_msg = f"Server error ({error_type}). Contact administrator."
+        
         return Response(
             {
                 'error': 'Internal server error while fetching job history.',
-                'detail': str(e) if logger.isEnabledFor(logging.DEBUG) else 'Check server logs.',
+                'detail': detail_msg or hint,
+                'error_type': error_type,
                 'success': False,
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR

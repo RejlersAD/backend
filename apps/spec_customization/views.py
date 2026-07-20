@@ -259,10 +259,33 @@ def upload_paper_spec(request):
         )
     except Exception as e:
         logger.exception("[SpecCustomization] upload_paper_spec failed: %s", e)
+        
+        # Determine error type and provide helpful message
+        error_type = type(e).__name__
+        error_msg = str(e)
+        
+        from django.conf import settings
+        detail_msg = error_msg if settings.DEBUG else None
+        
+        # Check for common errors
+        if 'column' in error_msg.lower() and 'does not exist' in error_msg.lower():
+            hint = "Database schema mismatch. Migrations needed."
+            if not settings.DEBUG:
+                detail_msg = f"Schema error - migrations required. ({error_type})"
+        elif 'relation' in error_msg.lower() and 'does not exist' in error_msg.lower():
+            hint = "Database table missing."
+            if not settings.DEBUG:
+                detail_msg = f"Table missing. ({error_type})"
+        else:
+            hint = "Check server logs."
+            if not settings.DEBUG:
+                detail_msg = f"Upload error ({error_type}). Contact administrator."
+        
         return Response(
             {
                 'error': 'Internal server error during file upload.',
-                'detail': str(e) if logger.isEnabledFor(logging.DEBUG) else 'Check server logs.',
+                'detail': detail_msg or hint,
+                'error_type': error_type,
                 'success': False,
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
