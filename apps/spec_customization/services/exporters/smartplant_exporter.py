@@ -52,12 +52,34 @@ def _find_header_row(ws) -> Optional[int]:
     """SPEC sheets use 'Head' in column A; CAT sheets may have multiple
     'Head' rows (definition block + CommodityPart block) — we want the
     one *closest* to the data we'll insert, which is the CommodityPart-
-    region `Head` (i.e. the LAST `Head` before any `Start` we'll use)."""
+    region `Head` (i.e. the LAST `Head` before any `Start` we'll use).
+    
+    Fallback: For sheets like PipingCommodityFilter that have no 'Head'
+    marker in column A, scan for a row with multiple non-empty labels
+    starting from column B (soft-coded via cfg.HEADER_FALLBACK_*).
+    """
     last = None
     for r in range(1, min(ws.max_row, 60) + 1):
         v = ws.cell(r, 1).value
         if v is not None and str(v).strip() in cfg.HEADER_MARKERS:
             last = r
+    
+    # Fallback: scan for unmarked header rows (PipingCommodityFilter, etc.)
+    if last is None:
+        scan_rows = getattr(cfg, 'HEADER_FALLBACK_SCAN_ROWS', 10)
+        min_labels = getattr(cfg, 'HEADER_FALLBACK_MIN_LABELS', 3)
+        for r in range(1, min(ws.max_row, scan_rows) + 1):
+            # Count non-empty string cells starting from column B
+            label_count = 0
+            for c in range(2, min(ws.max_column, 50) + 1):
+                v = ws.cell(r, c).value
+                if v is not None and isinstance(v, str) and v.strip():
+                    label_count += 1
+            if label_count >= min_labels:
+                last = r
+                logger.info("[SmartPlantExport] fallback header row %d (no Head marker, %d labels found)", r, label_count)
+                break
+    
     return last
 
 
