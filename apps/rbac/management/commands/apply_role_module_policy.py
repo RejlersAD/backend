@@ -141,41 +141,40 @@ class Command(BaseCommand):
             if not dry_run:
                 profile.save(update_fields=['status'])
 
-        # Collect modules the user's roles should provide
-        needed_codes = set()
         user_roles = UserRole.objects.filter(user_profile=profile).select_related('role')
         if not user_roles.exists():
             self.stdout.write('    (no roles assigned — skipping)')
             return
 
+        # SECURITY FIX (soft-coded, no cross-role contamination):
+        # Apply each role's OWN policy modules to that SAME role only.
+        # RoleModule is a role-level (shared) mapping, so a previous version of
+        # this loop merged modules from ALL of a user's roles and wrote them onto
+        # a single "target role" (the first UserRole found). For any user holding
+        # both e.g. 'default' and 'engineering_common_access', that silently
+        # granted QHSE/Admin modules onto the shared 'default' role — leaking
+        # that access to every other user with the 'default' role. Never write a
+        # role's modules onto a *different* role.
         for user_role in user_roles:
-            role_code = user_role.role.code
+            role = user_role.role
+            role_code = role.code
             policy_modules = ROLE_MODULE_POLICY.get(role_code, [])
             self.stdout.write(f'    role: {role_code} → {policy_modules or "(no policy)"}')
-            needed_codes.update(policy_modules)
 
-        if not needed_codes:
-            self.stdout.write('    (no modules in policy for these roles)')
-            return
+            for mod_code in sorted(policy_modules):
+                mod = module_objects.get(mod_code) or Module.objects.filter(code=mod_code, is_active=True).first()
+                if not mod:
+                    self.stdout.write(
+                        self.style.WARNING(f'    ⚠ module missing in DB: {mod_code}')
+                    )
+                    continue
 
-        # Apply: ensure every needed module is linked to at least one of the user's roles
-        # We attach to the first non-custom role found, or create/use a custom one
-        target_role = user_roles.first().role
-
-        for mod_code in sorted(needed_codes):
-            mod = module_objects.get(mod_code) or Module.objects.filter(code=mod_code, is_active=True).first()
-            if not mod:
-                self.stdout.write(
-                    self.style.WARNING(f'    ⚠ module missing in DB: {mod_code}')
-                )
-                continue
-
-            already = RoleModule.objects.filter(role=target_role, module=mod).exists()
-            if already:
-                self.stdout.write(f'    ✓ already has: {mod_code}')
-            elif dry_run:
-                self.stdout.write(f'    [dry] would grant: {mod_code}')
-            else:
-                with transaction.atomic():
-                    RoleModule.objects.get_or_create(role=target_role, module=mod)
-                self.stdout.write(self.style.SUCCESS(f'    ✓ granted: {mod_code}'))
+                already = RoleModule.objects.filter(role=role, module=mod).exists()
+                if already:
+                    self.stdout.write(f'    ✓ already has: {mod_code}')
+                elif dry_run:
+                    self.stdout.write(f'    [dry] would grant: {mod_code}')
+                else:
+                    with transaction.atomic():
+                        RoleModule.objects.get_or_create(role=role, module=mod)
+                    self.stdout.write(self.style.SUCCESS(f'    ✓ granted: {mod_code}'))

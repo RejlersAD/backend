@@ -29,6 +29,7 @@ from .permissions import (
 from .utils import create_audit_log
 from .s3_service import S3Service
 from .pagination import FlexiblePageNumberPagination
+from .rbac_config import ALL_MODULES_CATALOGUE
 
 
 class OrganizationViewSet(viewsets.ModelViewSet):
@@ -88,6 +89,14 @@ class ModuleViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing application modules
     Admins can view modules, only super admin can create/edit/delete
+
+    SOFT-CODED AUTO-SYNC: get_queryset() lazily provisions any module defined
+    in rbac_config.ALL_MODULES_CATALOGUE that is missing from the DB. This
+    means adding a new sub-feature's entry to ALL_MODULES_CATALOGUE makes it
+    appear in Module Access (Admin ▸ Roles) immediately on next page load —
+    no manual seed command or migration required. Purely additive/idempotent:
+    existing Module rows, role-module assignments, and permissions are never
+    modified or removed by this sync.
     """
     queryset = Module.objects.all()
     serializer_class = ModuleSerializer
@@ -97,7 +106,39 @@ class ModuleViewSet(viewsets.ModelViewSet):
     ordering_fields = ['order', 'name']
     filterset_fields = ['is_active']
     pagination_class = None  # Disable pagination - modules are a small dataset
-    
+
+    def get_queryset(self):
+        self._sync_catalogue_modules()
+        return super().get_queryset()
+
+    @staticmethod
+    def _sync_catalogue_modules():
+        """
+        Idempotently create any ALL_MODULES_CATALOGUE entry that doesn't yet
+        exist in the DB (matched by code). Cheap — two queries, and only
+        writes when a genuinely new module code is detected. Never touches
+        an existing Module row, so manual edits (e.g. is_active toggles)
+        made via Django admin are preserved.
+        """
+        existing_codes = set(Module.objects.values_list('code', flat=True))
+        missing = [m for m in ALL_MODULES_CATALOGUE if m['code'] not in existing_codes]
+        if not missing:
+            return
+        Module.objects.bulk_create(
+            [
+                Module(
+                    code=m['code'],
+                    name=m['name'],
+                    description=m.get('description', ''),
+                    icon=m.get('icon', ''),
+                    order=m.get('order', 0),
+                    is_active=True,
+                )
+                for m in missing
+            ],
+            ignore_conflicts=True,
+        )
+
     def get_permissions(self):
         """
         Allow admins to read modules, only super admin can modify
@@ -111,7 +152,7 @@ class ModuleViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated, IsAdmin])
     def active(self, request):
         """Get all active modules"""
-        modules = Module.objects.filter(is_active=True).order_by('order', 'name')
+        modules = self.get_queryset().filter(is_active=True).order_by('order', 'name')
         serializer = self.get_serializer(modules, many=True)
         return Response(serializer.data)
 
