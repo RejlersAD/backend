@@ -269,6 +269,14 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
     accuracy_pct = validation_report.get("template_comparison", {}).get("accuracy_estimate", 0)
     total_components = sum(len(cls.get("components", [])) for cls in cleaned_classes)
     
+    # Extract token usage and cost from service
+    usage_data = service.get_usage_and_cost()
+    job.gemini_prompt_tokens = usage_data["gemini_prompt_tokens"]
+    job.gemini_completion_tokens = usage_data["gemini_completion_tokens"]
+    job.openai_prompt_tokens = usage_data["openai_prompt_tokens"]
+    job.openai_completion_tokens = usage_data["openai_completion_tokens"]
+    job.cost_usd = usage_data["cost_usd"]
+    
     job.status = PaperSpecExtractionJob.STATUS_COMPLETED
     job.progress_percent = 100
     job.completed_at = timezone.now()
@@ -277,7 +285,11 @@ def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
         f"{accuracy_pct:.1f}% accuracy · "
         f"{quality_report['duplicates_removed']} dupes removed"
     )
-    job.save(update_fields=["status", "progress_percent", "completed_at", "current_phase"])
+    job.save(update_fields=[
+        "status", "progress_percent", "completed_at", "current_phase",
+        "gemini_prompt_tokens", "gemini_completion_tokens",
+        "openai_prompt_tokens", "openai_completion_tokens", "cost_usd"
+    ])
 
     _write_progress(
         str(job.id),

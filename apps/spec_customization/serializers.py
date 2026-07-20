@@ -86,3 +86,44 @@ class PipingClassListSerializer(serializers.ModelSerializer):
             'service_list', 'source_pages', 'confidence_score',
             'extraction_engine', 'components_count', 'created_at',
         ]
+
+
+
+class PaperSpecExtractionJobBriefSerializer(serializers.ModelSerializer):
+    """
+    Brief serializer for job history list view.
+    Mirrors electrical_checklist.ChecklistExtractionJobBriefSerializer pattern.
+    """
+    user_name = serializers.SerializerMethodField()
+    document_name = serializers.SerializerMethodField()
+    components_count = serializers.SerializerMethodField()
+    classes_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PaperSpecExtractionJob
+        fields = [
+            'id', 'status', 'progress_percent', 'current_phase',
+            'user_name', 'document_name', 'created_at', 'completed_at',
+            'components_count', 'classes_count',
+            'gemini_prompt_tokens', 'gemini_completion_tokens',
+            'openai_prompt_tokens', 'openai_completion_tokens', 'cost_usd',
+        ]
+        read_only_fields = fields
+
+    def get_user_name(self, obj):
+        if not obj.created_by:
+            return 'Unknown'
+        return obj.created_by.get_full_name() or obj.created_by.username
+
+    def get_document_name(self, obj):
+        if not obj.document:
+            return f'Job #{str(obj.id)[:8]}'
+        return obj.document.original_filename or obj.document.title or f'Document #{str(obj.document.id)[:8]}'
+
+    def get_components_count(self, obj):
+        # Prefetch via annotation in the view (components_count)
+        return getattr(obj, 'components_count', 0)
+
+    def get_classes_count(self, obj):
+        # Prefetch via annotation in the view (classes_count)
+        return getattr(obj, 'classes_count', 0)

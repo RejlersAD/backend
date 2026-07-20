@@ -267,3 +267,80 @@ def list_project_items(request, project_id):
         'document_count': len(doc_items),
         'items':          combined,
     })
+
+
+
+# ---------------------------------------------------------------------------
+# Project-scoped job history list (for history table UI)
+# ---------------------------------------------------------------------------
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_project_jobs(request, project_id):
+    """
+    GET /spec-customization/projects/<project_id>/jobs/
+    
+    Returns paginated list of extraction jobs for the project's history table.
+    Mirrors electrical_checklist.project_views.checklists() pattern.
+    
+    Query params:
+      - status: filter by job status (optional)
+      - page: page number (default 1)
+      - page_size: items per page (default 25, max 100)
+    """
+    try:
+        p = SpecProject.objects.get(project_id=project_id)
+    except SpecProject.DoesNotExist:
+        return Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not _is_admin(request.user) and p.created_by_id != getattr(request.user, 'id', None):
+        return Response({'error': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+    # Base queryset: jobs linked to documents belonging to this project
+    pid_str = str(p.project_id)
+    jobs_qs = (
+        PaperSpecExtractionJob.objects
+        .filter(document__project_id=pid_str)
+        .select_related('document', 'created_by')
+    )
+
+    # Optional status filter
+    status_filter = request.GET.get('status', '').strip()
+    if status_filter:
+        jobs_qs = jobs_qs.filter(status=status_filter)
+
+    # Annotate with counts (for serializer efficiency)
+    from django.db.models import Count as DjangoCount
+    jobs_qs = jobs_qs.annotate(
+        classes_count=DjangoCount('piping_classes', distinct=True),
+        components_count=DjangoCount('piping_classes__components', distinct=True),
+    )
+
+    # Order by most recent first
+    jobs_qs = jobs_qs.order_by('-created_at')
+
+    # Pagination
+    try:
+        page = int(request.GET.get('page', 1))
+        page_size = min(int(request.GET.get('page_size', 25)), 100)
+    except (TypeError, ValueError):
+        page = 1
+        page_size = 25
+
+    total = jobs_qs.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+    jobs = list(jobs_qs[start:end])
+
+    # Serialize
+    from .serializers import PaperSpecExtractionJobBriefSerializer
+    serializer = PaperSpecExtractionJobBriefSerializer(jobs, many=True)
+
+    return Response({
+        'success': True,
+        'jobs': serializer.data,
+        'pagination': {
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+        },
+    })

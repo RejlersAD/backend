@@ -90,6 +90,18 @@ SPEC_EXTRACTION_CONFIG = {
     "confidence_threshold":  0.35,   # below this, class flagged low-confidence
     "min_components_to_keep":  0,    # keep header-only detections (0 = no filter)
 
+    # ── AI escalation thresholds (OpenAI = last-level AI tier) ──────────
+    # Mirrors electrical_checklist's HANDWRITING_CONFIG escalation pattern:
+    # Gemini (primary, cheaper) result is accepted immediately ONLY if it
+    # clears both thresholds below; otherwise OpenAI is tried as the final
+    # escalation and the better of the two results is kept (see
+    # extraction_service.extract_chunk()'s WATERFALL MODE branch).
+    # Override via env vars without redeploying.
+    "escalate_if_components_below":       _env_int("SPEC_ESCALATE_IF_COMPONENTS_BELOW", 3, lo=0, hi=1000),
+    # Average self-reported `confidence` (0.0-1.0) across all classes found
+    # in the chunk; below this, escalate. Stored as float via env override.
+    "escalate_if_avg_confidence_below":   float(os.environ.get("SPEC_ESCALATE_IF_AVG_CONF_BELOW", "0.5") or 0.5),
+
     # ── Regex patterns (soft-coded) ─────────────────────────────────────
     # Broad regex covers common Oil & Gas PMS header formats:
     #   PIPING SPEC: A  |  PIPING SPECIFICATION: A  |  CLASS 150-A
@@ -132,6 +144,22 @@ SPEC_EXTRACTION_CONFIG = {
     # 90-100 → merge + persist
     "chunk_progress_start":  10,
     "chunk_progress_end":    90,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI model pricing (USD per 1M tokens) — for cost estimation & billing transparency
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTE: These are approximate rates as of 2026-07; verify against current vendor pricing.
+# Override in production via environment variables if needed.
+GEMINI_PRICING_PER_1M_TOKENS = {
+    "input":  float(os.environ.get("GEMINI_INPUT_PRICE_PER_1M", "0.15") or 0.15),    # flash model ~$0.15/1M input
+    "output": float(os.environ.get("GEMINI_OUTPUT_PRICE_PER_1M", "0.60") or 0.60),   # flash model ~$0.60/1M output
+}
+
+OPENAI_PRICING_PER_1M_TOKENS = {
+    "input":  float(os.environ.get("OPENAI_INPUT_PRICE_PER_1M", "2.50") or 2.50),    # gpt-4o ~$2.50/1M input
+    "output": float(os.environ.get("OPENAI_OUTPUT_PRICE_PER_1M", "10.00") or 10.00), # gpt-4o ~$10.00/1M output
 }
 
 

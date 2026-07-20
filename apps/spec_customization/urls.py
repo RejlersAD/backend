@@ -10,6 +10,7 @@ urlpatterns = [
     path('projects/',                          project_views.projects_collection, name='projects'),
     path('projects/<uuid:project_id>/',        project_views.project_detail,      name='project-detail'),
     path('projects/<uuid:project_id>/items/',  project_views.list_project_items,  name='project-items'),
+    path('projects/<uuid:project_id>/jobs/',   project_views.list_project_jobs,   name='project-jobs'),
 
     # Paper Spec extraction
     path('paper-spec/upload/',                 views.upload_paper_spec, name='upload'),

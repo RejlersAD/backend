@@ -21,7 +21,8 @@ hold only the *persisted* outputs.
 """
 from __future__ import annotations
 
-import uuid
+import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
@@ -110,7 +111,14 @@ class PaperSpecExtractionJob(models.Model):
     config_snapshot = models.JSONField(default=dict, blank=True)
 
     celery_task_id = models.CharField(max_length=128, blank=True, default='', db_index=True)
-    error_message = models.TextField(blank=True, default='')
+    error_message = models.TextField(blank=True, default='')
+
+    # AI token usage tracking (for cost estimation and billing transparency).
+    gemini_prompt_tokens = models.IntegerField(default=0)
+    gemini_completion_tokens = models.IntegerField(default=0)
+    openai_prompt_tokens = models.IntegerField(default=0)
+    openai_completion_tokens = models.IntegerField(default=0)
+    cost_usd = models.DecimalField(max_digits=10, decimal_places=6, default=Decimal('0'))
 
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

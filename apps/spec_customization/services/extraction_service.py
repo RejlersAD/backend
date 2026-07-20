@@ -23,7 +23,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import SPEC_EXTRACTION_CONFIG
-from .prompts import SYSTEM_PROMPT, EXTRACT_PIPING_CLASS_PROMPT
+from .prompts import SYSTEM_PROMPT, build_extraction_prompt
 from .advanced_validation import (
     merge_ensemble_results,
     validate_extracted_classes,
@@ -69,6 +69,12 @@ class PaperSpecExtractionService:
         self._gemini_quota_exceeded = False
         self._openai_quota_exceeded = False
         self._ai_pages_used = 0
+        
+        # Token usage tracking (for cost calculation)
+        self._gemini_prompt_tokens = 0
+        self._gemini_completion_tokens = 0
+        self._openai_prompt_tokens = 0
+        self._openai_completion_tokens = 0
 
     # ── Lazy client init ────────────────────────────────────────────────
     def _get_gemini(self):
@@ -197,7 +203,7 @@ class PaperSpecExtractionService:
             return None
         try:
             from google.genai import types  # type: ignore
-            parts: List[Any] = [SYSTEM_PROMPT + "\n\n" + EXTRACT_PIPING_CLASS_PROMPT]
+            parts: List[Any] = [SYSTEM_PROMPT + "\n\n" + build_extraction_prompt()]
             for b64 in images_b64:
                 parts.append(types.Part.from_bytes(
                     data=base64.b64decode(b64),
@@ -211,6 +217,12 @@ class PaperSpecExtractionService:
                     response_mime_type="application/json",
                 ),
             )
+            
+            # Track token usage for cost calculation
+            if hasattr(resp, 'usage_metadata') and resp.usage_metadata:
+                self._gemini_prompt_tokens += getattr(resp.usage_metadata, 'prompt_token_count', 0)
+                self._gemini_completion_tokens += getattr(resp.usage_metadata, 'candidates_token_count', 0)
+            
             blob = _extract_json_blob(resp.text or "")
             if not blob:
                 return None
@@ -234,7 +246,7 @@ class PaperSpecExtractionService:
             return None
         try:
             content: List[Dict[str, Any]] = [
-                {"type": "text", "text": EXTRACT_PIPING_CLASS_PROMPT},
+                {"type": "text", "text": build_extraction_prompt()},
             ]
             for b64 in images_b64:
                 content.append({
@@ -251,6 +263,12 @@ class PaperSpecExtractionService:
                 temperature=self.config["openai_temperature"],
                 response_format={"type": "json_object"},
             )
+            
+            # Track token usage for cost calculation
+            if hasattr(resp, 'usage') and resp.usage:
+                self._openai_prompt_tokens += getattr(resp.usage, 'prompt_tokens', 0)
+                self._openai_completion_tokens += getattr(resp.usage, 'completion_tokens', 0)
+            
             raw = resp.choices[0].message.content or ""
             blob = _extract_json_blob(raw)
             if not blob:
@@ -306,6 +324,31 @@ class PaperSpecExtractionService:
         except Exception as e:
             logger.info("[SpecExtraction] Tesseract not usable: %s", e)
             return None
+
+    # ── Escalation quality gate (mirrors HANDWRITING_CONFIG's
+    # escalate_if_fields_below / escalate_if_avg_conf_below pattern) ────
+    @staticmethod
+    def _classes_quality(classes: List[Dict[str, Any]]) -> Tuple[int, float]:
+        """Return (total_component_count, avg_confidence) for a list of
+        piping classes, used to decide whether to escalate to the next AI tier."""
+        if not classes:
+            return 0, 0.0
+        total_components = sum(len(c.get("components", []) or []) for c in classes)
+        confidences = [float(c.get("confidence", 0) or 0) for c in classes]
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        return total_components, avg_conf
+
+    def _meets_escalation_thresholds(self, classes: List[Dict[str, Any]]) -> bool:
+        """True if `classes` is good enough to accept WITHOUT escalating to
+        the next, costlier AI tier. Soft-coded via
+        `escalate_if_components_below` / `escalate_if_avg_confidence_below`
+        in SPEC_EXTRACTION_CONFIG."""
+        if not classes:
+            return False
+        total_components, avg_conf = self._classes_quality(classes)
+        min_components = int(self.config["escalate_if_components_below"])
+        min_conf = float(self.config["escalate_if_avg_confidence_below"])
+        return total_components >= min_components and avg_conf >= min_conf
 
     # ── Orchestrator: process one chunk via the engine waterfall ────────
     def extract_chunk(
@@ -382,26 +425,65 @@ class PaperSpecExtractionService:
                         "ensemble_metrics": ensemble_metrics,
                     }
             
-            # ── WATERFALL MODE: Try engines sequentially ──
+            # ── WATERFALL MODE: Try engines sequentially, escalating to the
+            # next (costlier) AI tier ONLY if the current result is below the
+            # soft-coded quality thresholds (escalate_if_components_below /
+            # escalate_if_avg_confidence_below in config.py). OpenAI is the
+            # final AI escalation tier — mirrors electrical_checklist's
+            # OCR-first / Vision-escalation pattern (HANDWRITING_CONFIG).
+            gemini_candidate: Optional[Dict[str, Any]] = None
             for engine in engines:
                 if engine == "pymupdf_text":
                     continue  # already done
                 if engine == "gemini_vision":
                     images = images or self.render_pages_to_jpeg_b64(pdf_path, start, end)
                     blob = self.extract_via_gemini(images, (start, end))
-                    if blob and blob.get("piping_classes"):
+                    classes = blob.get("piping_classes") if blob else None
+                    if classes:
                         self._ai_pages_used += page_count_in_chunk
-                        return {"piping_classes": blob["piping_classes"], "engine_used": "gemini_vision"}
+                        if self._meets_escalation_thresholds(classes):
+                            return {"piping_classes": classes, "engine_used": "gemini_vision"}
+                        # Below threshold — keep as a fallback candidate and
+                        # escalate to OpenAI (the last AI level) instead of
+                        # accepting immediately.
+                        gemini_candidate = {"piping_classes": classes, "engine_used": "gemini_vision"}
+                        logger.info(
+                            "[SpecExtraction] Gemini result below escalation thresholds "
+                            "(pages %d-%d) — escalating to OpenAI", start + 1, end + 1
+                        )
                 elif engine == "openai_vision":
                     images = images or self.render_pages_to_jpeg_b64(pdf_path, start, end)
                     blob = self.extract_via_openai(images, (start, end))
-                    if blob and blob.get("piping_classes"):
+                    classes = blob.get("piping_classes") if blob else None
+                    if classes:
                         self._ai_pages_used += page_count_in_chunk
-                        return {"piping_classes": blob["piping_classes"], "engine_used": "openai_vision"}
+                        if not gemini_candidate:
+                            return {"piping_classes": classes, "engine_used": "openai_vision"}
+                        # Both tiers produced something — pick whichever is
+                        # objectively better (more components, else higher
+                        # confidence) instead of blindly preferring whichever
+                        # ran last.
+                        g_count, g_conf = self._classes_quality(gemini_candidate["piping_classes"])
+                        o_count, o_conf = self._classes_quality(classes)
+                        if (o_count, o_conf) > (g_count, g_conf):
+                            return {"piping_classes": classes, "engine_used": "openai_vision_escalated"}
+                        return {"piping_classes": gemini_candidate["piping_classes"],
+                                "engine_used": "gemini_vision_kept_over_openai"}
+                    if gemini_candidate:
+                        # OpenAI failed/empty — Gemini's below-threshold result
+                        # is still better than nothing.
+                        return gemini_candidate
                 elif engine == "tesseract":
+                    if gemini_candidate:
+                        # Already have a usable AI candidate — tesseract's
+                        # header-only detection can't improve on it.
+                        return gemini_candidate
                     blob = self.extract_via_tesseract(pdf_path, start, end)
                     if blob and blob.get("piping_classes"):
                         return {"piping_classes": blob["piping_classes"], "engine_used": "tesseract"}
+
+            if gemini_candidate:
+                return gemini_candidate
         else:
             logger.info("[SpecExtraction] AI budget exhausted (%d/%d) — using text/tesseract only",
                         self._ai_pages_used, max_ai_pages)
@@ -440,3 +522,32 @@ class PaperSpecExtractionService:
                 if merged_pages:
                     bucket[code]["_source_pages"] = [merged_pages[0], merged_pages[-1]]
         return sorted(bucket.values(), key=lambda c: c.get("class_code", ""))
+
+
+    # -- Token usage & cost calculation ----------------------------------
+    def get_usage_and_cost(self) -> Dict[str, Any]:
+        """Return token usage totals and computed cost in USD.
+        
+        Mirrors the pattern used by electrical_checklist.handwriting_extractor:
+        compute cost once based on accumulated tokens, no async post-processing.
+        """
+        from .config import GEMINI_PRICING_PER_1M_TOKENS, OPENAI_PRICING_PER_1M_TOKENS
+        from decimal import Decimal
+        
+        gemini_cost = (
+            (self._gemini_prompt_tokens / 1_000_000) * GEMINI_PRICING_PER_1M_TOKENS["input"]
+            + (self._gemini_completion_tokens / 1_000_000) * GEMINI_PRICING_PER_1M_TOKENS["output"]
+        )
+        openai_cost = (
+            (self._openai_prompt_tokens / 1_000_000) * OPENAI_PRICING_PER_1M_TOKENS["input"]
+            + (self._openai_completion_tokens / 1_000_000) * OPENAI_PRICING_PER_1M_TOKENS["output"]
+        )
+        total_cost_usd = Decimal(str(round(gemini_cost + openai_cost, 6)))
+        
+        return {
+            "gemini_prompt_tokens": self._gemini_prompt_tokens,
+            "gemini_completion_tokens": self._gemini_completion_tokens,
+            "openai_prompt_tokens": self._openai_prompt_tokens,
+            "openai_completion_tokens": self._openai_completion_tokens,
+            "cost_usd": total_cost_usd,
+        }
