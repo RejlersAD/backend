@@ -158,8 +158,10 @@ def _template_passthrough_rows(
 
     Used for sheets that have no builder registered (e.g. SP3D static
     reference sheets like ``PipingCommodityFilter``) so the canvas reflects
-    the LS1E reference content.  Returns rows in preview shape with stable
-    ``row_key``s of the form ``tpl:{sheet}:{row_idx}``.
+    any static rows shipped with the standard template.  With the current
+    blank standard template these sheets have no rows between ``Start``/``End``
+    markers, so this naturally returns ``[]``.  Returns rows in preview shape
+    with stable ``row_key``s of the form ``tpl:{sheet}:{row_idx}``.
     """
     if not headers:
         return []
@@ -241,17 +243,74 @@ def _enumerate_spec_rows(job):
                     seq += 1
 
 
-def _enumerate_cat_rows(job):
-    """Yield (sheet_name, row_key, source_dict, cells_dict) tuples for CAT."""
+def _route_cat_components(job) -> tuple[dict[str, list], list[dict]]:
+    """Route every component in `job` to its CAT sheet.
+
+    Returns ``(by_sheet, unrouted)``:
+      - ``by_sheet``:  ``{sheet_name: [(cls, comp), ...]}``
+      - ``unrouted``:  components with no matching rule in
+        ``cfg._CAT_ROUTING_RULES`` (e.g. valve sub-types with no dedicated
+        sheet in the standard CAT template) — kept as plain dicts so the
+        canvas can report them instead of silently dropping the data.
+
+    Generic umbrella fitting-family spec lines (e.g. "B.W. FITTINGS" with no
+    shape given) are NOT left unrouted — they are fanned out into every
+    applicable CAT shape sheet via `cfg.expand_generic_fitting_family()`
+    (see smartplant_config.py, section 6b) before falling back to unrouted.
+    """
     classes = list(job.piping_classes.prefetch_related('components').order_by('class_code'))
-    # Route components → sheets exactly like the exporter does.
     by_sheet: dict[str, list] = {}
+    unrouted: list[dict] = []
     for cls in classes:
         for comp in cls.components.all().order_by('display_order'):
             sheet = cfg.route_component_to_cat_sheet(comp)
             if sheet is None:
+                fanned_out = cfg.expand_generic_fitting_family(comp)
+                if fanned_out:
+                    for target_sheet, comp_view in fanned_out:
+                        by_sheet.setdefault(target_sheet, []).append((cls, comp_view))
+                    continue
+                unrouted.append({
+                    'component_id':   str(comp.id),
+                    'class_code':     cls.class_code,
+                    'component_type': comp.component_type or '',
+                    'sub_type':       comp.sub_type or '',
+                    'description':    (comp.description or '')[:120],
+                })
                 continue
             by_sheet.setdefault(sheet, []).append((cls, comp))
+    return by_sheet, unrouted
+
+
+def _summarize_unrouted(unrouted: list[dict]) -> list[dict]:
+    """Group unrouted CAT components by (component_type, sub_type) with
+    counts + a few sample descriptions, for a compact UI summary."""
+    if not unrouted:
+        return []
+    limit = getattr(cfg, 'CAT_UNROUTED_SAMPLE_LIMIT', 5)
+    groups: dict[tuple[str, str], dict] = {}
+    for item in unrouted:
+        key = (item['component_type'], item['sub_type'])
+        g = groups.setdefault(key, {
+            'component_type': item['component_type'],
+            'sub_type':       item['sub_type'],
+            'count':          0,
+            'samples':        [],
+        })
+        g['count'] += 1
+        if len(g['samples']) < limit and item['description']:
+            g['samples'].append(item['description'])
+    return sorted(groups.values(), key=lambda g: -g['count'])
+
+
+def _enumerate_cat_rows(job, unrouted_out: list[dict] | None = None):
+    """Yield (sheet_name, row_key, source_dict, cells_dict) tuples for CAT.
+
+    If `unrouted_out` is given, unrouted components are appended to it.
+    """
+    by_sheet, unrouted = _route_cat_components(job)
+    if unrouted_out is not None:
+        unrouted_out.extend(unrouted)
 
     for sheet_name, items in by_sheet.items():
         builder = cfg.CAT_SHEET_BUILDERS.get(sheet_name)
@@ -296,14 +355,22 @@ def build_preview(job, workbook: str) -> dict:
         raise ValueError(f"unknown workbook: {workbook!r}")
 
     template_path = cfg.SPEC_TEMPLATE_PATH if workbook == WORKBOOK_SPEC else cfg.CAT_TEMPLATE_PATH
-    enumerate_fn  = _enumerate_spec_rows if workbook == WORKBOOK_SPEC else _enumerate_cat_rows
     overrides     = _load_overrides(job, workbook)
 
     # Bucket rows by sheet, preserving order.
     sheets_order: list[str] = []
     rows_by_sheet: dict[str, list[dict]] = {}
 
-    for sheet_name, row_key, source, cells in enumerate_fn(job):
+    # CAT-only: components with no matching routing rule (e.g. valve
+    # sub-types with no dedicated sheet in the standard template) are
+    # collected here instead of being silently dropped from the workbook.
+    unrouted: list[dict] = []
+    if workbook == WORKBOOK_CAT:
+        rows_iter = _enumerate_cat_rows(job, unrouted)
+    else:
+        rows_iter = _enumerate_spec_rows(job)
+
+    for sheet_name, row_key, source, cells in rows_iter:
         if sheet_name not in rows_by_sheet:
             sheets_order.append(sheet_name)
             rows_by_sheet[sheet_name] = []
@@ -344,8 +411,8 @@ def build_preview(job, workbook: str) -> dict:
 
     # Surface every template sheet in the canvas — even sheets with no
     # auto-generated rows (e.g. `CustomInterfaces`, `PipingCommodityFilter`).
-    # This keeps the UI aligned with the LS1E-A3 reference workbook so the
-    # user can see the full bulkload schema, not just the populated subset.
+    # This keeps the UI aligned with the standard bulkload template so the
+    # user can see the full schema, not just the populated subset.
     try:
         _wb = load_workbook(template_path, read_only=True, data_only=True)
         template_sheet_names = list(_wb.sheetnames)
@@ -362,8 +429,8 @@ def build_preview(job, workbook: str) -> dict:
         if not headers:
             # Skip sheets whose Head row could not be detected.
             continue
-        # Surface template-shipped static data (e.g. PipingCommodityFilter's
-        # 700+ LS1E reference rows) and apply any saved cell overrides on top.
+        # Surface any static data rows shipped with the template (blank in the
+        # current standard template) and apply any saved cell overrides on top.
         passthrough = _template_passthrough_rows(template_path, sheet_name, headers)
         for row in passthrough:
             sheet_overrides = overrides.get((sheet_name, row['row_key']), {})
@@ -377,11 +444,14 @@ def build_preview(job, workbook: str) -> dict:
             'rows':       passthrough,
         })
 
-    return {
+    result = {
         'workbook':  workbook,
         'job_id':    str(job.id),
         'sheets':    sheets_out,
     }
+    if workbook == WORKBOOK_CAT:
+        result['unrouted_components'] = _summarize_unrouted(unrouted)
+    return result
 
 
 def apply_overrides_to_row(

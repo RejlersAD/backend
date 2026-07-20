@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime
+from types import SimpleNamespace
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. TEMPLATE FILES
@@ -62,6 +63,14 @@ TEMPLATE_PASSTHROUGH_MAX_ROWS  = 5000   # hard cap per sheet to keep payload san
 # Enrich template-passthrough rows by filling blank cells with SP3D-valid
 # defaults (see TEMPLATE_PASSTHROUGH_FIELD_DEFAULTS at the bottom of this file).
 TEMPLATE_PASSTHROUGH_AUTOFILL_ENABLED = True
+
+# Components that fail to match any `_CAT_ROUTING_RULES` pattern (e.g. valve
+# sub-types like Ball/Plug/Butterfly that have no dedicated sheet in the
+# standard CAT bulkload template) are NOT written into any sheet — they are
+# instead surfaced via `unrouted_components` in the workbook preview response
+# so the gap is visible to the user instead of being silently dropped.
+# This caps how many example descriptions are kept per (type, sub_type) group.
+CAT_UNROUTED_SAMPLE_LIMIT = 5
 
 
 def _pcf_short_code_is_bend(c: dict) -> bool:
@@ -958,8 +967,14 @@ def _fmt_pressure(p):
 
 
 def _spec_name(cls) -> str:
-    """Stable SpecName for a PipingClass (matches SmartPlant SpecName key)."""
-    return (cls.class_full_code or cls.class_code or 'SPEC').strip()
+    """Stable SpecName for a PipingClass (matches SmartPlant SpecName key).
+
+    Per SP3D convention / Spec Customisation SME guidance, SpecName must be
+    the SHORT class code (e.g. "A"), not the full header line (e.g.
+    "PIPING SPEC: A"). ``class_full_code`` is retained only as a fallback
+    for the rare case where no short code was extracted.
+    """
+    return (cls.class_code or cls.class_full_code or 'SPEC').strip()
 
 
 def _safe_class_token(cls) -> str:
@@ -1043,6 +1058,20 @@ CAT_SHEET_DEFAULTS = {
                               icc_prefix='RAD_GLO', ports=2),
     'CheckValve':        dict(commodity_type='CHK',   geometry_type='15',  symbol_def='CheckValve,Ingr.SP3D.Content.Piping.CheckValve',
                               icc_prefix='RAD_CHK', ports=2),
+    # ── New valve sheets (added to cover real-world ADNOC-style specs — no
+    # LS1E-A3 reference calibration data exists for these; commodity_type
+    # codes + symbol_def strings follow the same naming convention as
+    # GateValve/GlobeValve/CheckValve but are NOT verified against a live
+    # SP3D catalogue. Refine once a reference project with these valve
+    # types is available. ──
+    'PlugValve':         dict(commodity_type='PLG',   geometry_type='15',  symbol_def='PlugValve,Ingr.SP3D.Content.Piping.PlugValve',
+                              icc_prefix='RAD_PLG', ports=2),
+    'BallValve':         dict(commodity_type='BAL',   geometry_type='15',  symbol_def='BallValve,Ingr.SP3D.Content.Piping.BallValve',
+                              icc_prefix='RAD_BAL', ports=2),
+    'ButterflyValve':    dict(commodity_type='BFY',   geometry_type='15',  symbol_def='ButterflyValve,Ingr.SP3D.Content.Piping.ButterflyValve',
+                              icc_prefix='RAD_BFY', ports=2),
+    'VentDrainValve':    dict(commodity_type='VDV',   geometry_type='15',  symbol_def='VentDrainValve,Ingr.SP3D.Content.Piping.VentDrainValve',
+                              icc_prefix='RAD_VDV', ports=2),
     'Paddle':            dict(commodity_type='BLSPA', geometry_type='15',  symbol_def='PaddleSpacer,Ingr.SP3D.Content.Piping.PaddleSpacer',
                               icc_prefix='RAD_PAD', ports=2),
     'Coupling':          dict(commodity_type='CPL',   geometry_type='15',  symbol_def='Coupling,Ingr.SP3D.Content.Piping.Coupling',
@@ -1570,6 +1599,53 @@ CAT_DIMENSIONAL_FIELDS: dict[str, dict[str, object]] = {
         # (e.g. 6"-150 SW = 165mm, 6"-150 FL = 451mm). Sentinel '0' fires
         # only when extractor yields nothing for the row.
         'FacetoFace':                    '0',
+    },
+    # ── New valve sheets (PlugValve/BallValve/ButterflyValve/VentDrainValve)
+    # No LS1E-A3 reference data exists for these valve types (added to cover
+    # real-world specs — see smartplant_config._CAT_ROUTING_RULES). Reuse the
+    # same "Not Specified" sentinel pattern as CheckValve/GateValve so the
+    # canvas never shows empty cells; PartDataBasis/ValveTrim left blank
+    # (unlike Gate/Globe/Check, no reference PartDataBasis code is known —
+    # override via WorkbookCellOverride once real project data is available).
+    'PlugValve':      {
+        'LiningMaterial': '0', 'BendRadius': '0', 'BendRadiusMultiplier': '0',
+        'MirrorBehaviorOption': '0', 'ValveManufacturer': '', 'ValveModelNumber': '',
+        'ValveTrim': '', 'PartDataBasis': '', 'FlangeFaceSurfaceFinish': '0',
+        'SurfacePreparation': '0', 'ManufacturingMethod': '0',
+        'MiscRequisitionClassification': '0', 'PipingNote1': '',
+        'DryWeight': '0', 'DryCogX': '0', 'DryCogY': '0', 'DryCogZ': '0',
+        'WaterWeight': '0', 'WaterCogX': '0', 'WaterCogY': '0', 'WaterCogZ': '0',
+        'SurfaceArea': '0', 'VolumetricCapacity': '0',
+    },
+    'BallValve':      {
+        'LiningMaterial': '0', 'BendRadius': '0', 'BendRadiusMultiplier': '0',
+        'MirrorBehaviorOption': '0', 'ValveManufacturer': '', 'ValveModelNumber': '',
+        'ValveTrim': '', 'PartDataBasis': '', 'FlangeFaceSurfaceFinish': '0',
+        'SurfacePreparation': '0', 'ManufacturingMethod': '0',
+        'MiscRequisitionClassification': '0', 'PipingNote1': '',
+        'DryWeight': '0', 'DryCogX': '0', 'DryCogY': '0', 'DryCogZ': '0',
+        'WaterWeight': '0', 'WaterCogX': '0', 'WaterCogY': '0', 'WaterCogZ': '0',
+        'SurfaceArea': '0', 'VolumetricCapacity': '0',
+    },
+    'ButterflyValve': {
+        'LiningMaterial': '0', 'BendRadius': '0', 'BendRadiusMultiplier': '0',
+        'MirrorBehaviorOption': '0', 'ValveManufacturer': '', 'ValveModelNumber': '',
+        'ValveTrim': '', 'PartDataBasis': '', 'FlangeFaceSurfaceFinish': '0',
+        'SurfacePreparation': '0', 'ManufacturingMethod': '0',
+        'MiscRequisitionClassification': '0', 'PipingNote1': '',
+        'DryWeight': '0', 'DryCogX': '0', 'DryCogY': '0', 'DryCogZ': '0',
+        'WaterWeight': '0', 'WaterCogX': '0', 'WaterCogY': '0', 'WaterCogZ': '0',
+        'SurfaceArea': '0', 'VolumetricCapacity': '0',
+    },
+    'VentDrainValve': {
+        'LiningMaterial': '0', 'BendRadius': '0', 'BendRadiusMultiplier': '0',
+        'MirrorBehaviorOption': '0', 'ValveManufacturer': '', 'ValveModelNumber': '',
+        'ValveTrim': '', 'PartDataBasis': '', 'FlangeFaceSurfaceFinish': '0',
+        'SurfacePreparation': '0', 'ManufacturingMethod': '0',
+        'MiscRequisitionClassification': '0', 'PipingNote1': '',
+        'DryWeight': '0', 'DryCogX': '0', 'DryCogY': '0', 'DryCogZ': '0',
+        'WaterWeight': '0', 'WaterCogX': '0', 'WaterCogY': '0', 'WaterCogZ': '0',
+        'SurfaceArea': '0', 'VolumetricCapacity': '0',
     },
     # ── Specialties ───────────────────────────────────────────────────────
     'Paddle': {
@@ -2836,76 +2912,99 @@ def _rows_weld_clearance_rule(cls):
 # fields that come straight from the extracted spec.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Soft-coded resolver: (component_type, sub_type keyword) → SP3D ShortCode.
-# Calibrated against the LS1E-A3 reference (PCF.ShortCode column). Keep
-# narrow keywords first; first match wins. Extend by adding a tuple — no
-# core-logic changes required.
-PCF_SHORT_CODE_RULES = [
-    # (component_type, sub_type/description keyword (lowercase), ShortCode)
-    ('pipe',    '',                'Piping'),
-    ('flange',  'blind',           'Blind Flange'),
-    ('flange',  'weld neck',       'Weld Neck Flange'),
-    ('flange',  'weldneck',        'Weld Neck Flange'),
-    ('flange',  'wn',              'Weld Neck Flange'),
-    ('flange',  '',                'Weld Neck Flange'),
-    ('fitting', '90 lr',           '90 Deg LR Elbow'),
-    ('fitting', '90 long',         '90 Deg LR Elbow'),
-    ('fitting', '45 lr',           '45 Deg LR Elbow'),
-    ('fitting', '45 long',         '45 Deg LR Elbow'),
-    ('fitting', '90',              '90 Deg Elbow'),
-    ('fitting', '45',              '45 Deg Elbow'),
-    ('fitting', 'elbow',           '90 Deg Elbow'),
-    ('fitting', 'reducing tee',    'Reducing Tee'),
-    ('fitting', 'red tee',         'Reducing Tee'),
-    ('fitting', 'tee',             'Tee'),
-    ('fitting', 'eccentric',       'Eccentric Reducer'),
-    ('fitting', 'concentric',      'Concentric Reducer'),
-    ('fitting', 'reducer',         'Concentric Reducer'),
-    ('fitting', 'swage',           'Concentric Swage'),
-    ('fitting', 'cap',             'Cap'),
-    # Branch connections - CRITICAL for S3D (reference LS1E-A3 has 255+ rows)
-    # Order matters: specific keywords first, generic 'olet' last
-    ('fitting', 'weldolet',        'Weldolet'),
-    ('fitting', 'elbolet',         'Elbolet'),
-    ('fitting', 'latrolet',        'Latrolet'),
-    ('fitting', 'sockolet',        'Sockolet'),
-    ('fitting', 'thredolet',       'Thredolet'),
-    ('fitting', 'threadolet',      'Thredolet'),
-    ('fitting', 'sweepolet',       'Sweepolet'),
-    ('fitting', 'nipolet',         'Nipolet'),
-    ('fitting', 'olet',            'Weldolet'),      # Generic fallback for unrecognized olet types
-    ('fitting', 'coupling',        'Coupling'),
-    ('fitting', 'nipple',          'Nipple'),
-    ('fitting', 'paddle',          'Paddle'),
-    ('fitting', 'spec blind',      'Paddle'),
-    ('fitting', 'spectacle',       'Paddle'),
-    ('fitting', '',                'Pipe Fitting'),  # Generic fitting fallback
-    ('valve',   'gate',            'Gate Valve'),
-    ('valve',   'globe',           'Globe Valve'),
-    ('valve',   'needle',          'Globe Valve'),  # Needle valves are often treated as globe type in S3D
-    ('valve',   'check',           'Check Valve'),
-    ('valve',   'nrv',             'Check Valve'),
-    ('valve',   '',                'Valve'),         # Generic valve fallback
-    ('gasket',  '',                'Gasket'),
-    ('bolt',    '',                'Stud Bolt'),
+# Soft-coded resolver: SP3D ShortCode for the PipingCommodityFilter (SPEC)
+# sheet. This is deliberately a THIN wrapper around the SAME rules the CAT
+# workbook already uses (`route_component_to_cat_sheet` /
+# `is_generic_fitting_family` / `_CAT_ROUTING_RULES`, defined further below
+# in section 6) instead of a second, independently-maintained keyword list.
+# That drift (two rule sets) is exactly what previously caused Plug/Ball/
+# Butterfly/Vent&Drain valves, Spade blinds, and generic "S.W. FITTINGS"
+# umbrella rows to fall back to a generic "Valve"/"Pipe Fitting" label in
+# the SPEC workbook even though the CAT workbook routed them correctly.
+# Extend by adding a CAT sheet name below (or a new rule to
+# `_CAT_ROUTING_RULES`) — no core-logic changes required.
+CAT_SHEET_TO_SHORT_CODE: dict = {
+    'PipeStock':          'Piping',
+    'BlindFlange':        'Blind Flange',
+    'WeldNeckFlange':     'Weld Neck Flange',
+    '90DegElbow':         '90 Deg Elbow',
+    '90DegLRElbow':       '90 Deg LR Elbow',
+    '45DegElbow':         '45 Deg Elbow',
+    '45DegLRElbow':       '45 Deg LR Elbow',
+    'ReducingTee':        'Reducing Tee',
+    'Tee':                'Tee',
+    'ConcentricReducer':  'Concentric Reducer',
+    'EccentricReducer':   'Eccentric Reducer',
+    'ConcentricSwage':    'Concentric Swage',
+    'Cap':                'Cap',
+    'Weldolet':           'Weldolet',
+    'Coupling':           'Coupling',
+    'Nipple':             'Nipple',
+    'Paddle':             'Paddle',
+    'GateValve':          'Gate Valve',
+    'GlobeValve':         'Globe Valve',
+    'CheckValve':         'Check Valve',
+    'PlugValve':          'Plug Valve',
+    'BallValve':          'Ball Valve',
+    'ButterflyValve':     'Butterfly Valve',
+    'VentDrainValve':     'Vent & Drain Valve',
+    'GasketPartData':     'Gasket',
+    'BoltPartData':       'Stud Bolt',
+}
+
+# Branch-fitting sub-types (Sockolet, Elbolet, Latrolet, Thredolet,
+# Sweepolet, Nipolet) all physically bulkload onto the single 'Weldolet'
+# CAT sheet (S3D has no dedicated sheet per branch type), so
+# `CAT_SHEET_TO_SHORT_CODE['Weldolet']` alone would hide the SPECIFIC
+# branch type the engineer wrote in the paper spec. These overrides
+# (regex, word-boundary aware so abbreviations like "SOL"/"WOL"/"TOL"
+# match without false-positiving on unrelated words) run BEFORE the sheet
+# lookup and win when matched, so ShortCode still shows e.g. "Sockolet"
+# even though CAT correctly bulkloads it under the Weldolet sheet.
+_BRANCH_FITTING_SHORT_CODE_OVERRIDES = [
+    (re.compile(r'(?i)sockolet|\bsol\b'),      'Sockolet'),
+    (re.compile(r'(?i)elbolet'),               'Elbolet'),
+    (re.compile(r'(?i)latrolet'),              'Latrolet'),
+    (re.compile(r'(?i)thr[ea]dolet|\btol\b'),  'Thredolet'),
+    (re.compile(r'(?i)sweepolet'),             'Sweepolet'),
+    (re.compile(r'(?i)nipolet'),               'Nipolet'),
+    (re.compile(r'(?i)weldolet|\bwol\b'),      'Weldolet'),
 ]
+
+# Human-readable label for a generic weld-type "umbrella" spec line (a row
+# that names NO specific shape, e.g. "S.W. FITTINGS 1/2"-2" SCH.80 ...") —
+# mirrors the label used in the source document, so it is always
+# recognisable in the SPEC workbook instead of showing "Pipe Fitting".
+_GENERIC_FAMILY_SHORT_CODE = {'BW': 'B.W. Fittings', 'SW': 'S.W. Fittings', 'SCRD': 'SCRD Fittings'}
 
 
 def _pcf_short_code_for_component(c) -> str:
-    """Soft-coded ShortCode resolver — SPEC↔CAT class-level join key.
+    """SP3D ShortCode for the SPEC↔CAT class-level join key.
 
-    Closes the audit gap where SPEC.ShortCode ('Gate Valve') had to map to
-    CAT.<sheet> ('GateValve'). Both sides now derive from the same rule
-    set, eliminating the whitespace/casing drift.
+    Derives from the SAME routing rules as the CAT workbook so the two
+    workbooks never disagree on what a component is. Precedence:
+      1. Generic weld-type umbrella rows ("S.W. FITTINGS" etc.)
+      2. Branch-fitting sub-type overrides (Sockolet/Elbolet/...)
+      3. The CAT sheet the component routes to (`route_component_to_cat_sheet`)
+      4. A last-resort label from the raw `component_type`
+    Never returns blank.
     """
+    family = is_generic_fitting_family(c)
+    if family:
+        return _GENERIC_FAMILY_SHORT_CODE.get(family, 'Pipe Fitting')
+
+    blob = f'{c.sub_type or ""} {c.description or ""}'
+    for pattern, label in _BRANCH_FITTING_SHORT_CODE_OVERRIDES:
+        if pattern.search(blob):
+            return label
+
+    sheet = route_component_to_cat_sheet(c)
+    if sheet:
+        return CAT_SHEET_TO_SHORT_CODE.get(sheet, sheet)
+
     ctype = (c.component_type or '').strip().lower()
-    blob  = f'{c.sub_type or ""} {c.description or ""}'.lower()
-    for rule_type, kw, short_code in PCF_SHORT_CODE_RULES:
-        if rule_type != ctype:
-            continue
-        if not kw or kw in blob:
-            return short_code
-    return 'Pipe Fitting'  # final fallback — never blank
+    return {'pipe': 'Piping', 'gasket': 'Gasket', 'bolt': 'Stud Bolt',
+            'valve': 'Valve'}.get(ctype, 'Pipe Fitting')  # final fallback — never blank
 
 
 def _rows_piping_commodity_filter(cls):
@@ -3030,14 +3129,21 @@ _CAT_ROUTING_RULES = [
     ('fitting', r'(?i)weldolet|wol\b|sockolet|sol\b|thredolet|tol\b|olet',        'Weldolet'),
     ('fitting', r'(?i)coupling',                                                  'Coupling'),
     ('fitting', r'(?i)nipple',                                                    'Nipple'),
-    ('fitting', r'(?i)paddle|spec\s*blind|spectacle|spacer\s*ring',               'Paddle'),
-    # No fitting fallback — leave un-routable fittings in the unrouted log.
+    ('fitting', r'(?i)paddle|spec\s*blind|spectacle|spacer\s*ring|\bspade\b|ring\s*(&|and)?\s*spade|spade\s*(&|and)?\s*ring|ring\s*set',  'Paddle'),
+    # No fitting fallback — components with no match are reported as
+    # `unrouted_components` in the CAT workbook preview (see
+    # `workbook_preview._summarize_unrouted`) instead of being silently dropped.
 
     # Valve ───────────────────────────────────────────────────────────────
     ('valve',   r'(?i)\bgate\b',                                                  'GateValve'),
     ('valve',   r'(?i)\b(globe|needle)\b',                                        'GlobeValve'),
     ('valve',   r'(?i)\bcheck\b|nrv|non[\s\-]?return',                            'CheckValve'),
-    # No valve fallback.
+    ('valve',   r'(?i)\bplug\b',                                                  'PlugValve'),
+    ('valve',   r'(?i)\bball\b',                                                  'BallValve'),
+    ('valve',   r'(?i)\b(butterfly|b\'?fly)\b',                                   'ButterflyValve'),
+    ('valve',   r'(?i)vent\s*(&|and)?\s*drain',                                   'VentDrainValve'),
+    # No valve fallback — genuinely unrecognised valve sub-types remain
+    # unrouted and reported via `unrouted_components` (see Plan v2, Phase 4).
 
     # Gasket / Bolt ───────────────────────────────────────────────────────
     ('gasket',  r'.*',                                                            'GasketPartData'),
@@ -3061,7 +3167,8 @@ def _bucket_component_type(component) -> str:
         return 'flange'
     if any(k in blob for k in ('elbow', 'ell ', ' tee', 'reducer', 'reducing', 'cap', 'olet',
                                 'coupling', 'nipple', 'swage', 'paddle', 'spec blind',
-                                'spectacle', 'spacer', 'fitting', 'union')):
+                                'spectacle', 'spacer', 'spade', 'ring set', 'ring & spade',
+                                'spade & ring', 'fitting', 'union')):
         return 'fitting'
     if any(k in blob for k in ('pipe', 'tube')):
         return 'pipe'
@@ -3078,6 +3185,93 @@ def route_component_to_cat_sheet(component) -> str | None:
         if re.search(pattern, sub_text):
             return sheet
     return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6b. GENERIC FITTING-FAMILY FAN-OUT
+#
+# Real piping specs commonly describe an entire weld-type family with ONE
+# umbrella spec line — e.g. "B.W. FITTINGS  2"-6"  SCH.40  DIMS BS1640 PART 3
+# MATL GR.WPB" — covering every butt-weld fitting SHAPE (elbow/tee/reducer/
+# cap/weldolet/coupling) that shares that material+schedule, without naming
+# a shape. The source document itself makes no shape distinction, so a
+# single unroutable "fitting" component is the WRONG model — the correct
+# SP3D-aligned behaviour is to fan the one spec line out into a synthetic
+# row per applicable shape sheet (see `expand_generic_fitting_family`).
+#
+# Soft-coded: retune which shapes belong to each weld-type family here only.
+# ─────────────────────────────────────────────────────────────────────────────
+GENERIC_FITTING_FAMILY_SHEETS: dict[str, list[str]] = {
+    'BW':   ['90DegElbow', '45DegElbow', 'Tee', 'ReducingTee', 'ConcentricReducer',
+             'EccentricReducer', 'Cap', 'Weldolet', 'Coupling'],
+    'SW':   ['90DegElbow', '45DegElbow', 'Tee', 'Weldolet', 'Coupling', 'Nipple'],
+    'SCRD': ['Tee', 'Coupling', 'Weldolet'],
+}
+
+# Fallback heuristic for jobs extracted before the AI prompt emitted
+# `is_generic_fitting_family` / `weld_type` (see prompts.build_extraction_prompt),
+# and as a safety net if the AI omits them. Matches umbrella category labels
+# with NO shape keyword present (checked by caller via route_component_to_cat_sheet
+# already returning None for these).
+_GENERIC_FITTING_FAMILY_PATTERNS = [
+    ('BW',   r'(?i)\bb\.?\s*w\.?\s*fittings?\b|\bbutt[\s\-]?weld(?:ed)?\s*fittings?\b'),
+    ('SW',   r'(?i)\bs\.?\s*w\.?\s*fittings?\b|\bsocket[\s\-]?weld(?:ed)?\s*fittings?\b'),
+    ('SCRD', r'(?i)\bscrd\.?\s*fittings?\b|\bthreaded\s*fittings?\b|\bscrewed\s*fittings?\b'),
+]
+
+
+def is_generic_fitting_family(component) -> str | None:
+    """Return 'BW'/'SW'/'SCRD' if `component` is a generic umbrella
+    fitting-family spec line (no specific shape given), else None.
+
+    Checks AI-emitted `weld_type` / `is_generic_fitting_family` fields first
+    (forward-compatible with the dynamic prompt), falling back to a regex
+    heuristic against sub_type/description text.
+    """
+    ai_flag = getattr(component, 'is_generic_fitting_family', None)
+    ai_weld_type = (getattr(component, 'weld_type', '') or '').strip().upper()
+    if ai_flag and ai_weld_type in GENERIC_FITTING_FAMILY_SHEETS:
+        return ai_weld_type
+
+    blob = f'{(component.sub_type or "")} {(component.description or "")}'
+    for weld_type, pattern in _GENERIC_FITTING_FAMILY_PATTERNS:
+        if re.search(pattern, blob):
+            return weld_type
+    return None
+
+
+def expand_generic_fitting_family(component) -> list[tuple[str, object]]:
+    """Fan a generic fitting-family component out into one synthetic
+    component-view per applicable CAT shape sheet (see
+    `GENERIC_FITTING_FAMILY_SHEETS`), so a single spec line produces rows in
+    every shape sheet sharing that material/schedule/end-prep instead of
+    being left unrouted.
+
+    Returns ``[(sheet_name, component_view), ...]``. `component_view` is a
+    lightweight duck-typed proxy (not a DB object) carrying only the
+    attributes `_build_cat_rows`/`_common_part_row` read; `sub_type` is
+    overridden per target shape for traceability, everything else is copied
+    from the source component unchanged.
+    """
+    weld_type = is_generic_fitting_family(component)
+    if not weld_type:
+        return []
+    out: list[tuple[str, object]] = []
+    for sheet_name in GENERIC_FITTING_FAMILY_SHEETS.get(weld_type, []):
+        view = SimpleNamespace(
+            id=component.id,
+            component_type='fitting',
+            sub_type=sheet_name,
+            description=component.description,
+            size_from=component.size_from,
+            size_to=component.size_to,
+            schedule_or_rating=component.schedule_or_rating,
+            material_standard=component.material_standard,
+            end_connection=component.end_connection,
+            notes=component.notes,
+        )
+        out.append((sheet_name, view))
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────

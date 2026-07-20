@@ -103,6 +103,8 @@ def _ingest_paper_spec_file(
     project_id,
     title: str,
     document_number: str,
+    engineer_name: str,       # BYOK attribution field
+    user_api_key: str,        # BYOK user-supplied OpenAI API key (optional)
     request_user,
 ):
     """Returns a DRF ``Response`` — same shape as the legacy upload view."""
@@ -155,6 +157,8 @@ def _ingest_paper_spec_file(
     job = PaperSpecExtractionJob.objects.create(
         document=doc,
         status=PaperSpecExtractionJob.STATUS_QUEUED,
+        engineer_name=engineer_name,
+        user_openai_api_key=user_api_key,  # Stored temporarily; wiped after extraction completes
         created_by=request_user if getattr(request_user, 'is_authenticated', False) else None,
     )
 
@@ -216,6 +220,8 @@ def upload_paper_spec(request):
         project_id=request.data.get('project_id') or None,
         title=request.data.get('title') or '',
         document_number=request.data.get('document_number') or '',
+        engineer_name=request.data.get('engineer_name') or '',          # BYOK attribution
+        user_api_key=request.data.get('user_openai_api_key') or '',     # BYOK user API key
         request_user=request.user,
     )
 
@@ -279,6 +285,8 @@ def complete_paper_spec_upload(request):
     project_id        = request.data.get('project_id') or None
     title             = request.data.get('title') or ''
     document_number   = request.data.get('document_number') or ''
+    engineer_name     = request.data.get('engineer_name') or ''          # BYOK attribution
+    user_api_key      = request.data.get('user_openai_api_key') or ''   # BYOK user API key
 
     if not s3_key or not original_filename:
         return Response(
@@ -306,6 +314,8 @@ def complete_paper_spec_upload(request):
             project_id=project_id,
             title=title,
             document_number=document_number,
+            engineer_name=engineer_name,      # BYOK attribution
+            user_api_key=user_api_key,        # BYOK user API key
             request_user=request.user,
         )
     finally:

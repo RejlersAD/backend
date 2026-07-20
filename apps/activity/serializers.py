@@ -107,15 +107,15 @@ class UserSessionSerializer(serializers.ModelSerializer):
             'user_name',
             'user_email',
             'session_key',
-            'started_at',
+            'created_at',
             'last_activity',
-            'ended_at',
+            'expires_at',
             'duration',
             'ip_address',
             'user_agent',
             'is_active',
         ]
-        read_only_fields = ['id', 'started_at', 'last_activity', 'ended_at']
+        read_only_fields = ['id', 'created_at', 'last_activity', 'expires_at']
     
     def get_user_name(self, obj):
         """Get user's full name or username"""
@@ -131,11 +131,9 @@ class UserSessionSerializer(serializers.ModelSerializer):
     
     def get_duration(self, obj):
         """Get session duration in seconds"""
-        if obj.ended_at and obj.started_at:
-            return (obj.ended_at - obj.started_at).total_seconds()
-        elif obj.started_at:
+        if obj.created_at:
             from django.utils import timezone
-            return (timezone.now() - obj.started_at).total_seconds()
+            return (timezone.now() - obj.created_at).total_seconds()
         return None
 
 
