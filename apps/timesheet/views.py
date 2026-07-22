@@ -798,6 +798,77 @@ def export_yearly_pdf(request):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Sync Health Monitoring Endpoint (Mirror Mode)
+# ─────────────────────────────────────────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def sync_health_status(request):
+    """
+    Return the health status of the office-side attendance sync agent.
+    
+    Only applicable when TIMESHEET_DATA_SOURCE=mirror. Returns cached status
+    from the most recent Celery Beat health check.
+    
+    Response:
+        {
+            'enabled': bool,             // Is monitoring enabled?
+            'data_source': str,          // 'mirror' or 'sqlserver'
+            'healthy': bool,             // Is sync data fresh?
+            'last_sync': str|null,       // ISO timestamp of last synced event
+            'data_age_hours': float|null,// Hours since last sync
+            'threshold_hours': float,    // Configured stale threshold
+            'message': str,              // Human-readable status
+            'checked_at': str            // ISO timestamp of last health check
+        }
+    """
+    from . import monitor
+    
+    # Return early if not using mirror mode
+    if ts_config.DATA_SOURCE != 'mirror':
+        return Response({
+            'enabled': False,
+            'data_source': ts_config.DATA_SOURCE,
+            'message': 'Sync monitoring only available in mirror mode'
+        })
+    
+    # Return early if monitoring disabled
+    if not monitor.HEALTH_MONITORING_ENABLED:
+        return Response({
+            'enabled': False,
+            'data_source': ts_config.DATA_SOURCE,
+            'message': 'Sync monitoring is disabled'
+        })
+    
+    # Try to get cached status from last Celery Beat check
+    cached_status = monitor.get_cached_sync_status()
+    
+    if cached_status:
+        return Response({
+            'enabled': True,
+            'data_source': ts_config.DATA_SOURCE,
+            **cached_status
+        })
+    
+    # No cached status - run a manual check
+    try:
+        status_data = monitor.check_sync_health()
+        return Response({
+            'enabled': True,
+            'data_source': ts_config.DATA_SOURCE,
+            **status_data
+        })
+    except Exception as exc:
+        logger.exception('[timesheet.sync_health_status] failed: %s', exc)
+        return Response({
+            'enabled': True,
+            'data_source': ts_config.DATA_SOURCE,
+            'healthy': False,
+            'error': str(exc),
+            'message': 'Failed to check sync health'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 def _error_response(exc: Exception):
     # Connection or missing-driver errors mean the on-prem SQL Server is not
     # reachable from this environment (e.g. Railway production has no route to

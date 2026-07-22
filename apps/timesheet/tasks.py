@@ -172,3 +172,54 @@ def warm_all_timesheet_caches() -> dict:
     except Exception as exc:
         logger.exception('[Timesheet Cache] Cache warming failed')
         return {'status': 'failed', 'error': str(exc), 'results': results}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sync Health Monitoring Task (Mirror Mode)
+# ─────────────────────────────────────────────────────────────────────────────
+@shared_task(name='timesheet.monitor_sync_health')
+def monitor_sync_health() -> dict:
+    """
+    Monitor the health of the office-side attendance sync agent.
+    
+    Runs periodically (default: every 15 minutes) to check if the biometric
+    sync agent is still pushing data. Sends alerts if data becomes stale.
+    
+    Only runs when TIMESHEET_DATA_SOURCE=mirror and monitoring is enabled.
+    
+    Returns:
+        dict: Health status including whether sync is healthy, last sync time,
+              data age, and whether an alert was sent.
+    """
+    from . import config as ts_config
+    from . import monitor
+    
+    # Skip if not using mirror mode
+    if ts_config.DATA_SOURCE != 'mirror':
+        return {
+            'status': 'skipped',
+            'reason': 'not_mirror_mode',
+            'data_source': ts_config.DATA_SOURCE
+        }
+    
+    # Skip if monitoring disabled
+    if not monitor.HEALTH_MONITORING_ENABLED:
+        return {
+            'status': 'skipped',
+            'reason': 'monitoring_disabled'
+        }
+    
+    try:
+        status = monitor.check_sync_health()
+        logger.info(
+            '[Timesheet Monitor] Health check completed: %s',
+            'HEALTHY' if status['healthy'] else 'STALE'
+        )
+        return status
+    except Exception as exc:
+        logger.exception('[Timesheet Monitor] Health check failed')
+        return {
+            'status': 'error',
+            'error': str(exc),
+            'healthy': False
+        }

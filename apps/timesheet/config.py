@@ -370,8 +370,12 @@ def _detect_schema_variant() -> str:
 # Celery beat schedule — picked up by config/celery.py via merge.
 #   TIMESHEET_MONTHLY_REPORT_CRON  e.g. "0 8 1 * *"  (default: 1st of month, 08:00 UTC)
 #   TIMESHEET_MONTHLY_REPORT_ENABLED  set 'false' to disable
+#   TIMESHEET_SYNC_MONITOR_ENABLED  (default: true when DATA_SOURCE=mirror)
+#   TIMESHEET_SYNC_MONITOR_INTERVAL_MINUTES  (default: 15)
 # ─────────────────────────────────────────────────────────────────────────────
 BEAT_SCHEDULE = {}
+
+# Monthly Report Email Task
 if config('TIMESHEET_MONTHLY_REPORT_ENABLED', default='true').lower() in ('1', 'true', 'yes', 'on'):
     _cron_raw = config('TIMESHEET_MONTHLY_REPORT_CRON', default='0 8 1 * *')
     try:
@@ -388,4 +392,22 @@ if config('TIMESHEET_MONTHLY_REPORT_ENABLED', default='true').lower() in ('1', '
             }
     except Exception:
         # Don't let a malformed cron expression break Django boot.
+        pass
+
+# Sync Health Monitoring Task (Mirror Mode Only)
+# Runs every N minutes to check if office-side sync agent is still pushing data
+_monitor_enabled = config('TIMESHEET_SYNC_MONITOR_ENABLED', default='true' if DATA_SOURCE == 'mirror' else 'false')
+if _monitor_enabled.lower() in ('1', 'true', 'yes', 'on'):
+    _monitor_interval = _env_int('TIMESHEET_SYNC_MONITOR_INTERVAL_MINUTES', 15)
+    try:
+        from celery.schedules import crontab
+        # Run every N minutes - use crontab with minute intervals
+        # For 15 minutes: */15 * * * * (every 15 minutes)
+        BEAT_SCHEDULE['timesheet-monitor-sync-health'] = {
+            'task': 'timesheet.monitor_sync_health',
+            'schedule': crontab(minute=f'*/{_monitor_interval}'),  # Every N minutes
+            'options': {'expires': _monitor_interval * 60},  # Expire if not run within interval
+        }
+    except Exception:
+        # Don't break if crontab import fails
         pass

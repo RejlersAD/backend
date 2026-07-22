@@ -7,6 +7,7 @@ app_name = 'timesheet'
 urlpatterns = [
     # Setup / health
     path('health/',                views.health,           name='health'),
+    path('sync-health/',           views.sync_health_status, name='sync-health'),  # Mirror sync agent monitoring
 
     # Discovery wizard
     path('discovery/databases/',   views.databases,        name='databases'),
