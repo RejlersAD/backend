@@ -544,8 +544,20 @@ ROLE_MODULE_POLICY = {
     # Default: standard engineering + common + hr_self_service (see DEFAULT_ROLE_MODULES)
     'default': DEFAULT_ROLE_MODULES,
 
+    # HR & Payroll Administrator: ALL HR modules (same as human_resource)
+    # SOFT-CODED: Complete access to section "4. Human Resource" in sidebar
+    # Michelle uses this role for HR management
+    'hr_admin': [
+        'hr_management',      # 4.1 Human Resources Dashboard
+        'payroll',            # 4.2 Payroll Engine
+        'timesheet',          # 4.3 Timesheet & Attendance
+        'hr_self_service',    # 4.4 My Profile (Employee Self-Service)
+        'hr_onboarding',      # 4.5 Onboarding | Offboarding
+    ],
+
     # Human Resource: ALL HR modules (HR Management, Payroll, Timesheet, Onboarding, My Profile)
     # SOFT-CODED: Complete access to section "4. Human Resource" in sidebar
+    # Same modules as hr_admin - kept separate for role assignment flexibility
     'human_resource': [
         'hr_management',      # 4.1 Human Resources Dashboard
         'payroll',            # 4.2 Payroll Engine
