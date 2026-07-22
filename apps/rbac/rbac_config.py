@@ -221,6 +221,19 @@ SYSTEM_ROLES_CONFIG = [
         'sensitive': True,
         'sensitive_modules': ['hr_management', 'payroll', 'timesheet', 'hr_onboarding'],
     },
+    {
+        # SOFT-CODED: Human Resource role — full access to all HR modules
+        # Covers: HR Management, Payroll, Timesheet, Onboarding/Offboarding, My Profile
+        # Assignable from /admin/roles page to any user
+        'code': 'human_resource',
+        'name': 'Human Resource',
+        'level': 3,
+        'description': 'Complete access to all Human Resource features including HR Management, Payroll, Timesheet, Onboarding/Offboarding, and Employee Self-Service.',
+        'is_system_role': True,
+        'badge_color': 'rose',
+        'sensitive': True,
+        'sensitive_modules': ['hr_management', 'payroll', 'timesheet', 'hr_onboarding', 'hr_self_service'],
+    },
 ]
 
 # Module Assignment Strategy
@@ -256,12 +269,12 @@ SUPERADMIN_ROLE_CODES = ['super_admin', 'superadmin']
 # Only these roles have full HR approval access (leave, payroll final approval)
 # Super admins and regular admins do NOT automatically get HR Manager privileges
 # Add new HR roles here to grant them full HR approval access
-HR_MANAGER_ROLE_CODES = ['hr_admin', 'hr_manager']
+HR_MANAGER_ROLE_CODES = ['hr_admin', 'hr_manager', 'human_resource']
 
 # Sensitive roles — only Super Admin may grant these
-SENSITIVE_ROLE_CODES = ['hr_admin']
+SENSITIVE_ROLE_CODES = ['hr_admin', 'human_resource']
 
-# Sensitive module codes — restricted to hr_admin and super_admin
+# Sensitive module codes — restricted to hr_admin, human_resource and super_admin
 SENSITIVE_MODULE_CODES = ['hr_management', 'payroll', 'timesheet', 'hr_onboarding']
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -530,6 +543,16 @@ ROLE_MODULE_POLICY = {
 
     # Default: standard engineering + common + hr_self_service (see DEFAULT_ROLE_MODULES)
     'default': DEFAULT_ROLE_MODULES,
+
+    # Human Resource: ALL HR modules (HR Management, Payroll, Timesheet, Onboarding, My Profile)
+    # SOFT-CODED: Complete access to section "4. Human Resource" in sidebar
+    'human_resource': [
+        'hr_management',      # 4.1 Human Resources Dashboard
+        'payroll',            # 4.2 Payroll Engine
+        'timesheet',          # 4.3 Timesheet & Attendance
+        'hr_self_service',    # 4.4 My Profile (Employee Self-Service)
+        'hr_onboarding',      # 4.5 Onboarding | Offboarding
+    ],
 
     # Super-admins bypass module checks in the app, but listed for completeness
     'super_admin': [],
