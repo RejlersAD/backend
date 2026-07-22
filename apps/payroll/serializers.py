@@ -192,6 +192,7 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
     status_display       = serializers.CharField(source='get_status_display', read_only=True)
     reviewed_by_name     = serializers.SerializerMethodField()
     rm_reviewed_by_name  = serializers.SerializerMethodField()
+    substitute_employee_name = serializers.SerializerMethodField()
 
     class Meta:
         model  = LeaveRequest
@@ -199,6 +200,9 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
             'id', 'employee', 'employee_code', 'employee_name', 'department',
             'leave_type', 'leave_type_detail',
             'start_date', 'end_date', 'days_requested', 'reason',
+            # SOFT-CODED: Additional fields for enhanced leave tracking
+            'contact_number', 'substitute_employee', 'substitute_employee_name', 
+            'substitute_name', 'attachment',
             'status', 'status_display',
             'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'reviewer_note',
             # Stage-1 Reporting Manager fields
@@ -209,7 +213,7 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
             'id', 'days_requested', 'status', 'status_display',
             'reviewed_by', 'reviewed_by_name', 'reviewed_at',
             'rm_reviewed_by', 'rm_reviewed_by_name', 'rm_reviewed_at',
-            'created_at', 'updated_at', 'leave_type_detail',
+            'created_at', 'updated_at', 'leave_type_detail', 'substitute_employee_name',
         ]
 
     def get_reviewed_by_name(self, obj):
@@ -227,6 +231,15 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
                 or obj.rm_reviewed_by.email
             )
         return None
+    
+    def get_substitute_employee_name(self, obj):
+        """SOFT-CODED: Return substitute employee display name"""
+        if obj.substitute_employee:
+            return (
+                f'{obj.substitute_employee.first_name} {obj.substitute_employee.last_name}'.strip()
+                or obj.substitute_employee.email
+            )
+        return obj.substitute_name or None
 
 
 # ---------------------------------------------------------------------------

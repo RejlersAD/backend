@@ -638,6 +638,28 @@ class LeaveRequest(models.Model):
     # Computed Mon–Fri count stored for fast balance checks
     days_requested   = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal('0'))
     reason           = models.TextField(blank=True)
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SOFT-CODED: Additional leave request fields for enhanced tracking
+    # ═══════════════════════════════════════════════════════════════════════════
+    contact_number   = models.CharField(
+        max_length=20, blank=True,
+        help_text='Contact number while on leave/travelling'
+    )
+    substitute_employee = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='substituted_leave_requests',
+        help_text='Employee who will substitute during leave'
+    )
+    substitute_name  = models.CharField(
+        max_length=255, blank=True,
+        help_text='Substitute employee name (for non-system users)'
+    )
+    attachment       = models.FileField(
+        upload_to='leave_attachments/%Y/%m/',
+        null=True, blank=True,
+        help_text='Supporting documents (medical certificate, travel docs, etc.)'
+    )
 
     # Approval workflow
     status           = models.CharField(
