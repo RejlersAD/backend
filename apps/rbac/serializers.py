@@ -233,7 +233,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
     )
     organization_name = serializers.CharField(source='organization.name', read_only=True)
     organization_id = serializers.UUIDField(write_only=True, required=False)
-    roles = RoleListSerializer(many=True, read_only=True)
+    primary_role = serializers.SerializerMethodField()
+    roles = serializers.SerializerMethodField()
     role_ids = serializers.ListField(
         child=serializers.UUIDField(),
         write_only=True,
@@ -375,7 +376,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = UserProfile
         fields = [
             'id', 'user', 'organization', 'organization_id', 'organization_name', 'status', 'is_mfa_enabled',
-            'roles', 'role_ids', 'module_ids', 'permissions', 'modules',
+            'primary_role', 'roles', 'role_ids', 'module_ids', 'permissions', 'modules',
             'employee_id', 'department', 'job_title', 'manager',
             'manager_id', 'manager_name', 'manager_detail',
             'last_login_ip', 'last_login_at', 'failed_login_attempts',
@@ -400,6 +401,45 @@ class UserProfileSerializer(serializers.ModelSerializer):
         """Get all accessible modules for user"""
         modules = obj.get_all_modules()
         return [{'id': str(m.id), 'code': m.code, 'name': m.name} for m in modules]
+    
+    def get_primary_role(self, obj):
+        """
+        Get primary role from userrole_set.
+        Returns: {id, name, code} or None
+        """
+        for user_role in obj.userrole_set.select_related('role').all():
+            if user_role.is_primary and user_role.role.is_active:
+                return {
+                    'id': str(user_role.role.id),
+                    'name': user_role.role.name,
+                    'code': user_role.role.code,
+                }
+        return None
+    
+    def get_roles(self, obj):
+        """
+        Return all active roles for this user with is_primary flag.
+        
+        SOFT-CODED: Filters out custom_* roles (per-user legacy roles).
+        Custom role prefix defined in rbac_config.MODULE_ASSIGNMENT_CONFIG.
+        
+        Format: [{id, name, code, level, is_primary}]
+        """
+        from apps.rbac.rbac_config import MODULE_ASSIGNMENT_CONFIG
+        custom_role_prefix = MODULE_ASSIGNMENT_CONFIG.get('custom_role_prefix', 'custom_')
+        
+        result = []
+        # Use userrole_set to access the junction table with is_primary
+        for user_role in obj.userrole_set.select_related('role').all():
+            if user_role.role.is_active and not user_role.role.code.startswith(custom_role_prefix):
+                result.append({
+                    'id':         str(user_role.role.id),
+                    'name':       user_role.role.name,
+                    'code':       user_role.role.code,
+                    'level':      user_role.role.level,
+                    'is_primary': user_role.is_primary,
+                })
+        return result
     
     def get_profile_photo(self, obj):
         """Return absolute URL for profile photo.
