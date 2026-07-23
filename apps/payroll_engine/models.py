@@ -432,6 +432,65 @@ class PayrollWorkflowLog(models.Model):
         return f'{self.run.cycle_code} {self.from_status}→{self.to_status} @ {self.at:%Y-%m-%d %H:%M}'
 
 
+# ════════════════════════════════════════════════════════════════════
+# PayslipLineItemChangeLog (track all line item modifications)
+# ════════════════════════════════════════════════════════════════════
+class PayslipLineItemChangeLog(models.Model):
+    """Immutable audit trail for all PayslipLineItem create/update/delete operations.
+    
+    Tracks who changed what, when, for complete payroll transparency and compliance.
+    Soft-coded action types via catalog for future extensibility.
+    """
+    ACTION_CHOICES = [
+        ('created', 'Created'),
+        ('updated', 'Updated'),
+        ('deleted', 'Deleted'),
+    ]
+
+    payslip = models.ForeignKey(
+        Payslip, on_delete=models.CASCADE, related_name='line_item_changes',
+    )
+    line_item = models.ForeignKey(
+        PayslipLineItem, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='change_logs',
+        help_text='NULL when line item is deleted.',
+    )
+    
+    # Action performed
+    action = models.CharField(max_length=16, choices=ACTION_CHOICES, db_index=True)
+    
+    # Who performed the action
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='payroll_line_item_changes',
+    )
+    
+    # Snapshot of values before and after (for updates)
+    old_values = models.JSONField(default=dict, blank=True, help_text='State before change (for updates/deletes)')
+    new_values = models.JSONField(default=dict, blank=True, help_text='State after change (for creates/updates)')
+    
+    # Metadata
+    at = models.DateTimeField(default=timezone.now, db_index=True)
+    note = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'payroll_engine_line_item_change_log'
+        verbose_name = 'Payslip Line Item Change Log'
+        verbose_name_plural = 'Payslip Line Item Change Logs'
+        ordering = ('-at',)
+        indexes = [
+            models.Index(fields=['payslip', '-at']),
+            models.Index(fields=['actor', '-at']),
+            models.Index(fields=['action', '-at']),
+        ]
+
+    def __str__(self) -> str:
+        emp = self.payslip.snapshot_full_name or f'Emp#{self.payslip.employee.employee_no}'
+        kind = self.new_values.get('kind') or self.old_values.get('kind') or ''
+        label = self.new_values.get('label') or self.old_values.get('label') or ''
+        return f'{emp} — {self.action} {kind}:{label} @ {self.at:%Y-%m-%d %H:%M}'
+
+
 # ════════════════════════════════════════════════════════════════════# RunUpload — store imported external files (ValueFrame / Sympa) per run
 # ╕══════════════════════════════════════════════════════════════════
 class PayrollRunUpload(models.Model):

@@ -20,11 +20,12 @@ from .config import (
 from .models import (
     PayrollAdjustment, PayrollEmployee, PayrollRun, Payslip, PayslipLineItem,
     PayrollWorkflowLog, PayrollComparison, PayrollComparisonRow,
+    PayslipLineItemChangeLog,
 )
 from .serializers import (
     CatalogSerializer, PayrollAdjustmentSerializer, PayrollEmployeeSerializer,
     PayrollRunSerializer, PayslipLineItemSerializer, PayslipSerializer,
-    PayrollWorkflowLogSerializer,
+    PayrollWorkflowLogSerializer, PayslipLineItemChangeLogSerializer,
     PayrollComparisonSerializer, PayrollComparisonDetailSerializer,
     PayrollComparisonRowSerializer,
 )
@@ -842,6 +843,79 @@ class PayslipViewSet(viewsets.ModelViewSet):
         )
         return resp
 
+    @action(detail=True, methods=['get'], url_path='change-history')
+    def change_history(self, request, pk=None):
+        """Retrieve all line item change history for this payslip.
+        
+        Returns chronological audit trail of all creates/updates/deletes
+        performed on OTHER EARNINGS and DEDUCTIONS.
+        
+        Soft-coded: Filterable via query params (e.g., ?action=updated).
+        """
+        slip = self.get_object()
+        logs = PayslipLineItemChangeLog.objects.filter(payslip=slip).select_related('actor', 'line_item')
+        
+        # Soft-coded filtering
+        action_filter = request.query_params.get('action')
+        if action_filter:
+            logs = logs.filter(action=action_filter)
+        
+        actor_filter = request.query_params.get('actor')
+        if actor_filter:
+            logs = logs.filter(actor_id=actor_filter)
+        
+        # Ordered newest first
+        logs = logs.order_by('-at')
+        
+        serializer = PayslipLineItemChangeLogSerializer(logs, many=True)
+        return Response({
+            'payslip_id': slip.id,
+            'employee_name': slip.snapshot_full_name,
+            'employee_no': slip.employee.employee_no,
+            'run_cycle': slip.run.cycle_code,
+            'total_changes': logs.count(),
+            'changes': serializer.data,
+        })
+
+
+# ── Line Item Change Logging Helper ────────────────────────────────
+def _capture_line_item_state(item):
+    """Capture the current state of a line item for audit logging.
+    
+    Soft-coded: Returns a dict that can be extended without schema changes.
+    """
+    return {
+        'kind': item.kind,
+        'component_code': item.component_code,
+        'label': item.label,
+        'description': item.description,
+        'amount': str(item.amount),  # Decimal to string for JSON
+        'source': item.source,
+    }
+
+
+def _log_line_item_change(payslip, action, actor, old_values=None, new_values=None, line_item=None, note=''):
+    """Create an immutable audit log entry for line item changes.
+    
+    Args:
+        payslip: Payslip instance
+        action: 'created' | 'updated' | 'deleted'
+        actor: User who performed the action
+        old_values: Dict of previous state (for update/delete)
+        new_values: Dict of new state (for create/update)
+        line_item: The PayslipLineItem instance (NULL for deletions)
+        note: Optional description
+    """
+    PayslipLineItemChangeLog.objects.create(
+        payslip=payslip,
+        line_item=line_item,
+        action=action,
+        actor=actor,
+        old_values=old_values or {},
+        new_values=new_values or {},
+        note=note,
+    )
+
 
 # ── PayslipLineItem CRUD ────────────────────────────────────────────
 class PayslipLineItemViewSet(viewsets.ModelViewSet):
@@ -862,32 +936,98 @@ class PayslipLineItemViewSet(viewsets.ModelViewSet):
             from rest_framework.exceptions import ValidationError as DRFValidationError
             raise DRFValidationError({'error': 'Run is not editable.'})
         item = serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
+        
+        # Log the creation
+        _log_line_item_change(
+            payslip=item.payslip,
+            action='created',
+            actor=self.request.user if self.request.user.is_authenticated else None,
+            new_values=_capture_line_item_state(item),
+            line_item=item,
+            note='Line item created via API'
+        )
+        
+        # CRITICAL: Clear the prefetch cache before recomputing
+        # This ensures line_items.all() fetches fresh data from DB
+        if hasattr(item.payslip, '_prefetched_objects_cache'):
+            item.payslip._prefetched_objects_cache = {}
+        
+        item.payslip.refresh_from_db()
         recompute_payslip_totals(item.payslip)
-        item.payslip.save()
+        item.payslip.save(update_fields=['gross_earnings', 'other_earnings', 'total_deductions', 'net_payable', 'total_worked_days', 'days'])
+        
+        item.payslip.run.refresh_from_db()
         recompute_run_totals(item.payslip.run)
-        item.payslip.run.save()
+        item.payslip.run.save(update_fields=['total_gross', 'total_deductions', 'total_net', 'total_hours'])
 
     def perform_update(self, serializer):
         slip = serializer.instance.payslip
         if not slip.run.is_editable:
             from rest_framework.exceptions import ValidationError as DRFValidationError
             raise DRFValidationError({'error': 'Run is not editable.'})
+        
+        # Capture old state before update
+        old_values = _capture_line_item_state(serializer.instance)
+        
         item = serializer.save()
+        
+        # Log the update with old and new values
+        _log_line_item_change(
+            payslip=item.payslip,
+            action='updated',
+            actor=self.request.user if self.request.user.is_authenticated else None,
+            old_values=old_values,
+            new_values=_capture_line_item_state(item),
+            line_item=item,
+            note='Line item updated via API'
+        )
+        
+        # CRITICAL: Clear the prefetch cache before recomputing
+        # This ensures line_items.all() fetches fresh data from DB
+        if hasattr(item.payslip, '_prefetched_objects_cache'):
+            item.payslip._prefetched_objects_cache = {}
+        
+        item.payslip.refresh_from_db()
         recompute_payslip_totals(item.payslip)
-        item.payslip.save()
+        item.payslip.save(update_fields=['gross_earnings', 'other_earnings', 'total_deductions', 'net_payable', 'total_worked_days', 'days'])
+        
+        item.payslip.run.refresh_from_db()
         recompute_run_totals(item.payslip.run)
-        item.payslip.run.save()
+        item.payslip.run.save(update_fields=['total_gross', 'total_deductions', 'total_net', 'total_hours'])
 
     def perform_destroy(self, instance):
         slip = instance.payslip
         if not slip.run.is_editable:
             from rest_framework.exceptions import ValidationError as DRFValidationError
             raise DRFValidationError({'error': 'Run is not editable.'})
+        
+        # Capture state before deletion
+        old_values = _capture_line_item_state(instance)
+        
+        # Log the deletion (line_item will be NULL after delete)
+        _log_line_item_change(
+            payslip=slip,
+            action='deleted',
+            actor=self.request.user if self.request.user.is_authenticated else None,
+            old_values=old_values,
+            line_item=None,  # Will be NULL after deletion
+            note='Line item deleted via API'
+        )
+        
         instance.delete()
+        
+        # CRITICAL: Clear the prefetch cache before recomputing
+        # This ensures line_items.all() fetches fresh data from DB after deletion
+        if hasattr(slip, '_prefetched_objects_cache'):
+            slip._prefetched_objects_cache = {}
+        
+        slip.refresh_from_db()
         recompute_payslip_totals(slip)
-        slip.save()
+        slip.save(update_fields=['gross_earnings', 'other_earnings', 'total_deductions', 'net_payable', 'total_worked_days', 'days'])
+        
+        slip.run.refresh_from_db()
         recompute_run_totals(slip.run)
-        slip.run.save()
+        slip.run.save(update_fields=['total_gross', 'total_deductions', 'total_net', 'total_hours'])
 
 
 # ── Adjustments CRUD ────────────────────────────────────────────────

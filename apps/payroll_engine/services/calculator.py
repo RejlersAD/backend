@@ -86,7 +86,10 @@ def recompute_payslip_totals(payslip) -> None:
     - Calculates Total Worked Days = (Hours ÷ Hours/Day) + PH + AL
     - Applies unpaid leave deduction automatically
     """
-    items = list(payslip.line_items.all()) if payslip.pk else []
+    # CRITICAL: Force fresh query from database, bypassing any ORM cache
+    # Do NOT use payslip.line_items.all() directly as it may use prefetched data
+    from ..models import PayslipLineItem
+    items = list(PayslipLineItem.objects.filter(payslip=payslip)) if payslip.pk else []
     
     # Fixed earnings (Basic + Housing + Transport + Home Leave)
     fixed = compute_fixed_earnings(

@@ -3,7 +3,7 @@ from django.contrib import admin
 
 from .models import (
     PayrollAdjustment, PayrollEmployee, PayrollRun, Payslip, PayslipLineItem,
-    PayrollWorkflowLog,
+    PayrollWorkflowLog, PayslipLineItemChangeLog,
 )
 
 
@@ -67,3 +67,18 @@ class PayrollWorkflowLogAdmin(admin.ModelAdmin):
     list_display = ('run', 'from_status', 'to_status', 'actor', 'at')
     list_filter = ('to_status',)
     readonly_fields = ('run', 'from_status', 'to_status', 'actor', 'note', 'at')
+
+
+@admin.register(PayslipLineItemChangeLog)
+class PayslipLineItemChangeLogAdmin(admin.ModelAdmin):
+    list_display = ('payslip', 'action', 'actor', 'at', 'get_item_label')
+    list_filter = ('action', 'at')
+    search_fields = ('payslip__snapshot_full_name', 'payslip__employee__employee_no', 'actor__email')
+    readonly_fields = ('payslip', 'line_item', 'action', 'actor', 'old_values', 'new_values', 'at', 'note')
+    ordering = ('-at',)
+    
+    def get_item_label(self, obj):
+        label = obj.new_values.get('label') or obj.old_values.get('label') or 'N/A'
+        kind = obj.new_values.get('kind') or obj.old_values.get('kind') or ''
+        return f"{kind}: {label}"
+    get_item_label.short_description = 'Item'

@@ -6,6 +6,7 @@ from . import catalog
 from .models import (
     PayrollAdjustment, PayrollEmployee, PayrollRun, Payslip, PayslipLineItem,
     PayrollWorkflowLog, PayrollComparison, PayrollComparisonRow, PayrollRunUpload,
+    PayslipLineItemChangeLog,
 )
 
 
@@ -162,6 +163,47 @@ class PayrollWorkflowLogSerializer(serializers.ModelSerializer):
         if not obj.actor:
             return ''
         return getattr(obj.actor, 'get_full_name', lambda: '')() or getattr(obj.actor, 'username', '')
+
+
+class PayslipLineItemChangeLogSerializer(serializers.ModelSerializer):
+    """Serializer for line item change audit logs.
+    
+    Provides full audit trail with actor info, before/after states,
+    and human-readable action descriptions.
+    """
+    actor_name = serializers.SerializerMethodField()
+    actor_email = serializers.SerializerMethodField()
+    payslip_employee_name = serializers.CharField(source='payslip.snapshot_full_name', read_only=True)
+    payslip_employee_no = serializers.CharField(source='payslip.employee.employee_no', read_only=True)
+    run_cycle = serializers.CharField(source='payslip.run.cycle_code', read_only=True)
+    action_label = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = PayslipLineItemChangeLog
+        fields = [
+            'id', 'payslip', 'line_item', 'action', 'action_label',
+            'actor', 'actor_name', 'actor_email',
+            'payslip_employee_name', 'payslip_employee_no', 'run_cycle',
+            'old_values', 'new_values', 'at', 'note',
+        ]
+        read_only_fields = fields
+    
+    def get_actor_name(self, obj):
+        if not obj.actor:
+            return 'System'
+        return getattr(obj.actor, 'get_full_name', lambda: '')() or getattr(obj.actor, 'username', '') or obj.actor.email
+    
+    def get_actor_email(self, obj):
+        return obj.actor.email if obj.actor else ''
+    
+    def get_action_label(self, obj):
+        # Soft-coded labels for extensibility
+        action_labels = {
+            'created': 'Created',
+            'updated': 'Updated',
+            'deleted': 'Deleted',
+        }
+        return action_labels.get(obj.action, obj.action.title())
 
 
 # ── Comparison ───────────────────────────────────────────────────────────────────
