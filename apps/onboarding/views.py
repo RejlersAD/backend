@@ -32,6 +32,7 @@ from apps.core.s3_service import S3Service
 # Employee management - using new EmployeeMaster system
 from apps.hr_core.models import EmployeeMaster
 from apps.hr_core.services import EmployeeService
+from apps.rbac.models import UserProfile as RBACUserProfile, Organization
 
 User = get_user_model()
 
@@ -217,6 +218,26 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                     is_first_login=True,
                     must_reset_password=True  # Will need to set password
                 )
+                
+                # ✅ Create RBAC UserProfile (required for role assignment)
+                # This will trigger the signal that auto-assigns the Default role
+                default_org = Organization.objects.filter(is_active=True).first()
+                if not default_org:
+                    default_org = Organization.objects.create(
+                        name='Default Organization',
+                        code='DEFAULT',
+                        is_active=True
+                    )
+                
+                rbac_profile = RBACUserProfile.objects.create(
+                    user=user,
+                    organization=default_org,
+                    status='active',
+                    department=data.get('division', ''),
+                    job_title=data.get('job_title_uae') or data.get('job_title_finland', ''),
+                    phone=data.get('mobile_phone', '')
+                )
+                print(f"[Onboarding] ✅ Created RBAC UserProfile for {email} — Default role will be auto-assigned")
                 
                 # Create EmployeeMaster record with all Sympa HR fields
                 manager_id = data.get('manager_id')

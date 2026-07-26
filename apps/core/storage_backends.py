@@ -19,24 +19,46 @@ if USE_S3:
         from botocore.exceptions import BotoCoreError, ClientError
         import traceback
         
-        class ResilientMediaStorage(FileSystemStorage):
+        class MediaStorage(S3Boto3Storage):
             """
-            Resilient storage that ALWAYS uses local filesystem
-            when S3 configuration is problematic
+            Primary S3 storage backend for all media files (user uploads, documents, etc.)
             
-            This prevents 500 errors from blocking file uploads
+            Features:
+            - Private access only (presigned URLs for downloads)
+            - Organized folder structure under media/
+            - Region-specific endpoint for opt-in regions (UAE, etc.)
+            - Automatic fallback to local storage only on actual S3 connection errors
             """
+            
+            location = 'media'
+            default_acl = 'private'
+            file_overwrite = False
+            custom_domain = False  # Forces presigned URLs with query-string auth
+            querystring_expire = 3600  # 1 hour default
+            
+            @property
+            def endpoint_url(self):
+                """Use region-specific endpoint to prevent S3 redirect issues"""
+                region = getattr(settings, 'AWS_S3_REGION_NAME', 'us-east-1')
+                return getattr(settings, 'AWS_S3_ENDPOINT_URL', f'https://s3.{region}.amazonaws.com')
+            
+            object_parameters = {
+                'CacheControl': 'max-age=86400',  # 24 hours
+                'Metadata': {
+                    'app': 'aiflow',
+                    'content_type': 'media'
+                }
+            }
             
             def __init__(self, *args, **kwargs):
-                # Always use local storage - no S3 complications
-                kwargs['location'] = getattr(settings, 'MEDIA_ROOT', 'media')
-                super().__init__(*args, **kwargs)
-                logger.warning("[MediaStorage] ⚠️ S3 configured but using LOCAL storage to avoid errors")
-                logger.info("[MediaStorage] 💾 Files will be saved to local filesystem")
+                try:
+                    super().__init__(*args, **kwargs)
+                    logger.info(f"✅ [MediaStorage] S3 storage initialized: {self.bucket_name}/{self.location}")
+                except Exception as e:
+                    logger.error(f"❌ [MediaStorage] Failed to initialize S3: {str(e)}")
+                    raise
         
-        # FORCE local storage when S3 is problematic
-        MediaStorage = ResilientMediaStorage
-        logger.info("[Storage] 🔄 Using resilient local storage (S3 disabled due to configuration issues)")
+        logger.info("🚀 [Storage] S3 storage backends loaded successfully")
         
     except ImportError as e:
         logger.error(f"[S3] Failed to import dependencies: {str(e)}")
@@ -46,6 +68,7 @@ if USE_S3:
             def __init__(self, *args, **kwargs):
                 kwargs['location'] = getattr(settings, 'MEDIA_ROOT', 'media')
                 super().__init__(*args, **kwargs)
+                logger.warning("[MediaStorage] Using local storage (S3 import failed)")
 
 
         class StaticStorage(S3Boto3Storage):

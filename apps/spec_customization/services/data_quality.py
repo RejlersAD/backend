@@ -22,6 +22,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 logger = logging.getLogger(__name__)
 
 
+# Import size expansion and component detection configs
+from .config import SIZE_EXPANSION_CONFIG, COMPONENT_TYPE_DETECTION_CONFIG, COMPONENT_TYPE_DETECTION_CONFIG
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Soft-coded configuration
 # ─────────────────────────────────────────────────────────────────────────────
@@ -516,6 +520,264 @@ def enrich_with_project_context(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Size Expansion — Smart Detection of "1.5 & Below" Patterns
+# ─────────────────────────────────────────────────────────────────────────────
+def _parse_size_value(size_str: str) -> Optional[float]:
+    """Parse a size string to float value (handles fractions like 1½, 1-1/2, 1/2).
+    
+    Returns None if unparseable. Reuses logic from smartplant_config._to_float_npd.
+    """
+    if not size_str:
+        return None
+    
+    s = str(size_str)
+    
+    # Remove inch markers
+    for tok in ('"', '"', '"', '″', '′', "''", "'", 'IN', 'in', 'In', 'inch', 'INCH', 'Inch'):
+        s = s.replace(tok, '')
+    s = s.replace('-', ' ').strip()
+    
+    if not s:
+        return None
+    
+    # Common fraction shortcuts
+    fraction_map = {
+        '1/8': 0.125, '1/4': 0.25, '3/8': 0.375,
+        '1/2': 0.5,   '3/4': 0.75,
+        '1 1/4': 1.25, '1-1/4': 1.25,
+        '1 1/2': 1.5,  '1-1/2': 1.5, '1½': 1.5,
+        '2 1/2': 2.5,  '2-1/2': 2.5,
+    }
+    if s in fraction_map:
+        return fraction_map[s]
+    
+    # Mixed fraction: '1 1/2', '2 1/4'
+    if ' ' in s and '/' in s:
+        try:
+            whole, frac = s.split(' ', 1)
+            num, den = frac.split('/', 1)
+            return float(whole) + float(num) / float(den)
+        except (ValueError, ZeroDivisionError):
+            pass
+    
+    # Pure fraction: '1/2', '3/4'
+    if '/' in s:
+        try:
+            num, den = s.split('/', 1)
+            return float(num) / float(den)
+        except (ValueError, ZeroDivisionError):
+            return None
+    
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _detect_below_pattern(size_str: str) -> bool:
+    """Return True if size_str contains '& Below' or 'and below' pattern."""
+    if not size_str:
+        return False
+    pattern = SIZE_EXPANSION_CONFIG.get("below_pattern_regex", r'(?:&|and)\s*below')
+    return bool(re.search(pattern, str(size_str), re.IGNORECASE))
+
+
+def _detect_range_pattern(size_str: str) -> bool:
+    """Detect if size string contains ANY range pattern (below, thru, to, etc.).
+    Matches: '1.5 & Below', '1/2" thru 1-1/2"', '≤ 1.5', 'up to 2"', etc.
+    """
+    if not size_str:
+        return False
+    
+    patterns = SIZE_EXPANSION_CONFIG.get("range_pattern_regexes", [
+        r'(?:&|and)\s*below',
+        r'\bthru\b',
+        r'\bthrough\b',
+        r'\bto\b',
+        r'up\s+to',
+        r'≤|<=',
+        r'\band\s+smaller\b',
+        r'\band\s+less\b',
+    ])
+    
+    for pattern in patterns:
+        if re.search(pattern, str(size_str), re.IGNORECASE):
+            return True
+    return False
+
+
+def _detect_size_range(size_from: str, size_to: str) -> bool:
+    """Detect if component has a size RANGE (different from/to values).
+    Returns True if from != to and both are valid numbers.
+    """
+    if not size_from or not size_to:
+        return False
+    
+    from_val = _parse_size_value(size_from)
+    to_val = _parse_size_value(size_to)
+    
+    if from_val is None or to_val is None:
+        return False
+    
+    # Range detected if values are different
+    return abs(from_val - to_val) > 0.01  # Allow tiny floating point diff
+
+
+def _format_size_display(size_float: float) -> str:
+    """Format a float size back to clean display format.
+    
+    Examples: 0.5 → "1/2", 0.75 → "3/4", 1.0 → "1", 1.5 → "1-1/2", 2.0 → "2"
+    """
+    # Common fractions
+    if size_float == 0.125:
+        return "1/8"
+    elif size_float == 0.25:
+        return "1/4"
+    elif size_float == 0.375:
+        return "3/8"
+    elif size_float == 0.5:
+        return "1/2"
+    elif size_float == 0.75:
+        return "3/4"
+    elif size_float == 1.25:
+        return "1-1/4"
+    elif size_float == 1.5:
+        return "1-1/2"
+    elif size_float == 2.5:
+        return "2-1/2"
+    elif float(size_float).is_integer():
+        return str(int(size_float))
+    else:
+        return str(size_float)
+
+
+def expand_small_size_components(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Expand components with size ranges to individual size rows.
+    
+    Intelligently detects and expands:
+    1. "Below" patterns: "1.5 & Below" → [0.5, 0.75, 1.0, 1.25, 1.5]
+    2. Range patterns: "1/2\" thru 1-1/2\"" → [0.5, 0.75, 1.0, 1.25, 1.5]
+    3. Explicit ranges: size_from="1/2", size_to="1-1/2" → individual rows
+    
+    Returns: expanded list of components (original + individual size rows)
+    """
+    if not SIZE_EXPANSION_CONFIG.get("enable_size_expansion", True):
+        return components
+    
+    small_threshold = SIZE_EXPANSION_CONFIG.get("small_size_threshold", 1.5)
+    medium_threshold = SIZE_EXPANSION_CONFIG.get("medium_size_threshold", 6.0)
+    small_ladder = SIZE_EXPANSION_CONFIG.get("small_size_ladder", [0.5, 0.75, 1.0, 1.25, 1.5])
+    medium_ladder = SIZE_EXPANSION_CONFIG.get("medium_size_ladder", [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0])
+    expand_all_ranges = SIZE_EXPANSION_CONFIG.get("expand_all_ranges", True)
+    duplicate_rows = SIZE_EXPANSION_CONFIG.get("duplicate_expanded_rows", True)
+    log_expansions = SIZE_EXPANSION_CONFIG.get("log_expansions", True)
+    
+    expanded: List[Dict[str, Any]] = []
+    expansion_count = 0
+    
+    for comp in components:
+        size_from_str = (comp.get("size_from") or "").strip()
+        size_to_str = (comp.get("size_to") or "").strip()
+        
+        # Parse size values
+        from_val = _parse_size_value(size_from_str)
+        to_val = _parse_size_value(size_to_str)
+        
+        # Check for range patterns (below, thru, to, etc.)
+        from_has_pattern = _detect_range_pattern(size_from_str)
+        to_has_pattern = _detect_range_pattern(size_to_str)
+        has_range_pattern = from_has_pattern or to_has_pattern
+        
+        # Check for explicit range (different from/to values)
+        has_explicit_range = _detect_size_range(size_from_str, size_to_str)
+        
+        # Determine if expansion should happen
+        should_expand = False
+        max_size = None
+        min_size = None
+        
+        if has_range_pattern:
+            # Pattern detected (e.g., "1.5 & Below", "thru 1-1/2")
+            should_expand = True
+            if from_has_pattern and from_val is not None:
+                max_size = from_val
+            elif to_has_pattern and to_val is not None:
+                max_size = to_val
+            min_size = 0.5  # Default minimum for range patterns
+            
+        elif expand_all_ranges and has_explicit_range:
+            # Explicit range detected (e.g., from="1/2", to="1-1/2")
+            should_expand = True
+            if from_val is not None and to_val is not None:
+                min_size = min(from_val, to_val)
+                max_size = max(from_val, to_val)
+        
+        # If no expansion needed, keep original
+        if not should_expand or max_size is None:
+            expanded.append(comp)
+            continue
+        
+        # Determine which size ladder to use
+        if max_size <= small_threshold:
+            size_ladder = small_ladder
+        elif max_size <= medium_threshold:
+            size_ladder = medium_ladder
+        else:
+            # Size too large for expansion - keep original
+            expanded.append(comp)
+            continue
+        
+        # Expansion triggered - generate individual rows
+        if log_expansions:
+            logger.info(
+                "[SizeExpansion] Expanding component %s | size_from=%s, size_to=%s → ladder %s (max=%.2f)",
+                comp.get("sub_type") or comp.get("component_type"),
+                size_from_str,
+                size_to_str,
+                size_ladder,
+                max_size
+            )
+        
+        # Keep original row if configured
+        if duplicate_rows:
+            expanded.append(comp)
+        
+        # Generate individual rows for each size in the applicable ladder
+        for individual_size in size_ladder:
+            # Only include sizes within the detected range
+            if min_size is not None and individual_size < min_size:
+                continue
+            if individual_size > max_size:
+                continue
+            
+            expanded_comp = dict(comp)  # Copy all fields
+            size_display = _format_size_display(individual_size)
+            
+            # Set both size_from and size_to to the same value (single size)
+            expanded_comp["size_from"] = size_display
+            expanded_comp["size_to"] = size_display
+            
+            # Add audit note
+            original_note = expanded_comp.get("notes", "") or ""
+            expansion_note = f"[Auto-expanded from range: '{size_from_str}' to '{size_to_str}']"
+            expanded_comp["notes"] = f"{original_note} {expansion_note}".strip()
+            
+            expanded.append(expanded_comp)
+            expansion_count += 1
+    
+    if log_expansions and expansion_count > 0:
+        logger.info(
+            "[SizeExpansion] Generated %d individual size rows from %d range patterns",
+            expansion_count,
+            sum(1 for c in components if _detect_range_pattern(c.get("size_from", "")) or 
+                                          _detect_range_pattern(c.get("size_to", "")) or
+                                          (expand_all_ranges and _detect_size_range(c.get("size_from", ""), c.get("size_to", ""))))
+        )
+    
+    return expanded
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main Quality Processing Pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 def process_extracted_classes(
@@ -539,6 +801,7 @@ def process_extracted_classes(
         "duplicates_removed": 0,
         "fields_normalized": 0,
         "fields_filled": 0,
+        "size_expansions": 0,  # NEW: Track small size expansions
     }
     
     cleaned: List[Dict[str, Any]] = []
@@ -572,6 +835,23 @@ def process_extracted_classes(
         cls["components"] = deduplicate_components(original_comps)
         dupes = len(original_comps) - len(cls["components"])
         quality_report["duplicates_removed"] += dupes
+        
+        # Step 4a: Expand "1.5 & Below" size patterns (NEW - Phase 2)
+        # This generates individual component rows for each small size (0.5, 0.75, 1.0, 1.25, 1.5)
+        # when the spec uses umbrella notation like "1½" & BELOW"
+        components_before_expansion = len(cls["components"])
+        cls["components"] = expand_small_size_components(cls["components"])
+        if len(cls["components"]) > components_before_expansion:
+            expansions = len(cls["components"]) - components_before_expansion
+            quality_report["size_expansions"] += expansions
+            logger.info(
+                "[DataQuality] Class %s: expanded %d → %d components (+%d from small size auto-expansion)",
+                cls.get("class_code", "?"),
+                components_before_expansion,
+                len(cls["components"]),
+                expansions
+            )
+        
         quality_report["total_components_after"] += len(cls["components"])
         
         # Step 5: Enrich with project context
@@ -598,10 +878,11 @@ def process_extracted_classes(
     
     logger.info(
         "[DataQuality] Pipeline complete: %d → %d classes, "
-        "%d components deduped, %d fields normalized, %d fields filled",
+        "%d components deduped, %d size expansions, %d fields normalized, %d fields filled",
         quality_report["input_classes"],
         quality_report["output_classes"],
         quality_report["duplicates_removed"],
+        quality_report["size_expansions"],
         quality_report["fields_normalized"],
         quality_report["fields_filled"],
     )

@@ -97,6 +97,19 @@ if not DEBUG and SECRET_KEY == 'django-insecure-change-this-in-production':
     print("="*70 + "\n")
 
 # ================================================================
+# BYOK (Bring Your Own Key) ENCRYPTION KEY
+# ================================================================
+# Used to encrypt user-provided API keys (OpenAI, Claude) stored in project metadata.
+# Must be a valid Fernet key (32 url-safe base64-encoded bytes).
+# Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# CRITICAL: Store in environment variables, never commit to version control.
+BYOK_ENCRYPTION_KEY = config('BYOK_ENCRYPTION_KEY', default=None)
+if BYOK_ENCRYPTION_KEY:
+    BYOK_ENCRYPTION_KEY = BYOK_ENCRYPTION_KEY.encode() if isinstance(BYOK_ENCRYPTION_KEY, str) else BYOK_ENCRYPTION_KEY
+else:
+    print("[WARNING] BYOK_ENCRYPTION_KEY not set — API key encryption will use insecure fallback!")
+
+# ================================================================
 # USER MANAGEMENT SECURITY SETTINGS
 # ================================================================
 # Default password for admin-initiated password resets
@@ -174,7 +187,9 @@ INSTALLED_APPS = [
     'apps.usage_tracking',  # Usage Tracking & Metering - Internal Analytics Dashboard
     'apps.wrench_integration',  # Wrench Project Platform Integration
     'apps.data_mining',  # Data Mining Platform - AI-Powered Data Integration & Transformation (Tableau Prep-style)
-    'apps.pid_verification',   # P&ID Quality Checker — deterministic rule engine
+    'apps.pid_verification',   # P&ID Quality Checker — deterministic rule engine (V1)
+    'apps.pid_verification_v2', # P&ID Quality Checker V2 — duplicate of V1 with isolated database
+    # 'apps.pid_checker_v2',      # P&ID Checker V2 — AI-powered multi-document validation engine (ISOLATED from V1) [DISABLED: Module does not exist]
     'apps.sld_verification',   # SLD Quality Checker — electrical single line diagram verification
     'apps.pfd_quality',          # PFD Quality Checker — deterministic rule engine
     'apps.cross_recommendation', # Cross PID/PFD recommendation bridge

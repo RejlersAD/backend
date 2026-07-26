@@ -38,6 +38,15 @@ def _legend_upload_path(instance, filename):
     return f'pid_verification/projects/{project_slug}/legends/{instance.legend_id}/{filename}'
 
 
+def _reference_data_upload_path(instance, filename):
+    """Storage path for reference data files (line list, equipment list, instrument index)."""
+    project_slug = (
+        str(instance.project.project_id) if instance.project_id else 'global'
+    )
+    data_type = instance.data_type  # 'line_list', 'equipment_list', 'instrument_index'
+    return f'pid_verification/projects/{project_slug}/reference_data/{data_type}/{instance.reference_id}/{filename}'
+
+
 # ---------------------------------------------------------------------------
 # Project  (top-level grouping)
 # ---------------------------------------------------------------------------
@@ -401,3 +410,202 @@ class PIDVInstrumentSymbol(models.Model):
 
     def __str__(self):
         return f'[{self.get_category_display()}] {self.symbol_code} — {self.description[:60]}'
+
+
+# ---------------------------------------------------------------------------
+# PIDVReferenceData  (line list, equipment list, instrument index uploads)
+# ---------------------------------------------------------------------------
+
+class PIDVReferenceData(models.Model):
+    """
+    Stores reference data files uploaded for cross-checking P&ID drawings.
+    
+    Supported types:
+      - line_list         : Piping line list (Excel/CSV/PDF)
+      - equipment_list    : Equipment register (Excel/CSV/PDF)
+      - instrument_index  : Instrument index (Excel/CSV/PDF)
+    
+    Files are parsed (if Excel/CSV) or stored as-is (PDF) for manual reference.
+    Parsed data is stored in `parsed_data` JSONField for querying.
+    """
+    
+    class DataType(models.TextChoices):
+        LINE_LIST         = 'line_list',         'Line List'
+        EQUIPMENT_LIST    = 'equipment_list',    'Equipment List'
+        INSTRUMENT_INDEX  = 'instrument_index',  'Instrument Index'
+    
+    class Status(models.TextChoices):
+        PENDING    = 'pending',    'Pending'
+        PROCESSING = 'processing', 'Processing'
+        COMPLETED  = 'completed',  'Completed'
+        FAILED     = 'failed',     'Failed'
+    
+    reference_id  = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    
+    # Owning project
+    project = models.ForeignKey(
+        PIDVProject,
+        on_delete=models.CASCADE,
+        related_name='reference_data',
+    )
+    
+    data_type     = models.CharField(max_length=30, choices=DataType.choices, db_index=True)
+    file_name     = models.CharField(max_length=512)
+    original_file = models.FileField(
+        upload_to=_reference_data_upload_path,
+        max_length=500,
+        null=True, blank=True,
+    )
+    
+    # S3 path or presigned URL — populated after upload
+    s3_path       = models.CharField(max_length=1024, blank=True)
+    
+    status        = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    error_message = models.TextField(blank=True)
+    
+    # Parsed data from Excel/CSV files
+    # Schema examples:
+    #   line_list:        [{ line_number, fluid_code, size, spec, from, to, ... }]
+    #   equipment_list:   [{ tag, description, type, size, material, ... }]
+    #   instrument_index: [{ tag, service, type, range, location, ... }]
+    parsed_data = models.JSONField(
+        null=True, blank=True,
+        help_text='Parsed tabular data from Excel/CSV files',
+    )
+    
+    # Metadata: row count, column headers, file size
+    metadata = models.JSONField(
+        default=dict, blank=True,
+        help_text='File metadata: row_count, columns, file_size_bytes',
+    )
+    
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='pid_reference_data',
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'pidv_reference_data'
+        ordering = ['-created_at']
+        indexes  = [
+            models.Index(fields=['reference_id']),
+            models.Index(fields=['project', 'data_type']),
+        ]
+    
+    def __str__(self):
+        return f'{self.get_data_type_display()}: {self.file_name} [{self.status}]'
+
+
+# ---------------------------------------------------------------------------
+# PIDVAICheckRun  (one AI check run per project)
+# ---------------------------------------------------------------------------
+
+class PIDVAICheckRun(models.Model):
+    """
+    Stores the results of one AI-powered check run on a project.
+    
+    Workflow:
+      1. User triggers "Run AI Checks" on project with uploaded P&IDs and reference data
+      2. System extracts equipment, lines, instruments from P&IDs using vision APIs
+      3. System runs AUTO checks (two-way reconciliation vs reference data)
+      4. System generates ASSIST check findings (AI extracts, engineer reviews)
+      5. Results stored here with check_results JSONField
+    
+    Schema of check_results:
+      [
+        {
+          "check_id": "AUTO_001",
+          "name": "Line List Two-Way Reconciliation",
+          "result": "Pass" | "Warning" | "Fail" | "Not Checked",
+          "confidence": "High" | "Medium" | "Low" | "",
+          "finding": "Description of result",
+          "severity": "critical" | "major" | "minor",
+          "details": { orphans: [...], missing: [...], ... },
+          "category": "AUTO" | "ASSIST" | "HUMAN"
+        }
+      ]
+    """
+    
+    class Status(models.TextChoices):
+        PENDING    = 'pending',    'Pending'
+        EXTRACTING = 'extracting', 'Extracting P&ID Elements'
+        CHECKING   = 'checking',   'Running Checks'
+        COMPLETED  = 'completed',  'Completed'
+        FAILED     = 'failed',     'Failed'
+    
+    run_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    
+    # Owning project
+    project = models.ForeignKey(
+        PIDVProject,
+        on_delete=models.CASCADE,
+        related_name='ai_check_runs',
+    )
+    
+    status        = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    error_message = models.TextField(blank=True)
+    
+    # Analysis mode used (standard, enhanced_openai, deep_claude, hybrid)
+    analysis_mode = models.CharField(max_length=30, default='hybrid')
+    
+    # Extracted data from P&IDs (equipment, lines, instruments)
+    # Schema:
+    #   {
+    #     "equipment": [{ tag, type, service, sheet, confidence }],
+    #     "lines": [{ line_number, size, spec, from, to, sheet, confidence }],
+    #     "instruments": [{ tag, type, location, sheet, confidence }],
+    #     "overview": { sheet_count, equipment_count, line_count, instrument_count }
+    #   }
+    extracted_data = models.JSONField(
+        null=True, blank=True,
+        help_text='All extracted P&ID elements from vision APIs',
+    )
+    
+    # Check results (AUTO + ASSIST + HUMAN)
+    # See docstring above for schema
+    check_results = models.JSONField(
+        default=list, blank=True,
+        help_text='Results of all executed checks',
+    )
+    
+    # Summary statistics
+    # { total_checks, auto_count, assist_count, human_count, pass_count, fail_count, warning_count }
+    summary_stats = models.JSONField(
+        default=dict, blank=True,
+        help_text='Summary statistics of check run',
+    )
+    
+    # Processing metadata
+    # { sheets_processed, api_calls_made, total_cost_usd, processing_time_seconds }
+    processing_metadata = models.JSONField(
+        default=dict, blank=True,
+        help_text='Processing metrics and costs',
+    )
+    
+    triggered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='pid_ai_check_runs',
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        db_table = 'pidv_ai_check_runs'
+        ordering = ['-created_at']
+        indexes  = [
+            models.Index(fields=['run_id']),
+            models.Index(fields=['project', 'status']),
+        ]
+    
+    def __str__(self):
+        return f'AI Check Run {self.run_id} [{self.status}] - {self.project.project_name}'
+

@@ -36,7 +36,7 @@ from rest_framework.response import Response
 from apps.rbac.permissions import HasDisciplineAccess
 from apps.core.queue_service import RobustQueueService, QueueUnavailableException
 
-from .models import PIDVProject, PIDVDocument, PIDVFinding, PIDVLegendSheet
+from .models import PIDVProject, PIDVDocument, PIDVFinding, PIDVLegendSheet, PIDVReferenceData
 from .serializers import (
     PIDVProjectSerializer,
     PIDVProjectCreateSerializer,
@@ -177,6 +177,74 @@ def upload_pid(request):
         if project is None:
             return Response({"error": "Project not found or access denied"}, status=status.HTTP_404_NOT_FOUND)
 
+    # ── V2 BYOK: Extract and validate API keys ─────────────────────────────
+    # Soft-coded: AI analysis mode and user-provided API keys (Bring Your Own Key)
+    import re
+    
+    analysis_mode = request.data.get('analysis_mode', 'standard').strip()
+    openai_api_key = request.data.get('openai_api_key', '').strip()
+    claude_api_key = request.data.get('claude_api_key', '').strip()
+    
+    # Validate analysis mode first
+    VALID_MODES = ['standard', 'enhanced_openai', 'deep_claude', 'hybrid']
+    if analysis_mode not in VALID_MODES:
+        return Response(
+            {"error": f"Invalid analysis_mode. Must be one of: {', '.join(VALID_MODES)}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    
+    # Validate API key formats (server-side security)
+    # Updated patterns to match frontend validation (allow hyphens and underscores)
+    API_KEY_PATTERNS = {
+        'openai': re.compile(r'^sk-[A-Za-z0-9\-_]{20,}$'),
+        'claude': re.compile(r'^sk-ant-[A-Za-z0-9\-_]{20,}$'),
+    }
+    
+    # Determine which keys are required based on the analysis mode
+    needs_openai = analysis_mode in ['enhanced_openai', 'hybrid']
+    needs_claude = analysis_mode in ['deep_claude', 'hybrid']
+    
+    # Validate OpenAI key only if provided or required
+    if openai_api_key:
+        if not API_KEY_PATTERNS['openai'].match(openai_api_key):
+            return Response(
+                {"error": "Invalid OpenAI API key format. Must start with 'sk-' and contain at least 20 characters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    elif needs_openai:
+        return Response(
+            {"error": f"OpenAI API key required for '{analysis_mode}' mode."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    
+    # Validate Claude key only if provided or required
+    if claude_api_key:
+        if not API_KEY_PATTERNS['claude'].match(claude_api_key):
+            return Response(
+                {"error": "Invalid Claude API key format. Must start with 'sk-ant-' and contain at least 20 characters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    elif needs_claude:
+        return Response(
+            {"error": f"Claude API key required for '{analysis_mode}' mode."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    
+    # Package BYOK context for Celery task
+    byok_context = {
+        'analysis_mode': analysis_mode,
+        'openai_api_key': openai_api_key if openai_api_key else None,
+        'claude_api_key': claude_api_key if claude_api_key else None,
+    }
+    
+    logger.info(
+        "[PIDVUpload] BYOK enabled: mode=%s, openai=%s, claude=%s",
+        analysis_mode,
+        "provided" if openai_api_key else "none",
+        "provided" if claude_api_key else "none",
+    )
+    # ── End BYOK validation ─────────────────────────────────────────────────
+
     # Deterministic cache check (only reuse if same project)
     file_hash = compute_file_hash(uploaded_file)
     cached    = check_cache(file_hash)
@@ -216,13 +284,23 @@ def upload_pid(request):
         project       = project,
         status        = PIDVDocument.Status.UPLOADED,
     )
+    
+    # V2 FIX: Log document creation for debugging
+    logger.info(
+        "[PIDVUpload] Document created: doc_id=%s, file=%s, project_id=%s, project_name=%s, user=%s",
+        doc.document_id,
+        uploaded_file.name,
+        str(project.project_id) if project else "None",
+        project.project_name if project else "None",
+        request.user.username
+    )
 
     # Enqueue Celery task with intelligent fallback
     try:
         from .tasks import process_pid_document, _resolve_file_path
 
         # ── Shared synchronous processing pipeline ─────────────────────────
-        def _run_sync_pipeline(doc_id: str) -> None:
+        def _run_sync_pipeline(doc_id: str, context: dict = None) -> None:
             """
             Execute the full P&ID processing pipeline synchronously.
             Used both as the RobustQueueService sync_fallback (when Redis is
@@ -230,8 +308,13 @@ def upload_pid(request):
             are active in production).
             Uses _resolve_file_path from tasks.py so S3-backed files are
             handled identically to the Celery task.
+            
+            Args:
+                doc_id: Document UUID
+                context: Optional dict with BYOK settings (analysis_mode, API keys)
             """
-            logger.warning("[PIDVUpload] Running sync pipeline for doc_id=%s", doc_id)
+            context = context or {}
+            logger.warning("[PIDVUpload] Running sync pipeline for doc_id=%s with context=%s", doc_id, context)
             try:
                 from apps.pid_verification.services.segmentation import segment_document
                 from apps.pid_verification.services.extraction import extract_drawing
@@ -337,7 +420,7 @@ def upload_pid(request):
             )
             t = threading.Thread(
                 target=_run_sync_pipeline,
-                args=(str(doc.document_id),),
+                args=(str(doc.document_id), byok_context),
                 daemon=True,
                 name=f"pidv-sync-{doc.document_id}",
             )
@@ -349,7 +432,8 @@ def upload_pid(request):
                 RobustQueueService.queue_task(
                     process_pid_document,
                     args=(str(doc.document_id),),
-                    sync_fallback=_run_sync_pipeline,
+                    kwargs={'context': byok_context},
+                    sync_fallback=lambda: _run_sync_pipeline(str(doc.document_id), byok_context),
                     max_retries=3,
                 )
                 logger.info("[PIDVUpload] Task queued via Celery: doc_id=%s", doc.document_id)
@@ -384,16 +468,24 @@ def upload_pid(request):
     except Exception as exc:
         logger.warning("[PIDVUpload] Cross snapshot sync skipped: %s", exc)
 
-    return Response(
-        {
-            "document_id": str(doc.document_id),
-            "status":      doc.status,
-            "file_name":   doc.file_name,
-            "project_id":  str(project.project_id) if project else None,
-            "message":     "File uploaded successfully. Processing started.",
-        },
-        status=status.HTTP_202_ACCEPTED,
-    )
+    # Build response with BYOK information for frontend transparency
+    response_data = {
+        "document_id": str(doc.document_id),
+        "status":      doc.status,
+        "file_name":   doc.file_name,
+        "project_id":  str(project.project_id) if project else None,
+        "message":     "File uploaded successfully. Processing started.",
+    }
+    
+    # Add BYOK context to response (without exposing actual API keys)
+    if byok_context and byok_context.get('analysis_mode') != 'standard':
+        response_data['analysis'] = {
+            'mode': byok_context['analysis_mode'],
+            'enhanced': True,
+            'description': _get_analysis_mode_description(byok_context['analysis_mode'])
+        }
+    
+    return Response(response_data, status=status.HTTP_202_ACCEPTED)
 
 
 # ===========================================================================
@@ -704,7 +796,28 @@ def list_documents(request):
 
     project_id = request.query_params.get("project_id")
     if project_id:
-        qs = qs.filter(project__project_id=project_id)
+        # V2 FIX: Ensure project_id is properly validated and converted
+        # Defensive: strip whitespace and validate UUID format before filtering
+        project_id_str = str(project_id).strip()
+        
+        if project_id_str:
+            try:
+                # Validate UUID format to prevent errors
+                import uuid
+                uuid.UUID(project_id_str)
+                qs = qs.filter(project__project_id=project_id_str)
+                logger.info(
+                    "[PIDVList] Filtering by project_id=%s, user=%s, result_count=%d",
+                    project_id_str,
+                    request.user.username,
+                    qs.count()
+                )
+            except ValueError:
+                logger.warning(
+                    "[PIDVList] Invalid UUID format for project_id=%s, ignoring filter",
+                    project_id_str
+                )
+                # Don't filter if UUID is invalid — return all user's documents
 
     qs = qs.order_by("-created_at")[:100]
     return Response(PIDVDocumentListSerializer(qs, many=True).data)
@@ -1238,6 +1351,358 @@ def compare_accuracy(request, document_id):
 
 
 # ===========================================================================
+# REFERENCE DATA API  — line list, equipment list, instrument index
+# ===========================================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, HasDisciplineAccess])
+@parser_classes([MultiPartParser, FormParser])
+def upload_reference_data(request, project_id):
+    """
+    POST /api/v1/pid-verification/projects/<project_id>/reference-data/upload/
+
+    Upload reference data files for cross-checking P&ID drawings.
+    
+    Form fields:
+      data_type — 'line_list' | 'equipment_list' | 'instrument_index'
+      file      — single file upload (Excel/CSV/PDF)
+    
+    Supported formats: .xlsx, .xls, .csv, .pdf, .txt
+    """
+    upload_reference_data.module_required = 'pid_verification'
+
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({'error': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    data_type = request.data.get('data_type')
+    uploaded_file = request.FILES.get('file')
+
+    if not data_type:
+        return Response({'error': 'data_type is required'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    if data_type not in ['line_list', 'equipment_list', 'instrument_index']:
+        return Response({'error': 'Invalid data_type'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not uploaded_file:
+        return Response({'error': 'No file uploaded'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Soft-coded: allowed reference data file extensions
+    ALLOWED_EXTS = {'.xlsx', '.xls', '.csv', '.pdf', '.txt'}
+    ext = Path(uploaded_file.name).suffix.lower()
+    if ext not in ALLOWED_EXTS:
+        return Response(
+            {'error': f'Unsupported file type: {ext}. Allowed: {", ".join(ALLOWED_EXTS)}'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Create reference data record
+    ref_data = PIDVReferenceData.objects.create(
+        project      = project,
+        data_type    = data_type,
+        file_name    = uploaded_file.name,
+        original_file= uploaded_file,
+        status       = PIDVReferenceData.Status.PENDING,
+        uploaded_by  = request.user,
+    )
+
+    # Queue parsing task for Excel/CSV files
+    if ext in {'.xlsx', '.xls', '.csv'}:
+        from .tasks import parse_reference_data_task
+        try:
+            parse_reference_data_task.delay(str(ref_data.reference_id))
+            logger.info('[ReferenceDataUpload] Queued parsing for reference_id=%s', ref_data.reference_id)
+        except Exception as exc:
+            # Worker unavailable — run synchronously in bg thread
+            import threading
+            threading.Thread(
+                target=parse_reference_data_task,
+                args=(str(ref_data.reference_id),),
+                daemon=True,
+            ).start()
+            logger.warning('[ReferenceDataUpload] Queue unavailable (%s) — running sync thread', exc)
+    else:
+        # PDF/TXT files — mark as completed (no parsing)
+        ref_data.status = PIDVReferenceData.Status.COMPLETED
+        ref_data.save()
+
+    return Response({
+        'reference_id': str(ref_data.reference_id),
+        'data_type':    ref_data.data_type,
+        'file_name':    ref_data.file_name,
+        'status':       ref_data.status,
+        'created_at':   ref_data.created_at,
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def project_reference_data(request, project_id):
+    """
+    GET /api/v1/pid-verification/projects/<project_id>/reference-data/
+    
+    Query params:
+      data_type — optional filter: 'line_list' | 'equipment_list' | 'instrument_index'
+    
+    List all reference data files for a project.
+    """
+    project = _get_project_or_404(project_id, request.user)
+    if project is None:
+        return Response({'error': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    qs = PIDVReferenceData.objects.filter(project=project).order_by('-created_at')
+    
+    # Optional filter by data_type
+    data_type = request.query_params.get('data_type')
+    if data_type:
+        qs = qs.filter(data_type=data_type)
+
+    data = []
+    for ref in qs:
+        data.append({
+            'reference_id': str(ref.reference_id),
+            'data_type':    ref.data_type,
+            'file_name':    ref.file_name,
+            'status':       ref.status,
+            'metadata':     ref.metadata,
+            'uploaded_by':  ref.uploaded_by.username if ref.uploaded_by else None,
+            'created_at':   ref.created_at,
+        })
+
+    return Response({'reference_data': data}, status=status.HTTP_200_OK)
+
+
+@api_view(["GET", "DELETE"])
+@permission_classes([IsAuthenticated])
+def reference_data_detail(request, reference_id):
+    """
+    GET    /api/v1/pid-verification/reference-data/<reference_id>/
+    DELETE /api/v1/pid-verification/reference-data/<reference_id>/
+    """
+    try:
+        ref = PIDVReferenceData.objects.select_related('project').get(reference_id=reference_id)
+    except PIDVReferenceData.DoesNotExist:
+        return Response({'error': 'Reference data not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    # Permissions: must own the project or be admin
+    if ref.project.created_by != request.user and not request.user.is_staff:
+        return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'DELETE':
+        ref.delete()
+        return Response({'message': 'Reference data deleted'}, status=status.HTTP_200_OK)
+
+    # GET: return full detail including parsed data
+    return Response({
+        'reference_id': str(ref.reference_id),
+        'project_id':   str(ref.project.project_id),
+        'data_type':    ref.data_type,
+        'file_name':    ref.file_name,
+        'status':       ref.status,
+        'error_message': ref.error_message,
+        'metadata':     ref.metadata,
+        'parsed_data':  ref.parsed_data,
+        'uploaded_by':  ref.uploaded_by.username if ref.uploaded_by else None,
+        'created_at':   ref.created_at,
+    }, status=status.HTTP_200_OK)
+
+
+# ===========================================================================
+# AI-Powered P&ID Checks
+# ===========================================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def run_ai_checks(request, project_id):
+    """
+    POST /api/v1/pid-verification/run-ai-checks/<project_id>/
+    
+    Trigger AI-powered extraction and checking for a project.
+    
+    Required conditions:
+      - Project must have at least one completed P&ID document
+      - Project should have uploaded reference data (line list, equipment list, instrument index)
+    
+    Request body:
+      {
+        "analysis_mode": "standard" | "enhanced_openai" | "deep_claude" | "hybrid",
+        "openai_api_key": "sk-...",  // optional, for enhanced/hybrid mode
+        "claude_api_key": "sk-ant-..."  // optional, for deep/hybrid mode
+      }
+    
+    Returns:
+      {
+        "run_id": "uuid",
+        "status": "pending",
+        "message": "AI check run started. Processing in background."
+      }
+    """
+    from apps.pid_verification.models import PIDVProject, PIDVAICheckRun, PIDVDocument
+    from apps.pid_verification.tasks import run_ai_checks_task
+    
+    try:
+        project = PIDVProject.objects.get(project_id=project_id)
+    except PIDVProject.DoesNotExist:
+        return Response({'error': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    # Permission check
+    if project.created_by != request.user and not request.user.is_staff:
+        return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+    
+    # Validate: must have at least one completed document
+    completed_docs = PIDVDocument.objects.filter(
+        project=project,
+        status=PIDVDocument.Status.COMPLETED
+    ).count()
+    
+    if completed_docs == 0:
+        return Response({
+            'error': 'No completed P&ID documents found in project. Upload and process P&IDs first.'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Get analysis mode and API keys from request
+    analysis_mode = request.data.get('analysis_mode', 'hybrid')
+    openai_api_key = request.data.get('openai_api_key')
+    claude_api_key = request.data.get('claude_api_key')
+    
+    # Validate BYOK keys if required
+    if analysis_mode in ['enhanced_openai', 'hybrid']:
+        if not openai_api_key:
+            return Response({
+                'error': f'OpenAI API key required for {analysis_mode} mode'
+            }, status=status.HTTP_400_BAD_REQUEST)
+    
+    if analysis_mode in ['deep_claude', 'hybrid']:
+        if not claude_api_key:
+            return Response({
+                'error': f'Claude API key required for {analysis_mode} mode'
+            }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Create check run record
+    check_run = PIDVAICheckRun.objects.create(
+        project=project,
+        analysis_mode=analysis_mode,
+        triggered_by=request.user,
+        status=PIDVAICheckRun.Status.PENDING
+    )
+    
+    # Trigger background task
+    context = {
+        'analysis_mode': analysis_mode,
+        'openai_api_key': openai_api_key,
+        'claude_api_key': claude_api_key,
+    }
+    
+    run_ai_checks_task.delay(str(check_run.run_id), context)
+    
+    return Response({
+        'run_id': str(check_run.run_id),
+        'status': check_run.status,
+        'message': 'AI check run started. Processing in background.',
+        'analysis_mode': analysis_mode,
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def project_ai_check_runs(request, project_id):
+    """
+    GET /api/v1/pid-verification/project-ai-check-runs/<project_id>/
+    
+    Get all AI check runs for a project.
+    
+    Returns:
+      {
+        "check_runs": [
+          {
+            "run_id": "uuid",
+            "status": "completed",
+            "analysis_mode": "hybrid",
+            "summary_stats": { total_checks, pass_count, fail_count, ... },
+            "created_at": "...",
+            "completed_at": "..."
+          }
+        ]
+      }
+    """
+    from apps.pid_verification.models import PIDVProject, PIDVAICheckRun
+    
+    try:
+        project = PIDVProject.objects.get(project_id=project_id)
+    except PIDVProject.DoesNotExist:
+        return Response({'error': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    # Permission check
+    if project.created_by != request.user and not request.user.is_staff:
+        return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+    
+    check_runs = PIDVAICheckRun.objects.filter(project=project).order_by('-created_at')
+    
+    data = []
+    for run in check_runs:
+        data.append({
+            'run_id': str(run.run_id),
+            'status': run.status,
+            'analysis_mode': run.analysis_mode,
+            'summary_stats': run.summary_stats,
+            'processing_metadata': run.processing_metadata,
+            'triggered_by': run.triggered_by.username if run.triggered_by else None,
+            'created_at': run.created_at,
+            'completed_at': run.completed_at,
+        })
+    
+    return Response({'check_runs': data}, status=status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def ai_check_run_detail(request, run_id):
+    """
+    GET /api/v1/pid-verification/ai-check-run/<run_id>/
+    
+    Get full details of an AI check run including all check results.
+    
+    Returns:
+      {
+        "run_id": "uuid",
+        "status": "completed",
+        "analysis_mode": "hybrid",
+        "extracted_data": { equipment, lines, instruments, overview },
+        "check_results": [ { check_id, name, result, confidence, finding, details } ],
+        "summary_stats": { total_checks, pass_count, fail_count, ... },
+        "processing_metadata": { sheets_processed, api_calls_made, total_cost_usd, ... }
+      }
+    """
+    from apps.pid_verification.models import PIDVAICheckRun
+    
+    try:
+        check_run = PIDVAICheckRun.objects.select_related('project').get(run_id=run_id)
+    except PIDVAICheckRun.DoesNotExist:
+        return Response({'error': 'AI check run not found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    # Permission check
+    if check_run.project.created_by != request.user and not request.user.is_staff:
+        return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+    
+    return Response({
+        'run_id': str(check_run.run_id),
+        'project_id': str(check_run.project.project_id),
+        'project_name': check_run.project.project_name,
+        'status': check_run.status,
+        'analysis_mode': check_run.analysis_mode,
+        'extracted_data': check_run.extracted_data,
+        'check_results': check_run.check_results,
+        'summary_stats': check_run.summary_stats,
+        'processing_metadata': check_run.processing_metadata,
+        'error_message': check_run.error_message,
+        'triggered_by': check_run.triggered_by.username if check_run.triggered_by else None,
+        'created_at': check_run.created_at,
+        'updated_at': check_run.updated_at,
+        'completed_at': check_run.completed_at,
+    }, status=status.HTTP_200_OK)
+
+
+# ===========================================================================
 # Tag Naming & Acronym Check
 # ===========================================================================
 
@@ -1710,23 +2175,76 @@ _ISA_DEFAULT_SYMBOLS_COUNT = list(range(44))   # 44 entries in _ISA_DEFAULT_SYMB
 
 # ===========================================================================
 
+def _get_analysis_mode_description(mode: str) -> str:
+    """Return user-friendly description for analysis mode"""
+    descriptions = {
+        'standard': 'Standard rule-based analysis',
+        'enhanced_openai': 'Enhanced analysis with OpenAI GPT-4o',
+        'deep_claude': 'Deep analysis with Claude 3.5 Sonnet',
+        'hybrid': 'Hybrid analysis with OpenAI + Claude cross-validation'
+    }
+    return descriptions.get(mode, 'Unknown analysis mode')
+
+
 def _get_doc_or_404(document_id: str, user):
+    """
+    Soft-coded helper: Retrieves a PIDVDocument with permission checking.
+    Returns None if document doesn't exist OR user lacks permission.
+    Logs the reason for easier debugging.
+    """
     try:
         doc = PIDVDocument.objects.get(document_id=document_id)
         user_obj = getattr(user, "user", user)
+        
+        # Permission check: document owner or staff
         if doc.uploaded_by == user or getattr(user_obj, "is_staff", False):
             return doc
+        
+        # Permission denied
+        logger.warning(
+            "[PIDVDoc] Permission denied - user=%s tried to access document_id=%s (owner=%s)",
+            getattr(user, 'username', 'unknown'),
+            document_id,
+            getattr(doc.uploaded_by, 'username', 'unknown')
+        )
         return None
+        
     except PIDVDocument.DoesNotExist:
+        logger.info(
+            "[PIDVDoc] Document not found - user=%s requested document_id=%s",
+            getattr(user, 'username', 'unknown'),
+            document_id
+        )
         return None
 
 
 def _get_project_or_404(project_id: str, user):
+    """
+    Soft-coded helper: Retrieves a PIDVProject with permission checking.
+    Returns None if project doesn't exist OR user lacks permission.
+    Logs the reason for easier debugging.
+    """
     try:
         project = PIDVProject.objects.get(project_id=project_id)
         user_obj = getattr(user, "user", user)
+        
+        # Permission check: project creator or staff
         if project.created_by == user or getattr(user_obj, "is_staff", False):
             return project
+        
+        # Permission denied
+        logger.warning(
+            "[PIDVProject] Permission denied - user=%s tried to access project_id=%s (creator=%s)",
+            getattr(user, 'username', 'unknown'),
+            project_id,
+            getattr(project.created_by, 'username', 'unknown')
+        )
         return None
+        
     except PIDVProject.DoesNotExist:
+        logger.info(
+            "[PIDVProject] Project not found - user=%s requested project_id=%s",
+            getattr(user, 'username', 'unknown'),
+            project_id
+        )
         return None

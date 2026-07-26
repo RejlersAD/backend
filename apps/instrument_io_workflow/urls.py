@@ -1,11 +1,12 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from .views import IOListDocumentViewSet, config_view, diff_view
+from .views import IOListProjectViewSet, IOListDocumentViewSet, config_view, diff_view
 
 app_name = 'instrument_io_workflow'
 
 router = DefaultRouter()
+router.register(r'projects', IOListProjectViewSet, basename='io-project')
 router.register(r'documents', IOListDocumentViewSet, basename='io-document')
 
 urlpatterns = [

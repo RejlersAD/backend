@@ -44,6 +44,16 @@ urlpatterns = [
     path('legend-sheets/<str:legend_id>/',                    views.legend_sheet_detail,   name='legend-sheet-detail'),
     path('legend-sheets/<str:legend_id>/retry/',              views.retry_legend_extraction, name='retry-legend-extraction'),
 
+    # Reference Data — line list, equipment list, instrument index uploads
+    path('projects/<str:project_id>/reference-data/',         views.project_reference_data,  name='project-reference-data'),
+    path('projects/<str:project_id>/reference-data/upload/',  views.upload_reference_data,   name='upload-reference-data'),
+    path('reference-data/<str:reference_id>/',                views.reference_data_detail,   name='reference-data-detail'),
+
+    # AI-Powered P&ID Checks
+    path('projects/<str:project_id>/run-ai-checks/',          views.run_ai_checks,           name='run-ai-checks'),
+    path('projects/<str:project_id>/ai-check-runs/',          views.project_ai_check_runs,   name='project-ai-check-runs'),
+    path('ai-check-run/<str:run_id>/',                        views.ai_check_run_detail,     name='ai-check-run-detail'),
+
     # Instrument Symbol Registry
     path('projects/<str:project_id>/instrument-symbols/',     views.project_instrument_symbols, name='project-instrument-symbols'),
     path('instrument-symbols/<str:symbol_id>/',               views.instrument_symbol_detail,   name='instrument-symbol-detail'),

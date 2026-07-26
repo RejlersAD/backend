@@ -148,6 +148,151 @@ SPEC_EXTRACTION_CONFIG = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NPD Format Configuration — Display Format for Size Columns
+# ─────────────────────────────────────────────────────────────────────────────
+NPD_FORMAT_CONFIG = {
+    # NPD display format for FirstSizeFrom/FirstSizeTo columns in Excel export
+    # Options:
+    #   'decimal'  → 0.5, 0.75, 1.0, 1.25, 1.5, 2.0 (preferred for data processing)
+    #   'fraction' → 1/2, 3/4, 1, 1-1/4, 1-1/2, 2 (industry-standard piping notation)
+    # 
+    # User requirement: "convert format '1/2, 3/4, 1, 1-1/4, 1-1/2' to decimal value
+    # example '0.5, 0.75, 1.0, 1.5'" — using decimal format for better Excel visibility
+    "npd_display_format": "decimal",  # 'decimal' or 'fraction'
+    
+    # When decimal format is selected, control decimal precision
+    # (0 = whole numbers only, 2 = two decimal places for all sizes)
+    "decimal_precision": None,  # None = smart (whole numbers as int, fractional as-is)
+    
+    # Force decimal places for whole numbers (e.g., 1 → 1.0, 2 → 2.0)
+    "force_decimal_notation": False,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Size Expansion Configuration — Intelligent Range Detection & Expansion
+# ─────────────────────────────────────────────────────────────────────────────
+SIZE_EXPANSION_CONFIG = {
+    # Enable automatic expansion of size range patterns to individual rows
+    "enable_size_expansion": True,
+    
+    # Enable expansion for ALL size ranges (not just "below" patterns)
+    # When True: "1/2" to 1-1/2" → expands to [0.5, 0.75, 1.0, 1.25, 1.5]
+    # When False: only "1.5 & Below" patterns trigger expansion
+    "expand_all_ranges": True,
+    
+    # Threshold: if size_from or size_to contains a size ≤ this value,
+    # expand to include all standard small sizes
+    "small_size_threshold": 1.5,
+    
+    # Standard small sizes to include when expansion is triggered
+    # (calibrated against ADNOC LNG / ARAMCO specs — common for small-bore piping)
+    "small_size_ladder": [0.5, 0.75, 1.0, 1.25, 1.5],
+    
+    # Medium sizes (1.5" to 6") — expanded with 0.25" increments
+    "medium_size_threshold": 6.0,
+    "medium_size_ladder": [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0],
+    
+    # Regex patterns that trigger size expansion (case-insensitive)
+    # Matches: "1.5 & Below", "1½ & Below", "1-1/2 & Below", "1.5 and below",
+    # "thru", "to", "up to", "≤", etc.
+    "range_pattern_regexes": [
+        r'(?:&|and)\s*below',           # "1.5 & Below"
+        r'\bthru\b',                     # "1/2" thru 1-1/2""
+        r'\bthrough\b',                  # "1/2" through 1-1/2""
+        r'\bto\b',                       # "1/2" to 1-1/2""
+        r'up\s+to',                      # "up to 1-1/2""
+        r'≤|<=',                         # "≤ 1.5""
+        r'\band\s+smaller\b',            # "1.5 and smaller"
+        r'\band\s+less\b',               # "1.5 and less"
+    ],
+    
+    # When a range pattern is detected, keep the original row AND generate
+    # individual rows for each sub-size (so SmartPlant 3D gets explicit size entries)
+    "duplicate_expanded_rows": True,
+    
+    # Log expansion actions for audit trail
+    "log_expansions": True,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Component Type Detection — Enhanced AI Extraction Guidance
+# ─────────────────────────────────────────────────────────────────────────────
+COMPONENT_TYPE_DETECTION_CONFIG = {
+    # Enable comprehensive component type extraction
+    "enable_enhanced_detection": True,
+    
+    # Critical component types that MUST be extracted (used to validate extraction quality)
+    "required_component_types": [
+        "pipe",
+        "fitting",
+        "flange",
+        "valve",
+        "gasket",
+        "bolt",
+    ],
+    
+    # Specific component sub-types to explicitly request from AI
+    # (added to prompt to improve extraction recall)
+    "priority_subtypes": {
+        "valve": [
+            "GATE VALVE",
+            "GLOBE VALVE",
+            "CHECK VALVE",
+            "BALL VALVE",
+            "PLUG VALVE",
+            "BUTTERFLY VALVE",
+            "NEEDLE VALVE",
+            "VENT & DRAIN VALVE",
+            "VENT AND DRAIN VALVE",
+            "DRAIN VALVE",
+            "BLOWDOWN VALVE",
+        ],
+        "fitting": [
+            "90° ELBOW",
+            "45° ELBOW",
+            "TEE",
+            "REDUCER",
+            "CAP",
+            "WELDOLET",
+            "SOCKOLET",
+            "THREADOLET",
+            "ELBOLET",
+            "COUPLING",
+            "NIPPLE",
+            "UNION",
+            "SWAGE",
+        ],
+        "flange": [
+            "WELD NECK FLANGE",
+            "BLIND FLANGE",
+            "SLIP-ON FLANGE",
+            "THREADED FLANGE",
+            "LAP JOINT FLANGE",
+            "SOCKET WELD FLANGE",
+            "FLANGES (GEN.)",
+            "FLANGES GENERAL",
+        ],
+        "gasket": [
+            "SPIRAL WOUND GASKET",
+            "RING JOINT GASKET",
+            "FLAT GASKET",
+            "GASKETS",
+        ],
+        "bolt": [
+            "STUD BOLT",
+            "MACHINE BOLT",
+            "BOLTS",
+        ],
+    },
+    
+    # Minimum components per class to consider extraction successful
+    "min_components_warning_threshold": 10,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # AI model pricing (USD per 1M tokens) — for cost estimation & billing transparency
 # ─────────────────────────────────────────────────────────────────────────────
 # NOTE: These are approximate rates as of 2026-07; verify against current vendor pricing.

@@ -865,11 +865,67 @@ def _to_float_npd(size) -> float | None:
 
 
 def _normalize_npd(size) -> str:
-    """Stringify an NPD value in S3D format (integer when whole, else decimal)."""
+    """Stringify an NPD value according to configured display format.
+    
+    Two formats supported (controlled by NPD_FORMAT_CONFIG):
+    
+    1. DECIMAL (default — user requested):
+       - 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, etc.
+       - Better for Excel data processing and filtering
+       - User requirement: "convert format '1/2, 3/4' to decimal '0.5, 0.75'"
+    
+    2. FRACTION (industry-standard piping notation):
+       - 1/2, 3/4, 1, 1-1/4, 1-1/2, 2, etc.
+       - Matches SmartPlant 3D catalog conventions
+    
+    Format is soft-coded and can be switched dynamically via config.NPD_FORMAT_CONFIG.
+    """
+    from ..config import NPD_FORMAT_CONFIG
+    
     v = _to_float_npd(size)
     if v is None:
         return str(size or '').strip()
-    return str(int(v)) if float(v).is_integer() else str(v)
+    
+    # Get configured display format (default to decimal per user requirement)
+    display_format = NPD_FORMAT_CONFIG.get('npd_display_format', 'decimal')
+    
+    if display_format == 'fraction':
+        # Soft-coded mapping: decimal NPD → piping fraction notation
+        npd_fraction_reverse_map = {
+            0.125: "1/8",
+            0.25: "1/4",
+            0.375: "3/8",
+            0.5: "1/2",
+            0.75: "3/4",
+            1.25: "1-1/4",
+            1.5: "1-1/2",
+            2.5: "2-1/2",
+            3.5: "3-1/2",
+            4.5: "4-1/2",
+            5.5: "5-1/2",
+        }
+        
+        if v in npd_fraction_reverse_map:
+            return npd_fraction_reverse_map[v]
+        
+        # Whole numbers as integers
+        return str(int(v)) if float(v).is_integer() else str(v)
+    
+    else:  # decimal format (default)
+        # User requirement: show as 0.5, 0.75, 1.0, 1.5 in Excel columns
+        force_decimal = NPD_FORMAT_CONFIG.get('force_decimal_notation', False)
+        precision = NPD_FORMAT_CONFIG.get('decimal_precision')
+        
+        if precision is not None:
+            # Fixed decimal precision (e.g., precision=2 → "1.00", "0.50")
+            return f"{v:.{precision}f}"
+        elif force_decimal and float(v).is_integer():
+            # Force .0 suffix for whole numbers (e.g., 1 → "1.0")
+            return f"{v:.1f}"
+        else:
+            # Smart format: whole numbers as int, fractional as-is
+            # Examples: 0.5 → "0.5", 0.75 → "0.75", 1.0 → "1", 1.5 → "1.5"
+            return str(int(v)) if float(v).is_integer() else str(v)
 
 
 def _class_npd_range(cls) -> tuple[float | None, float | None]:
@@ -3049,6 +3105,11 @@ def _rows_piping_commodity_filter(cls):
                 'FirstSizeFrom':       first_size,
                 'FirstSizeTo':         first_size,
                 'FirstSizeUnits':      S3D_DEFAULTS['NpdUnitType'],
+                # ── W.T. / Schedule (NEW: Phase 2 — preserve exact extracted value) ──
+                # FirstSizeSchedule gets the EXACT W.T. value from the PDF (e.g. "SCH. 80", "3/8" THK")
+                # instead of computed value. This ensures precise match with source document.
+                # The apply_passthrough_defaults lambda will only fill if blank.
+                'FirstSizeSchedule':   sched if sched else '',  # Phase 2: explicit W.T. mapping
                 # ── End preparation + rating (the per-row spec rule) ──────
                 'EndPreparation':      end_prep,
                 'EndStandard':         S3D_DEFAULTS['EndStandard'],

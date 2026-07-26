@@ -19,6 +19,27 @@ from apps.hr_core.services import EmployeeService
 
 User = get_user_model()
 
+# ═══════════════════════════════════════════════════════════════════════════
+# SOFT-CODED: Employee Data Fetching Configuration
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Map EmployeeMaster fields to offboarding/legacy field names (Priority order)
+EMPLOYEE_FIELD_MAPPING = {
+    'position': ['job_title_uae', 'job_title_finland', 'designation'],  # Try UAE title first, then Finland, then designation
+    'reporting_manager': ['manager'],  # FK relationship - will call get_full_name()
+    'department': ['department', 'business_unit'],  # Department field, fallback to business_unit
+    'branch': ['branch'],  # Direct field mapping (RAD/RIN)
+}
+
+# HR Manager role codes for filtering (from apps.rbac.rbac_config)
+HR_MANAGER_ROLE_CODES = ['hr_admin', 'hr_manager']
+
+# Minimum fields required for employee selection dropdown (performance optimization)
+EMPLOYEE_DROPDOWN_MIN_FIELDS = [
+    'user_id', 'first_name', 'last_name', 'email', 
+    'position', 'department', 'branch', 'reporting_manager'
+]
+
 # ── Soft-coded Profile Field Configuration ────────────────────────────────
 # Defines all editable profile fields with metadata for frontend rendering
 PROFILE_FIELD_GROUPS = [
@@ -94,16 +115,32 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
         """
         GET /api/v1/users/employees/active_employees/
         List all active employees with complete profile data
-        Supports search query parameter
+        
+        Query Parameters:
+        - search: Filter by name, email, employee number
+        - role_filter: 'hr_manager' to filter HR managers only
+        - minimal: 'true' to return only essential fields for dropdowns
         
         ✅ MIGRATED: Now uses EmployeeMaster instead of UserProfile
+        ✅ ENHANCED: Smart field mapping for legacy compatibility
         """
         search_query = request.query_params.get('search', '').strip()
+        role_filter = request.query_params.get('role_filter', '').strip().lower()
+        minimal = request.query_params.get('minimal', '').lower() == 'true'
         
         # Get all active employees using EmployeeMaster
         employees_query = EmployeeMaster.objects.filter(
             user__is_active=True
         ).select_related('user', 'manager')
+        
+        # Apply role filtering for HR managers
+        if role_filter == 'hr_manager':
+            from apps.rbac.models import UserProfile as RBACUserProfile, UserRole
+            hr_user_ids = UserRole.objects.filter(
+                role__code__in=HR_MANAGER_ROLE_CODES,
+                role__is_active=True  # Check Role.is_active, not UserRole.is_active
+            ).values_list('user_profile__user_id', flat=True)
+            employees_query = employees_query.filter(user_id__in=hr_user_ids)
         
         # Apply search filter if provided
         if search_query:
@@ -119,12 +156,30 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
         # Order by last name, first name
         employees_query = employees_query.order_by('last_name', 'first_name')
         
+        # Helper function to resolve mapped fields
+        def get_mapped_field(employee, mapping_key):
+            """
+            Resolve field value using EMPLOYEE_FIELD_MAPPING configuration
+            Returns first non-empty value from priority list
+            """
+            field_options = EMPLOYEE_FIELD_MAPPING.get(mapping_key, [])
+            for field_name in field_options:
+                if field_name == 'manager':
+                    # Special handling for FK relationships
+                    if employee.manager:
+                        return employee.manager.get_full_name()
+                else:
+                    value = getattr(employee, field_name, None)
+                    if value:
+                        return value
+            return ''
+        
         # Serialize the data
         employee_data = []
         for employee in employees_query:
             user = employee.user
             
-            # Build employee data object from EmployeeMaster
+            # Build base employee data object
             employee_dict = {
                 'id': user.id,
                 'user_id': user.id,
@@ -132,6 +187,23 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                 'first_name': employee.first_name or user.first_name or '',
                 'last_name': employee.last_name or user.last_name or '',
                 'email': employee.email or user.email or '',
+            }
+            
+            # Add computed/mapped fields (ALWAYS included for compatibility)
+            employee_dict.update({
+                'position': get_mapped_field(employee, 'position'),
+                'reporting_manager': get_mapped_field(employee, 'reporting_manager'),
+                'department': get_mapped_field(employee, 'department'),
+                'branch': employee.branch or 'RAD',
+            })
+            
+            # If minimal mode, return only essential fields
+            if minimal:
+                employee_data.append(employee_dict)
+                continue
+            
+            # Otherwise, include full profile data
+            employee_dict.update({
                 'phone_number': user.phone_number or '',
                 'is_active': user.is_active,
                 'date_joined': user.date_joined.isoformat() if user.date_joined else None,
@@ -173,15 +245,21 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                 'implementation_test': getattr(employee, 'implementation_test', ''),
                 'hrm_test': getattr(employee, 'hrm_test', ''),
                 'process_testing': getattr(employee, 'process_testing', ''),
-            }
+            })
             
             employee_data.append(employee_dict)
         
-        return Response({
+        response_data = {
             'count': len(employee_data),
             'results': employee_data,
-            'field_groups': PROFILE_FIELD_GROUPS,  # Include field configuration for frontend
-        })
+        }
+        
+        # Include field configuration and mapping info for frontend (only in full mode)
+        if not minimal:
+            response_data['field_groups'] = PROFILE_FIELD_GROUPS
+            response_data['field_mapping'] = EMPLOYEE_FIELD_MAPPING
+        
+        return Response(response_data)
 
     @action(detail=True, methods=['patch'])
     def update_profile_field(self, request, pk=None):

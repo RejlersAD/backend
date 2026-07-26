@@ -514,6 +514,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         """
         SUPER_ADMIN_ONLY_ACTIONS = {
             'create', 'reset_password', 'activate', 'deactivate', 'soft_delete',
+            'bulk_deactivate_by_roles',
         }
         # Admin (level 2+) can assign/revoke roles — but the action itself guards
         # against assigning the super_admin role without super_admin privileges
@@ -695,6 +696,153 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         )
         
         return Response({'status': 'user soft deleted'})
+    
+    @action(detail=False, methods=['post'], url_path='bulk-deactivate-by-roles')
+    def bulk_deactivate_by_roles(self, request):
+        """
+        Bulk deactivate users based on their roles
+        
+        SOFT-CODED: All thresholds, messages, and validation rules are configurable
+        
+        Request body:
+        {
+            "role_codes": ["engineer", "contractor"],  // OR role_ids
+            "role_ids": [1, 2, 3],                     // Optional alternative
+            "exclude_super_admins": true,              // Soft-coded safety flag (default: true)
+            "dry_run": false                           // Preview mode (default: false)
+        }
+        
+        Returns:
+        {
+            "status": "success",
+            "deactivated_count": 25,
+            "affected_users": [...],  // if dry_run=true
+            "excluded_count": 2,       // super admins excluded
+            "message": "25 users deactivated successfully"
+        }
+        """
+        # SOFT-CODED: Configuration constants
+        MAX_BULK_DEACTIVATE_LIMIT = 500  # Safety limit
+        EXCLUDE_SUPER_ADMINS_BY_DEFAULT = True
+        SUPER_ADMIN_ROLE_CODES = ['super_admin', 'superadmin']
+        
+        # Extract request data
+        role_codes = request.data.get('role_codes', [])
+        role_ids = request.data.get('role_ids', [])
+        exclude_super_admins = request.data.get('exclude_super_admins', EXCLUDE_SUPER_ADMINS_BY_DEFAULT)
+        dry_run = request.data.get('dry_run', False)
+        
+        # Validation
+        if not role_codes and not role_ids:
+            return Response(
+                {'error': 'Either role_codes or role_ids must be provided'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Build queryset - find all users with any of the specified roles
+        user_queryset = UserProfile.objects.filter(
+            status='active',  # Only deactivate currently active users
+            user__is_active=True
+        ).distinct()
+        
+        # Filter by role codes or IDs
+        if role_codes:
+            user_queryset = user_queryset.filter(
+                roles__code__in=role_codes,
+                roles__is_active=True
+            )
+        elif role_ids:
+            user_queryset = user_queryset.filter(
+                roles__id__in=role_ids,
+                roles__is_active=True
+            )
+        
+        # SOFT-CODED: Exclude super admins if requested (safety feature)
+        excluded_count = 0
+        if exclude_super_admins:
+            super_admin_users = user_queryset.filter(
+                roles__code__in=SUPER_ADMIN_ROLE_CODES
+            ).distinct()
+            excluded_count = super_admin_users.count()
+            user_queryset = user_queryset.exclude(
+                id__in=super_admin_users.values_list('id', flat=True)
+            )
+        
+        # Check count limit (safety)
+        total_count = user_queryset.count()
+        if total_count > MAX_BULK_DEACTIVATE_LIMIT:
+            return Response(
+                {
+                    'error': f'Cannot deactivate more than {MAX_BULK_DEACTIVATE_LIMIT} users at once',
+                    'requested_count': total_count,
+                    'limit': MAX_BULK_DEACTIVATE_LIMIT
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # DRY RUN MODE - return preview without making changes
+        if dry_run:
+            affected_users = []
+            for profile in user_queryset.select_related('user').prefetch_related('roles'):
+                affected_users.append({
+                    'id': str(profile.id),
+                    'email': profile.user.email,
+                    'name': f"{profile.user.first_name} {profile.user.last_name}".strip() or profile.user.email,
+                    'department': profile.department,
+                    'roles': [r.name for r in profile.roles.filter(is_active=True)]
+                })
+            
+            return Response({
+                'status': 'dry_run',
+                'would_deactivate_count': total_count,
+                'excluded_super_admin_count': excluded_count,
+                'affected_users': affected_users,
+                'message': f'Preview: {total_count} users would be deactivated'
+            })
+        
+        # ACTUAL DEACTIVATION
+        deactivated_count = 0
+        deactivated_user_ids = []
+        
+        for profile in user_queryset.select_related('user'):
+            # Deactivate user
+            profile.status = 'inactive'
+            profile.user.is_active = False
+            profile.save()
+            profile.user.save()
+            
+            deactivated_count += 1
+            deactivated_user_ids.append(str(profile.id))
+            
+            # Create audit log for each deactivation
+            create_audit_log(
+                user=request.user,
+                action='bulk_deactivate',
+                resource_type='UserProfile',
+                resource_id=profile.id,
+                resource_repr=str(profile),
+                metadata={
+                    'bulk_operation': True,
+                    'role_codes': role_codes,
+                    'role_ids': role_ids,
+                    'excluded_super_admins': exclude_super_admins
+                },
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+        
+        # SOFT-CODED: Success message
+        message = f'{deactivated_count} user{"s" if deactivated_count != 1 else ""} deactivated successfully'
+        if excluded_count > 0:
+            message += f' ({excluded_count} super admin{"s" if excluded_count != 1 else ""} excluded)'
+        
+        return Response({
+            'status': 'success',
+            'deactivated_count': deactivated_count,
+            'excluded_super_admin_count': excluded_count,
+            'deactivated_user_ids': deactivated_user_ids,
+            'message': message
+        }, status=status.HTTP_200_OK)
     
     @action(detail=True, methods=['post'], url_path='reset-password')
     def reset_password(self, request, pk=None):

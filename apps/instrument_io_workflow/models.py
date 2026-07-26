@@ -1,6 +1,7 @@
 """
-Lean data model — three tables only:
+Lean data model — four tables (project management added):
 
+    IOListProject           — project container for organizing documents
     IOListDocument          — one uploaded PDF (single revision)
     IOListExtractedComment  — rows from the Comments Resolution Sheet
     IOListExtractedRow      — rows from the structured IO table
@@ -11,6 +12,74 @@ Multi-revision chain tracking is delegated to the existing CRS chain backend
 
 from django.conf import settings
 from django.db import models
+
+
+class IOListProject(models.Model):
+    """
+    Project container for grouping I/O List documents.
+    Soft-coded — all field choices and labels live in config.py and frontend.
+    """
+    
+    STATUS_CHOICES = [
+        ('draft',      'Draft'),
+        ('active',     'Active'),
+        ('review',     'Under Review'),
+        ('completed',  'Completed'),
+        ('archived',   'Archived'),
+    ]
+    
+    CATEGORY_CHOICES = [
+        ('oil_gas',    'Oil & Gas'),
+        ('refinery',   'Refinery'),
+        ('lng',        'LNG'),
+        ('power',      'Power Plant'),
+        ('water',      'Water/Wastewater'),
+        ('other',      'Other'),
+    ]
+    
+    # Identity
+    project_name   = models.CharField(max_length=255)
+    project_code   = models.CharField(max_length=100, blank=True, default='')
+    description    = models.TextField(blank=True, default='')
+    
+    # Classification
+    category       = models.CharField(
+        max_length=50, choices=CATEGORY_CHOICES, default='oil_gas',
+    )
+    status         = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='draft',
+    )
+    
+    # Metadata
+    client         = models.CharField(max_length=255, blank=True, default='')
+    location       = models.CharField(max_length=255, blank=True, default='')
+    tags           = models.JSONField(default=list, blank=True)  # Flexible tagging
+    
+    # Audit
+    created_by     = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='io_list_projects',
+    )
+    created_at     = models.DateTimeField(auto_now_add=True)
+    updated_at     = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes  = [
+            models.Index(fields=['created_by', 'status']),
+            models.Index(fields=['category']),
+            models.Index(fields=['-created_at']),
+        ]
+        verbose_name = 'I/O List Project'
+        verbose_name_plural = 'I/O List Projects'
+    
+    def __str__(self) -> str:
+        return f'{self.project_name} ({self.get_status_display()})'
+    
+    @property
+    def document_count(self):
+        """Cached count of documents in this project."""
+        return self.documents.count()
 
 
 class IOListDocument(models.Model):
@@ -46,6 +115,16 @@ class IOListDocument(models.Model):
 
     # Optional link into existing CRS revision chain (NO core change to CRS)
     crs_chain_id      = models.CharField(max_length=64, blank=True, default='')
+    
+    # Project organization (soft-coded, backward compatible)
+    project           = models.ForeignKey(
+        'IOListProject',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='documents',
+        help_text='Optional project container for organizing documents',
+    )
 
     # Audit
     uploaded_by       = models.ForeignKey(

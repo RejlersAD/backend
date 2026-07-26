@@ -27,9 +27,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from .models import (
-    IOListDocument, IOListExtractedComment, IOListExtractedRow,
+    IOListProject, IOListDocument, IOListExtractedComment, IOListExtractedRow,
 )
 from .serializers import (
+    IOListProjectSerializer,
     IOListDocumentListSerializer, IOListDocumentDetailSerializer,
 )
 from .services.config import (
@@ -302,6 +303,63 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
 
 # ──────────────────────────────────────────────────────────────────────
 # Diff endpoint — compare any two documents (typically two revisions)
+# ──────────────────────────────────────────────────────────────────────
+class IOListProjectViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for I/O List Project management.
+    
+    Endpoints:
+      GET    /api/v1/instrument-io-workflow/projects/          — list all projects
+      POST   /api/v1/instrument-io-workflow/projects/          — create new project
+      GET    /api/v1/instrument-io-workflow/projects/{id}/     — retrieve project
+      PUT    /api/v1/instrument-io-workflow/projects/{id}/     — update project
+      PATCH  /api/v1/instrument-io-workflow/projects/{id}/     — partial update
+      DELETE /api/v1/instrument-io-workflow/projects/{id}/     — delete project
+    """
+    
+    queryset = IOListProject.objects.all()
+    serializer_class = IOListProjectSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """Filter projects by current user with soft-coded query params."""
+        qs = super().get_queryset().filter(created_by=self.request.user)
+        
+        # Soft-coded filtering via query params
+        status_filter = self.request.query_params.get('status')
+        category = self.request.query_params.get('category')
+        search = self.request.query_params.get('search')
+        
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        if category:
+            qs = qs.filter(category=category)
+        if search:
+            from django.db.models import Q
+            qs = qs.filter(
+                Q(project_name__icontains=search) |
+                Q(project_code__icontains=search) |
+                Q(client__icontains=search)
+            )
+        
+        # Annotate with document count for efficiency
+        from django.db.models import Count
+        qs = qs.annotate(document_count=Count('documents'))
+        
+        return qs
+    
+    @action(detail=True, methods=['get'])
+    def documents(self, request, pk=None):
+        """
+        GET /api/v1/instrument-io-workflow/projects/{id}/documents/
+        Return all documents within this project.
+        """
+        project = self.get_object()
+        docs = project.documents.all()
+        serializer = IOListDocumentListSerializer(docs, many=True)
+        return Response(serializer.data)
+
+
 # ──────────────────────────────────────────────────────────────────────
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])

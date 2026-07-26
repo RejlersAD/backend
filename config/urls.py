@@ -196,10 +196,20 @@ if is_app_installed('apps.data_mining'):
     urlpatterns.append(path('api/v1/data-mining/', include('apps.data_mining.urls')))
     print("[URL] ✅ Data Mining Platform URLs registered")
 
-# P&ID Verification — deterministic quality checker
+# P&ID Verification — deterministic quality checker (V1)
 if is_app_installed('apps.pid_verification'):
     urlpatterns.append(path('api/v1/pid-verification/', include('apps.pid_verification.urls')))
-    print("[URL] ✅ P&ID Verification URLs registered")
+    print("[URL] ✅ P&ID Verification V1 URLs registered")
+
+# P&ID Verification V2 — duplicate of V1 with isolated database (soft-coded isolation)
+if is_app_installed('apps.pid_verification_v2'):
+    urlpatterns.append(path('api/v2/pid-verification/', include('apps.pid_verification_v2.urls')))
+    print("[URL] ✅ P&ID Verification V2 URLs registered")
+
+# P&ID Checker V2 — AI-powered multi-document validation engine (ISOLATED from V1) [DISABLED: Module does not exist]
+# if is_app_installed('apps.pid_checker_v2'):
+#     urlpatterns.append(path('api/v2/pid-checker/', include('apps.pid_checker_v2.urls')))
+#     print("[URL] ✅ P&ID Checker V2 URLs registered")
 
 # SLD Verification — electrical single line diagram quality checker
 if is_app_installed('apps.sld_verification'):

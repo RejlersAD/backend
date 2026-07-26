@@ -14,6 +14,7 @@ needed here. Mirrors the pattern used by
 (field dictionary generated from TEMPLATE_V2_SECTIONS).
 """
 from __future__ import annotations
+from .config import COMPONENT_TYPE_DETECTION_CONFIG
 
 SYSTEM_PROMPT = """You are an expert piping engineer extracting structured data
 from legacy Piping Material Specification (PMS) PDF pages used in Oil & Gas
@@ -26,10 +27,11 @@ CRITICAL REQUIREMENTS:
 1. Extract COMPLETE component tables - if a table has 100 rows, extract ALL 100 rows
 2. Do NOT skip rows or sample - extract EVERY component from EVERY table
 3. A typical spec has 50-200+ components per class across multiple tables
-4. Extract ALL component types: pipes, fittings, branch connections (weldolets, elbolets), 
-   flanges, valves, gaskets, bolts
+4. Extract ALL component types: pipes, fittings, branch connections (weldolets, sockolets, elbolets), 
+   flanges (including general flanges), valves (including vent & drain valves), gaskets, bolts
 5. Be conservative with metadata: if a value is not clearly visible, return empty string
 6. Be COMPREHENSIVE with components: extract every single row from component tables
+7. NEVER skip valves, gaskets, sockolets, or general flanges - these are critical components
 """
 
 
@@ -67,6 +69,32 @@ def _build_component_catalog_text() -> str:
     return "\n".join(lines)
 
 
+def _build_priority_component_checklist() -> str:
+    """Build a comprehensive checklist of priority component sub-types from
+    COMPONENT_TYPE_DETECTION_CONFIG. This guides the AI to extract ALL critical
+    component types that users commonly report as missing."""
+    if not COMPONENT_TYPE_DETECTION_CONFIG.get("enable_enhanced_detection", True):
+        return ""
+    
+    priority_subtypes = COMPONENT_TYPE_DETECTION_CONFIG.get("priority_subtypes", {})
+    
+    if not priority_subtypes:
+        return ""
+    
+    lines = ["**PRIORITY COMPONENTS TO EXTRACT (do NOT skip these)**:"]
+    
+    for comp_type, subtypes in priority_subtypes.items():
+        type_display = comp_type.upper()
+        subtype_list = ", ".join(subtypes)
+        lines.append(f"  • {type_display}: {subtype_list}")
+    
+    lines.append("")
+    lines.append("If you find ANY of these components in the table, extract them. "
+                 "Missing these components is a critical extraction error.")
+    
+    return "\n".join(lines)
+
+
 def _build_generic_fitting_family_note() -> str:
     """Explain the generic-fitting-family escape hatch, listing the exact
     weld-type keys the fan-out builder understands (kept in sync with
@@ -93,6 +121,8 @@ def build_extraction_prompt() -> str:
     so routing-rule/CAT-sheet changes are automatically reflected."""
     component_catalog = _build_component_catalog_text()
     generic_family_note = _build_generic_fitting_family_note()
+    priority_checklist = _build_priority_component_checklist()
+    
     return f"""Analyse the page(s) below and identify every
 PIPING SPEC class (also known as: Piping Material Specification, PMS, Line Class,
 Pipe Class, Material Class, Spec Code, or similar). The header may appear in any
@@ -113,6 +143,8 @@ possible, name the SPECIFIC shape/type from the list so the row routes
 correctly)**:
 {component_catalog}
 
+{priority_checklist}
+
 **GENERIC FITTING-FAMILY ROWS (special case)**:
 {generic_family_note}
 
@@ -120,8 +152,10 @@ correctly)**:
 1. Extract EVERY row from component tables - do NOT skip rows
 2. If a table has 50 rows, extract all 50 - do NOT sample
 3. Each row becomes one component object in the components array
-4. Preserve size ranges exactly as shown (e.g. "1/2 to 2", "DN15-DN50")
+4. Preserve size ranges exactly as shown (e.g. "1/2 to 2", "DN15-DN50", "1½" & BELOW")
 5. Include ALL material standards, schedules, and specifications
+6. Extract W.T. (Wall Thickness) / Schedule values EXACTLY as printed - do NOT normalize
+   (e.g. "SCH. 80", "SCH.40", "3/8" THK", "NOTE 1" - keep spaces, periods, and formatting)
 
 For each class produce one object in this exact schema:
 
@@ -250,15 +284,17 @@ For each class produce one object in this exact schema:
   "confidence":           0.88                       # 0.0–1.0 self-assessed
 }}
 
-**EXTRACTION CHECKLIST**:
+**EXTRACTION CHECKLIST** (verify before submitting):
 ✓ Did you extract ALL pipes (multiple schedules/sizes)?
 ✓ Did you extract ALL fittings (elbows, tees, reducers, caps)?
-✓ Did you extract ALL branch connections (weldolets, elbolets, etc.)?
-✓ Did you extract ALL flanges (WN, blind, etc.)?
-✓ Did you extract ALL valves (gate, globe, check, plug, ball, butterfly, vent & drain)?
-✓ Did you extract ALL gaskets and bolts?
+✓ Did you extract ALL branch connections (weldolets, SOCKOLETS, elbolets, threadolets)?
+✓ Did you extract ALL flanges (WN, blind, slip-on, FLANGES (GEN.), FLANGES GENERAL)?
+✓ Did you extract ALL valves (gate, globe, CHECK VALVES, plug, ball, butterfly, VENT & DRAIN VALVES)?
+✓ Did you extract ALL gaskets (GASKETS, spiral wound, ring joint, flat gaskets)?
+✓ Did you extract ALL bolts and studs?
 ✓ Did you flag genuine umbrella "B.W./S.W./SCRD FITTINGS" rows with is_generic_fitting_family?
 ✓ Did you read COMPLETE tables, not just samples?
+✓ Did you extract size ranges accurately (e.g., "1/2\" thru 1-1/2\"", "1.5 & Below")?
 
 Return a single JSON object: {{"piping_classes": [ ... ]}}
 
@@ -277,7 +313,9 @@ IMPORTANT:
 # Concise prompt used when AI must re-process a chunk with smaller context.
 COMPACT_EXTRACTION_PROMPT = """Extract piping classes from this page in JSON.
 CRITICAL: Extract ALL components from ALL tables - do NOT skip rows.
-Include pipes, fittings, branch connections (weldolets, elbolets), flanges, valves, gaskets, bolts.
+Include pipes, fittings, branch connections (weldolets, sockolets, elbolets), 
+flanges (including FLANGES (GEN.)), valves (including CHECK VALVES and VENT & DRAIN VALVES), 
+gaskets (GASKETS), bolts.
 
 Return ONLY the JSON object: 
 {"piping_classes":[{"class_code":"","class_full_code":"","material_grade":"",
