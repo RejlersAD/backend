@@ -77,6 +77,10 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'finance',                'name': 'Finance',                      'icon': 'CreditCard',  'order': 80, 'description': 'Invoice tracking, billing and financial management'},
     {'code': 'sales',                  'name': 'Sales',                        'icon': 'TrendingUp',  'order': 81, 'description': 'Internal sales pipeline and business development'},
     {'code': 'project_control',        'name': 'Project Control',              'icon': 'Briefcase',   'order': 82, 'description': 'Project planning, tracking and schedule control'},
+    # SOFT-CODED: 6.2 Planning Package — split out from 'project_control' so it can be
+    # granted/revoked independently in Role & Access Management (mirrors the QHSE/
+    # Procurement pattern of one module code per sidebar sub-feature).
+    {'code': 'planning_package',       'name': 'Planning Package',              'icon': 'Cube',        'order': 823, 'description': 'AI-assisted work package planning — WBS, schedule, EDDR, manhours and narrative generation'},
     {'code': 'procurement',              'name': 'Procurement',                'icon': 'ShoppingCart','order': 83, 'description': 'Procurement overview and dashboard'},
     {'code': 'procurement_vendors',      'name': 'Vendor Management',          'icon': 'Users',       'order': 84, 'description': 'Manage vendors and supplier records'},
     {'code': 'procurement_requisitions', 'name': 'Purchase Requisitions',      'icon': 'DocumentText','order': 85, 'description': 'Purchase recommendations and requisitions'},
@@ -523,6 +527,7 @@ ROLE_MODULE_POLICY = {
         'finance',
         'sales',
         'project_control',
+        'planning_package',
         'procurement',
         'procurement_vendors',
         'procurement_requisitions',
