@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 
 ACTIVITY_COLUMNS = [
     'id', 'wbs_code', 'name', 'discipline', 'deliverable', 'responsible_role',
@@ -28,15 +29,31 @@ PRIMAVERA_COLUMNS = [
     ('predecessors_str', 'Predecessors'),
 ]
 
-# Brand palette for the PPTX deck — mirrors the RADAI frontend's
-# violet/indigo hero gradient (see PLANNING_UI.heroGradient in
-# frontend/src/config/planningIntelligence.config.js) so the exported deck
-# feels consistent with the web app.
-PPTX_BRAND_PRIMARY_RGB = (109, 40, 217)     # violet-700
-PPTX_BRAND_SECONDARY_RGB = (67, 56, 202)    # indigo-700
-PPTX_BRAND_ACCENT_RGB = (15, 23, 42)        # slate-900
-PPTX_BRAND_LIGHT_RGB = (243, 244, 246)      # slate-100
+# ─────────────────────────────────────────────────────────────────────────
+# PowerPoint export — built on Rejlers' own corporate template so exported
+# decks carry the real brand (fonts, colors, logo, master slides) instead of
+# a hand-drawn approximation. Template file is a versioned asset shipped with
+# the backend (COPY'd into every Docker image — local & production alike),
+# so no extra deploy step or file path configuration is required.
+# ─────────────────────────────────────────────────────────────────────────
+PPTX_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), '..', 'assets', 'rejlers_template.pptx')
+
+# Layout names inside rejlers_template.pptx — soft-coded so a template
+# revision only needs a one-line update here (not a rewrite of the slide
+# building logic) if Rejlers ever renames a layout in the master.
+PPTX_LAYOUT_COVER = 'Start slide'
+PPTX_LAYOUT_CONTENT = 'Text slide (light grey)'
+PPTX_LAYOUT_TABLE = 'Graph/table slide (light grey)'
+PPTX_LAYOUT_CLOSING = 'Last slide_Thanks'
+
+# Placeholder indexes used by the above layouts (verified against the
+# template — see idx values on `layout.placeholders`).
+PPTX_HEADING_PLACEHOLDER_IDX = 12   # present on every content layout — slide heading
+PPTX_BODY_PLACEHOLDER_IDX = 14      # "Text slide (light grey)" — bullet/body text area
+PPTX_CONTENT_PLACEHOLDER_IDX = 15   # "Graph/table slide (light grey)" — table/graphic area
+
 PPTX_MAX_TABLE_ROWS = 12  # keep slide tables readable — soft-coded cap
+
 
 
 def _predecessors_str(activity: dict) -> str:
@@ -105,159 +122,124 @@ def activities_to_excel_bytes(activities: list) -> bytes:
     return stream.getvalue()
 
 
-def _pptx_add_title_slide(prs, project, generation):
-    from pptx.util import Pt
+def _pptx_get_layout(prs, name):
+    """Look up a slide layout by its name in the Rejlers template. Falls back
+    to the deck's first layout so export never hard-fails if the template is
+    ever revised/renamed."""
+    for layout in prs.slide_layouts:
+        if layout.name == name:
+            return layout
+    return prs.slide_layouts[0]
 
-    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
-    _pptx_fill_background(slide, PPTX_BRAND_PRIMARY_RGB)
 
-    title_box = slide.shapes.add_textbox(prs.slide_width * 0.08, prs.slide_height * 0.32,
-                                          prs.slide_width * 0.84, prs.slide_height * 0.22)
-    tf = title_box.text_frame
+def _pptx_strip_sample_slides(prs):
+    """rejlers_template.pptx ships with sample/demo slides (used internally by
+    Rejlers to showcase the template). Remove them so generated decks start
+    clean while keeping every master/layout/theme/logo asset intact."""
+    from pptx.oxml.ns import qn
+
+    slide_id_list = prs.slides._sldIdLst
+    for sld in list(slide_id_list):
+        r_id = sld.get(qn('r:id'))
+        prs.part.drop_rel(r_id)
+        slide_id_list.remove(sld)
+
+
+def _pptx_add_cover_slide(prs, project, generation):
+    slide = prs.slides.add_slide(_pptx_get_layout(prs, PPTX_LAYOUT_COVER))
+    tf = slide.placeholders[PPTX_HEADING_PLACEHOLDER_IDX].text_frame
     tf.word_wrap = True
-    p = tf.paragraphs[0]
-    run = p.add_run()
-    run.text = project.name or 'Untitled Planning Project'
-    run.font.size = Pt(40)
-    run.font.bold = True
-    run.font.color.rgb = _pptx_rgb((255, 255, 255))
+    tf.paragraphs[0].text = project.name or 'Untitled Planning Project'
 
     subtitle_bits = [b for b in [project.phase, project.client, project.location] if b]
-    subtitle_box = slide.shapes.add_textbox(prs.slide_width * 0.08, prs.slide_height * 0.54,
-                                             prs.slide_width * 0.84, prs.slide_height * 0.12)
-    stf = subtitle_box.text_frame
-    stf.word_wrap = True
-    sp = stf.paragraphs[0]
-    srun = sp.add_run()
-    srun.text = ' · '.join(subtitle_bits) if subtitle_bits else 'Project Planning Presentation'
-    srun.font.size = Pt(18)
-    srun.font.color.rgb = _pptx_rgb((237, 233, 254))  # violet-100
-
-    footer_box = slide.shapes.add_textbox(prs.slide_width * 0.08, prs.slide_height * 0.86,
-                                           prs.slide_width * 0.84, prs.slide_height * 0.08)
-    ftf = footer_box.text_frame
-    fp = ftf.paragraphs[0]
-    frun = fp.add_run()
-    frun.text = f'RADAI Project Planning Application · Schedule v{generation.version}'
-    frun.font.size = Pt(12)
-    frun.font.color.rgb = _pptx_rgb((196, 181, 253))  # violet-200
+    for line in (
+        ' · '.join(subtitle_bits) if subtitle_bits else 'Project Planning Presentation',
+        f'Effective Date: {project.effective_date or "—"}',
+        f'RADAI Project Planning Application · Schedule v{generation.version}',
+    ):
+        p = tf.add_paragraph()
+        p.text = line
+    return slide
 
 
-def _pptx_rgb(rgb_tuple):
-    from pptx.dml.color import RGBColor
-    return RGBColor(*rgb_tuple)
+def _pptx_add_bullet_slide(prs, heading, bullets, max_items=10):
+    slide = prs.slides.add_slide(_pptx_get_layout(prs, PPTX_LAYOUT_CONTENT))
+    slide.placeholders[PPTX_HEADING_PLACEHOLDER_IDX].text = heading
 
-
-def _pptx_fill_background(slide, rgb_tuple):
-    slide.background.fill.solid()
-    slide.background.fill.fore_color.rgb = _pptx_rgb(rgb_tuple)
-
-
-def _pptx_add_content_slide(prs, heading, icon=''):
-    """Adds a blank slide with a colored heading bar; returns (slide, content_top_emu)."""
-    from pptx.enum.shapes import MSO_SHAPE
-    from pptx.util import Pt, Emu
-
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _pptx_fill_background(slide, (255, 255, 255))
-
-    bar_height = Emu(int(prs.slide_height * 0.14))
-    bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, bar_height)
-    bar.fill.solid()
-    bar.fill.fore_color.rgb = _pptx_rgb(PPTX_BRAND_SECONDARY_RGB)
-    bar.line.fill.background()
-    bar.shadow.inherit = False
-
-    tf = bar.text_frame
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
-    run = p.add_run()
-    run.text = f'{icon}  {heading}'.strip()
-    run.font.size = Pt(26)
-    run.font.bold = True
-    run.font.color.rgb = _pptx_rgb((255, 255, 255))
-
-    return slide, int(bar_height) + Emu(int(prs.slide_height * 0.04))
-
-
-def _pptx_add_bullets(slide, prs, top_emu, bullets, max_items=10):
-    from pptx.util import Pt, Emu
-
-    box = slide.shapes.add_textbox(Emu(int(prs.slide_width * 0.08)), Emu(top_emu),
-                                    Emu(int(prs.slide_width * 0.84)), Emu(int(prs.slide_height * 0.75)))
-    tf = box.text_frame
+    tf = slide.placeholders[PPTX_BODY_PLACEHOLDER_IDX].text_frame
     tf.word_wrap = True
     items = bullets[:max_items] or ['No data available.']
     for i, text in enumerate(items):
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-        run = p.add_run()
-        run.text = f'•  {text}'
-        run.font.size = Pt(16)
-        run.font.color.rgb = _pptx_rgb((30, 41, 59))  # slate-800
-        p.space_after = Pt(8)
+        p.text = str(text)
     if len(bullets) > max_items:
         p = tf.add_paragraph()
-        run = p.add_run()
-        run.text = f'…and {len(bullets) - max_items} more (see full export for details).'
-        run.font.size = Pt(13)
-        run.font.italic = True
-        run.font.color.rgb = _pptx_rgb((100, 116, 139))  # slate-500
+        p.text = f'…and {len(bullets) - max_items} more (see full export for details).'
+    return slide
 
 
-def _pptx_add_table(slide, prs, top_emu, headers, rows, max_rows=PPTX_MAX_TABLE_ROWS):
+def _pptx_add_table_slide(prs, heading, headers, rows, max_rows=PPTX_MAX_TABLE_ROWS, footnote=None):
+    """Adds a table-content slide using the template's 'Graph/table slide'
+    layout. The layout's empty content placeholder only supports simple text
+    (it is not a native table placeholder in python-pptx), so we read its
+    on-brand position/size then swap it for a real table at that exact spot —
+    keeping the table perfectly aligned with the template's grid."""
     from pptx.util import Pt, Emu
 
+    slide = prs.slides.add_slide(_pptx_get_layout(prs, PPTX_LAYOUT_TABLE))
+    slide.placeholders[PPTX_HEADING_PLACEHOLDER_IDX].text = heading
+
+    content_ph = slide.placeholders[PPTX_CONTENT_PLACEHOLDER_IDX]
+    left, top, width, height = content_ph.left, content_ph.top, content_ph.width, content_ph.height
+    content_ph._element.getparent().remove(content_ph._element)
+
+    note_lines = []
+    if len(rows) > max_rows:
+        note_lines.append(f'Showing {max_rows} of {len(rows)} rows — full detail available via CSV/Excel export.')
+    if footnote:
+        note_lines.append(footnote)
+    table_height = Emu(int(height * 0.85)) if note_lines else height
+
     display_rows = rows[:max_rows]
-    n_rows = len(display_rows) + 1
-    n_cols = len(headers)
-    table_height = Emu(int(prs.slide_height * min(0.6, 0.06 * n_rows)))
-    table_shape = slide.shapes.add_table(
-        n_rows, n_cols,
-        Emu(int(prs.slide_width * 0.06)), Emu(top_emu),
-        Emu(int(prs.slide_width * 0.88)), table_height,
-    )
-    table = table_shape.table
-
+    graphic_frame = slide.shapes.add_table(len(display_rows) + 1, len(headers), left, top, width, table_height)
+    table = graphic_frame.table
     for c, header in enumerate(headers):
-        cell = table.cell(0, c)
-        cell.text = str(header)
-        for run in cell.text_frame.paragraphs[0].runs:
+        table.cell(0, c).text = str(header)
+        for run in table.cell(0, c).text_frame.paragraphs[0].runs:
             run.font.bold = True
-            run.font.size = Pt(12)
-            run.font.color.rgb = _pptx_rgb((255, 255, 255))
-        cell.fill.solid()
-        cell.fill.fore_color.rgb = _pptx_rgb(PPTX_BRAND_ACCENT_RGB)
-
     for r, row in enumerate(display_rows, start=1):
         for c, value in enumerate(row):
-            cell = table.cell(r, c)
-            cell.text = '' if value is None else str(value)
-            for run in cell.text_frame.paragraphs[0].runs:
-                run.font.size = Pt(11)
-                run.font.color.rgb = _pptx_rgb((30, 41, 59))
-            cell.fill.solid()
-            cell.fill.fore_color.rgb = _pptx_rgb(PPTX_BRAND_LIGHT_RGB if r % 2 == 0 else (255, 255, 255))
+            table.cell(r, c).text = '' if value is None else str(value)
 
-    if len(rows) > max_rows:
-        note_top = Emu(int(top_emu) + int(table_height) + Emu(int(prs.slide_height * 0.02)))
-        note = slide.shapes.add_textbox(Emu(int(prs.slide_width * 0.06)), note_top,
-                                         Emu(int(prs.slide_width * 0.88)), Emu(int(prs.slide_height * 0.06)))
-        p = note.text_frame.paragraphs[0]
-        run = p.add_run()
-        run.text = f'Showing {max_rows} of {len(rows)} rows — full detail available via CSV/Excel export.'
-        run.font.size = Pt(11)
-        run.font.italic = True
-        run.font.color.rgb = _pptx_rgb((100, 116, 139))
+    if note_lines:
+        note_top = Emu(int(top) + int(table_height) + Emu(int(prs.slide_height * 0.015)))
+        note_box = slide.shapes.add_textbox(left, note_top, width, Emu(int(prs.slide_height * 0.08)))
+        ntf = note_box.text_frame
+        ntf.word_wrap = True
+        for i, line in enumerate(note_lines):
+            p = ntf.paragraphs[0] if i == 0 else ntf.add_paragraph()
+            run = p.add_run()
+            run.text = line
+            run.font.size = Pt(11)
+            run.font.italic = True
+    return slide
+
+
+def _pptx_add_closing_slide(prs, message='Thank You'):
+    slide = prs.slides.add_slide(_pptx_get_layout(prs, PPTX_LAYOUT_CLOSING))
+    slide.placeholders[PPTX_HEADING_PLACEHOLDER_IDX].text = message
+    return slide
 
 
 def generation_to_pptx_bytes(generation) -> bytes:
     """
     Builds a client/internal-review-ready PowerPoint deck summarizing a
-    PlanningGeneration: title, overview, WBS, schedule, EDDR, manhours,
-    validation and narrative/executive-summary slides.
+    PlanningGeneration, using Rejlers' own corporate template
+    (assets/rejlers_template.pptx) for the slide masters/layouts — cover,
+    agenda, content, table and closing slides all inherit that template's
+    fonts, colors and logo placement automatically.
     """
     from pptx import Presentation
-    from pptx.util import Inches, Pt
 
     project = generation.project
     activities = generation.activities or []
@@ -267,15 +249,29 @@ def generation_to_pptx_bytes(generation) -> bytes:
     validation = generation.validation or []
     intelligence = generation.intelligence or {}
 
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)
-    prs.slide_height = Inches(7.5)
+    try:
+        prs = Presentation(PPTX_TEMPLATE_PATH)
+        _pptx_strip_sample_slides(prs)
+    except Exception:
+        # Defensive fallback so export never hard-fails if the template asset
+        # is ever missing/unreadable — falls back to a blank deck.
+        prs = Presentation()
 
-    # 1) Title
-    _pptx_add_title_slide(prs, project, generation)
+    # 1) Cover
+    _pptx_add_cover_slide(prs, project, generation)
 
-    # 2) Project Overview
-    slide, top = _pptx_add_content_slide(prs, 'Project Overview', '🧭')
+    # 2) Agenda
+    milestones = generation.milestones or [a for a in activities if a.get('is_milestone')]
+    agenda_items = ['Project Overview', 'Work Breakdown Structure', 'Schedule Summary']
+    if milestones:
+        agenda_items.append('Key Milestones')
+    agenda_items += [
+        'Engineering Document Deliverable Register', 'Manhour Estimate',
+        'Validation & Quality Checks', 'Executive Summary',
+    ]
+    _pptx_add_bullet_slide(prs, 'Agenda', agenda_items, max_items=len(agenda_items))
+
+    # 3) Project Overview
     overview_bullets = [
         f'Client: {project.client or "—"}',
         f'Location: {project.location or "—"}',
@@ -285,22 +281,19 @@ def generation_to_pptx_bytes(generation) -> bytes:
         f'Reference Documents Analyzed: {len(intelligence.get("disciplines", {}) or {})} discipline(s)',
         f'Schedule Version: v{generation.version}',
     ]
-    _pptx_add_bullets(slide, prs, top, overview_bullets)
+    _pptx_add_bullet_slide(prs, 'Project Overview', overview_bullets)
 
-    # 3) WBS Summary
-    slide, top = _pptx_add_content_slide(prs, 'Work Breakdown Structure', '🗂️')
+    # 4) WBS Summary
     top_level = [n for n in wbs if n.get('level') == 1] or wbs
     wbs_bullets = [f'{n.get("code", "")} — {n.get("name", "")}' for n in top_level]
     if not wbs_bullets:
         wbs_bullets = ['WBS not yet generated.']
     else:
         wbs_bullets.insert(0, f'{len(wbs)} total WBS node(s) across the project.')
-    _pptx_add_bullets(slide, prs, top, wbs_bullets)
+    _pptx_add_bullet_slide(prs, 'Work Breakdown Structure', wbs_bullets)
 
-    # 4) Schedule Summary
-    slide, top = _pptx_add_content_slide(prs, 'Schedule Summary', '📅')
+    # 5) Schedule Summary
     critical = [a for a in activities if a.get('is_critical')]
-    milestones = generation.milestones or [a for a in activities if a.get('is_milestone')]
     finish_dates = [a.get('finish_date') for a in activities if a.get('finish_date')]
     schedule_bullets = [
         f'Total Activities: {len(activities)}',
@@ -308,49 +301,46 @@ def generation_to_pptx_bytes(generation) -> bytes:
         f'Milestones: {len(milestones)}',
         f'Projected Finish: {max(finish_dates) if finish_dates else "—"}',
     ]
-    _pptx_add_bullets(slide, prs, top, schedule_bullets, max_items=6)
+    _pptx_add_bullet_slide(prs, 'Schedule Summary', schedule_bullets, max_items=6)
+
+    # 6) Key Milestones (only when milestones exist)
     if milestones:
-        table_top = top + Inches(2.0)
-        _pptx_add_table(
-            slide, prs, table_top,
+        _pptx_add_table_slide(
+            prs, 'Key Milestones',
             ['Milestone', 'Finish Date'],
             [[m.get('name', ''), m.get('finish_date', '')] for m in milestones],
             max_rows=8,
         )
 
-    # 5) EDDR Summary
-    slide, top = _pptx_add_content_slide(prs, 'Engineering Document Deliverable Register', '📋')
+    # 7) EDDR Summary
     if eddr:
-        _pptx_add_table(
-            slide, prs, top,
+        _pptx_add_table_slide(
+            prs, 'Engineering Document Deliverable Register',
             ['Discipline', 'Deliverable', 'Final Issue'],
             [[row.get('discipline', ''), row.get('deliverable_name', ''), row.get('final_issue_date', '')] for row in eddr],
         )
     else:
-        _pptx_add_bullets(slide, prs, top, ['EDDR not yet generated.'])
+        _pptx_add_bullet_slide(prs, 'Engineering Document Deliverable Register', ['EDDR not yet generated.'])
 
-    # 6) Manhours Summary
-    slide, top = _pptx_add_content_slide(prs, 'Manhour Estimate', '⏱️')
+    # 8) Manhours Summary
     by_discipline = manhours.get('by_discipline') or []
     if by_discipline:
-        _pptx_add_table(
-            slide, prs, top,
+        grand_total_hours = manhours.get('grand_total_man_hours')
+        grand_total_days = sum(r.get('man_days') or 0 for r in by_discipline)
+        footnote = (
+            f'Grand Total: {grand_total_days} man-days / {grand_total_hours} man-hours'
+            if grand_total_hours is not None else None
+        )
+        _pptx_add_table_slide(
+            prs, 'Manhour Estimate',
             ['Discipline', 'Role', 'Man-Days', 'Man-Hours'],
             [[r.get('discipline_name', ''), r.get('responsible_role', ''), r.get('man_days', ''), r.get('man_hours', '')] for r in by_discipline],
-            max_rows=8,
+            max_rows=8, footnote=footnote,
         )
-        note_top = top + Inches(min(5.5, 0.5 * (len(by_discipline[:8]) + 1) + 0.3))
-        note = slide.shapes.add_textbox(Inches(0.8), note_top, Inches(11.5), Inches(0.6))
-        p = note.text_frame.paragraphs[0]
-        run = p.add_run()
-        run.text = f'Grand Total: {manhours.get("grand_total_man_hours", "—")} man-hours'
-        run.font.bold = True
-        run.font.size = Pt(15)
     else:
-        _pptx_add_bullets(slide, prs, top, ['Manhour estimate not yet generated.'])
+        _pptx_add_bullet_slide(prs, 'Manhour Estimate', ['Manhour estimate not yet generated.'])
 
-    # 7) Validation Summary
-    slide, top = _pptx_add_content_slide(prs, 'Validation & Quality Checks', '✅')
+    # 9) Validation Summary
     counts = {}
     for issue in validation:
         counts[issue.get('severity', 'pass')] = counts.get(issue.get('severity', 'pass'), 0) + 1
@@ -363,14 +353,16 @@ def generation_to_pptx_bytes(generation) -> bytes:
     if critical_msgs:
         validation_bullets.append('Key issues:')
         validation_bullets.extend(critical_msgs[:5])
-    _pptx_add_bullets(slide, prs, top, validation_bullets, max_items=10)
+    _pptx_add_bullet_slide(prs, 'Validation & Quality Checks', validation_bullets, max_items=10)
 
-    # 8) Narrative / Executive Summary
-    slide, top = _pptx_add_content_slide(prs, 'Executive Summary', '📝')
+    # 10) Narrative / Executive Summary
     narrative_text = (generation.narrative or '').strip()
     paragraphs = [p.strip() for p in narrative_text.split('\n') if p.strip()]
     summary_bullets = paragraphs[:6] if paragraphs else ['Narrative not yet generated.']
-    _pptx_add_bullets(slide, prs, top, summary_bullets, max_items=6)
+    _pptx_add_bullet_slide(prs, 'Executive Summary', summary_bullets, max_items=6)
+
+    # 11) Closing
+    _pptx_add_closing_slide(prs, 'Thank You')
 
     stream = io.BytesIO()
     prs.save(stream)
