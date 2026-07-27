@@ -24,7 +24,8 @@ from rest_framework.response import Response
 from apps.core.project_models import Project
 
 from .config import (
-    DOCUMENT_KINDS, MAX_DOCUMENT_BYTES, PHASE_FLAGS, VARIANCE_THRESHOLDS,
+    DOCUMENT_KINDS, MAX_DOCUMENT_BYTES, PHASE_FLAGS,
+    PLANNING_PACKAGE_ALLOWED_HTTP_METHODS, VARIANCE_THRESHOLDS,
     is_phase_enabled,
 )
 from .models import (
@@ -240,14 +241,18 @@ class PlanningPackageViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
         GET    /api/v1/project-control/planning-packages/{id}/   - Get detail
         PUT    /api/v1/project-control/planning-packages/{id}/   - Update
         PATCH  /api/v1/project-control/planning-packages/{id}/   - Partial update
-        DELETE /api/v1/project-control/planning-packages/{id}/   - Soft delete
-        
+
+    NOTE: Deletion is intentionally disabled (SOFT-CODED via
+    PLANNING_PACKAGE_ALLOWED_HTTP_METHODS in config.py) — DELETE requests
+    return 405 Method Not Allowed. Packages are never removable from this API.
+
     Query params:
         ?project={id}   - Filter by project
         ?status={value} - Filter by status
         ?priority={value} - Filter by priority
     """
     permission_classes = [IsAuthenticated]
+    http_method_names = PLANNING_PACKAGE_ALLOWED_HTTP_METHODS
     queryset = PlanningPackage.objects.all().select_related(
         'project', 'package_manager', 'wbs_node'
     )

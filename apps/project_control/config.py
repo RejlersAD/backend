@@ -92,6 +92,14 @@ DOCUMENT_KINDS = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Planning Packages — allowed HTTP verbs
+# ─────────────────────────────────────────────────────────────────────────────
+# SOFT-CODED: 'delete' intentionally excluded — Planning Packages must never be
+# removable via the API (list/create/update only). Re-add 'delete' here (and
+# implement a soft-delete override in the ViewSet) if deletion is ever required.
+PLANNING_PACKAGE_ALLOWED_HTTP_METHODS = ['get', 'post', 'put', 'patch', 'head', 'options']
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Excel BOQ import — fuzzy header detection
 # ─────────────────────────────────────────────────────────────────────────────
 # Soft-coded synonym map: canonical_name → list of header substrings (lowercased,

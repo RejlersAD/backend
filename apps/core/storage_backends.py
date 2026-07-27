@@ -294,6 +294,41 @@ if USE_S3:
             super().__init__(*args, **kwargs)
             logger.info(f"[IOListDocumentStorage] Initialized: {self.bucket_name}/{self.location}")
 
+
+    class PlanningIntelligenceStorage(S3Boto3Storage):
+        """
+        Dedicated S3 storage for RADAI Project Planning Application uploads
+        (apps.planning_intelligence) — SOW / WBS / MDR / EDDR / schedule
+        requirement reference documents.
+
+        Uses a region-specific endpoint_url (required for opt-in regions such as
+        me-central-1 / UAE) so presigned URLs are not invalidated by an S3
+        redirect, matching the other feature-dedicated storage classes above.
+        """
+
+        location = 'media/planning_intelligence'
+        default_acl = 'private'
+        file_overwrite = False
+        custom_domain = False  # forces presigned query-string auth
+        querystring_expire = 3600  # 1 hour
+
+        @property
+        def endpoint_url(self):
+            region = getattr(settings, 'AWS_S3_REGION_NAME', 'us-east-1')
+            return getattr(settings, 'AWS_S3_ENDPOINT_URL', f'https://s3.{region}.amazonaws.com')
+
+        object_parameters = {
+            'CacheControl': 'max-age=86400',
+            'Metadata': {
+                'app': 'aiflow',
+                'content_type': 'planning_intelligence_document'
+            }
+        }
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            logger.info(f"[PlanningIntelligenceStorage] Initialized: {self.bucket_name}/{self.location}")
+
 else:
     # Fallback to local file storage when S3 is not enabled
     from django.core.files.storage import FileSystemStorage
@@ -352,5 +387,11 @@ else:
         """Local storage for Instrument IO List PDFs (non-S3 fallback)"""
         def __init__(self, *args, **kwargs):
             kwargs['location'] = 'media'
+            super().__init__(*args, **kwargs)
+
+    class PlanningIntelligenceStorage(FileSystemStorage):
+        """Local storage for RADAI Project Planning Application uploads (non-S3 fallback)"""
+        def __init__(self, *args, **kwargs):
+            kwargs['location'] = 'media/planning_intelligence'
             super().__init__(*args, **kwargs)
 

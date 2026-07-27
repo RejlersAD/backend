@@ -206,6 +206,7 @@ INSTALLED_APPS = [
     'apps.onboarding',           # Onboarding & Offboarding — employee lifecycle management (joining, exit, equipment, documents)
     'apps.site_visits',          # Site Visit Tracking — GPS-based attendance for off-site engineers
     'apps.dashboard',             # Personal Dashboard — role-scoped data bundles + AI insights
+    'apps.planning_intelligence', # RADAI Project Planning Application — AI-assisted FEED/DEFINE schedule generation
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)

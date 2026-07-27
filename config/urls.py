@@ -163,6 +163,7 @@ urlpatterns = [
     path('api/v1/marketing-analytics/', include('apps.marketing_analytics.urls')),  # GA4 Real-time
     path('api/v1/projects/', include('apps.core.project_urls')),
     path('api/v1/project-control/', include('apps.project_control.urls')),  # Project Management — cost dashboards, estimates, documents
+    path('api/v1/planning-intelligence/', include('apps.planning_intelligence.urls')),  # RADAI Project Planning Application
     path('api/v1/dashboard/', include('apps.dashboard.urls')),  # Personal Dashboard — role-scoped bundles + AI insights
 ]
 
