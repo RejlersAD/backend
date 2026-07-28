@@ -1738,6 +1738,19 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 results = []
                 for output in outputs:
                     try:
+                        # SOFT-CODED file-availability check — `bool(output.excel_file)`
+                        # only tells us the FileField has a *name*, not that the file
+                        # physically still exists in storage (S3). Verify storage
+                        # existence so the frontend can grey out actions (Download /
+                        # Edit Data / Columns) that would otherwise fail with a 404.
+                        file_exists = False
+                        if output.excel_file:
+                            try:
+                                file_exists = output.excel_file.storage.exists(output.excel_file.name)
+                            except Exception as storage_err:
+                                logger.warning(f"Storage check failed for output {output.id}: {storage_err}")
+                                file_exists = False
+
                         results.append({
                             'id': str(output.id),
                             'pid_number': output.pid_number or '',
@@ -1750,7 +1763,7 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                             'file_size_mb': round(output.file_size / (1024 * 1024), 2) if output.file_size else 0,
                             'enrichment_enabled': output.enrichment_enabled or False,
                             'format_type': output.format_type or 'general',
-                            'has_file': bool(output.excel_file) if hasattr(output, 'excel_file') else False,
+                            'has_file': file_exists,
                             'edited_from': str(output.edited_from_id) if output.edited_from_id else None,
                         })
                     except Exception as e:
@@ -1810,13 +1823,15 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             
             if not output.excel_file:
                 return Response({
-                    "error": "Excel file not found for this output"
+                    "error": "Excel file not found for this output",
+                    "code": "file_missing",
                 }, status=status.HTTP_404_NOT_FOUND)
             
             # Check if file exists
             if not output.excel_file.storage.exists(output.excel_file.name):
                 return Response({
-                    "error": "Excel file no longer exists on server"
+                    "error": "Excel file no longer exists on server",
+                    "code": "file_missing",
                 }, status=status.HTTP_404_NOT_FOUND)
             
             # Open file and create response
@@ -1926,6 +1941,22 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             )
             output.excel_file.save(excel_file.name, ContentFile(excel_bytes), save=True)
 
+            # SOFT-CODED post-save verification — confirm the upload actually
+            # reached storage (S3) before reporting success, so broken
+            # uploads don't silently create a "phantom" output record whose
+            # Download/Edit Data/Columns actions permanently 404 later.
+            try:
+                upload_confirmed = output.excel_file.storage.exists(output.excel_file.name)
+            except Exception as verify_err:
+                upload_confirmed = False
+                logger.error(f"❌ Could not verify upload for output {output.id}: {verify_err}", exc_info=True)
+            if not upload_confirmed:
+                logger.error(f"❌ Excel file for output {output.id} ({excel_file.name}) missing from storage right after save()")
+                return Response({
+                    'error': 'The file was recorded but failed to upload to storage. Please try saving again.',
+                    'code': 'upload_failed',
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
             logger.info(
                 f"💾 Saved output {output.id} ({excel_file.name}) by {request.user}"
                 + (f" [edited from {edited_from.id}]" if edited_from else "")
@@ -1972,7 +2003,10 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Output not found'}, status=status.HTTP_404_NOT_FOUND)
 
         if not output.excel_file or not output.excel_file.storage.exists(output.excel_file.name):
-            return Response({'error': 'Excel file not found for this output'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                'error': 'Excel file not found for this output',
+                'code': 'file_missing',
+            }, status=status.HTTP_404_NOT_FOUND)
 
         try:
             from openpyxl import load_workbook

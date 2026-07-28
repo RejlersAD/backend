@@ -796,13 +796,32 @@ def process_pid_upload_async(
                 ContentFile(excel_buffer.getvalue()),
                 save=True
             )
-            
+
+            # SOFT-CODED post-save verification — confirm the file actually
+            # landed in storage (S3). Without this check, a silently failed
+            # upload leaves a DB record whose Download/Edit Data/Columns
+            # actions permanently 404 with no visibility into why.
+            try:
+                upload_confirmed = output_record.excel_file.storage.exists(output_record.excel_file.name)
+            except Exception as verify_err:
+                upload_confirmed = False
+                logger.error(
+                    f"❌ Could not verify Excel upload for output {output_record.id}: {verify_err}",
+                    exc_info=True
+                )
+            if not upload_confirmed:
+                logger.error(
+                    f"❌ Excel file for output {output_record.id} ({excel_filename}) was not found in "
+                    f"storage immediately after save() — the upload likely failed silently."
+                )
+
             excel_file_path = output_record.excel_file.name
             logger.info(f"📥 Saved historical output: {excel_filename} (ID: {output_record.id})")
             
         except Exception as excel_err:
-            logger.warning(f"⚠️ Could not save Excel output for history: {excel_err}")
-            # Don't fail the entire process if Excel save fails
+            logger.error(f"❌ Could not save Excel output for history: {excel_err}", exc_info=True)
+            # Don't fail the entire process if Excel save fails — the core
+            # line-list extraction result still returns to the user.
         
         # DEBUG: Log what we're returning
         logger.info("="*80)
