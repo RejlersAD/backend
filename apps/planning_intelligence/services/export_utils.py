@@ -13,6 +13,7 @@ import datetime
 import io
 import json
 import os
+import re
 
 from django.utils import timezone
 
@@ -388,7 +389,37 @@ XER_PROJ_ID = 1
 XER_CLNDR_ID = 1
 XER_LINE_SEP = '\r\n'  # native XER line ending
 
+# Primavera P6 enforces hard character limits on several short-identifier
+# fields at the database schema level. Exceeding them doesn't just truncate
+# on import — P6's XER importer silently REJECTS the offending row (and,
+# critically, when it's the PROJECT row itself, the entire project — WBS,
+# activities, everything — never gets created, so the import appears to
+# do nothing at all). Every value written into these fields below is
+# capped against these soft-coded limits so that can never happen again.
+XER_PROJ_SHORT_NAME_MAX_LEN = 20   # PROJECT.proj_short_name ("Project ID")
+XER_WBS_SHORT_NAME_MAX_LEN = 20    # PROJWBS.wbs_short_name ("WBS Code")
+XER_WBS_NAME_MAX_LEN = 100         # PROJWBS.wbs_name
+XER_TASK_CODE_MAX_LEN = 20         # TASK.task_code ("Activity ID")
+XER_TASK_NAME_MAX_LEN = 120        # TASK.task_name ("Activity Name")
+
 _XER_PRED_TYPE = {'FS': 'PR_FS', 'SS': 'PR_SS', 'FF': 'PR_FF', 'SF': 'PR_SF'}
+
+
+def _derive_proj_short_name(project) -> str:
+    """P6's Project ID is a short *code*, not the descriptive project name
+    (the reference sample files use e.g. 'Q-101685') — and it's capped at
+    `XER_PROJ_SHORT_NAME_MAX_LEN` characters. Prefer a trailing bracketed
+    reference number if the project name has one (e.g. '... (30201-50198)'
+    -> '30201-50198'), otherwise sanitize the name into a code-safe token.
+    """
+    name = (project.name or '').strip()
+    match = re.search(r'\(([A-Za-z0-9][A-Za-z0-9\-_/]{2,})\)\s*$', name)
+    candidate = match.group(1) if match else name
+    # P6 Project IDs are conventionally alphanumeric + hyphen/underscore —
+    # collapse anything else (spaces, punctuation) into a single hyphen.
+    candidate = re.sub(r'[^A-Za-z0-9\-_]+', '-', candidate).strip('-')
+    candidate = re.sub(r'-{2,}', '-', candidate)
+    return (candidate or 'PROJECT')[:XER_PROJ_SHORT_NAME_MAX_LEN]
 
 
 def _xer_field(value) -> str:
@@ -483,7 +514,7 @@ def generation_to_xer_bytes(generation) -> bytes:
                   'last_recalc_date\tscd_end_date\tguid')
     lines.append(_xer_row(
         XER_PROJ_ID, 1, 'N', 'Y', 'Y', 'N', 'Y', 'N', 'N', 'Y', '.', 'CP_Drtn',
-        (project.name or 'Project')[:100], XER_CLNDR_ID, 1000, 10, 500, 4,
+        _derive_proj_short_name(project), XER_CLNDR_ID, 1000, 10, 500, 4,
         'DT_FixedDUR2', 'QT_Hour', 'COST_PER_QTY', 'Y', 'Y', 'TT_Task', 'N',
         hours_per_day * 5,
         _xer_datetime(plan_start, '00:00'), _xer_datetime(plan_end, '00:00'),
@@ -496,7 +527,10 @@ def generation_to_xer_bytes(generation) -> bytes:
     lines.append('%F\tclndr_id\tdefault_flag\tclndr_name\tproj_id\tbase_clndr_id\tlast_chng_date\t'
                   'clndr_type\tday_hr_cnt\tweek_hr_cnt\tmonth_hr_cnt\tyear_hr_cnt\trsrc_private\tclndr_data')
     lines.append(_xer_row(
-        XER_CLNDR_ID, 'Y', 'Standard 5 Day Workweek', '', '', now.strftime('%Y-%m-%d %H:%M'),
+        # default_flag='N' — this calendar must NOT claim to be the P6
+        # database's global default; it only needs to be assigned (via
+        # clndr_id) to this project's own WBS/activities.
+        XER_CLNDR_ID, 'N', 'Standard 5 Day Workweek', '', '', now.strftime('%Y-%m-%d %H:%M'),
         'CA_Base', hours_per_day, hours_per_day * 5, hours_per_day * 5 * 4, hours_per_day * 5 * 52,
         'N', _xer_calendar_data(hours_per_day),
     ))
@@ -510,7 +544,8 @@ def generation_to_xer_bytes(generation) -> bytes:
         lines.append(_xer_row(
             wbs_id_map[node['code']], XER_PROJ_ID, '', i,
             'Y' if node.get('level') == 0 else 'N', 'N', 'WS_Open',
-            node['code'].split('.')[-1], node.get('name', ''),
+            node['code'].split('.')[-1][:XER_WBS_SHORT_NAME_MAX_LEN],
+            (node.get('name') or '')[:XER_WBS_NAME_MAX_LEN],
             wbs_id_map.get(parent_code, '') if parent_code else '',
         ))
 
@@ -545,7 +580,8 @@ def generation_to_xer_bytes(generation) -> bytes:
         lines.append(_xer_row(
             task_id_map[activity['id']], XER_PROJ_ID, wbs_id, XER_CLNDR_ID, 0,
             'TT_Mile' if activity.get('is_milestone') else 'TT_Task', 'DT_FixedDUR2',
-            'TK_NotStart', activity['id'], activity.get('name', ''),
+            'TK_NotStart', str(activity['id'])[:XER_TASK_CODE_MAX_LEN],
+            (activity.get('name') or '')[:XER_TASK_NAME_MAX_LEN],
             float_hrs, float_hrs, duration_hrs, duration_hrs,
             '', '', late_start, late_end, early_start, early_end, early_start, early_end, '',
         ))
