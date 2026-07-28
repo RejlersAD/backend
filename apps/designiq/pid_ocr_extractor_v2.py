@@ -2026,6 +2026,32 @@ Example 4: "10\"-PG-0003-033842-X-H"
                     # Skip FROM-TO phases for this page
                     continue
 
+                # PHASE 3D: Tag Position Capture (additive, best-effort — NEVER
+                # affects extraction results). Locates where each line_number's
+                # own tag/label text sits on the rendered page, so the P&ID
+                # Drawing Canvas can later offer it as an optional "suggested"
+                # From/To anchor. Wrapped so any failure is silently ignored.
+                try:
+                    from apps.designiq.tag_position_locator import locate_tag_positions
+                    tag_positions = locate_tag_positions(
+                        img=img,
+                        line_numbers=[it['line_number'] for it in line_items],
+                        normalize_fn=self._normalize_ocr_text,
+                    )
+                    if tag_positions:
+                        for item in line_items:
+                            pos = tag_positions.get(item['line_number'])
+                            if pos:
+                                item['tag_x_pct'] = pos['x_pct']
+                                item['tag_y_pct'] = pos['y_pct']
+                                item['tag_position_confidence'] = pos['confidence']
+                        logger.info(
+                            f"  📍 PHASE 3D: Located tag positions for "
+                            f"{len(tag_positions)}/{len(line_items)} line numbers"
+                        )
+                except Exception as _tag_pos_err:
+                    logger.warning(f"  ⚠️ PHASE 3D tag position capture failed (non-fatal): {_tag_pos_err}")
+
                 # PHASE 3A: Spatial Matching FROM-TO Detection (PRIMARY METHOD - from research paper)
                 spatial_from_to_success = False
                 try:
@@ -4297,7 +4323,13 @@ Analyze and return JSON:"""
                 'flow_confidence': item.get('flow_confidence', ''),
                 'page': item.get('page', 1),
                 'confidence': item.get('confidence', 'medium'),
-                'criticality_stress': item.get('criticality_stress', 'N/A')  # NEW: Stress Criticality column
+                'criticality_stress': item.get('criticality_stress', 'N/A'),  # NEW: Stress Criticality column
+                # Additive/optional — OCR tag-position capture for the P&ID Drawing
+                # Canvas "suggested From/To" enhancement. Popped out before Excel
+                # export in tasks.py, never shown as a table/Excel column.
+                'tag_x_pct': item.get('tag_x_pct'),
+                'tag_y_pct': item.get('tag_y_pct'),
+                'tag_position_confidence': item.get('tag_position_confidence'),
             })
         
         return table_data

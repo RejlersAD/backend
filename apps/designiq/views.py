@@ -2033,6 +2033,10 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 'format_type': output.format_type,
                 'enrichment_enabled': output.enrichment_enabled,
                 'include_area': output.include_area,
+                # Additive — P&ID Drawing Canvas "suggested From/To" anchors,
+                # keyed by line_number. Empty dict for outputs processed
+                # before this feature (never breaks existing consumers).
+                'tag_positions': output.tag_positions or {},
             })
         except Exception as e:
             logger.error(f"Error reading output data {output_id}: {e}", exc_info=True)
@@ -2276,6 +2280,318 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                 'health': 'error',
                 'error': f'Failed to recheck: {str(e)}',
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # ------------------------------------------------------------------
+    # P&ID DRAWING CANVAS (Phase 2) — additive endpoints, do not touch the
+    # OCR/extraction pipeline. Lets the frontend display the source P&ID
+    # drawing(s) for an output and let the user mark/adjust From→To lines
+    # for each extracted row. Read endpoints (list/render) follow the same
+    # "no ownership check" precedent as download_output/output_data; write
+    # endpoints (attach/delete/save annotation) reuse `_can_modify_output`.
+    # ------------------------------------------------------------------
+    @action(detail=False, methods=['get', 'post'], url_path='output_drawings/(?P<output_id>[^/.]+)',
+            parser_classes=[MultiPartParser, FormParser, JSONParser])
+    def output_drawings(self, request, output_id=None):
+        """
+        GET  /api/v1/designiq/lists/output_drawings/{output_id}/  — list drawings
+        POST /api/v1/designiq/lists/output_drawings/{output_id}/  — attach an
+             extra drawing (multipart form field: drawing_file)
+        """
+        from .models import ProcessedPIDOutput, PIDSourceDrawing
+        try:
+            output = ProcessedPIDOutput.objects.get(id=output_id)
+        except ProcessedPIDOutput.DoesNotExist:
+            return Response({'error': 'Output not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.method == 'GET':
+            drawings = output.source_drawings.all().order_by('sequence', 'created_at')
+            results = []
+            for d in drawings:
+                try:
+                    file_exists = bool(d.original_file) and d.original_file.storage.exists(d.original_file.name)
+                except Exception as storage_err:
+                    logger.warning(f"Storage check failed for drawing {d.id}: {storage_err}")
+                    file_exists = False
+                results.append({
+                    'id': str(d.id),
+                    'filename': d.original_filename,
+                    'page_count': d.page_count,
+                    'sequence': d.sequence,
+                    'has_file': file_exists,
+                    'uploaded_by': d.uploaded_by.email if d.uploaded_by else 'Unknown',
+                    'created_at': d.created_at.strftime('%Y-%m-%d %H:%M') if d.created_at else '',
+                })
+            return Response({'success': True, 'count': len(results), 'drawings': results})
+
+        # POST — attach a new drawing
+        if not self._can_modify_output(request, output):
+            return Response(
+                {'error': 'You do not have permission to attach a drawing to this output.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        drawing_file = request.FILES.get('drawing_file')
+        if not drawing_file:
+            return Response({'error': 'drawing_file is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not drawing_file.name.lower().endswith('.pdf'):
+            return Response({'error': 'Only PDF drawings are supported'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            import fitz
+            from django.core.files.base import ContentFile
+            from django.db.models import Max
+
+            drawing_bytes = drawing_file.read()
+            try:
+                pdf_doc = fitz.open(stream=drawing_bytes, filetype='pdf')
+                page_count = len(pdf_doc)
+                pdf_doc.close()
+            except Exception as page_count_err:
+                logger.warning(f"Could not compute page count for attached drawing: {page_count_err}")
+                page_count = 1
+
+            next_sequence = (output.source_drawings.aggregate(m=Max('sequence'))['m'] or 0) + 1
+
+            drawing = PIDSourceDrawing.objects.create(
+                output=output,
+                original_filename=drawing_file.name,
+                page_count=page_count,
+                sequence=next_sequence,
+                uploaded_by=request.user,
+            )
+            drawing.original_file.save(drawing_file.name, ContentFile(drawing_bytes), save=True)
+
+            try:
+                upload_confirmed = drawing.original_file.storage.exists(drawing.original_file.name)
+            except Exception as verify_err:
+                upload_confirmed = False
+                logger.error(f"❌ Could not verify drawing upload for {drawing.id}: {verify_err}", exc_info=True)
+            if not upload_confirmed:
+                return Response({
+                    'error': 'The drawing was recorded but failed to upload to storage. Please try again.',
+                    'code': 'upload_failed',
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            logger.info(f"🖼️ Attached drawing {drawing.id} ({drawing_file.name}) to output {output_id} by {request.user}")
+
+            return Response({
+                'success': True,
+                'drawing': {
+                    'id': str(drawing.id),
+                    'filename': drawing.original_filename,
+                    'page_count': drawing.page_count,
+                    'sequence': drawing.sequence,
+                    'has_file': True,
+                    'uploaded_by': request.user.email if request.user else 'Unknown',
+                }
+            }, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            logger.error(f"Error attaching drawing to output {output_id}: {e}", exc_info=True)
+            return Response({'error': f'Failed to attach drawing: {str(e)}'},
+                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['delete'],
+            url_path='output_drawings/(?P<output_id>[^/.]+)/(?P<drawing_id>[^/.]+)')
+    def delete_output_drawing(self, request, output_id=None, drawing_id=None):
+        """
+        DELETE /api/v1/designiq/lists/output_drawings/{output_id}/{drawing_id}/
+
+        Removes a source drawing (record + file). Any PIDLineAnnotation rows
+        referencing it keep existing — their from_drawing/to_drawing FK is
+        SET_NULL, so the frontend just shows that marker as "drawing removed".
+        """
+        from .models import ProcessedPIDOutput, PIDSourceDrawing
+        try:
+            output = ProcessedPIDOutput.objects.get(id=output_id)
+        except ProcessedPIDOutput.DoesNotExist:
+            return Response({'error': 'Output not found'}, status=status.HTTP_404_NOT_FOUND)
+        if not self._can_modify_output(request, output):
+            return Response(
+                {'error': 'You do not have permission to delete this drawing.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        try:
+            drawing = PIDSourceDrawing.objects.get(id=drawing_id, output=output)
+        except PIDSourceDrawing.DoesNotExist:
+            return Response({'error': 'Drawing not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            filename = drawing.original_filename
+            if drawing.original_file:
+                try:
+                    drawing.original_file.delete(save=False)
+                except Exception as file_err:
+                    logger.warning(f"Could not delete drawing file {drawing_id}: {file_err}")
+            drawing.delete()
+            logger.info(f"🗑️ Deleted drawing {drawing_id} ({filename}) from output {output_id} by {request.user}")
+            return Response({'success': True, 'deleted_id': drawing_id})
+        except Exception as e:
+            logger.error(f"Error deleting drawing {drawing_id}: {e}", exc_info=True)
+            return Response({'error': f'Failed to delete drawing: {str(e)}'},
+                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # SOFT-CODED render settings — zoom factor controls output PNG resolution.
+    DRAWING_RENDER_ZOOM = 2.0  # ≈150 DPI, matches pid_verification_v2 precedent
+
+    @action(detail=False, methods=['get'],
+            url_path='drawing_image/(?P<drawing_id>[^/.]+)/(?P<page_index>[^/.]+)')
+    def drawing_image(self, request, drawing_id=None, page_index=None):
+        """
+        GET /api/v1/designiq/lists/drawing_image/{drawing_id}/{page_index}/
+
+        Renders one page of a retained source P&ID PDF as a PNG, using the
+        storage-agnostic PyMuPDF pattern (works for both local disk and S3
+        FileField storage — no `.path` usage).
+        """
+        from .models import PIDSourceDrawing
+        try:
+            drawing = PIDSourceDrawing.objects.get(id=drawing_id)
+        except PIDSourceDrawing.DoesNotExist:
+            return Response({'error': 'Drawing not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            page_idx = int(page_index)
+        except (TypeError, ValueError):
+            return Response({'error': 'page_index must be an integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not drawing.original_file or not drawing.original_file.storage.exists(drawing.original_file.name):
+            return Response({
+                'error': 'Drawing file not found in storage',
+                'code': 'file_missing',
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            import fitz
+
+            with drawing.original_file.open('rb') as fh:
+                raw = fh.read()
+
+            pdf_doc = fitz.open(stream=raw, filetype='pdf')
+            try:
+                if page_idx < 0 or page_idx >= len(pdf_doc):
+                    return Response({'error': f'page_index out of range (0-{len(pdf_doc) - 1})'},
+                                     status=status.HTTP_400_BAD_REQUEST)
+                page = pdf_doc[page_idx]
+                mat = fitz.Matrix(self.DRAWING_RENDER_ZOOM, self.DRAWING_RENDER_ZOOM)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                png_bytes = pix.tobytes('png')
+            finally:
+                pdf_doc.close()
+
+            response = HttpResponse(png_bytes, content_type='image/png')
+            response['X-Page-Count'] = str(drawing.page_count)
+            response['Cache-Control'] = 'private, max-age=3600'
+            return response
+        except Exception as e:
+            logger.error(f"Error rendering drawing {drawing_id} page {page_index}: {e}", exc_info=True)
+            return Response({'error': f'Failed to render drawing: {str(e)}'},
+                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get', 'put', 'delete'],
+            url_path='line_annotations/(?P<output_id>[^/.]+)', parser_classes=[JSONParser])
+    def line_annotations(self, request, output_id=None):
+        """
+        GET    /api/v1/designiq/lists/line_annotations/{output_id}/
+               — list all From/To markups for this output.
+        PUT    /api/v1/designiq/lists/line_annotations/{output_id}/
+               — create/update the markup for one line_number. Body (JSON):
+                 { line_number, from: {drawing_id, page_index, x_pct, y_pct},
+                   to: {drawing_id, page_index, x_pct, y_pct},
+                   path_points: [{x_pct,y_pct}, ...], color }
+        DELETE /api/v1/designiq/lists/line_annotations/{output_id}/?line_number=...
+               — remove the markup for one line_number.
+        """
+        from .models import ProcessedPIDOutput, PIDSourceDrawing, PIDLineAnnotation
+        try:
+            output = ProcessedPIDOutput.objects.get(id=output_id)
+        except ProcessedPIDOutput.DoesNotExist:
+            return Response({'error': 'Output not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        def _serialize(a):
+            return {
+                'line_number': a.line_number,
+                'from_drawing_id': str(a.from_drawing_id) if a.from_drawing_id else None,
+                'from_page_index': a.from_page_index,
+                'from_point': a.from_point or {},
+                'to_drawing_id': str(a.to_drawing_id) if a.to_drawing_id else None,
+                'to_page_index': a.to_page_index,
+                'to_point': a.to_point or {},
+                'path_points': a.path_points or [],
+                'color': a.color or '',
+                'updated_at': a.updated_at.strftime('%Y-%m-%d %H:%M') if a.updated_at else '',
+            }
+
+        if request.method == 'GET':
+            annotations = output.line_annotations.all()
+            return Response({
+                'success': True,
+                'annotations': {a.line_number: _serialize(a) for a in annotations},
+            })
+
+        if not self._can_modify_output(request, output):
+            return Response(
+                {'error': 'You do not have permission to modify annotations for this output.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if request.method == 'DELETE':
+            line_number = request.query_params.get('line_number')
+            if not line_number:
+                return Response({'error': 'line_number query parameter is required'},
+                                 status=status.HTTP_400_BAD_REQUEST)
+            deleted, _ = PIDLineAnnotation.objects.filter(output=output, line_number=line_number).delete()
+            if not deleted:
+                return Response({'error': 'Annotation not found'}, status=status.HTTP_404_NOT_FOUND)
+            logger.info(f"🗑️ Deleted annotation for line {line_number} on output {output_id} by {request.user}")
+            return Response({'success': True, 'line_number': line_number})
+
+        # PUT — create or update
+        payload = request.data if isinstance(request.data, dict) else {}
+        line_number = payload.get('line_number')
+        if not line_number:
+            return Response({'error': 'line_number is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        def _resolve_drawing(point_payload):
+            drawing_id = (point_payload or {}).get('drawing_id')
+            if not drawing_id:
+                return None
+            try:
+                return PIDSourceDrawing.objects.get(id=drawing_id, output=output)
+            except PIDSourceDrawing.DoesNotExist:
+                return None
+
+        from_payload = payload.get('from') or {}
+        to_payload = payload.get('to') or {}
+
+        try:
+            annotation, _created = PIDLineAnnotation.objects.update_or_create(
+                output=output,
+                line_number=line_number,
+                defaults={
+                    'from_drawing': _resolve_drawing(from_payload),
+                    'from_page_index': int(from_payload.get('page_index', 0) or 0),
+                    'from_point': {
+                        'x_pct': from_payload.get('x_pct'),
+                        'y_pct': from_payload.get('y_pct'),
+                    } if from_payload.get('x_pct') is not None else {},
+                    'to_drawing': _resolve_drawing(to_payload),
+                    'to_page_index': int(to_payload.get('page_index', 0) or 0),
+                    'to_point': {
+                        'x_pct': to_payload.get('x_pct'),
+                        'y_pct': to_payload.get('y_pct'),
+                    } if to_payload.get('x_pct') is not None else {},
+                    'path_points': payload.get('path_points') or [],
+                    'color': payload.get('color', '') or '',
+                    'created_by': request.user,
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error saving annotation for line {line_number} on output {output_id}: {e}", exc_info=True)
+            return Response({'error': f'Failed to save annotation: {str(e)}'},
+                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        logger.info(f"✏️ Saved annotation for line {line_number} on output {output_id} by {request.user}")
+        return Response({'success': True, 'annotation': _serialize(annotation)})
 
     @action(detail=False, methods=['post'], url_path='base_extraction')
     def base_extraction(self, request):

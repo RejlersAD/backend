@@ -744,6 +744,17 @@ def process_pid_upload_async(
         enriched_data = table_data
         logger.info(f"✅ Base extraction ready: {len(enriched_data)} lines with {len(enriched_data[0].keys()) if enriched_data else 0} columns per line")
         
+        # P&ID DRAWING CANVAS (Phase 2) — best-effort read of the source PDF
+        # bytes BEFORE the local temp copy is removed (S3 case) so it can be
+        # retained as a PIDSourceDrawing further below. Never blocks/alters
+        # the core extraction result if it fails.
+        source_pdf_bytes = None
+        try:
+            with open(local_file_path, 'rb') as pdf_fh:
+                source_pdf_bytes = pdf_fh.read()
+        except Exception as read_err:
+            logger.warning(f"[Task {task_id}] Could not read source PDF for drawing retention: {read_err}")
+
         if storage_type == 's3':
             try:
                 os.unlink(local_file_path)
@@ -758,7 +769,27 @@ def process_pid_upload_async(
             import pandas as pd
             from django.core.files.base import ContentFile
             from .models import ProcessedPIDOutput
-            
+
+            # 📍 P&ID Drawing Canvas — "suggested From/To" enhancement (additive).
+            # Pop the OCR tag-position keys (added by PHASE 3D in
+            # pid_ocr_extractor_v2.py) out of each row BEFORE building the Excel
+            # table, so they never leak into the spreadsheet as visible columns.
+            # Collected separately to build suggestion anchors below.
+            tag_positions_by_line = {}
+            for _item in enriched_data:
+                _x = _item.pop('tag_x_pct', None)
+                _y = _item.pop('tag_y_pct', None)
+                _conf = _item.pop('tag_position_confidence', None)
+                if _x is not None and _y is not None:
+                    _ln = _item.get('line_number')
+                    if _ln:
+                        tag_positions_by_line[_ln] = {
+                            'x_pct': _x,
+                            'y_pct': _y,
+                            'page_index': max(int(_item.get('page', 1)) - 1, 0),
+                            'confidence': _conf or 'medium',
+                        }
+
             # Generate Excel file from enriched data
             df = pd.DataFrame(enriched_data)
             excel_buffer = BytesIO()
@@ -817,12 +848,102 @@ def process_pid_upload_async(
 
             excel_file_path = output_record.excel_file.name
             logger.info(f"📥 Saved historical output: {excel_filename} (ID: {output_record.id})")
-            
+
+            # 📍 Build "suggested From/To" anchors for the Drawing Canvas from
+            # the captured tag positions (PHASE 3D, best-effort). Dual-point
+            # (From+To) suggestion is ONLY offered when the EXISTING/unchanged
+            # flow_confidence is 'high' AND the referenced line's own tag
+            # position was also captured — otherwise fall back to the single
+            # reliable "From" anchor. Never guesses blindly. Fully additive —
+            # any failure here is logged only and never affects the saved
+            # extraction output above.
+            try:
+                if tag_positions_by_line:
+                    suggestions_map = {}
+                    for _item in enriched_data:
+                        _ln = _item.get('line_number')
+                        if not _ln:
+                            continue
+                        own_pos = tag_positions_by_line.get(_ln)
+                        if not own_pos:
+                            continue
+
+                        suggestion = {'from': own_pos}
+
+                        to_line_ref = _item.get('to_line')
+                        flow_conf = (_item.get('flow_confidence') or '').lower()
+                        if to_line_ref and flow_conf == 'high':
+                            to_pos = tag_positions_by_line.get(to_line_ref)
+                            if to_pos:
+                                suggestion['to'] = to_pos
+
+                        suggestions_map[_ln] = suggestion
+
+                    if suggestions_map:
+                        output_record.tag_positions = suggestions_map
+                        output_record.save(update_fields=['tag_positions'])
+                        logger.info(
+                            f"📍 Saved {len(suggestions_map)} suggested tag position(s) "
+                            f"for output {output_record.id}"
+                        )
+            except Exception as tag_pos_save_err:
+                logger.warning(f"⚠️ Could not save suggested tag positions (non-fatal): {tag_pos_save_err}")
+
         except Exception as excel_err:
             logger.error(f"❌ Could not save Excel output for history: {excel_err}", exc_info=True)
             # Don't fail the entire process if Excel save fails — the core
             # line-list extraction result still returns to the user.
-        
+
+        # 🖼️ P&ID DRAWING CANVAS (Phase 2) — best-effort retention of the
+        # source PDF so the "Drawing" view can display it for From/To line
+        # markup. Entirely additive/non-blocking: any failure here is only
+        # logged and NEVER affects the core extraction result above.
+        if source_pdf_bytes and 'output_record' in locals() and output_record is not None:
+            try:
+                import fitz  # PyMuPDF
+                from django.core.files.base import ContentFile
+                from .models import PIDSourceDrawing
+
+                try:
+                    pdf_doc = fitz.open(stream=source_pdf_bytes, filetype='pdf')
+                    page_count = len(pdf_doc)
+                    pdf_doc.close()
+                except Exception as page_count_err:
+                    logger.warning(f"[Task {task_id}] Could not compute page count for source drawing: {page_count_err}")
+                    page_count = 1
+
+                drawing = PIDSourceDrawing.objects.create(
+                    output=output_record,
+                    original_filename=filename,
+                    page_count=page_count,
+                    sequence=0,
+                    uploaded_by=user,
+                )
+                drawing.original_file.save(
+                    filename,
+                    ContentFile(source_pdf_bytes),
+                    save=True
+                )
+
+                try:
+                    drawing_upload_confirmed = drawing.original_file.storage.exists(drawing.original_file.name)
+                except Exception as verify_err:
+                    drawing_upload_confirmed = False
+                    logger.error(
+                        f"❌ Could not verify source drawing upload for {drawing.id}: {verify_err}",
+                        exc_info=True
+                    )
+                if not drawing_upload_confirmed:
+                    logger.error(
+                        f"❌ Source drawing file for {drawing.id} ({filename}) was not found in "
+                        f"storage immediately after save() — the upload likely failed silently."
+                    )
+                else:
+                    logger.info(f"🖼️ Retained source P&ID drawing {drawing.id} ({page_count} page(s)) for output {output_record.id}")
+            except Exception as drawing_err:
+                logger.error(f"❌ Could not retain source P&ID drawing: {drawing_err}", exc_info=True)
+                # Don't fail the entire process if drawing retention fails.
+
         # DEBUG: Log what we're returning
         logger.info("="*80)
         logger.info("🔍 PREPARING TASK RESULT")

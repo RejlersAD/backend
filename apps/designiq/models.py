@@ -372,7 +372,14 @@ class ProcessedPIDOutput(TimeStampedModel):
         blank=True,
         related_name='edited_versions',
     )
-    
+
+    # P&ID Drawing Canvas — "suggested From/To" enhancement (additive).
+    # Best-effort OCR tag-position anchors captured at extraction time, keyed
+    # by line_number: {line_number: {'from': {x_pct,y_pct,page_index,confidence},
+    # 'to': {...} (optional)}}. Empty for outputs processed before this
+    # feature, and for the manual "Edit Data" save path — never required.
+    tag_positions = models.JSONField(default=dict, blank=True)
+
     class Meta:
         db_table = 'designiq_processed_pid_outputs'
         ordering = ['-processing_date']
@@ -384,4 +391,97 @@ class ProcessedPIDOutput(TimeStampedModel):
     
     def __str__(self):
         return f"PID: {self.pid_number} - Rev {self.pid_revision} ({self.processing_date.strftime('%Y-%m-%d')})"
+
+
+class PIDSourceDrawing(TimeStampedModel):
+    """
+    P&ID DRAWING CANVAS (Phase 2) — retains the source PDF/image used to
+    produce a ProcessedPIDOutput so it can be displayed on a canvas for
+    From/To line markup. A single output can have MULTIPLE drawings:
+    - sequence=0 is auto-retained at extraction time (best-effort, never
+      blocks/alters the core extraction pipeline if it fails — see tasks.py).
+    - sequence>0 are manually attached afterward (e.g. to backfill legacy
+      outputs whose source PDF was never retained, or to add extra sheets
+      when a line's From/To continues onto a different drawing).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    output = models.ForeignKey(
+        ProcessedPIDOutput,
+        on_delete=models.CASCADE,
+        related_name='source_drawings',
+    )
+    original_file = models.FileField(upload_to='designiq/source_drawings/%Y/%m/')
+    original_filename = models.CharField(max_length=500)
+    page_count = models.PositiveIntegerField(default=1)
+    # SOFT-CODED ordering — lets the frontend show "Drawing 1", "Drawing 2", ...
+    # in a stable, user-meaningful order regardless of upload order edge cases.
+    sequence = models.PositiveIntegerField(default=0)
+    uploaded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+
+    class Meta:
+        db_table = 'designiq_pid_source_drawings'
+        ordering = ['sequence', 'created_at']
+
+    def __str__(self):
+        return f"Drawing {self.sequence} for output {self.output_id} ({self.original_filename})"
+
+
+class PIDLineAnnotation(TimeStampedModel):
+    """
+    P&ID DRAWING CANVAS (Phase 2) — stores the user-drawn From/To markup for
+    one extracted Line List row on a given output's drawing(s).
+
+    From and To can each reference a DIFFERENT PIDSourceDrawing/page — real
+    P&ID line lists commonly have a line continue onto another sheet — in
+    which case `path_points` is not rendered as a connecting polyline (the
+    two points live on separate images); the frontend instead shows a small
+    "continues on Drawing N" indicator at each marker.
+
+    When from/to share the same drawing+page, `path_points` (bookended by
+    from_point/to_point) is rendered as a draggable multi-point polyline.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    output = models.ForeignKey(
+        ProcessedPIDOutput,
+        on_delete=models.CASCADE,
+        related_name='line_annotations',
+    )
+    # Matches the "Line Number" column text from the extracted Excel/grid —
+    # no FK to a per-row model exists for historical outputs, so we key by
+    # this text value (soft reference), same convention EngineeringListItem
+    # uses via item_tag.
+    line_number = models.CharField(max_length=200, db_index=True)
+
+    from_drawing = models.ForeignKey(
+        PIDSourceDrawing, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='from_annotations',
+    )
+    from_page_index = models.PositiveIntegerField(default=0)
+    from_point = models.JSONField(default=dict, blank=True)  # {"x_pct": .., "y_pct": ..}
+
+    to_drawing = models.ForeignKey(
+        PIDSourceDrawing, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='to_annotations',
+    )
+    to_page_index = models.PositiveIntegerField(default=0)
+    to_point = models.JSONField(default=dict, blank=True)  # {"x_pct": .., "y_pct": ..}
+
+    # Intermediate waypoints ONLY (excludes from_point/to_point themselves) —
+    # ordered list of {"x_pct": .., "y_pct": ..}. Soft-coded/free-length so
+    # the user can add as many bends as needed.
+    path_points = models.JSONField(default=list, blank=True)
+
+    # Soft-coded display color (hex), assigned client-side from a palette so
+    # each line stays visually distinct and consistent across reloads.
+    color = models.CharField(max_length=20, blank=True)
+
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+
+    class Meta:
+        db_table = 'designiq_pid_line_annotations'
+        unique_together = ('output', 'line_number')
+        ordering = ['line_number']
+
+    def __str__(self):
+        return f"Annotation for {self.line_number} (output {self.output_id})"
 
