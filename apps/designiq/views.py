@@ -1750,7 +1750,8 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
                             'file_size_mb': round(output.file_size / (1024 * 1024), 2) if output.file_size else 0,
                             'enrichment_enabled': output.enrichment_enabled or False,
                             'format_type': output.format_type or 'general',
-                            'has_file': bool(output.excel_file) if hasattr(output, 'excel_file') else False
+                            'has_file': bool(output.excel_file) if hasattr(output, 'excel_file') else False,
+                            'edited_from': str(output.edited_from_id) if output.edited_from_id else None,
                         })
                     except Exception as e:
                         logger.warning(f"Error processing output {output.id}: {e}")
@@ -1842,6 +1843,167 @@ class EngineeringListItemViewSet(viewsets.ModelViewSet):
             return Response({
                 "error": f"Failed to download output: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # ------------------------------------------------------------------
+    # SAVE / EDIT — persist client-side exports (and edited corrections)
+    # to the SAME ProcessedPIDOutput model/storage used by the AI
+    # extraction pipeline, WITHOUT touching that pipeline (tasks.py) at
+    # all. This lets the main "Export Excel" button on the results table,
+    # and a follow-up "Edit Data" correction pass, both land in Previous
+    # Outputs (DB + whatever FileField storage backend is configured —
+    # S3 when USE_S3 is enabled, else local disk).
+    # ------------------------------------------------------------------
+    @action(detail=False, methods=['post'], url_path='save_output', parser_classes=[MultiPartParser, FormParser])
+    def save_output(self, request):
+        """
+        Persist a client-generated Excel export as a new ProcessedPIDOutput.
+
+        POST /api/v1/designiq/lists/save_output/  (multipart/form-data)
+        Fields:
+          excel_file          (required) — the generated .xlsx blob
+          pid_number          (optional, default 'Manual Export')
+          pid_revision        (optional)
+          list_type           (optional, default 'line_list')
+          format_type         (optional, default 'general')
+          total_lines         (optional, int)
+          total_columns       (optional, int)
+          enrichment_enabled  (optional, bool-ish)
+          include_area        (optional, bool-ish)
+          edited_from         (optional, UUID) — set when this is a
+                               corrected re-save of an existing output's
+                               data (creates a NEW version; the source
+                               output/file is left untouched).
+        """
+        from .models import ProcessedPIDOutput
+        from django.core.files.base import ContentFile
+        from django.core.exceptions import ValidationError
+        import uuid as uuid_lib
+
+        excel_file = request.FILES.get('excel_file')
+        if not excel_file:
+            return Response({'error': 'excel_file is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = request.data
+        list_type = data.get('list_type', 'line_list')
+        if list_type not in LIST_TYPES:
+            return Response({
+                'error': f"Invalid list_type. Must be one of: {', '.join(LIST_TYPES.keys())}"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        def _to_bool(v):
+            return str(v).lower() in ('1', 'true', 'yes', 'on')
+
+        def _to_int(v, default=0):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return default
+
+        edited_from = None
+        edited_from_id = data.get('edited_from')
+        if edited_from_id:
+            try:
+                edited_from = ProcessedPIDOutput.objects.get(id=edited_from_id)
+            except (ProcessedPIDOutput.DoesNotExist, ValueError, ValidationError):
+                edited_from = None
+
+        try:
+            excel_bytes = excel_file.read()
+            output = ProcessedPIDOutput.objects.create(
+                pid_number=data.get('pid_number') or 'Manual Export',
+                pid_revision=data.get('pid_revision', ''),
+                list_type=list_type,
+                document_id=f"manual-{uuid_lib.uuid4().hex[:12]}",
+                processed_by=request.user,
+                excel_filename=excel_file.name,
+                file_size=len(excel_bytes),
+                total_lines=_to_int(data.get('total_lines')),
+                total_columns=_to_int(data.get('total_columns')),
+                format_type=data.get('format_type', 'general'),
+                include_area=_to_bool(data.get('include_area')),
+                enrichment_enabled=_to_bool(data.get('enrichment_enabled')),
+                edited_from=edited_from,
+            )
+            output.excel_file.save(excel_file.name, ContentFile(excel_bytes), save=True)
+
+            logger.info(
+                f"💾 Saved output {output.id} ({excel_file.name}) by {request.user}"
+                + (f" [edited from {edited_from.id}]" if edited_from else "")
+            )
+
+            return Response({
+                'success': True,
+                'output': {
+                    'id': str(output.id),
+                    'pid_number': output.pid_number,
+                    'pid_revision': output.pid_revision,
+                    'processing_date': output.processing_date.strftime('%Y-%m-%d %H:%M'),
+                    'processed_by': request.user.email if request.user else 'Unknown',
+                    'total_lines': output.total_lines,
+                    'total_columns': output.total_columns,
+                    'excel_filename': output.excel_filename,
+                    'file_size_mb': round(output.file_size / (1024 * 1024), 2) if output.file_size else 0,
+                    'enrichment_enabled': output.enrichment_enabled,
+                    'format_type': output.format_type,
+                    'has_file': True,
+                    'edited_from': str(edited_from.id) if edited_from else None,
+                }
+            }, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            logger.error(f"Error saving output: {e}", exc_info=True)
+            return Response({'error': f'Failed to save output: {str(e)}'},
+                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'], url_path='output_data/(?P<output_id>[^/.]+)')
+    def output_data(self, request, output_id=None):
+        """
+        Read a previously saved output's Excel rows as JSON, so the
+        frontend can present an editable grid ("Edit Data"). Does NOT
+        modify the stored file — call `save_output` with
+        `edited_from=<output_id>` afterwards to persist corrections as a
+        new version.
+
+        GET /api/v1/designiq/lists/output_data/{output_id}/
+        """
+        from .models import ProcessedPIDOutput
+        try:
+            output = ProcessedPIDOutput.objects.get(id=output_id)
+        except ProcessedPIDOutput.DoesNotExist:
+            return Response({'error': 'Output not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not output.excel_file or not output.excel_file.storage.exists(output.excel_file.name):
+            return Response({'error': 'Excel file not found for this output'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            from openpyxl import load_workbook
+
+            with output.excel_file.open('rb') as fh:
+                wb = load_workbook(fh, read_only=True, data_only=True)
+                ws = wb.active
+                rows_iter = ws.iter_rows(values_only=True)
+                headers = ['' if c is None else c for c in next(rows_iter, ())]
+                rows = []
+                for row in rows_iter:
+                    if any(cell not in (None, '') for cell in row):
+                        rows.append(['' if c is None else c for c in row])
+                wb.close()
+
+            return Response({
+                'success': True,
+                'output_id': output_id,
+                'headers': headers,
+                'rows': rows,
+                'pid_number': output.pid_number,
+                'pid_revision': output.pid_revision,
+                'list_type': output.list_type,
+                'format_type': output.format_type,
+                'enrichment_enabled': output.enrichment_enabled,
+                'include_area': output.include_area,
+            })
+        except Exception as e:
+            logger.error(f"Error reading output data {output_id}: {e}", exc_info=True)
+            return Response({'error': f'Failed to read output data: {str(e)}'},
+                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # ------------------------------------------------------------------
     # SOFT-CODED OUTPUT MANAGEMENT — Delete / Modify / Recheck

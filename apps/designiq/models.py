@@ -360,6 +360,18 @@ class ProcessedPIDOutput(TimeStampedModel):
     format_type = models.CharField(max_length=50, default='general')  # onshore, offshore, general, adnoc
     include_area = models.BooleanField(default=False)
     enrichment_enabled = models.BooleanField(default=False)
+
+    # Data-edit lineage: set when this output was produced by editing the
+    # rows of another output (the "Edit Data" feature) rather than by a
+    # fresh AI extraction — lets us keep every corrected version without
+    # overwriting/losing the original.
+    edited_from = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='edited_versions',
+    )
     
     class Meta:
         db_table = 'designiq_processed_pid_outputs'
