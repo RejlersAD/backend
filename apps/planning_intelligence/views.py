@@ -9,7 +9,8 @@ URL roots (wired in apps.planning_intelligence.urls):
     /api/v1/planning-intelligence/projects/<id>/ai-settings/test/ (POST)
     /api/v1/planning-intelligence/files/
     /api/v1/planning-intelligence/generations/
-    /api/v1/planning-intelligence/generations/<id>/export/    (GET ?export_format=csv|json|primavera_csv|excel|pptx)
+    /api/v1/planning-intelligence/generations/<id>/edit/      (PATCH — hand-edit wbs/activities/eddr/manhours/milestones/narrative)
+    /api/v1/planning-intelligence/generations/<id>/export/    (GET ?export_format=csv|json|primavera_csv|excel|pptx|xer)
 """
 from __future__ import annotations
 
@@ -42,6 +43,52 @@ from .services.wbs_generator import build_wbs
 from .tasks import parse_uploaded_planning_file
 
 logger = logging.getLogger(__name__)
+
+# Fields the Project Scheduler is allowed to hand-edit in-place on an already
+# generated PlanningGeneration (see PlanningGenerationViewSet.edit). Computed/
+# derived fields (logic_matrix, validation, intelligence) are deliberately
+# excluded — they are recomputed by the pipeline, never hand-edited.
+GENERATION_EDITABLE_FIELDS = {'wbs', 'activities', 'eddr', 'manhours', 'milestones', 'narrative'}
+
+# Document Intelligence fields the Project Scheduler may correct before
+# generating the schedule — see PlanningProjectViewSet.generate.
+_INTELLIGENCE_OVERRIDE_SCALARS = (
+    'detected_project_name', 'detected_effective_date_text', 'detected_duration_months',
+)
+
+
+def _apply_intelligence_overrides(intelligence: dict, overrides: dict) -> dict:
+    """Merges user-edited Document Intelligence values (from the frontend's
+    editable preview) on top of the freshly re-computed `intelligence` dict,
+    so manual corrections survive into WBS/Schedule/EDDR/Manhour generation.
+    Only whitelisted, already-known keys are merged — arbitrary keys in the
+    request body are ignored."""
+    merged = dict(intelligence)
+
+    for key in _INTELLIGENCE_OVERRIDE_SCALARS:
+        if key in overrides and overrides[key] not in (None, ''):
+            merged[key] = overrides[key]
+
+    disc_overrides = overrides.get('disciplines')
+    if isinstance(disc_overrides, dict):
+        merged_disciplines = {code: dict(info) for code, info in (merged.get('disciplines') or {}).items()}
+        for disc_code, disc_override in disc_overrides.items():
+            if disc_code not in merged_disciplines or not isinstance(disc_override, dict):
+                continue
+            deliverables = disc_override.get('deliverables')
+            if isinstance(deliverables, list):
+                cleaned = [str(d).strip() for d in deliverables if str(d).strip()]
+                if cleaned:
+                    merged_disciplines[disc_code]['deliverables'] = cleaned
+        merged['disciplines'] = merged_disciplines
+
+    hse_overrides = overrides.get('hse_studies')
+    if isinstance(hse_overrides, list):
+        cleaned = [str(s).strip() for s in hse_overrides if str(s).strip()]
+        if cleaned:
+            merged['hse_studies'] = cleaned
+
+    return merged
 
 
 class PlanningProjectViewSet(viewsets.ModelViewSet):
@@ -80,6 +127,11 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         files_qs = project.files.filter(is_deleted=False, parse_status='done')
 
         intelligence = analyze_project(list(files_qs), project=project, user=request.user)
+
+        overrides = request.data.get('intelligence_overrides') if hasattr(request.data, 'get') else None
+        if isinstance(overrides, dict) and overrides:
+            intelligence = _apply_intelligence_overrides(intelligence, overrides)
+
         wbs = build_wbs(project, intelligence)
         schedule = build_activities(project, wbs, intelligence)
         activities = schedule['activities']
@@ -255,6 +307,28 @@ class PlanningGenerationViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(project_id=project_id)
         return qs
 
+    @action(detail=True, methods=['patch'], url_path='edit')
+    def edit(self, request, pk=None):
+        """Lets a Project Scheduler hand-correct this generation's WBS,
+        schedule activities, EDDR, manhour estimate, milestones or narrative
+        in place — a working correction against the same version, not a new
+        pipeline run. Body: partial JSON, e.g. {"wbs": [...]} or
+        {"activities": [...]}. Only GENERATION_EDITABLE_FIELDS are accepted;
+        computed fields (logic_matrix, validation, intelligence) are never
+        editable here — re-run Generate to recompute those."""
+        generation = self.get_object()
+        body = request.data if hasattr(request.data, 'items') else {}
+        updates = {k: v for k, v in body.items() if k in GENERATION_EDITABLE_FIELDS}
+        if not updates:
+            return Response(
+                {'error': f'No editable fields supplied. Allowed: {sorted(GENERATION_EDITABLE_FIELDS)}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        for field, value in updates.items():
+            setattr(generation, field, value)
+        generation.save(update_fields=list(updates.keys()) + ['updated_at'])
+        return Response(PlanningGenerationSerializer(generation).data)
+
     @action(detail=True, methods=['get'], url_path='export')
     def export(self, request, pk=None):
         # NOTE: the export format is read from `export_format`, NOT `format`.
@@ -302,6 +376,12 @@ class PlanningGenerationViewSet(viewsets.ReadOnlyModelViewSet):
                 content_type='application/vnd.openxmlformats-officedocument.presentationml.presentation',
             )
             response['Content-Disposition'] = f'attachment; filename="{base_name}_presentation.pptx"'
+            return response
+
+        if fmt == 'xer':
+            content = export_utils.generation_to_xer_bytes(generation)
+            response = HttpResponse(content, content_type='application/octet-stream')
+            response['Content-Disposition'] = f'attachment; filename="{base_name}_schedule.xer"'
             return response
 
         # default: json

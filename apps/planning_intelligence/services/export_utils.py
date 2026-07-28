@@ -9,9 +9,15 @@ python-pptx) — no extra dependency risk beyond python-pptx itself.
 from __future__ import annotations
 
 import csv
+import datetime
 import io
 import json
 import os
+
+from django.utils import timezone
+
+from ..config import DEFAULT_CALENDAR
+from .calendar_utils import add_working_days
 
 ACTIVITY_COLUMNS = [
     'id', 'wbs_code', 'name', 'discipline', 'deliverable', 'responsible_role',
@@ -367,3 +373,212 @@ def generation_to_pptx_bytes(generation) -> bytes:
     stream = io.BytesIO()
     prs.save(stream)
     return stream.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Primavera P6 .xer export — schedule-only subset (CURRTYPE / PROJECT /
+# CALENDAR / PROJWBS / TASK / TASKPRED). Field layout is soft-coded against
+# the P6 v17.12 XER schema used by the reference sample files supplied for
+# this feature (Documents/Project Control/Planning Package/*.xer) — every
+# %F/%R column list below mirrors that schema exactly so the exported file
+# opens cleanly in Primavera P6 (File > Import > Primavera PM - (XER)).
+# ─────────────────────────────────────────────────────────────────────────
+XER_VERSION = '17.12'
+XER_PROJ_ID = 1
+XER_CLNDR_ID = 1
+XER_LINE_SEP = '\r\n'  # native XER line ending
+
+_XER_PRED_TYPE = {'FS': 'PR_FS', 'SS': 'PR_SS', 'FF': 'PR_FF', 'SF': 'PR_SF'}
+
+
+def _xer_field(value) -> str:
+    """Sanitizes a single tab-delimited field value (XER is TSV-based, one
+    record per line — tabs/newlines inside a value would corrupt the file)."""
+    if value is None:
+        return ''
+    return str(value).replace('\t', ' ').replace('\r', ' ').replace('\n', ' ').strip()
+
+
+def _xer_row(*values) -> str:
+    return '\t'.join(['%R'] + [_xer_field(v) for v in values])
+
+
+def _xer_datetime(date_str, time_str='08:00') -> str:
+    if not date_str:
+        return ''
+    return f'{date_str} {time_str}'
+
+
+def _xer_calendar_data(hours_per_day: int) -> str:
+    """Builds a Mon–Fri working calendar (Sat/Sun off) at the given daily
+    hour span, in P6's proprietary calendar syntax — mirrors the 'Standard
+    5 Day Workweek' calendar found in the reference sample .xer files."""
+    start_hr = '08:00'
+    end_hr = f'{8 + hours_per_day:02d}:00' if hours_per_day < 16 else '17:00'
+    workday = f'(0||0(s|{start_hr}|f|{end_hr})())'
+    days = ''.join(
+        f'(0||{d}()({workday if 2 <= d <= 6 else ""}))'
+        for d in range(1, 8)
+    )
+    return (
+        f'(0||CalendarData()(  (0||DaysOfWeek()(    {days}))  '
+        f'(0||VIEW(ShowTotal|Y)())  (0||Exceptions()())))'
+    )
+
+
+def generation_to_xer_bytes(generation) -> bytes:
+    """
+    Exports this generation's WBS + Activities + Logic Matrix as a
+    Primavera P6-compatible .xer schedule file (single project, single
+    Mon–Fri calendar). Returns bytes encoded as Windows-1252 (P6's native
+    XER encoding) with UTF-8 as a defensive fallback for characters that
+    don't map (e.g. non-Latin project names).
+    """
+    project = generation.project
+    wbs_nodes = generation.wbs or []
+    activities = generation.activities or []
+    logic_matrix = generation.logic_matrix or []
+
+    calendar = dict(DEFAULT_CALENDAR)
+    calendar.update(getattr(project, 'calendar_overrides', None) or {})
+    hours_per_day = int(calendar.get('hours_per_day') or 8)
+
+    now = timezone.now()
+    export_date = now.strftime('%Y-%m-%d')
+    export_user = (getattr(generation.generated_by, 'username', '') or 'radai').strip() or 'radai'
+    export_user_full = getattr(generation.generated_by, 'get_full_name', lambda: '')() or export_user
+
+    # WBS code -> synthetic numeric wbs_id (P6 requires numeric FKs).
+    wbs_id_map = {node['code']: 1000 + i for i, node in enumerate(wbs_nodes, start=1)}
+    root_wbs_id = wbs_id_map.get('1') or (next(iter(wbs_id_map.values())) if wbs_id_map else 1000)
+
+    # Activity id (e.g. "PR-100") -> synthetic numeric task_id.
+    task_id_map = {a['id']: 2000 + i for i, a in enumerate(activities, start=1)}
+
+    starts = [a['start_date'] for a in activities if a.get('start_date')]
+    finishes = [a['finish_date'] for a in activities if a.get('finish_date')]
+    plan_start = min(starts) if starts else (project.effective_date.isoformat() if project.effective_date else export_date)
+    plan_end = max(finishes) if finishes else plan_start
+
+    lines = [
+        f'ERMHDR\t{XER_VERSION}\t{export_date}\tProject\t{export_user}\t{export_user_full}\t'
+        f'dbxDatabaseNoName\tProject Management\tUSD'
+    ]
+
+    # ── CURRTYPE ──
+    lines.append('%T\tCURRTYPE')
+    lines.append('%F\tcurr_id\tdecimal_digit_cnt\tcurr_symbol\tdecimal_symbol\tdigit_group_symbol\t'
+                  'pos_curr_fmt_type\tneg_curr_fmt_type\tcurr_type\tcurr_short_name\tgroup_digit_cnt\tbase_exch_rate')
+    lines.append(_xer_row(1, 2, '$', '.', ',', '#1.1', '(#1.1)', 'US Dollar', 'USD', 3, 1))
+
+    # ── PROJECT ──
+    lines.append('%T\tPROJECT')
+    lines.append('%F\tproj_id\tfy_start_month_num\trsrc_self_add_flag\tallow_complete_flag\t'
+                  'rsrc_multi_assign_flag\tcheckout_flag\tproject_flag\tstep_complete_flag\t'
+                  'cost_qty_recalc_flag\tbatch_sum_flag\tname_sep_char\tdef_complete_pct_type\t'
+                  'proj_short_name\tclndr_id\ttask_code_base\ttask_code_step\tpriority_num\t'
+                  'wbs_max_sum_level\tdef_duration_type\tdef_qty_type\tdef_rate_type\t'
+                  'add_act_remain_flag\tact_this_per_link_flag\tdef_task_type\tact_pct_link_flag\t'
+                  'critical_drtn_hr_cnt\tplan_start_date\tplan_end_date\tadd_date\t'
+                  'last_recalc_date\tscd_end_date\tguid')
+    lines.append(_xer_row(
+        XER_PROJ_ID, 1, 'N', 'Y', 'Y', 'N', 'Y', 'N', 'N', 'Y', '.', 'CP_Drtn',
+        (project.name or 'Project')[:100], XER_CLNDR_ID, 1000, 10, 500, 4,
+        'DT_FixedDUR2', 'QT_Hour', 'COST_PER_QTY', 'Y', 'Y', 'TT_Task', 'N',
+        hours_per_day * 5,
+        _xer_datetime(plan_start, '00:00'), _xer_datetime(plan_end, '00:00'),
+        now.strftime('%Y-%m-%d %H:%M'), now.strftime('%Y-%m-%d %H:%M'),
+        _xer_datetime(plan_end, '00:00'), '',
+    ))
+
+    # ── CALENDAR (single Mon-Fri project calendar) ──
+    lines.append('%T\tCALENDAR')
+    lines.append('%F\tclndr_id\tdefault_flag\tclndr_name\tproj_id\tbase_clndr_id\tlast_chng_date\t'
+                  'clndr_type\tday_hr_cnt\tweek_hr_cnt\tmonth_hr_cnt\tyear_hr_cnt\trsrc_private\tclndr_data')
+    lines.append(_xer_row(
+        XER_CLNDR_ID, 'Y', 'Standard 5 Day Workweek', '', '', now.strftime('%Y-%m-%d %H:%M'),
+        'CA_Base', hours_per_day, hours_per_day * 5, hours_per_day * 5 * 4, hours_per_day * 5 * 52,
+        'N', _xer_calendar_data(hours_per_day),
+    ))
+
+    # ── PROJWBS ──
+    lines.append('%T\tPROJWBS')
+    lines.append('%F\twbs_id\tproj_id\tobs_id\tseq_num\tproj_node_flag\tsum_data_flag\t'
+                  'status_code\twbs_short_name\twbs_name\tparent_wbs_id')
+    for i, node in enumerate(wbs_nodes, start=1):
+        parent_code = node.get('parent_code')
+        lines.append(_xer_row(
+            wbs_id_map[node['code']], XER_PROJ_ID, '', i,
+            'Y' if node.get('level') == 0 else 'N', 'N', 'WS_Open',
+            node['code'].split('.')[-1], node.get('name', ''),
+            wbs_id_map.get(parent_code, '') if parent_code else '',
+        ))
+
+    # ── TASK ──
+    lines.append('%T\tTASK')
+    lines.append('%F\ttask_id\tproj_id\twbs_id\tclndr_id\tphys_complete_pct\ttask_type\t'
+                  'duration_type\tstatus_code\ttask_code\ttask_name\ttotal_float_hr_cnt\t'
+                  'free_float_hr_cnt\tremain_drtn_hr_cnt\ttarget_drtn_hr_cnt\tact_start_date\t'
+                  'act_end_date\tlate_start_date\tlate_end_date\tearly_start_date\tearly_end_date\t'
+                  'target_start_date\ttarget_end_date\tguid')
+    for activity in activities:
+        wbs_id = wbs_id_map.get(activity.get('wbs_code'), root_wbs_id)
+        duration_hrs = int((activity.get('original_duration_days') or 0) * hours_per_day)
+        float_days = activity.get('total_float_days') or 0
+        float_hrs = int(float_days * hours_per_day)
+
+        start_raw = activity.get('start_date')
+        finish_raw = activity.get('finish_date')
+        early_start = _xer_datetime(start_raw)
+        early_end = _xer_datetime(finish_raw, '17:00' if not activity.get('is_milestone') else '08:00')
+
+        late_start, late_end = early_start, early_end
+        if float_days and start_raw and finish_raw:
+            try:
+                late_start_date = add_working_days(datetime.date.fromisoformat(start_raw), int(float_days))
+                late_end_date = add_working_days(datetime.date.fromisoformat(finish_raw), int(float_days))
+                late_start = _xer_datetime(late_start_date.isoformat())
+                late_end = _xer_datetime(late_end_date.isoformat(), '17:00')
+            except (ValueError, TypeError):
+                pass
+
+        lines.append(_xer_row(
+            task_id_map[activity['id']], XER_PROJ_ID, wbs_id, XER_CLNDR_ID, 0,
+            'TT_Mile' if activity.get('is_milestone') else 'TT_Task', 'DT_FixedDUR2',
+            'TK_NotStart', activity['id'], activity.get('name', ''),
+            float_hrs, float_hrs, duration_hrs, duration_hrs,
+            '', '', late_start, late_end, early_start, early_end, early_start, early_end, '',
+        ))
+
+    # ── TASKPRED ──
+    lines.append('%T\tTASKPRED')
+    lines.append('%F\ttask_pred_id\ttask_id\tpred_task_id\tproj_id\tpred_proj_id\tpred_type\tlag_hr_cnt')
+    pred_seq = 1
+    for link in logic_matrix or []:
+        task_id = task_id_map.get(link.get('activity_id') or link.get('task_id'))
+        pred_id = task_id_map.get(link.get('predecessor_id') or link.get('pred_task_id'))
+        if not task_id or not pred_id:
+            continue
+        pred_type = _XER_PRED_TYPE.get((link.get('type') or 'FS').upper(), 'PR_FS')
+        lines.append(_xer_row(pred_seq, task_id, pred_id, XER_PROJ_ID, XER_PROJ_ID, pred_type, 0))
+        pred_seq += 1
+    if not (logic_matrix and pred_seq > 1):
+        # Fall back to each activity's own `predecessors` list (always
+        # present, even if the separate logic_matrix export is empty).
+        for activity in activities:
+            task_id = task_id_map.get(activity['id'])
+            for pred in activity.get('predecessors') or []:
+                pred_id = task_id_map.get(pred.get('id'))
+                if not task_id or not pred_id:
+                    continue
+                pred_type = _XER_PRED_TYPE.get((pred.get('type') or 'FS').upper(), 'PR_FS')
+                lines.append(_xer_row(pred_seq, task_id, pred_id, XER_PROJ_ID, XER_PROJ_ID, pred_type, 0))
+                pred_seq += 1
+
+    lines.append('%E')
+
+    text = XER_LINE_SEP.join(lines) + XER_LINE_SEP
+    try:
+        return text.encode('cp1252')
+    except UnicodeEncodeError:
+        return text.encode('utf-8')
