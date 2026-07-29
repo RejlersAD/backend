@@ -17,6 +17,7 @@ Last Updated: 2026-07-24
 """
 
 import logging
+import re
 import time
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
@@ -66,6 +67,44 @@ REFERENCE_FIELD_ALIASES = {
 }
 
 
+# Soft-coded: a 'line_tag' value is treated as an already-composite pipeline
+# designation (e.g. 6"-CD-AC3N-8183) — and therefore left untouched — if it
+# contains an inch mark or any letter. Real-world Line List exports often
+# split the designation into separate Size / Service Code / Spec / Line
+# Number columns instead, in which case the 'line_tag' column only holds the
+# bare numeric sequence (e.g. "8183"), which will never match the composite
+# tags extracted from the P&ID drawing itself.
+COMPOSITE_LINE_TAG_MARKER_RE = re.compile(r'["\u201d]|[A-Za-z]')
+
+
+def _build_composite_line_tag(mapped: Dict[str, Any]) -> None:
+    """
+    Reconstruct the full composite pipeline designation for line_list rows
+    whose source document stores Size / Service Code / Spec / Line Number as
+    separate columns rather than one pre-composed tag column, so the result
+    lines up with the composite tags read off the actual P&ID drawing
+    (e.g. Size="6", Service Code="CD", Spec="AC3N", Line Number="8183" ->
+    line_tag = '6"-CD-AC3N-8183').
+    """
+    tag = str(mapped.get('line_tag') or '').strip()
+    if not tag or COMPOSITE_LINE_TAG_MARKER_RE.search(tag):
+        return  # empty, or already looks like a composite designation
+
+    size = str(mapped.get('size') or '').strip()
+    service = str(mapped.get('service') or '').strip()
+    spec = str(mapped.get('spec') or '').strip()
+    if not (size and service):
+        return  # not enough info to rebuild a composite tag
+
+    parts = [f'{size}"', service]
+    if spec:
+        parts.append(spec)
+    parts.append(tag)
+
+    mapped['raw_line_number'] = tag
+    mapped['line_tag'] = '-'.join(parts)
+
+
 def _normalize_reference_rows(data_type: str, raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Map arbitrary source column headers (from Excel/CSV/PDF-extracted
@@ -82,7 +121,6 @@ def _normalize_reference_rows(data_type: str, raw_rows: List[Dict[str, Any]]) ->
     Rows with no recognizable key column (line_tag / tag) are dropped,
     since the comparison engine cannot match them against P&ID items.
     """
-    import re
 
     def _clean(value: Any) -> str:
         return re.sub(r'[^a-z0-9]', '', str(value).lower())
@@ -120,6 +158,8 @@ def _normalize_reference_rows(data_type: str, raw_rows: List[Dict[str, Any]]) ->
             canonical = _match_column(_clean(col_name))
             if canonical and canonical not in mapped:
                 mapped[canonical] = value
+        if data_type == 'line_list':
+            _build_composite_line_tag(mapped)
         if mapped.get(key_field):
             normalized.append(mapped)
 
@@ -487,7 +527,7 @@ class ComparisonEngineStage(StageExecutor):
             self.logger.info("[comparison_engine] Feature disabled, skipping")
             return {'skipped': True}
         
-        from apps.pid_verification_v2.services.comparison_engine import run_all_comparisons
+        from apps.pid_verification_v2.services.comparison_engine import run_all_comparisons, _normalize_tag
         from apps.pid_verification_v2.services.rule_engine import RuleFinding
         
         # Reference data (legend / line list / equipment list / instrument
@@ -496,73 +536,131 @@ class ComparisonEngineStage(StageExecutor):
         line_list_data = self._fetch_line_list_data(context)
         equipment_list_data = self._fetch_equipment_list_data(context)
         instrument_index_data = self._fetch_instrument_index_data(context)
-        
-        all_findings = []
-        aggregate_summary: Dict[str, Any] = {}
+
+        # ── Aggregate P&ID-extracted items across ALL pages/segments so every
+        # comparison runs ONCE at the document level instead of once per page.
+        # Running per-page previously meant the same discrepancy (e.g. an
+        # equipment tag referenced/mentioned on several pages but genuinely
+        # absent from the register) was flagged as a duplicate 'critical'
+        # finding on every page that mentioned it, instead of a single
+        # document-wide fact. We still track the first page each tag was
+        # extracted on so findings can be attributed back to the right
+        # drawing for the Drawing Layout marker view.
+        all_symbols: List[Dict[str, Any]] = []
+        all_lines: List[Dict[str, Any]] = []
+        all_equipment: List[Dict[str, Any]] = []
+        all_instruments: List[Dict[str, Any]] = []
+        tag_to_drawing: Dict[str, Dict[str, str]] = {
+            'legend': {}, 'linelist': {}, 'equipment': {}, 'instrument': {},
+        }
 
         for seg in context.segments:
             seg_bucket = context.segment_data.setdefault(seg.drawing_id, {})
             extraction = seg_bucket.get('extraction', {})
 
-            # Run comparisons for this page
-            comparison_results = run_all_comparisons(
-                extraction=extraction,
-                legend_data=legend_data,
-                line_list_data=line_list_data,
-                equipment_list_data=equipment_list_data,
-                instrument_index_data=instrument_index_data
-            )
-            
-            # Convert to findings
-            comparison_findings = []
-            for comp_type, result in comparison_results.items():
-                for finding in result.findings:
-                    rule_prefix = {
-                        'legend': 'LGN',
-                        'linelist': 'LSZ',
-                        'equipment': 'EQP',
-                        'instrument': 'IMS'
-                    }.get(comp_type, 'CMP')
-                    
-                    category_suffix = {
-                        'missing': '001',
-                        'extra': '002',
-                        'mismatch': '003'
-                    }.get(finding.category, '999')
-                    
-                    rule_id = f'{rule_prefix}-{category_suffix}'
-                    
-                    comparison_findings.append(RuleFinding(
-                        category=comp_type,
-                        rule_id=rule_id,
-                        issue_observed=finding.issue_observed,
-                        action_required=f'Review and resolve {finding.category} discrepancy',
-                        evidence=finding.evidence,
-                        direction='N/A',
-                        severity=finding.severity
-                    ))
+            for s in extraction.get('symbols', []):
+                all_symbols.append(s)
+                key = (s.get('symbol_type') or '').strip().upper()
+                if key:
+                    tag_to_drawing['legend'].setdefault(key, seg.drawing_id)
 
-            seg_bucket['comparison_findings'] = comparison_findings
-            seg_bucket['comparison_summary'] = {
-                comp_type: {
-                    'matched': result.matched_count,
-                    'missing': result.missing_count,
-                    'extra': result.extra_count,
-                    'mismatch': result.mismatch_count,
-                }
-                for comp_type, result in comparison_results.items()
-            }
-            all_findings.extend(comparison_findings)
+            for l in extraction.get('line_tags', []):
+                all_lines.append(l)
+                key = _normalize_tag(l.get('text', ''))
+                if key:
+                    tag_to_drawing['linelist'].setdefault(key, seg.drawing_id)
 
-            for comp_type, result in comparison_results.items():
-                agg = aggregate_summary.setdefault(
-                    comp_type, {'matched': 0, 'missing': 0, 'extra': 0, 'mismatch': 0}
+            for eq in extraction.get('equipment', []):
+                all_equipment.append(eq)
+                key = _normalize_tag(eq.get('tag', ''))
+                if key:
+                    tag_to_drawing['equipment'].setdefault(key, seg.drawing_id)
+
+            for ins in extraction.get('instruments', []):
+                all_instruments.append(ins)
+                key = _normalize_tag(ins.get('tag', ''))
+                if key:
+                    tag_to_drawing['instrument'].setdefault(key, seg.drawing_id)
+
+        aggregated_extraction = {
+            'symbols': all_symbols,
+            'line_tags': all_lines,
+            'equipment': all_equipment,
+            'instruments': all_instruments,
+        }
+
+        # Run each comparison type ONCE for the whole document.
+        comparison_results = run_all_comparisons(
+            extraction=aggregated_extraction,
+            legend_data=legend_data,
+            line_list_data=line_list_data,
+            equipment_list_data=equipment_list_data,
+            instrument_index_data=instrument_index_data
+        )
+
+        # Fallback bucket (first page) for document-level findings with no
+        # natural page association — e.g. a reference-list item ('missing')
+        # that's absent from the P&ID entirely.
+        first_drawing_id = context.segments[0].drawing_id if context.segments else None
+
+        all_findings: List[Any] = []
+        aggregate_summary: Dict[str, Any] = {}
+        findings_by_drawing: Dict[str, List[Any]] = {seg.drawing_id: [] for seg in context.segments}
+
+        for comp_type, result in comparison_results.items():
+            rule_prefix = {
+                'legend': 'LGN',
+                'linelist': 'LSZ',
+                'equipment': 'EQP',
+                'instrument': 'IMS'
+            }.get(comp_type, 'CMP')
+
+            for finding in result.findings:
+                category_suffix = {
+                    'missing': '001',
+                    'extra': '002',
+                    'mismatch': '003'
+                }.get(finding.category, '999')
+
+                rule_id = f'{rule_prefix}-{category_suffix}'
+
+                rule_finding = RuleFinding(
+                    category=comp_type,
+                    rule_id=rule_id,
+                    issue_observed=finding.issue_observed,
+                    action_required=f'Review and resolve {finding.category} discrepancy',
+                    evidence=finding.evidence,
+                    direction='N/A',
+                    severity=finding.severity
                 )
-                agg['matched']  += result.matched_count
-                agg['missing']  += result.missing_count
-                agg['extra']    += result.extra_count
-                agg['mismatch'] += result.mismatch_count
-        
+
+                # Attribute the finding back to the page the tag actually
+                # appears on (extra/mismatch originate from a real
+                # P&ID-extracted item); 'missing' findings have no natural
+                # page, so fall back to the first page only.
+                key = (finding.item_id or '').strip().upper() if comp_type == 'legend' else _normalize_tag(finding.item_id)
+                drawing_id = tag_to_drawing[comp_type].get(key) or first_drawing_id
+
+                if drawing_id and drawing_id in findings_by_drawing:
+                    findings_by_drawing[drawing_id].append(rule_finding)
+                all_findings.append(rule_finding)
+
+            agg = aggregate_summary.setdefault(
+                comp_type, {'matched': 0, 'missing': 0, 'extra': 0, 'mismatch': 0}
+            )
+            agg['matched']  += result.matched_count
+            agg['missing']  += result.missing_count
+            agg['extra']    += result.extra_count
+            agg['mismatch'] += result.mismatch_count
+
+        for seg in context.segments:
+            seg_bucket = context.segment_data.setdefault(seg.drawing_id, {})
+            seg_bucket['comparison_findings'] = findings_by_drawing.get(seg.drawing_id, [])
+            # Document-wide tally (comparisons now run once per document, not
+            # once per page) — same summary object content on every page,
+            # copied per-segment to avoid shared mutable references.
+            seg_bucket['comparison_summary'] = {k: dict(v) for k, v in aggregate_summary.items()}
+
         context.comparison_findings = all_findings  # aggregate — backward-compat
         
         return {

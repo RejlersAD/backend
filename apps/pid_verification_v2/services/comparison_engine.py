@@ -56,6 +56,14 @@ ATTRIBUTE_WEIGHTS = {
 # Legend symbol matching — exact match required (no fuzzy matching for symbols)
 LEGEND_EXACT_MATCH = True
 
+# Characters stripped when building a normalized tag KEY for set-based matching
+# (line list / equipment / instrument comparisons). This makes 'V-805', 'V805',
+# 'v 805' and 'V_805' all resolve to the same identity so real-world formatting
+# differences between P&ID OCR text and reference-document tag columns don't
+# produce false 'missing'/'extra' findings. The ORIGINAL (un-normalized) tag
+# string is always preserved for display in finding messages/evidence.
+TAG_NORMALIZE_STRIP_PATTERN = r'[^A-Z0-9]'
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # DATA CLASSES
@@ -111,6 +119,21 @@ def fuzzy_match(str1: str, str2: str, threshold: float = COMPARISON_MATCH_THRESH
     
     # Use SequenceMatcher for fuzzy comparison
     return SequenceMatcher(None, str1_clean, str2_clean).ratio()
+
+
+def _normalize_tag(value: Any) -> str:
+    """
+    Build a normalization-tolerant KEY for tag-identity matching (line list /
+    equipment / instrument comparisons). Strips everything except letters and
+    digits and upper-cases the result, so 'V-805', 'V805', 'v 805' and
+    'V_805' all resolve to the identical key 'V805'.
+
+    This is used ONLY for set membership / dict-key matching — the ORIGINAL
+    tag string (unmodified) is always what gets shown in finding messages,
+    `item_id`, and `evidence` so displayed text stays faithful to the source.
+    """
+    import re
+    return re.sub(TAG_NORMALIZE_STRIP_PATTERN, '', str(value or '').upper())
 
 
 def weighted_similarity(pid_item: Dict, ref_item: Dict, weights: Dict[str, float]) -> float:
@@ -247,9 +270,12 @@ def compare_with_line_list(
     matched_count = 0
     mismatch_count = 0
     
-    # Build lookup dictionaries
-    pid_line_dict = {line.get('text', ''): line for line in pid_lines if line.get('text')}
-    ref_line_dict = {line.get('line_tag', ''): line for line in line_list_data if line.get('line_tag')}
+    # Build lookup dictionaries keyed by a normalization-tolerant tag key so
+    # formatting differences (case/hyphen/whitespace) don't cause false
+    # missing/extra findings. Original tag text is preserved on each item for
+    # display in messages.
+    pid_line_dict = {_normalize_tag(line.get('text', '')): line for line in pid_lines if line.get('text')}
+    ref_line_dict = {_normalize_tag(line.get('line_tag', '')): line for line in line_list_data if line.get('line_tag')}
     
     pid_tags = set(pid_line_dict.keys())
     ref_tags = set(ref_line_dict.keys())
@@ -258,9 +284,10 @@ def compare_with_line_list(
     exact_matches = pid_tags & ref_tags
     
     # Check for attribute mismatches in exact matches
-    for tag in exact_matches:
-        pid_line = pid_line_dict[tag]
-        ref_line = ref_line_dict[tag]
+    for norm_tag in exact_matches:
+        pid_line = pid_line_dict[norm_tag]
+        ref_line = ref_line_dict[norm_tag]
+        tag = pid_line.get('text', '') or ref_line.get('line_tag', '')
         
         # Compare size
         pid_size = pid_line.get('size', '')
@@ -284,8 +311,9 @@ def compare_with_line_list(
     
     # Find missing lines (in Line List but not on P&ID)
     missing = ref_tags - pid_tags
-    for tag in missing:
-        ref_line = ref_line_dict[tag]
+    for norm_tag in missing:
+        ref_line = ref_line_dict[norm_tag]
+        tag = ref_line.get('line_tag', '')
         findings.append(ComparisonFinding(
             category='missing',
             comparison_type='linelist',
@@ -300,8 +328,9 @@ def compare_with_line_list(
     
     # Find extra lines (on P&ID but not in Line List)
     extra = pid_tags - ref_tags
-    for tag in extra:
-        pid_line = pid_line_dict[tag]
+    for norm_tag in extra:
+        pid_line = pid_line_dict[norm_tag]
+        tag = pid_line.get('text', '')
         findings.append(ComparisonFinding(
             category='extra',
             comparison_type='linelist',
@@ -345,9 +374,12 @@ def compare_with_equipment_list(
     matched_count = 0
     mismatch_count = 0
     
-    # Build lookup dictionaries
-    pid_equip_dict = {eq.get('tag', ''): eq for eq in pid_equipment if eq.get('tag')}
-    ref_equip_dict = {eq.get('tag', ''): eq for eq in equipment_list_data if eq.get('tag')}
+    # Build lookup dictionaries keyed by a normalization-tolerant tag key so
+    # formatting differences (case/hyphen/whitespace) don't cause false
+    # missing/extra findings. Original tag text is preserved on each item for
+    # display in messages.
+    pid_equip_dict = {_normalize_tag(eq.get('tag', '')): eq for eq in pid_equipment if eq.get('tag')}
+    ref_equip_dict = {_normalize_tag(eq.get('tag', '')): eq for eq in equipment_list_data if eq.get('tag')}
     
     pid_tags = set(pid_equip_dict.keys())
     ref_tags = set(ref_equip_dict.keys())
@@ -356,9 +388,10 @@ def compare_with_equipment_list(
     exact_matches = pid_tags & ref_tags
     
     # Check for attribute mismatches
-    for tag in exact_matches:
-        pid_eq = pid_equip_dict[tag]
-        ref_eq = ref_equip_dict[tag]
+    for norm_tag in exact_matches:
+        pid_eq = pid_equip_dict[norm_tag]
+        ref_eq = ref_equip_dict[norm_tag]
+        tag = pid_eq.get('tag', '') or ref_eq.get('tag', '')
         
         # Compare type/description
         pid_type = pid_eq.get('type', '')
@@ -386,8 +419,9 @@ def compare_with_equipment_list(
     
     # Find missing equipment
     missing = ref_tags - pid_tags
-    for tag in missing:
-        ref_eq = ref_equip_dict[tag]
+    for norm_tag in missing:
+        ref_eq = ref_equip_dict[norm_tag]
+        tag = ref_eq.get('tag', '')
         findings.append(ComparisonFinding(
             category='missing',
             comparison_type='equipment',
@@ -402,8 +436,9 @@ def compare_with_equipment_list(
     
     # Find extra equipment
     extra = pid_tags - ref_tags
-    for tag in extra:
-        pid_eq = pid_equip_dict[tag]
+    for norm_tag in extra:
+        pid_eq = pid_equip_dict[norm_tag]
+        tag = pid_eq.get('tag', '')
         findings.append(ComparisonFinding(
             category='extra',
             comparison_type='equipment',
@@ -447,9 +482,12 @@ def compare_with_instrument_index(
     matched_count = 0
     mismatch_count = 0
     
-    # Build lookup dictionaries
-    pid_instr_dict = {ins.get('tag', ''): ins for ins in pid_instruments if ins.get('tag')}
-    ref_instr_dict = {ins.get('tag', ''): ins for ins in instrument_index_data if ins.get('tag')}
+    # Build lookup dictionaries keyed by a normalization-tolerant tag key so
+    # formatting differences (case/hyphen/whitespace) don't cause false
+    # missing/extra findings. Original tag text is preserved on each item for
+    # display in messages.
+    pid_instr_dict = {_normalize_tag(ins.get('tag', '')): ins for ins in pid_instruments if ins.get('tag')}
+    ref_instr_dict = {_normalize_tag(ins.get('tag', '')): ins for ins in instrument_index_data if ins.get('tag')}
     
     pid_tags = set(pid_instr_dict.keys())
     ref_tags = set(ref_instr_dict.keys())
@@ -458,9 +496,10 @@ def compare_with_instrument_index(
     exact_matches = pid_tags & ref_tags
     
     # Check for attribute mismatches
-    for tag in exact_matches:
-        pid_ins = pid_instr_dict[tag]
-        ref_ins = ref_instr_dict[tag]
+    for norm_tag in exact_matches:
+        pid_ins = pid_instr_dict[norm_tag]
+        ref_ins = ref_instr_dict[norm_tag]
+        tag = pid_ins.get('tag', '') or ref_ins.get('tag', '')
         
         # Compare instrument type
         pid_type = pid_ins.get('type', '')
@@ -488,8 +527,9 @@ def compare_with_instrument_index(
     
     # Find missing instruments
     missing = ref_tags - pid_tags
-    for tag in missing:
-        ref_ins = ref_instr_dict[tag]
+    for norm_tag in missing:
+        ref_ins = ref_instr_dict[norm_tag]
+        tag = ref_ins.get('tag', '')
         findings.append(ComparisonFinding(
             category='missing',
             comparison_type='instrument',
@@ -504,8 +544,9 @@ def compare_with_instrument_index(
     
     # Find extra instruments
     extra = pid_tags - ref_tags
-    for tag in extra:
-        pid_ins = pid_instr_dict[tag]
+    for norm_tag in extra:
+        pid_ins = pid_instr_dict[norm_tag]
+        tag = pid_ins.get('tag', '')
         findings.append(ComparisonFinding(
             category='extra',
             comparison_type='instrument',

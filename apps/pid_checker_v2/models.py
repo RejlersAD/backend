@@ -223,3 +223,288 @@ class PidCheckerV2LegendSheet(models.Model):
     def __str__(self) -> str:
         marker = ' *' if self.is_active else ''
         return f'{self.name} [{self.section}]{marker}'
+
+
+# ─── Master Line List (Excel upload) ──────────────────────────────────
+LINE_LIST_FILENAME_MAX_LEN = 300
+LINE_LIST_TITLE_MAX_LEN = 500
+LINE_LIST_PID_REF_MAX_LEN = 500
+
+
+class PidCheckerV2LineListUpload(models.Model):
+    """A parsed master Line List (Excel) uploaded by a user.
+
+    The rows are stored as ``PidCheckerV2LineListRow`` children.  We keep
+    the raw meta captured from the header block (title, doc no, source
+    P&ID reference) so the UI can display it and the cross-check can pin
+    the diff to one drawing.
+    """
+
+    line_list_id = models.UUIDField(
+        default=uuid.uuid4, editable=False, unique=True, db_index=True,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='pid_checker_v2_line_lists',
+    )
+    filename = models.CharField(max_length=LINE_LIST_FILENAME_MAX_LEN)
+    sheet_name = models.CharField(max_length=200, blank=True, default='')
+    title = models.CharField(max_length=LINE_LIST_TITLE_MAX_LEN, blank=True, default='')
+    doc_no = models.CharField(max_length=LINE_LIST_TITLE_MAX_LEN, blank=True, default='')
+    doc_date = models.CharField(max_length=64, blank=True, default='')
+    pid_extract_ref = models.CharField(max_length=LINE_LIST_PID_REF_MAX_LEN, blank=True, default='')
+    total_rows = models.PositiveIntegerField(default=0)
+    columns = models.JSONField(default=dict)     # {canonical_key: excel_col_idx}
+    summary = models.JSONField(default=dict)     # per-service / per-spec counts
+    is_active = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pid_checker_v2_line_list_upload'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['created_by', '-created_at']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['created_by'],
+                condition=models.Q(is_active=True),
+                name='uniq_pidv2_active_line_list_per_user',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        marker = ' *' if self.is_active else ''
+        return f'{self.filename} ({self.total_rows} rows){marker}'
+
+
+class PidCheckerV2LineListRow(models.Model):
+    """One line from a master Line List Excel."""
+
+    upload = models.ForeignKey(
+        PidCheckerV2LineListUpload,
+        on_delete=models.CASCADE,
+        related_name='rows',
+    )
+    excel_row = models.PositiveIntegerField(default=0)
+    tag = models.CharField(max_length=200, db_index=True, blank=True, default='')
+    size = models.CharField(max_length=32, blank=True, default='')
+    service_code = models.CharField(max_length=16, blank=True, default='')
+    serial = models.CharField(max_length=32, blank=True, default='')
+    spec = models.CharField(max_length=32, blank=True, default='')
+    from_ref = models.CharField(max_length=300, blank=True, default='')
+    to_ref = models.CharField(max_length=300, blank=True, default='')
+    pid_no = models.CharField(max_length=300, blank=True, default='')
+    fluid_service = models.CharField(max_length=200, blank=True, default='')
+    # Free-form bag of the rest so we don't lose the ~30 columns
+    extras = models.JSONField(default=dict)
+
+    class Meta:
+        db_table = 'pid_checker_v2_line_list_row'
+        ordering = ['excel_row']
+        indexes = [
+            models.Index(fields=['upload', 'tag']),
+        ]
+
+    def __str__(self) -> str:
+        return self.tag or f'row {self.excel_row}'
+
+
+# ─── Master Equipment List (Excel upload) ─────────────────────────────
+EQUIPMENT_LIST_FILENAME_MAX_LEN = 300
+EQUIPMENT_LIST_TITLE_MAX_LEN = 500
+EQUIPMENT_LIST_PID_REF_MAX_LEN = 500
+
+
+class PidCheckerV2EquipmentListUpload(models.Model):
+    """A parsed master Equipment List (Excel) uploaded by a user.
+
+    Rows are stored as ``PidCheckerV2EquipmentListRow`` children.  We keep
+    the raw meta captured from the header block (title, doc no, source
+    P&ID reference, company, project) so the UI can display it and the
+    cross-check can pin the diff to one drawing.
+    """
+
+    equipment_list_id = models.UUIDField(
+        default=uuid.uuid4, editable=False, unique=True, db_index=True,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='pid_checker_v2_equipment_lists',
+    )
+    filename = models.CharField(max_length=EQUIPMENT_LIST_FILENAME_MAX_LEN)
+    sheet_name = models.CharField(max_length=200, blank=True, default='')
+    title = models.CharField(max_length=EQUIPMENT_LIST_TITLE_MAX_LEN, blank=True, default='')
+    doc_no = models.CharField(max_length=EQUIPMENT_LIST_TITLE_MAX_LEN, blank=True, default='')
+    doc_date = models.CharField(max_length=64, blank=True, default='')
+    pid_extract_ref = models.CharField(max_length=EQUIPMENT_LIST_PID_REF_MAX_LEN, blank=True, default='')
+    company = models.CharField(max_length=EQUIPMENT_LIST_TITLE_MAX_LEN, blank=True, default='')
+    project = models.CharField(max_length=EQUIPMENT_LIST_TITLE_MAX_LEN, blank=True, default='')
+    total_rows = models.PositiveIntegerField(default=0)
+    columns = models.JSONField(default=dict)     # {canonical_key: excel_col_idx}
+    summary = models.JSONField(default=dict)     # per-pid / per-moc counts
+    is_active = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pid_checker_v2_equipment_list_upload'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['created_by', '-created_at']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['created_by'],
+                condition=models.Q(is_active=True),
+                name='uniq_pidv2_active_equipment_list_per_user',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        marker = ' *' if self.is_active else ''
+        return f'{self.filename} ({self.total_rows} rows){marker}'
+
+
+class PidCheckerV2EquipmentListRow(models.Model):
+    """One equipment item from a master Equipment List Excel."""
+
+    upload = models.ForeignKey(
+        PidCheckerV2EquipmentListUpload,
+        on_delete=models.CASCADE,
+        related_name='rows',
+    )
+    excel_row = models.PositiveIntegerField(default=0)
+    tag = models.CharField(max_length=64, db_index=True, blank=True, default='')
+    description = models.CharField(max_length=300, blank=True, default='')
+    design_flow = models.CharField(max_length=100, blank=True, default='')
+    op_pressure = models.CharField(max_length=64, blank=True, default='')
+    op_temp = models.CharField(max_length=64, blank=True, default='')
+    design_p_min = models.CharField(max_length=32, blank=True, default='')
+    design_p_max = models.CharField(max_length=32, blank=True, default='')
+    design_t_min = models.CharField(max_length=32, blank=True, default='')
+    design_t_max = models.CharField(max_length=32, blank=True, default='')
+    moc = models.CharField(max_length=100, blank=True, default='')
+    insulation = models.CharField(max_length=64, blank=True, default='')
+    dim_length = models.CharField(max_length=32, blank=True, default='')
+    dim_diameter = models.CharField(max_length=32, blank=True, default='')
+    motor_rating = models.CharField(max_length=32, blank=True, default='')
+    pid_no = models.CharField(max_length=300, blank=True, default='')
+    qty = models.CharField(max_length=16, blank=True, default='')
+    phase = models.CharField(max_length=64, blank=True, default='')
+    remarks = models.CharField(max_length=500, blank=True, default='')
+    # Free-form bag of the rest so we don't lose extra columns
+    extras = models.JSONField(default=dict)
+
+    class Meta:
+        db_table = 'pid_checker_v2_equipment_list_row'
+        ordering = ['excel_row']
+        indexes = [
+            models.Index(fields=['upload', 'tag']),
+        ]
+
+    def __str__(self) -> str:
+        return self.tag or f'row {self.excel_row}'
+
+
+# --- Master Instrument Index (Excel upload) ---------------------------
+INSTRUMENT_INDEX_FILENAME_MAX_LEN = 300
+INSTRUMENT_INDEX_TITLE_MAX_LEN = 500
+INSTRUMENT_INDEX_PID_REF_MAX_LEN = 500
+
+
+class PidCheckerV2InstrumentIndexUpload(models.Model):
+    """A parsed master Instrument Index (Excel) uploaded by a user.
+
+    Each instrument is stored as one ``PidCheckerV2InstrumentIndexRow``
+    (already merged from the primary + secondary Excel rows).
+    """
+
+    instrument_index_id = models.UUIDField(
+        default=uuid.uuid4, editable=False, unique=True, db_index=True,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='pid_checker_v2_instrument_indexes',
+    )
+    filename = models.CharField(max_length=INSTRUMENT_INDEX_FILENAME_MAX_LEN)
+    sheet_name = models.CharField(max_length=200, blank=True, default='')
+    title = models.CharField(max_length=INSTRUMENT_INDEX_TITLE_MAX_LEN, blank=True, default='')
+    doc_no = models.CharField(max_length=INSTRUMENT_INDEX_TITLE_MAX_LEN, blank=True, default='')
+    doc_date = models.CharField(max_length=64, blank=True, default='')
+    pid_extract_ref = models.CharField(max_length=INSTRUMENT_INDEX_PID_REF_MAX_LEN, blank=True, default='')
+    company = models.CharField(max_length=300, blank=True, default='')
+    project = models.CharField(max_length=500, blank=True, default='')
+    total_rows = models.PositiveIntegerField(default=0)
+    columns = models.JSONField(default=dict)
+    summary = models.JSONField(default=dict)
+    is_active = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pid_checker_v2_instrument_index_upload'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['created_by', '-created_at']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['created_by'],
+                condition=models.Q(is_active=True),
+                name='uniq_pidv2_active_instrument_index_per_user',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        marker = ' *' if self.is_active else ''
+        return f'{self.filename} ({self.total_rows} rows){marker}'
+
+
+class PidCheckerV2InstrumentIndexRow(models.Model):
+    """One instrument from a master Instrument Index Excel."""
+
+    upload = models.ForeignKey(
+        PidCheckerV2InstrumentIndexUpload,
+        on_delete=models.CASCADE,
+        related_name='rows',
+    )
+    excel_row = models.PositiveIntegerField(default=0)
+    tag = models.CharField(max_length=64, db_index=True, blank=True, default='')
+    instrument_type = models.CharField(max_length=200, blank=True, default='')
+    service_description = models.CharField(max_length=500, blank=True, default='')
+    pid_no = models.CharField(max_length=300, blank=True, default='')
+    line_no = models.CharField(max_length=200, blank=True, default='')
+    eqpt_no = models.CharField(max_length=64, blank=True, default='')
+    location = models.CharField(max_length=64, blank=True, default='')
+    ex_class = models.CharField(max_length=64, blank=True, default='')
+    power_supply = models.CharField(max_length=64, blank=True, default='')
+    range_min = models.CharField(max_length=32, blank=True, default='')
+    range_max = models.CharField(max_length=32, blank=True, default='')
+    range_unit = models.CharField(max_length=32, blank=True, default='')
+    cal_min = models.CharField(max_length=32, blank=True, default='')
+    cal_max = models.CharField(max_length=32, blank=True, default='')
+    cal_unit = models.CharField(max_length=32, blank=True, default='')
+    datasheet_no = models.CharField(max_length=200, blank=True, default='')
+    loop_dwg_no = models.CharField(max_length=200, blank=True, default='')
+    hookup_dwg_no = models.CharField(max_length=200, blank=True, default='')
+    location_layout_no = models.CharField(max_length=200, blank=True, default='')
+    manufacturer = models.CharField(max_length=200, blank=True, default='')
+    model = models.CharField(max_length=200, blank=True, default='')
+    remarks = models.CharField(max_length=500, blank=True, default='')
+    rev = models.CharField(max_length=16, blank=True, default='')
+    extras = models.JSONField(default=dict)
+
+    class Meta:
+        db_table = 'pid_checker_v2_instrument_index_row'
+        ordering = ['excel_row']
+        indexes = [
+            models.Index(fields=['upload', 'tag']),
+        ]
+
+    def __str__(self) -> str:
+        return self.tag or f'row {self.excel_row}'

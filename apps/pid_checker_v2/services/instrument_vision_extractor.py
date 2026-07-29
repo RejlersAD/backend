@@ -1,0 +1,217 @@
+"""BYOK Vision-AI instrument-tag extractor for P&ID Checker V2.
+
+Mirrors ``vision_extractor.py`` (line-tag extractor) but with a prompt
+tuned to identify **instrument tags** (ISA-5.1 loops such as LT-8019,
+PT-8003ATF, PCV-8004B TF, SDV-8003TF, FE-8001) on the drawing.
+
+Return payload shape mirrors the line-tag extractor::
+
+    {
+        'provider': 'openai'|'claude',
+        'model':    <str>,
+        'tags':     [{'tag': 'LT-8019TF', 'function_code': 'LT',
+                      'loop_number': '8019', 'site_symbol': 'TF',
+                      'service': 'Level transmitter'}, …],
+        'call_count': <int>,
+        'raw':      <str>,
+    }
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from typing import Optional
+
+from .vision_extractor import (
+    SUPPORTED_PROVIDERS,
+    VISION_MODELS,
+    VISION_INCLUDE_OVERVIEW,
+    VISION_TILE_ROWS,
+    VISION_TILE_COLS,
+    VISION_TILE_OVERLAP_FRAC,
+    VISION_TILE_MAX_DIMENSION_PX,
+    VISION_OVERVIEW_MAX_DIMENSION_PX,
+    _render_pages,
+    _tile_image,
+    _downscale,
+    _image_to_b64_png,
+    _call_openai,
+    _call_claude,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ─── Soft-coded config ────────────────────────────────────────────────
+INSTRUMENT_TAG_PATTERN = re.compile(
+    r'^[A-Z]{1,4}-\d{2,4}[A-Z]?(?:[A-Z]{2})?$'
+)
+
+VISION_SYSTEM_PROMPT = (
+    "You are an expert instrumentation engineer specialised in reading P&ID drawings. "
+    "Your task is to enumerate every unique ISA-5.1 instrument loop tag visible on the drawing."
+)
+
+VISION_USER_PROMPT = """Identify EVERY unique instrument loop tag on this P&ID image.
+
+Instrument tags follow the ISA-5.1 shape:  FUNC-LOOP[SUFFIX][SITE]
+Examples:  LT-8019TF, LT-8019 TF, PT-8003A, PT-8003ATF, PCV-8004B TF,
+           SDV-8003TF, FE-8001, PSV-8006, LI-2, FT-8103.
+
+Field rules:
+- FUNC  = 1-4 uppercase ISA function letters (LT, PT, FT, PCV, FCV, LCV, PSV, SDV, TIT, FIT, LG, FE, TW, PY, LY…).
+- LOOP  = 2-4 digits, optional trailing single letter for parallel duty (8003A, 8004B).
+- SITE  = optional 2-letter site symbol (TF = Mubarraz Island; may appear fused "PT-8003ATF"
+          or space-separated "LT-8019 TF").
+
+INCLUDE:
+- Transmitters, indicators, controllers, valves, switches, elements, PSVs, gauges.
+- Both field-mounted and panel-mounted symbols.
+- Tags on branches to vessels, on flare / drain / vent lines.
+
+EXCLUDE strictly:
+- Equipment tags (V-803-TF, P-801-A, E-401, T-101, K-501).
+- Line tags (4"-FL-AC6N-8112, 20"-PL-DC3N-8106).
+- Reference / drawing numbers (PJ6-EXD-MRI-BQDA-0023).
+- Note / type callouts (NOTE 4, TYPE 8, DETAIL A).
+
+SCAN THE ENTIRE IMAGE METHODICALLY:
+- Instruments are drawn as circles or hexagons; the tag sits inside the balloon.
+- Read text rotated 90° / 270° along vertical lines.
+- Include peripheral / marginal instruments.
+
+Return ONLY a JSON array of objects — no prose, no markdown fences.
+Each object has these fields (leave "" if not visible):
+  {"tag": "LT-8019TF", "function_code": "LT", "loop_number": "8019",
+   "site_symbol": "TF", "service": "Level transmitter"}
+
+Canonicalise the tag: strip whitespace inside so "LT-8019 TF" becomes "LT-8019TF".
+
+Be exhaustive. A typical process P&ID has 20-80 instrument tags.
+"""
+
+
+# ─── Public API ───────────────────────────────────────────────────────
+def extract_instrument_tags_via_vision(
+    pdf_bytes: bytes,
+    provider: str,
+    api_key: str,
+) -> dict:
+    """Multi-tile Vision extraction of instrument tags from a P&ID PDF."""
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ValueError(f"Unsupported provider '{provider}'. Choose one of {SUPPORTED_PROVIDERS}.")
+    if not api_key or not api_key.strip():
+        raise ValueError("api_key is required for Vision extraction")
+
+    all_raw: list[str] = []
+    merged: dict[str, dict] = {}
+    call_count = 0
+
+    for page_idx, page_image in enumerate(_render_pages(pdf_bytes)):
+        if VISION_INCLUDE_OVERVIEW:
+            overview = _downscale(page_image, VISION_OVERVIEW_MAX_DIMENSION_PX)
+            raw = _call_vision(provider, api_key, _image_to_b64_png(overview))
+            call_count += 1
+            all_raw.append(f'[page {page_idx} overview]\n{raw}')
+            _merge_tags(merged, _parse_instrument_list(raw))
+
+        for tile_idx, tile in enumerate(_tile_image(page_image,
+                                                    VISION_TILE_ROWS,
+                                                    VISION_TILE_COLS,
+                                                    VISION_TILE_OVERLAP_FRAC)):
+            tile = _downscale(tile, VISION_TILE_MAX_DIMENSION_PX)
+            raw = _call_vision(provider, api_key, _image_to_b64_png(tile))
+            call_count += 1
+            all_raw.append(f'[page {page_idx} tile {tile_idx}]\n{raw}')
+            _merge_tags(merged, _parse_instrument_list(raw))
+
+    tags_sorted = sorted(merged.values(),
+                         key=lambda t: (t.get('function_code') or '', t.get('loop_number') or ''))
+    return {
+        'provider': provider,
+        'model': VISION_MODELS[provider],
+        'tags': tags_sorted,
+        'raw': '\n\n---\n\n'.join(all_raw),
+        'call_count': call_count,
+    }
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────
+def _call_vision(provider: str, api_key: str, image_b64: str) -> str:
+    if provider == 'openai':
+        return _call_openai(api_key, image_b64, VISION_USER_PROMPT)
+    if provider == 'claude':
+        return _call_claude(api_key, image_b64, VISION_USER_PROMPT)
+    raise ValueError(f"unknown provider {provider}")
+
+
+def _merge_tags(merged: dict[str, dict], new_tags: list[dict]) -> None:
+    for t in new_tags:
+        tag = t.get('tag')
+        if not tag:
+            continue
+        existing = merged.get(tag)
+        if not existing:
+            merged[tag] = t
+            continue
+        if not existing.get('service') and t.get('service'):
+            existing['service'] = t['service']
+
+
+def _parse_instrument_list(raw: str) -> list[dict]:
+    if not raw:
+        return []
+    text = raw.strip()
+    text = re.sub(r'^```(?:json)?\s*', '', text)
+    text = re.sub(r'\s*```$', '', text)
+
+    parsed: Optional[list] = None
+    try:
+        candidate = json.loads(text)
+        if isinstance(candidate, list):
+            parsed = candidate
+    except json.JSONDecodeError:
+        m = re.search(r'\[.*\]', text, flags=re.DOTALL)
+        if m:
+            try:
+                candidate = json.loads(m.group(0))
+                if isinstance(candidate, list):
+                    parsed = candidate
+            except json.JSONDecodeError:
+                parsed = None
+
+    if parsed is None:
+        parsed = [
+            {'tag': tok}
+            for tok in re.findall(r'[A-Z]{1,4}-\d{2,4}[A-Z]?(?:\s?[A-Z]{2})?', text)
+        ]
+
+    results: list[dict] = []
+    for item in parsed:
+        if isinstance(item, str):
+            tag = _clean_tag(item)
+            entry = {'tag': tag, 'function_code': '', 'loop_number': '',
+                     'site_symbol': '', 'service': ''}
+        elif isinstance(item, dict):
+            tag = _clean_tag(item.get('tag') or item.get('name') or '')
+            entry = {
+                'tag': tag,
+                'function_code': str(item.get('function_code') or '').strip().upper(),
+                'loop_number':   str(item.get('loop_number')   or '').strip(),
+                'site_symbol':   str(item.get('site_symbol')   or '').strip().upper(),
+                'service':       str(item.get('service')       or item.get('description') or '').strip(),
+            }
+        else:
+            continue
+
+        if not tag or not INSTRUMENT_TAG_PATTERN.match(tag):
+            continue
+        results.append(entry)
+    return results
+
+
+def _clean_tag(s: str) -> str:
+    if not s:
+        return ''
+    return re.sub(r'\s+', '', s.strip().upper())

@@ -23,6 +23,12 @@ from .models import (
     PidCheckerV2Extraction,
     PidCheckerV2LineTag,
     PidCheckerV2LegendSheet,
+    PidCheckerV2LineListUpload,
+    PidCheckerV2LineListRow,
+    PidCheckerV2EquipmentListUpload,
+    PidCheckerV2EquipmentListRow,
+    PidCheckerV2InstrumentIndexUpload,
+    PidCheckerV2InstrumentIndexRow,
     MODE_OCR,
     MODE_VISION,
 )
@@ -30,6 +36,12 @@ from .serializers import (
     PidCheckerV2ExtractionListSerializer,
     PidCheckerV2ExtractionDetailSerializer,
     PidCheckerV2LegendSheetSerializer,
+    PidCheckerV2LineListListSerializer,
+    PidCheckerV2LineListDetailSerializer,
+    PidCheckerV2EquipmentListListSerializer,
+    PidCheckerV2EquipmentListDetailSerializer,
+    PidCheckerV2InstrumentIndexListSerializer,
+    PidCheckerV2InstrumentIndexDetailSerializer,
 )
 from .legend_defaults import (
     SECTIONS as LEGEND_SECTIONS,
@@ -38,6 +50,12 @@ from .legend_defaults import (
 )
 from .services.legend_engine import compile_legend, build_prompt_block
 from .services.legend_validator import validate_tags as validate_tags_against_legend
+from .services.line_list_parser import parse_line_list, ParseError as LineListParseError
+from .services.line_list_cross_check import cross_check as cross_check_tags
+from .services.equipment_list_parser import parse_equipment_list, ParseError as EquipmentListParseError
+from .services.equipment_cross_check import cross_check as cross_check_equipment_tags
+from .services.instrument_index_parser import parse_instrument_index, ParseError as InstrumentIndexParseError
+from .services.instrument_cross_check import cross_check as cross_check_instrument_tags
 from .services.line_tag_extractor import extract_line_tags, summarize
 from .services.vision_extractor import (
     extract_line_tags_via_vision,
@@ -51,6 +69,12 @@ logger = logging.getLogger(__name__)
 UPLOAD_FIELD_NAME = 'file'
 MAX_UPLOAD_MB = 25
 ALLOWED_EXTENSIONS = ('.pdf',)
+ALLOWED_LINE_LIST_EXTENSIONS = ('.xlsx', '.xlsm')
+MAX_LINE_LIST_MB = 15
+ALLOWED_EQUIPMENT_LIST_EXTENSIONS = ('.xlsx', '.xlsm')
+MAX_EQUIPMENT_LIST_MB = 15
+ALLOWED_INSTRUMENT_INDEX_EXTENSIONS = ('.xlsx', '.xlsm')
+MAX_INSTRUMENT_INDEX_MB = 15
 SUPPORTED_MODES = (MODE_OCR, MODE_VISION)
 HISTORY_PAGE_SIZE = 50   # max rows returned by the history list endpoint
 
@@ -493,3 +517,789 @@ class ValidateLineTagsView(APIView):
             'legend_source': legend_source,
             **result,
         })
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Master Line List (Excel) upload + cross-check
+# ═════════════════════════════════════════════════════════════════════
+
+def _resolve_active_line_list(user):
+    return (
+        PidCheckerV2LineListUpload.objects
+        .filter(created_by=user, is_active=True)
+        .first()
+    )
+
+
+def _persist_line_list(user, filename: str, parsed: dict) -> PidCheckerV2LineListUpload:
+    """Save parsed rows and mark this upload as the active one."""
+    meta = parsed.get('meta') or {}
+    with transaction.atomic():
+        # Deactivate any previously-active line list for this user
+        PidCheckerV2LineListUpload.objects.filter(
+            created_by=user, is_active=True,
+        ).update(is_active=False)
+
+        upload = PidCheckerV2LineListUpload.objects.create(
+            created_by=user,
+            filename=filename[:300],
+            sheet_name=(meta.get('sheet_name') or '')[:200],
+            title=(meta.get('title') or '')[:500],
+            doc_no=(meta.get('doc_no') or '')[:500],
+            doc_date=(meta.get('date') or '')[:64],
+            pid_extract_ref=(meta.get('pid_extract_ref') or '')[:500],
+            total_rows=len(parsed.get('rows') or []),
+            columns=parsed.get('columns') or {},
+            summary=parsed.get('summary') or {},
+            is_active=True,
+        )
+
+        rows = []
+        KNOWN = {'excel_row', 'tag', 'size', 'service_code', 'serial', 'spec',
+                 'from', 'to', 'pid_no', 'fluid_service'}
+        for r in (parsed.get('rows') or []):
+            extras = {k: v for k, v in r.items() if k not in KNOWN and not k.startswith('_')}
+            rows.append(PidCheckerV2LineListRow(
+                upload=upload,
+                excel_row=r.get('_excel_row') or 0,
+                tag=(r.get('tag') or '')[:200],
+                size=str(r.get('size') or '')[:32],
+                service_code=str(r.get('service_code') or '')[:16],
+                serial=str(r.get('serial') or '')[:32],
+                spec=str(r.get('spec') or '')[:32],
+                from_ref=(r.get('from') or '')[:300],
+                to_ref=(r.get('to') or '')[:300],
+                pid_no=(r.get('pid_no') or '')[:300],
+                fluid_service=(r.get('fluid_service') or '')[:200],
+                extras=extras,
+            ))
+        if rows:
+            PidCheckerV2LineListRow.objects.bulk_create(rows, batch_size=500)
+    return upload
+
+
+class LineListUploadView(APIView):
+    """GET → list user's uploads.  POST → parse + save an xlsx."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get(self, request):
+        qs = (
+            PidCheckerV2LineListUpload.objects
+            .filter(created_by=request.user)
+            .order_by('-created_at')[:HISTORY_PAGE_SIZE]
+        )
+        return Response(PidCheckerV2LineListListSerializer(qs, many=True).data)
+
+    def post(self, request):
+        upload = request.FILES.get(UPLOAD_FIELD_NAME)
+        if upload is None:
+            return Response({'error': f"missing file field '{UPLOAD_FIELD_NAME}'"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if upload.size > MAX_LINE_LIST_MB * 1024 * 1024:
+            return Response({'error': f'file exceeds {MAX_LINE_LIST_MB} MB limit'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        name_lower = (upload.name or '').lower()
+        if not name_lower.endswith(ALLOWED_LINE_LIST_EXTENSIONS):
+            return Response({'error': f'only {ALLOWED_LINE_LIST_EXTENSIONS} allowed'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            parsed = parse_line_list(upload.read(), upload.name)
+        except LineListParseError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception('Line list parse crashed')
+            return Response({'error': f'parse failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        obj = _persist_line_list(request.user, upload.name, parsed)
+        return Response(
+            PidCheckerV2LineListDetailSerializer(obj).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class LineListListView(APIView):
+    """Deprecated — kept for backward compat; use LineListUploadView.get."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = (
+            PidCheckerV2LineListUpload.objects
+            .filter(created_by=request.user)
+            .order_by('-created_at')[:HISTORY_PAGE_SIZE]
+        )
+        return Response(PidCheckerV2LineListListSerializer(qs, many=True).data)
+
+
+class LineListDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, line_list_id):
+        obj = get_object_or_404(
+            PidCheckerV2LineListUpload,
+            created_by=request.user, line_list_id=line_list_id,
+        )
+        return Response(PidCheckerV2LineListDetailSerializer(obj).data)
+
+    def delete(self, request, line_list_id):
+        obj = get_object_or_404(
+            PidCheckerV2LineListUpload,
+            created_by=request.user, line_list_id=line_list_id,
+        )
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class LineListActivateView(APIView):
+    """POST → mark this line list active for the user (deactivate siblings)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, line_list_id):
+        obj = get_object_or_404(
+            PidCheckerV2LineListUpload,
+            created_by=request.user, line_list_id=line_list_id,
+        )
+        with transaction.atomic():
+            PidCheckerV2LineListUpload.objects.filter(
+                created_by=request.user, is_active=True,
+            ).exclude(pk=obj.pk).update(is_active=False)
+            if not obj.is_active:
+                obj.is_active = True
+                obj.save(update_fields=['is_active', 'updated_at'])
+        return Response(PidCheckerV2LineListDetailSerializer(obj).data)
+
+
+class CrossCheckView(APIView):
+    """POST P&ID tags → compare against user's active (or specified) Line List.
+
+    Body:
+        tags:           list[dict]  each with at least 'tag' (composite)
+        line_list_id:   UUID        optional — override active line list
+        use_ai:         bool        default False
+        vision_provider, vision_api_key   (required if use_ai=True)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        tags = request.data.get('tags')
+        if not isinstance(tags, list):
+            return Response({'error': 'tags must be a list'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        line_list_id = request.data.get('line_list_id')
+        if line_list_id:
+            line_list = (
+                PidCheckerV2LineListUpload.objects
+                .filter(created_by=request.user, line_list_id=line_list_id)
+                .first()
+            )
+        else:
+            line_list = _resolve_active_line_list(request.user)
+        if line_list is None:
+            return Response(
+                {'error': 'No master Line List uploaded yet. Upload one first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ll_rows = [
+            {
+                'tag': r.tag,
+                'size': r.size,
+                'service_code': r.service_code,
+                'serial': r.serial,
+                'spec': r.spec,
+                'from_ref': r.from_ref,
+                'to_ref': r.to_ref,
+                'fluid_service': r.fluid_service,
+                'excel_row': r.excel_row,
+            }
+            for r in line_list.rows.all()
+        ]
+
+        use_ai = bool(request.data.get('use_ai'))
+        ai_provider = (request.data.get('vision_provider') or '').lower() or None
+        ai_api_key = request.data.get('vision_api_key') or None
+        if use_ai and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
+            return Response(
+                {'error': 'use_ai=true requires vision_provider (openai|claude) and vision_api_key'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            result = cross_check_tags(
+                tags, ll_rows,
+                use_ai=use_ai,
+                ai_provider=ai_provider,
+                ai_api_key=ai_api_key,
+            )
+        except Exception as exc:
+            logger.exception('Cross-check failed')
+            return Response({'error': f'cross-check failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            'line_list_id': str(line_list.line_list_id),
+            'line_list_filename': line_list.filename,
+            'line_list_title': line_list.title,
+            **result,
+        })
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Master Equipment List (Excel) upload + cross-check
+# ═════════════════════════════════════════════════════════════════════
+
+def _resolve_active_equipment_list(user):
+    return (
+        PidCheckerV2EquipmentListUpload.objects
+        .filter(created_by=user, is_active=True)
+        .first()
+    )
+
+
+EQUIPMENT_LIST_KNOWN_FIELDS = {
+    'excel_row', 'tag', 'description', 'design_flow', 'op_pressure', 'op_temp',
+    'design_p_min', 'design_p_max', 'design_t_min', 'design_t_max',
+    'moc', 'insulation', 'dim_length', 'dim_diameter', 'motor_rating',
+    'pid_no', 'qty', 'phase', 'remarks', 'sno', 'rev',
+}
+
+
+def _persist_equipment_list(user, filename: str, parsed: dict) -> PidCheckerV2EquipmentListUpload:
+    """Save parsed rows and mark this upload as the active one."""
+    meta = parsed.get('meta') or {}
+    with transaction.atomic():
+        PidCheckerV2EquipmentListUpload.objects.filter(
+            created_by=user, is_active=True,
+        ).update(is_active=False)
+
+        upload = PidCheckerV2EquipmentListUpload.objects.create(
+            created_by=user,
+            filename=filename[:300],
+            sheet_name=(meta.get('sheet_name') or '')[:200],
+            title=(meta.get('title') or '')[:500],
+            doc_no=(meta.get('doc_no') or '')[:500],
+            doc_date=(meta.get('date') or '')[:64],
+            pid_extract_ref=(meta.get('pid_extract_ref') or '')[:500],
+            company=(meta.get('company') or '')[:500],
+            project=(meta.get('project') or '')[:500],
+            total_rows=len(parsed.get('rows') or []),
+            columns=parsed.get('columns') or {},
+            summary=parsed.get('summary') or {},
+            is_active=True,
+        )
+
+        rows = []
+        for r in (parsed.get('rows') or []):
+            extras = {k: v for k, v in r.items() if k not in EQUIPMENT_LIST_KNOWN_FIELDS and not k.startswith('_')}
+            rows.append(PidCheckerV2EquipmentListRow(
+                upload=upload,
+                excel_row=r.get('_excel_row') or 0,
+                tag=(r.get('tag') or '')[:64],
+                description=str(r.get('description') or '')[:300],
+                design_flow=str(r.get('design_flow') or '')[:100],
+                op_pressure=str(r.get('op_pressure') or '')[:64],
+                op_temp=str(r.get('op_temp') or '')[:64],
+                design_p_min=str(r.get('design_p_min') or '')[:32],
+                design_p_max=str(r.get('design_p_max') or '')[:32],
+                design_t_min=str(r.get('design_t_min') or '')[:32],
+                design_t_max=str(r.get('design_t_max') or '')[:32],
+                moc=str(r.get('moc') or '')[:100],
+                insulation=str(r.get('insulation') or '')[:64],
+                dim_length=str(r.get('dim_length') or '')[:32],
+                dim_diameter=str(r.get('dim_diameter') or '')[:32],
+                motor_rating=str(r.get('motor_rating') or '')[:32],
+                pid_no=str(r.get('pid_no') or '')[:300],
+                qty=str(r.get('qty') or '')[:16],
+                phase=str(r.get('phase') or '')[:64],
+                remarks=str(r.get('remarks') or '')[:500],
+                extras=extras,
+            ))
+        if rows:
+            PidCheckerV2EquipmentListRow.objects.bulk_create(rows, batch_size=500)
+    return upload
+
+
+class EquipmentListUploadView(APIView):
+    """GET → list user's uploads.  POST → parse + save an xlsx."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get(self, request):
+        qs = (
+            PidCheckerV2EquipmentListUpload.objects
+            .filter(created_by=request.user)
+            .order_by('-created_at')[:HISTORY_PAGE_SIZE]
+        )
+        return Response(PidCheckerV2EquipmentListListSerializer(qs, many=True).data)
+
+    def post(self, request):
+        upload = request.FILES.get(UPLOAD_FIELD_NAME)
+        if upload is None:
+            return Response({'error': f"missing file field '{UPLOAD_FIELD_NAME}'"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if upload.size > MAX_EQUIPMENT_LIST_MB * 1024 * 1024:
+            return Response({'error': f'file exceeds {MAX_EQUIPMENT_LIST_MB} MB limit'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        name_lower = (upload.name or '').lower()
+        if not name_lower.endswith(ALLOWED_EQUIPMENT_LIST_EXTENSIONS):
+            return Response({'error': f'only {ALLOWED_EQUIPMENT_LIST_EXTENSIONS} allowed'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            parsed = parse_equipment_list(upload.read(), upload.name)
+        except EquipmentListParseError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception('Equipment list parse crashed')
+            return Response({'error': f'parse failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        obj = _persist_equipment_list(request.user, upload.name, parsed)
+        return Response(
+            PidCheckerV2EquipmentListDetailSerializer(obj).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class EquipmentListDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, equipment_list_id):
+        obj = get_object_or_404(
+            PidCheckerV2EquipmentListUpload,
+            created_by=request.user, equipment_list_id=equipment_list_id,
+        )
+        return Response(PidCheckerV2EquipmentListDetailSerializer(obj).data)
+
+    def delete(self, request, equipment_list_id):
+        obj = get_object_or_404(
+            PidCheckerV2EquipmentListUpload,
+            created_by=request.user, equipment_list_id=equipment_list_id,
+        )
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class EquipmentListActivateView(APIView):
+    """POST → mark this equipment list active for the user (deactivate siblings)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, equipment_list_id):
+        obj = get_object_or_404(
+            PidCheckerV2EquipmentListUpload,
+            created_by=request.user, equipment_list_id=equipment_list_id,
+        )
+        with transaction.atomic():
+            PidCheckerV2EquipmentListUpload.objects.filter(
+                created_by=request.user, is_active=True,
+            ).exclude(pk=obj.pk).update(is_active=False)
+            if not obj.is_active:
+                obj.is_active = True
+                obj.save(update_fields=['is_active', 'updated_at'])
+        return Response(PidCheckerV2EquipmentListDetailSerializer(obj).data)
+
+
+class EquipmentCrossCheckView(APIView):
+    """POST equipment tags → compare against user's active (or specified) Equipment List.
+
+    Body:
+        equipment_tags:       list[str]   tags read from the P&ID
+        equipment_list_id:    UUID        optional — override active list
+        use_ai:               bool        default False
+        vision_provider, vision_api_key   (required if use_ai=True)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        tags = request.data.get('equipment_tags')
+        if not isinstance(tags, list):
+            return Response({'error': 'equipment_tags must be a list of strings'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        equipment_list_id = request.data.get('equipment_list_id')
+        if equipment_list_id:
+            equipment_list = (
+                PidCheckerV2EquipmentListUpload.objects
+                .filter(created_by=request.user, equipment_list_id=equipment_list_id)
+                .first()
+            )
+        else:
+            equipment_list = _resolve_active_equipment_list(request.user)
+        if equipment_list is None:
+            return Response(
+                {'error': 'No master Equipment List uploaded yet. Upload one first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        el_rows = [
+            {
+                'tag': r.tag,
+                'description': r.description,
+                'pid_no': r.pid_no,
+                'moc': r.moc,
+                'phase': r.phase,
+                'excel_row': r.excel_row,
+            }
+            for r in equipment_list.rows.all()
+        ]
+
+        use_ai = bool(request.data.get('use_ai'))
+        ai_provider = (request.data.get('vision_provider') or '').lower() or None
+        ai_api_key = request.data.get('vision_api_key') or None
+        if use_ai and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
+            return Response(
+                {'error': 'use_ai=true requires vision_provider (openai|claude) and vision_api_key'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            result = cross_check_equipment_tags(
+                tags, el_rows,
+                use_ai=use_ai,
+                ai_provider=ai_provider,
+                ai_api_key=ai_api_key,
+            )
+        except Exception as exc:
+            logger.exception('Equipment cross-check failed')
+            return Response({'error': f'cross-check failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            'equipment_list_id': str(equipment_list.equipment_list_id),
+            'equipment_list_filename': equipment_list.filename,
+            'equipment_list_title': equipment_list.title,
+            **result,
+        })
+
+
+# ---------------------------------------------------------------------
+# Instrument Index — upload / list / detail / activate / cross-check
+# ---------------------------------------------------------------------
+
+def _resolve_active_instrument_index(user):
+    return (
+        PidCheckerV2InstrumentIndexUpload.objects
+        .filter(created_by=user, is_active=True)
+        .first()
+    )
+
+
+INSTRUMENT_INDEX_KNOWN_FIELDS = {
+    'tag', 'instrument_type', 'service_description', 'pid_no', 'line_no',
+    'eqpt_no', 'location', 'ex_class', 'power_supply',
+    'range_min', 'range_max', 'range_unit',
+    'cal_min', 'cal_max', 'cal_unit',
+    'datasheet_no', 'loop_dwg_no', 'hookup_dwg_no', 'location_layout_no',
+    'manufacturer', 'model', 'remarks', 'rev',
+}
+
+
+def _persist_instrument_index(user, filename: str, parsed: dict) -> PidCheckerV2InstrumentIndexUpload:
+    meta = parsed.get('meta') or {}
+    summary = parsed.get('summary') or {}
+    with transaction.atomic():
+        PidCheckerV2InstrumentIndexUpload.objects.filter(
+            created_by=user, is_active=True
+        ).update(is_active=False)
+
+        upload = PidCheckerV2InstrumentIndexUpload.objects.create(
+            created_by=user,
+            filename=filename[:300],
+            sheet_name=(meta.get('sheet_name') or '')[:200],
+            title=(meta.get('title') or '')[:500],
+            doc_no=(meta.get('doc_no') or '')[:500],
+            doc_date=(meta.get('date') or '')[:64],
+            pid_extract_ref=(meta.get('pid_extract_ref') or '')[:500],
+            company=(meta.get('company') or '')[:300],
+            project=(meta.get('project') or '')[:500],
+            total_rows=summary.get('total') or 0,
+            columns=parsed.get('columns') or {},
+            summary=summary,
+            is_active=True,
+        )
+        rows = []
+        for r in parsed.get('rows') or []:
+            extras = {
+                k: v for k, v in r.items()
+                if k not in INSTRUMENT_INDEX_KNOWN_FIELDS and not k.startswith('_')
+            }
+            rows.append(PidCheckerV2InstrumentIndexRow(
+                upload=upload,
+                excel_row=r.get('_excel_row') or 0,
+                tag=str(r.get('tag') or '')[:64],
+                instrument_type=str(r.get('instrument_type') or '')[:200],
+                service_description=str(r.get('service_description') or '')[:500],
+                pid_no=str(r.get('pid_no') or '')[:300],
+                line_no=str(r.get('line_no') or '')[:200],
+                eqpt_no=str(r.get('eqpt_no') or '')[:64],
+                location=str(r.get('location') or '')[:64],
+                ex_class=str(r.get('ex_class') or '')[:64],
+                power_supply=str(r.get('power_supply') or '')[:64],
+                range_min=str(r.get('range_min') or '')[:32],
+                range_max=str(r.get('range_max') or '')[:32],
+                range_unit=str(r.get('range_unit') or '')[:32],
+                cal_min=str(r.get('cal_min') or '')[:32],
+                cal_max=str(r.get('cal_max') or '')[:32],
+                cal_unit=str(r.get('cal_unit') or '')[:32],
+                datasheet_no=str(r.get('datasheet_no') or '')[:200],
+                loop_dwg_no=str(r.get('loop_dwg_no') or '')[:200],
+                hookup_dwg_no=str(r.get('hookup_dwg_no') or '')[:200],
+                location_layout_no=str(r.get('location_layout_no') or '')[:200],
+                manufacturer=str(r.get('manufacturer') or '')[:200],
+                model=str(r.get('model') or '')[:200],
+                remarks=str(r.get('remarks') or '')[:500],
+                rev=str(r.get('rev') or '')[:16],
+                extras=extras,
+            ))
+        if rows:
+            PidCheckerV2InstrumentIndexRow.objects.bulk_create(rows, batch_size=500)
+    return upload
+
+
+class InstrumentIndexUploadView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get(self, request):
+        qs = (
+            PidCheckerV2InstrumentIndexUpload.objects
+            .filter(created_by=request.user)
+            .order_by('-is_active', '-created_at')
+        )
+        return Response(PidCheckerV2InstrumentIndexListSerializer(qs, many=True).data)
+
+    def post(self, request):
+        upload = request.FILES.get(UPLOAD_FIELD_NAME)
+        if upload is None:
+            return Response({'error': f'{UPLOAD_FIELD_NAME!r} field is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if upload.size > MAX_INSTRUMENT_INDEX_MB * 1024 * 1024:
+            return Response({'error': f'file exceeds {MAX_INSTRUMENT_INDEX_MB} MB limit'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        name_lower = upload.name.lower()
+        if not name_lower.endswith(ALLOWED_INSTRUMENT_INDEX_EXTENSIONS):
+            return Response({'error': f'only {ALLOWED_INSTRUMENT_INDEX_EXTENSIONS} allowed'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            parsed = parse_instrument_index(upload.read(), upload.name)
+        except InstrumentIndexParseError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception('Instrument Index parse failed')
+            return Response({'error': f'parse failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        obj = _persist_instrument_index(request.user, upload.name, parsed)
+        return Response(
+            PidCheckerV2InstrumentIndexDetailSerializer(obj).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class InstrumentIndexDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, instrument_index_id):
+        obj = get_object_or_404(
+            PidCheckerV2InstrumentIndexUpload,
+            created_by=request.user, instrument_index_id=instrument_index_id,
+        )
+        return Response(PidCheckerV2InstrumentIndexDetailSerializer(obj).data)
+
+    def delete(self, request, instrument_index_id):
+        obj = get_object_or_404(
+            PidCheckerV2InstrumentIndexUpload,
+            created_by=request.user, instrument_index_id=instrument_index_id,
+        )
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class InstrumentIndexActivateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, instrument_index_id):
+        obj = get_object_or_404(
+            PidCheckerV2InstrumentIndexUpload,
+            created_by=request.user, instrument_index_id=instrument_index_id,
+        )
+        with transaction.atomic():
+            PidCheckerV2InstrumentIndexUpload.objects.filter(
+                created_by=request.user, is_active=True
+            ).update(is_active=False)
+            obj.is_active = True
+            obj.save(update_fields=['is_active', 'updated_at'])
+        return Response(PidCheckerV2InstrumentIndexDetailSerializer(obj).data)
+
+
+class InstrumentCrossCheckView(APIView):
+    """POST instrument tags ? compare against user's active (or specified) Instrument Index.
+
+    Body:
+        instrument_tags:        list[str]
+        instrument_index_id:    UUID        optional — override active
+        use_ai:                 bool        default False
+        vision_provider, vision_api_key    (required if use_ai=True)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        tags = request.data.get('instrument_tags')
+        if not isinstance(tags, list):
+            return Response({'error': 'instrument_tags must be a list of strings'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        instrument_index_id = request.data.get('instrument_index_id')
+        if instrument_index_id:
+            instrument_index = (
+                PidCheckerV2InstrumentIndexUpload.objects
+                .filter(created_by=request.user, instrument_index_id=instrument_index_id)
+                .first()
+            )
+        else:
+            instrument_index = _resolve_active_instrument_index(request.user)
+        if instrument_index is None:
+            return Response(
+                {'error': 'No master Instrument Index uploaded yet. Upload one first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ii_rows = [
+            {
+                'tag': r.tag,
+                'instrument_type': r.instrument_type,
+                'service_description': r.service_description,
+                'pid_no': r.pid_no,
+                'eqpt_no': r.eqpt_no,
+                'line_no': r.line_no,
+                'excel_row': r.excel_row,
+            }
+            for r in instrument_index.rows.all()
+        ]
+
+        use_ai = bool(request.data.get('use_ai'))
+        ai_provider = (request.data.get('vision_provider') or '').lower() or None
+        ai_api_key = request.data.get('vision_api_key') or None
+        if use_ai and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
+            return Response(
+                {'error': 'use_ai=true requires vision_provider (openai|claude) and vision_api_key'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            result = cross_check_instrument_tags(
+                tags, ii_rows,
+                use_ai=use_ai,
+                ai_provider=ai_provider,
+                ai_api_key=ai_api_key,
+            )
+        except Exception as exc:
+            logger.exception('Instrument cross-check failed')
+            return Response({'error': f'cross-check failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            'instrument_index_id': str(instrument_index.instrument_index_id),
+            'instrument_index_filename': instrument_index.filename,
+            'instrument_index_title': instrument_index.title,
+            **result,
+        })
+
+
+# ─── Vision-based tag extraction from P&ID (BYOK) ─────────────────────
+# Dedicated equipment / instrument extractors used by the cross-check
+# panels. They accept only the PDF + BYOK, run a multi-tile Vision pass
+# targeted at the specific tag class, and return the tag list. No DB
+# persistence — this is a stateless helper for the cross-check flow.
+class ExtractEquipmentTagsFromPidView(APIView):
+    """POST a P&ID PDF + BYOK, receive equipment tags found on the drawing."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, *args, **kwargs):
+        upload = request.FILES.get(UPLOAD_FIELD_NAME)
+        if upload is None:
+            return Response({'error': f"missing file field '{UPLOAD_FIELD_NAME}'"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if upload.size > MAX_UPLOAD_MB * 1024 * 1024:
+            return Response({'error': f'file exceeds {MAX_UPLOAD_MB} MB limit'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        name_lower = (upload.name or '').lower()
+        if not name_lower.endswith(ALLOWED_EXTENSIONS):
+            return Response({'error': f'only {ALLOWED_EXTENSIONS} allowed'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        provider = (request.data.get('provider') or '').lower()
+        api_key = (request.data.get('api_key') or '').strip()
+        if provider not in SUPPORTED_PROVIDERS:
+            return Response({'error': f'provider must be one of {SUPPORTED_PROVIDERS}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not api_key:
+            return Response({'error': 'api_key required for vision extraction'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from .services.equipment_vision_extractor import extract_equipment_tags_via_vision
+        try:
+            result = extract_equipment_tags_via_vision(upload.read(), provider, api_key)
+        except Exception as exc:
+            logger.exception('Equipment vision extraction failed')
+            return Response({'error': f'vision extraction failed: {exc}'},
+                            status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response({
+            'filename': upload.name,
+            'provider': result['provider'],
+            'model':    result['model'],
+            'tags':     result['tags'],
+            'call_count': result['call_count'],
+        }, status=status.HTTP_200_OK)
+
+
+class ExtractInstrumentTagsFromPidView(APIView):
+    """POST a P&ID PDF + BYOK, receive instrument tags found on the drawing."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, *args, **kwargs):
+        upload = request.FILES.get(UPLOAD_FIELD_NAME)
+        if upload is None:
+            return Response({'error': f"missing file field '{UPLOAD_FIELD_NAME}'"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if upload.size > MAX_UPLOAD_MB * 1024 * 1024:
+            return Response({'error': f'file exceeds {MAX_UPLOAD_MB} MB limit'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        name_lower = (upload.name or '').lower()
+        if not name_lower.endswith(ALLOWED_EXTENSIONS):
+            return Response({'error': f'only {ALLOWED_EXTENSIONS} allowed'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        provider = (request.data.get('provider') or '').lower()
+        api_key = (request.data.get('api_key') or '').strip()
+        if provider not in SUPPORTED_PROVIDERS:
+            return Response({'error': f'provider must be one of {SUPPORTED_PROVIDERS}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not api_key:
+            return Response({'error': 'api_key required for vision extraction'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from .services.instrument_vision_extractor import extract_instrument_tags_via_vision
+        try:
+            result = extract_instrument_tags_via_vision(upload.read(), provider, api_key)
+        except Exception as exc:
+            logger.exception('Instrument vision extraction failed')
+            return Response({'error': f'vision extraction failed: {exc}'},
+                            status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response({
+            'filename': upload.name,
+            'provider': result['provider'],
+            'model':    result['model'],
+            'tags':     result['tags'],
+            'call_count': result['call_count'],
+        }, status=status.HTTP_200_OK)
