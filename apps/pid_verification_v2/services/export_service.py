@@ -107,6 +107,11 @@ REPORT_CONFIG = {
         'enabled':       True,
         'dpi':           150,     # render DPI (balance quality vs file size)
         'marker_radius': 14,      # pixels at render DPI
+        # Soft-coded: restrict the annotated drawing's marker circles to a
+        # single severity (matches the frontend's OVERLAY_ONLY_CRITICAL /
+        # "Critical Only" Drawing Overlay behaviour in PIDVerificationV2.jsx).
+        # Set to None/'' to restore markers for every severity.
+        'only_severity': 'critical',
         # RGBA tuples for each severity level
         'severity_rgba': {
             'critical': (220, 38,  38,  230),
@@ -370,8 +375,9 @@ def generate_pdf(document, view: str = 'all') -> Optional[bytes]:
             import fitz as _fitz
             from PIL import Image as _PILImg, ImageDraw as _IDraw, ImageFont as _IFont
 
-            dpi      = RC['drawing_overlay']['dpi']
-            sev_rgba = RC['drawing_overlay']['severity_rgba']
+            dpi          = RC['drawing_overlay']['dpi']
+            sev_rgba     = RC['drawing_overlay']['severity_rgba']
+            only_sev     = (RC['drawing_overlay'].get('only_severity') or '').lower()
 
             pdf = _fitz.open(file_path)
             if page_index >= len(pdf):
@@ -412,6 +418,13 @@ def generate_pdf(document, view: str = 'all') -> Optional[bytes]:
 
             for (num, finding, x_pct, y_pct) in tagged:
                 if x_pct is None or y_pct is None:
+                    continue
+                # Soft-coded: only draw a marker circle for the configured
+                # severity (default 'critical') — matches the frontend's
+                # Drawing Overlay behaviour. Findings that are skipped here
+                # still appear in the findings table below the image, just
+                # without a numbered circle on the drawing itself.
+                if only_sev and finding.severity.lower() != only_sev:
                     continue
                 px   = int(x_pct / 100.0 * img_w)
                 py   = int(y_pct / 100.0 * img_h)
@@ -585,9 +598,17 @@ def generate_pdf(document, view: str = 'all') -> Optional[bytes]:
 
             story.append(RLImage(img_buf, width=target_w, height=target_h))
             has_coords = any(xp is not None for _, _, xp, _ in tagged)
+            # Soft-coded caption: reflects RC['drawing_overlay']['only_severity']
+            # so the wording always matches which markers are actually drawn.
+            _only_sev = (RC['drawing_overlay'].get('only_severity') or '').lower()
+            _marker_scope = (
+                f'Numbered circles mark {_only_sev}-severity finding locations only.'
+                if _only_sev else
+                'Numbered circles mark finding locations \u2014 colours match severity '
+                '(Critical\u00a0=\u00a0red, Major\u00a0=\u00a0orange, Minor\u00a0=\u00a0amber, Info\u00a0=\u00a0blue).'
+            )
             story.append(Paragraph(
-                'Numbered circles mark finding locations \u2014 colours match severity (Critical\u00a0=\u00a0red, Major\u00a0=\u00a0orange, Minor\u00a0=\u00a0amber, Info\u00a0=\u00a0blue). '
-                'Match each number to the table below.'
+                f'{_marker_scope} Match each number to the table below.'
                 if has_coords else
                 'Drawing rendered from source PDF. No coordinate data available for this page.',
                 S['sm'],
