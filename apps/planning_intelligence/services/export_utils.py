@@ -17,7 +17,7 @@ import re
 
 from django.utils import timezone
 
-from ..config import DEFAULT_CALENDAR
+from ..config import DEFAULT_CALENDAR, PRIMAVERA_XER_VERSION
 from .calendar_utils import add_working_days
 
 ACTIVITY_COLUMNS = [
@@ -379,12 +379,14 @@ def generation_to_pptx_bytes(generation) -> bytes:
 # ─────────────────────────────────────────────────────────────────────────
 # Primavera P6 .xer export — schedule-only subset (CURRTYPE / PROJECT /
 # CALENDAR / PROJWBS / TASK / TASKPRED). Field layout is soft-coded against
-# the P6 v17.12 XER schema used by the reference sample files supplied for
-# this feature (Documents/Project Control/Planning Package/*.xer) — every
-# %F/%R column list below mirrors that schema exactly so the exported file
-# opens cleanly in Primavera P6 (File > Import > Primavera PM - (XER)).
+# the P6 XER schema used by the reference sample files supplied for this
+# feature (Documents/Project Control/Planning Package/*.xer) — every %F/%R
+# column list below mirrors that schema so the exported file opens cleanly
+# in Primavera P6 (File > Import > Primavera PM - (XER)). The ERMHDR version
+# string itself is soft-coded in ../config.py (PRIMAVERA_XER_VERSION) since
+# it must match the target site's installed P6 version, not the schema layout.
 # ─────────────────────────────────────────────────────────────────────────
-XER_VERSION = '17.12'
+XER_VERSION = PRIMAVERA_XER_VERSION
 XER_PROJ_ID = 1
 XER_CLNDR_ID = 1
 XER_LINE_SEP = '\r\n'  # native XER line ending

@@ -39,6 +39,19 @@ PARSE_STATUS_CHOICES = [
 # Maximum upload size (bytes) — defaults to 100 MB, overridable via env.
 MAX_FILE_BYTES = int(config('PLANNING_MAX_FILE_BYTES', default=str(100 * 1024 * 1024)))
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Primavera P6 .xer export — schedule version identifier (MODULE 12 export).
+# The XER ERMHDR version string tells Primavera P6 which schema revision the
+# file was written against. P6 can always import a file whose version is <=
+# its own installed version, but REJECTS files whose version is NEWER than
+# itself (e.g. a "P6 Professional 17" desktop on the 17.7 base release cannot
+# open a file exported as 17.12 — a later R17 patch schema). '17.7' is the
+# baseline release of the "version 17" line, so it opens cleanly on every
+# Primavera P6 Professional 17.x install. Override via env var if a site
+# specifically needs a different/newer P6 version (e.g. '18.8', '19.12').
+# ─────────────────────────────────────────────────────────────────────────────
+PRIMAVERA_XER_VERSION = config('PRIMAVERA_XER_VERSION', default='17.7')
+
 # NOTE: S3 storage location/prefix for uploaded planning files is now owned by
 # apps.core.storage_backends.PlanningIntelligenceStorage (location=
 # 'media/planning_intelligence'), set directly on PlanningFile.file's
