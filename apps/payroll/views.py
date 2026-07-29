@@ -500,14 +500,26 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
 
             qs = qs.filter(own_q)
 
-        params = self.request.query_params
+        params  = self.request.query_params
         st      = params.get('status')
+        # SOFT-CODED: the Approvals dashboard (frontend/src/pages/ApprovalsPageDynamic.jsx)
+        # requests the "pending" tab with a comma-separated `status__in` param
+        # (e.g. `status__in=PENDING,RM_APPROVED`) so it can show both approval
+        # stages at once. This param was previously ignored here, so the
+        # backend returned ALL leave requests (including already-APPROVED /
+        # REJECTED ones) and the frontend's own guard then rejected acting on
+        # them with "Invalid status for approve: <status>". Support it.
+        st_in   = params.get('status__in')
         code    = params.get('employee_code')
         year    = params.get('year')
         month   = params.get('month')
         search  = params.get('search')
         if st:
             qs = qs.filter(status__iexact=st)
+        elif st_in:
+            statuses = [s.strip().upper() for s in st_in.split(',') if s.strip()]
+            if statuses:
+                qs = qs.filter(status__in=statuses)
         if code:
             qs = qs.filter(employee_code=code)
         if year and month:
