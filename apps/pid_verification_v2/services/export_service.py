@@ -57,12 +57,18 @@ COMPARISON_VIEW_SHEET_NAMES = {
 }
 
 
-def _include_finding(finding_category: str, categories) -> bool:
+def _include_finding(finding_category: str, categories, severity: str = None) -> bool:
     """
     Decide whether a finding should appear in this export.
     - categories is None  → full/legacy export: exclude HIDDEN_CATEGORIES only.
     - categories is a list → scoped comparison view: allowlist only.
+    - severity: soft-coded gate via REPORT_CONFIG['findings_export']
+      ['only_severity'] (defaults to 'critical'); pass None to skip the
+      severity check (e.g. callers that don't have a severity to check yet).
     """
+    only_sev = (REPORT_CONFIG.get('findings_export', {}) or {}).get('only_severity')
+    if only_sev and severity is not None and (severity or '').lower() != only_sev.lower():
+        return False
     if categories is None:
         return finding_category not in HIDDEN_CATEGORIES
     return finding_category in categories
@@ -120,6 +126,14 @@ REPORT_CONFIG = {
             'info':     (37,  99,  235, 210),
         },
     },
+    # Soft-coded: restrict every exported finding row (Excel sheet rows, PDF
+    # findings-table rows, and the PDF's severity-summary counts) to a single
+    # severity. Keeps the Full Report page, Excel export and PDF export all
+    # aligned with the "Critical Only" Drawing Overlay behaviour above.
+    # Set to None/'' to restore all severities.
+    'findings_export': {
+        'only_severity': 'critical',
+    },
 }
 
 
@@ -151,7 +165,7 @@ def generate_excel(document, view: str = 'all') -> Optional[bytes]:
     rows = []
     for drawing in document.drawings.order_by('page_index'):
         for finding in drawing.findings.order_by('sl_no'):
-            if not _include_finding(finding.category, categories):
+            if not _include_finding(finding.category, categories, finding.severity):
                 continue
             rows.append({
                 'SL No':           finding.sl_no,
@@ -323,7 +337,7 @@ def generate_pdf(document, view: str = 'all') -> Optional[bytes]:
     total_count = 0
     for drw in document.drawings.order_by('page_index'):
         for f in drw.findings.all():
-            if not _include_finding(f.category, categories):
+            if not _include_finding(f.category, categories, f.severity):
                 continue
             sk = f.severity.upper()
             sev_counts[sk] = sev_counts.get(sk, 0) + 1
@@ -560,7 +574,7 @@ def generate_pdf(document, view: str = 'all') -> Optional[bytes]:
     # ── Per-drawing sections: annotated image + findings table ────────────────
     for drw in document.drawings.order_by('page_index'):
         findings = [f for f in drw.findings.order_by('sl_no')
-                   if _include_finding(f.category, categories)]
+                   if _include_finding(f.category, categories, f.severity)]
         if not findings:
             continue
 
