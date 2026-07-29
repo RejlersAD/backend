@@ -441,6 +441,11 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class   = LeaveRequestSerializer
 
+    # Soft-coded: RBAC role codes that always have full (all-employee) visibility
+    # and final-stage approval rights, matching APPROVAL_TYPES.LEAVE.allowedRoles
+    # in frontend/src/config/approvalsSystem.config.js
+    HR_REVIEW_ROLE_CODES = ['hr_manager', 'hr_admin', 'super_admin', 'admin']
+
     @staticmethod
     def _user_employee_code(user):
         """Safely read the biometric employee_id from the user's RBAC profile."""
@@ -448,6 +453,18 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             return user.rbac_profile.employee_id or None
         except Exception:
             return None
+
+    @classmethod
+    def _is_hr_or_admin(cls, user):
+        """True for superusers/staff or users holding an HR/Admin RBAC role."""
+        if user.is_staff or user.is_superuser:
+            return True
+        try:
+            return user.rbac_profile.roles.filter(
+                code__in=cls.HR_REVIEW_ROLE_CODES, is_active=True
+            ).exists()
+        except Exception:
+            return False
 
     def get_queryset(self):
         qs = (
@@ -457,13 +474,30 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         )
         user = self.request.user
 
-        # Non-staff users see only their own leave requests.
-        # Match by User FK *or* by biometric employee_code (handles HR-created requests).
-        if not user.is_staff:
+        # HR / Admin roles have unrestricted visibility (they perform the
+        # final Stage-2 approval regardless of reporting line); everyone else
+        # sees only their own leave requests + requests submitted by their
+        # direct reports (Reporting Manager Stage-1 approval).
+        if not self._is_hr_or_admin(user):
             emp_code = self._user_employee_code(user)
             own_q = Q(employee=user)
             if emp_code:
                 own_q |= Q(employee_code=emp_code)
+
+            try:
+                from apps.rbac.models import UserProfile
+                subordinates = UserProfile.objects.filter(manager__user=user, is_deleted=False)
+                sub_user_ids = list(
+                    subordinates.exclude(user__isnull=True).values_list('user_id', flat=True)
+                )
+                sub_codes = [c for c in subordinates.values_list('employee_id', flat=True) if c]
+                if sub_user_ids:
+                    own_q |= Q(employee_id__in=sub_user_ids)
+                if sub_codes:
+                    own_q |= Q(employee_code__in=sub_codes)
+            except Exception:
+                pass
+
             qs = qs.filter(own_q)
 
         params = self.request.query_params
@@ -501,10 +535,17 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             extra['employee_name'] = emp_name
         serializer.save(**extra)
 
+    # Soft-coded: statuses from which the final (HR) approve/reject action is
+    # allowed. A request can be finalised either directly from PENDING
+    # (single-stage / HR self-service) or from RM_APPROVED (after the
+    # Reporting Manager has completed Stage 1).
+    FINAL_APPROVABLE_STATUSES = (LeaveRequestStatus.PENDING, LeaveRequestStatus.RM_APPROVED)
+
     @action(detail=True, methods=['post'], url_path='approve')
     def approve(self, request, pk=None):
+        """Stage 2 (or single-stage): final approval — HR Manager / Admin."""
         req = self.get_object()
-        if req.status != LeaveRequestStatus.PENDING:
+        if req.status not in self.FINAL_APPROVABLE_STATUSES:
             return Response(
                 {'error': f'Cannot approve a {req.status} request'},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -518,8 +559,9 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='reject')
     def reject(self, request, pk=None):
+        """Stage 2 (or single-stage): final rejection — HR Manager / Admin."""
         req = self.get_object()
-        if req.status != LeaveRequestStatus.PENDING:
+        if req.status not in self.FINAL_APPROVABLE_STATUSES:
             return Response(
                 {'error': f'Cannot reject a {req.status} request'},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -528,6 +570,38 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         req.reviewed_by  = request.user
         req.reviewed_at  = timezone.now()
         req.reviewer_note = request.data.get('note', '')
+        req.save()
+        return Response(LeaveRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'], url_path='rm-approve')
+    def rm_approve(self, request, pk=None):
+        """Stage 1: Direct Reporting Manager approval (PENDING → RM_APPROVED)."""
+        req = self.get_object()
+        if req.status != LeaveRequestStatus.PENDING:
+            return Response(
+                {'error': f'Cannot approve a {req.status} request at the reporting-manager stage'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        req.status         = LeaveRequestStatus.RM_APPROVED
+        req.rm_reviewed_by = request.user
+        req.rm_reviewed_at = timezone.now()
+        req.rm_note        = request.data.get('note', '')
+        req.save()
+        return Response(LeaveRequestSerializer(req).data)
+
+    @action(detail=True, methods=['post'], url_path='rm-reject')
+    def rm_reject(self, request, pk=None):
+        """Stage 1: Direct Reporting Manager rejection (PENDING → RM_REJECTED)."""
+        req = self.get_object()
+        if req.status != LeaveRequestStatus.PENDING:
+            return Response(
+                {'error': f'Cannot reject a {req.status} request at the reporting-manager stage'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        req.status         = LeaveRequestStatus.RM_REJECTED
+        req.rm_reviewed_by = request.user
+        req.rm_reviewed_at = timezone.now()
+        req.rm_note        = request.data.get('note', '')
         req.save()
         return Response(LeaveRequestSerializer(req).data)
 
