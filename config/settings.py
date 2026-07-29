@@ -189,7 +189,7 @@ INSTALLED_APPS = [
     'apps.data_mining',  # Data Mining Platform - AI-Powered Data Integration & Transformation (Tableau Prep-style)
     'apps.pid_verification',   # P&ID Quality Checker — deterministic rule engine (V1)
     'apps.pid_verification_v2', # P&ID Quality Checker V2 — duplicate of V1 with isolated database
-    # 'apps.pid_checker_v2',      # P&ID Checker V2 — AI-powered multi-document validation engine (ISOLATED from V1) [DISABLED: Module does not exist]
+    'apps.pid_checker_v2',      # P&ID Checker V2 — new minimal scaffold (isolated DB, empty starting point)
     'apps.sld_verification',   # SLD Quality Checker — electrical single line diagram verification
     'apps.pfd_quality',          # PFD Quality Checker — deterministic rule engine
     'apps.cross_recommendation', # Cross PID/PFD recommendation bridge

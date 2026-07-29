@@ -207,10 +207,10 @@ if is_app_installed('apps.pid_verification_v2'):
     urlpatterns.append(path('api/v2/pid-verification/', include('apps.pid_verification_v2.urls')))
     print("[URL] ✅ P&ID Verification V2 URLs registered")
 
-# P&ID Checker V2 — AI-powered multi-document validation engine (ISOLATED from V1) [DISABLED: Module does not exist]
-# if is_app_installed('apps.pid_checker_v2'):
-#     urlpatterns.append(path('api/v2/pid-checker/', include('apps.pid_checker_v2.urls')))
-#     print("[URL] ✅ P&ID Checker V2 URLs registered")
+# P&ID Checker V2 — new minimal scaffold (isolated DB, empty starting point)
+if is_app_installed('apps.pid_checker_v2'):
+    urlpatterns.append(path('api/v1/pid-checker-v2/', include('apps.pid_checker_v2.urls')))
+    print("[URL] ✅ P&ID Checker V2 URLs registered")
 
 # SLD Verification — electrical single line diagram quality checker
 if is_app_installed('apps.sld_verification'):
