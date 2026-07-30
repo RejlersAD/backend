@@ -44,6 +44,14 @@ COL_ALIASES = {
     'qty':             ['qty', 'quantity'],
     'phase':           ['phase'],
     'remarks':         ['remarks', 'notes'],
+    # Deep attribute columns (compared against P&ID Vision extraction)
+    'nominal_capacity':  ['nominal capacity', 'capacity', 'nom. capacity', 'design capacity'],
+    'length_tt':         ['length t/t', 'length tt', 'length (t/t)', 't/t length', 'tan-to-tan'],
+    'diameter_id':       ['diameter id', 'diameter (id)', 'id diameter', 'internal diameter', 'inside diameter'],
+    'material_shell':    ['material of shell', 'shell material', 'material shell', 'shell moc'],
+    'material_internal': ['material of internal', 'internal material', 'material internal',
+                          'internals material', 'internals moc', 'internal moc'],
+    'trim':              ['trim', 'trim material', 'valve trim'],
 }
 
 # When looking for the header row, at least this many of these

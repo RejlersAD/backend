@@ -40,6 +40,7 @@ from .vision_extractor import (
     _image_to_b64_png,
     _call_openai,
     _call_claude,
+    _call_vision as _shared_call_vision,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,13 +108,36 @@ SCAN THE ENTIRE IMAGE METHODICALLY:
 - Read text rotated 90° / 270°.
 
 Return ONLY a JSON array of objects — no prose, no markdown fences.
-Each object has three fields:
-  {"tag": "V-803-TF", "kind": "vessel", "description": "MRD Oil Slug Catcher"}
-  {"tag": "P-801-A",  "kind": "pump",   "description": ""}
+Each object has these fields:
+  {
+    "tag": "V-803-TF",
+    "kind": "vessel",
+    "description": "MRD Oil Slug Catcher",
+    "attributes": {
+      "nominal_capacity":    "5 m3",
+      "length_tt":           "3500 mm",
+      "diameter_id":         "1200 mm",
+      "op_pressure":         "8 barg",
+      "design_pressure_min": "FV",
+      "design_pressure_max": "10 barg",
+      "op_temp_min":         "25 C",
+      "op_temp_max":         "60 C",
+      "design_temp_min":     "-10 C",
+      "design_temp_max":     "80 C",
+      "material_shell":      "CS + 3 mm CA",
+      "material_internal":   "SS 316L cladding",
+      "trim":                "SS 316"
+    }
+  }
 
 - kind        — one of: vessel, pump, compressor, exchanger, tank, column, filter,
                 reactor, furnace, separator, blower, other
 - description — free-text service / duty if visible on the drawing; empty string otherwise.
+- attributes  — READ VERBATIM from the equipment data table / callouts that sit
+                next to each tag on the drawing. Use whatever unit is printed
+                on the drawing (do NOT convert). Use an empty string "" for any
+                attribute that is not shown for that equipment. Do not invent
+                values. The keys are FIXED — do not rename or add new keys.
 
 Be exhaustive. A typical process P&ID has 3–15 pieces of equipment.
 """
@@ -123,6 +147,42 @@ KNOWN_KINDS = {
     'vessel', 'pump', 'compressor', 'exchanger', 'tank', 'column',
     'filter', 'reactor', 'furnace', 'separator', 'silencer', 'blower',
     'agitator', 'other',
+}
+
+# Canonical equipment attribute keys — single source of truth reused by the
+# vision extractor, Excel parser, comparator service, and Excel exporter.
+EQUIPMENT_ATTRIBUTE_KEYS = (
+    'nominal_capacity',
+    'length_tt',
+    'diameter_id',
+    'op_pressure',
+    'design_pressure_min',
+    'design_pressure_max',
+    'op_temp_min',
+    'op_temp_max',
+    'design_temp_min',
+    'design_temp_max',
+    'material_shell',
+    'material_internal',
+    'trim',
+)
+
+# Human-readable labels for reporting / UI. Kept beside the key tuple so
+# they can't drift out of sync.
+EQUIPMENT_ATTRIBUTE_LABELS = {
+    'nominal_capacity':    'Nominal Capacity',
+    'length_tt':           'Length (T/T)',
+    'diameter_id':         'Diameter (ID)',
+    'op_pressure':         'Operating Pressure',
+    'design_pressure_min': 'Design Pressure (min)',
+    'design_pressure_max': 'Design Pressure (max)',
+    'op_temp_min':         'Operating Temperature (min)',
+    'op_temp_max':         'Operating Temperature (max)',
+    'design_temp_min':     'Design Temperature (min)',
+    'design_temp_max':     'Design Temperature (max)',
+    'material_shell':      'Material of Shell',
+    'material_internal':   'Material of Internal',
+    'trim':                'Trim',
 }
 
 
@@ -172,15 +232,14 @@ def extract_equipment_tags_via_vision(
 
 # ─── Helpers ──────────────────────────────────────────────────────────
 def _call_vision(provider: str, api_key: str, image_b64: str) -> str:
-    if provider == 'openai':
-        return _call_openai(api_key, image_b64, VISION_USER_PROMPT)
-    if provider == 'claude':
-        return _call_claude(api_key, image_b64, VISION_USER_PROMPT)
-    raise ValueError(f"unknown provider {provider}")
+    # Delegate to the shared wrapper so we inherit retry-with-backoff
+    # on transient upstream errors (Claude 529, OpenAI 429/5xx).
+    return _shared_call_vision(provider, api_key, image_b64, VISION_USER_PROMPT)
 
 
 def _merge_tags(merged: dict[str, dict], new_tags: list[dict]) -> None:
-    """Merge new tags into the accumulator, keeping the richest description."""
+    """Merge new tags into the accumulator, keeping the richest description
+    and the richest non-empty value for each equipment attribute."""
     for t in new_tags:
         tag = t.get('tag')
         if not tag:
@@ -189,11 +248,15 @@ def _merge_tags(merged: dict[str, dict], new_tags: list[dict]) -> None:
         if not existing:
             merged[tag] = t
             continue
-        # Prefer the entry with a description
         if not existing.get('description') and t.get('description'):
             existing['description'] = t['description']
         if existing.get('kind') == 'other' and t.get('kind') != 'other':
             existing['kind'] = t['kind']
+        existing_attrs = existing.setdefault('attributes', {})
+        for key in EQUIPMENT_ATTRIBUTE_KEYS:
+            new_val = (t.get('attributes') or {}).get(key)
+            if new_val and not existing_attrs.get(key):
+                existing_attrs[key] = new_val
 
 
 def _parse_equipment_list(raw: str) -> list[dict]:
@@ -232,10 +295,21 @@ def _parse_equipment_list(raw: str) -> list[dict]:
             tag = _clean_tag(item)
             kind = 'other'
             desc = ''
+            attrs = {}
         elif isinstance(item, dict):
             tag = _clean_tag(item.get('tag') or item.get('name') or '')
             kind = str(item.get('kind') or '').strip().lower() or 'other'
             desc = str(item.get('description') or item.get('service') or '').strip()
+            raw_attrs = item.get('attributes') or {}
+            attrs = {}
+            if isinstance(raw_attrs, dict):
+                for key in EQUIPMENT_ATTRIBUTE_KEYS:
+                    v = raw_attrs.get(key)
+                    if v is None:
+                        continue
+                    s = str(v).strip()
+                    if s and s.lower() not in ('n/a', 'na', '-', '--'):
+                        attrs[key] = s
         else:
             continue
 
@@ -244,7 +318,7 @@ def _parse_equipment_list(raw: str) -> list[dict]:
         if kind not in KNOWN_KINDS:
             kind = 'other'
 
-        results.append({'tag': tag, 'kind': kind, 'description': desc})
+        results.append({'tag': tag, 'kind': kind, 'description': desc, 'attributes': attrs})
     return results
 
 

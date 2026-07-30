@@ -111,7 +111,10 @@ EQUIPMENT_LIST_ROW_FIELDS = (
     'excel_row', 'tag', 'description', 'design_flow', 'op_pressure', 'op_temp',
     'design_p_min', 'design_p_max', 'design_t_min', 'design_t_max',
     'moc', 'insulation', 'dim_length', 'dim_diameter', 'motor_rating',
-    'pid_no', 'qty', 'phase', 'remarks', 'extras',
+    'pid_no', 'qty', 'phase', 'remarks',
+    'nominal_capacity', 'length_tt', 'diameter_id',
+    'material_shell', 'material_internal', 'trim',
+    'extras',
 )
 EQUIPMENT_LIST_LIST_FIELDS = (
     'equipment_list_id', 'filename', 'sheet_name', 'title', 'doc_no', 'doc_date',

@@ -909,7 +909,12 @@ class EquipmentCrossCheckView(APIView):
         equipment_tags:       list[str]   tags read from the P&ID
         equipment_list_id:    UUID        optional — override active list
         use_ai:               bool        default False
-        vision_provider, vision_api_key   (required if use_ai=True)
+        vision_provider, vision_api_key   (required if use_ai=True OR when
+                                            equipment_attributes is present)
+        equipment_attributes: dict[str, dict[str,str]]
+                                          optional — per-tag attribute map
+                                          from Vision extractor; triggers
+                                          attribute-level comparison.
     """
     permission_classes = [IsAuthenticated]
 
@@ -942,6 +947,18 @@ class EquipmentCrossCheckView(APIView):
                 'moc': r.moc,
                 'phase': r.phase,
                 'excel_row': r.excel_row,
+                'nominal_capacity':    r.nominal_capacity,
+                'length_tt':           r.length_tt,
+                'diameter_id':         r.diameter_id,
+                'op_pressure':         r.op_pressure,
+                'design_p_min':        r.design_p_min,
+                'design_p_max':        r.design_p_max,
+                'op_temp':             r.op_temp,
+                'design_t_min':        r.design_t_min,
+                'design_t_max':        r.design_t_max,
+                'material_shell':      r.material_shell,
+                'material_internal':   r.material_internal,
+                'trim':                r.trim,
             }
             for r in equipment_list.rows.all()
         ]
@@ -949,9 +966,21 @@ class EquipmentCrossCheckView(APIView):
         use_ai = bool(request.data.get('use_ai'))
         ai_provider = (request.data.get('vision_provider') or '').lower() or None
         ai_api_key = request.data.get('vision_api_key') or None
+        equipment_attributes = request.data.get('equipment_attributes') or None
+        if equipment_attributes is not None and not isinstance(equipment_attributes, dict):
+            return Response(
+                {'error': 'equipment_attributes must be an object mapping tag → {attribute_key: value}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if use_ai and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
             return Response(
                 {'error': 'use_ai=true requires vision_provider (openai|claude) and vision_api_key'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if equipment_attributes and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
+            return Response(
+                {'error': 'equipment_attributes require vision_provider (openai|claude) and vision_api_key',
+                 'code': 'byok_required_for_attributes'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -961,6 +990,7 @@ class EquipmentCrossCheckView(APIView):
                 use_ai=use_ai,
                 ai_provider=ai_provider,
                 ai_api_key=ai_api_key,
+                pid_attributes=equipment_attributes,
             )
         except Exception as exc:
             logger.exception('Equipment cross-check failed')
@@ -1143,7 +1173,12 @@ class InstrumentCrossCheckView(APIView):
         instrument_tags:        list[str]
         instrument_index_id:    UUID        optional — override active
         use_ai:                 bool        default False
-        vision_provider, vision_api_key    (required if use_ai=True)
+        vision_provider, vision_api_key    (required if use_ai=True OR when
+                                             instrument_attributes is present)
+        instrument_attributes:  dict[str, dict[str,str]]
+                                             optional — per-tag attribute map
+                                             from Vision extractor; triggers
+                                             attribute-level comparison.
     """
     permission_classes = [IsAuthenticated]
 
@@ -1177,6 +1212,16 @@ class InstrumentCrossCheckView(APIView):
                 'eqpt_no': r.eqpt_no,
                 'line_no': r.line_no,
                 'excel_row': r.excel_row,
+                'range_min':    r.range_min,
+                'range_max':    r.range_max,
+                'range_unit':   r.range_unit,
+                'cal_min':      r.cal_min,
+                'cal_max':      r.cal_max,
+                'cal_unit':     r.cal_unit,
+                'ex_class':     r.ex_class,
+                'power_supply': r.power_supply,
+                'manufacturer': r.manufacturer,
+                'model':        r.model,
             }
             for r in instrument_index.rows.all()
         ]
@@ -1184,9 +1229,21 @@ class InstrumentCrossCheckView(APIView):
         use_ai = bool(request.data.get('use_ai'))
         ai_provider = (request.data.get('vision_provider') or '').lower() or None
         ai_api_key = request.data.get('vision_api_key') or None
+        instrument_attributes = request.data.get('instrument_attributes') or None
+        if instrument_attributes is not None and not isinstance(instrument_attributes, dict):
+            return Response(
+                {'error': 'instrument_attributes must be an object mapping tag → {attribute_key: value}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if use_ai and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
             return Response(
                 {'error': 'use_ai=true requires vision_provider (openai|claude) and vision_api_key'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if instrument_attributes and (ai_provider not in SUPPORTED_PROVIDERS or not ai_api_key):
+            return Response(
+                {'error': 'instrument_attributes require vision_provider (openai|claude) and vision_api_key',
+                 'code': 'byok_required_for_attributes'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -1196,6 +1253,7 @@ class InstrumentCrossCheckView(APIView):
                 use_ai=use_ai,
                 ai_provider=ai_provider,
                 ai_api_key=ai_api_key,
+                pid_attributes=instrument_attributes,
             )
         except Exception as exc:
             logger.exception('Instrument cross-check failed')
@@ -1248,7 +1306,14 @@ class ExtractEquipmentTagsFromPidView(APIView):
             result = extract_equipment_tags_via_vision(upload.read(), provider, api_key)
         except Exception as exc:
             logger.exception('Equipment vision extraction failed')
-            return Response({'error': f'vision extraction failed: {exc}'},
+            msg = str(exc)
+            if 'overloaded' in msg.lower() or '529' in msg:
+                friendly = (f"{provider.title()} vision API is temporarily overloaded "
+                            "after several automatic retries. Please try again in a "
+                            "minute or switch provider.")
+            else:
+                friendly = f'vision extraction failed: {exc}'
+            return Response({'error': friendly},
                             status=status.HTTP_502_BAD_GATEWAY)
 
         return Response({
@@ -1293,7 +1358,14 @@ class ExtractInstrumentTagsFromPidView(APIView):
             result = extract_instrument_tags_via_vision(upload.read(), provider, api_key)
         except Exception as exc:
             logger.exception('Instrument vision extraction failed')
-            return Response({'error': f'vision extraction failed: {exc}'},
+            msg = str(exc)
+            if 'overloaded' in msg.lower() or '529' in msg:
+                friendly = (f"{provider.title()} vision API is temporarily overloaded "
+                            "after several automatic retries. Please try again in a "
+                            "minute or switch provider.")
+            else:
+                friendly = f'vision extraction failed: {exc}'
+            return Response({'error': friendly},
                             status=status.HTTP_502_BAD_GATEWAY)
 
         return Response({

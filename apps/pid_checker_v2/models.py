@@ -396,6 +396,13 @@ class PidCheckerV2EquipmentListRow(models.Model):
     qty = models.CharField(max_length=16, blank=True, default='')
     phase = models.CharField(max_length=64, blank=True, default='')
     remarks = models.CharField(max_length=500, blank=True, default='')
+    # Deep-attribute columns compared against P&ID Vision extraction.
+    nominal_capacity = models.CharField(max_length=64, blank=True, default='')
+    length_tt = models.CharField(max_length=64, blank=True, default='')
+    diameter_id = models.CharField(max_length=64, blank=True, default='')
+    material_shell = models.CharField(max_length=120, blank=True, default='')
+    material_internal = models.CharField(max_length=120, blank=True, default='')
+    trim = models.CharField(max_length=120, blank=True, default='')
     # Free-form bag of the rest so we don't lose extra columns
     extras = models.JSONField(default=dict)
 

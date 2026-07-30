@@ -36,6 +36,13 @@ VISION_MODELS = {
 VISION_MAX_TOKENS = 4096
 VISION_TEMPERATURE = 0.0             # deterministic — we want factual extraction
 
+# Retry policy for transient upstream errors (Claude 529 overloaded,
+# OpenAI 429/500/502/503/504). Exponential backoff with jitter.
+VISION_RETRY_MAX_ATTEMPTS = 4
+VISION_RETRY_BASE_DELAY_S = 2.0
+VISION_RETRY_MAX_DELAY_S = 30.0
+VISION_RETRY_STATUS_CODES = (429, 500, 502, 503, 504, 529)
+
 # ─── Tiling strategy ──────────────────────────────────────────────────
 # Large P&IDs contain small, rotated, and peripheral tags. A single
 # whole-page Vision call misses ~30-40 % of them because the image is
@@ -301,10 +308,56 @@ def _normalise_candidate(s: str) -> Optional[str]:
 
 def _call_vision(provider: str, api_key: str, image_b64: str, user_prompt: str = VISION_USER_PROMPT) -> str:
     if provider == 'openai':
-        return _call_openai(api_key, image_b64, user_prompt)
-    if provider == 'claude':
-        return _call_claude(api_key, image_b64, user_prompt)
-    raise ValueError(f"unknown provider {provider}")
+        fn = _call_openai
+    elif provider == 'claude':
+        fn = _call_claude
+    else:
+        raise ValueError(f"unknown provider {provider}")
+    return _with_retries(provider, fn, api_key, image_b64, user_prompt)
+
+
+def _with_retries(provider, fn, api_key, image_b64, user_prompt):
+    import random
+    import time
+    last_exc = None
+    for attempt in range(1, VISION_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return fn(api_key, image_b64, user_prompt)
+        except Exception as exc:  # noqa: BLE001
+            status = _extract_status_code(exc)
+            retriable = status in VISION_RETRY_STATUS_CODES or _is_overloaded_error(exc)
+            last_exc = exc
+            if not retriable or attempt == VISION_RETRY_MAX_ATTEMPTS:
+                raise
+            delay = min(VISION_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)),
+                        VISION_RETRY_MAX_DELAY_S)
+            delay += random.uniform(0, delay * 0.25)
+            logger.warning(
+                "[vision] %s transient error (status=%s attempt=%d/%d): %s — retrying in %.1fs",
+                provider, status, attempt, VISION_RETRY_MAX_ATTEMPTS, exc, delay,
+            )
+            time.sleep(delay)
+    raise last_exc  # pragma: no cover
+
+
+def _extract_status_code(exc) -> Optional[int]:
+    for attr in ('status_code', 'http_status', 'code'):
+        v = getattr(exc, attr, None)
+        if isinstance(v, int):
+            return v
+    resp = getattr(exc, 'response', None)
+    if resp is not None:
+        v = getattr(resp, 'status_code', None)
+        if isinstance(v, int):
+            return v
+    # Fall back to parsing the message (e.g. "Error code: 529 - {...}")
+    m = re.search(r'\b(4\d{2}|5\d{2})\b', str(exc))
+    return int(m.group(1)) if m else None
+
+
+def _is_overloaded_error(exc) -> bool:
+    msg = str(exc).lower()
+    return 'overloaded' in msg or 'overloaded_error' in msg
 
 
 def _call_openai(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PROMPT) -> str:

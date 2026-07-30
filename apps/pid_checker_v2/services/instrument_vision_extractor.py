@@ -38,6 +38,7 @@ from .vision_extractor import (
     _image_to_b64_png,
     _call_openai,
     _call_claude,
+    _call_vision as _shared_call_vision,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,39 @@ logger = logging.getLogger(__name__)
 INSTRUMENT_TAG_PATTERN = re.compile(
     r'^[A-Z]{1,4}-\d{2,4}[A-Z]?(?:[A-Z]{2})?$'
 )
+
+# Attribute keys we ask Vision to read *verbatim* from the drawing and that
+# the cross-check compares against the Instrument Index Excel row.  Keep
+# this tuple aligned with EL/model column keys in instrument_cross_check.py.
+INSTRUMENT_ATTRIBUTE_KEYS = (
+    'instrument_type',
+    'service_description',
+    'range_min',
+    'range_max',
+    'range_unit',
+    'cal_min',
+    'cal_max',
+    'cal_unit',
+    'ex_class',
+    'power_supply',
+    'manufacturer',
+    'model',
+)
+
+INSTRUMENT_ATTRIBUTE_LABELS = {
+    'instrument_type':     'Type',
+    'service_description': 'Service',
+    'range_min':           'Range Min',
+    'range_max':           'Range Max',
+    'range_unit':          'Range Unit',
+    'cal_min':             'Calibration Min',
+    'cal_max':             'Calibration Max',
+    'cal_unit':            'Calibration Unit',
+    'ex_class':            'Ex Classification',
+    'power_supply':        'Power Supply',
+    'manufacturer':        'Manufacturer',
+    'model':               'Model',
+}
 
 VISION_SYSTEM_PROMPT = (
     "You are an expert instrumentation engineer specialised in reading P&ID drawings. "
@@ -83,8 +117,37 @@ SCAN THE ENTIRE IMAGE METHODICALLY:
 
 Return ONLY a JSON array of objects — no prose, no markdown fences.
 Each object has these fields (leave "" if not visible):
-  {"tag": "LT-8019TF", "function_code": "LT", "loop_number": "8019",
-   "site_symbol": "TF", "service": "Level transmitter"}
+  {
+    "tag": "LT-8019TF",
+    "function_code": "LT",
+    "loop_number": "8019",
+    "site_symbol": "TF",
+    "service": "Level transmitter",
+    "attributes": {
+      "instrument_type":     "",
+      "service_description": "",
+      "range_min":           "",
+      "range_max":           "",
+      "range_unit":          "",
+      "cal_min":             "",
+      "cal_max":             "",
+      "cal_unit":            "",
+      "ex_class":            "",
+      "power_supply":        "",
+      "manufacturer":        "",
+      "model":               ""
+    }
+  }
+
+Attribute rules — read verbatim from the drawing, DO NOT invent:
+- The attribute keys above are fixed. Keep them exactly as shown.
+- Read values in the original units and formatting on the drawing.
+- Leave a value as "" (empty string) when the attribute is not visible.
+- range_min / range_max = process range printed near the balloon
+  (e.g. "0", "100" for "0-100 mmH2O"). range_unit = "mmH2O".
+- cal_min / cal_max / cal_unit = calibrated range only if separately shown.
+- ex_class = hazardous-area classification (e.g. "Ex ia IIC T4").
+- power_supply = "24VDC", "230VAC", "Loop-powered", etc.
 
 Canonicalise the tag: strip whitespace inside so "LT-8019 TF" becomes "LT-8019TF".
 
@@ -139,11 +202,7 @@ def extract_instrument_tags_via_vision(
 
 # ─── Helpers ──────────────────────────────────────────────────────────
 def _call_vision(provider: str, api_key: str, image_b64: str) -> str:
-    if provider == 'openai':
-        return _call_openai(api_key, image_b64, VISION_USER_PROMPT)
-    if provider == 'claude':
-        return _call_claude(api_key, image_b64, VISION_USER_PROMPT)
-    raise ValueError(f"unknown provider {provider}")
+    return _shared_call_vision(provider, api_key, image_b64, VISION_USER_PROMPT)
 
 
 def _merge_tags(merged: dict[str, dict], new_tags: list[dict]) -> None:
@@ -157,6 +216,17 @@ def _merge_tags(merged: dict[str, dict], new_tags: list[dict]) -> None:
             continue
         if not existing.get('service') and t.get('service'):
             existing['service'] = t['service']
+        # Merge per-attribute — keep the richest non-empty value seen
+        # across tiles for each key.
+        cur_attrs = existing.setdefault('attributes', {})
+        new_attrs = t.get('attributes') or {}
+        for k in INSTRUMENT_ATTRIBUTE_KEYS:
+            v_new = str(new_attrs.get(k) or '').strip()
+            if not v_new:
+                continue
+            v_cur = str(cur_attrs.get(k) or '').strip()
+            if not v_cur or len(v_new) > len(v_cur):
+                cur_attrs[k] = v_new
 
 
 def _parse_instrument_list(raw: str) -> list[dict]:
@@ -192,15 +262,25 @@ def _parse_instrument_list(raw: str) -> list[dict]:
         if isinstance(item, str):
             tag = _clean_tag(item)
             entry = {'tag': tag, 'function_code': '', 'loop_number': '',
-                     'site_symbol': '', 'service': ''}
+                     'site_symbol': '', 'service': '', 'attributes': {}}
         elif isinstance(item, dict):
             tag = _clean_tag(item.get('tag') or item.get('name') or '')
+            raw_attrs = item.get('attributes') or {}
+            if not isinstance(raw_attrs, dict):
+                raw_attrs = {}
+            attrs: dict[str, str] = {}
+            for k in INSTRUMENT_ATTRIBUTE_KEYS:
+                v = str(raw_attrs.get(k) or '').strip()
+                if v.lower() in ('n/a', 'na', '-', '--'):
+                    v = ''
+                attrs[k] = v
             entry = {
                 'tag': tag,
                 'function_code': str(item.get('function_code') or '').strip().upper(),
                 'loop_number':   str(item.get('loop_number')   or '').strip(),
                 'site_symbol':   str(item.get('site_symbol')   or '').strip().upper(),
                 'service':       str(item.get('service')       or item.get('description') or '').strip(),
+                'attributes':    attrs,
             }
         else:
             continue
