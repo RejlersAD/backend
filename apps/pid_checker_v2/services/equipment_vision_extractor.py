@@ -202,10 +202,15 @@ def extract_equipment_tags_via_vision(
     merged: dict[str, dict] = {}
     call_count = 0
 
+    from .token_accounting import UsageMeter
+    meter = UsageMeter(feature='equipment_extraction')
+    model = VISION_MODELS[provider]
+
     for page_idx, page_image in enumerate(_render_pages(pdf_bytes)):
         if VISION_INCLUDE_OVERVIEW:
             overview = _downscale(page_image, VISION_OVERVIEW_MAX_DIMENSION_PX)
-            raw = _call_vision(provider, api_key, _image_to_b64_png(overview))
+            raw, in_t, out_t = _call_vision(provider, api_key, _image_to_b64_png(overview))
+            meter.add(provider, model, in_t, out_t)
             call_count += 1
             all_raw.append(f'[page {page_idx} overview]\n{raw}')
             _merge_tags(merged, _parse_equipment_list(raw))
@@ -215,7 +220,8 @@ def extract_equipment_tags_via_vision(
                                                     VISION_TILE_COLS,
                                                     VISION_TILE_OVERLAP_FRAC)):
             tile = _downscale(tile, VISION_TILE_MAX_DIMENSION_PX)
-            raw = _call_vision(provider, api_key, _image_to_b64_png(tile))
+            raw, in_t, out_t = _call_vision(provider, api_key, _image_to_b64_png(tile))
+            meter.add(provider, model, in_t, out_t)
             call_count += 1
             all_raw.append(f'[page {page_idx} tile {tile_idx}]\n{raw}')
             _merge_tags(merged, _parse_equipment_list(raw))
@@ -223,17 +229,16 @@ def extract_equipment_tags_via_vision(
     tags_sorted = sorted(merged.values(), key=lambda t: (t.get('kind') or '', t.get('tag') or ''))
     return {
         'provider': provider,
-        'model': VISION_MODELS[provider],
+        'model': model,
         'tags': tags_sorted,
         'raw': '\n\n---\n\n'.join(all_raw),
         'call_count': call_count,
+        'token_usage': meter.summary(),
     }
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────
-def _call_vision(provider: str, api_key: str, image_b64: str) -> str:
-    # Delegate to the shared wrapper so we inherit retry-with-backoff
-    # on transient upstream errors (Claude 529, OpenAI 429/5xx).
+def _call_vision(provider: str, api_key: str, image_b64: str):
     return _shared_call_vision(provider, api_key, image_b64, VISION_USER_PROMPT)
 
 

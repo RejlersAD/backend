@@ -11,6 +11,7 @@ from .models import (
     PidCheckerV2EquipmentListRow,
     PidCheckerV2InstrumentIndexUpload,
     PidCheckerV2InstrumentIndexRow,
+    PidCheckerV2UsageLog,
 )
 from .services.legend_engine import compile_legend
 
@@ -182,5 +183,23 @@ class PidCheckerV2InstrumentIndexDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = PidCheckerV2InstrumentIndexUpload
         fields = INSTRUMENT_INDEX_LIST_FIELDS + ('columns', 'rows',)
+        read_only_fields = fields
+
+
+# Soft-coded usage log fields
+USAGE_LOG_FIELDS = (
+    'id', 'run_id', 'feature', 'provider', 'model_name',
+    'call_count', 'input_tokens', 'output_tokens', 'total_tokens',
+    'cost_usd', 'related_extraction_id', 'related_upload_id',
+    'notes', 'created_at',
+)
+
+
+class PidCheckerV2UsageLogSerializer(serializers.ModelSerializer):
+    cost_usd = serializers.DecimalField(max_digits=12, decimal_places=6, read_only=True)
+
+    class Meta:
+        model = PidCheckerV2UsageLog
+        fields = USAGE_LOG_FIELDS
         read_only_fields = fields
 

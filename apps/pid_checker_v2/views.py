@@ -29,6 +29,7 @@ from .models import (
     PidCheckerV2EquipmentListRow,
     PidCheckerV2InstrumentIndexUpload,
     PidCheckerV2InstrumentIndexRow,
+    PidCheckerV2UsageLog,
     MODE_OCR,
     MODE_VISION,
 )
@@ -42,6 +43,7 @@ from .serializers import (
     PidCheckerV2EquipmentListDetailSerializer,
     PidCheckerV2InstrumentIndexListSerializer,
     PidCheckerV2InstrumentIndexDetailSerializer,
+    PidCheckerV2UsageLogSerializer,
 )
 from .legend_defaults import (
     SECTIONS as LEGEND_SECTIONS,
@@ -126,6 +128,44 @@ def _persist_extraction(*, user, upload, pdf_bytes, mode, provider, model_name,
         if rows:
             PidCheckerV2LineTag.objects.bulk_create(rows, batch_size=500)
     return extraction
+
+
+def _persist_token_usage(*, user, feature: str, usage: dict,
+                         related_extraction_id=None, related_upload_id=None) -> None:
+    """Persist a `UsageMeter.summary()` payload as one row per (provider,model)."""
+    if not usage or not isinstance(usage, dict):
+        return
+    by_model = usage.get('by_model') or []
+    if not by_model:
+        return
+    from decimal import Decimal
+    try:
+        rows = []
+        for item in by_model:
+            try:
+                cost = Decimal(str(item.get('cost_usd') or '0'))
+            except Exception:
+                cost = Decimal('0')
+            in_t = int(item.get('input_tokens') or 0)
+            out_t = int(item.get('output_tokens') or 0)
+            rows.append(PidCheckerV2UsageLog(
+                created_by=user,
+                feature=feature or '',
+                provider=str(item.get('provider') or ''),
+                model_name=str(item.get('model') or ''),
+                call_count=int(item.get('calls') or 0),
+                input_tokens=in_t,
+                output_tokens=out_t,
+                total_tokens=in_t + out_t,
+                cost_usd=cost,
+                related_extraction_id=related_extraction_id,
+                related_upload_id=related_upload_id,
+                notes={},
+            ))
+        if rows:
+            PidCheckerV2UsageLog.objects.bulk_create(rows)
+    except Exception:
+        logger.exception('Failed to persist token usage for feature=%s', feature)
 
 
 def _resolve_active_legend(user, section: str) -> PidCheckerV2LegendSheet | None:
@@ -279,6 +319,13 @@ class ExtractLineTagsView(APIView):
                 logger.exception('Auto-save of vision extraction failed')
                 extraction = None
 
+            _persist_token_usage(
+                user=request.user,
+                feature='line_extraction',
+                usage=result.get('token_usage') or {},
+                related_extraction_id=extraction.extraction_id if extraction else None,
+            )
+
             return Response({
                 'extraction_id': str(extraction.extraction_id) if extraction else None,
                 'filename': upload.name,
@@ -290,6 +337,7 @@ class ExtractLineTagsView(APIView):
                 'legend_id': str(legend.legend_id) if legend else None,
                 'legend_name': legend.name if legend else None,
                 'created_at': extraction.created_at.isoformat() if extraction else None,
+                'token_usage': result.get('token_usage'),
             }, status=status.HTTP_200_OK)
 
         # ── OCR path ───────────────────────────────────────────────
@@ -739,6 +787,13 @@ class CrossCheckView(APIView):
             return Response({'error': f'cross-check failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+        _persist_token_usage(
+            user=request.user,
+            feature='line_list_cross_check',
+            usage=result.get('token_usage') or {},
+            related_upload_id=line_list.line_list_id,
+        )
+
         return Response({
             'line_list_id': str(line_list.line_list_id),
             'line_list_filename': line_list.filename,
@@ -996,6 +1051,13 @@ class EquipmentCrossCheckView(APIView):
             logger.exception('Equipment cross-check failed')
             return Response({'error': f'cross-check failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        _persist_token_usage(
+            user=request.user,
+            feature='equipment_cross_check',
+            usage=result.get('token_usage') or {},
+            related_upload_id=equipment_list.equipment_list_id,
+        )
 
         return Response({
             'equipment_list_id': str(equipment_list.equipment_list_id),
@@ -1260,6 +1322,13 @@ class InstrumentCrossCheckView(APIView):
             return Response({'error': f'cross-check failed: {exc}'},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+        _persist_token_usage(
+            user=request.user,
+            feature='instrument_cross_check',
+            usage=result.get('token_usage') or {},
+            related_upload_id=instrument_index.instrument_index_id,
+        )
+
         return Response({
             'instrument_index_id': str(instrument_index.instrument_index_id),
             'instrument_index_filename': instrument_index.filename,
@@ -1316,12 +1385,19 @@ class ExtractEquipmentTagsFromPidView(APIView):
             return Response({'error': friendly},
                             status=status.HTTP_502_BAD_GATEWAY)
 
+        _persist_token_usage(
+            user=request.user,
+            feature='equipment_extraction',
+            usage=result.get('token_usage') or {},
+        )
+
         return Response({
             'filename': upload.name,
             'provider': result['provider'],
             'model':    result['model'],
             'tags':     result['tags'],
             'call_count': result['call_count'],
+            'token_usage': result.get('token_usage'),
         }, status=status.HTTP_200_OK)
 
 
@@ -1368,10 +1444,151 @@ class ExtractInstrumentTagsFromPidView(APIView):
             return Response({'error': friendly},
                             status=status.HTTP_502_BAD_GATEWAY)
 
+        _persist_token_usage(
+            user=request.user,
+            feature='instrument_extraction',
+            usage=result.get('token_usage') or {},
+        )
+
         return Response({
             'filename': upload.name,
             'provider': result['provider'],
             'model':    result['model'],
             'tags':     result['tags'],
             'call_count': result['call_count'],
+            'token_usage': result.get('token_usage'),
         }, status=status.HTTP_200_OK)
+
+
+# ─── Token usage endpoints ───────────────────────────────────────────
+USAGE_LIST_PAGE_SIZE = 200
+USAGE_LIST_MAX_PAGE_SIZE = 1000
+
+
+class UsageLogListView(ListAPIView):
+    """List the current user's token usage rows (most recent first)."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = PidCheckerV2UsageLogSerializer
+
+    def get_queryset(self):
+        qs = PidCheckerV2UsageLog.objects.filter(created_by=self.request.user)
+        feature = self.request.query_params.get('feature')
+        if feature:
+            qs = qs.filter(feature=feature)
+        since = self.request.query_params.get('since')
+        until = self.request.query_params.get('until')
+        from datetime import datetime as _dt
+        if since:
+            try:
+                qs = qs.filter(created_at__date__gte=_dt.strptime(since, '%Y-%m-%d').date())
+            except ValueError:
+                pass
+        if until:
+            try:
+                qs = qs.filter(created_at__date__lte=_dt.strptime(until, '%Y-%m-%d').date())
+            except ValueError:
+                pass
+        try:
+            page_size = min(int(self.request.query_params.get('page_size') or USAGE_LIST_PAGE_SIZE),
+                            USAGE_LIST_MAX_PAGE_SIZE)
+        except (TypeError, ValueError):
+            page_size = USAGE_LIST_PAGE_SIZE
+        return qs.order_by('-created_at')[:page_size]
+
+
+class UsageSummaryView(APIView):
+    """Aggregate usage for the current user (optionally within a date range)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = PidCheckerV2UsageLog.objects.filter(created_by=request.user)
+        since = request.query_params.get('since')
+        until = request.query_params.get('until')
+        from datetime import datetime as _dt
+        if since:
+            try:
+                qs = qs.filter(created_at__date__gte=_dt.strptime(since, '%Y-%m-%d').date())
+            except ValueError:
+                pass
+        if until:
+            try:
+                qs = qs.filter(created_at__date__lte=_dt.strptime(until, '%Y-%m-%d').date())
+            except ValueError:
+                pass
+        from decimal import Decimal
+        from collections import defaultdict
+        total = {'calls': 0, 'input_tokens': 0, 'output_tokens': 0,
+                 'total_tokens': 0, 'cost_usd': Decimal('0')}
+        by_feature = defaultdict(lambda: {'calls': 0, 'input_tokens': 0,
+                                          'output_tokens': 0, 'total_tokens': 0,
+                                          'cost_usd': Decimal('0')})
+        by_model = defaultdict(lambda: {'calls': 0, 'input_tokens': 0,
+                                        'output_tokens': 0, 'total_tokens': 0,
+                                        'cost_usd': Decimal('0')})
+        for r in qs.only('feature', 'provider', 'model_name', 'call_count',
+                         'input_tokens', 'output_tokens', 'total_tokens',
+                         'cost_usd'):
+            for bucket in (total, by_feature[r.feature or ''],
+                           by_model[f'{r.provider}|{r.model_name}']):
+                bucket['calls'] += r.call_count
+                bucket['input_tokens'] += r.input_tokens
+                bucket['output_tokens'] += r.output_tokens
+                bucket['total_tokens'] += r.total_tokens
+                bucket['cost_usd'] += r.cost_usd or Decimal('0')
+
+        def _fmt(b):
+            return {**b, 'cost_usd': str(b['cost_usd'])}
+
+        return Response({
+            'total': _fmt(total),
+            'by_feature': {k: _fmt(v) for k, v in by_feature.items()},
+            'by_model': {k: _fmt(v) for k, v in by_model.items()},
+            'row_count': qs.count(),
+        })
+
+
+class TokenReportView(APIView):
+    """Generate a consolidated token report (Excel or PDF)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        fmt = (request.data.get('format') or 'xlsx').lower()
+        if fmt not in ('xlsx', 'pdf'):
+            return Response({'error': "format must be 'xlsx' or 'pdf'"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        qs = PidCheckerV2UsageLog.objects.filter(created_by=request.user)
+        since = request.data.get('since')
+        until = request.data.get('until')
+        from datetime import datetime as _dt
+        if since:
+            try:
+                qs = qs.filter(created_at__date__gte=_dt.strptime(since, '%Y-%m-%d').date())
+            except ValueError:
+                pass
+        if until:
+            try:
+                qs = qs.filter(created_at__date__lte=_dt.strptime(until, '%Y-%m-%d').date())
+            except ValueError:
+                pass
+        qs = qs.order_by('-created_at')
+
+        from .services.token_report import build_xlsx, build_pdf
+        try:
+            if fmt == 'xlsx':
+                data = build_xlsx(qs)
+                content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                filename = f'pid_checker_v2_token_report_{_dt.utcnow().strftime("%Y%m%d_%H%M%S")}.xlsx'
+            else:
+                data = build_pdf(qs)
+                content_type = 'application/pdf'
+                filename = f'pid_checker_v2_token_report_{_dt.utcnow().strftime("%Y%m%d_%H%M%S")}.pdf'
+        except Exception as exc:
+            logger.exception('Token report generation failed')
+            return Response({'error': f'report generation failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        from django.http import HttpResponse
+        resp = HttpResponse(data, content_type=content_type)
+        resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return resp
+

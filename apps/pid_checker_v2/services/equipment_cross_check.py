@@ -180,9 +180,11 @@ def cross_check(
 
     ai_used = False
     ai_attr_used = False
+    from .token_accounting import UsageMeter
+    meter = UsageMeter(feature='equipment_cross_check')
     if use_ai and ai_provider and ai_api_key:
         try:
-            _enrich_with_ai(findings, ai_provider, ai_api_key)
+            _enrich_with_ai(findings, ai_provider, ai_api_key, meter=meter)
             ai_used = True
         except Exception:
             logger.exception('AI equipment cross-check enrichment failed — falling back to deterministic result')
@@ -193,7 +195,7 @@ def cross_check(
         _compare_attributes_deterministic(matched, pid_attr_by_tag, el_by_tag)
         if ai_provider and ai_api_key:
             try:
-                _refine_attributes_with_ai(matched, ai_provider, ai_api_key)
+                _refine_attributes_with_ai(matched, ai_provider, ai_api_key, meter=meter)
                 ai_attr_used = True
             except Exception:
                 logger.exception('AI attribute-comparison judge failed — keeping deterministic result')
@@ -204,6 +206,7 @@ def cross_check(
         'findings': findings,
         'ai_used': ai_used,
         'ai_attributes_used': ai_attr_used,
+        'token_usage': meter.summary(),
     }
 
 
@@ -256,7 +259,7 @@ def _finding_extra(tag: str) -> dict:
 # AI enrichment
 # ═════════════════════════════════════════════════════════════════════
 
-def _enrich_with_ai(findings: list[dict], provider: str, api_key: str) -> None:
+def _enrich_with_ai(findings: list[dict], provider: str, api_key: str, *, meter=None) -> None:
     missing = [f for f in findings if f['kind'] == FINDING_MISSING_ON_PID][:AI_MAX_TAGS_PER_SIDE]
     extra   = [f for f in findings if f['kind'] == FINDING_EXTRA_ON_PID][:AI_MAX_TAGS_PER_SIDE]
     if not missing and not extra:
@@ -270,7 +273,10 @@ def _enrich_with_ai(findings: list[dict], provider: str, api_key: str) -> None:
                     for f in missing) + '\n\n'
         "Correlate them where possible. Respond with the JSON array as specified."
     )
-    raw = _call_ai(provider, api_key, user_prompt)
+    raw, in_t, out_t = _call_ai(provider, api_key, user_prompt)
+    if meter is not None:
+        from .vision_extractor import VISION_MODELS
+        meter.add(provider, VISION_MODELS[provider], in_t, out_t)
     parsed = _extract_json_array(raw)
 
     by_kind_tag: dict[tuple, dict] = {}
@@ -290,8 +296,9 @@ def _enrich_with_ai(findings: list[dict], provider: str, api_key: str) -> None:
         target['ai_confidence']      = str(row.get('confidence') or '')
 
 
-def _call_ai(provider: str, api_key: str, user_prompt: str) -> str:
+def _call_ai(provider: str, api_key: str, user_prompt: str):
     from .vision_extractor import VISION_MODELS
+    from .token_accounting import read_openai_usage, read_claude_usage
     p = (provider or '').lower()
     if p == 'openai':
         import openai
@@ -305,7 +312,8 @@ def _call_ai(provider: str, api_key: str, user_prompt: str) -> str:
                 {'role': 'user', 'content': user_prompt},
             ],
         )
-        return resp.choices[0].message.content or ''
+        inp, out = read_openai_usage(resp)
+        return (resp.choices[0].message.content or ''), inp, out
     if p == 'claude':
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
@@ -317,7 +325,8 @@ def _call_ai(provider: str, api_key: str, user_prompt: str) -> str:
             messages=[{'role': 'user', 'content': user_prompt}],
         )
         parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
-        return ''.join(parts)
+        inp, out = read_claude_usage(resp)
+        return ''.join(parts), inp, out
     raise ValueError(f'unknown AI provider {provider!r}')
 
 
@@ -454,7 +463,7 @@ def _overall_severity_from_rows(rows: list[dict]) -> str:
     return worst
 
 
-def _refine_attributes_with_ai(match_findings: list[dict], provider: str, api_key: str) -> None:
+def _refine_attributes_with_ai(match_findings: list[dict], provider: str, api_key: str, *, meter=None) -> None:
     """Ask BYOK model to re-judge attribute equivalence (units, synonyms, ranges).
 
     Overwrites ``status`` / ``note`` on each attribute row and recomputes
@@ -486,7 +495,10 @@ def _refine_attributes_with_ai(match_findings: list[dict], provider: str, api_ke
             "system prompt.\n\n"
             + json.dumps(batch, ensure_ascii=False, indent=2)
         )
-        raw = _call_ai_attr(provider, api_key, user_prompt)
+        raw, in_t, out_t = _call_ai_attr(provider, api_key, user_prompt)
+        if meter is not None:
+            from .vision_extractor import VISION_MODELS
+            meter.add(provider, VISION_MODELS[provider], in_t, out_t)
         parsed = _extract_json_array(raw)
         for row in parsed:
             if not isinstance(row, dict):
@@ -523,8 +535,9 @@ def _refine_attributes_with_ai(match_findings: list[dict], provider: str, api_ke
                 target['severity'] = _overall_severity_from_rows(target.get('attributes') or [])
 
 
-def _call_ai_attr(provider: str, api_key: str, user_prompt: str) -> str:
+def _call_ai_attr(provider: str, api_key: str, user_prompt: str):
     from .vision_extractor import VISION_MODELS
+    from .token_accounting import read_openai_usage, read_claude_usage
     p = (provider or '').lower()
     if p == 'openai':
         import openai
@@ -538,7 +551,8 @@ def _call_ai_attr(provider: str, api_key: str, user_prompt: str) -> str:
                 {'role': 'user', 'content': user_prompt},
             ],
         )
-        return resp.choices[0].message.content or ''
+        inp, out = read_openai_usage(resp)
+        return (resp.choices[0].message.content or ''), inp, out
     if p == 'claude':
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
@@ -550,5 +564,6 @@ def _call_ai_attr(provider: str, api_key: str, user_prompt: str) -> str:
             messages=[{'role': 'user', 'content': user_prompt}],
         )
         parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
-        return ''.join(parts)
+        inp, out = read_claude_usage(resp)
+        return ''.join(parts), inp, out
     raise ValueError(f'unknown AI provider {provider!r}')

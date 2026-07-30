@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from difflib import SequenceMatcher
 from typing import Optional
 
 from .instrument_vision_extractor import (
@@ -84,6 +85,19 @@ AI_MAX_TAGS_PER_SIDE = 40
 AI_MAX_TOKENS = 2048
 AI_TEMPERATURE = 0.0
 
+# Fuzzy (deterministic) pairing of MISSING ↔ EXTRA before AI.
+# Catches OCR / hyphen / suffix drift like "PT-8003A" vs "PT8003 A" or
+# "LT-8019TF" vs "LT-8019 TF" without spending BYOK tokens.
+FUZZY_MATCH_ENABLED         = True
+FUZZY_MATCH_THRESHOLD       = 0.85     # SequenceMatcher ratio
+FUZZY_ALPHA_MUST_MATCH      = True     # function-code letters must be identical
+FUZZY_NUMERIC_MUST_MATCH    = True     # numeric core must be identical
+
+# AI-suggested pair promotion — when the AI returns
+# should_match=true with confidence high|medium the pair is promoted
+# to a MATCH row (marked as `ai_probable_match=True`).
+AI_PROMOTE_CONFIDENCES = ('high', 'medium')
+
 # Attribute-comparison AI judge
 AI_ATTR_MAX_TAGS_PER_BATCH = 12
 AI_ATTR_MAX_TOKENS = 3000
@@ -91,16 +105,26 @@ AI_ATTR_MAX_TOKENS = 3000
 AI_SYSTEM_PROMPT = (
     "You are an instrumentation engineering QA reviewer. You are given two "
     "lists of instrument tags: (A) tags read from a P&ID drawing, and (B) "
-    "tags from the master Instrument Index (Excel).  Some tags in list A "
-    "may correspond to tags in list B despite typos, OCR errors, or minor "
-    "formatting differences (e.g. 'LT-8019 TF' vs 'LT-8019TF', or "
-    "confusion between 'PT-8003A' and 'PT-8003ATF'). For each MISSING "
-    "(list-B tag not seen on the drawing) and each EXTRA (list-A tag not "
-    "in the Instrument Index), suggest the most likely correlated "
-    "counterpart if any, plus a short reason and a confidence "
-    "low|medium|high.  Respond with ONLY a JSON array of objects with "
-    "keys: kind ('missing_on_pid'|'extra_on_pid'), tag, suggested_match, "
-    "reason, confidence."
+    "tags from the master Instrument Index (Excel). Some tags in list A "
+    "may correspond to tags in list B despite typos, OCR errors, hyphen / "
+    "space differences, or suffix drift (e.g. 'LT-8019 TF' vs 'LT8019TF', "
+    "'PT-8003A' vs 'PT8003ATF', 'FIC 8002' vs 'FIC-8002'). Your job is to "
+    "PAIR them wherever engineering intent is the same instrument. For "
+    "each MISSING (index tag not seen on drawing) and each EXTRA (drawing "
+    "tag not in index) return ONE JSON object with keys: "
+    "  kind ('missing_on_pid'|'extra_on_pid'), "
+    "  tag (the input tag verbatim), "
+    "  suggested_match (the counterpart tag from the OTHER list, or ''), "
+    "  should_match (true when you are confident the two refer to the "
+    "                 same instrument and should be treated as MATCH), "
+    "  reason (max 25 words), "
+    "  confidence ('low'|'medium'|'high'). "
+    "Respond with ONLY a JSON array of these objects. "
+    "Rules: (1) never invent tags — suggested_match must come from the "
+    "supplied lists; (2) same function-code letters + same numeric core "
+    "is a strong pair even if suffixes differ by one letter; (3) return "
+    "should_match=false when confidence is low or when instrument "
+    "families clearly differ (e.g. 'PT' vs 'LT')."
 )
 
 AI_ATTR_SYSTEM_PROMPT = (
@@ -183,11 +207,21 @@ def cross_check(
         if tag not in ii_by_tag:
             findings.append(_finding_extra(tag))
 
+    # Deterministic fuzzy pass: promote near-identical MISSING↔EXTRA pairs
+    # to fuzzy matches so obvious OCR / hyphen / suffix drift doesn't
+    # burn BYOK tokens or bloat the discrepancy list.
+    fuzzy_pairs = 0
+    if FUZZY_MATCH_ENABLED:
+        fuzzy_pairs = _pair_fuzzy_matches(findings, ii_by_tag)
+
     ai_used = False
     ai_attr_used = False
+    ai_promoted = 0
+    from .token_accounting import UsageMeter
+    meter = UsageMeter(feature='instrument_cross_check')
     if use_ai and ai_provider and ai_api_key:
         try:
-            _enrich_with_ai(findings, ai_provider, ai_api_key)
+            ai_promoted = _enrich_with_ai(findings, ii_by_tag, ai_provider, ai_api_key, meter=meter)
             ai_used = True
         except Exception:
             logger.exception(
@@ -199,7 +233,7 @@ def cross_check(
         _compare_attributes_deterministic(matched, pid_attr_by_tag, ii_by_tag)
         if ai_provider and ai_api_key:
             try:
-                _refine_attributes_with_ai(matched, ai_provider, ai_api_key)
+                _refine_attributes_with_ai(matched, ai_provider, ai_api_key, meter=meter)
                 ai_attr_used = True
             except Exception:
                 logger.exception(
@@ -207,11 +241,14 @@ def cross_check(
                 )
 
     summary = _summarise(findings, len(pid_by_tag), len(ii_by_tag))
+    summary['fuzzy_pairs'] = fuzzy_pairs
+    summary['ai_promoted_pairs'] = ai_promoted
     return {
         'summary': summary,
         'findings': findings,
         'ai_used': ai_used,
         'ai_attributes_used': ai_attr_used,
+        'token_usage': meter.summary(),
     }
 
 
@@ -267,11 +304,11 @@ def _finding_extra(tag: str) -> dict:
 # AI enrichment
 # ═════════════════════════════════════════════════════════════════════
 
-def _enrich_with_ai(findings: list[dict], provider: str, api_key: str) -> None:
+def _enrich_with_ai(findings: list[dict], ii_by_tag: dict[str, dict], provider: str, api_key: str, *, meter=None) -> int:
     missing = [f for f in findings if f['kind'] == FINDING_MISSING_ON_PID][:AI_MAX_TAGS_PER_SIDE]
     extra   = [f for f in findings if f['kind'] == FINDING_EXTRA_ON_PID][:AI_MAX_TAGS_PER_SIDE]
     if not missing and not extra:
-        return
+        return 0
 
     user_prompt = (
         "P&ID EXTRACTED TAGS (EXTRA — on drawing, not in Instrument Index):\n"
@@ -284,13 +321,18 @@ def _enrich_with_ai(findings: list[dict], provider: str, api_key: str) -> None:
         ) + '\n\n'
         "Correlate them where possible. Respond with the JSON array as specified."
     )
-    raw = _call_ai(provider, api_key, user_prompt)
+    raw, in_t, out_t = _call_ai(provider, api_key, user_prompt)
+    if meter is not None:
+        from .vision_extractor import VISION_MODELS
+        meter.add(provider, VISION_MODELS[provider], in_t, out_t)
     parsed = _extract_json_array(raw)
 
     by_kind_tag: dict[tuple, dict] = {}
     for f in findings:
         by_kind_tag[(f['kind'], _norm(f['tag']))] = f
 
+    # Two-pass: annotate first, then promote confident pairs to MATCH.
+    promote_pairs: list[tuple[dict, str, str, str]] = []
     for row in parsed:
         if not isinstance(row, dict):
             continue
@@ -299,13 +341,138 @@ def _enrich_with_ai(findings: list[dict], provider: str, api_key: str) -> None:
         target = by_kind_tag.get((kind, tag))
         if not target:
             continue
-        target['ai_suggested_match'] = str(row.get('suggested_match') or '')
-        target['ai_reason']          = str(row.get('reason') or '')
-        target['ai_confidence']      = str(row.get('confidence') or '')
+        suggested = str(row.get('suggested_match') or '')
+        reason    = str(row.get('reason') or '')
+        confidence = str(row.get('confidence') or '').lower()
+        target['ai_suggested_match'] = suggested
+        target['ai_reason']          = reason
+        target['ai_confidence']      = confidence
+
+        if (
+            bool(row.get('should_match'))
+            and suggested
+            and confidence in AI_PROMOTE_CONFIDENCES
+            and target.get('kind') == FINDING_MISSING_ON_PID
+        ):
+            # For MISSING rows we can look up the paired EXTRA finding
+            # and merge both into a single AI-promoted MATCH.
+            extra_target = by_kind_tag.get((FINDING_EXTRA_ON_PID, _norm(suggested)))
+            if extra_target is not None:
+                promote_pairs.append((target, extra_target, reason, confidence))
+
+    promoted = 0
+    for missing_f, extra_f, reason, confidence in promote_pairs:
+        _promote_pair_to_match(findings, missing_f, extra_f, ii_by_tag, reason, confidence)
+        promoted += 1
+    return promoted
 
 
-def _call_ai(provider: str, api_key: str, user_prompt: str) -> str:
+def _promote_pair_to_match(
+    findings: list[dict],
+    missing_f: dict,
+    extra_f: dict,
+    ii_by_tag: dict[str, dict],
+    reason: str,
+    confidence: str,
+) -> None:
+    index_tag = missing_f.get('instrument_index_tag') or missing_f.get('tag')
+    pid_tag   = extra_f.get('pid_tag') or extra_f.get('tag')
+    ii_row    = ii_by_tag.get(_norm(index_tag), {})
+    promoted = _finding_match(index_tag, ii_row)
+    promoted.update({
+        'severity': SEVERITY_WARNING,
+        'ai_probable_match': True,
+        'ai_reason': reason,
+        'ai_confidence': confidence,
+        'pid_tag': pid_tag,
+        'message': f"AI-matched: P&ID '{pid_tag}' ↔ Index '{index_tag}' ({reason})",
+    })
+    # Drop the original MISSING + EXTRA rows and append the promoted MATCH.
+    findings.remove(missing_f)
+    findings.remove(extra_f)
+    findings.append(promoted)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Fuzzy pairing (deterministic, no AI cost)
+# ═════════════════════════════════════════════════════════════════════
+
+_ALPHA_RE   = re.compile(r'[A-Z]+')
+_NUMERIC_RE = re.compile(r'\d+')
+
+
+def _tag_alpha(tag: str) -> str:
+    """Return the leading function-code letters (e.g. 'PT' from 'PT-8003A')."""
+    m = _ALPHA_RE.match(_norm(tag))
+    return m.group(0) if m else ''
+
+
+def _tag_numeric(tag: str) -> str:
+    """Return the first numeric run (e.g. '8003' from 'PT-8003A')."""
+    m = _NUMERIC_RE.search(_norm(tag))
+    return m.group(0) if m else ''
+
+
+def _tag_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, _norm(a), _norm(b)).ratio()
+
+
+def _pair_fuzzy_matches(findings: list[dict], ii_by_tag: dict[str, dict]) -> int:
+    missing = [f for f in findings if f['kind'] == FINDING_MISSING_ON_PID]
+    extra   = [f for f in findings if f['kind'] == FINDING_EXTRA_ON_PID]
+    if not missing or not extra:
+        return 0
+
+    used_extra: set[int] = set()
+    promoted = 0
+
+    for miss in list(missing):
+        miss_tag = miss.get('tag') or ''
+        miss_alpha = _tag_alpha(miss_tag)
+        miss_num   = _tag_numeric(miss_tag)
+
+        best_idx = -1
+        best_score = 0.0
+        for idx, ex in enumerate(extra):
+            if idx in used_extra:
+                continue
+            ex_tag = ex.get('tag') or ''
+            if FUZZY_ALPHA_MUST_MATCH and _tag_alpha(ex_tag) != miss_alpha:
+                continue
+            if FUZZY_NUMERIC_MUST_MATCH and _tag_numeric(ex_tag) != miss_num:
+                continue
+            score = _tag_similarity(miss_tag, ex_tag)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        if best_idx < 0 or best_score < FUZZY_MATCH_THRESHOLD:
+            continue
+        ex = extra[best_idx]
+        used_extra.add(best_idx)
+        _promote_pair_to_match(
+            findings, miss, ex, ii_by_tag,
+            reason=f"deterministic fuzzy pair (similarity {best_score:.2f})",
+            confidence='high',
+        )
+        # Mark as deterministic, not AI-promoted, for downstream reporting.
+        # Last appended item is the promoted match.
+        findings[-1]['fuzzy_match'] = True
+        findings[-1].pop('ai_probable_match', None)
+        findings[-1]['message'] = (
+            f"Fuzzy-matched: P&ID '{ex.get('pid_tag') or ex.get('tag')}' ↔ "
+            f"Index '{miss.get('instrument_index_tag') or miss.get('tag')}' "
+            f"(similarity {best_score:.2f})"
+        )
+        promoted += 1
+
+    return promoted
+
+
+
+def _call_ai(provider: str, api_key: str, user_prompt: str):
     from .vision_extractor import VISION_MODELS
+    from .token_accounting import read_openai_usage, read_claude_usage
     p = (provider or '').lower()
     if p == 'openai':
         import openai
@@ -319,7 +486,8 @@ def _call_ai(provider: str, api_key: str, user_prompt: str) -> str:
                 {'role': 'user', 'content': user_prompt},
             ],
         )
-        return resp.choices[0].message.content or ''
+        inp, out = read_openai_usage(resp)
+        return (resp.choices[0].message.content or ''), inp, out
     if p == 'claude':
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
@@ -331,7 +499,8 @@ def _call_ai(provider: str, api_key: str, user_prompt: str) -> str:
             messages=[{'role': 'user', 'content': user_prompt}],
         )
         parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
-        return ''.join(parts)
+        inp, out = read_claude_usage(resp)
+        return ''.join(parts), inp, out
     raise ValueError(f'unknown AI provider {provider!r}')
 
 
@@ -361,7 +530,9 @@ def _extract_json_array(text: str) -> list:
 def _norm(v) -> str:
     if v is None:
         return ''
-    return re.sub(r'\s+', '', str(v).strip().upper())
+    # Strip whitespace AND hyphens so "SDV8005" (P&ID) matches "SDV-8005"
+    # (Instrument Index Excel).
+    return re.sub(r'[\s\-]+', '', str(v).strip().upper())
 
 
 def _summarise(findings: list[dict], n_pid: int, n_ii: int) -> dict:
@@ -462,7 +633,7 @@ def _overall_severity_from_rows(rows: list[dict]) -> str:
     return worst
 
 
-def _refine_attributes_with_ai(match_findings: list[dict], provider: str, api_key: str) -> None:
+def _refine_attributes_with_ai(match_findings: list[dict], provider: str, api_key: str, *, meter=None) -> None:
     payload_tags = []
     for f in match_findings:
         rows = f.get('attributes') or []
@@ -488,7 +659,10 @@ def _refine_attributes_with_ai(match_findings: list[dict], provider: str, api_ke
             "system prompt.\n\n"
             + json.dumps(batch, ensure_ascii=False, indent=2)
         )
-        raw = _call_ai_attr(provider, api_key, user_prompt)
+        raw, in_t, out_t = _call_ai_attr(provider, api_key, user_prompt)
+        if meter is not None:
+            from .vision_extractor import VISION_MODELS
+            meter.add(provider, VISION_MODELS[provider], in_t, out_t)
         parsed = _extract_json_array(raw)
         for row in parsed:
             if not isinstance(row, dict):
@@ -524,8 +698,9 @@ def _refine_attributes_with_ai(match_findings: list[dict], provider: str, api_ke
                 target['severity'] = _overall_severity_from_rows(target.get('attributes') or [])
 
 
-def _call_ai_attr(provider: str, api_key: str, user_prompt: str) -> str:
+def _call_ai_attr(provider: str, api_key: str, user_prompt: str):
     from .vision_extractor import VISION_MODELS
+    from .token_accounting import read_openai_usage, read_claude_usage
     p = (provider or '').lower()
     if p == 'openai':
         import openai
@@ -539,7 +714,8 @@ def _call_ai_attr(provider: str, api_key: str, user_prompt: str) -> str:
                 {'role': 'user', 'content': user_prompt},
             ],
         )
-        return resp.choices[0].message.content or ''
+        inp, out = read_openai_usage(resp)
+        return (resp.choices[0].message.content or ''), inp, out
     if p == 'claude':
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
@@ -551,5 +727,6 @@ def _call_ai_attr(provider: str, api_key: str, user_prompt: str) -> str:
             messages=[{'role': 'user', 'content': user_prompt}],
         )
         parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
-        return ''.join(parts)
+        inp, out = read_claude_usage(resp)
+        return ''.join(parts), inp, out
     raise ValueError(f'unknown AI provider {provider!r}')

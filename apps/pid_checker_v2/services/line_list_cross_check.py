@@ -109,9 +109,11 @@ def cross_check(
 
     # Optional AI enrichment on missing + extra only
     ai_used = False
+    from .token_accounting import UsageMeter
+    meter = UsageMeter(feature='line_list_cross_check')
     if use_ai and ai_provider and ai_api_key:
         try:
-            _enrich_with_ai(findings, ai_provider, ai_api_key)
+            _enrich_with_ai(findings, ai_provider, ai_api_key, meter=meter)
             ai_used = True
         except Exception:
             logger.exception('AI cross-check enrichment failed — falling back to deterministic result')
@@ -121,6 +123,7 @@ def cross_check(
         'summary': summary,
         'findings': findings,
         'ai_used': ai_used,
+        'token_usage': meter.summary(),
     }
 
 
@@ -191,7 +194,7 @@ def _finding_extra(tag: str, pid_row: dict) -> dict:
 # AI enrichment
 # ═════════════════════════════════════════════════════════════════════
 
-def _enrich_with_ai(findings: list[dict], provider: str, api_key: str) -> None:
+def _enrich_with_ai(findings: list[dict], provider: str, api_key: str, *, meter=None) -> None:
     missing = [f for f in findings if f['kind'] == FINDING_MISSING_ON_PID][:AI_MAX_TAGS_PER_SIDE]
     extra   = [f for f in findings if f['kind'] == FINDING_EXTRA_ON_PID][:AI_MAX_TAGS_PER_SIDE]
     if not missing and not extra:
@@ -205,7 +208,10 @@ def _enrich_with_ai(findings: list[dict], provider: str, api_key: str) -> None:
                     for f in missing) + '\n\n'
         "Correlate them where possible. Respond with the JSON array as specified."
     )
-    raw = _call_ai(provider, api_key, user_prompt)
+    raw, in_t, out_t = _call_ai(provider, api_key, user_prompt)
+    if meter is not None:
+        from .vision_extractor import VISION_MODELS
+        meter.add(provider, VISION_MODELS[provider], in_t, out_t)
     parsed = _extract_json_array(raw)
 
     # Index findings by tag for fast update
@@ -226,8 +232,9 @@ def _enrich_with_ai(findings: list[dict], provider: str, api_key: str) -> None:
         target['ai_confidence']      = str(row.get('confidence') or '')
 
 
-def _call_ai(provider: str, api_key: str, user_prompt: str) -> str:
+def _call_ai(provider: str, api_key: str, user_prompt: str):
     from .vision_extractor import VISION_MODELS
+    from .token_accounting import read_openai_usage, read_claude_usage
     p = (provider or '').lower()
     if p == 'openai':
         import openai
@@ -241,7 +248,8 @@ def _call_ai(provider: str, api_key: str, user_prompt: str) -> str:
                 {'role': 'user', 'content': user_prompt},
             ],
         )
-        return resp.choices[0].message.content or ''
+        inp, out = read_openai_usage(resp)
+        return (resp.choices[0].message.content or ''), inp, out
     if p == 'claude':
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
@@ -253,7 +261,8 @@ def _call_ai(provider: str, api_key: str, user_prompt: str) -> str:
             messages=[{'role': 'user', 'content': user_prompt}],
         )
         parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
-        return ''.join(parts)
+        inp, out = read_claude_usage(resp)
+        return ''.join(parts), inp, out
     raise ValueError(f'unknown AI provider {provider!r}')
 
 

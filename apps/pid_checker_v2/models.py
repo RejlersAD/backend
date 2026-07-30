@@ -515,3 +515,52 @@ class PidCheckerV2InstrumentIndexRow(models.Model):
 
     def __str__(self) -> str:
         return self.tag or f'row {self.excel_row}'
+
+
+# ── Token usage log ───────────────────────────────────────────────────────
+USAGE_FEATURE_MAX_LEN = 64
+USAGE_PROVIDER_MAX_LEN = 32
+USAGE_MODEL_MAX_LEN = 128
+
+
+class PidCheckerV2UsageLog(models.Model):
+    """One row per AI-billable operation (vision extract, AI cross-check).
+
+    ``call_count`` may be > 1 when a single logical operation (e.g. tiled
+    vision extraction) makes multiple provider calls that all bill against
+    the same feature/model combination.
+    """
+
+    run_id = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='pid_checker_v2_usage_logs',
+    )
+    feature = models.CharField(max_length=USAGE_FEATURE_MAX_LEN, db_index=True)
+    provider = models.CharField(max_length=USAGE_PROVIDER_MAX_LEN, blank=True, default='')
+    model_name = models.CharField(max_length=USAGE_MODEL_MAX_LEN, blank=True, default='')
+
+    call_count = models.PositiveIntegerField(default=0)
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    total_tokens = models.PositiveIntegerField(default=0)
+    cost_usd = models.DecimalField(max_digits=12, decimal_places=6, default=0)
+
+    related_extraction_id = models.UUIDField(null=True, blank=True, db_index=True)
+    related_upload_id = models.UUIDField(null=True, blank=True, db_index=True)
+    notes = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'pid_checker_v2_usage_log'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['created_by', '-created_at']),
+            models.Index(fields=['feature', '-created_at']),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.feature} · {self.model_name} · {self.total_tokens} tok'
+

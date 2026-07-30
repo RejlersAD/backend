@@ -24,6 +24,9 @@ from .views import (
     InstrumentCrossCheckView,
     ExtractEquipmentTagsFromPidView,
     ExtractInstrumentTagsFromPidView,
+    UsageLogListView,
+    UsageSummaryView,
+    TokenReportView,
 )
 
 app_name = 'pid_checker_v2'
@@ -51,6 +54,9 @@ INSTRUMENT_INDEXES_ACTIVATE_PATH = 'instrument-indexes/<uuid:instrument_index_id
 INSTRUMENT_CROSS_CHECK_PATH = 'instrument-cross-check/'
 EXTRACT_EQUIPMENT_TAGS_PATH = 'extract-equipment-tags/'
 EXTRACT_INSTRUMENT_TAGS_PATH = 'extract-instrument-tags/'
+USAGE_LIST_PATH = 'usage/'
+USAGE_SUMMARY_PATH = 'usage/summary/'
+USAGE_REPORT_PATH = 'usage/report/'
 
 urlpatterns = [
     path(EXTRACT_LINE_TAGS_PATH, ExtractLineTagsView.as_view(),
@@ -104,4 +110,8 @@ urlpatterns = [
          name='extract-equipment-tags'),
     path(EXTRACT_INSTRUMENT_TAGS_PATH, ExtractInstrumentTagsFromPidView.as_view(),
          name='extract-instrument-tags'),
+    # Token usage / consolidated report — /usage/summary/ must precede /usage/
+    path(USAGE_SUMMARY_PATH, UsageSummaryView.as_view(), name='usage-summary'),
+    path(USAGE_REPORT_PATH, TokenReportView.as_view(), name='usage-report'),
+    path(USAGE_LIST_PATH, UsageLogListView.as_view(), name='usage-list'),
 ]

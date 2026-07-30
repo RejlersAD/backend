@@ -140,6 +140,8 @@ def extract_line_tags_via_vision(
 
     user_prompt = _compose_user_prompt(legend_prompt)
 
+    from .token_accounting import UsageMeter
+    meter = UsageMeter(feature='line_extraction')
     all_raw: list[str] = []
     all_tags: dict[str, dict] = {}
     call_count = 0
@@ -148,7 +150,8 @@ def extract_line_tags_via_vision(
         # 1) Optional low-res overview pass — helps the model see the drawing layout.
         if VISION_INCLUDE_OVERVIEW:
             overview = _downscale(page_image, VISION_OVERVIEW_MAX_DIMENSION_PX)
-            raw = _call_vision(provider, api_key, _image_to_b64_png(overview), user_prompt)
+            raw, in_t, out_t = _call_vision(provider, api_key, _image_to_b64_png(overview), user_prompt)
+            meter.add(provider, VISION_MODELS[provider], in_t, out_t)
             call_count += 1
             all_raw.append(f'[page {page_idx} overview]\n{raw}')
             for tag in _parse_tag_list(raw):
@@ -160,7 +163,8 @@ def extract_line_tags_via_vision(
                                                    VISION_TILE_COLS,
                                                    VISION_TILE_OVERLAP_FRAC)):
             tile = _downscale(tile, VISION_TILE_MAX_DIMENSION_PX)
-            raw = _call_vision(provider, api_key, _image_to_b64_png(tile), user_prompt)
+            raw, in_t, out_t = _call_vision(provider, api_key, _image_to_b64_png(tile), user_prompt)
+            meter.add(provider, VISION_MODELS[provider], in_t, out_t)
             call_count += 1
             all_raw.append(f'[page {page_idx} tile {tile_idx}]\n{raw}')
             for tag in _parse_tag_list(raw):
@@ -174,6 +178,7 @@ def extract_line_tags_via_vision(
         'tags': tags_sorted,
         'raw': '\n\n---\n\n'.join(all_raw),
         'call_count': call_count,
+        'token_usage': meter.summary(),
     }
 
 
@@ -360,8 +365,9 @@ def _is_overloaded_error(exc) -> bool:
     return 'overloaded' in msg or 'overloaded_error' in msg
 
 
-def _call_openai(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PROMPT) -> str:
+def _call_openai(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PROMPT):
     import openai
+    from .token_accounting import read_openai_usage
     client = openai.OpenAI(api_key=api_key)
     resp = client.chat.completions.create(
         model=VISION_MODELS['openai'],
@@ -384,11 +390,14 @@ def _call_openai(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PR
             },
         ],
     )
-    return resp.choices[0].message.content or ''
+    text = resp.choices[0].message.content or ''
+    inp, out = read_openai_usage(resp)
+    return text, inp, out
 
 
-def _call_claude(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PROMPT) -> str:
+def _call_claude(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PROMPT):
     import anthropic
+    from .token_accounting import read_claude_usage
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
         model=VISION_MODELS['claude'],
@@ -412,6 +421,6 @@ def _call_claude(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PR
             }
         ],
     )
-    # anthropic response is a list of content blocks
     parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
-    return ''.join(parts)
+    inp, out = read_claude_usage(resp)
+    return ''.join(parts), inp, out
