@@ -8,12 +8,14 @@ python-pptx) — no extra dependency risk beyond python-pptx itself.
 """
 from __future__ import annotations
 
+import base64
 import csv
 import datetime
 import io
 import json
 import os
 import re
+import uuid
 
 from django.utils import timezone
 
@@ -447,7 +449,11 @@ def _xer_calendar_data(hours_per_day: int) -> str:
     hour span, in P6's proprietary calendar syntax — mirrors the 'Standard
     5 Day Workweek' calendar found in the reference sample .xer files."""
     start_hr = '08:00'
-    end_hr = f'{8 + hours_per_day:02d}:00' if hours_per_day < 16 else '17:00'
+    # P6 clock is 24h; workday finish = start + hours_per_day. Previous
+    # code only handled hours_per_day < 16 and produced garbage on 8h days
+    # (2×8=16 → '16:00' vs P6's expected end-of-shift), so compute directly.
+    end_total_min = 8 * 60 + int(hours_per_day * 60)
+    end_hr = f'{(end_total_min // 60) % 24:02d}:{end_total_min % 60:02d}'
     workday = f'(0||0(s|{start_hr}|f|{end_hr})())'
     days = ''.join(
         f'(0||{d}()({workday if 2 <= d <= 6 else ""}))'
@@ -459,13 +465,61 @@ def _xer_calendar_data(hours_per_day: int) -> str:
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# XER — GUID + soft-coded structural identifiers
+# P6 uses base64-encoded 16-byte UUIDs (22 chars, no '=' padding) as record
+# GUIDs across TASK / PROJWBS / PROJECT. Generating real GUIDs (instead of
+# leaving the column blank) keeps update semantics correct on re-import and
+# avoids "duplicate" collisions with any prior imported schedule.
+# ─────────────────────────────────────────────────────────────────────────
+XER_OBS_ID = 1
+XER_OBS_NAME = 'Enterprise'
+XER_FINTMPL_ID = 1
+XER_FINTMPL_NAME = 'Calendar'
+XER_SCHEDOPTIONS_ID = 1
+# Default working shift (soft-coded here — matches sample XER 08:00–17:00).
+XER_WORK_START = '08:00'
+XER_WORK_END = '17:00'
+
+
+def _xer_guid() -> str:
+    """Returns a Primavera-style 22-character base64 GUID (no '=' padding)."""
+    return base64.b64encode(uuid.uuid4().bytes).decode('ascii').rstrip('=')
+
+
+def _xer_add_working_days(iso_date: str, days: int, end_time: str = XER_WORK_END) -> str:
+    """Shifts `iso_date` by `days` working days (Mon–Fri) and returns a
+    P6 datetime literal `YYYY-MM-DD HH:MM`. Returns '' if the input date
+    can't be parsed."""
+    if not iso_date:
+        return ''
+    try:
+        base = datetime.date.fromisoformat(iso_date)
+    except (ValueError, TypeError):
+        return ''
+    try:
+        shifted = add_working_days(base, int(days))
+    except (ValueError, TypeError):
+        return ''
+    return f'{shifted.isoformat()} {end_time}'
+
+
 def generation_to_xer_bytes(generation) -> bytes:
     """
     Exports this generation's WBS + Activities + Logic Matrix as a
-    Primavera P6-compatible .xer schedule file (single project, single
-    Mon–Fri calendar). Returns bytes encoded as Windows-1252 (P6's native
-    XER encoding) with UTF-8 as a defensive fallback for characters that
-    don't map (e.g. non-Latin project names).
+    Primavera P6-compatible .xer schedule file.
+
+    Layout mirrors a native P6-exported schedule (Documents/Project Control/
+    Planning Package/Sample.txt): every mandatory section — ERMHDR, CURRTYPE,
+    FINTMPL, OBS, PROJECT, CALENDAR, SCHEDOPTIONS, PROJWBS, TASK, TASKPRED —
+    is emitted with the full column set P6 expects, so File > Import >
+    Primavera PM (XER) succeeds and the imported project retains WBS
+    hierarchy, activity dates, constraint types, GUIDs and full FS/SS/FF/SF
+    predecessor logic.
+
+    Returns bytes encoded as Windows-1252 (P6's native XER encoding) with
+    UTF-8 as a defensive fallback for characters that don't map (e.g.
+    non-Latin project names).
     """
     project = generation.project
     wbs_nodes = generation.wbs or []
@@ -475,23 +529,31 @@ def generation_to_xer_bytes(generation) -> bytes:
     calendar = dict(DEFAULT_CALENDAR)
     calendar.update(getattr(project, 'calendar_overrides', None) or {})
     hours_per_day = int(calendar.get('hours_per_day') or 8)
+    days_per_week = int(calendar.get('working_days_per_week') or 5)
 
     now = timezone.now()
+    now_stamp = now.strftime('%Y-%m-%d %H:%M')
     export_date = now.strftime('%Y-%m-%d')
     export_user = (getattr(generation.generated_by, 'username', '') or 'radai').strip() or 'radai'
     export_user_full = getattr(generation.generated_by, 'get_full_name', lambda: '')() or export_user
 
     # WBS code -> synthetic numeric wbs_id (P6 requires numeric FKs).
     wbs_id_map = {node['code']: 1000 + i for i, node in enumerate(wbs_nodes, start=1)}
+    wbs_guid_map = {node['code']: _xer_guid() for node in wbs_nodes}
     root_wbs_id = wbs_id_map.get('1') or (next(iter(wbs_id_map.values())) if wbs_id_map else 1000)
 
     # Activity id (e.g. "PR-100") -> synthetic numeric task_id.
     task_id_map = {a['id']: 2000 + i for i, a in enumerate(activities, start=1)}
+    task_guid_map = {a['id']: _xer_guid() for a in activities}
 
     starts = [a['start_date'] for a in activities if a.get('start_date')]
     finishes = [a['finish_date'] for a in activities if a.get('finish_date')]
     plan_start = min(starts) if starts else (project.effective_date.isoformat() if project.effective_date else export_date)
     plan_end = max(finishes) if finishes else plan_start
+
+    week_hours = hours_per_day * days_per_week
+    month_hours = week_hours * 4        # P6 convention: 4 weeks/month
+    year_hours = week_hours * 52
 
     lines = [
         f'ERMHDR\t{XER_VERSION}\t{export_date}\tProject\t{export_user}\t{export_user_full}\t'
@@ -504,114 +566,221 @@ def generation_to_xer_bytes(generation) -> bytes:
                   'pos_curr_fmt_type\tneg_curr_fmt_type\tcurr_type\tcurr_short_name\tgroup_digit_cnt\tbase_exch_rate')
     lines.append(_xer_row(1, 2, '$', '.', ',', '#1.1', '(#1.1)', 'US Dollar', 'USD', 3, 1))
 
+    # ── FINTMPL (Finance Template — required by P6 PROJECT.fintmpl_id FK) ──
+    lines.append('%T\tFINTMPL')
+    lines.append('%F\tfintmpl_id\tfintmpl_name\tdefault_flag')
+    lines.append(_xer_row(XER_FINTMPL_ID, XER_FINTMPL_NAME, 'Y'))
+
+    # ── OBS (Organizational Breakdown Structure — required by PROJWBS.obs_id) ──
+    lines.append('%T\tOBS')
+    lines.append('%F\tobs_id\tparent_obs_id\tguid\tseq_num\tobs_name\tobs_descr')
+    lines.append(_xer_row(XER_OBS_ID, '', _xer_guid(), 0, XER_OBS_NAME, ''))
+
     # ── PROJECT ──
+    # Column list mirrors Sample.txt exactly so every downstream P6
+    # subsystem (baseline mgr, resource loader, scheduler) finds the
+    # values it expects; blank strings are valid P6 "unset".
     lines.append('%T\tPROJECT')
     lines.append('%F\tproj_id\tfy_start_month_num\trsrc_self_add_flag\tallow_complete_flag\t'
                   'rsrc_multi_assign_flag\tcheckout_flag\tproject_flag\tstep_complete_flag\t'
                   'cost_qty_recalc_flag\tbatch_sum_flag\tname_sep_char\tdef_complete_pct_type\t'
-                  'proj_short_name\tclndr_id\ttask_code_base\ttask_code_step\tpriority_num\t'
-                  'wbs_max_sum_level\tdef_duration_type\tdef_qty_type\tdef_rate_type\t'
-                  'add_act_remain_flag\tact_this_per_link_flag\tdef_task_type\tact_pct_link_flag\t'
-                  'critical_drtn_hr_cnt\tplan_start_date\tplan_end_date\tadd_date\t'
-                  'last_recalc_date\tscd_end_date\tguid')
+                  'proj_short_name\tacct_id\torig_proj_id\tsource_proj_id\tbase_type_id\t'
+                  'clndr_id\tsum_base_proj_id\ttask_code_base\ttask_code_step\tpriority_num\t'
+                  'wbs_max_sum_level\tstrgy_priority_num\tlast_checksum\tcritical_drtn_hr_cnt\t'
+                  'def_cost_per_qty\tlast_recalc_date\tplan_start_date\tplan_end_date\t'
+                  'scd_end_date\tadd_date\tlast_tasksum_date\tfcst_start_date\tdef_duration_type\t'
+                  'task_code_prefix\tguid\tdef_qty_type\tadd_by_name\tweb_local_root_path\t'
+                  'proj_url\tdef_rate_type\tadd_act_remain_flag\tact_this_per_link_flag\t'
+                  'def_task_type\tact_pct_link_flag\tcritical_path_type\ttask_code_prefix_flag\t'
+                  'def_rollup_dates_flag\tuse_project_baseline_flag\trem_target_link_flag\t'
+                  'reset_planned_flag\tallow_neg_act_flag\tsum_assign_level\tlast_fin_dates_id\t'
+                  'fintmpl_id\tlast_baseline_update_date\tcr_external_key\tapply_actuals_date\t'
+                  'location_id\tloaded_scope_level\texport_flag\tnew_fin_dates_id\t'
+                  'baselines_to_export\tbaseline_names_to_export\tnext_data_date\t'
+                  'close_period_flag\tsum_refresh_date\ttrsrcsum_loaded\tsumtask_loaded')
     lines.append(_xer_row(
-        XER_PROJ_ID, 1, 'N', 'Y', 'Y', 'N', 'Y', 'N', 'N', 'Y', '.', 'CP_Drtn',
-        _derive_proj_short_name(project), XER_CLNDR_ID, 1000, 10, 500, 4,
-        'DT_FixedDUR2', 'QT_Hour', 'COST_PER_QTY', 'Y', 'Y', 'TT_Task', 'N',
-        hours_per_day * 5,
-        _xer_datetime(plan_start, '00:00'), _xer_datetime(plan_end, '00:00'),
-        now.strftime('%Y-%m-%d %H:%M'), now.strftime('%Y-%m-%d %H:%M'),
-        _xer_datetime(plan_end, '00:00'), '',
+        XER_PROJ_ID, 1, 'Y', 'Y', 'Y', 'N', 'Y', 'N', 'N', 'Y', '.', 'CP_Drtn',
+        _derive_proj_short_name(project),
+        '', '', '', '',                       # acct_id, orig_proj_id, source_proj_id, base_type_id
+        XER_CLNDR_ID,
+        '',                                   # sum_base_proj_id
+        1000, 10, 10, 2, 500,                 # code_base, code_step, priority_num, wbs_max_sum_level, strgy_priority_num
+        '', 0, '0.0000',                      # last_checksum, critical_drtn_hr_cnt, def_cost_per_qty
+        _xer_datetime(plan_start, '00:00'),   # last_recalc_date
+        _xer_datetime(plan_start, '00:00'),
+        _xer_datetime(plan_end, '00:00'),
+        _xer_datetime(plan_end, '00:00'),     # scd_end_date
+        now_stamp, '', '',                    # add_date, last_tasksum_date, fcst_start_date
+        'DT_FixedDUR2', 'A', _xer_guid(), 'QT_Hour', export_user, '', '',
+        'COST_PER_QTY', 'N', 'Y', 'TT_Task', 'Y',
+        'CT_TotFloat', 'Y', 'Y', 'Y', 'Y', 'N', 'N',
+        'SL_Taskrsrc', '',                    # sum_assign_level, last_fin_dates_id
+        XER_FINTMPL_ID, '', '', '', '',       # fintmpl_id, last_baseline_update_date, cr_external_key, apply_actuals_date, location_id
+        7, 'Y', '', '', '', '', '', '', '', '',
     ))
 
-    # ── CALENDAR (single Mon-Fri project calendar) ──
+    # ── CALENDAR ──
     lines.append('%T\tCALENDAR')
     lines.append('%F\tclndr_id\tdefault_flag\tclndr_name\tproj_id\tbase_clndr_id\tlast_chng_date\t'
                   'clndr_type\tday_hr_cnt\tweek_hr_cnt\tmonth_hr_cnt\tyear_hr_cnt\trsrc_private\tclndr_data')
     lines.append(_xer_row(
-        # default_flag='N' — this calendar must NOT claim to be the P6
-        # database's global default; it only needs to be assigned (via
-        # clndr_id) to this project's own WBS/activities.
-        XER_CLNDR_ID, 'N', 'Standard 5 Day Workweek', '', '', now.strftime('%Y-%m-%d %H:%M'),
-        'CA_Base', hours_per_day, hours_per_day * 5, hours_per_day * 5 * 4, hours_per_day * 5 * 52,
+        # default_flag='N' — this calendar is project-scoped, not a global
+        # default P6 database calendar.
+        XER_CLNDR_ID, 'N', 'Standard 5 Day Workweek', '', '', now_stamp,
+        'CA_Base', hours_per_day, week_hours, month_hours, year_hours,
         'N', _xer_calendar_data(hours_per_day),
+    ))
+
+    # ── SCHEDOPTIONS (required for CPM scheduling on import) ──
+    lines.append('%T\tSCHEDOPTIONS')
+    lines.append('%F\tschedoptions_id\tproj_id\tsched_outer_depend_type\tsched_open_critical_flag\t'
+                  'sched_lag_early_start_flag\tsched_retained_logic\tsched_setplantoforecast\t'
+                  'sched_float_type\tsched_calendar_on_relationship_lag\tsched_use_expect_end_flag\t'
+                  'sched_progress_override\tlevel_float_thrs_cnt\tlevel_outer_assign_flag\t'
+                  'level_outer_assign_priority\tlevel_over_alloc_pct\tlevel_within_float_flag\t'
+                  'level_keep_sched_date_flag\tlevel_all_rsrc_flag\tsched_use_project_end_date_for_float\t'
+                  'enable_multiple_longest_path_calc\tlimit_multiple_longest_path_calc\t'
+                  'max_multiple_longest_path\tuse_total_float_multiple_longest_paths\t'
+                  'key_activity_for_multiple_longest_paths\tLevelPriorityList')
+    lines.append(_xer_row(
+        XER_SCHEDOPTIONS_ID, XER_PROJ_ID,
+        'SD_Both', 'N', 'Y', 'Y', 'N', 'FT_FF', 'rcal_Predecessor', 'Y', 'N',
+        0, 'N', 5, 25, 'N', 'Y', 'Y', 'Y', 'N', 'Y', 10, 'Y', '',
+        'priority_type,ASC_BY_FIELD/ASC',
     ))
 
     # ── PROJWBS ──
     lines.append('%T\tPROJWBS')
-    lines.append('%F\twbs_id\tproj_id\tobs_id\tseq_num\tproj_node_flag\tsum_data_flag\t'
-                  'status_code\twbs_short_name\twbs_name\tparent_wbs_id')
+    lines.append('%F\twbs_id\tproj_id\tobs_id\tseq_num\test_wt\tproj_node_flag\tsum_data_flag\t'
+                  'status_code\twbs_short_name\twbs_name\tphase_id\tparent_wbs_id\tev_user_pct\t'
+                  'ev_etc_user_value\torig_cost\tindep_remain_total_cost\tann_dscnt_rate_pct\t'
+                  'dscnt_period_type\tindep_remain_work_qty\tanticip_start_date\t'
+                  'anticip_end_date\tev_compute_type\tev_etc_compute_type\tguid\ttmpl_guid\t'
+                  'plan_open_state')
     for i, node in enumerate(wbs_nodes, start=1):
         parent_code = node.get('parent_code')
         lines.append(_xer_row(
-            wbs_id_map[node['code']], XER_PROJ_ID, '', i,
+            wbs_id_map[node['code']], XER_PROJ_ID, XER_OBS_ID, i, 1,
             'Y' if node.get('level') == 0 else 'N', 'N', 'WS_Open',
             node['code'].split('.')[-1][:XER_WBS_SHORT_NAME_MAX_LEN],
             (node.get('name') or '')[:XER_WBS_NAME_MAX_LEN],
+            '',                               # phase_id
             wbs_id_map.get(parent_code, '') if parent_code else '',
+            6, '0.88', '0.0000', '0.0000',   # EV defaults matching Sample.txt
+            '', '', '', '', '', '',
+            'EC_Cmp_pct', 'EE_Rem_hr',
+            wbs_guid_map[node['code']], '', '',
         ))
 
     # ── TASK ──
+    # Full column set from the sample XER — every date/flag/priority
+    # field is emitted so P6 doesn't re-default them on import.
     lines.append('%T\tTASK')
-    lines.append('%F\ttask_id\tproj_id\twbs_id\tclndr_id\tphys_complete_pct\ttask_type\t'
-                  'duration_type\tstatus_code\ttask_code\ttask_name\ttotal_float_hr_cnt\t'
-                  'free_float_hr_cnt\tremain_drtn_hr_cnt\ttarget_drtn_hr_cnt\tact_start_date\t'
-                  'act_end_date\tlate_start_date\tlate_end_date\tearly_start_date\tearly_end_date\t'
-                  'target_start_date\ttarget_end_date\tguid')
+    lines.append('%F\ttask_id\tproj_id\twbs_id\tclndr_id\tphys_complete_pct\trev_fdbk_flag\t'
+                  'est_wt\tlock_plan_flag\tauto_compute_act_flag\tcomplete_pct_type\ttask_type\t'
+                  'duration_type\tstatus_code\ttask_code\ttask_name\trsrc_id\ttotal_float_hr_cnt\t'
+                  'free_float_hr_cnt\tremain_drtn_hr_cnt\tact_work_qty\tremain_work_qty\t'
+                  'target_work_qty\ttarget_drtn_hr_cnt\ttarget_equip_qty\tact_equip_qty\t'
+                  'remain_equip_qty\tcstr_date\tact_start_date\tact_end_date\tlate_start_date\t'
+                  'late_end_date\texpect_end_date\tearly_start_date\tearly_end_date\t'
+                  'restart_date\treend_date\ttarget_start_date\ttarget_end_date\t'
+                  'rem_late_start_date\trem_late_end_date\tcstr_type\tpriority_type\t'
+                  'suspend_date\tresume_date\tfloat_path\tfloat_path_order\tguid\ttmpl_guid\t'
+                  'cstr_date2\tcstr_type2\tdriving_path_flag\tact_this_per_work_qty\t'
+                  'act_this_per_equip_qty\texternal_early_start_date\texternal_late_end_date\t'
+                  'create_date\tupdate_date\tcreate_user\tupdate_user\tlocation_id\tcrt_path_num')
     for activity in activities:
         wbs_id = wbs_id_map.get(activity.get('wbs_code'), root_wbs_id)
+        is_milestone = bool(activity.get('is_milestone'))
         duration_hrs = int((activity.get('original_duration_days') or 0) * hours_per_day)
+        # P6 milestones must always have zero duration; force it here so
+        # a stale duration on the activity row can't corrupt the schedule.
+        if is_milestone:
+            duration_hrs = 0
         float_days = activity.get('total_float_days') or 0
         float_hrs = int(float_days * hours_per_day)
 
         start_raw = activity.get('start_date')
         finish_raw = activity.get('finish_date')
-        early_start = _xer_datetime(start_raw)
-        early_end = _xer_datetime(finish_raw, '17:00' if not activity.get('is_milestone') else '08:00')
+        early_start = _xer_datetime(start_raw, XER_WORK_START)
+        early_end = _xer_datetime(finish_raw, XER_WORK_START if is_milestone else XER_WORK_END)
 
-        late_start, late_end = early_start, early_end
-        if float_days and start_raw and finish_raw:
-            try:
-                late_start_date = add_working_days(datetime.date.fromisoformat(start_raw), int(float_days))
-                late_end_date = add_working_days(datetime.date.fromisoformat(finish_raw), int(float_days))
-                late_start = _xer_datetime(late_start_date.isoformat())
-                late_end = _xer_datetime(late_end_date.isoformat(), '17:00')
-            except (ValueError, TypeError):
-                pass
+        late_start = early_start
+        late_end = early_end
+        if float_days:
+            shifted_start = _xer_add_working_days(start_raw, int(float_days), XER_WORK_START)
+            shifted_end = _xer_add_working_days(finish_raw, int(float_days), XER_WORK_START if is_milestone else XER_WORK_END)
+            if shifted_start and shifted_end:
+                late_start, late_end = shifted_start, shifted_end
 
         lines.append(_xer_row(
-            task_id_map[activity['id']], XER_PROJ_ID, wbs_id, XER_CLNDR_ID, 0,
-            'TT_Mile' if activity.get('is_milestone') else 'TT_Task', 'DT_FixedDUR2',
-            'TK_NotStart', str(activity['id'])[:XER_TASK_CODE_MAX_LEN],
+            task_id_map[activity['id']], XER_PROJ_ID, wbs_id, XER_CLNDR_ID, 0, 'N', 1, 'N', 'N',
+            'CP_Drtn',
+            'TT_Mile' if is_milestone else 'TT_Task',
+            'DT_FixedDUR2', 'TK_NotStart',
+            str(activity['id'])[:XER_TASK_CODE_MAX_LEN],
             (activity.get('name') or '')[:XER_TASK_NAME_MAX_LEN],
-            float_hrs, float_hrs, duration_hrs, duration_hrs,
-            '', '', late_start, late_end, early_start, early_end, early_start, early_end, '',
+            '',                                # rsrc_id (none — resources managed downstream)
+            float_hrs, float_hrs, duration_hrs,
+            0, 0, 0, duration_hrs, 0, 0, 0,    # work / equip quantities (planning-only export)
+            '',                                # cstr_date
+            '', '',                            # act_start_date / act_end_date (not started)
+            late_start, late_end, '',
+            early_start, early_end,
+            early_start, early_end,            # restart_date / reend_date
+            early_start, early_end,            # target_start_date / target_end_date
+            late_start, late_end,              # rem_late_start / rem_late_end
+            '', 'PT_Normal',                   # cstr_type / priority_type
+            '', '', '', '',                    # suspend/resume/float_path/float_path_order
+            task_guid_map[activity['id']], '', '', '',
+            '', 0, 0, '', '',
+            now_stamp, now_stamp, export_user, export_user, '', '',
         ))
 
     # ── TASKPRED ──
+    # Collect and de-duplicate predecessor links from both sources so the
+    # imported schedule always carries a fully-connected logic network —
+    # P6's scheduler otherwise flags every unlinked activity as "open"
+    # and won't compute a critical path.
     lines.append('%T\tTASKPRED')
-    lines.append('%F\ttask_pred_id\ttask_id\tpred_task_id\tproj_id\tpred_proj_id\tpred_type\tlag_hr_cnt')
-    pred_seq = 1
+    lines.append('%F\ttask_pred_id\ttask_id\tpred_task_id\tproj_id\tpred_proj_id\tpred_type\t'
+                  'lag_hr_cnt\tcomments\tfloat_path\taref\tarls')
+
+    seen_pred_keys = set()
+    pred_rows = []
+
+    def _record_pred(succ_id, pred_id, rel_type, lag_hrs=0):
+        succ = task_id_map.get(succ_id)
+        pred = task_id_map.get(pred_id)
+        if not succ or not pred or succ == pred:
+            return
+        key = (succ, pred, rel_type)
+        if key in seen_pred_keys:
+            return
+        seen_pred_keys.add(key)
+        pred_rows.append((succ, pred, rel_type, lag_hrs))
+
     for link in logic_matrix or []:
-        task_id = task_id_map.get(link.get('activity_id') or link.get('task_id'))
-        pred_id = task_id_map.get(link.get('predecessor_id') or link.get('pred_task_id'))
-        if not task_id or not pred_id:
-            continue
-        pred_type = _XER_PRED_TYPE.get((link.get('type') or 'FS').upper(), 'PR_FS')
-        lines.append(_xer_row(pred_seq, task_id, pred_id, XER_PROJ_ID, XER_PROJ_ID, pred_type, 0))
-        pred_seq += 1
-    if not (logic_matrix and pred_seq > 1):
-        # Fall back to each activity's own `predecessors` list (always
-        # present, even if the separate logic_matrix export is empty).
-        for activity in activities:
-            task_id = task_id_map.get(activity['id'])
-            for pred in activity.get('predecessors') or []:
-                pred_id = task_id_map.get(pred.get('id'))
-                if not task_id or not pred_id:
-                    continue
-                pred_type = _XER_PRED_TYPE.get((pred.get('type') or 'FS').upper(), 'PR_FS')
-                lines.append(_xer_row(pred_seq, task_id, pred_id, XER_PROJ_ID, XER_PROJ_ID, pred_type, 0))
-                pred_seq += 1
+        rel = _XER_PRED_TYPE.get((link.get('type') or 'FS').upper(), 'PR_FS')
+        _record_pred(
+            link.get('activity_id') or link.get('task_id'),
+            link.get('predecessor_id') or link.get('pred_task_id'),
+            rel,
+            int((link.get('lag_days') or 0) * hours_per_day),
+        )
+    for activity in activities:
+        for pred in activity.get('predecessors') or []:
+            rel = _XER_PRED_TYPE.get((pred.get('type') or 'FS').upper(), 'PR_FS')
+            _record_pred(
+                activity['id'], pred.get('id'), rel,
+                int((pred.get('lag_days') or 0) * hours_per_day),
+            )
+
+    for seq, (succ, pred, rel_type, lag_hrs) in enumerate(pred_rows, start=1):
+        lines.append(_xer_row(
+            seq, succ, pred, XER_PROJ_ID, XER_PROJ_ID, rel_type, lag_hrs,
+            '', '', '', '',
+        ))
 
     lines.append('%E')
 

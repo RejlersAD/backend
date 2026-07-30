@@ -12,8 +12,17 @@ from __future__ import annotations
 import json
 import re
 
-from ..config import CLAUDE_MAX_INPUT_CHARS, CLAUDE_INTELLIGENCE_MAX_TOKENS, DISCIPLINE_DEFAULT_DELIVERABLES, DEFAULT_HSE_STUDIES
+from ..config import (
+    CLAUDE_MAX_INPUT_CHARS, CLAUDE_INTELLIGENCE_MAX_TOKENS,
+    DISCIPLINE_DEFAULT_DELIVERABLES, DEFAULT_HSE_STUDIES, DISCIPLINE_NAME_BY_CODE,
+    DELIVERABLE_ALIASES,
+)
 from . import claude_client
+
+# Categories that materially describe project scope; when the planner has
+# uploaded *only* SOW (no MDR/EDDR/WBS), we flag `sow_only_mode = True` so the
+# UI can tell the user that BYOK will be doing the heavy lifting on scope.
+_SCOPE_DEFINING_CATEGORIES = {'mdr', 'eddr', 'wbs'}
 
 _EFFECTIVE_DATE_RE = re.compile(
     r'(effective date|zero date|contract award)[^\n]{0,40}?'
@@ -41,15 +50,24 @@ _CLAUDE_SYSTEM_PROMPT = (
 
 def _detect_disciplines_and_deliverables(all_text: str) -> dict:
     """For each discipline, flag whether any of its default deliverables are
-    mentioned in the source text; always keep the full default list as the
-    generation fallback (per MVP: never block generation on imperfect NLP)."""
+    mentioned in the source text (via canonical name OR any soft-coded alias);
+    always keep the full default list as the generation fallback (per MVP:
+    never block generation on imperfect NLP)."""
     lower = all_text.lower()
     result = {}
     for discipline, deliverables in DISCIPLINE_DEFAULT_DELIVERABLES.items():
-        detected = [d for d in deliverables if d.lower() in lower]
+        detected = []
+        for canonical in deliverables:
+            terms = [canonical.lower(), *[a.lower() for a in DELIVERABLE_ALIASES.get(canonical, [])]]
+            if any(term in lower for term in terms):
+                detected.append(canonical)
         result[discipline] = {
             'mentioned_in_source': detected,
-            'deliverables': deliverables,  # always use the full soft-coded catalogue
+            'deliverables': list(deliverables),
+            'in_scope': True,
+            # AI-discovered deliverables get merged in by the BYOK scope pass
+            # below; the frontend uses this to badge them separately.
+            'ai_discovered': [],
         }
     return result
 
@@ -116,6 +134,159 @@ def _augment_with_claude(intelligence: dict, combined_text: str, project, user) 
     intelligence['ai_provider_used'] = 'anthropic'
 
 
+_CLAUDE_SCOPE_SYSTEM_PROMPT = (
+    'You are an oil & gas FEED/DEFINE project-controls scope analyst. You will '
+    'receive a SOW / MDR / EDDR extract plus a fixed catalogue of engineering '
+    'disciplines, their canonical deliverables, and HSE studies the platform is '
+    'capable of scheduling. Your job is to decide which of those catalogue '
+    'entries are ACTUALLY in scope for this specific project based on the source '
+    'text, and to surface any deliverables the SOW requires that are NOT in the '
+    'catalogue. Respond with STRICT JSON only (no markdown fences, no prose '
+    'outside the JSON) matching: '
+    '{"disciplines_in_scope": [<discipline code>, ...], '
+    '"disciplines_out_of_scope": [<discipline code>, ...], '
+    '"hse_studies_in_scope": [<hse study name>, ...], '
+    '"deliverable_hints": {<discipline code>: [<new deliverable name>, ...]}, '
+    '"authoritative_deliverables_by_discipline": {<discipline code>: [<deliverable>, ...]}, '
+    '"scope_summary": string}. '
+    'Rules: (a) use ONLY the discipline codes from the CATALOGUE — do not '
+    'invent new ones; (b) if the source text is silent about a discipline / HSE '
+    'study, LEAVE IT IN scope (safer to over-schedule than to drop scope '
+    'silently); (c) only mark out_of_scope when the SOW clearly excludes it or '
+    'the project type obviously does not need it; '
+    '(d) "deliverable_hints" is the list of deliverables the SOW explicitly '
+    'names that the catalogue is missing — return only genuinely new ones, do '
+    'not repeat catalogue entries; '
+    '(e) "authoritative_deliverables_by_discipline" — ONLY populate this when '
+    'the user prompt says SOW-only mode is True; in that case, for every '
+    'discipline you marked in-scope, return the deliverables the SOW '
+    'EXPLICITLY requires (catalogue matches + new ones), in execution order. '
+    'Leave the object empty when SOW-only mode is False. '
+    '(f) "scope_summary" is 1-2 sentences on why this scope was chosen.'
+)
+
+
+def _augment_with_claude_scope(intelligence: dict, combined_text: str, project, user) -> None:
+    """Second BYOK pass that asks Claude to decide which disciplines / HSE
+    studies are actually in scope. Mutates `intelligence` in place:
+    - flips `disciplines[<code>].in_scope` to False for disciplines Claude
+      marked out of scope;
+    - shrinks `hse_studies` to Claude's `hse_studies_in_scope` list (only
+      when Claude returned a non-empty subset);
+    - stores the raw payload under `intelligence['ai_scope']` for the UI to
+      render as a badge / summary.
+    Never raises, never removes the deterministic disciplines dict; the
+    planner can always re-enable a discipline from the Edit panel."""
+    intelligence['ai_scope'] = None
+
+    if claude_client.get_claude_config(project) is None:
+        return
+
+    discipline_catalogue = {code: DISCIPLINE_NAME_BY_CODE.get(code, code) for code in DISCIPLINE_DEFAULT_DELIVERABLES.keys()}
+    catalogue_payload = {
+        'disciplines': discipline_catalogue,
+        'deliverables_by_discipline': dict(DISCIPLINE_DEFAULT_DELIVERABLES),
+        'hse_studies': list(DEFAULT_HSE_STUDIES),
+    }
+    sow_only = bool(intelligence.get('sow_only_mode'))
+    user_prompt = (
+        f'CATALOGUE (allowed values):\n{json.dumps(catalogue_payload)}\n\n'
+        f'SOW-only mode: {sow_only}\n\n'
+        f'SOURCE TEXT (truncated):\n{combined_text[:CLAUDE_MAX_INPUT_CHARS]}'
+    )
+
+    result = claude_client.call_claude(
+        project,
+        system_prompt=_CLAUDE_SCOPE_SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        max_tokens=CLAUDE_INTELLIGENCE_MAX_TOKENS,
+        feature='document_intelligence_scope',
+        user=user,
+    )
+    if result is None:
+        intelligence['notes'].append(
+            'Claude BYOK scope pass did not succeed this run — every discipline '
+            'stays in scope by default.'
+        )
+        return
+
+    try:
+        parsed = json.loads(result['text'])
+    except (ValueError, TypeError):
+        intelligence['notes'].append(
+            'Claude BYOK scope pass responded but the JSON could not be parsed — '
+            'every discipline stays in scope by default.'
+        )
+        return
+
+    in_scope_codes = {str(c).strip() for c in (parsed.get('disciplines_in_scope') or []) if str(c).strip()}
+    out_of_scope_codes = {str(c).strip() for c in (parsed.get('disciplines_out_of_scope') or []) if str(c).strip()}
+    hse_in_scope = [str(h).strip() for h in (parsed.get('hse_studies_in_scope') or []) if str(h).strip()]
+    deliverable_hints_raw = parsed.get('deliverable_hints') or {}
+    deliverable_hints = {
+        str(k): [str(v).strip() for v in vs if str(v).strip()]
+        for k, vs in deliverable_hints_raw.items()
+        if isinstance(vs, list)
+    }
+    authoritative_raw = parsed.get('authoritative_deliverables_by_discipline') or {}
+    authoritative = {
+        str(k): [str(v).strip() for v in vs if str(v).strip()]
+        for k, vs in authoritative_raw.items()
+        if isinstance(vs, list)
+    }
+    scope_summary = parsed.get('scope_summary') or ''
+
+    disciplines = intelligence.get('disciplines') or {}
+    for code, info in disciplines.items():
+        if code in out_of_scope_codes and code not in in_scope_codes:
+            info['in_scope'] = False
+        else:
+            info['in_scope'] = True
+
+        # SOW-only mode: when Claude returns an authoritative list for this
+        # in-scope discipline, REPLACE the catalogue fallback with it — the
+        # SOW is the source of truth and the catalogue was just a safety net.
+        if sow_only and code in authoritative and info.get('in_scope') is not False:
+            info['deliverables'] = list(authoritative[code])
+            info['mentioned_in_source'] = [d for d in authoritative[code]
+                                            if d in DISCIPLINE_DEFAULT_DELIVERABLES.get(code, [])]
+
+        # Merge Claude's discovered deliverables into every in-scope
+        # discipline (both SOW-only and full-upload modes) — dedupe against
+        # what's already there and track the AI-provenance for the UI badge.
+        hints = deliverable_hints.get(code) or []
+        if hints and info.get('in_scope') is not False:
+            existing = set(info.get('deliverables') or [])
+            existing_lower = {d.lower() for d in existing}
+            discovered = info.setdefault('ai_discovered', [])
+            for hint in hints:
+                if hint.lower() in existing_lower:
+                    continue
+                info.setdefault('deliverables', []).append(hint)
+                if hint not in info.get('mentioned_in_source', []):
+                    info.setdefault('mentioned_in_source', []).append(hint)
+                if hint not in discovered:
+                    discovered.append(hint)
+                existing_lower.add(hint.lower())
+
+    # Only prune HSE studies when Claude returned a non-empty subset — an
+    # empty list may just mean Claude was not confident, and the planner has
+    # already been given the interactive HSE picker (see PlanningPackagePage).
+    valid_hse = [h for h in hse_in_scope if h in DEFAULT_HSE_STUDIES]
+    if valid_hse:
+        intelligence['hse_studies'] = valid_hse
+
+    intelligence['ai_scope'] = {
+        'disciplines_in_scope': sorted(in_scope_codes),
+        'disciplines_out_of_scope': sorted(out_of_scope_codes),
+        'hse_studies_in_scope': valid_hse,
+        'deliverable_hints': deliverable_hints,
+        'authoritative_deliverables_by_discipline': authoritative if sow_only else {},
+        'sow_only_authoritative_applied': bool(sow_only and authoritative),
+        'scope_summary': scope_summary,
+    }
+
+
 def analyze_project(files_qs, project=None, user=None) -> dict:
     """
     files_qs: iterable of PlanningFile instances (already parsed).
@@ -132,15 +303,23 @@ def analyze_project(files_qs, project=None, user=None) -> dict:
     duration_match = _DURATION_RE.search(combined_text)
 
     categories_present = sorted({f.category for f in files_list})
+    categories_set = set(categories_present)
+    sow_only_mode = 'sow' in categories_set and not (categories_set & _SCOPE_DEFINING_CATEGORIES)
 
     intelligence = {
         'source_file_count': len(files_list),
         'categories_present': categories_present,
+        'sow_only_mode': sow_only_mode,
         'detected_project_name': project_name_match.group(1).strip()[:255] if project_name_match else None,
         'detected_effective_date_text': effective_date_match.group(2) if effective_date_match else None,
         'detected_duration_months': int(duration_match.group(1)) if duration_match else None,
         'disciplines': _detect_disciplines_and_deliverables(combined_text),
         'hse_studies': _detect_hse_studies(combined_text),
+        # Full HSE catalogue the planner can pick from — the UI renders every
+        # entry as a checkbox and pre-selects the ones in `hse_studies`. Kept
+        # here (not hardcoded in the frontend) so the master list stays
+        # single-sourced in config.py.
+        'available_hse_studies': list(DEFAULT_HSE_STUDIES),
         'notes': [
             'Document intelligence is generated by a deterministic keyword/pattern '
             'analyzer (no external AI API is configured). Review before finalizing.',
@@ -148,5 +327,6 @@ def analyze_project(files_qs, project=None, user=None) -> dict:
     }
 
     _augment_with_claude(intelligence, combined_text, project, user)
+    _augment_with_claude_scope(intelligence, combined_text, project, user)
     return intelligence
 

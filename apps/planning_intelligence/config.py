@@ -153,6 +153,48 @@ DISCIPLINE_DEFAULT_DELIVERABLES = {
     ],
 }
 
+# Soft-coded alias table — the deterministic keyword matcher looks up every
+# canonical deliverable AND its aliases in the source text, so short-form
+# references like "P&IDs", "SLD", "MTO" are recognised as the same document.
+# Keep entries lower-case for cheap case-insensitive matching.
+DELIVERABLE_ALIASES = {
+    'Process Flow Diagram (PFD)': ['pfd', 'process flow diagram', 'process flow diagrams'],
+    'Piping & Instrumentation Diagram (P&ID) - Process': [
+        'p&id', 'p&ids', 'p & id', 'pid', 'pids',
+        'piping and instrumentation diagram', 'piping & instrumentation diagram',
+    ],
+    'Heat & Material Balance': ['h&mb', 'heat and material balance', 'heat & material balance'],
+    'Cause & Effect Diagram': ['cause and effect', 'c&e', 'cause & effect chart', 'cause and effect chart'],
+    'Equipment List': ['equipment list', 'equipment register'],
+    'Line List': ['line list', 'pipe line list'],
+    'Hydraulic Analysis Report': ['hydraulic analysis', 'hydraulic calculations'],
+    'Piping Material Specification': ['pms', 'piping material spec', 'material specification'],
+    'MTO / Bill of Materials': ['mto', 'bill of materials', 'bom'],
+    'Piping Stress Analysis Report': ['stress analysis', 'pipe stress analysis'],
+    'Piping General Arrangement Drawings': ['piping ga', 'ga drawings', 'general arrangement drawings'],
+    'Plot Plan': ['plot plan'],
+    'Plot Plan / Civil Layout': ['plot plan', 'civil layout'],
+    'Foundation Design Calculations': ['foundation design', 'foundation calculations'],
+    'Single Line Diagram': ['sld', 'single line diagram', 'single-line diagram'],
+    'Electrical Load List': ['load list', 'electrical load list'],
+    'Cable Schedule': ['cable schedule'],
+    'Instrument Index': ['instrument index', 'i/o index'],
+    'Input/Output List': ['i/o list', 'io list', 'input output list', 'input/output list'],
+    'Instrument Data Sheets': ['instrument data sheets', 'instrument datasheets'],
+    'Mechanical Data Sheets for Equipment': ['mechanical data sheets', 'equipment data sheets', 'equipment datasheets'],
+    'Material Requisition for Equipment': ['material requisition', 'mr for equipment'],
+    'Technical Bid Evaluation': ['tbe', 'technical bid evaluation'],
+    'Operation and Control Philosophy': ['control philosophy', 'operating philosophy', 'operation philosophy'],
+    'Block Flow Diagram': ['bfd', 'block flow diagram'],
+    'Process Design Basis': ['process design basis', 'process basis of design'],
+    'Piping Design Basis': ['piping design basis', 'piping basis of design'],
+    'Mechanical Design Basis': ['mechanical design basis', 'mechanical basis of design'],
+    'Civil & Structural Design Basis': ['civil design basis', 'structural design basis', 'civil & structural design basis'],
+    'Electrical Design Basis': ['electrical design basis'],
+    'Instrument Design Basis': ['instrument design basis', 'instrumentation design basis'],
+    'Tie-in List': ['tie-in list', 'tie in list', 'tieins'],
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Default HSE studies (MODULE 3)
 # ─────────────────────────────────────────────────────────────────────────────

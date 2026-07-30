@@ -34,6 +34,11 @@ def build_wbs(project, intelligence: dict) -> list:
 
     seq = 1
     for disc_code in _WBS_LEVEL2_ORDER:
+        disc_info = disciplines_intel.get(disc_code, {}) if isinstance(disciplines_intel, dict) else {}
+        # Skip disciplines the planner (or the BYOK scope pass) has flagged
+        # out of scope — they contribute neither a WBS branch nor schedule.
+        if disc_info.get('in_scope') is False:
+            continue
         disc_name = DISCIPLINE_NAME_BY_CODE.get(disc_code, disc_code.title())
         l2_code = f'1.{seq}'
         nodes.append({
@@ -44,7 +49,7 @@ def build_wbs(project, intelligence: dict) -> list:
             'discipline': disc_code,
         })
 
-        deliverables = disciplines_intel.get(disc_code, {}).get('deliverables', [])
+        deliverables = disc_info.get('deliverables', [])
         for d_index, deliverable in enumerate(deliverables, start=1):
             l3_code = f'{l2_code}.{d_index}'
             nodes.append({

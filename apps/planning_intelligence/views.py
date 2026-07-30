@@ -80,13 +80,15 @@ def _apply_intelligence_overrides(intelligence: dict, overrides: dict) -> dict:
                 cleaned = [str(d).strip() for d in deliverables if str(d).strip()]
                 if cleaned:
                     merged_disciplines[disc_code]['deliverables'] = cleaned
+            if 'in_scope' in disc_override:
+                merged_disciplines[disc_code]['in_scope'] = bool(disc_override['in_scope'])
         merged['disciplines'] = merged_disciplines
 
     hse_overrides = overrides.get('hse_studies')
     if isinstance(hse_overrides, list):
-        cleaned = [str(s).strip() for s in hse_overrides if str(s).strip()]
-        if cleaned:
-            merged['hse_studies'] = cleaned
+        # Honour an explicit empty list — planners must be able to opt out
+        # of every HSE study (small brownfield scopes may have none).
+        merged['hse_studies'] = [str(s).strip() for s in hse_overrides if str(s).strip()]
 
     return merged
 
@@ -105,10 +107,32 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         already used everywhere else in this app's querysets."""
         instance.soft_delete()
 
+    def _require_byok(self, project):
+        """Hard gate: refuse to analyze / generate when this project has no
+        usable BYOK / Claude configuration. Returns a Response on failure,
+        None on success."""
+        if claude_client.get_claude_config(project) is None:
+            return Response(
+                {
+                    'error': (
+                        'This project has no active BYOK (Claude) configuration. '
+                        'Open the AI Settings (BYOK) panel, enable it, save a valid '
+                        'Anthropic API key, and run Test Connection before analyzing '
+                        'or generating a schedule.'
+                    ),
+                    'code': 'byok_required',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None
+
     @action(detail=True, methods=['post'], url_path='analyze')
     def analyze(self, request, pk=None):
         """Document Intelligence preview — does not persist a generation."""
         project = self.get_object()
+        byok_error = self._require_byok(project)
+        if byok_error is not None:
+            return byok_error
         files_qs = project.files.filter(is_deleted=False, parse_status='done')
         if not files_qs.exists():
             return Response(
@@ -124,6 +148,9 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         -> EDDR -> manhours -> validation -> narrative, then persists a new
         PlanningGeneration version."""
         project = self.get_object()
+        byok_error = self._require_byok(project)
+        if byok_error is not None:
+            return byok_error
         files_qs = project.files.filter(is_deleted=False, parse_status='done')
 
         intelligence = analyze_project(list(files_qs), project=project, user=request.user)
