@@ -46,7 +46,10 @@ logger = logging.getLogger(__name__)
 
 # Initialize OpenAI client
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+try:
+    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+except Exception:
+    openai_client = None
 
 
 class AdvancedPFDToPIDPipeline:

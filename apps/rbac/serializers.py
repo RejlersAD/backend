@@ -129,6 +129,11 @@ class RoleSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
     
     def get_user_count(self, obj):
+        # Prefer the queryset-level annotation (avoids one query per role);
+        # fall back to a live count if a caller didn't annotate it.
+        annotated = getattr(obj, 'user_count_annotated', None)
+        if annotated is not None:
+            return annotated
         return obj.user_profiles.filter(is_deleted=False).count()
     
     def create(self, validated_data):
@@ -768,7 +773,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             instance.user.must_reset_password = False
             instance.user.is_first_login = False
             instance.user.save()
-        
+            instance.must_change_password = False
+
         # Update profile
         for attr, value in validated_data.items():
             setattr(instance, attr, value)

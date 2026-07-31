@@ -199,7 +199,12 @@ class RoleViewSet(viewsets.ModelViewSet):
 
     queryset = Role.objects.prefetch_related('permissions', 'modules', 'user_profiles') \
                            .filter(is_active=True) \
-                           .exclude(code__startswith=_CUSTOM_PREFIX)
+                           .exclude(code__startswith=_CUSTOM_PREFIX) \
+                           .annotate(user_count_annotated=Count(
+                               'user_profiles',
+                               filter=Q(user_profiles__is_deleted=False),
+                               distinct=True,
+                           ))
     permission_classes = [IsAuthenticated, CanManageRoles]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['name', 'code']
@@ -212,8 +217,12 @@ class RoleViewSet(viewsets.ModelViewSet):
         return RoleSerializer
 
     def get_permissions(self):
-        # Admins can read roles; only super admin can create/edit/delete
-        if self.action in ['list', 'retrieve', 'assign_module', 'revoke_module',
+        # Anyone who can manage users can also view the roles list (same
+        # broader check — role code OR user_mgmt module OR users.manage
+        # permission — instead of the stricter role-code-only IsAdmin).
+        if self.action in ['list', 'retrieve']:
+            return [IsAuthenticated(), CanManageUsers()]
+        if self.action in ['assign_module', 'revoke_module',
                            'assign_permission', 'revoke_permission']:
             return [IsAuthenticated(), IsAdmin()]
         return [IsAuthenticated(), CanManageRoles()]
@@ -514,7 +523,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         """
         SUPER_ADMIN_ONLY_ACTIONS = {
             'create', 'reset_password', 'activate', 'deactivate', 'soft_delete',
-            'bulk_deactivate_by_roles',
+            'bulk_deactivate_by_roles', 'total_count',
         }
         # Admin (level 2+) can assign/revoke roles — but the action itself guards
         # against assigning the super_admin role without super_admin privileges
@@ -545,7 +554,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             'roles',
             'userrole_set__role'  # Fix N+1 for primary_role lookup
         ).filter(is_deleted=False)
-        
+
         # Super admin sees all
         try:
             profile = user.rbac_profile
@@ -2076,6 +2085,17 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             'job_titles': list(job_titles),
             'count': len(job_titles)
         })
+
+    @action(detail=False, methods=['get'], url_path='total-count')
+    def total_count(self, request):
+        """
+        Company-wide user count across ALL organizations, ignoring the
+        organization-scoping normally applied in get_queryset(). Super admin
+        only — this deliberately bypasses org scoping, so it must not be
+        reachable by a regular org-scoped admin.
+        """
+        count = UserProfile.objects.filter(is_deleted=False).count()
+        return Response({'count': count})
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):

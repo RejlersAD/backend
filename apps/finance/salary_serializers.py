@@ -69,16 +69,37 @@ class EmployeeSalaryInfoListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for listing employees"""
     user_name = serializers.SerializerMethodField()
     user_email = serializers.EmailField(source='user.email', read_only=True)
+    gross_salary = serializers.SerializerMethodField()
+    net_salary = serializers.SerializerMethodField()
     
     class Meta:
         model = EmployeeSalaryInfo
         fields = [
             'id', 'employee_id', 'user_name', 'user_email', 'department',
-            'designation', 'basic_salary', 'currency', 'is_active'
+            'designation', 'basic_salary', 'currency', 'is_active',
+            'gross_salary', 'net_salary'
         ]
     
     def get_user_name(self, obj):
         return obj.user.get_full_name() or obj.user.email
+
+    def get_gross_salary(self, obj):
+        from apps.payroll.models import MasterPayrollRow
+        row = MasterPayrollRow.objects.filter(
+            employee_code=obj.employee_id
+        ).order_by('-import_session__generated_at').first()
+        if row:
+            return float(row.basic_salary + row.total_allowances)
+        return float(obj.basic_salary or 0)
+
+    def get_net_salary(self, obj):
+        from apps.payroll.models import MasterPayrollRow
+        row = MasterPayrollRow.objects.filter(
+            employee_code=obj.employee_id
+        ).order_by('-import_session__generated_at').first()
+        if row:
+            return float(row.final_salary)
+        return float(obj.basic_salary or 0)
 
 
 # ===========================

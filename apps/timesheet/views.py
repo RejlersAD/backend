@@ -282,7 +282,7 @@ def monthly(request):
     try:
         return Response({
             'configured': True,
-            **_svc().monthly_report(int(y) if y else None, int(m) if m else None),
+            **_svc().monthly_report(year=int(y) if y else None, month=int(m) if m else None),
         })
     except (TimesheetConnectionError, TimesheetDriverError) as exc:
         return _graceful_unavailable(exc)

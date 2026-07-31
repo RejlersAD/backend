@@ -556,14 +556,16 @@ def reset_password_with_token(request):
             # Clear reset token and update flags
             PasswordResetService.clear_reset_token(user)
             
-            # Mark email as verified if not already
+            # Mark email as verified if not already, and clear must_change_password
+            # so the "Change Password Required" prompt doesn't reappear
             try:
                 profile = user.rbac_profile
                 if not profile.metadata:
                     profile.metadata = {}
                 profile.metadata['email_verified'] = True
                 profile.metadata['email_verified_at'] = timezone.now().isoformat()
-                profile.save(update_fields=['metadata'])
+                profile.must_change_password = False
+                profile.save(update_fields=['metadata', 'must_change_password'])
             except Exception as e:
                 logger.warning(f"Could not update email verification: {e}")
         

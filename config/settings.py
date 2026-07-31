@@ -567,7 +567,7 @@ REST_FRAMEWORK = {
         'rest_framework.parsers.FormParser',
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 100,  # Increased from 10 to show more items per page
+    'PAGE_SIZE': 500,  # Increased from 10 to show more items per page
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
 }
