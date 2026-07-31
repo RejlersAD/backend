@@ -551,3 +551,127 @@ def run_equipment_batch_analysis_task(self, upload_id: str, files_data: list):
         logger.error('[EQBatchTask] Failed  upload_id=%s: %s', upload_id, exc, exc_info=True)
         cache.set(cache_key, {'status': 'failed', 'error': str(exc)}, EQ_RESULT_CACHE_TTL_S)
         # Do NOT re-raise: same reasoning as run_equipment_analysis_task.
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Instrument Index — async extraction pipeline
+# ═══════════════════════════════════════════════════════════════════════════
+# Instrument Index scanning is the heaviest of the three extractors (overview
+# + 2 rotations + 4 tiles per page, dense tags, long AI passes) and previously
+# ran synchronously — which meant a 20-30 minute drawing would exceed Gunicorn
+# worker timeout and the request would silently drop. We now dispatch it as a
+# Celery task with the same soft/hard time limits as the equipment pipeline
+# and expose a status endpoint the frontend can poll.
+
+# Soft-coded task limits — mirror the equipment task budget so heavy P&IDs
+# have the same headroom. Tune here if a class of drawings needs longer.
+II_TASK_SOFT_LIMIT_S = 3000       # 50 min — SoftTimeLimitExceeded raised
+II_TASK_HARD_LIMIT_S = 3600       # 60 min — SIGKILL
+II_RESULT_CACHE_TTL_S = 14400     # 4 hours in Redis
+II_RESULT_CACHE_KEY_FMT = 'instrument_index:{upload_id}'
+
+
+@shared_task(
+    bind=True,
+    name='pid_analysis.run_instrument_index_task',
+    max_retries=1,
+    default_retry_delay=60,
+    soft_time_limit=II_TASK_SOFT_LIMIT_S,
+    time_limit=II_TASK_HARD_LIMIT_S,
+)
+def run_instrument_index_task(
+    self,
+    upload_id: str,
+    pid_b64: str,
+    filename: str,
+    drawing_info: dict,
+    legend_b64: str = '',
+    legend_filename: str = '',
+):
+    """Extract the instrument index in the background.
+
+    The frontend polls
+        GET /api/v1/pid_analysis/instrument-index/status/<upload_id>/
+    every few seconds until this task writes ``status='completed'`` (or
+    ``'failed'``) to Redis.
+    """
+    from apps.pid_analysis.instrument_index_service import InstrumentIndexService
+
+    cache_key = II_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id)
+
+    def _set_progress(pct: int, msg: str) -> None:
+        cache.set(cache_key,
+                  {'status': 'processing', 'progress': pct, 'message': msg},
+                  II_RESULT_CACHE_TTL_S)
+
+    logger.info('[IITask] Starting  upload_id=%s  file=%s', upload_id, filename)
+    _set_progress(5, 'Initialising instrument index extraction…')
+
+    try:
+        pid_bytes = base64.b64decode(pid_b64)
+        service = InstrumentIndexService()
+
+        legend_context_override = None
+        if legend_b64:
+            _set_progress(10, 'Parsing legend sheet…')
+            try:
+                legend_bytes = base64.b64decode(legend_b64)
+                legend_context_override = service.build_legend_context_from_uploaded_file(
+                    legend_bytes, legend_filename or 'legend.pdf',
+                )
+            except Exception as exc:
+                logger.warning('[IITask] Legend parse failed (continuing): %s', exc)
+
+        _set_progress(20, 'Scanning P&ID for instrument tags…')
+        instruments = service.extract_instruments(
+            pid_bytes,
+            drawing_info,
+            legend_context_override=legend_context_override,
+        )
+
+        _set_progress(85, 'Building category summary…')
+        category_summary: dict = {}
+        for inst in instruments or []:
+            cat = inst.get('category') or 'Unknown'
+            category_summary[cat] = category_summary.get(cat, 0) + 1
+
+        _set_progress(92, 'Generating Excel workbook…')
+        excel_available = False
+        try:
+            excel_bytes = service.generate_excel(instruments or [], drawing_info)
+            # Excel is cached under a separate key that the download endpoint reads.
+            cache.set(
+                f'instrument_index_excel_{upload_id}',
+                excel_bytes,
+                II_RESULT_CACHE_TTL_S,
+            )
+            excel_available = True
+        except Exception as exc:
+            logger.error('[IITask] Excel generation failed: %s', exc, exc_info=True)
+
+        result = {
+            'status':          'completed',
+            'success':         True,
+            'upload_id':       upload_id,
+            'drawing_info':    drawing_info,
+            'instruments':     instruments or [],
+            'total':           len(instruments or []),
+            'category_summary': category_summary,
+            'excel_url':       (
+                f'/api/v1/pid_analysis/instrument-index/download-excel/{upload_id}/'
+                if excel_available else None
+            ),
+        }
+        cache.set(cache_key, result, II_RESULT_CACHE_TTL_S)
+        logger.info('[IITask] Completed  upload_id=%s  items=%d',
+                    upload_id, len(instruments or []))
+
+    except Exception as exc:
+        logger.error('[IITask] Failed  upload_id=%s  error=%s', upload_id, exc, exc_info=True)
+        cache.set(
+            cache_key,
+            {'status': 'failed', 'error': str(exc)},
+            II_RESULT_CACHE_TTL_S,
+        )
+        # Do NOT re-raise — same reasoning as the equipment task.
+
