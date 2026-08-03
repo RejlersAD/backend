@@ -83,9 +83,14 @@ class TransformerDatasheetGenerator:
     ) -> Dict:
         """Generate datasheet rows from a transformer sizing calculation PDF."""
         try:
+            # ── Step 1: Always start with the full template ──────────────────────
+            datasheet_rows = self._get_default_datasheet_template()
+
+            # ── Step 2: Extract text from PDF ────────────────────────────────────
             logger.info("[TransformerDatasheet] Extracting text from sizing calculation PDF…")
             doc_text = self.extract_text_from_pdf(pdf_file)
 
+<<<<<<< HEAD
             if not doc_text or len(doc_text) < MIN_DOC_TEXT_LEN:
                 logger.error(
                     f"[TransformerDatasheet] Insufficient text: "
@@ -112,6 +117,18 @@ class TransformerDatasheetGenerator:
             populated_rows = self._populate_vendor_data_with_ai(
                 template_rows, doc_text, variant, project_info
             )
+=======
+            # ── Step 3: AI vendor data extraction + merge ─────────────────────────
+            if doc_text and len(doc_text) >= 20:
+                logger.info(f"[TransformerDatasheet] {len(doc_text)} chars extracted — running AI vendor extraction…")
+                vendor_map = self._extract_vendor_data_with_ai(doc_text, project_info)
+                if vendor_map:
+                    merged = self._merge_vendor_data(datasheet_rows, vendor_map)
+                    logger.info(f"[TransformerDatasheet] Merged {merged} vendor values into template")
+            else:
+                logger.warning("[TransformerDatasheet] No/insufficient text from PDF — showing template with empty vendor data")
+                doc_text = ""
+>>>>>>> c2ffe7a2aedceca15c10a57859e766d539217d13
 
             summary = {
                 "variant":          variant,
@@ -128,11 +145,15 @@ class TransformerDatasheetGenerator:
                 ),
             }
 
+<<<<<<< HEAD
             logger.info(
                 f"[TransformerDatasheet] ✅ Generated {summary['total_rows']} rows "
                 f"({summary['completed_fields']} vendor fields populated)"
             )
 
+=======
+            logger.info(f"[TransformerDatasheet] ✅ {summary['total_rows']} rows | {summary['completed_fields']} vendor values filled")
+>>>>>>> c2ffe7a2aedceca15c10a57859e766d539217d13
             return {
                 "success": True,
                 "datasheet_rows": populated_rows,
@@ -148,6 +169,7 @@ class TransformerDatasheetGenerator:
             logger.error(f"[TransformerDatasheet] Error: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
+<<<<<<< HEAD
     # ──────────────────────────────────────────────────────────────────────
     # AI vendor-data population
     # ──────────────────────────────────────────────────────────────────────
@@ -162,6 +184,110 @@ class TransformerDatasheetGenerator:
         Send the structured template to the AI and ask it to populate ONLY the
         ``vendor_data`` field for non-section rows, by extracting matching
         values from the supplied sizing-calculation document.
+=======
+    # ──────────────────────────────────────────────────────────────────────────
+    # AI vendor data extraction + merge helpers
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _extract_vendor_data_with_ai(self, doc_text: str, project_info: Dict = None) -> Dict:
+        """
+        Use GPT-4o to extract parameter values from the uploaded document.
+        Returns a dict mapping NORMALIZED_DESCRIPTION_UPPER → extracted_value.
+        """
+        prompt = f"""You are a senior electrical engineer specialising in power transformers. Read the following technical document and extract every parameter value you can find.
+
+DOCUMENT:
+{doc_text[:8000]}
+
+TASK:
+Return a JSON object where:
+- Keys   = parameter/field names in UPPERCASE (e.g. "TAG NO.", "RATED POWER", "VECTOR GROUP")
+- Values = the extracted value as a string
+
+Focus on: equipment tags, kVA/MVA ratings, voltages, currents, impedances, vector groups, frequencies, cooling types, manufacturers, weights, dimensions, temperatures, efficiency values.
+
+Rules:
+- Include ONLY fields actually present in the document.
+- Do NOT invent or assume values.
+- Return ONLY a valid JSON object — no explanation, no markdown.
+
+Example:
+{{"TAG NO.": "13-BF-0113M", "RATED POWER": "1250", "VECTOR GROUP": "Dy11", "RATED PRIMARY VOLTAGE": "11", "MANUFACTURER": "ABB"}}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "You are an expert electrical engineer. Extract parameter values from transformer documents. Return only valid JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+            )
+            ai_response = response.choices[0].message.content.strip()
+            if "```json" in ai_response:
+                ai_response = ai_response.split("```json")[1].split("```")[0]
+            elif "```" in ai_response:
+                ai_response = ai_response.split("```")[1].split("```")[0]
+            vendor_map = json.loads(ai_response.strip())
+            if isinstance(vendor_map, dict):
+                normalized = {k.strip().upper(): str(v).strip() for k, v in vendor_map.items() if v and str(v).strip()}
+                logger.info(f"[TransformerDatasheet] AI extracted {len(normalized)} vendor key-value pairs")
+                return normalized
+            return {}
+        except json.JSONDecodeError as e:
+            logger.error(f"[TransformerDatasheet] Vendor JSON decode error: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"[TransformerDatasheet] Vendor AI extraction error: {e}")
+            return {}
+
+    def _merge_vendor_data(self, template_rows: List[Dict], vendor_map: Dict) -> int:
+        """
+        Merge vendor_map values into template_rows by description matching.
+        Returns count of rows filled.
+        """
+        merged = 0
+        stop_words = {'AND', 'OR', 'OF', 'THE', 'WITH', 'FOR', 'AT', 'IN', 'TO', 'A', 'AN', 'BY', 'ON'}
+        for row in template_rows:
+            if row.get('vendor_data'):
+                continue
+            desc = row.get('description', '').strip().upper()
+            if not desc:
+                continue
+            # 1. Exact match
+            if desc in vendor_map:
+                row['vendor_data'] = vendor_map[desc]
+                merged += 1
+                continue
+            # 2. Containment match
+            matched = False
+            for ai_key, ai_val in vendor_map.items():
+                if not ai_key or not ai_val:
+                    continue
+                if ai_key in desc or desc in ai_key:
+                    row['vendor_data'] = ai_val
+                    merged += 1
+                    matched = True
+                    break
+            if matched:
+                continue
+            # 3. Word-overlap match (≥2 meaningful common words)
+            desc_words = set(desc.split()) - stop_words
+            for ai_key, ai_val in vendor_map.items():
+                if not ai_key or not ai_val:
+                    continue
+                ai_words = set(ai_key.split()) - stop_words
+                if len(desc_words & ai_words) >= 2:
+                    row['vendor_data'] = ai_val
+                    merged += 1
+                    break
+        return merged
+
+    def _LEGACY_extract_datasheet_with_ai(self, doc_text: str, project_info: Dict = None) -> List[Dict]:
+        """LEGACY — kept for reference only. Use _extract_vendor_data_with_ai instead."""
+        # (original AI prompt method — not called)
+>>>>>>> c2ffe7a2aedceca15c10a57859e766d539217d13
 
         Returns the rows in the same order with vendor_data filled where found.
         """
@@ -268,6 +394,7 @@ DATASHEET LINE-ITEMS (extract vendor_data for each, in order):
             logger.error(f"[TransformerDatasheet] AI extraction error: {e}", exc_info=True)
             return template_rows
 
+<<<<<<< HEAD
     # ──────────────────────────────────────────────────────────────────────
     # Fallback default template
     # ──────────────────────────────────────────────────────────────────────
@@ -283,6 +410,264 @@ DATASHEET LINE-ITEMS (extract vendor_data for each, in order):
         self, datasheet_rows: List[Dict], project_info: Optional[Dict] = None
     ) -> BytesIO:
         """Render the full ADNOC datasheet workbook (6 sheets) to BytesIO."""
+=======
+    # ──────────────────────────────────────────────────────────────────────────
+    # Default template  (ADNOC distribution transformer form – all sections)
+    # ──────────────────────────────────────────────────────────────────────────
+    def _get_default_datasheet_template(self) -> List[Dict]:
+        """Return the full ADNOC distribution transformer datasheet template (6-column)."""
+        R = lambda sr, desc, unit="", req="": {
+            "sr_no": sr, "description": desc, "unit": unit,
+            "required_data": req, "vendor_data": "", "rev": ""
+        }
+        H = lambda desc: {
+            "sr_no": "", "description": desc, "unit": "",
+            "required_data": "", "vendor_data": "", "rev": ""
+        }
+        return [
+            # ── A. GENERAL DATA ─────────────────────────────────────────────
+            H("A   GENERAL DATA"),
+            R("1",  "TAG NO."),
+            R("2",  "TITLE",                                          "",    "11/0.433 KV DISTRIBUTION TRANSFORMER"),
+            R("3",  "MANUFACTURER / COUNTRY OF ORIGIN",               "",    "*** (AS PER COMPANY APPROVED LIST)"),
+            R("4",  "YEAR OF MANUFACTURE"),
+            R("5",  "QUANTITY",                                       "No."),
+            R("6",  "RATING",                                         "kVA"),
+            R("7",  "PROJECT SPECIFICATION",                          "",    "BGS-EE-003"),
+            R("8",  "STANDARD",                                       "",    "IEC 60076"),
+            R("9",  "DESIGN LIFE",                                    "",    "25 YEARS"),
+            R("10", "CRITICALITY RATING"),
+            R("11", "INSPECTION CLASS",                               "",    "2"),
+            R("12", "MATERIAL CERTIFICATION",                         "",    "3"),
+
+            # ── B. ENVIRONMENTAL CONDITIONS ─────────────────────────────────
+            H("B   ENVIRONMENTAL CONDITIONS"),
+            R("1",  "TYPE OF INSTALLATION",                           "",    "OUTDOOR IN SHADED AREA"),
+            R("2",  "ATMOSPHERE",                                     "",    "SALTY, SULPHUROUS AND DUSTY WITH HIGH CONCENTRATION OF WINDBORNE SAND"),
+            R("3",  "ALTITUDE",                                       "M",   "LESS THAN 1000m AMSL"),
+            R("4",  "MAX AMBIENT TEMPERATURE",                        "°C",  "56"),
+            R("5",  "MINIMUM AMBIENT TEMPERATURE",                    "°C",  "-5"),
+            R("6",  "MAXIMUM RELATIVE HUMIDITY",                      "at 43°C", "95%"),
+            R("7",  "DEGREE OF PROTECTION (IP)",                      "at 54°C", "IP65"),
+            R("8",  "SPECIAL CONDITIONS",                             "",    "TROPICALIZED"),
+
+            # ── C. GENERAL TECHNICAL CHARACTERISTICS ────────────────────────
+            H("C   GENERAL TECHNICAL CHARACTERISTICS"),
+            R("1",  "RATED PRIMARY VOLTAGE",                          "kV",  "11"),
+            R("2",  "RATED SECONDARY VOLTAGE AT NO LOAD",             "kV",  "0.433"),
+            R("3",  "SECONDARY VOLTAGE AT RATED POWER AND P.F 0.8",   "kV",  "0.415"),
+            R("4",  "RATED FREQUENCY",                                "Hz",  "50"),
+            R("5",  "NO. OF PHASES",                                  "",    "3"),
+            R("6",  "CONNECTION SYMBOL AND VECTOR GROUP",             "",    "Dy11"),
+            R("7",  "MAXIMUM FLUX DENSITY",                           "T"),
+            R("8",  "WITH SEPARATE WINDINGS"),
+
+            # ── INSULATION SYSTEMS ───────────────────────────────────────────
+            H("INSULATION SYSTEMS"),
+            H("CORE TYPE"),
+            R("1",  "UNIFORM INSULATION",                             "",    "YES"),
+            H("2   POWER FREQUENCY WITHSTAND VOLTAGE"),
+            R("3.1","- PRIMARY",                                      "kV",  "28"),
+            R("3.2","- SECONDARY",                                    "kV",  "3"),
+            H("4   IMPULSE SE WITHSTAND VOLTAGE"),
+            R("4.1","- PRIMARY",                                      "kV",  "75"),
+            R("4.2","- SECONDARY",                                    "kV",  "12"),
+            R("5",  "RATED TRANSFORMER"),
+            R("6",  "OIL IMMERSED TRANSFORMER",                       "",    "YES"),
+            R("7",  "OIL TYPE",                                       "",    "AS PER BGS-EE-003"),
+            R("8",  "TRANSFORMER TANK CONSTRUCTION",                  "",    "LIQUID (IMMERSED) HERMETICALLY SEALED"),
+            R("9",  "COMPLETELY FILLED",                              "",    "YES"),
+            R("10", "WITH GAS CUSHION"),
+            R("11", "TYPE OF COOLING (ONAN/ONAF)",                    "",    "ONAN"),
+            H("MODE OF OPERATION"),
+            R("",   "INDIVIDUAL / PARALLEL",                          "",    "PARALLEL (REFER NOTE 10)"),
+
+            # ── F. PRIMARY WINDING ───────────────────────────────────────────
+            H("F   PRIMARY WINDING"),
+            R("1",  "HIGH VOLTAGE (UM)",                              "kV",  "12"),
+            R("2",  "COPPER",                                         "",    "YES"),
+            R("3",  "MAXIMUM CURRENT DENSITY IN THE WINDING"),
+            R("4",  "RATED PRIMARY CURRENT",                          "A",   "***"),
+
+            # ── G. SECONDARY WINDING ─────────────────────────────────────────
+            H("G   SECONDARY WINDING"),
+            R("1",  "HIGH VOLTAGE (UM)",                              "kV",  "0.8"),
+            R("2",  "COPPER",                                         "",    "YES"),
+            R("3",  "ADDITIONAL NEUTRAL BROUGHT IN A SEPARATED BOX",  "",    "BUS"),
+            R("4",  "EARTHING SYSTEM",                                "",    "SOLID"),
+            R("5",  "MAXIMUM CURRENT DENSITY IN THE WINDING"),
+            R("6",  "RATED PRIMARY CURRENT"),
+
+            # ── H. ELECTRICAL AND MECHANICAL CHARACTERISTICS ─────────────────
+            H("H   ELECTRICAL AND MECHANICAL CHARACTERISTICS"),
+            R("1",  "NO-LOAD CURRENT (PRIMARY)"),
+            R("2",  "MAGNETIZING INRUSH CURRENT AND DURATION"),
+            R("3",  "SHORT CIRCUIT IMPEDANCE AT 75°C",                "%"),
+            R("4",  "TRANSFORMER IMPEDANCE AT PRINCIPLE TAP"),
+            R("5",  "TRANSFORMER IMPEDANCE AT MAXIMUM TAP"),
+            R("6",  "TRANSFORMER IMPEDANCE AT MINIMUM TAP",           "%"),
+            R("7",  "TOLERANCE ON SHORT CIRCUIT IMPEDANCE",           "%",   "+/- 10 %"),
+            R("8",  "ZERO SEQUENCE IMPEDANCE"),
+            R("9",  "POSITIVE SEQUENCE X/R RATIO"),
+            R("9a", "ZERO SEQUENCE X/R RATIO"),
+            R("10", "PRIMARY SIDE VOLTAGE LEVEL AND VARIATION",       "kV",  "11kV ± 10%"),
+            R("11", "FREQUENCY AND VARIATION",                        "Hz",  "50 Hz ± 2%"),
+            R("12", "PRIMARY 11KV SYSTEM APPARENT SHORT CIRCUIT RATING", "kA"),
+            R("13", "MAX SHORT CIRCUIT DURATION",                     "Sec", "1"),
+            R("14", "SECONDARY SIDE APPARENT SHORT CIRCUIT RATINGS",  "kA"),
+            R("15", "MAX SHORT CIRCUIT DURATION",                     "Sec", "1"),
+            R("16", "TOP OIL TEMPERATURE RISE (AS PER IEC - 60076-2, TABLE (J & II))", "°C", "45"),
+            R("17", "AVERAGE WINDING TEMPERATURE RISE (AS PER IEC - 60076-2, TABLE (J & II))", "°C", "60"),
+            R("",   "HOT SPOT TEMPERATURE",                           "°C"),
+            R("18", "IRON LOSSES (NO LOAD)"),
+            R("19", "COPPER LOSSES (FULL LOAD)"),
+            R("20", "TOTAL LOSSES"),
+            H("20  EFFICIENCY AT 0.8 POWER FACTOR"),
+            R("20.1","50% LOAD"),
+            R("20.2","75% LOAD"),
+            R("20.3","100% LOAD"),
+            H("20.4 EFFICIENCY AT POWER FACTOR 1"),
+            R("20.5","50% LOAD"),
+            R("20.6","75% LOAD"),
+            R("20.7","100% LOAD"),
+            R("21", "VOLTAGE REGULATION"),
+            R("",   "AT UNITY POWER FACTOR"),
+            R("",   "AT 0.8 POWER FACTOR"),
+            R("",   "SATURATION VOLTAGE"),
+
+            # ── I. TAP CHANGERS ──────────────────────────────────────────────
+            H("I   TAP CHANGERS"),
+            R("1",  "OFF-CIRCUIT (Y/N)",                              "",    "YES"),
+            R("2",  "NO. OF TAPPINGS",                                "No."),
+            R("3",  "TAPPING STEP"),
+            R("4",  "TAPPING RANGE",                                  "%",   "± 5% (IN STEP OF 2.5%)"),
+            R("5",  "VOLTAGE REGULATOR & PARALLEL CONTROL SYSTEM",    "",    "NA"),
+
+            # ── J. TANK ──────────────────────────────────────────────────────
+            H("J   TANK"),
+            H("TANK MATERIAL"),
+            R("1",  "FABRICATED UNDER BASE",                          "MM",  "YES (THICKNESS MIN. 10 MM)"),
+            H("THICKNESS OF TANK"),
+            R("3.1","- BOTTOM",                                       "MM"),
+            R("3.2","- SIDES",                                        "MM"),
+            R("3.3","- TOP",                                          "MM"),
+            R("4",  "TYPE OF TANK (SEALED / CONSERVATOR)",            "",    "HERMETICALLY SEALED"),
+            H("RADIATOR"),
+            R("5",  "NUMBER OF RADIATORS",                            "",    "DETACHABLE"),
+            R("6",  "TRANSFORMER MOUNTING",                           "",    "BI-DIRECTIONAL ROLLERS"),
+
+            # ── K. TANK COVER TYPE ───────────────────────────────────────────
+            H("K   TANK COVER TYPE"),
+            R("1",  "BOLTED",                                         "",    "YES"),
+            R("2",  "WELDED",                                         "",    "NA"),
+            R("3",  "BELL TYPE",                                      "",    "NA"),
+            R("",   "THICKNESS",                                      "MM"),
+            H("DIMENSIONS"),
+            R("",   "OVERALL WITH ACCESSORIES (LENGTH / WIDTH / HEIGHT)", "MM", "AS PER BGS-EE-003"),
+            R("",   "BETWEEN ROLLER AXIS",                            "MM"),
+
+            # ── L. WEIGHTS ───────────────────────────────────────────────────
+            H("L   WEIGHTS"),
+            R("1",  "TOTAL",                                          "KG"),
+            R("2",  "OIL",                                            "LITER"),
+            R("3",  "CORE AND WINDING",                               "KG"),
+            R("4",  "TANK AND FITTING",                               "KG"),
+            R("5",  "VOLUME OF OIL",                                  "LITER"),
+            R("6",  "MAKE OF OIL"),
+
+            # ── N. NOISE LEVEL ───────────────────────────────────────────────
+            H("N   NOISE LEVEL"),
+            R("",   "WITHOUT COOLING",                                "dB",  "*** (AS PER IEC 60076-10)"),
+            R("",   "WITH COOLING",                                   "",    "NA"),
+
+            # ── O. CONNECTIONS ───────────────────────────────────────────────
+            H("O   CONNECTIONS"),
+            H("PRIMARY VOLTAGE SIDE"),
+            R("1",    "CABLE CONNECTION",                             "",    "YES"),
+            R("1.2",  "CABLE TYPE AND SIZE"),
+            R("1.3",  "TYPE OF BUSHING AND RATING",                   "",    "AS PER SPEC. BGS-EE-003"),
+            R("1.3.1","QUANTITY OF BUSHINGS"),
+            R("1.4",  "SPACE FOR CURRENT TRANSFORMER",                "kA"),
+            R("1.5",  "PLUG IN TERMINAL"),
+            R("1.6",  "CABLE BOX WITH OIL"),
+            R("1.7",  "SF6 CONNECTION",                               "",    "NO"),
+            R("1.8",  "PROTECTIVE ENCLOSURE",                         "",    "AIR INSULATED CABLE BOX"),
+            R("1.9",  "THERMAL IMAGE WINDOW FOR CABLE INVESTIGATION", "",    "REQUIRED"),
+            R("1.10", "PRESSURE RELIEF DIAPHRAGM",                    "",    "REQUIRED"),
+            R("1.11", "DISCONNECTING CHAMBERS / LINKS",               "",    "REQUIRED"),
+            H("SECONDARY VOLTAGE SIDE"),
+            R("2.1",  "CABLE CONNECTION",                             "",    "NO"),
+            R("2.2",  "CABLE SIZE",                                   "",    "NO"),
+            R("2.3",  "BUS DUCT",                                     "",    "YES"),
+            R("2.4",  "BUS DUCT TYPE",                                "",    "PHASE REGULATED AS PER BGS-EE-006"),
+            R("2.8",  "BUS DUCT TERMINATIONS",                        "",    "AS PER BGS-EE-003"),
+            H("NEUTRAL SIDE"),
+            R("3.1",  "NEUTRAL TERMINAL IN A SEPARATE NEUTRAL TERMINAL BOX", "", "YES"),
+            R("3.2",  "THERMAL IMAGE WINDOW FOR CABLE INVESTIGATION", "",    "YES"),
+            R("3.3",  "PRESSURE RELIEF DIAPHRAGM",                    "",    "YES"),
+            H("CONTROL AND PROTECTION DEVICES"),
+            R("4",  "PRESSURE RELIEF DEVICE WITH TWO TRIP CONTACT FORM 'C'",       "", "YES"),
+            R("5",  "BUCHHOLZ RELAY WITH TWO ALARM AND TWO TRIP CONTACTS",          "", "NA"),
+            R("6",  "THERMAL IMAGE TYPE WINDING TEMPERATURE WITH CONTACTS (TWO ALARM / TWO TRIP)", "", "YES"),
+            R("7",  "OIL TEMP. INDICATOR WITH CONTACTS (TWO ALARM & TWO TRIP)",     "", "YES"),
+            R("8",  "WINDING TEMP. INDICATOR WITH CONTACTS (TWO ALARM & TWO TRIP)", "", "YES"),
+            R("9",  "TEMPERATURE METER POCKETS / THERMOWELLS",                      "", "YES"),
+            R("10", "THERMOSTAT",                                                    "", "YES"),
+            R("11", "LIQUID LEVEL GAUGE WITH 2 CONTACTS (ALARM / TRIP)",            "", "YES"),
+            R("12", "MAGNETIC OIL LEVEL GAUGE WITH TWO CONTACTS (ALARM)",           "", "YES"),
+            R("13", "PRESSURE VACUUM GAUGE WITH OPERATING 4 CONTACTS (ALARM / TRIP)", "", "YES"),
+            R("14", "NEUTRAL CT IN SEPARATE NEUTRAL TERMINAL BOX (Y/N)",            "", "YES (***)"),
+            R("15", "CURRENT TRANSFORMER FOR STANDBY E/F PROTECTION",               "", "2000/1A, SP23, 15VA"),
+            H("ACCESSORIES"),
+            R("1",  "PRIMARY SURGE ARRESTOR",                         "",    "NA"),
+            R("2",  "LIFTING EYES & JACKING LUGS",                    "",    "YES"),
+            R("3",  "PULLING EYES FOR MOVING TRANSFORMER IN ALL DIRECTIONS", "", "YES"),
+            R("4",  "SAFETY VALVE ON TANK AND RADIATORS",             "",    "YES AND BOTTOM"),
+            R("5",  "FILLING VALVE ON TANK AND RADIATORS",            "",    "YES AND BOTTOM"),
+            R("6",  "SAFETY VALVE ON TANK AND RADIATORS",             "",    "YES AND BOTTOM"),
+            R("7",  "FILLING VALVE (DRAIN VALVE) ON TANK AND RADIATORS", "", "YES AND BOTTOM"),
+            R("8",  "FILLER PLUG / FILTER VALVES",                    "",    "YES"),
+            R("9",  "CASTERS (FIXED / ORIENTABLE)",                   "",    "ORIENTABLE"),
+            R("10", "EARTH TERMINAL",                                  "",    "YES: 2"),
+            R("11", "MARSHALLING BOX",                                "",    "YES"),
+            R("12", "JACKING PADS",                                   "",    "YES"),
+            R("13", "THERMOMETERS",                                   "",    "YES"),
+            R("14", "PADLOCKS",                                       "",    "YES"),
+            R("15", "TERMINAL BOX FOR AUXILIARIES",                   "",    "YES"),
+
+            # ── R. INSPECTION & TESTING ──────────────────────────────────────
+            H("R   INSPECTION & TESTING"),
+            R("1",  "INSPECTIONS & TESTS",                            "",    "AS PER SPEC. BGS-EE-003"),
+            R("2",  "ROUTINE TESTS",                                  "",    "AS PER APPENDIX-3 OF BGS-EE-003"),
+            R("3",  "TYPE TESTS & ACOUSTIC SOUND TESTS",              "",    "AS PER APPENDIX-3 OF BGS-EE-003"),
+            R("4",  "SPECIAL TESTS",                                  "",    "AS PER APPENDIX-3 OF BGS-EE-003"),
+
+            # ── PAINTING ─────────────────────────────────────────────────────
+            H("PAINTING"),
+            R("",   "COLOUR"),
+            R("",   "PAINTING THICKNESS TANK",                        "",    "RAL 6511 AS PER BGS-MX-001"),
+            R("",   "PAINTING THICKNESS RADIATOR"),
+            R("",   "GALVANISATION THICKNESS TANK"),
+            R("",   "GALVANISATION THICKNESS RADIATOR"),
+
+            # ── LOSS EVALUATION ──────────────────────────────────────────────
+            H("LOSS EVALUATION"),
+            R("",   "ENERGY COST + LATERS / kWH"),
+            R("",   "INTEREST RATE"),
+            R("",   "DISCOUNT FACTOR",                                "",    "50%"),
+
+            # ── Q. EXTERNAL POWER SUPPLY REQUIREMENT ─────────────────────────
+            H("Q   EXTERNAL POWER SUPPLY REQUIREMENT"),
+            R("1",  "EXTERNAL POWER SUPPLY FOR AUXILIARY POWER",      "",    "230V AC, 50 Hz, 1-Ph FOR SPACE HEATER SUPPLY"),
+            R("2",  "AUXILIARY LOAD DETAILS",                         "W"),
+        ]
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Excel Export
+    # ──────────────────────────────────────────────────────────────────────────
+    def export_to_excel(self, datasheet_rows: List[Dict], project_info: Dict = None):
+        """Export transformer datasheet to formatted Excel workbook."""
+>>>>>>> c2ffe7a2aedceca15c10a57859e766d539217d13
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 

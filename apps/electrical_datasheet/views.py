@@ -1281,6 +1281,113 @@ Please provide your response as JSON with this exact structure:
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    # LV SWITCHGEAR DATASHEET ENDPOINTS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @action(detail=False, methods=['post'], url_path='generate-lv-switchgear-datasheet')
+    def generate_lv_switchgear_datasheet(self, request):
+        """
+        Generate LV Switchgear Datasheet from Technical Datasheet PDF.
+
+        POST /api/v1/electrical-datasheet/datasheets/generate-lv-switchgear-datasheet/
+
+        FormData:
+        - lv_datasheet_file : PDF of the Technical Datasheet for LV Switchgear
+        - project_name      : (optional)
+        - drawing_number    : (optional)
+        - area              : (optional)
+        """
+        from .lv_switchgear_datasheet_generator import LVSwitchgearDatasheetGenerator
+
+        try:
+            if 'lv_datasheet_file' not in request.FILES:
+                return Response(
+                    {'success': False, 'error': 'Technical Datasheet for LV Switchgear file is required'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            lv_file = request.FILES['lv_datasheet_file']
+
+            if not lv_file.name.lower().endswith('.pdf'):
+                return Response(
+                    {'success': False, 'error': 'Only PDF files are supported'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            project_info = {
+                'project_name':   request.data.get('project_name', ''),
+                'drawing_number': request.data.get('drawing_number', ''),
+                'area':           request.data.get('area', ''),
+                'equipment_type': 'LV Switchgear',
+            }
+
+            logger.info(f"[LVSwitchgearDatasheet] Generating from: {lv_file.name}")
+
+            generator = LVSwitchgearDatasheetGenerator()
+            result = generator.generate_datasheet_from_document(lv_file, project_info)
+
+            if not result['success']:
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
+
+            return Response(result, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"[LVSwitchgearDatasheet] Error: {e}", exc_info=True)
+            return Response(
+                {'success': False, 'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['post'], url_path='export-lv-switchgear-datasheet')
+    def export_lv_switchgear_datasheet(self, request):
+        """
+        Export LV Switchgear Datasheet rows to a formatted Excel file.
+
+        POST /api/v1/electrical-datasheet/datasheets/export-lv-switchgear-datasheet/
+
+        Body (JSON):
+        - datasheet_rows : array of row objects
+        - project_info   : project metadata dict
+        """
+        from .lv_switchgear_datasheet_generator import LVSwitchgearDatasheetGenerator
+        from django.http import HttpResponse
+        from datetime import datetime
+
+        try:
+            datasheet_rows = request.data.get('datasheet_rows', [])
+            project_info   = request.data.get('project_info', {})
+
+            if not datasheet_rows:
+                return Response(
+                    {'success': False, 'error': 'No datasheet rows provided'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            logger.info(f"[LVSwitchgearDatasheet] Exporting {len(datasheet_rows)} rows to Excel")
+
+            generator = LVSwitchgearDatasheetGenerator()
+            excel_buffer = generator.export_to_excel(datasheet_rows, project_info)
+
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename  = f"LV_Switchgear_Datasheet_{timestamp}.xlsx"
+
+            response = HttpResponse(
+                excel_buffer.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            response['Access-Control-Expose-Headers'] = 'Content-Disposition'
+
+            logger.info(f"[LVSwitchgearDatasheet] ✅ Excel exported: {filename}")
+            return response
+
+        except Exception as e:
+            logger.error(f"[LVSwitchgearDatasheet] Export error: {e}", exc_info=True)
+            return Response(
+                {'success': False, 'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     @action(detail=False, methods=['post'], url_path='generate-smart')
     def generate_smart_datasheet(self, request):
         """
@@ -1297,7 +1404,7 @@ Please provide your response as JSON with this exact structure:
         {
             "success": true,
             "datasheet_id": 123,
-            "excel_url": "/api/v1/electrical-datasheet/datasheets/123/download/",
+            "excel_url": "/electrical-datasheet/datasheets/123/download/",
             "summary": {
                 "files_processed": 3,
                 "fields_extracted": 45,
@@ -1416,9 +1523,14 @@ Please provide your response as JSON with this exact structure:
                         )
                         logger.warning(f"[SmartDatasheet] No config found for {internal_type}, created minimal record")
                 
+                import uuid as _uuid
+                auto_tag = f"{equipment_type.upper()[:8]}-{_uuid.uuid4().hex[:8].upper()}"
+
                 datasheet = ElectricalDatasheet.objects.create(
                     equipment_type=equipment_obj,
-                    project_id=request.data.get('project_id'),
+                    tag_number=auto_tag,
+                    service_description=f"Auto-generated {equipment_type.replace('_',' ').title()} datasheet",
+                    location='',
                     form_data=structured_data,
                     created_by=request.user,
                     status='draft'
@@ -1431,7 +1543,7 @@ Please provide your response as JSON with this exact structure:
                 return Response({
                     'success': True,
                     'datasheet_id': datasheet.id,
-                    'excel_url': f'/api/v1/electrical-datasheet/datasheets/{datasheet.id}/download/',
+                    'excel_url': f'/electrical-datasheet/datasheets/{datasheet.id}/download/',
                     'summary': {
                         'files_processed': len(uploaded_files),
                         'fields_extracted': len(structured_data),
@@ -1819,6 +1931,90 @@ Please provide your response as JSON with this exact structure:
             'total_attachments': len(form_data['attached_files'])
         })
     
+    @action(detail=True, methods=['get'], url_path='download')
+    def download_excel(self, request, pk=None):
+        """
+        Generate and download a generic Excel file for any smart-generated datasheet.
+        Converts the form_data dict into a two-column (Field / Value) spreadsheet.
+        """
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        from django.http import HttpResponse
+        import io
+
+        datasheet = self.get_object()
+        form_data = datasheet.form_data or {}
+        equipment_type = datasheet.equipment_type.name if datasheet.equipment_type else 'Equipment'
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Datasheet"
+
+        # ── Styles ────────────────────────────────────────────────
+        header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+        header_font = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
+        label_fill  = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
+        label_font  = Font(name="Calibri", bold=True, size=10)
+        value_font  = Font(name="Calibri", size=10)
+        center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        left_align   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+        thin = Side(style="thin", color="AAAAAA")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        # ── Title row ─────────────────────────────────────────────
+        ws.merge_cells("A1:B1")
+        title_cell = ws["A1"]
+        title_cell.value = f"{equipment_type} — Technical Datasheet"
+        title_cell.font = Font(name="Calibri", bold=True, color="FFFFFF", size=13)
+        title_cell.fill = header_fill
+        title_cell.alignment = center_align
+        ws.row_dimensions[1].height = 28
+
+        # ── Column headers ────────────────────────────────────────
+        ws["A2"] = "Field"
+        ws["B2"] = "Value"
+        for cell in [ws["A2"], ws["B2"]]:
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = center_align
+            cell.border = border
+        ws.row_dimensions[2].height = 20
+
+        # ── Data rows ─────────────────────────────────────────────
+        row = 3
+        for key, value in form_data.items():
+            label = str(key).replace("_", " ").title()
+            display_val = value if not isinstance(value, (dict, list)) else json.dumps(value, indent=2)
+
+            ws.cell(row=row, column=1, value=label).font  = label_font
+            ws.cell(row=row, column=1).fill      = label_fill
+            ws.cell(row=row, column=1).alignment = left_align
+            ws.cell(row=row, column=1).border    = border
+
+            ws.cell(row=row, column=2, value=str(display_val) if display_val is not None else "").font = value_font
+            ws.cell(row=row, column=2).alignment = left_align
+            ws.cell(row=row, column=2).border    = border
+
+            ws.row_dimensions[row].height = 18
+            row += 1
+
+        # ── Column widths ─────────────────────────────────────────
+        ws.column_dimensions["A"].width = 40
+        ws.column_dimensions["B"].width = 60
+
+        excel_file = io.BytesIO()
+        wb.save(excel_file)
+        excel_file.seek(0)
+
+        safe_name = equipment_type.replace(" ", "_").replace("/", "-")
+        response = HttpResponse(
+            excel_file.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        response["Content-Disposition"] = f'attachment; filename="{safe_name}_Datasheet_{datasheet.id}.xlsx"'
+        return response
+
     @action(detail=True, methods=['get'])
     def download_file(self, request, pk=None):
         """
