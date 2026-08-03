@@ -167,3 +167,18 @@ eq_test.pdf
 # Local RBAC audit scratch + preview CSVs (contain employee PII)
 _audit_rbac_current_state.py
 role_alignment_preview_*.csv
+radai_backup.sql
+.env.production.backup
+align_hr_master.py
+align_hr_master_v2.py
+align_leave.py
+align_managers.py
+align_offboarding.py
+align_onboarding.py
+align_payroll_hr.py
+align_rbac.py
+align_salary_info.py
+align_smart.py
+fix_salary.py
+fix.py
+temp_check.py
