@@ -1,0 +1,128 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+docs/
+
+# Test files (CRITICAL - exclude ALL test files)
+test_*.py
+*_test.py
+tests/
+.pytest_cache/
+test_outputs/
+testing/
+
+# Training & Large Data Directories (CRITICAL - 20MB+)
+pfd_documents/
+pfd_training_samples/
+pfd_projects/
+pfd_quality/
+pid_drawings/
+pid_drawings_advanced/
+pid_training_samples/
+training_data_cache/
+project_data/
+domain_knowledge/
+
+# Logs
+*.log
+logs/
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.development
+
+# Database
+*.sqlite3
+*.db
+
+# Media files (will be on S3 in production)
+media/
+staticfiles/
+
+# Admin & Utility Scripts (not needed at runtime)
+change_user_password.py
+cleanup_duplicate_emails.py
+configure_s3.py
+delete_user.py
+diagnose_user_sync.py
+reset_*_password.py
+smart_populate_area.py
+soft_delete_user.py
+remove_*.py
+generate_ui_comparison_report.py
+*_report.txt
+
+# Build & Deployment Scripts
+git_push.ps1
+push_to_github.bat
+*.sh
+!railway_start.sh
+!start.sh
+!docker-entrypoint.sh
+*.bat
+*.ps1
+
+# Knowledge Base Files (should be in S3)
+*_knowledge_base.json
+*_training_examples.json
+pfd_knowledge_base.json
+pfd_training_examples.json
+pid_knowledge_base.json
+pid_training_examples.json
+
+# Railway/Cloud specific
+railway_*.py
+verify_railway_*.py
+
+# Local development
+docker-compose*.yml
+Dockerfile*
+nixpacks.toml
+railway.toml
+Procfile
+
+# Backup files
+*.bak
+*.backup
+*.old

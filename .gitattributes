@@ -1,0 +1,4 @@
+# Force bash scripts to use LF line endings even on Windows
+*.sh text eol=lf
+railway_start.sh text eol=lf
+post_deploy.sh text eol=lf

@@ -1,0 +1,184 @@
+# ============================================
+# SECURITY: Environment & Credentials
+# ============================================
+# NEVER commit these files!
+.env
+.env.local
+.env.*.local
+*.env
+*credentials*
+*aws_credentials*
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+PIPFILE.lock
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+/media
+/staticfiles
+# Runtime upload roots (MEDIA_ROOT subdirs)
+/spec_customization/paper_specs/
+
+# Temporary directories
+temp_sfiles2_*/
+
+# Training samples and generated files
+pfd_training_samples/
+pid_training_samples/
+pid_drawings/
+
+# Analysis scripts (one-off scripts)
+analyze_s3_pfds.py
+/static
+celerybeat-schedule
+celerybeat.pid
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+pyvenv.cfg
+
+# Secrets
+*.pem
+*.key
+*.cert
+secrets/
+credentials/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+.ropeproject
+.spyderproject
+.spyproject
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Testing
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+.hypothesis/
+pytestdebug.log
+nosetests.xml
+test-results/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# pyenv
+.python-version
+
+# Railway
+.railway/
+
+# Backup files
+*.bak
+*.swp
+*.tmp
+*~
+
+# Test files and utility scripts folder
+test/
+test_*.py
+*.md
+*.txt
+# Allow P&ID analysis config prompt files (engineers tune these without code deploys)
+!apps/pid_analysis/config/*.txt
+
+pfd_projects/
+
+# Runtime upload / cache directories (repo-root only, NOT the apps/pid_verification/ Django app)
+/pid_verification/
+
+# Runtime-generated comparison cache snapshots (UUID-named JSON blobs)
+domain_knowledge/pid_verification/comparison_*.json
+
+# Runtime caches and sample binaries (added 2026-05-06)
+non_teff_batches/
+non_teff_search_cache/
+pid_drawings_advanced/
+_sample.xlsx
+eq_sample.pdf
+eq_test.pdf
+
+
+# Local RBAC audit scratch + preview CSVs (contain employee PII)
+_audit_rbac_current_state.py
+role_alignment_preview_*.csv
+radai_backup.sql
+.env.production.backup
+align_hr_master.py
+align_hr_master_v2.py
+align_leave.py
+align_managers.py
+align_offboarding.py
+align_onboarding.py
+align_payroll_hr.py
+align_rbac.py
+align_salary_info.py
+align_smart.py
+fix_salary.py
+fix.py
+temp_check.py

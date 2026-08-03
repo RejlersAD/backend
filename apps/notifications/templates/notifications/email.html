@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="x-auto-generated" content="true">
+    <meta name="x-sender" content="RAD AI Platform">
+    <title>{{ notification.title }} - RAD AI Auto-Generated Notification</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #374151;
+            background-color: #F3F4F6;
+        }
+        
+        .email-container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+        }
+        
+        .email-header {
+            padding: 30px 40px;
+            text-align: center;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .email-header h1 {
+            font-size: 24px;
+            font-weight: 700;
+            margin: 0;
+        }
+        
+        .email-header .logo {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+        
+        .priority-banner {
+            padding: 15px 40px;
+            text-align: center;
+            font-weight: 600;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .priority-critical {
+            background-color: #DC2626;
+            color: white;
+        }
+        
+        .priority-urgent {
+            background-color: #EF4444;
+            color: white;
+        }
+        
+        .priority-high {
+            background-color: #F59E0B;
+            color: white;
+        }
+        
+        .priority-normal {
+            background-color: #3B82F6;
+            color: white;
+        }
+        
+        .priority-low {
+            background-color: #6B7280;
+            color: white;
+        }
+        
+        .email-body {
+            padding: 40px;
+        }
+        
+        .notification-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: #1F2937;
+            margin-bottom: 20px;
+        }
+        
+        .notification-message {
+            font-size: 16px;
+            line-height: 1.8;
+            color: #4B5563;
+            margin-bottom: 30px;
+            white-space: pre-wrap;
+        }
+        
+        .notification-metadata {
+            background-color: #F9FAFB;
+            border-left: 4px solid #667eea;
+            padding: 15px 20px;
+            margin-bottom: 30px;
+            border-radius: 4px;
+        }
+        
+        .metadata-item {
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        
+        .metadata-label {
+            font-weight: 600;
+            color: #1F2937;
+            display: inline-block;
+            min-width: 120px;
+        }
+        
+        .metadata-value {
+            color: #4B5563;
+        }
+        
+        .action-button {
+            display: inline-block;
+            padding: 14px 32px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 16px;
+            text-align: center;
+            transition: transform 0.2s;
+        }
+        
+        .action-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+        
+        .action-container {
+            text-align: center;
+            margin: 30px 0;
+        }
+        
+        .divider {
+            height: 1px;
+            background-color: #E5E7EB;
+            margin: 30px 0;
+        }
+        
+        .email-footer {
+            padding: 30px 40px;
+            background-color: #F9FAFB;
+            text-align: center;
+            font-size: 13px;
+            color: #6B7280;
+        }
+        
+        .footer-logo {
+            font-size: 20px;
+            margin-bottom: 10px;
+        }
+        
+        .footer-links {
+            margin: 15px 0;
+        }
+        
+        .footer-links a {
+            color: #667eea;
+            text-decoration: none;
+            margin: 0 10px;
+        }
+        
+        .footer-links a:hover {
+            text-decoration: underline;
+        }
+        
+        .unsubscribe {
+            margin-top: 15px;
+            font-size: 12px;
+        }
+        
+        .unsubscribe a {
+            color: #9CA3AF;
+            text-decoration: underline;
+        }
+        
+        @media only screen and (max-width: 600px) {
+            .email-header,
+            .email-body,
+            .email-footer,
+            .priority-banner {
+                padding-left: 20px;
+                padding-right: 20px;
+            }
+            
+            .notification-title {
+                font-size: 18px;
+            }
+            
+            .notification-message {
+                font-size: 14px;
+            }
+            
+            .action-button {
+                display: block;
+                padding: 12px 24px;
+                font-size: 14px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="email-container">
+        <!-- Auto-Generated Email Warning Banner -->
+        <div style="background: linear-gradient(135deg, #1e3a8a 0%, #3730a3 100%); color: white; padding: 12px 20px; text-align: center; font-size: 13px; font-weight: 600; border-bottom: 3px solid #fbbf24;">
+            <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
+                <span style="font-size: 18px;">🤖</span>
+                <span>AUTO-GENERATED EMAIL FROM RAD AI PLATFORM</span>
+                <span style="font-size: 18px;">🔒</span>
+            </div>
+            <div style="font-size: 11px; margin-top: 4px; opacity: 0.9;">
+                This is an automated notification. Please do not reply to this email.
+            </div>
+        </div>
+        
+        <!-- Header -->
+        <div class="email-header">
+            <div class="logo">🚀</div>
+            <h1>RAD AI Platform</h1>
+            <div style="font-size: 12px; margin-top: 8px; opacity: 0.9;">Intelligent Construction Management System</div>
+        </div>
+        
+        <!-- Priority Banner -->
+        {% if notification.priority in 'CRITICAL,URGENT,HIGH' %}
+        <div class="priority-banner priority-{{ notification.priority|lower }}">
+            {% if notification.priority == 'CRITICAL' %}
+                ⚠️ CRITICAL ALERT
+            {% elif notification.priority == 'URGENT' %}
+                🔴 URGENT NOTIFICATION
+            {% elif notification.priority == 'HIGH' %}
+                🟡 HIGH PRIORITY
+            {% endif %}
+        </div>
+        {% endif %}
+        
+        <!-- Body -->
+        <div class="email-body">
+            <div class="notification-title">
+                {{ notification.title }}
+            </div>
+            
+            <div class="notification-message">
+                {{ notification.message }}
+            </div>
+            
+            <!-- Metadata -->
+            {% if metadata %}
+            <div class="notification-metadata">
+                {% for key, value in metadata.items %}
+                <div class="metadata-item">
+                    <span class="metadata-label">{{ key|title }}:</span>
+                    <span class="metadata-value">{{ value }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            
+            <!-- Action Button -->
+            {% if notification.action_url %}
+            <div class="action-container">
+                <a href="{{ notification.action_url }}" class="action-button">
+                    {{ notification.action_label|default:"View Details" }}
+                </a>
+            </div>
+            {% endif %}
+            
+            <div class="divider"></div>
+            
+            <!-- Additional Info -->
+            <p style="font-size: 13px; color: #6B7280; margin-top: 20px;">
+                <strong>Notification Details:</strong><br>
+                Category: {{ notification.category.name }}<br>
+                Priority: {{ notification.get_priority_display }}<br>
+                Sent: {{ notification.created_at|date:"F d, Y g:i A" }}
+            </p>
+        </div>
+        
+        <!-- Footer -->
+        <div class="email-footer">
+            <!-- Safety & Auto-Generated Disclaimer -->
+            <div style="background: #FEF3C7; border: 2px solid #F59E0B; border-radius: 6px; padding: 12px; margin-bottom: 20px; text-align: left;">
+                <div style="display: flex; align-items: start; gap: 10px;">
+                    <span style="font-size: 20px;">⚠️</span>
+                    <div style="flex: 1;">
+                        <strong style="color: #92400E; font-size: 14px;">IMPORTANT SAFETY NOTICE</strong>
+                        <p style="color: #78350F; font-size: 12px; margin: 5px 0 0 0; line-height: 1.5;">
+                            <strong>This is an AUTO-GENERATED email from RAD AI Platform's notification system.</strong><br>
+                            • Do NOT reply to this email - replies are not monitored<br>
+                            • This email was triggered automatically by system events<br>
+                            • If you believe this email is suspicious or unexpected, contact your system administrator<br>
+                            • Never share sensitive information via email<br>
+                            • Always verify critical actions through the RAD AI web portal
+                        </p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="footer-logo">🚀</div>
+            <p>
+                <strong>RAD AI Platform</strong><br>
+                Your Intelligent Construction Management System
+            </p>
+            
+            <div class="footer-links">
+                <a href="{{ base_url }}">Dashboard</a>
+                <a href="{{ base_url }}/notifications">All Notifications</a>
+                <a href="{{ base_url }}/settings/notifications">Preferences</a>
+            </div>
+            
+            <p style="margin-top: 15px; color: #9CA3AF; font-size: 11px;">
+                <strong>🤖 Automated Email Service</strong><br>
+                This email was automatically generated by RAD AI Platform<br>
+                Sent: {{ notification.created_at|date:"F d, Y g:i A" }}<br>
+                Notification ID: #{{ notification.id }}
+            </p>
+            
+            <p style="margin-top: 15px; color: #9CA3AF;">
+                © {{ current_year }} RAD AI Platform. All rights reserved.
+            </p>
+            
+            <div class="unsubscribe">
+                <a href="{{ unsubscribe_url }}">Manage notification preferences</a> |
+                <a href="{{ base_url }}/help">Help Center</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

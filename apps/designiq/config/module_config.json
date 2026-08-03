@@ -1,0 +1,129 @@
+{
+  "design_modules": {
+    "enabled_modules": [],
+    "disabled_modules": [
+      {
+        "id": "process_flow",
+        "name": "Process Flow Design",
+        "icon": "🔄",
+        "color": "blue",
+        "description": "Process flow diagrams and analysis",
+        "reason": "Feature disabled by configuration"
+      },
+      {
+        "id": "equipment",
+        "name": "Equipment Design",
+        "icon": "⚙️",
+        "color": "green",
+        "description": "Equipment specifications and design",
+        "reason": "Feature disabled by configuration"
+      },
+      {
+        "id": "piping",
+        "name": "Piping & Instrumentation",
+        "icon": "🔧",
+        "color": "purple",
+        "description": "P&ID drawings and specifications",
+        "reason": "Feature disabled by configuration"
+      },
+      {
+        "id": "heat_exchanger",
+        "name": "Heat Exchanger Design",
+        "icon": "🔥",
+        "color": "red",
+        "description": "Heat exchanger calculations and design",
+        "reason": "Feature disabled by configuration"
+      },
+      {
+        "id": "vessel",
+        "name": "Pressure Vessel Design",
+        "icon": "🛢️",
+        "color": "indigo",
+        "description": "Pressure vessel specifications and design",
+        "reason": "Feature disabled by configuration"
+      },
+      {
+        "id": "pump",
+        "name": "Pump Selection & Design",
+        "icon": "💧",
+        "color": "cyan",
+        "description": "Pump selection and sizing calculations",
+        "reason": "Feature disabled by configuration"
+      },
+      {
+        "id": "valve",
+        "name": "Valve Sizing & Selection",
+        "icon": "🎚️",
+        "color": "teal",
+        "description": "Valve sizing and selection criteria",
+        "reason": "Feature disabled by configuration"
+      },
+      {
+        "id": "safety",
+        "name": "Safety System Design",
+        "icon": "🛡️",
+        "color": "yellow",
+        "description": "Safety instrumented systems",
+        "reason": "Feature disabled by configuration"
+      }
+    ]
+  },
+  "list_types": {
+    "enabled": [
+      {
+        "code": "line_list",
+        "name": "Line List",
+        "icon": "ViewColumnsIcon",
+        "description": "Piping line specifications and attributes",
+        "color": "blue",
+        "fields": ["line_number", "service", "size", "rating", "material"]
+      },
+      {
+        "code": "equipment_list",
+        "name": "Equipment List",
+        "icon": "CubeIcon",
+        "description": "Equipment specifications and details",
+        "color": "green",
+        "fields": ["tag_number", "description", "type", "capacity", "duty"]
+      },
+      {
+        "code": "tie_in_list",
+        "name": "Tie-In List",
+        "icon": "LinkIcon",
+        "description": "Connection points and tie-in specifications",
+        "color": "purple",
+        "fields": ["tie_in_number", "location", "size", "type", "connection_details"]
+      },
+      {
+        "code": "alarm_trip_list",
+        "name": "Alarm/Trip List",
+        "icon": "BellAlertIcon",
+        "description": "Safety alarms and trip setpoints",
+        "color": "red",
+        "fields": ["tag", "description", "alarm_type", "setpoint", "action"]
+      }
+    ]
+  },
+  "features": {
+    "show_design_type_cards": false,
+    "show_engineering_lists": true,
+    "show_project_creation": true,
+    "show_ai_recommendations": true
+  },
+  "extraction_settings": {
+    "_comment": "Soft-coded validation tolerances for P&ID line number extraction.  Change these values here to tune how aggressively the OCR extractor accepts / rejects candidates — no code changes required.",
+    "ocr_resolution_scale": 3.0,
+    "onshore_seq_len_min": 3,
+    "onshore_seq_len_max": 6,
+    "onshore_pipr_class_len_min": 4,
+    "onshore_pipr_class_len_max": 8,
+    "onshore_pipr_class_alphanumeric": true,
+    "fluid_code_max_len_onshore": 3,
+    "fluid_code_max_len_offshore": 3
+  },
+  "metadata": {
+    "version": "1.1",
+    "last_updated": "2026-03-26",
+    "description": "DesignIQ module visibility configuration - enables/disables design modules and features"
+  }
+}

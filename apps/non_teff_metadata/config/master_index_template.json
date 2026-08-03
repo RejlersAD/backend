@@ -1,0 +1,73 @@
+{
+  "_comment": "Soft-coded column schema for the NONTEF Master Index workflow. Drives frontend grid, backend extraction dispatcher, and Excel export. Modify this file to rename/reorder/add/remove columns without touching Python or JSX.",
+  "version": "1.0",
+  "template_name": "NONTEF Master Index",
+
+  "_comment_sheets": "primary sheet name supports {plant} token; defaults to the batch plant in uppercase with spaces -> underscores.",
+  "sheets": {
+    "primary": "{plant}_METADATA",
+    "count":   "DOCUMENT_COUNT"
+  },
+
+  "_comment_na": "Value written to AI-extracted cells when no confident match is found; matches the convention in the reference template.",
+  "default_na_value": "NA",
+
+  "_comment_limits": "Per-batch ceilings. Tuned for Q1=(a) local-storage first pass; raise once S3 is wired in.",
+  "limits": {
+    "max_files_per_batch": 2000,
+    "max_file_size_mb":    500,
+    "max_batch_size_gb":   20,
+    "allowed_extensions":  [".pdf", ".xlsx", ".xls", ".docx", ".doc", ".dwg", ".dxf"]
+  },
+
+  "_comment_classes": "Column behavioural classes — the service dispatches each column to the matching handler. auto_serial=system index; file_derived=read from file object; batch_default=taken from the batch payload; ai_extract=regex/AI; derived=computed from another column.",
+
+  "columns": [
+    { "key": "sr_no",            "label": "SR NO",                           "class": "auto_serial",   "width":  6 },
+    { "key": "source_folder",    "label": "Source Folder",                   "class": "batch_default", "width": 32 },
+    { "key": "file_name",        "label": "File name",                       "class": "file_derived",  "width": 22 },
+    { "key": "document_number",  "label": "Document Number",                 "class": "ai_extract",    "width": 18, "extractor": "filename_stem" },
+    { "key": "full_path",        "label": "File Full Path",                  "class": "file_derived",  "width": 30, "fallback": "NA" },
+    { "key": "document_type",    "label": "Document Type",                   "class": "ai_extract",    "width": 18, "extractor": "taxonomy_classifier" },
+    { "key": "document_subtype", "label": "Document Sub-Type",               "class": "ai_extract",    "width": 28, "extractor": "taxonomy_narrow", "depends_on": "document_type" },
+    { "key": "document_title",   "label": "Document Title",                  "class": "ai_extract",    "width": 40, "extractor": "title_scan" },
+    { "key": "issue_date",       "label": "Document issue Date",             "class": "ai_extract",    "width": 14, "extractor": "date_any" },
+    { "key": "revision",         "label": "Revision",                        "class": "ai_extract",    "width":  8, "extractor": "rev_token" },
+    { "key": "revision_status",  "label": "Revision Description/Status",     "class": "ai_extract",    "width": 22, "extractor": "status_keyword" },
+    { "key": "area",             "label": "Area",                            "class": "ai_extract",    "width": 10, "extractor": "pattern_lookup" },
+    { "key": "unit",             "label": "Unit",                            "class": "ai_extract",    "width": 10, "extractor": "unit_code" },
+    { "key": "adnoc_project_no", "label": "ADNOC Project No.",               "class": "batch_or_extract", "width": 12 },
+    { "key": "project_title",    "label": "Project Title/Name",              "class": "batch_or_extract", "width": 32 },
+    { "key": "tag",              "label": "Tag",                             "class": "ai_extract",    "width": 28, "extractor": "equipment_tag" },
+    { "key": "discipline",       "label": "Discipline",                      "class": "derived",       "width": 14, "derive_from": "document_type", "rule": "type_to_discipline" },
+    { "key": "vendor_name",      "label": "Vendor Name",                     "class": "ai_extract",    "width": 30, "extractor": "pattern_lookup" },
+    { "key": "po_no",            "label": "Purchase Order No.",              "class": "ai_extract",    "width": 14, "extractor": "pattern_lookup" },
+    { "key": "plant",            "label": "Plant",                           "class": "batch_default", "width": 12 },
+    { "key": "contractor_ref",   "label": "Contractor Doc Reference Number", "class": "ai_extract",    "width": 34, "extractor": "pattern_lookup" },
+    { "key": "vendor_ref",       "label": "Vendor Doc Reference Number",     "class": "ai_extract",    "width": 20, "extractor": "pattern_lookup" },
+    { "key": "originator",       "label": "From/Originator",                 "class": "batch_or_extract", "width": 28 },
+    { "key": "to",               "label": "To",                              "class": "batch_default", "width": 12 },
+    { "key": "project_location", "label": "Project Location",                "class": "batch_or_extract", "width": 14 },
+    { "key": "agreement_no",     "label": "Agreement Number",                "class": "batch_or_extract", "width": 12 },
+    { "key": "agreement_desc",   "label": "Agreement Description",           "class": "batch_or_extract", "width": 18 },
+    { "key": "file_format",      "label": "File Format",                     "class": "file_derived",  "width":  8 },
+    { "key": "author",           "label": "Author",                          "class": "batch_or_extract", "width": 28 },
+    { "key": "no_of_sheets",     "label": "No. of Sheets",                   "class": "file_derived",  "width":  8 },
+    { "key": "paper_size",       "label": "Paper Size",                      "class": "file_derived",  "width":  8 },
+    { "key": "category",         "label": "Category",                        "class": "batch_default", "width": 12 },
+    { "key": "class_review",     "label": "Class/Review Code",               "class": "batch_or_extract", "width": 10 },
+    { "key": "transmittal_no",   "label": "Transmittal no.",                 "class": "batch_or_extract", "width": 14 },
+    { "key": "vendor_doc_flag",  "label": "Vendor Document (Y/N)",           "class": "derived",       "width":  8, "derive_from": "vendor_name", "rule": "yn_if_present" }
+  ],
+
+  "_comment_defaults": "Batch-default values that can be pre-populated in the UI form. Keys must match a column whose class is 'batch_default'.",
+  "batch_default_hints": {
+    "to":            "ADNOC",
+    "adnoc_project_no": "NA",
+    "agreement_no":  "NA",
+    "agreement_desc":"NA",
+    "transmittal_no":"NA",
+    "class_review":  "NA",
+    "category":      "Documents"
+  }
+}

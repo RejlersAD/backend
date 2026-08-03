@@ -1,0 +1,199 @@
+{
+  "_comment": "Soft-coded configuration for the P&ID multi-pass analysis engine (PIDAnalysisService). Changes here take effect on next analysis run — no code deploy required.",
+  "pid_analysis": {
+
+    "_models_comment": "Vision-capable models only. gpt-3.5 / gpt-4-base do NOT support images.",
+    "primary_model": "gpt-4o",
+    "fallback_model": "gpt-4o-mini",
+
+    "_pdf_comment": "DPI used when rendering PDF pages to base64 images for the AI vision passes.",
+    "pdf_dpi": 300,
+
+    "_ocr_comment": "If embedded PDF text is shorter than ocr_sparse_threshold * 20 chars, Tesseract fallback is attempted.",
+    "ocr_sparse_threshold": 10,
+    "ocr_tesseract_fallback_enabled": true,
+
+    "_layout_comment": "Layout detection pre-pass: a lightweight gpt-4o-mini call that identifies the drawing company standard, zone grid, title block position, and notes/legend positions BEFORE the main analysis passes. This context is injected into Passes 3, 5, and 6 so the AI can adapt to ANY P&ID layout style dynamically.",
+    "layout_detection": {
+      "enabled": true,
+      "model": "gpt-4o-mini",
+      "max_tokens": 800,
+      "temperature": 0.0,
+      "timeout_seconds": 60,
+      "default_zones": [
+        "Top-Left", "Top-Center", "Top-Right",
+        "Middle-Left", "Middle-Center", "Middle-Right",
+        "Bottom-Left", "Bottom-Center", "Bottom-Right"
+      ]
+    },
+
+    "_thresholds_comment": "QC thresholds. min_issues_target is injected into AI prompts as the minimum expected finding count for an IFC-stage drawing.",
+    "min_issues_target": 10,
+    "min_issues_rescan_threshold": 8,
+    "near_dup_threshold": 2,
+    "supplement_notes_below": 10,
+    "confidence_high_threshold": 15,
+
+    "_pass3_comment": "Pass 3: Main vision analysis (chain-of-thought, ISA-5.1, advanced compliance). Highest token budget — needs to return 20-50 structured findings.",
+    "pass_3": {
+      "system_prompt_file": "pass3_system_prompt.txt",
+      "max_tokens": 16384,
+      "temperature": 0.0,
+      "timeout_seconds": 600
+    },
+
+    "_pass5_comment": "Pass 5: Second review — broader zone-by-zone rescan for missed elements.",
+    "pass_5": {
+      "max_tokens": 12000,
+      "temperature": 0.0,
+      "timeout_seconds": 300
+    },
+
+    "_pass6_comment": "Pass 6: Engineering compliance deep-scan (PSV, valve standards, NACE, tie-ins, LTCS, etc.). Set enabled=false to disable entirely — no code deploy required. DISABLED by default: this pass applies external industry standards (ASME, API, NACE, ISO) which are NOT project-specific and produce false positives when the project has its own documentation standards.",
+    "pass_6": {
+      "enabled": false,
+      "max_tokens": 12000,
+      "temperature": 0.0,
+      "timeout_seconds": 300
+    },
+
+    "_pass7_comment": "Pass 7: Line size validation & AI recommendation engine.",
+    "pass_7": {
+      "max_tokens": 8000,
+      "temperature": 0.0,
+      "timeout_seconds": 240
+    },
+
+    "_pass8_comment": "Pass 8: Smart QC enhancement (9 targeted checks: duplicates, valve sizing, notes/holds, TYPE designations, revision clouds, etc.).",
+    "pass_8": {
+      "max_tokens": 16000,
+      "temperature": 0.0,
+      "timeout_seconds": 360
+    },
+
+    "_client_comment": "OpenAI client-level timeout and retry settings.",
+    "client_timeout": 180.0,
+    "client_max_retries": 2,
+
+    "_gemini_comment": "Google Gemini provider. Set enabled=true and supply GEMINI_API_KEY env var to activate. Gemini 2.0 Flash supports 1M token context which yields richer, more complete reports. soft-coded: change models here without touching any Python code.",
+    "gemini": {
+      "enabled": true,
+      "primary_model": "gemini-2.0-flash",
+      "fallback_model": "gemini-2.0-flash-lite",
+      "api_key_env": "GEMINI_API_KEY",
+      "max_output_tokens": 65536
+    },
+
+    "_routing_comment": "Per-pass provider routing. Values: 'gemini' (Gemini first, OpenAI fallback) | 'openai' (OpenAI only). Changing a value here instantly re-routes that pass without any code change.",
+    "provider_routing": {
+      "pass_3": "gemini",
+      "pass_5": "gemini",
+      "pass_6": "openai",
+      "pass_7": "openai"
+    },
+
+    "_cache_comment": "S3 result cache. When enabled, the SHA-256 hash of the raw PDF bytes is used as a content-addressable key. Uploading the SAME file again (any filename, any user) immediately returns the stored report — all 8 AI passes are skipped. Set enabled=false to force a fresh analysis. ttl_days=0 means objects never expire automatically.",
+    "cache": {
+      "enabled": false,
+      "backend": "s3",
+      "s3_bucket_env": "AWS_STORAGE_BUCKET_NAME",
+      "s3_prefix": "pid_analysis_cache_v2/",
+      "ttl_days": 0
+    },
+
+    "_hide_no_evidence_comment": "When true, any finding returned to the report that has an empty or blank 'evidence' field is silently hidden from the engineer's view. This prevents undefended comments from reaching the P&ID review table. Set to false to show all findings regardless of evidence quality. No code deploy required — change this value and it takes effect on the next page load.",
+    "hide_findings_without_evidence": true,
+    "cag_post_filter_enabled": true,
+
+    "_suppress_comment": "Categories to exclude from the final report. Any finding whose 'category' field (case-insensitive, partial match) appears in this list is silently dropped before the report is saved. Full category list: instrument, equipment, piping, valve, safety, control_loop, documentation, legend, pipe_class, psv_compliance, holds_compliance, notes_compliance, trim_class, dissimilar_material, ltcs_compliance, free_drain_slope, spool_requirement, critical_stress, valve_standard, tie_in_reference, corrosion_allowance. To re-enable a category, remove it from this list — no code deploy required.",
+    "suppressed_categories": [
+      "psv_compliance",
+      "safety"
+    ],
+
+    "_evidence_comment": "Evidence writing standard injected into every AI pass system prompt. Controls how the AI justifies each finding. Edit here — no code deploy needed. The AI must follow this format for every 'evidence' field: VISUAL → GAP → STANDARD.",
+    "evidence_guidance": {
+      "format_template": "VISUAL: [describe exactly what is drawn — symbol present, tag readable, position on drawing, connections shown]. GAP: [state precisely what annotation, element, or connection is absent or inconsistent with other elements on this drawing]. DRAWING BASIS: [reference what on THIS drawing establishes the requirement — e.g. 'Drawing legend defines actuated valves must show fail position', 'Note 3 on this drawing requires SIS signal routing', 'Engineering convention for P&ID: every controller must have a paired final control element visible on the same loop'. Do NOT cite external company standards unless they are explicitly referenced in the drawing's own notes or title block.]",
+      "quality_rules": [
+        "NEVER write 'not visible' without first stating exactly what IS visible and WHERE it is on the drawing.",
+        "Base every finding on a visual gap observable ON THIS DRAWING — compare similar elements on the same drawing to identify inconsistencies.",
+        "NEVER reference a document not on the P&ID (datasheets, line lists, equipment schedules) as the location of the deficiency — the deficiency must be drawing-observable.",
+        "If the element symbol IS visible but the annotation is missing, state: '[Tag] symbol is visible at [zone] on [line/equipment] — [annotation] is absent from the symbol/actuator.'",
+        "If the element itself is missing, state: 'No [element type] symbol is drawn on [specific line or nozzle] — other similar elements on this drawing have one.'",
+        "For programmatic detections (OCR cross-checks, note references), state: 'Programmatically detected via OCR text extraction — visual confirmation by engineer recommended.'",
+        "Evidence must be specific enough that a different engineer reading it could locate the exact element on the drawing within 30 seconds."
+      ],
+      "standards_library": {
+        "instrument": [
+          "Signal line missing: transmitter symbol has no output signal line to any receiver visible on this drawing — compare to other transmitters on the same drawing",
+          "SIS instrument disconnected: safety switch (PSHH/LSHH/TSHH etc.) has no outgoing signal line to SIS/ESD visible on this drawing",
+          "Tag incomplete: tag is partially readable or formatted differently from other tags on this drawing"
+        ],
+        "valve": [
+          "Fail-safe annotation absent: actuated valve has no FC/FO/FL annotation next to its actuator body, while other actuated valves on this drawing show it",
+          "BDV without fail-safe: BDV actuator body shows no fail-safe position annotation",
+          "MOV without limit switches: MOV body has no ZSH/ZSL drawn, while other MOVs on this drawing have them"
+        ],
+        "piping": [
+          "Line number incomplete: line is missing size, fluid code, or pipe class that other lines on this drawing include",
+          "Spec break not marked: pipe class visibly changes at a junction but no spec-break symbol is drawn between them"
+        ],
+        "psv_compliance": [
+          "PSV inlet valve missing: PSV connects directly to vessel nozzle with no isolation (block) valve between",
+          "PSV discharge not routed: PSV outlet terminates without connecting to a defined discharge header on this drawing",
+          "Vessel without PSV: vessel has no PSV drawn, while other pressure vessels on this drawing have one"
+        ],
+        "equipment": [
+          "Pump strainer absent: pump suction run has no strainer symbol, while other centrifugal pumps on this drawing have one",
+          "Pump check valve absent: pump discharge has no check valve symbol, while other pump discharges on this drawing have one",
+          "Vessel without level instrument: vessel has no level instrument (LT or LG) drawn, while similar vessels on this drawing have one"
+        ],
+        "control_loop": [
+          "Controller without final element: controller bubble is visible but no tagged final control element (FCV/PCV/TCV) is drawn on its process loop",
+          "SIS loop incomplete: safety instrument has no traceable signal line to a logic solver or ESD system visible on this drawing"
+        ],
+        "documentation": [
+          "Legend undefined symbol: symbol used in the drawing body is not defined in the legend section of this drawing",
+          "Revision cloud without reference: element inside a revision cloud has no matching entry in the revision table",
+          "Unresolved HOLD: HOLD item has no resolution status, closing note, or responsible engineer shown on this drawing"
+        ],
+        "safety": [
+          "SIS field device disconnected: safety instrument (PSHH, LSHH, TSHH) has no signal line to SIS/ESD visible on this drawing",
+          "Safety device without interlock: ESD or shutdown valve has no visible connection to any interlock or logic system on this drawing"
+        ]
+      },
+      "examples": [
+        {
+          "category": "valve",
+          "pid_reference": "BDV-2101",
+          "good_evidence": "VISUAL: BDV-2101 actuated valve symbol with a solenoid (XY) actuator is clearly drawn in the Middle-Right zone on the 6\"-BD-2101-CS300 blowdown header. The SIS signal line from XY is present. GAP: No fail-safe position annotation (FO, FC, or FL) is shown adjacent to the actuator symbol; the position next to the actuator body is blank. DRAWING BASIS: Other actuated valves on this drawing (e.g. SDV-2201, XV-2301) each show a fail-safe annotation adjacent to their actuator body — BDV-2101 is the only actuated valve on this drawing without one."
+        },
+        {
+          "category": "instrument",
+          "pid_reference": "PT-3105",
+          "good_evidence": "VISUAL: PT-3105 pressure transmitter circle-bubble is visible in the Top-Right zone, connected to the 3\"-HC-3105-CS150 suction header tapping. The transmitter symbol itself is correctly drawn with a readable tag. GAP: No signal line (dashed or solid) extends from PT-3105 to any DCS node, indicator, or controller; the output side of the bubble terminates without a connection. DRAWING BASIS: Other transmitters on this drawing (e.g. FT-3101, PT-3201) each have a dashed signal line leading to a DCS bubble — PT-3105 is drawn with an unconnected output, inconsistent with the pattern on this drawing."
+        },
+        {
+          "category": "psv_compliance",
+          "pid_reference": "PSV-1015",
+          "good_evidence": "VISUAL: PSV-1015 relief valve symbol is drawn at the top nozzle of Vessel V-1015 in the Middle-Left zone with a readable tag. The inlet pipe connects directly from the vessel nozzle to the PSV inlet. GAP: No gate or globe valve with a car-sealed open (CSO) annotation is drawn between the vessel nozzle and PSV-1015; the connection is a direct stub without any isolation valve. DRAWING BASIS: PSV-1020 on this same drawing shows a CSO block valve between the vessel nozzle and PSV inlet — PSV-1015 is missing the same arrangement, inconsistent with how other PSVs are drawn on this sheet."
+        },
+        {
+          "category": "piping",
+          "pid_reference": "6\"-HC-2201",
+          "good_evidence": "VISUAL: A 6-inch horizontal process line is visible across the Bottom-Center zone between Pump P-2201A discharge nozzle and the shell-side inlet of Heat Exchanger E-2201. The line carries the annotation '6\"-HC-2201'. GAP: The pipe specification/class designator (e.g. CS150, SS300) is absent from the line number; only the size (6\"), fluid code (HC), and sequence (2201) are shown. DRAWING BASIS: All other process lines on this drawing include a pipe class in their annotation (e.g. 4\"-HC-2101-CS150, 3\"-HC-2301-CS300) — this line is the only one missing the class field."
+        },
+        {
+          "category": "equipment",
+          "pid_reference": "P-3601A",
+          "good_evidence": "VISUAL: Centrifugal pump P-3601A symbol is visible in the Bottom-Left zone. A gate valve and straight pipe run are drawn on the suction side between Vessel V-3601 bottom outlet and the pump suction nozzle. GAP: No strainer symbol (Y-type or basket) is drawn on the suction pipe between the isolation valve and P-3601A suction nozzle — the suction run is a plain pipe with only a gate valve. DRAWING BASIS: P-3601B (standby train) on this same drawing shows a Y-strainer on the suction line in the same position — P-3601A's suction is drawn differently from its identical twin, suggesting the strainer symbol was omitted."
+        },
+        {
+          "category": "control_loop",
+          "pid_reference": "FIC-4201",
+          "good_evidence": "VISUAL: FIC-4201 flow indicating controller bubble is visible in the Top-Center zone with a dashed signal line from FT-4201 transmitter on the 4\"-HC-4201-CS150 line. The controller bubble is complete with tag. GAP: No control valve (FCV-4201 or tagged equivalent) is shown anywhere on the 4\"-HC-4201-CS150 line downstream — the loop has a sensor and controller but no final control element visible. DRAWING BASIS: Other flow control loops on this drawing (FIC-4101, FIC-4301) each show a paired FCV on the process line — FIC-4201 is the only controller on this drawing whose process loop has no final control element."
+        }
+      ]
+    }
+  }
+}

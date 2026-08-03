@@ -1,0 +1,67 @@
+{
+  "_comment": "Soft-coded validation rules for pressure instrument vision output. Tweak this file to tighten/loosen extraction without touching Python.",
+  "version": "1.0",
+  "enabled": true,
+  "tag_validation": {
+    "_comment": "Tag must match ISA-5.1 letter prefix + dash/space + numeric tag. Suffix letter (A/B) optional.",
+    "patterns": [
+      "^([A-Z]{2,5})\\s*[-_]?\\s*(\\d{2,5})([A-Z])?$",
+      "^[A-Z0-9]{2,8}[-_]([A-Z]{2,5})[-_](\\d{2,5})([A-Z])?$"
+    ],
+    "min_length": 4,
+    "max_length": 32,
+    "drop_if_blank": true,
+    "drop_if_duplicate": true,
+    "duplicate_keys": ["tag_number"]
+  },
+  "allowed_prefixes": [
+    "PT", "PI", "PS", "PC", "PG", "PV",
+    "PDT", "PDI", "PDIS", "PDIT",
+    "PIT", "PIC", "PISH", "PISL",
+    "PSV", "PRV", "PSE",
+    "PAH", "PAL", "PAHH", "PALL",
+    "PIA", "PIAH", "PIAL"
+  ],
+  "drop_if_prefix_unknown": false,
+  "field_validators": {
+    "_comment": "Numeric range guards.  String values pass through; 'N/A' / blanks are normalised to ''.  Unit names are canonicalised on the fly.",
+    "operating_pressure_min":   {"min": -10,  "max": 600},
+    "operating_pressure_norm":  {"min": -10,  "max": 600},
+    "operating_pressure_max":   {"min": -10,  "max": 600},
+    "design_pressure_min":      {"min": -10,  "max": 800},
+    "design_pressure_norm":     {"min": -10,  "max": 800},
+    "design_pressure_max":      {"min": -10,  "max": 800},
+    "operating_temp_min":       {"min": -200, "max": 1200},
+    "operating_temp_norm":      {"min": -200, "max": 1200},
+    "operating_temp_max":       {"min": -200, "max": 1200},
+    "density_min":              {"min": 0,    "max": 5000},
+    "density_norm":             {"min": 0,    "max": 5000},
+    "density_max":              {"min": 0,    "max": 5000},
+    "viscosity_min":            {"min": 0,    "max": 100000},
+    "viscosity_norm":           {"min": 0,    "max": 100000},
+    "viscosity_max":            {"min": 0,    "max": 100000}
+  },
+  "string_normalisation": {
+    "trim_whitespace": true,
+    "collapse_internal_spaces": true,
+    "blank_tokens": ["N/A", "n/a", "NA", "—", "-", "", "?", "TBD", "tbd"],
+    "uppercase_tag": true
+  },
+  "unit_aliases": {
+    "_comment": "Normalised unit names for downstream consistency.  Key=canonical, value=list of accepted variations (case-insensitive).",
+    "barg":    ["barg", "bar(g)", "bar g", "bar"],
+    "kg/cm2g": ["kg/cm2g", "kg/cm²g", "kg/cm2(g)", "kg/cm2"],
+    "kpag":    ["kpag", "kpa(g)", "kpa g", "kpa"],
+    "psig":    ["psig", "psi(g)", "psi g", "psi"],
+    "degC":    ["degc", "°c", "deg c", "c"],
+    "degF":    ["degf", "°f", "deg f", "f"]
+  },
+  "hallucination_filters": {
+    "_comment": "Heuristic drops: rows that look fabricated by a confused model.",
+    "drop_if_all_pressures_blank":  true,
+    "drop_if_service_too_short":    3,
+    "drop_if_service_contains": [
+      "example", "sample", "placeholder", "lorem", "test only"
+    ]
+  }
+}

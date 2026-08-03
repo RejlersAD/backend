@@ -1,0 +1,206 @@
+[
+  {
+    "timestamp_utc": "2026-04-02T04:27:22.540198+00:00",
+    "document_id": "a194a0da-93ef-4850-86a1-21d1ab84c1f6",
+    "file_name": "P16093-16-01-08-1677-1_Rev 1-IFC_WITH MISTAKES.pdf",
+    "legend_sources": [
+      "/tmp/legends.pdf"
+    ],
+    "summary_after_legend": {
+      "tags": 22,
+      "instruments": 3,
+      "valves": 0,
+      "equipment": 4,
+      "line_sizes": 7,
+      "notes": 10,
+      "holds": 3
+    },
+    "line_sizes_unique_after_legend": [
+      "1\"",
+      "2\"",
+      "24\"",
+      "3\"",
+      "4\"",
+      "5\"",
+      "8\""
+    ],
+    "findings_total": 10,
+    "findings_severity": {
+      "critical": 1,
+      "major": 9,
+      "minor": 0,
+      "info": 0
+    }
+  },
+  {
+    "timestamp_utc": "2026-04-02T04:41:02.047733+00:00",
+    "document_id": "05f473c9-dd55-4f24-93cb-95c33dc70356",
+    "file_name": "DWG-3002-EN-IN-BL-001.pdf",
+    "legend_sources": [
+      "/tmp/legends.pdf"
+    ],
+    "summary_after_legend": {
+      "tags": 0,
+      "instruments": 0,
+      "valves": 0,
+      "equipment": 0,
+      "line_sizes": 0,
+      "notes": 0,
+      "holds": 0
+    },
+    "line_sizes_unique_after_legend": [],
+    "findings_total": 0,
+    "findings_severity": {
+      "critical": 0,
+      "major": 0,
+      "minor": 0,
+      "info": 0
+    }
+  },
+  {
+    "timestamp_utc": "2026-04-02T08:29:14.908323+00:00",
+    "document_id": "5d6a411e-4346-457e-8d9a-550bdc1df798",
+    "file_name": "test_01.pdf",
+    "legend_sources": [
+      "/tmp/legends.pdf"
+    ],
+    "summary_after_legend": {
+      "tags": 1,
+      "instruments": 0,
+      "valves": 0,
+      "equipment": 0,
+      "line_sizes": 2,
+      "notes": 0,
+      "holds": 0
+    },
+    "line_sizes_unique_after_legend": [
+      "4\"",
+      "6\""
+    ],
+    "findings_total": 1,
+    "findings_severity": {
+      "critical": 1,
+      "major": 0,
+      "minor": 0,
+      "info": 0
+    }
+  },
+  {
+    "timestamp_utc": "2026-04-03T11:47:18.653467+00:00",
+    "document_id": "c3b74594-0036-4bad-a654-9931a2773610",
+    "file_name": "P16093-16-01-08-1677-1_Rev 1-IFC_WITH MISTAKES.pdf",
+    "legend_sources": [
+      "/tmp/legends.pdf"
+    ],
+    "summary_after_legend": {
+      "tags": 47,
+      "instruments": 14,
+      "valves": 0,
+      "equipment": 5,
+      "line_sizes": 11,
+      "notes": 38,
+      "holds": 10
+    },
+    "line_sizes_unique_after_legend": [
+      "1\"",
+      "12\"",
+      "14\"",
+      "2\"",
+      "24\"",
+      "3\"",
+      "4\"",
+      "5\"",
+      "6\"",
+      "8\"",
+      "9610dn"
+    ],
+    "findings_total": 46,
+    "findings_severity": {
+      "critical": 6,
+      "major": 40,
+      "minor": 0,
+      "info": 0
+    }
+  },
+  {
+    "timestamp_utc": "2026-04-03T11:52:34.867939+00:00",
+    "document_id": "c3b74594-0036-4bad-a654-9931a2773610",
+    "file_name": "P16093-16-01-08-1677-1_Rev 1-IFC_WITH MISTAKES.pdf",
+    "legend_sources": [
+      "/tmp/legends.pdf"
+    ],
+    "summary_after_legend": {
+      "tags": 47,
+      "instruments": 14,
+      "valves": 0,
+      "equipment": 5,
+      "line_sizes": 11,
+      "notes": 38,
+      "holds": 10
+    },
+    "line_sizes_unique_after_legend": [
+      "1\"",
+      "12\"",
+      "14\"",
+      "2\"",
+      "24\"",
+      "3\"",
+      "4\"",
+      "5\"",
+      "6\"",
+      "8\"",
+      "9610dn"
+    ],
+    "findings_total": 46,
+    "findings_severity": {
+      "critical": 6,
+      "major": 40,
+      "minor": 0,
+      "info": 0
+    }
+  },
+  {
+    "timestamp_utc": "2026-04-08T05:28:00.853931+00:00",
+    "document_id": "ef6cb449-7cac-440d-9007-3bead2b186b5",
+    "file_name": "P16093-16-01-08-1689_P&ID1.pdf",
+    "legend_sources": [
+      "/tmp/legends.pdf"
+    ],
+    "summary_after_legend": {
+      "tags": 60,
+      "instruments": 0,
+      "valves": 16,
+      "equipment": 4,
+      "line_sizes": 18,
+      "notes": 368,
+      "holds": 21
+    },
+    "line_sizes_unique_after_legend": [
+      "00mm",
+      "08.1732mm",
+      "0MM",
+      "1\"",
+      "10\"",
+      "12\"",
+      "16\"",
+      "18\"",
+      "2\"",
+      "3\"",
+      "3901MM",
+      "3DN",
+      "4\"",
+      "5\"",
+      "6\"",
+      "600MM",
+      "600mm",
+      "8\""
+    ],
+    "findings_total": 88,
+    "findings_severity": {
+      "critical": 18,
+      "major": 40,
+      "minor": 14,
+      "info": 16
+    }
+  }
+]
