@@ -1,102 +1,162 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
-Railway Environment Validator
-Checks for required environment variables before deployment
+Railway Environment Validation Script
+Checks all required environment variables for deployment
 """
 import os
 import sys
 
-
-def validate_railway_environment():
+def validate_environment():
     """Validate Railway environment variables"""
-    print("\n" + "="*70)
-    print("🔍 Validating Railway Environment Variables")
-    print("="*70)
+    print("=" * 70)
+    print("🔍 Railway Environment Validation")
+    print("=" * 70)
     
     errors = []
     warnings = []
     
-    # Check critical variables
+    # Critical variables (deployment will fail without these)
     critical_vars = {
-        'SECRET_KEY': 'Django secret key for security',
-        'DATABASE_URL': 'PostgreSQL connection string (auto-set by Railway)',
-        'RAILWAY_ENVIRONMENT': 'Deployment environment (production/staging)',
+        'DATABASE_URL': 'PostgreSQL database connection string',
+        'SECRET_KEY': 'Django secret key for cryptographic signing',
     }
     
-    # Check recommended variables
-    recommended_vars = {
-        'FRONTEND_URL': 'Frontend URL for CORS (https://www.radai.ae)',
-        'BACKEND_URL': 'Backend URL for health checks',
-        'AWS_ACCESS_KEY_ID': 'AWS S3 access key (for file uploads)',
-        'AWS_SECRET_ACCESS_KEY': 'AWS S3 secret key (for file uploads)',
-        'AWS_STORAGE_BUCKET_NAME': 'AWS S3 bucket name',
+    # Important variables (deployment works but with degraded functionality)
+    important_vars = {
+        'REDIS_URL': 'Redis connection for cache and Celery (falls back to in-memory)',
+        'AWS_ACCESS_KEY_ID': 'AWS S3 access for file storage',
+        'AWS_SECRET_ACCESS_KEY': 'AWS S3 secret key',
+        'AWS_STORAGE_BUCKET_NAME': 'S3 bucket name for file storage',
     }
     
-    # Check optional variables
+    # Optional variables
     optional_vars = {
-        'OPENAI_API_KEY': 'OpenAI API key (for AI features)',
-        'ANTHROPIC_API_KEY': 'Anthropic API key (for AI features)',
-        'REDIS_URL': 'Redis connection (for caching/Celery)',
-        'SENTRY_DSN': 'Sentry error tracking',
+        'ENVIRONMENT': 'Environment name (defaults to "local")',
+        'DEBUG': 'Debug mode (should be False in production)',
+        'ALLOWED_HOSTS': 'Comma-separated list of allowed hosts',
+        'FRONTEND_URL': 'Frontend URL for CORS',
+        'BACKEND_URL': 'Backend URL for CORS',
     }
     
-    print("\nCritical Variables:")
-    for var, desc in critical_vars.items():
-        value = os.environ.get(var)
+    print("\n📋 CRITICAL VARIABLES (deployment fails without these):")
+    print("-" * 70)
+    for var, description in critical_vars.items():
+        value = os.getenv(var)
         if not value:
-            errors.append(f"❌ {var}: MISSING - {desc}")
-            print(f"  ❌ {var}: MISSING")
-        elif var == 'SECRET_KEY' and value == 'django-insecure-change-this-in-production':
-            warnings.append(f"⚠️  {var}: Using default value (INSECURE)")
-            print(f"  ⚠️  {var}: Using default (INSECURE!)")
+            errors.append(f"❌ {var} is NOT SET")
+            print(f"❌ {var}")
+            print(f"   Description: {description}")
+            print(f"   Status: NOT SET - DEPLOYMENT WILL FAIL")
+        elif var == 'DATABASE_URL':
+            # Validate DATABASE_URL format
+            if value.startswith('postgresql://') or value.startswith('postgres://'):
+                # Hide password in output
+                safe_url = value.split('@')[0].split(':')[:-1]
+                safe_url = ':'.join(safe_url) + ':***@' + value.split('@')[1] if '@' in value else '***'
+                print(f"✅ {var}")
+                print(f"   Value: {safe_url}")
+            else:
+                errors.append(f"❌ {var} format is invalid (must start with postgresql://)")
+                print(f"❌ {var}")
+                print(f"   Value: {value[:50]}...")
+                print(f"   Status: INVALID FORMAT")
+        elif var == 'SECRET_KEY':
+            if len(value) < 50:
+                warnings.append(f"⚠️  {var} is too short (should be 50+ characters)")
+                print(f"⚠️  {var}")
+                print(f"   Length: {len(value)} characters (should be 50+)")
+            elif value == 'django-insecure-change-this-in-production':
+                errors.append(f"❌ {var} is using default insecure value")
+                print(f"❌ {var}")
+                print(f"   Status: USING DEFAULT VALUE - INSECURE")
+            else:
+                print(f"✅ {var}")
+                print(f"   Length: {len(value)} characters")
         else:
-            print(f"  ✅ {var}: OK (len={len(value)})")
+            print(f"✅ {var}")
+            print(f"   Value: {value[:30]}...")
+        print()
     
-    print("\nRecommended Variables:")
-    for var, desc in recommended_vars.items():
-        value = os.environ.get(var)
+    print("\n📋 IMPORTANT VARIABLES (optional but recommended):")
+    print("-" * 70)
+    for var, description in important_vars.items():
+        value = os.getenv(var)
         if not value:
-            warnings.append(f"⚠️  {var}: Missing - {desc}")
-            print(f"  ⚠️  {var}: Missing - {desc}")
+            warnings.append(f"⚠️  {var} is not set")
+            print(f"⚠️  {var}")
+            print(f"   Description: {description}")
+            print(f"   Status: NOT SET - will use fallback")
+        elif var == 'REDIS_URL':
+            # Validate REDIS_URL format
+            if value.startswith('redis://'):
+                # Check if URL is complete
+                if '@:' in value or value.endswith(':'):
+                    errors.append(f"❌ {var} format is incomplete (missing host/port)")
+                    print(f"❌ {var}")
+                    print(f"   Value: {value}")
+                    print(f"   Status: INCOMPLETE - missing host/port after @")
+                else:
+                    safe_url = value.split('@')[0].split(':')[:-1]
+                    safe_url = ':'.join(safe_url) + ':***@' + value.split('@')[1] if '@' in value else '***'
+                    print(f"✅ {var}")
+                    print(f"   Value: {safe_url}")
+            else:
+                warnings.append(f"⚠️  {var} format may be invalid")
+                print(f"⚠️  {var}")
+                print(f"   Value: {value[:50]}...")
+                print(f"   Status: May be invalid (should start with redis://)")
         else:
-            print(f"  ✅ {var}: OK")
+            print(f"✅ {var}")
+            print(f"   Value: {value[:30]}..." if len(value) > 30 else f"   Value: {value}")
+        print()
     
-    print("\nOptional Variables:")
-    for var, desc in optional_vars.items():
-        value = os.environ.get(var)
+    print("\n📋 OPTIONAL VARIABLES:")
+    print("-" * 70)
+    for var, description in optional_vars.items():
+        value = os.getenv(var)
         if value:
-            print(f"  ✅ {var}: OK")
+            print(f"✅ {var}")
+            print(f"   Value: {value}")
         else:
-            print(f"  ℹ️  {var}: Not set - {desc}")
+            print(f"ℹ️  {var}")
+            print(f"   Status: Not set (will use default)")
+            print(f"   Description: {description}")
+        print()
     
-    # Print summary
-    print("\n" + "="*70)
+    # Summary
+    print("\n" + "=" * 70)
+    print("📊 VALIDATION SUMMARY")
+    print("=" * 70)
+    
     if errors:
-        print("❌ CRITICAL ERRORS FOUND:")
+        print(f"\n❌ {len(errors)} CRITICAL ERROR(S) FOUND:")
         for error in errors:
-            print(f"  {error}")
-        print("\nDeployment may fail! Set these variables in Railway:")
-        print("  1. Go to Railway → aiflowbackend-production → Variables")
-        print("  2. Add missing variables")
-        print("="*70 + "\n")
-        # Don't exit - allow deployment to continue with warnings
-        # return 1
+            print(f"   {error}")
+        print("\n🚨 DEPLOYMENT WILL FAIL - Fix these errors before deploying")
     
     if warnings:
-        print("⚠️  WARNINGS:")
+        print(f"\n⚠️  {len(warnings)} WARNING(S):")
         for warning in warnings:
-            print(f"  {warning}")
-        print("\nConsider setting these for full functionality:")
-        print("  - FRONTEND_URL: Required for CORS")
-        print("  - AWS credentials: Required for file uploads")
-        print("="*70 + "\n")
+            print(f"   {warning}")
+        print("\n⚡ Deployment will work but may have reduced functionality")
     
     if not errors and not warnings:
-        print("✅ All required environment variables are set!")
-        print("="*70 + "\n")
+        print("\n✅ ALL CHECKS PASSED - Environment is properly configured")
     
-    return 0  # Always succeed to allow deployment
+    print("=" * 70)
+    
+    # Return appropriate exit code
+    if errors:
+        sys.exit(1)  # Critical errors - fail
+    else:
+        sys.exit(0)  # Warnings are OK - continue
 
 
 if __name__ == '__main__':
-    sys.exit(validate_railway_environment())
+    try:
+        validate_environment()
+    except Exception as e:
+        print(f"\n❌ Validation script failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

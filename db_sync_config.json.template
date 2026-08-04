@@ -1,0 +1,25 @@
+{
+  "remote_db": {
+    "host": "your-railway-host.proxy.rlwy.net",
+    "port": 12345,
+    "database": "railway",
+    "user": "postgres",
+    "password": "YOUR_REMOTE_PASSWORD",
+    "comment": "Railway database (production/staging/test)"
+  },
+  "local_db": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "radai_local",
+    "user": "postgres",
+    "password": "YOUR_LOCAL_PASSWORD"
+  },
+  "sync_settings": {
+    "pg_bin_path": "C:\\Program Files\\PostgreSQL\\17\\bin",
+    "sync_interval_seconds": 300,
+    "backup_before_sync": true,
+    "backup_directory": "./db_backups",
+    "exclude_tables": [],
+    "log_file": "./db_sync.log"
+  }
+}
