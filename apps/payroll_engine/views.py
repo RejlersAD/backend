@@ -772,12 +772,18 @@ class PayslipViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         run = self.request.query_params.get('run')
         emp = self.request.query_params.get('employee')
+        emp_no = self.request.query_params.get('employee_no')
         st = self.request.query_params.get('status')
         q = self.request.query_params.get('q')
         if run:
             qs = qs.filter(run_id=run)
         if emp:
             qs = qs.filter(employee_id=emp)
+        if emp_no:
+            # Lets callers that only know the employee's biometric/HR code
+            # (not the PayrollEmployee PK) filter directly — e.g. the
+            # Employee Self-Service payroll tab.
+            qs = qs.filter(employee__employee_no=emp_no)
         if st:
             qs = qs.filter(status=st)
         if q:
