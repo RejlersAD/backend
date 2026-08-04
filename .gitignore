@@ -9,6 +9,17 @@
 *credentials*
 *aws_credentials*
 
+# ============================================
+# SENSITIVE DATA: HR & Finance
+# ============================================
+# Employee salary and personal data - MUST NOT be committed!
+salary_*.xlsx
+salary_*.csv
+*salary*extract*.csv
+*salary*extract*.xlsx
+employee_data*.xlsx
+employee_data*.csv
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
