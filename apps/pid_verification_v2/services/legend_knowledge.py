@@ -181,7 +181,7 @@ def save_legend_knowledge(knowledge: dict, output_path: Path | None = None) -> P
     """Persist legend knowledge JSON for future recognition."""
     if output_path:
         safe_filename = os.path.basename(str(output_path))
-        target = LEGEND_KNOWLEDGE_PATH.parent / safe_filename
+        target = Path(os.path.join(str(LEGEND_KNOWLEDGE_PATH.parent), safe_filename))
     else:
         target = LEGEND_KNOWLEDGE_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
