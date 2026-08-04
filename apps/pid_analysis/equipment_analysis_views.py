@@ -3346,154 +3346,153 @@ def _ai_gap_fill_pid_items(items: list, text: str, config: dict) -> list:
 
     ext_cfg     = config.get('extraction', {})
     enabled     = bool(ext_cfg.get('ai_gap_fill_enabled', True))
-    if not enabled:
-        return items
+    if enabled:
+        fill_fields = list(ext_cfg.get('ai_gap_fill_fields', _AI_GAP_FILL_DEFAULT_FIELDS))
+        ctx_chars   = int(ext_cfg.get('ai_gap_fill_context_chars', 800))
+        max_tokens  = int(ext_cfg.get('ai_gap_fill_max_tokens', 350))
+        temperature = float(ext_cfg.get('ai_gap_fill_temperature', 0))
+        min_empty   = int(ext_cfg.get('ai_gap_fill_min_empty_fields', 1))
+        provider    = str(ext_cfg.get('ai_gap_fill_provider', 'both')).lower()
+        # Fields where AI result ALWAYS overrides regex — ensures deterministic,
+        # consistent output across users regardless of OCR noise (e.g. description).
+        authoritative_fields = set(ext_cfg.get('ai_authoritative_fields', []))
 
-    fill_fields = list(ext_cfg.get('ai_gap_fill_fields', _AI_GAP_FILL_DEFAULT_FIELDS))
-    ctx_chars   = int(ext_cfg.get('ai_gap_fill_context_chars', 800))
-    max_tokens  = int(ext_cfg.get('ai_gap_fill_max_tokens', 350))
-    temperature = float(ext_cfg.get('ai_gap_fill_temperature', 0))
-    min_empty   = int(ext_cfg.get('ai_gap_fill_min_empty_fields', 1))
-    provider    = str(ext_cfg.get('ai_gap_fill_provider', 'both')).lower()
-    # Fields where AI result ALWAYS overrides regex — ensures deterministic,
-    # consistent output across users regardless of OCR noise (e.g. description).
-    authoritative_fields = set(ext_cfg.get('ai_authoritative_fields', []))
-
-    # Lazy-import to avoid circular imports and keep startup fast
-    try:
-        from apps.pid_analysis.multi_model_service import MultiModelAIService
-        ai = MultiModelAIService()
-    except Exception as _e:
-        print(f'[EQ-DIAG][AI-FILL] Service init failed: {_e}', flush=True)
-        return items
-
-    text_upper = text.upper()
-
-    # ── Shared prompt builder ────────────────────────────────────────────────
-    _FIELD_HINTS = {
-        'oper_pressure':      'Operating pressure with unit (e.g. "155 PSIG" or "10 barg")',
-        'oper_temperature':   'Operating temperature with unit (e.g. "105 °F" or "40 °C")',
-        'design_pressure_min': 'Minimum design/set pressure with unit (e.g. "-13.2 PSIG")',
-        'design_pressure_max': 'Maximum design/set pressure with unit (e.g. "195 PSIG")',
-        'design_temp_min':    'Minimum design temperature with unit (e.g. "-13 °F")',
-        'design_temp_max':    'Maximum design temperature with unit (e.g. "185 °F")',
-        'design_flowrate':    'Design flowrate or capacity with unit (e.g. "327 M3" or "100 M3/H")',
-        'moc':                'Material of construction abbreviation (e.g. "CS", "SS316L", "DUPLEX")',
-        'insulation':         'Insulation type code (e.g. "PERS", "HOT", "BARE", "TRACED")',
-        'description':        (
-            'Equipment service description — the exact 2-8 word ALL-CAPS title '
-            'printed in the equipment data box directly below or next to the tag '
-            '(e.g. "MRD THREE PHASE SEPARATOR", "MRD PRODUCED WATER DISPOSAL PUMP", '
-            '"MRD MEA INLET SCRUBBER"). Prefer the literal words on the drawing. '
-            'Do NOT use connector/routing text like "SOUR GAS TO ..." or "FROM ..." '
-            'or "TO ...". Do NOT include pipe tags, line numbers, or drawing numbers. '
-            'Return the title as ALL UPPERCASE.'
-        ),
-    }
-
-    def _build_prompt(tag: str, empty: list, ctx: str) -> str:
-        field_list = '\n'.join(
-            f'  "{f}": {_FIELD_HINTS.get(f, f)}'
-            for f in empty
-        )
-        return (
-            f'You are an Oil & Gas P&ID data extraction assistant.\n'
-            f'Extract the following fields for equipment tag {tag} from the text excerpt below.\n'
-            f'Return ONLY a valid JSON object with these exact keys. '
-            f'Set the value to null if the field cannot be found.\n'
-            f'Do NOT include markdown fences, explanations, or keys not listed.\n\n'
-            f'Fields to extract:\n{field_list}\n\n'
-            f'TEXT EXCERPT:\n{ctx}'
-        )
-
-    def _call_ai(prompt: str, model_hint: str) -> dict:
-        """Call the AI and return parsed dict, or {} on failure."""
+        # Lazy-import to avoid circular imports and keep startup fast
+        ai = None
         try:
-            raw = ai.chat_completion(
-                messages=[{'role': 'user', 'content': prompt}],
-                model=model_hint,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-            # Strip markdown code fences if present
-            cleaned = re.sub(r'^```[a-z]*\s*', '', raw.strip(), flags=re.IGNORECASE)
-            cleaned = re.sub(r'\s*```$', '', cleaned.strip())
-            parsed  = _json.loads(cleaned)
-            if isinstance(parsed, dict):
-                return parsed
+            from apps.pid_analysis.multi_model_service import MultiModelAIService
+            ai = MultiModelAIService()
         except Exception as _e:
-            print(f'[EQ-DIAG][AI-FILL] parse/call error ({model_hint}): {_e}', flush=True)
-        return {}
+            print(f'[EQ-DIAG][AI-FILL] Service init failed: {_e}', flush=True)
 
-    # ── Per-item gap fill ────────────────────────────────────────────────────
-    for item in items:
-        tag = item.get('tag', '')
-        if not tag:
-            continue
+        if ai is not None:
+            text_upper = text.upper()
 
-        empty_fields = [f for f in fill_fields if not item.get(f)]
-        # Authoritative fields are ALWAYS queried — even when regex populated
-        # them — so the AI result overrides inconsistent OCR-derived values.
-        forced_fields = [
-            f for f in fill_fields
-            if f in authoritative_fields and f not in empty_fields
-        ]
-        query_fields = empty_fields + forced_fields
-        if len(query_fields) < min_empty:
-            continue
+            # ── Shared prompt builder ────────────────────────────────────────────────
+            _FIELD_HINTS = {
+                'oper_pressure':      'Operating pressure with unit (e.g. "155 PSIG" or "10 barg")',
+                'oper_temperature':   'Operating temperature with unit (e.g. "105 °F" or "40 °C")',
+                'design_pressure_min': 'Minimum design/set pressure with unit (e.g. "-13.2 PSIG")',
+                'design_pressure_max': 'Maximum design/set pressure with unit (e.g. "195 PSIG")',
+                'design_temp_min':    'Minimum design temperature with unit (e.g. "-13 °F")',
+                'design_temp_max':    'Maximum design temperature with unit (e.g. "185 °F")',
+                'design_flowrate':    'Design flowrate or capacity with unit (e.g. "327 M3" or "100 M3/H")',
+                'moc':                'Material of construction abbreviation (e.g. "CS", "SS316L", "DUPLEX")',
+                'insulation':         'Insulation type code (e.g. "PERS", "HOT", "BARE", "TRACED")',
+                'description':        (
+                    'Equipment service description — the exact 2-8 word ALL-CAPS title '
+                    'printed in the equipment data box directly below or next to the tag '
+                    '(e.g. "MRD THREE PHASE SEPARATOR", "MRD PRODUCED WATER DISPOSAL PUMP", '
+                    '"MRD MEA INLET SCRUBBER"). Prefer the literal words on the drawing. '
+                    'Do NOT use connector/routing text like "SOUR GAS TO ..." or "FROM ..." '
+                    'or "TO ...". Do NOT include pipe tags, line numbers, or drawing numbers. '
+                    'Return the title as ALL UPPERCASE.'
+                ),
+            }
 
-        # Re-locate tag in text for context window
-        idx = text_upper.find(tag.upper())
-        if idx == -1:
-            continue
-        ctx_start = max(0, idx - ctx_chars // 2)
-        ctx_end   = min(len(text), idx + ctx_chars // 2)
-        ctx       = text[ctx_start:ctx_end]
+            def _build_prompt(tag: str, empty: list, ctx: str) -> str:
+                field_list = '\n'.join(
+                    f'  "{f}": {_FIELD_HINTS.get(f, f)}'
+                    for f in empty
+                )
+                return (
+                    f'You are an Oil & Gas P&ID data extraction assistant.\n'
+                    f'Extract the following fields for equipment tag {tag} from the text excerpt below.\n'
+                    f'Return ONLY a valid JSON object with these exact keys. '
+                    f'Set the value to null if the field cannot be found.\n'
+                    f'Do NOT include markdown fences, explanations, or keys not listed.\n\n'
+                    f'Fields to extract:\n{field_list}\n\n'
+                    f'TEXT EXCERPT:\n{ctx}'
+                )
 
-        prompt = _build_prompt(tag, query_fields, ctx)
+            def _call_ai(prompt: str, model_hint: str) -> dict:
+                """Call the AI and return parsed dict, or {} on failure."""
+                try:
+                    raw = ai.chat_completion(
+                        messages=[{'role': 'user', 'content': prompt}],
+                        model=model_hint,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    # Strip markdown code fences if present
+                    cleaned = re.sub(r'^```[a-z]*\s*', '', raw.strip(), flags=re.IGNORECASE)
+                    cleaned = re.sub(r'\s*```$', '', cleaned.strip())
+                    parsed  = _json.loads(cleaned)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception as _e:
+                    print(f'[EQ-DIAG][AI-FILL] parse/call error ({model_hint}): {_e}', flush=True)
+                return {}
 
-        # ── Pass 1: primary provider (GPT-4o, with auto Gemini fallback) ──
-        gpt_result = {}
-        if provider in ('openai', 'both'):
-            gpt_result = _call_ai(prompt, 'openai')
+            # ── Per-item gap fill ────────────────────────────────────────────────────
+            for item in items:
+                tag = item.get('tag', '')
+                if not tag:
+                    continue
 
-        # ── Pass 2: Gemini second-opinion (fills any fields GPT-4o left null) ──
-        gem_result = {}
-        if provider in ('gemini', 'both'):
-            still_empty = [f for f in query_fields if not gpt_result.get(f)]
-            if still_empty:
-                gem_result = _call_ai(_build_prompt(tag, still_empty, ctx), 'gemini')
+                empty_fields = [f for f in fill_fields if not item.get(f)]
+                # Authoritative fields are ALWAYS queried — even when regex populated
+                # them — so the AI result overrides inconsistent OCR-derived values.
+                forced_fields = [
+                    f for f in fill_fields
+                    if f in authoritative_fields and f not in empty_fields
+                ]
+                query_fields = empty_fields + forced_fields
+                if len(query_fields) < min_empty:
+                    continue
 
-        # ── Merge: OpenAI wins over Gemini.
-        # Authoritative fields: AI always overrides regex.
-        # Non-authoritative fields: AI fills only when regex left it empty.
-        filled = []
-        for f in query_fields:
-            val = gpt_result.get(f) or gem_result.get(f)
-            if not val or str(val).strip().lower() in ('null', 'none', ''):
-                continue
-            is_authoritative = f in authoritative_fields
-            if item.get(f) and not is_authoritative:
-                continue                       # already filled by regex — skip
-            new_val = str(val).strip()
-            if is_authoritative and item.get(f) == new_val:
-                continue                       # no change
-            item[f] = new_val
-            filled.append(f)
+                # Re-locate tag in text for context window
+                idx = text_upper.find(tag.upper())
+                if idx == -1:
+                    continue
+                ctx_start = max(0, idx - ctx_chars // 2)
+                ctx_end   = min(len(text), idx + ctx_chars // 2)
+                ctx       = text[ctx_start:ctx_end]
 
-        if filled:
-            print(f'[EQ-DIAG][AI-FILL] {tag}: AI filled {filled}', flush=True)
+                prompt = _build_prompt(tag, query_fields, ctx)
 
-    # ── Uppercase normalization for material/abbreviation fields ─────────
-    # Applied again here so AI-filled MOC / insulation values also render in
-    # canonical uppercase. Soft-coded via 'uppercase_fields' in config.
-    _upper_fields_ai = ext_cfg.get('uppercase_fields', ['moc', 'insulation'])
-    if _upper_fields_ai:
-        for _it in items:
-            for _uf in _upper_fields_ai:
-                _uv = _it.get(_uf, '')
-                if isinstance(_uv, str) and _uv and _uv.strip() not in ('—', 'N/A'):
-                    _it[_uf] = _uv.upper()
+                # ── Pass 1: primary provider (GPT-4o, with auto Gemini fallback) ──
+                gpt_result = {}
+                if provider in ('openai', 'both'):
+                    gpt_result = _call_ai(prompt, 'openai')
+
+                # ── Pass 2: Gemini second-opinion (fills any fields GPT-4o left null) ──
+                gem_result = {}
+                if provider in ('gemini', 'both'):
+                    still_empty = [f for f in query_fields if not gpt_result.get(f)]
+                    if still_empty:
+                        gem_result = _call_ai(_build_prompt(tag, still_empty, ctx), 'gemini')
+
+                # ── Merge: OpenAI wins over Gemini.
+                # Authoritative fields: AI always overrides regex.
+                # Non-authoritative fields: AI fills only when regex left it empty.
+                filled = []
+                for f in query_fields:
+                    val = gpt_result.get(f) or gem_result.get(f)
+                    if not val or str(val).strip().lower() in ('null', 'none', ''):
+                        continue
+                    is_authoritative = f in authoritative_fields
+                    if item.get(f) and not is_authoritative:
+                        continue                       # already filled by regex — skip
+                    new_val = str(val).strip()
+                    if is_authoritative and item.get(f) == new_val:
+                        continue                       # no change
+                    item[f] = new_val
+                    filled.append(f)
+
+                if filled:
+                    print(f'[EQ-DIAG][AI-FILL] {tag}: AI filled {filled}', flush=True)
+
+            # ── Uppercase normalization for material/abbreviation fields ─────────
+            # Applied again here so AI-filled MOC / insulation values also render in
+            # canonical uppercase. Soft-coded via 'uppercase_fields' in config.
+            _upper_fields_ai = ext_cfg.get('uppercase_fields', ['moc', 'insulation'])
+            if _upper_fields_ai:
+                for _it in items:
+                    for _uf in _upper_fields_ai:
+                        _uv = _it.get(_uf, '')
+                        if isinstance(_uv, str) and _uv and _uv.strip() not in ('—', 'N/A'):
+                            _it[_uf] = _uv.upper()
 
     return items
 
