@@ -59,7 +59,5 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8000
 
 # Use JSON array format for CMD to prevent signal issues
-# EMERGENCY: Using emergency startup to diagnose deployment issues
-# This will show detailed diagnostic output in Railway logs
-# Once working, switch back to: railway_start_fast.sh
-CMD ["bash", "-c", "echo '=== RAILWAY STARTUP DEBUG ===' && env | grep -E 'DATABASE|REDIS|SECRET|DEBUG|ALLOWED|PORT|RAILWAY' && echo '=== STARTING GUNICORN ===' && exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120 --log-level debug --access-logfile - --error-logfile -"]
+# TEST: Ultra-minimal startup to verify container can run
+CMD ["sh", "-c", "echo 'Container started! PORT=${PORT}' && gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 30 --log-level info"]
