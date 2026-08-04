@@ -1,5 +1,16 @@
 # Deployment Workflow Guide
 
+## 🆕 New Production Database (Sakura - PostgreSQL 18.4)
+
+**Status:** ✅ Fresh setup  
+**External URL (local testing):** `sakura.proxy.rlwy.net:31281`  
+**Internal URL (Railway):** `postgres.railway.internal:5432`  
+
+**Setup Guide:** See [FRESH_PRODUCTION_SETUP.md](FRESH_PRODUCTION_SETUP.md)  
+**Database Sync:** See [DB_SYNC_GUIDE.md](DB_SYNC_GUIDE.md)
+
+---
+
 ## Branch Structure
 ```
 development (active development)
