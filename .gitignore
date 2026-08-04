@@ -146,6 +146,19 @@ test_*.py
 *.txt
 # Allow P&ID analysis config prompt files (engineers tune these without code deploys)
 !apps/pid_analysis/config/*.txt
+# Allow README files
+!README.md
+!*/README.md
+!DB_SYNC_README.md
+
+# Database sync and backup files
+db_sync.log
+db_backups/
+remote_dump_*.sql
+local_backup_*.sql
+db_sync_config.json
+# Allow config template
+!db_sync_config.json.template
 
 pfd_projects/
 
