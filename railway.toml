@@ -1,0 +1,21 @@
+# ============================================
+# RAILWAY DEPLOYMENT - Backend Service
+# ============================================
+# Build Context: Repository root
+# Dockerfile: Dockerfile.backend (multi-stage build)
+# Target: production (optimized for Railway)
+# Start Command: Defined in Dockerfile CMD (railway_start.sh)
+# Health Check: /api/v1/health/
+# ============================================
+
+[build]
+  builder = "dockerfile"
+  dockerfilePath = "Dockerfile.backend"
+  # Use production stage from multi-stage build
+  dockerfileTarget = "production"
+
+[deploy]
+  healthcheckPath = "/api/v1/health/"
+  healthcheckTimeout = 300
+  restartPolicyType = "on_failure"
+  restartPolicyMaxRetries = 10
