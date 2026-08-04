@@ -351,9 +351,8 @@ class HandwritingExtractor:
             pdf_file.seek(0)
         else:
             base_dir = os.path.abspath(str(settings.BASE_DIR))
-            safe_path = os.path.abspath(os.path.join(base_dir, pdf_file))
-            if os.path.commonpath([base_dir, safe_path]) != base_dir:
-                raise ValueError(f"Invalid PDF path: {pdf_file}")
+            safe_filename = os.path.basename(pdf_file)
+            safe_path = os.path.join(base_dir, safe_filename)
             with open(safe_path, "rb") as fp:
                 pdf_bytes = fp.read()
 
