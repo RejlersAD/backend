@@ -1,0 +1,35 @@
+# Electrical Checklist Extraction - OCR Dependencies
+# FREE extractors first, AI fallback optional
+
+# ─── PRIMARY OCR ENGINES (FREE) ───────────────────────────────────────────────
+pytesseract>=0.3.10          # Tesseract OCR wrapper (FREE, fast)
+easyocr>=1.7.0               # Deep learning OCR (FREE, better accuracy)
+opencv-python>=4.8.0         # Image processing & signature detection (FREE)
+
+# ─── PDF & IMAGE PROCESSING ───────────────────────────────────────────────────
+PyMuPDF>=1.23.0              # PDF to image conversion (fitz)
+Pillow>=10.0.0               # Image manipulation
+numpy>=1.24.0                # Array operations for CV
+
+# ─── EXCEL EXPORT ──────────────────────────────────────────────────────────────
+openpyxl>=3.1.0              # Excel file generation
+
+# ─── OPTIONAL AI FALLBACK (PAID - only if enable_ai_fallback=True) ────────────
+google-generativeai>=0.3.0   # Gemini Vision (optional)
+openai>=1.0.0                # GPT-4o Vision (optional)
+
+# ─── SYSTEM REQUIREMENTS ───────────────────────────────────────────────────────
+# For Tesseract OCR to work, you need to install Tesseract system package:
+# 
+# Windows: 
+#   Download from: https://github.com/UB-Mannheim/tesseract/wiki
+#   Or via chocolatey: choco install tesseract
+#
+# Linux:
+#   sudo apt-get install tesseract-ocr
+#
+# macOS:
+#   brew install tesseract
+#
+# After installation, add to system PATH or configure:
+#   pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
