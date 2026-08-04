@@ -1,0 +1,124 @@
+# ==========================================
+# AIFLOW - SINGLE SOURCE OF TRUTH
+# ONE requirements.txt for all environments
+# Last updated: 2026-03-23 (PFD 4-pass engine)
+# ==========================================
+
+# ==========================================
+# 1. DJANGO CORE (Required)
+# ==========================================
+Django==5.0.0
+djangorestframework==3.14.0
+django-cors-headers==4.3.1
+django-filter==23.5
+psycopg2-binary>=2.9.9
+python-decouple==3.8
+python-dotenv==1.0.0
+dj-database-url==2.1.0
+gunicorn==21.2.0
+whitenoise==6.6.0
+
+# ==========================================
+# 2. ASYNC & WEBSOCKETS (Required)
+# ==========================================
+celery==5.3.4
+redis==5.0.1
+django-redis==5.4.0
+channels==4.0.0
+channels-redis==4.1.0
+daphne==4.0.0
+
+# ==========================================
+# 3. AUTHENTICATION & API (Required)
+# ==========================================
+djangorestframework-simplejwt==5.3.1
+drf-spectacular==0.27.0
+
+# ==========================================
+# 4. AI APIs (Required)
+# ==========================================
+openai==1.54.3
+google-genai>=0.8.0  # Google Gemini AI  new SDK for genai
+anthropic>=0.18.0
+httpx==0.27.2
+requests>=2.31.0
+cryptography>=42.0.0  # Wrench integration – Fernet encryption for API key storage
+
+# ==========================================
+# 5. FILE PROCESSING (Required)
+# ==========================================
+pillow>=10.1.0
+PyPDF2==3.0.1
+pdf2image==1.17.0
+pymupdf>=1.24.0
+reportlab==4.0.7
+openpyxl>=3.1.5
+xlsxwriter==3.1.9
+python-docx==1.1.0
+python-pptx==0.6.23
+pdfplumber>=0.10.0
+python-dateutil==2.8.2
+
+# SQL Server connector for Time Sheet Analytics (apps.timesheet)
+# pymssql ships manylinux wheels — no system ODBC driver needed.
+pymssql>=2.2.11
+
+# ==========================================
+# 6. AWS S3 STORAGE (Required)
+# ==========================================
+boto3==1.34.69
+django-storages==1.14.2
+
+# Lightweight alternatives for Sales/Finance modules (no heavy ML needed)
+# Sales module uses rule-based AI - statistical calculations only
+
+# ==========================================
+# 7. GOOGLE SHEETS API (Required)
+# ==========================================
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.1.1
+google-auth-oauthlib>=1.1.0
+
+# ==========================================
+# 8. DATA PROCESSING (Lightweight - Required)
+# ==========================================
+numpy>=1.24.0
+pandas>=2.1.0
+networkx==3.2.1
+psutil>=5.9.0  # Real-time CPU/memory/disk metrics for the admin dashboard
+
+# ==========================================
+# 9. OCR STACK (Required for P&ID/PFD Processing)
+# ==========================================
+pytesseract==0.3.13
+easyocr==1.7.2
+paddlepaddle==3.3.0
+paddleocr==3.3.3
+opencv-python-headless==4.10.0.84
+
+# 10. DATA PROCESSING & ML (Required)
+# ==========================================
+scikit-learn>=1.3.0
+
+# ==========================================
+# 11. UTILITIES (Required)
+# ==========================================
+tqdm>=4.66.0
+
+# ==========================================
+# NOTES:
+# ==========================================
+# • This is the SINGLE source of truth for dependencies
+# • Use same file for local development, Docker, and Railway
+# • To speed up local dev: Comment out OCR section (saves 3-4GB)
+# • Production (Railway/Docker): Install everything
+# • Heavy ML models (PyTorch, YOLOv8, etc.) removed - using cloud APIs
+# ==========================================
+
+# ==========================================
+# TESTING (Optional)
+# ==========================================
+# Uncomment if running pytest:
+# pytest==7.4.3
+# pytest-django==4.7.0
+# pytest-cov==4.1.0

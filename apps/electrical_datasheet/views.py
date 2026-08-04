@@ -13,10 +13,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ── Soft-coded configuration constants ──────────────────────────────────────
-AUTO_TAG_PREFIX_LENGTH = 8   # Number of chars from equipment_type for auto-generated tag prefix
-AUTO_TAG_UUID_LENGTH = 8     # Number of hex chars from UUID for auto-generated tag suffix
-
 from .models import (
     ElectricalEquipmentType,
     ElectricalDatasheet,
@@ -1528,7 +1524,7 @@ Please provide your response as JSON with this exact structure:
                         logger.warning(f"[SmartDatasheet] No config found for {internal_type}, created minimal record")
                 
                 import uuid as _uuid
-                auto_tag = f"{equipment_type.upper()[:AUTO_TAG_PREFIX_LENGTH]}-{_uuid.uuid4().hex[:AUTO_TAG_UUID_LENGTH].upper()}"
+                auto_tag = f"{equipment_type.upper()[:8]}-{_uuid.uuid4().hex[:8].upper()}"
 
                 datasheet = ElectricalDatasheet.objects.create(
                     equipment_type=equipment_obj,

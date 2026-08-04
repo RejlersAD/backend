@@ -36,28 +36,6 @@ VISION_MODELS = {
 VISION_MAX_TOKENS = 4096
 VISION_TEMPERATURE = 0.0             # deterministic — we want factual extraction
 
-# Determinism / anti-hallucination controls (soft-coded).
-#   • VISION_SEED is passed to OpenAI's chat.completions.create as `seed=`.
-#     gpt-4o honours it and produces reproducible outputs for the same image
-#     + prompt + seed. Anthropic does not yet accept a seed parameter.
-#   • VISION_CONSENSUS_MIN_HITS is the minimum number of independent Vision
-#     passes (overview + tiles) a tag must appear in before we keep it.
-#       - 1  = keep every tag (highest recall, some hallucinations pass through)
-#       - 2  = balanced (recommended default — a real tag usually shows up in
-#              the overview AND at least one tile because of the 15% overlap)
-#       - 3+ = precision-first (may drop small edge-of-page tags)
-#   • VISION_KEEP_UNCONFIRMED lets callers opt-out of the hit-count filter and
-#     retain every tag regardless (useful for legend-driven extraction where
-#     the user explicitly listed the rules).
-#   • VISION_CONSENSUS_RECALL_FLOOR guards against consensus dropping too
-#     many tags on drawings where a lot of items really do live at the edge
-#     of a single tile. If consensus would keep fewer than this fraction
-#     of the merged set, we downgrade min_hits to 1 for that run.
-VISION_SEED = 42
-VISION_CONSENSUS_MIN_HITS = 2
-VISION_KEEP_UNCONFIRMED = False
-VISION_CONSENSUS_RECALL_FLOOR = 0.70
-
 # Retry policy for transient upstream errors (Claude 529 overloaded,
 # OpenAI 429/500/502/503/504). Exponential backoff with jitter.
 VISION_RETRY_MAX_ATTEMPTS = 4
@@ -166,7 +144,6 @@ def extract_line_tags_via_vision(
     meter = UsageMeter(feature='line_extraction')
     all_raw: list[str] = []
     all_tags: dict[str, dict] = {}
-    hit_counts: dict[str, int] = {}
     call_count = 0
 
     for page_idx, page_image in enumerate(_render_pages(pdf_bytes)):
@@ -177,12 +154,8 @@ def extract_line_tags_via_vision(
             meter.add(provider, VISION_MODELS[provider], in_t, out_t)
             call_count += 1
             all_raw.append(f'[page {page_idx} overview]\n{raw}')
-            seen_in_pass: set[str] = set()
             for tag in _parse_tag_list(raw):
                 all_tags.setdefault(tag['tag'], tag)
-                if tag['tag'] not in seen_in_pass:
-                    hit_counts[tag['tag']] = hit_counts.get(tag['tag'], 0) + 1
-                    seen_in_pass.add(tag['tag'])
 
         # 2) High-detail overlapping tile passes.
         for tile_idx, tile in enumerate(_tile_image(page_image,
@@ -194,46 +167,10 @@ def extract_line_tags_via_vision(
             meter.add(provider, VISION_MODELS[provider], in_t, out_t)
             call_count += 1
             all_raw.append(f'[page {page_idx} tile {tile_idx}]\n{raw}')
-            seen_in_pass = set()
             for tag in _parse_tag_list(raw):
                 all_tags.setdefault(tag['tag'], tag)
-                if tag['tag'] not in seen_in_pass:
-                    hit_counts[tag['tag']] = hit_counts.get(tag['tag'], 0) + 1
-                    seen_in_pass.add(tag['tag'])
 
-    # Consensus filter — a tag must have been seen by ≥N independent passes.
-    # This is what tames run-to-run hallucination: a real tag reliably shows
-    # up in the overview + at least one overlapping tile; a hallucinated tag
-    # typically appears in only one pass and disappears on the next run.
-    min_hits = 1 if VISION_KEEP_UNCONFIRMED else max(1, int(VISION_CONSENSUS_MIN_HITS))
-    # If a single-pass run produced everything (VISION_INCLUDE_OVERVIEW=False,
-    # 1×1 tiles), enforcing ≥2 would empty the result — degrade gracefully.
-    if call_count <= 1:
-        min_hits = 1
-    # Recall floor guard — if the strict filter would keep less than the
-    # allowed fraction of merged tags, back off to min_hits=1 for this run.
-    if min_hits > 1 and all_tags:
-        would_keep = sum(1 for t in all_tags if hit_counts.get(t, 0) >= min_hits)
-        if would_keep < VISION_CONSENSUS_RECALL_FLOOR * len(all_tags):
-            logger.info("[vision] consensus would keep %d/%d (<%.0f%%); relaxing min_hits→1",
-                        would_keep, len(all_tags), VISION_CONSENSUS_RECALL_FLOOR * 100)
-            min_hits = 1
-
-    confirmed: dict[str, dict] = {}
-    for tag_str, tag in all_tags.items():
-        hits = hit_counts.get(tag_str, 0)
-        enriched = dict(tag)
-        enriched['hit_count'] = hits
-        enriched['confidence'] = round(hits / max(call_count, 1), 3)
-        if hits >= min_hits:
-            confirmed[tag_str] = enriched
-
-    dropped = len(all_tags) - len(confirmed)
-    if dropped:
-        logger.info("[vision] consensus filter kept %d/%d tags (min_hits=%d, passes=%d)",
-                    len(confirmed), len(all_tags), min_hits, call_count)
-
-    tags_sorted = sorted(confirmed.values(),
+    tags_sorted = sorted(all_tags.values(),
                          key=lambda t: (t.get('service') or '', _serial_int(t.get('serial') or ''), t.get('size') or ''))
     return {
         'provider': provider,
@@ -242,8 +179,6 @@ def extract_line_tags_via_vision(
         'raw': '\n\n---\n\n'.join(all_raw),
         'call_count': call_count,
         'token_usage': meter.summary(),
-        'consensus_min_hits': min_hits,
-        'dropped_by_consensus': dropped,
     }
 
 
@@ -438,7 +373,6 @@ def _call_openai(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PR
         model=VISION_MODELS['openai'],
         max_tokens=VISION_MAX_TOKENS,
         temperature=VISION_TEMPERATURE,
-        seed=VISION_SEED,
         messages=[
             {'role': 'system', 'content': VISION_SYSTEM_PROMPT},
             {

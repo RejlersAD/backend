@@ -1402,28 +1402,12 @@ class ExtractEquipmentTagsFromPidView(APIView):
 
 
 class ExtractInstrumentTagsFromPidView(APIView):
-    """POST a P&ID PDF + BYOK, dispatch async vision extraction.
-
-    Returns HTTP 202 with a ``job_id`` and ``poll_url`` — the actual work
-    runs in Celery (``run_extract_instrument_tags_task``) so long-running
-    heavy P&IDs no longer hit Gunicorn's request timeout.
-    """
+    """POST a P&ID PDF + BYOK, receive instrument tags found on the drawing."""
 
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, *args, **kwargs):
-        import base64 as _b64
-        import threading as _threading
-        import uuid as _uuid
-
-        from django.core.cache import cache as _cache
-        from .tasks import (
-            run_extract_instrument_tags_task,
-            EXTRACT_INSTRUMENT_CACHE_KEY_FMT,
-            EXTRACT_TAG_RESULT_TTL_S,
-        )
-
         upload = request.FILES.get(UPLOAD_FIELD_NAME)
         if upload is None:
             return Response({'error': f"missing file field '{UPLOAD_FIELD_NAME}'"},
@@ -1445,52 +1429,35 @@ class ExtractInstrumentTagsFromPidView(APIView):
             return Response({'error': 'api_key required for vision extraction'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        job_id = _uuid.uuid4().hex
-        pdf_b64 = _b64.b64encode(upload.read()).decode('ascii')
+        from .services.instrument_vision_extractor import extract_instrument_tags_via_vision
+        try:
+            result = extract_instrument_tags_via_vision(upload.read(), provider, api_key)
+        except Exception as exc:
+            logger.exception('Instrument vision extraction failed')
+            msg = str(exc)
+            if 'overloaded' in msg.lower() or '529' in msg:
+                friendly = (f"{provider.title()} vision API is temporarily overloaded "
+                            "after several automatic retries. Please try again in a "
+                            "minute or switch provider.")
+            else:
+                friendly = f'vision extraction failed: {exc}'
+            return Response({'error': friendly},
+                            status=status.HTTP_502_BAD_GATEWAY)
 
-        # Pre-seed processing state so the first poll never 404s.
-        _cache.set(
-            EXTRACT_INSTRUMENT_CACHE_KEY_FMT.format(job_id=job_id),
-            {'status': 'processing', 'progress': 1, 'message': 'Queued for extraction…'},
-            EXTRACT_TAG_RESULT_TTL_S,
+        _persist_token_usage(
+            user=request.user,
+            feature='instrument_extraction',
+            usage=result.get('token_usage') or {},
         )
 
-        task_args = (job_id, pdf_b64, upload.name, provider, api_key, request.user.id)
-        try:
-            run_extract_instrument_tags_task.delay(*task_args)
-        except Exception as exc:
-            # Broker unavailable (local dev without Celery) — run in a daemon thread.
-            logger.warning('[PIDV2InstrExtract] Celery dispatch failed, using thread: %s', exc)
-            _threading.Thread(
-                target=run_extract_instrument_tags_task,
-                args=task_args,
-                daemon=True,
-            ).start()
-
         return Response({
-            'async':    True,
-            'job_id':   job_id,
-            'status':   'processing',
-            'poll_url': f'/api/v1/pid_checker_v2/extract-instrument-tags/status/{job_id}/',
-        }, status=status.HTTP_202_ACCEPTED)
-
-
-class ExtractInstrumentTagsStatusView(APIView):
-    """Poll endpoint for ``run_extract_instrument_tags_task``."""
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, job_id, *args, **kwargs):
-        from django.core.cache import cache as _cache
-        from .tasks import EXTRACT_INSTRUMENT_CACHE_KEY_FMT
-
-        entry = _cache.get(EXTRACT_INSTRUMENT_CACHE_KEY_FMT.format(job_id=job_id))
-        if entry is None:
-            return Response(
-                {'status': 'unknown', 'error': 'job not found or expired'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        return Response(entry, status=status.HTTP_200_OK)
+            'filename': upload.name,
+            'provider': result['provider'],
+            'model':    result['model'],
+            'tags':     result['tags'],
+            'call_count': result['call_count'],
+            'token_usage': result.get('token_usage'),
+        }, status=status.HTTP_200_OK)
 
 
 # ─── Token usage endpoints ───────────────────────────────────────────

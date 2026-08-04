@@ -1,0 +1,11 @@
+# NEW Dependencies for CRS Document Intelligence Extension
+# Add these to your main requirements.txt
+
+# PDF Processing
+PyPDF2==3.0.1
+
+# Excel/XLSX Manipulation (preserves formatting)
+openpyxl==3.1.2
+
+# Optional: Enhanced PDF extraction
+# pdfplumber==0.10.3  # Uncomment for better table/annotation extraction
