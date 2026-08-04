@@ -21,8 +21,16 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.finance.salary_models import (
-    PayrollRun, SalarySlip, EmployeeSalaryInfo, SalaryStatus,
+    EmployeeSalaryInfo,
 )
+# Real payroll runs/payslips are generated through the Payroll Engine
+# (apps.payroll_engine) — apps.finance.salary_models.PayrollRun/SalarySlip
+# is a separate, unused-in-practice model in this deployment and is always
+# empty, so the dashboard summary below reads from the engine models instead.
+from apps.payroll_engine.models import (
+    PayrollRun as EnginePayrollRun, Payslip as EnginePayslip,
+)
+from apps.payroll_engine.catalog import Status as EngineStatus
 
 from .models import (
     PayrollValidationLog,
@@ -82,23 +90,28 @@ class PayrollDashboardSummaryView(APIView):
         current_year  = now.year
 
         # ── Salary-slip KPIs (current month) ────────────────────────────────
-        slip_agg = SalarySlip.objects.filter(
+        # PayrollRun denormalises gross/net/deductions per run, so the
+        # current-month row (if generated) gives us these directly.
+        current_run = EnginePayrollRun.objects.filter(
             month=current_month,
             year=current_year,
-        ).aggregate(
-            total_gross=Sum('gross_salary'),
-            total_net=Sum('net_salary'),
-            total_deductions=Sum('total_deductions'),
-            slip_count=Count('id'),
-        )
+        ).first()
+        slip_agg = {
+            'total_gross':      current_run.total_gross if current_run else Decimal('0'),
+            'total_net':        current_run.total_net if current_run else Decimal('0'),
+            'total_deductions': current_run.total_deductions if current_run else Decimal('0'),
+            'slip_count':       current_run.employee_count if current_run else 0,
+        }
 
         # YTD totals
-        ytd_agg = SalarySlip.objects.filter(
+        ytd_agg = EnginePayrollRun.objects.filter(
             year=current_year,
-        ).aggregate(ytd_net=Sum('net_salary'))
+        ).aggregate(ytd_net=Sum('total_net'))
 
-        pending_approvals = SalarySlip.objects.filter(
-            status=SalaryStatus.PENDING_APPROVAL
+        # "Pending approval" == payslips still in the draft stage (not yet
+        # HR-approved) — the earliest actionable stage of the run workflow.
+        pending_approvals = EnginePayslip.objects.filter(
+            status=EngineStatus.DRAFT
         ).count()
 
         # ── Active employee count ────────────────────────────────────────────
@@ -132,12 +145,26 @@ class PayrollDashboardSummaryView(APIView):
 
         # ── Leave summary (annual aggregates) ───────────────────────────────
         leave_agg = EmployeeLeaveRecord.objects.filter(year=current_year).aggregate(
-            total_taken=Sum('total_taken'),
             total_earned=Sum('total_earned'),
             avg_balance=Avg('leave_balance'),
         )
+        # "Taken" comes from actual approved LeaveRequest submissions, not the
+        # EmployeeLeaveRecord.total_taken column — that field only reflects a
+        # one-off HR Excel snapshot and is never updated as leave is approved
+        # through the app, so it stays 0 while real leave gets taken.
+        leave_taken_agg = LeaveRequest.objects.filter(
+            status=LeaveRequestStatus.APPROVED,
+            start_date__year=current_year,
+        ).aggregate(total_taken=Sum('days_requested'))
+        leave_total_taken = leave_taken_agg['total_taken'] or Decimal('0')
+
         leave_employees_taken = (
-            EmployeeLeaveRecord.objects.filter(year=current_year, total_taken__gt=0).count()
+            LeaveRequest.objects
+            .filter(status=LeaveRequestStatus.APPROVED, start_date__year=current_year)
+            .exclude(employee_code__isnull=True)
+            .values('employee_code')
+            .distinct()
+            .count()
         )
 
         # Current-month leave taken (from monthly breakdown table)
@@ -148,7 +175,7 @@ class PayrollDashboardSummaryView(APIView):
         )
 
         # ── Latest payroll run ───────────────────────────────────────────────
-        latest_run = PayrollRun.objects.order_by('-year', '-month').first()
+        latest_run = EnginePayrollRun.objects.order_by('-year', '-month').first()
 
         return Response({
             'current_month':       current_month,
@@ -169,7 +196,7 @@ class PayrollDashboardSummaryView(APIView):
             'open_alerts':         open_alerts + leave_critical,
             # Leave intelligence — always populated from imported leave data
             'leave_data_available':        leave_employee_count > 0,
-            'leave_total_taken_ytd':       str(leave_agg['total_taken'] or 0),
+            'leave_total_taken_ytd':       str(leave_total_taken),
             'leave_total_earned_ytd':      str(leave_agg['total_earned'] or 0),
             'leave_avg_balance':           str(round(leave_agg['avg_balance'] or 0, 2)),
             'leave_employees_taken':       leave_employees_taken,
@@ -192,7 +219,7 @@ class PayrollDashboardSummaryView(APIView):
             ).count(),
             'latest_run': {
                 'id':     str(latest_run.id)     if latest_run else None,
-                'code':   latest_run.run_code    if latest_run else None,
+                'code':   latest_run.cycle_code  if latest_run else None,
                 'month':  latest_run.month       if latest_run else None,
                 'year':   latest_run.year        if latest_run else None,
                 'status': latest_run.status      if latest_run else None,
