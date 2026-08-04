@@ -1,55 +1,9 @@
-# ========================================================================
-# OPTIONAL MACHINE LEARNING & OCR DEPENDENCIES
-# ========================================================================
-# WARNING: These packages add ~6-8GB to Docker image and 10-15 minutes build time
-# 
-# Image sizes:
-# - Base (without ML): ~1-2GB
-# - With ML enabled: ~8-10GB
-# 
-# To enable ML/OCR features:
-# 1. Set ENABLE_ML_FEATURES=true in docker-compose.yml environment
-# 2. Rebuild: docker-compose build --no-cache backend_local
-# 
-# When to enable:
-# - P&ID/PFD document OCR processing
-# - Equipment detection from drawings
-# - Advanced image analysis features
-# 
-# When to disable (default):
-# - Sales/Finance/RBAC-only modules
-# - API development without document processing
-# - Cost optimization (smaller images = faster deploys)
-# ========================================================================
+# ML/OCR requirements (optional heavy dependencies)
+# These are only installed when ENABLE_ML_FEATURES=true in docker-compose.yml
+# This keeps the base image slim for local development
 
-# ========================================================================
-# 1. OCR STACK (P&ID/PFD Document Processing)
-# ========================================================================
-# Size: ~4-5GB, Build time: ~8 minutes
-pytesseract==0.3.13
-easyocr==1.7.2
-paddlepaddle==3.3.0
-paddleocr==3.3.3
-opencv-python-headless==4.10.0.84
-
-# ========================================================================
-# 2. MACHINE LEARNING (Advanced Analytics)
-# ========================================================================
-# Size: ~2-3GB, Build time: ~5 minutes
-scikit-learn>=1.3.0
-scipy>=1.11.0
-
-# ========================================================================
-# 3. DEEP LEARNING (Optional - Not Currently Used)
-# ========================================================================
-# Uncomment only if needed for custom models
-# torch>=2.0.0              # ~2GB
-# torchvision>=0.15.0       # ~500MB
-# tensorflow>=2.12.0        # ~2GB
-
-# ========================================================================
-# 4. NLP (Optional - Not Currently Used)
-# ========================================================================
-# transformers>=4.30.0        # Hugging Face transformers
-# sentence-transformers>=2.2.0 # Sentence embeddings
-
+# Currently empty - add ML packages here if needed:
+# paddleocr
+# easyocr  
+# opencv-python
+# mlflow
