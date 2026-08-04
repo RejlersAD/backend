@@ -93,22 +93,21 @@ def _apply_header_remap(tool: str, rows: list[dict]) -> tuple[list[dict], Option
 
 
 def _apply_service_classifier(rows: list[dict]) -> list[dict]:
-    if not ai_features.is_enabled('service_classification'):
-        return rows
-    for r in rows or []:
-        if not isinstance(r, dict):
-            continue
-        # Only fill blanks.
-        if r.get('signal_type') and r.get('family'):
-            continue
-        text = ' '.join(str(r.get(k) or '') for k in ('description', 'service', 'tag'))
-        info = ai_service_classifier.classify(text)
-        if info.get('signal_type') and not r.get('signal_type'):
-            r['signal_type'] = info['signal_type']
-        if info.get('family') and not r.get('family'):
-            r['family'] = info['family']
-        if info.get('confidence') is not None:
-            r['_ai_classifier_confidence'] = info['confidence']
+    if ai_features.is_enabled('service_classification'):
+        for r in rows or []:
+            if not isinstance(r, dict):
+                continue
+            # Only fill blanks.
+            if r.get('signal_type') and r.get('family'):
+                continue
+            text = ' '.join(str(r.get(k) or '') for k in ('description', 'service', 'tag'))
+            info = ai_service_classifier.classify(text)
+            if info.get('signal_type') and not r.get('signal_type'):
+                r['signal_type'] = info['signal_type']
+            if info.get('family') and not r.get('family'):
+                r['family'] = info['family']
+            if info.get('confidence') is not None:
+                r['_ai_classifier_confidence'] = info['confidence']
     return rows
 
 

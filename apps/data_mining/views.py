@@ -383,8 +383,8 @@ class WrenchDocumentSearchViewSet(viewsets.ViewSet):
             # Use Wrench service to search documents
             results = wrench_service.search_documents(
                 config,
-                project_number=project_number,
-                search_term=search_term,
+                order_no=project_number,
+                doc_no=search_term,
                 page=1,
                 page_size=100
             )

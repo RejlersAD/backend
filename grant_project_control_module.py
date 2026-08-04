@@ -131,6 +131,9 @@ if __name__ == '__main__':
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+def grant_project_control_module(username_or_email='admin'):
     """Grant project_control module to a user"""
     print("\n" + "="*70)
     print("GRANT PROJECT_CONTROL MODULE ACCESS")

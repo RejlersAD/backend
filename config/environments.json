@@ -85,11 +85,10 @@
       "database": {
         "use_url": true,
         "url_env_var": "DATABASE_URL",
-        "fallback_url": "postgresql://postgres:OPMUckaUZIxVfSsWxgRKuVFbBsVKxPyk@nozomi.proxy.rlwy.net:43647/railway",
         "host": "nozomi.proxy.rlwy.net",
         "port": 43647,
         "name": "railway",
-        "comment": "Preprod PostgreSQL on Railway - uses external proxy URL"
+        "comment": "Preprod PostgreSQL on Railway - uses external proxy URL. Credentials come from the DATABASE_URL env var."
       },
       "redis": {
         "use_url": true,
@@ -145,11 +144,10 @@
       "database": {
         "use_url": true,
         "url_env_var": "DATABASE_URL",
-        "fallback_url": "postgresql://postgres:cJLHOrfvZxZXHKaMCWdLdRedgHgmIneU@shinkansen.proxy.rlwy.net:38534/railway",
         "host": "shinkansen.proxy.rlwy.net",
         "port": 38534,
         "name": "railway",
-        "comment": "Production PostgreSQL on Railway - uses external proxy URL"
+        "comment": "Production PostgreSQL on Railway - uses external proxy URL. Credentials come from the DATABASE_URL env var."
       },
       "redis": {
         "use_url": true,

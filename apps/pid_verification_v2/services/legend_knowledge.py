@@ -6,6 +6,7 @@ This enables future PID verification runs to reuse project legend prefixes.
 """
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Iterable
@@ -178,7 +179,9 @@ def build_legend_knowledge(file_paths: Iterable[str]) -> dict:
 
 def save_legend_knowledge(knowledge: dict, output_path: Path | None = None) -> Path:
     """Persist legend knowledge JSON for future recognition."""
-    target = output_path or LEGEND_KNOWLEDGE_PATH
+    target = Path(os.path.abspath(str(output_path or LEGEND_KNOWLEDGE_PATH)))
+    if os.path.commonpath([str(BASE_DIR), str(target)]) != str(BASE_DIR):
+        raise ValueError(f"Invalid output path: {output_path}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(knowledge, indent=2), encoding="utf-8")
     return target

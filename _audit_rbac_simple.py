@@ -9,14 +9,12 @@ import psycopg2
 from pathlib import Path
 
 def get_db_connection():
-    """Get database connection from environment or Railway"""
+    """Get database connection from environment"""
     db_url = os.getenv('DATABASE_URL')
-    
+
     if not db_url:
-        # Use Railway test/staging database
-        db_url = "postgresql://postgres:OPMUckaUZIxVfSsWxgRKuVFbBsVKxPyk@nozomi.proxy.rlwy.net:43647/railway"
-        print(f"Connecting to Railway TEST database: nozomi.proxy.rlwy.net:43647/railway\n")
-    
+        sys.exit('DATABASE_URL environment variable is not set.')
+
     return psycopg2.connect(db_url)
 
 

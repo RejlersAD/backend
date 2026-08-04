@@ -11,7 +11,9 @@ django.setup()
 from apps.users.models import User
 
 email = 'tanzeem.agra@rejlers.ae'
-password = 'Tanzeem@786'
+password = os.environ.get('ADMIN_PASSWORD')
+if not password:
+    raise SystemExit('ADMIN_PASSWORD environment variable is not set.')
 
 try:
     user = User.objects.get(email=email)

@@ -67,7 +67,11 @@ def _now_iso() -> str:
 
 
 def _job_path(job_id: str) -> str:
-    return os.path.join(JOB_DIR, f'{job_id}.json')
+    allowed_dir = os.path.abspath(JOB_DIR)
+    path = os.path.abspath(os.path.join(allowed_dir, f'{job_id}.json'))
+    if os.path.commonpath([allowed_dir, path]) != allowed_dir:
+        raise ValueError(f'Invalid job_id: {job_id}')
+    return path
 
 
 def _read_disk(job_id: str) -> Optional[Dict[str, Any]]:

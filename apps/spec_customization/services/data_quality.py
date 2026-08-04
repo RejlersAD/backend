@@ -341,16 +341,12 @@ def normalize_flange_facing(facing: str) -> str:
 
 def validate_material_standard(standard: str) -> bool:
     """Return True if standard matches known patterns."""
-    if not standard or not DATA_QUALITY_CONFIG["validate_standards"]:
-        return True
-    
-    patterns = DATA_QUALITY_CONFIG["material_standard_patterns"]
-    for pattern in patterns:
-        if re.search(pattern, standard.upper()):
-            return True
-    
-    # Warn but don't reject (AI might have extracted valid non-standard notation)
-    logger.warning("[DataQuality] Unrecognized material standard: %s", standard)
+    if standard and DATA_QUALITY_CONFIG["validate_standards"]:
+        patterns = DATA_QUALITY_CONFIG["material_standard_patterns"]
+        if not any(re.search(pattern, standard.upper()) for pattern in patterns):
+            # Warn but don't reject (AI might have extracted valid non-standard notation)
+            logger.warning("[DataQuality] Unrecognized material standard: %s", standard)
+
     return True
 
 

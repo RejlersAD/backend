@@ -172,49 +172,48 @@ def fix_michelle_roles(profile, gaps, roles_status):
     
     if not gaps:
         print("✅ No fixes needed - configuration is already correct")
-        return True
-    
-    print(f"🔧 Applying {len(gaps)} fix(es)...\n")
-    
-    for gap in gaps:
-        code = gap['code']
-        config = gap['config']
-        
-        if gap['type'] == 'missing':
-            # Add missing role
-            if roles_status[code]['exists']:
-                role = roles_status[code]['role']
-                user_role, created = UserRole.objects.get_or_create(
-                    user_profile=profile,
-                    role=role,
-                    defaults={'is_primary': config['is_primary']}
-                )
-                
-                if created:
-                    print(f"✅ ADDED role '{code}' ({role.name})")
-                    print(f"   - Primary: {config['is_primary']}")
+    else:
+        print(f"🔧 Applying {len(gaps)} fix(es)...\n")
+
+        for gap in gaps:
+            code = gap['code']
+            config = gap['config']
+
+            if gap['type'] == 'missing':
+                # Add missing role
+                if roles_status[code]['exists']:
+                    role = roles_status[code]['role']
+                    user_role, created = UserRole.objects.get_or_create(
+                        user_profile=profile,
+                        role=role,
+                        defaults={'is_primary': config['is_primary']}
+                    )
+
+                    if created:
+                        print(f"✅ ADDED role '{code}' ({role.name})")
+                        print(f"   - Primary: {config['is_primary']}")
+                    else:
+                        print(f"⚠️  Role '{code}' already exists (no action)")
                 else:
-                    print(f"⚠️  Role '{code}' already exists (no action)")
-            else:
-                print(f"❌ Cannot add '{code}' - role does not exist in database")
-        
-        elif gap['type'] == 'wrong_primary':
-            # Fix primary flag
-            try:
-                user_role = UserRole.objects.get(
-                    user_profile=profile,
-                    role__code=code
-                )
-                old_value = user_role.is_primary
-                user_role.is_primary = config['is_primary']
-                user_role.save()
-                
-                print(f"✅ FIXED primary flag for '{code}'")
-                print(f"   - Changed: {old_value} → {config['is_primary']}")
-                
-            except UserRole.DoesNotExist:
-                print(f"❌ Cannot fix '{code}' - UserRole not found")
-    
+                    print(f"❌ Cannot add '{code}' - role does not exist in database")
+
+            elif gap['type'] == 'wrong_primary':
+                # Fix primary flag
+                try:
+                    user_role = UserRole.objects.get(
+                        user_profile=profile,
+                        role__code=code
+                    )
+                    old_value = user_role.is_primary
+                    user_role.is_primary = config['is_primary']
+                    user_role.save()
+
+                    print(f"✅ FIXED primary flag for '{code}'")
+                    print(f"   - Changed: {old_value} → {config['is_primary']}")
+
+                except UserRole.DoesNotExist:
+                    print(f"❌ Cannot fix '{code}' - UserRole not found")
+
     return True
 
 

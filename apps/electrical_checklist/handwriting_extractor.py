@@ -20,6 +20,7 @@ import base64
 import io
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -349,7 +350,11 @@ class HandwritingExtractor:
             pdf_bytes = pdf_file.read()
             pdf_file.seek(0)
         else:
-            with open(pdf_file, "rb") as fp:
+            base_dir = os.path.abspath(str(settings.BASE_DIR))
+            safe_path = os.path.abspath(os.path.join(base_dir, pdf_file))
+            if os.path.commonpath([base_dir, safe_path]) != base_dir:
+                raise ValueError(f"Invalid PDF path: {pdf_file}")
+            with open(safe_path, "rb") as fp:
                 pdf_bytes = fp.read()
 
         dpi = self.config.get("pdf_dpi", 200)
