@@ -48,8 +48,8 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p /app/media /app/staticfiles /app/media/invoices
 
-# Make startup script executable
-RUN chmod +x railway_start.sh || true
+# Make startup scripts executable
+RUN chmod +x railway_start.sh railway_start_fast.sh 2>/dev/null || true
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -59,6 +59,7 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8000
 
 # Use JSON array format for CMD to prevent signal issues
-# railway_start.sh handles migrations, collectstatic, and starts Gunicorn
-# with the bulletproof WSGI (config.wsgi_bulletproof:application)
-CMD ["bash", "railway_start.sh"]
+# FAST START: railway_start_fast.sh starts Gunicorn immediately for health checks
+# Migrations run in background after service is healthy
+# To use full startup with migrations: change to railway_start.sh
+CMD ["bash", "railway_start_fast.sh"]

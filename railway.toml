@@ -3,8 +3,10 @@
 # ============================================
 # Build Context: backend/ directory (git repository root)
 # Dockerfile: Dockerfile (single-stage production build)
-# Start Command: Defined in Dockerfile CMD (railway_start.sh)
-# Health Check: /api/v1/health/
+# Start Command: railway_start_fast.sh (health-first mode)
+#   - Starts Gunicorn immediately for fast health checks
+#   - Runs migrations in background after service is healthy
+# Health Check: /api/v1/health/ (should pass within 15 seconds)
 # ============================================
 
 [build]
