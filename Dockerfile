@@ -59,7 +59,7 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8000
 
 # Use JSON array format for CMD to prevent signal issues
-# FAST START: railway_start_fast.sh starts Gunicorn immediately for health checks
-# Migrations run in background after service is healthy
-# To use full startup with migrations: change to railway_start.sh
-CMD ["bash", "railway_start_fast.sh"]
+# EMERGENCY: Using emergency startup to diagnose deployment issues
+# This will show detailed diagnostic output in Railway logs
+# Once working, switch back to: railway_start_fast.sh
+CMD ["bash", "-c", "echo '=== RAILWAY STARTUP DEBUG ===' && env | grep -E 'DATABASE|REDIS|SECRET|DEBUG|ALLOWED|PORT|RAILWAY' && echo '=== STARTING GUNICORN ===' && exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --timeout 120 --log-level debug --access-logfile - --error-logfile -"]
