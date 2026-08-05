@@ -205,16 +205,31 @@ DEFAULT_HSE_STUDIES = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Workflow Status Markers — standard document control workflow stages as per
+# expert recommendation. Each deliverable progresses through these 6 stages.
+# ─────────────────────────────────────────────────────────────────────────────
+WORKFLOW_STATUS_MARKERS = [
+    'Start',              # Initial preparation/development
+    'IFR',                # Issued for Review
+    'COMPANY Review',     # Under company review
+    'IFA',                # Issued for Approval
+    'COMPANY Approval',   # Under company approval
+    'Final Issue',        # Final issue for design/tender
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Workflow templates — a deliverable is never one activity, it is a workflow.
-# Each step: (suffix, is_review_activity, review_cycle_key or None duration_days)
+# Each step includes: suffix (activity name), status (workflow stage marker),
+# cycle_key (review duration lookup), and optional duration override.
+# This 6-step workflow matches industry standard document control practices.
 # ─────────────────────────────────────────────────────────────────────────────
 DELIVERABLE_WORKFLOW_STEPS = [
-    {'suffix': 'Prepare / Develop {name}',                    'cycle_key': 'prepare_ifr'},
-    {'suffix': 'Issue {name} for Company Review',             'cycle_key': None, 'duration': 1},
-    {'suffix': 'Company Review of {name}',                    'cycle_key': 'company_review'},
-    {'suffix': 'Incorporate Comments & Issue {name} for Approval', 'cycle_key': 'incorporate_ifa'},
-    {'suffix': 'Company Approval of {name}',                  'cycle_key': 'company_approval'},
-    {'suffix': 'Issue {name} for Design / Tender',            'cycle_key': 'issue_ifd'},
+    {'suffix': 'Prepare / Develop {name}',                    'status': 'Start',            'cycle_key': 'prepare_ifr'},
+    {'suffix': 'Issue {name} for Company Review',             'status': 'IFR',              'cycle_key': None, 'duration': 1},
+    {'suffix': 'Company Review of {name}',                    'status': 'COMPANY Review',   'cycle_key': 'company_review'},
+    {'suffix': 'Incorporate Comments & Issue {name} for Approval', 'status': 'IFA',         'cycle_key': 'incorporate_ifa'},
+    {'suffix': 'Company Approval of {name}',                  'status': 'COMPANY Approval', 'cycle_key': 'company_approval'},
+    {'suffix': 'Issue {name} for Design / Tender',            'status': 'Final Issue',      'cycle_key': 'issue_ifd'},
 ]
 
 HSE_STUDY_WORKFLOW_STEPS = [

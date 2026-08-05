@@ -24,8 +24,8 @@ from .calendar_utils import add_working_days
 
 ACTIVITY_COLUMNS = [
     'id', 'wbs_code', 'name', 'discipline', 'deliverable', 'responsible_role',
-    'original_duration_days', 'start_date', 'finish_date', 'total_float_days',
-    'is_critical', 'is_milestone',
+    'workflow_status', 'original_duration_days', 'start_date', 'finish_date', 
+    'total_float_days', 'is_critical', 'is_milestone',
 ]
 
 PRIMAVERA_COLUMNS = [
