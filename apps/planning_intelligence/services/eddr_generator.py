@@ -26,11 +26,19 @@ def build_eddr(activities: list) -> list:
     rows = []
     for (discipline, deliverable), acts in grouped.items():
         acts_sorted = sorted(acts, key=lambda a: a['start_date'])
+        
+        # Determine current workflow status based on dates (for tracking progress)
+        current_status = 'Start'  # Default to first stage
+        for act in acts_sorted:
+            if act.get('workflow_status'):
+                current_status = act['workflow_status']
+        
         row = {
             'discipline': discipline,
             'deliverable_name': deliverable,
             'wbs_code': acts_sorted[0]['wbs_code'],
             'document_status': 'Planned',
+            'current_workflow_status': current_status,  # Current stage in 6-step workflow
         }
         for label, act in zip(_STEP_LABELS, acts_sorted):
             row[f'{label}_activity_id'] = act['id']
