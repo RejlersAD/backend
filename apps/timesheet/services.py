@@ -484,84 +484,83 @@ def _backfill_email_from_matrix_name(rows: list[dict]) -> list[dict]:
                        prevent runaway DB scans
     """
     cfg = getattr(ts_config, 'NAME_BACKFILL', None) or {}
-    if not cfg.get('enabled', False) or not rows:
-        return rows
+    if cfg.get('enabled', False) and rows:
+        needs: list[tuple[dict, list[str]]] = []
+        for r in rows:
+            if r.get('radai_email'):
+                continue
+            full = (
+                r.get('matrix_full_name')
+                or r.get('employee_name')
+                or r.get('name')
+                or ''
+            )
+            toks = _name_tokens(full)
+            if toks:
+                needs.append((r, toks))
 
-    needs: list[tuple[dict, list[str]]] = []
-    for r in rows:
-        if r.get('radai_email'):
-            continue
-        full = (
-            r.get('matrix_full_name')
-            or r.get('employee_name')
-            or r.get('name')
-            or ''
-        )
-        toks = _name_tokens(full)
-        if toks:
-            needs.append((r, toks))
-    if not needs:
-        return rows
+        if needs:
+            imports_ok = True
+            try:
+                from apps.rbac.models import UserProfile
+                from django.db.models import Q
+            except Exception:
+                imports_ok = False
 
-    try:
-        from apps.rbac.models import UserProfile
-        from django.db.models import Q
-    except Exception:
-        return rows
+            if imports_ok:
+                min_hits = max(1, int(cfg.get('min_token_hits', 2)))
+                cap = max(1, int(cfg.get('max_candidates', 8)))
 
-    min_hits = max(1, int(cfg.get('min_token_hits', 2)))
-    cap = max(1, int(cfg.get('max_candidates', 8)))
+                # Aggregate every distinct token across all needy rows so we issue
+                # ONE candidate query per token instead of N per-row queries.
+                token_to_rows: dict[str, list[tuple[dict, set[str]]]] = {}
+                for r, toks in needs:
+                    tset = set(toks)
+                    for t in tset:
+                        token_to_rows.setdefault(t, []).append((r, tset))
 
-    # Aggregate every distinct token across all needy rows so we issue
-    # ONE candidate query per token instead of N per-row queries.
-    token_to_rows: dict[str, list[tuple[dict, set[str]]]] = {}
-    for r, toks in needs:
-        tset = set(toks)
-        for t in tset:
-            token_to_rows.setdefault(t, []).append((r, tset))
+                candidate_cache: dict[str, list] = {}
+                for token in token_to_rows.keys():
+                    if len(token) < 3:
+                        continue
+                    try:
+                        qs = UserProfile.objects.select_related('user').filter(
+                            is_deleted=False
+                        ).filter(
+                            Q(user__first_name__icontains=token)
+                            | Q(user__last_name__icontains=token)
+                            | Q(user__email__icontains=token)
+                            | Q(user__username__icontains=token)
+                        )[:cap]
+                        candidate_cache[token] = list(qs)
+                    except Exception as exc:
+                        logger.info('[timesheet] name-backfill token=%r skipped: %s', token, exc)
+                        candidate_cache[token] = []
 
-    candidate_cache: dict[str, list] = {}
-    for token in token_to_rows.keys():
-        if len(token) < 3:
-            continue
-        try:
-            qs = UserProfile.objects.select_related('user').filter(
-                is_deleted=False
-            ).filter(
-                Q(user__first_name__icontains=token)
-                | Q(user__last_name__icontains=token)
-                | Q(user__email__icontains=token)
-                | Q(user__username__icontains=token)
-            )[:cap]
-            candidate_cache[token] = list(qs)
-        except Exception as exc:
-            logger.info('[timesheet] name-backfill token=%r skipped: %s', token, exc)
-            candidate_cache[token] = []
-
-    for r, toks in needs:
-        tset = set(toks)
-        best_hits, best_profile = 0, None
-        seen_ids: set = set()
-        for token in tset:
-            for profile in candidate_cache.get(token, []):
-                if profile.user_id in seen_ids:
-                    continue
-                seen_ids.add(profile.user_id)
-                u = profile.user
-                profile_tokens = set(_name_tokens(
-                    u.first_name, u.last_name, u.email, u.username
-                ))
-                hits = len(tset & profile_tokens)
-                if hits > best_hits:
-                    best_hits, best_profile = hits, profile
-        if best_profile and best_hits >= min_hits:
-            u = best_profile.user
-            r['radai_user_id'] = str(u.id)
-            r['radai_email'] = u.email
-            r['radai_full_name'] = f'{u.first_name or ""} {u.last_name or ""}'.strip() or r.get('matrix_full_name')
-            r['radai_department'] = best_profile.department or r.get('department') or ''
-            r['radai_job_title'] = best_profile.job_title or r.get('radai_job_title') or ''
-            r['matched_by'] = 'matrix_name'
+                for r, toks in needs:
+                    tset = set(toks)
+                    best_hits, best_profile = 0, None
+                    seen_ids: set = set()
+                    for token in tset:
+                        for profile in candidate_cache.get(token, []):
+                            if profile.user_id in seen_ids:
+                                continue
+                            seen_ids.add(profile.user_id)
+                            u = profile.user
+                            profile_tokens = set(_name_tokens(
+                                u.first_name, u.last_name, u.email, u.username
+                            ))
+                            hits = len(tset & profile_tokens)
+                            if hits > best_hits:
+                                best_hits, best_profile = hits, profile
+                    if best_profile and best_hits >= min_hits:
+                        u = best_profile.user
+                        r['radai_user_id'] = str(u.id)
+                        r['radai_email'] = u.email
+                        r['radai_full_name'] = f'{u.first_name or ""} {u.last_name or ""}'.strip() or r.get('matrix_full_name')
+                        r['radai_department'] = best_profile.department or r.get('department') or ''
+                        r['radai_job_title'] = best_profile.job_title or r.get('radai_job_title') or ''
+                        r['matched_by'] = 'matrix_name'
     return rows
 
 

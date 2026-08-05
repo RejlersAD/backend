@@ -67,7 +67,8 @@ def _now_iso() -> str:
 
 
 def _job_path(job_id: str) -> str:
-    return os.path.join(JOB_DIR, f'{job_id}.json')
+    safe_id = os.path.basename(job_id)
+    return os.path.join(JOB_DIR, f'{safe_id}.json')
 
 
 def _read_disk(job_id: str) -> Optional[Dict[str, Any]]:

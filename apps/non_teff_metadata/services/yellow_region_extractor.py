@@ -260,23 +260,21 @@ def _ocr_crop(img_pil) -> str:
 
 def _ai_label_text(text: str) -> str:
     """Best-effort one-word label for what a yellow stamp says. Returns ''."""
-    if not YELLOW_CONFIG.get('ai_label_enabled'):
-        return ''
-    try:
-        from . import ai_recommendations as r
-        # Re-use the provider chain by piggy-backing on its dispatcher with
-        # a tiny prompt. Falls back silently to '' on any failure.
-        prompt = (
-            "Classify this stamp text from an engineering drawing into ONE "
-            "of: revision_stamp, approval_stamp, hold_flag, status_stamp, "
-            "vendor_ref, document_number, date_stamp, other. Reply with the "
-            f'single token only.\n\nText: "{text}"\n'
-        )
-        provider, data = r._dispatch(prompt)  # noqa: SLF001 — internal reuse
-        if isinstance(data, dict):
-            return ''  # JSON-mode dispatcher won't return raw token
-    except Exception:
-        return ''
+    if YELLOW_CONFIG.get('ai_label_enabled'):
+        try:
+            from . import ai_recommendations as r
+            # Re-use the provider chain by piggy-backing on its dispatcher with
+            # a tiny prompt. Falls back silently to '' on any failure.
+            prompt = (
+                "Classify this stamp text from an engineering drawing into ONE "
+                "of: revision_stamp, approval_stamp, hold_flag, status_stamp, "
+                "vendor_ref, document_number, date_stamp, other. Reply with the "
+                f'single token only.\n\nText: "{text}"\n'
+            )
+            provider, data = r._dispatch(prompt)  # noqa: SLF001 — internal reuse
+            # JSON-mode dispatcher won't return a raw token either way.
+        except Exception:
+            pass
     return ''
 
 

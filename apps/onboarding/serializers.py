@@ -147,7 +147,7 @@ class OnboardingRecordListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'employee_name', 'employee_email', 'employee_id',
             'position', 'department', 'reporting_manager', 'branch',
-            'joining_date', 'initiated_date', 'target_completion_date',
+            'joining_date', 'initiated_date', 'target_completion_date', 'actual_completion_date',
             'status', 'progress_percentage',
             'created_by_name', 'assigned_to_name',
             'created_at', 'updated_at',
@@ -225,7 +225,7 @@ class OffboardingRecordListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'employee_name', 'employee_email', 'employee_id',
             'position', 'department', 'reporting_manager', 'branch',
-            'exit_reason', 'last_working_day', 'initiated_date', 'target_completion_date',
+            'exit_reason', 'last_working_day', 'initiated_date', 'target_completion_date', 'actual_completion_date',
             'status', 'progress_percentage',
             'created_by_name', 'assigned_to_name',
             'created_at', 'updated_at',

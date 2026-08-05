@@ -55,16 +55,16 @@ param(
 )
 
 # Colors for output
-function Write-Success { param($Message) Write-Host "✅ $Message" -ForegroundColor Green }
-function Write-Warning { param($Message) Write-Host "⚠️  $Message" -ForegroundColor Yellow }
-function Write-Error { param($Message) Write-Host "❌ $Message" -ForegroundColor Red }
-function Write-Info { param($Message) Write-Host "ℹ️  $Message" -ForegroundColor Cyan }
+function Write-Success { param($Message) Write-Host "[OK] $Message" -ForegroundColor Green }
+function Write-Warning { param($Message) Write-Host "[WARNING] $Message" -ForegroundColor Yellow }
+function Write-Error { param($Message) Write-Host "[ERROR] $Message" -ForegroundColor Red }
+function Write-Info { param($Message) Write-Host "[INFO] $Message" -ForegroundColor Cyan }
 
 # Header
 Write-Host ""
-Write-Host "╔═══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║       RAD AI Attendance Sync Agent - Health Check            ║" -ForegroundColor Cyan
-Write-Host "╚═══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "=================================================================" -ForegroundColor Cyan
+Write-Host "       RAD AI Attendance Sync Agent - Health Check            " -ForegroundColor Cyan
+Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host ""
 
 # Check if running as administrator
@@ -198,7 +198,7 @@ if ($pythonProcesses) {
 
 # 7. Decision: Restart or not?
 Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "=================================================================" -ForegroundColor Cyan
 
 if ($Check) {
     Write-Info "Check mode - no restart performed"
@@ -266,9 +266,9 @@ try {
 }
 
 Write-Host ""
-Write-Host "╔═══════════════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║                     ✅ RESTART COMPLETE                       ║" -ForegroundColor Green
-Write-Host "╚═══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
+Write-Host "=================================================================" -ForegroundColor Green
+Write-Host "                     RESTART COMPLETE                         " -ForegroundColor Green
+Write-Host "=================================================================" -ForegroundColor Green
 Write-Host ""
 
 exit 0

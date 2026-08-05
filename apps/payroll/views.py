@@ -500,30 +500,38 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             .all()
         )
         user = self.request.user
+        mine_only = self.request.query_params.get('mine', '').lower() in ('true', '1', 'yes')
 
         # HR / Admin roles have unrestricted visibility (they perform the
         # final Stage-2 approval regardless of reporting line); everyone else
         # sees only their own leave requests + requests submitted by their
         # direct reports (Reporting Manager Stage-1 approval).
-        if not self._is_hr_or_admin(user):
+        # `?mine=true` overrides this for HR/Admin too — used by the Employee
+        # Self-Service page so an HR/Admin viewing their OWN leave data isn't
+        # shown every employee's requests just because their role has broader
+        # review visibility elsewhere in the app.
+        if mine_only or not self._is_hr_or_admin(user):
             emp_code = self._user_employee_code(user)
             own_q = Q(employee=user)
             if emp_code:
                 own_q |= Q(employee_code=emp_code)
 
-            try:
-                from apps.rbac.models import UserProfile
-                subordinates = UserProfile.objects.filter(manager__user=user, is_deleted=False)
-                sub_user_ids = list(
-                    subordinates.exclude(user__isnull=True).values_list('user_id', flat=True)
-                )
-                sub_codes = [c for c in subordinates.values_list('employee_id', flat=True) if c]
-                if sub_user_ids:
-                    own_q |= Q(employee_id__in=sub_user_ids)
-                if sub_codes:
-                    own_q |= Q(employee_code__in=sub_codes)
-            except Exception:
-                pass
+            # Direct reports are only relevant for the Reporting-Manager queue
+            # view — never included for an explicit "mine only" request.
+            if not mine_only:
+                try:
+                    from apps.rbac.models import UserProfile
+                    subordinates = UserProfile.objects.filter(manager__user=user, is_deleted=False)
+                    sub_user_ids = list(
+                        subordinates.exclude(user__isnull=True).values_list('user_id', flat=True)
+                    )
+                    sub_codes = [c for c in subordinates.values_list('employee_id', flat=True) if c]
+                    if sub_user_ids:
+                        own_q |= Q(employee_id__in=sub_user_ids)
+                    if sub_codes:
+                        own_q |= Q(employee_code__in=sub_codes)
+                except Exception:
+                    pass
 
             qs = qs.filter(own_q)
 
@@ -562,14 +570,36 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         return qs.order_by('-created_at')
 
     def perform_create(self, serializer):
-        """Auto-link the leave request to the authenticated user."""
+        """Auto-link the leave request to the authenticated user — unless HR/Admin
+        is submitting on behalf of a different employee (a different employee_code
+        was explicitly supplied), in which case link to THAT employee's own User
+        account instead. Previously `employee` was force-set to the submitter
+        unconditionally, so "on behalf of" submissions got mis-attributed to
+        whichever HR/Admin filed them rather than the actual target employee."""
         user     = self.request.user
         emp_code = self._user_employee_code(user)
         emp_name = f'{user.first_name} {user.last_name}'.strip() or user.username
-        extra    = {'employee': user}
+        supplied_code = serializer.validated_data.get('employee_code')
+
+        extra = {}
+        if supplied_code and supplied_code != emp_code:
+            # Submitting on behalf of someone else — resolve their real User
+            # account so `employee` (FK) isn't mis-attributed to the submitter.
+            try:
+                from apps.rbac.models import UserProfile
+                target = UserProfile.objects.filter(
+                    employee_id=supplied_code, is_deleted=False
+                ).select_related('user').first()
+                if target and target.user_id:
+                    extra['employee'] = target.user
+            except Exception:
+                pass
+        else:
+            extra['employee'] = user
+            if emp_code and not supplied_code:
+                extra['employee_code'] = emp_code
+
         # Only fill denormalised fields if the caller didn’t supply them
-        if emp_code and not serializer.validated_data.get('employee_code'):
-            extra['employee_code'] = emp_code
         if not serializer.validated_data.get('employee_name'):
             extra['employee_name'] = emp_name
         serializer.save(**extra)

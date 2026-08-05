@@ -110,7 +110,7 @@ class S3Service:
                 action='generate_upload_url',
                 resource_type='storage',
                 resource_id=str(storage.id),
-                details={'file_name': file_name, 'file_size': file_size, 'category': category}
+                metadata={'file_name': file_name, 'file_size': file_size, 'category': category}
             )
             
             return {
@@ -173,7 +173,7 @@ class S3Service:
                 action='generate_download_url',
                 resource_type='storage',
                 resource_id=str(storage.id),
-                details={'file_name': storage.file_name, 'file_key': storage.file_key}
+                metadata={'file_name': storage.file_name, 'file_key': storage.file_key}
             )
             
             return {
@@ -223,7 +223,7 @@ class S3Service:
                 action='delete_file',
                 resource_type='storage',
                 resource_id=str(storage.id),
-                details={'file_name': storage.file_name, 'file_key': storage.file_key}
+                metadata={'file_name': storage.file_name, 'file_key': storage.file_key}
             )
             
             return True
@@ -271,7 +271,7 @@ class S3Service:
                 action='verify_upload',
                 resource_type='storage',
                 resource_id=str(storage.id),
-                details={'file_name': storage.file_name, 'verified': True}
+                metadata={'file_name': storage.file_name, 'verified': True}
             )
             
             return True
