@@ -176,6 +176,9 @@ class PurchaseRequisition(TimeStampedModel):
     STATUS_CHOICES = [
         ('draft', 'Draft'),
         ('submitted', 'Submitted'),
+        ('in_review', 'In Review'),
+        ('pending_level_2', 'Pending Level 2 Approval'),
+        ('approved', 'Approved'),
         ('pm_approved', 'PM Approved'),
         ('vp_approved', 'VP Approved'),
         ('fully_approved', 'Fully Approved'),
@@ -487,6 +490,17 @@ class PurchaseOrder(TimeStampedModel):
     approved_date = models.DateField(null=True, blank=True, help_text='Date when PO was approved')
     approval_signature = models.CharField(max_length=500, blank=True, help_text='Digital signature (base64 or S3 URL)')
     approval_stamp = models.CharField(max_length=500, blank=True, help_text='Company stamp image (S3 URL)')
+
+    # ═══ MULTI-STAGE APPROVAL WORKFLOW (Form Section: Approval Status Log) ═══
+    technical_approver = models.CharField(max_length=200, blank=True, help_text='Assigned technical approver name or identifier')
+    financial_approver = models.CharField(max_length=200, blank=True, help_text='Assigned financial approver name or identifier')
+    management_approver = models.CharField(max_length=200, blank=True, help_text='Assigned management approver name or identifier')
+    approval_log = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Approval stage log list: [{"stage": "Technical Approval", "approver": "", "status": "Pending", "date": "", "comments": ""}]'
+    )
+    final_approver_notes = models.TextField(blank=True, help_text='Final sign-off notes and approval handover comments')
     
     # ═══ ORDER CONFIRMATION (Template: Vendor Response Section) ═══
     confirmation_date = models.DateField(null=True, blank=True, help_text='Date vendor confirmed the order')

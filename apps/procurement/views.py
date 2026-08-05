@@ -17,6 +17,13 @@ from datetime import timedelta
 
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db import models as django_models
+from django.http import HttpResponse
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+import io
 
 from .models import (
     Vendor, 
@@ -43,6 +50,27 @@ from .serializers import (
     CostCenterSerializer,
     BudgetSerializer,
 )
+
+
+def validate_rejection_reason(reason):
+    """Validate rejection reason with soft-coded business rules."""
+    min_length = 10
+    max_length = 1000
+
+    if reason is None:
+        return False, 'Please provide a reason for rejection.'
+
+    trimmed = str(reason).strip()
+    if not trimmed:
+        return False, 'Rejection reason cannot be empty or contain only whitespace.'
+
+    if len(trimmed) < min_length:
+        return False, f'Rejection reason must be at least {min_length} characters long.'
+
+    if len(trimmed) > max_length:
+        return False, f'Rejection reason cannot exceed {max_length} characters.'
+
+    return True, None
 
 
 # Soft-coded pagination for vendor list - supports large page_size
@@ -206,6 +234,52 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         self.perform_create(serializer)
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def _get_or_initialize_approval_hierarchy(self, pr):
+        """Return normalized approval hierarchy list with at least Stage 1 and Stage 2."""
+        hierarchy = pr.approval_workflow_config if isinstance(pr.approval_workflow_config, list) else []
+
+        if not hierarchy:
+            hierarchy = [
+                {
+                    'step': 1,
+                    'stage': 'Technical Review',
+                    'role': 'Project Manager',
+                    'status': 'pending',
+                    'approver_id': str(pr.pm_name_id) if pr.pm_name_id else None,
+                    'approver_name': pr.pm_name.get_full_name() if pr.pm_name else None,
+                },
+                {
+                    'step': 2,
+                    'stage': 'Procurement Manager Review',
+                    'role': 'Procurement Manager',
+                    'status': 'pending',
+                },
+            ]
+
+        for idx, stage in enumerate(hierarchy):
+            stage.setdefault('step', idx + 1)
+            stage.setdefault('stage', stage.get('role') or f"Stage {idx + 1}")
+            stage.setdefault('status', 'pending')
+
+        if len(hierarchy) == 1:
+            hierarchy.append({
+                'step': 2,
+                'stage': 'Procurement Manager Review',
+                'role': 'Procurement Manager',
+                'status': 'pending',
+            })
+
+        return hierarchy
+
+    def _build_requisition_response(self, pr):
+        """Ensure API response contains both status and approval_hierarchy."""
+        serializer = self.get_serializer(pr)
+        payload = dict(serializer.data)
+        payload['status'] = pr.status
+        payload['approval_hierarchy'] = pr.approval_workflow_config if isinstance(pr.approval_workflow_config, list) else []
+        payload['convert_to_po_enabled'] = pr.status in ['approved', 'fully_approved']
+        return payload
     
     @action(detail=True, methods=['post'])
     def pm_approve(self, request, pk=None):
@@ -227,15 +301,52 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         pr.pm_signature = request.data.get('signature', '')
         pr.pm_approval_status = 'approved'
         pr.pm_approved_at = timezone.now()
-        
-        # Update overall status
-        if pr.status == 'submitted' or pr.status == 'draft':
-            pr.status = 'pm_approved'
-        
+
+        hierarchy = self._get_or_initialize_approval_hierarchy(pr)
+
+        # Resolve Stage 1 / current user stage in hierarchy
+        current_idx = next(
+            (
+                idx for idx, stage in enumerate(hierarchy)
+                if (
+                    str(stage.get('approver_id') or '') == str(request.user.id) or
+                    (stage.get('role') or '').strip().lower() in ['project manager', 'technical review'] or
+                    int(stage.get('step', idx + 1)) == 1
+                ) and str(stage.get('status', '')).lower() in ['pending', 'in_review']
+            ),
+            None,
+        )
+
+        if current_idx is None:
+            current_idx = 0
+
+        hierarchy[current_idx]['status'] = 'approved'
+        hierarchy[current_idx]['approved_at'] = timezone.now().isoformat()
+        hierarchy[current_idx]['approved_by_id'] = str(request.user.id)
+        hierarchy[current_idx]['approved_by_name'] = request.user.get_full_name() or request.user.username
+
+        # Determine the next required stage
+        next_pending_idx = next(
+            (idx for idx in range(current_idx + 1, len(hierarchy)) if str(hierarchy[idx].get('status', '')).lower() != 'approved'),
+            None,
+        )
+
+        if next_pending_idx is None:
+            # Final stage reached -> fully approved and ready for PO conversion
+            pr.status = 'approved'
+            pr.approved_by = request.user
+            pr.approved_at = timezone.now()
+            pr.current_approval_step = len(hierarchy)
+        else:
+            # More sign-off required -> next stage pending
+            hierarchy[next_pending_idx]['status'] = 'pending'
+            pr.status = 'pending_level_2' if int(hierarchy[next_pending_idx].get('step', next_pending_idx + 1)) == 2 else 'in_review'
+            pr.current_approval_step = next_pending_idx
+
+        pr.approval_workflow_config = hierarchy
         pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response(serializer.data)
+
+        return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
     def pm_reject(self, request, pk=None):
@@ -418,43 +529,47 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         Advances to next step in approval_workflow_config
         """
         pr = self.get_object()
-        current_step = pr.current_approval_step
-        workflow = pr.approval_workflow_config
-        
+        workflow = self._get_or_initialize_approval_hierarchy(pr)
+
         if not workflow or len(workflow) == 0:
             return Response(
                 {'error': 'No approval workflow configured'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
+        current_step = pr.current_approval_step if pr.current_approval_step is not None else 0
+
         if current_step >= len(workflow):
             return Response(
                 {'error': 'All approval steps completed'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         # Get current step
         step_config = workflow[current_step]
-        
+
         # Mark current step as approved
         step_config['status'] = 'approved'
         step_config['approved_at'] = timezone.now().isoformat()
         step_config['approved_by_id'] = str(request.user.id)
         step_config['approved_by_name'] = request.user.get_full_name()
-        
+
         # Move to next step
         pr.current_approval_step = current_step + 1
-        
-        # If all steps completed, mark as fully approved
+
+        # If all steps completed, mark as approved and enable conversion
         if pr.current_approval_step >= len(workflow):
-            pr.status = 'fully_approved'
+            pr.status = 'approved'
             pr.approved_by = request.user
             pr.approved_at = timezone.now()
-        
+        else:
+            pr.status = 'pending_level_2' if pr.current_approval_step == 1 else 'in_review'
+            workflow[pr.current_approval_step]['status'] = 'pending'
+
+        pr.approval_workflow_config = workflow
         pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response(serializer.data)
+
+        return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
     def recommend_vendors(self, request, pk=None):
@@ -856,6 +971,256 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'message': f'{len(files)} file(s) uploaded successfully',
             'attachments': pr.attachments
         })
+
+    @action(detail=True, methods=['get'])
+    def export_pdf(self, request, pk=None):
+        """Export approved requisition as an industry-standard PDF document download."""
+        pr = self.get_object()
+
+        approved_statuses = ['approved', 'fully_approved', 'vp_approved']
+        if pr.status not in approved_statuses:
+            return Response(
+                {'error': 'Only approved requisitions can be exported as PDF.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        safe_pr_number = (pr.pr_number or str(pr.id)).replace('/', '-').replace(' ', '_')
+        filename = f"{safe_pr_number}_Approved.pdf"
+
+        response = HttpResponse(content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=letter,
+            rightMargin=36,
+            leftMargin=36,
+            topMargin=36,
+            bottomMargin=36,
+        )
+
+        story = []
+        styles = getSampleStyleSheet()
+
+        # Brand palette
+        PRIMARY_BLUE = colors.HexColor('#2563EB')
+        SLATE_DARK = colors.HexColor('#0F172A')
+        TEXT_MUTED = colors.HexColor('#64748B')
+        BG_LIGHT = colors.HexColor('#F8FAFC')
+        BORDER_COLOR = colors.HexColor('#E2E8F0')
+        APPROVED_GREEN = colors.HexColor('#16A34A')
+
+        # Typography
+        style_company = ParagraphStyle('CompanyTitle', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=PRIMARY_BLUE)
+        style_doc_title = ParagraphStyle('DocTitle', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=14, leading=18, textColor=SLATE_DARK, alignment=2)
+        style_badge = ParagraphStyle('Badge', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10, leading=12, textColor=APPROVED_GREEN, alignment=2)
+        style_label = ParagraphStyle('Label', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8, leading=10, textColor=TEXT_MUTED)
+        style_value = ParagraphStyle('Value', parent=styles['Normal'], fontName='Helvetica', fontSize=9, leading=12, textColor=SLATE_DARK)
+        style_table_header = ParagraphStyle('TableHeader', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8, leading=10, textColor=colors.white)
+        style_table_cell = ParagraphStyle('TableCell', parent=styles['Normal'], fontName='Helvetica', fontSize=8, leading=11, textColor=SLATE_DARK)
+
+        # Header section
+        header_data = [
+            [
+                Paragraph('<b>RADAI PROCUREMENT</b><br/><font size="8" color="#64748B">Oil &amp; Gas Standard Compliance</font>', style_company),
+                [
+                    Paragraph('<b>PURCHASE REQUISITION</b>', style_doc_title),
+                    Paragraph('STATUS: <b>APPROVED</b>', style_badge),
+                ],
+            ]
+        ]
+        header_table = Table(header_data, colWidths=[3.25 * inch, 4.25 * inch])
+        header_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+        story.append(header_table)
+        story.append(Spacer(1, 10))
+        story.append(HRFlowable(width='100%', thickness=1.5, color=PRIMARY_BLUE, spaceBefore=0, spaceAfter=12))
+
+        requester_name = pr.issued_by.get_full_name() if pr.issued_by else 'N/A'
+        project_reference = pr.project or pr.project_department or 'N/A'
+        department_name = pr.department or pr.project_department or 'N/A'
+
+        # Metadata grid
+        meta_data = [
+            [
+                Paragraph('REQUISITION DETAILS', style_label),
+                Paragraph('PROJECT &amp; VENDOR INFO', style_label),
+            ],
+            [
+                Paragraph(
+                    f'<b>PR Number:</b> {pr.pr_number or "N/A"}<br/>'
+                    f'<b>Date Issued:</b> {pr.issued_date or "N/A"}<br/>'
+                    f'<b>Issued By:</b> {requester_name}<br/>'
+                    f'<b>Department:</b> {department_name}',
+                    style_value,
+                ),
+                Paragraph(
+                    f'<b>Project Reference:</b> {project_reference}<br/>'
+                    f'<b>Supplier/Vendor:</b> {pr.supplier_name or "RAD Internal"}<br/>'
+                    f'<b>Business ID / License:</b> {pr.supplier_business_id or "N/A"}',
+                    style_value,
+                ),
+            ],
+        ]
+        meta_table = Table(meta_data, colWidths=[3.75 * inch, 3.75 * inch])
+        meta_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), BG_LIGHT),
+            ('BOX', (0, 0), (-1, -1), 1, BORDER_COLOR),
+            ('INNERGRID', (0, 0), (-1, -1), 0.5, BORDER_COLOR),
+            ('PADDING', (0, 0), (-1, -1), 8),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        story.append(meta_table)
+        story.append(Spacer(1, 14))
+
+        # Line items table
+        items_data = [[
+            Paragraph('Item', style_table_header),
+            Paragraph('Description', style_table_header),
+            Paragraph('API / ASME Standard', style_table_header),
+            Paragraph('Qty', style_table_header),
+            Paragraph('UOM', style_table_header),
+            Paragraph('Unit Price', style_table_header),
+            Paragraph('Discount', style_table_header),
+            Paragraph('Line Total', style_table_header),
+        ]]
+
+        raw_items = pr.items if isinstance(pr.items, list) else []
+
+        if not raw_items and pr.product_service:
+            raw_items = [{
+                'description': pr.product_service,
+                'tag': 'Standard',
+                'qty': 1,
+                'uom': 'LOT',
+                'unit_price': float(pr.total_price or 0),
+                'discount': 0,
+                'total': float(pr.total_price or 0),
+            }]
+
+        def _to_float(value, default=0.0):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        normalized_items = []
+        for item in raw_items:
+            description = item.get('description') or item.get('desc') or item.get('item') or 'N/A'
+            standards = item.get('tag') or item.get('standard') or item.get('standards') or item.get('api_asme_standard')
+            if isinstance(standards, list):
+                standards = ', '.join([str(s) for s in standards if s])
+            standards = standards or 'Standard'
+
+            qty = _to_float(item.get('quantity', item.get('qty', 1)), 1)
+            uom = item.get('uom') or item.get('unit_of_measure') or item.get('unit') or 'EA'
+            unit_price = _to_float(item.get('unit_price', item.get('price', 0)), 0)
+            discount = _to_float(item.get('discount', item.get('line_discount', 0)), 0)
+            line_total = _to_float(item.get('line_total', item.get('total', (qty * unit_price) - discount)), (qty * unit_price) - discount)
+
+            normalized_items.append({
+                'description': description,
+                'standards': standards,
+                'qty': qty,
+                'uom': uom,
+                'unit_price': unit_price,
+                'discount': discount,
+                'line_total': line_total,
+            })
+
+        for idx, item in enumerate(normalized_items, start=1):
+            items_data.append([
+                Paragraph(str(idx), style_table_cell),
+                Paragraph(item['description'], style_table_cell),
+                Paragraph(f"<font color='#2563EB'><b>{item['standards']}</b></font>", style_table_cell),
+                Paragraph(f"{item['qty']:,.2f}".rstrip('0').rstrip('.'), style_table_cell),
+                Paragraph(str(item['uom']), style_table_cell),
+                Paragraph(f"{item['unit_price']:,.2f}", style_table_cell),
+                Paragraph(f"{item['discount']:,.2f}", style_table_cell),
+                Paragraph(f"<b>{item['line_total']:,.2f}</b>", style_table_cell),
+            ])
+
+        items_table = Table(items_data, colWidths=[0.35 * inch, 2.15 * inch, 1.6 * inch, 0.5 * inch, 0.5 * inch, 0.85 * inch, 0.8 * inch, 0.9 * inch])
+        items_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), PRIMARY_BLUE),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('ALIGN', (3, 1), (-1, -1), 'RIGHT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, BORDER_COLOR),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, BG_LIGHT]),
+            ('LEFTPADDING', (0, 0), (-1, -1), 5),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+            ('TOPPADDING', (0, 0), (-1, -1), 5),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+        ]))
+        story.append(items_table)
+        story.append(Spacer(1, 12))
+
+        subtotal = sum(item['line_total'] for item in normalized_items)
+        vat_value = _to_float(pr.total_price, subtotal) - _to_float(pr.net_total_excl_vat, subtotal)
+        if vat_value == 0:
+            vat_value = subtotal * 0.05
+        grand_total = _to_float(pr.total_price, subtotal + vat_value)
+        currency = pr.currency or 'AED'
+
+        totals_data = [
+            [Paragraph('Subtotal (excl. VAT):', style_label), Paragraph(f"{subtotal:,.2f} {currency}", style_value)],
+            [Paragraph('VAT:', style_label), Paragraph(f"{vat_value:,.2f} {currency}", style_value)],
+            [Paragraph('<b>Grand Total:</b>', style_label), Paragraph(f"<b>{grand_total:,.2f} {currency}</b>", style_value)],
+        ]
+        totals_table = Table(totals_data, colWidths=[2.0 * inch, 1.5 * inch])
+        totals_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (-1, -1), 'RIGHT'),
+            ('LINEABOVE', (0, 2), (-1, 2), 1, PRIMARY_BLUE),
+            ('PADDING', (0, 0), (-1, -1), 4),
+        ]))
+
+        story.append(Table([["", totals_table]], colWidths=[3.9 * inch, 3.6 * inch]))
+        story.append(Spacer(1, 12))
+
+        # Approval block
+        pm_name = pr.pm_name.get_full_name() if pr.pm_name else 'N/A'
+        vp_name = pr.vp_op_name.get_full_name() if pr.vp_op_name else 'N/A'
+        pm_date = pr.pm_approved_at.strftime('%Y-%m-%d %H:%M UTC') if pr.pm_approved_at else 'N/A'
+        vp_date = pr.vp_op_approved_at.strftime('%Y-%m-%d %H:%M UTC') if pr.vp_op_approved_at else 'N/A'
+
+        approval_data = [
+            [
+                Paragraph('<b>PROJECT MANAGER SIGN-OFF</b>', style_label),
+                Paragraph('<b>EXECUTIVE / VP SIGN-OFF</b>', style_label),
+            ],
+            [
+                Paragraph(
+                    f'<b>Approver:</b> {pm_name}<br/>'
+                    f'<b>Status:</b> <font color="#16A34A"><b>{pr.pm_approval_status.upper()}</b></font><br/>'
+                    f'<b>Date:</b> {pm_date}<br/>'
+                    f'<i>Comments: Technical and standards verification completed.</i>',
+                    style_value,
+                ),
+                Paragraph(
+                    f'<b>Approver:</b> {vp_name}<br/>'
+                    f'<b>Status:</b> <font color="#16A34A"><b>{pr.vp_op_approval_status.upper()}</b></font><br/>'
+                    f'<b>Date:</b> {vp_date}<br/>'
+                    f'<i>Comments: Commercial terms and budget approved.</i>',
+                    style_value,
+                ),
+            ],
+        ]
+        approval_table = Table(approval_data, colWidths=[3.75 * inch, 3.75 * inch])
+        approval_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#F1F5F9')),
+            ('BOX', (0, 0), (-1, -1), 1, BORDER_COLOR),
+            ('INNERGRID', (0, 0), (-1, -1), 0.5, BORDER_COLOR),
+            ('PADDING', (0, 0), (-1, -1), 8),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        story.append(approval_table)
+
+        doc.build(story)
+        buffer.seek(0)
+        response.write(buffer.read())
+        return response
     
     @action(detail=False, methods=['get'])
     def dashboard(self, request):

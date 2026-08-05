@@ -88,6 +88,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         required=False,
         help_text='Upload multiple files (will be stored in S3)'
     )
+
+    # API alias for frontend compatibility
+    approval_hierarchy = serializers.JSONField(source='approval_workflow_config', required=False)
     
     class Meta:
         model = PurchaseRequisition
@@ -120,7 +123,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'purchase_recommendation',
             
             # Dynamic Approval Workflow
-            'approval_workflow_config', 'current_approval_step',
+            'approval_workflow_config', 'approval_hierarchy', 'current_approval_step',
             
             # Approvals Section (Fields 16-21) - Enhanced with new tiers
             'pm_name', 'pm_name_display', 'pm_signature', 'pm_approval_status', 'pm_approval_status_display', 'pm_approved_at',
@@ -321,6 +324,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             # Approval section
             'approved_by', 'approved_by_user_name', 'approved_by_name', 'approved_by_title', 'approved_date',
             'approval_signature', 'approval_stamp',
+            'technical_approver', 'financial_approver', 'management_approver',
+            'approval_log', 'final_approver_notes',
             
             # Order confirmation (vendor response)
             'confirmation_date', 'seller_contact_person', 'seller_phone', 'seller_fax', 'seller_email',
