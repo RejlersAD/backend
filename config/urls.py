@@ -202,11 +202,10 @@ if is_app_installed('apps.pid_verification'):
     urlpatterns.append(path('api/v1/pid-verification/', include('apps.pid_verification.urls')))
     print("[URL] ✅ P&ID Verification V1 URLs registered")
 
-# P&ID Verification V2 — disabled: entry points removed from frontend; app
-# remains installed to preserve historical DB tables and migrations.
-# if is_app_installed('apps.pid_verification_v2'):
-#     urlpatterns.append(path('api/v2/pid-verification/', include('apps.pid_verification_v2.urls')))
-#     print("[URL] ✅ P&ID Verification V2 URLs registered")
+# P&ID Verification V2 — Re-enabled with isolated database and V2 endpoints
+if is_app_installed('apps.pid_verification_v2'):
+    urlpatterns.append(path('api/v2/pid-verification/', include('apps.pid_verification_v2.urls')))
+    print("[URL] ✅ P&ID Verification V2 URLs registered")
 
 # P&ID Checker V2 — new minimal scaffold (isolated DB, empty starting point)
 if is_app_installed('apps.pid_checker_v2'):
