@@ -127,6 +127,7 @@ def _run_ocr(file_path: str, page_index: int) -> str:
     Falls back to plain text extraction if pytesseract is unavailable.
     temperature=0 equivalent: fixed model config, no randomness.
     """
+    result = ''
     try:
         import pytesseract
         from PIL import Image, ImageOps, ImageFilter
@@ -184,7 +185,7 @@ def _run_ocr(file_path: str, page_index: int) -> str:
                     seen_lines.add(line_norm)
                     all_text_parts.append(line_norm)
 
-        try:
+        def _scan() -> str:
             # Adaptive/tiered escalation: cheapest DPI + variant + config first,
             # only escalating to the next (more expensive) combination if the
             # accumulated yield is still below _ocr_yield_sufficient()'s
@@ -205,12 +206,14 @@ def _run_ocr(file_path: str, page_index: int) -> str:
                             return '\n'.join(all_text_parts)
 
             return '\n'.join(all_text_parts)
+
+        try:
+            result = _scan()
         finally:
             if _doc_ref is not None:
                 _doc_ref.close()
     except ImportError:
         logger.warning('[PIDExtraction] pytesseract/fitz not available – using empty extraction')
-        return ''
     except SoftTimeLimitExceeded:
         # Never swallow the Celery soft time-limit signal here — let it
         # propagate so the task can fail cleanly instead of silently
@@ -219,7 +222,7 @@ def _run_ocr(file_path: str, page_index: int) -> str:
         raise
     except Exception as exc:
         logger.error('[PIDExtraction] OCR error: %s', exc)
-        return ''
+    return result
 
 
 # Regex patterns – all deterministic

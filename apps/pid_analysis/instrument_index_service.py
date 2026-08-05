@@ -3614,102 +3614,101 @@ class InstrumentIndexService:
         gauge, or a pressure set-point on a temperature instrument).
         """
         cfg = SMART_FIELD_DEFAULTS_CONFIG
-        if not cfg.get("enabled", True) or not instruments:
-            return instruments
+        if cfg.get("enabled", True) and instruments:
 
-        fs_cfg  = cfg.get("fail_safe", {})
-        sig_cfg = cfg.get("signal_type", {})
-        sp_cfg  = cfg.get("set_point", {})
+            fs_cfg  = cfg.get("fail_safe", {})
+            sig_cfg = cfg.get("signal_type", {})
+            sp_cfg  = cfg.get("set_point", {})
 
-        fs_prefix_map = fs_cfg.get("by_prefix", {})
-        fs_cat_map    = fs_cfg.get("by_category", {})
-        valve_prefixes = set(fs_cfg.get("valve_prefixes", set()))
+            fs_prefix_map = fs_cfg.get("by_prefix", {})
+            fs_cat_map    = fs_cfg.get("by_category", {})
+            valve_prefixes = set(fs_cfg.get("valve_prefixes", set()))
 
-        sig_prefix_map = sig_cfg.get("by_prefix", {})
+            sig_prefix_map = sig_cfg.get("by_prefix", {})
 
-        sp_unit_hint   = sp_cfg.get("unit_hint_by_category", {})
-        sp_hint_letter = sp_cfg.get("unit_hint_by_first_letter", {})
-        sp_switches    = set(sp_cfg.get("switch_prefixes", set()))
-        sp_cvalves     = set(sp_cfg.get("control_valve_prefixes", set()))
-        sp_no_setpt    = set(sp_cfg.get("no_setpoint_prefixes", set()))
-        sp_units_cat   = sp_cfg.get("category_units", {})
+            sp_unit_hint   = sp_cfg.get("unit_hint_by_category", {})
+            sp_hint_letter = sp_cfg.get("unit_hint_by_first_letter", {})
+            sp_switches    = set(sp_cfg.get("switch_prefixes", set()))
+            sp_cvalves     = set(sp_cfg.get("control_valve_prefixes", set()))
+            sp_no_setpt    = set(sp_cfg.get("no_setpoint_prefixes", set()))
+            sp_units_cat   = sp_cfg.get("category_units", {})
 
-        cleared_fs = cleared_sig = cleared_sp = 0
-        filled_fs = filled_sig = filled_sp = 0
+            cleared_fs = cleared_sig = cleared_sp = 0
+            filled_fs = filled_sig = filled_sp = 0
 
-        for inst in instruments:
-            tag = (inst.get("tag_number") or "").strip().upper()
-            m = re.match(r"^([A-Z]{2,6})", tag)
-            prefix = m.group(1) if m else ""
-            category = inst.get("category") or ""
+            for inst in instruments:
+                tag = (inst.get("tag_number") or "").strip().upper()
+                m = re.match(r"^([A-Z]{2,6})", tag)
+                prefix = m.group(1) if m else ""
+                category = inst.get("category") or ""
 
-            # ── 1) FAIL-SAFE ─────────────────────────────────────────────
-            cur_fs = (inst.get("fail_safe") or "").strip()
-            is_valve = prefix in valve_prefixes
-            if fs_cfg.get("clear_for_non_valve", True) and not is_valve:
-                if cur_fs and cur_fs not in ("N/A", "—", "-"):
-                    inst["fail_safe"] = "N/A"
-                    cleared_fs += 1
-                    cur_fs = "N/A"
-            if cur_fs in ("", "N/A", None) and is_valve:
-                default_fs = fs_prefix_map.get(prefix) or fs_cat_map.get(category)
-                if default_fs:
-                    inst["fail_safe"] = default_fs
-                    filled_fs += 1
+                # ── 1) FAIL-SAFE ─────────────────────────────────────────────
+                cur_fs = (inst.get("fail_safe") or "").strip()
+                is_valve = prefix in valve_prefixes
+                if fs_cfg.get("clear_for_non_valve", True) and not is_valve:
+                    if cur_fs and cur_fs not in ("N/A", "—", "-"):
+                        inst["fail_safe"] = "N/A"
+                        cleared_fs += 1
+                        cur_fs = "N/A"
+                if cur_fs in ("", "N/A", None) and is_valve:
+                    default_fs = fs_prefix_map.get(prefix) or fs_cat_map.get(category)
+                    if default_fs:
+                        inst["fail_safe"] = default_fs
+                        filled_fs += 1
 
-            # ── 2) SIGNAL TYPE ───────────────────────────────────────────
-            cur_sig = (inst.get("signal_type") or "").strip()
-            prefix_default_sig = sig_prefix_map.get(prefix)
+                # ── 2) SIGNAL TYPE ───────────────────────────────────────────
+                cur_sig = (inst.get("signal_type") or "").strip()
+                prefix_default_sig = sig_prefix_map.get(prefix)
 
-            # Validate: override a clearly-wrong value on local-only devices
-            if sig_cfg.get("validate_against_prefix", True) and prefix_default_sig:
-                looks_local = prefix_default_sig.startswith("Local") or prefix_default_sig == "—"
-                if looks_local and cur_sig and cur_sig not in ("N/A", "", "—"):
-                    # Only override if current value looks like an electronic signal
-                    if re.search(r"(4-20|HART|FIELD|PROFI|DI|DO|DISCRETE|DIGITAL)", cur_sig, re.IGNORECASE):
-                        inst["signal_type"] = prefix_default_sig
-                        cleared_sig += 1
-                        cur_sig = prefix_default_sig
+                # Validate: override a clearly-wrong value on local-only devices
+                if sig_cfg.get("validate_against_prefix", True) and prefix_default_sig:
+                    looks_local = prefix_default_sig.startswith("Local") or prefix_default_sig == "—"
+                    if looks_local and cur_sig and cur_sig not in ("N/A", "", "—"):
+                        # Only override if current value looks like an electronic signal
+                        if re.search(r"(4-20|HART|FIELD|PROFI|DI|DO|DISCRETE|DIGITAL)", cur_sig, re.IGNORECASE):
+                            inst["signal_type"] = prefix_default_sig
+                            cleared_sig += 1
+                            cur_sig = prefix_default_sig
 
-            if cur_sig in ("", "N/A", None) and prefix_default_sig:
-                inst["signal_type"] = prefix_default_sig
-                filled_sig += 1
+                if cur_sig in ("", "N/A", None) and prefix_default_sig:
+                    inst["signal_type"] = prefix_default_sig
+                    filled_sig += 1
 
-            # ── 3) SET POINT ─────────────────────────────────────────────
-            cur_sp = (inst.get("set_point") or "").strip()
+                # ── 3) SET POINT ─────────────────────────────────────────────
+                cur_sp = (inst.get("set_point") or "").strip()
 
-            # Validate current set-point's unit matches category
-            if sp_cfg.get("validate_units_by_category", True) and cur_sp and cur_sp not in ("N/A", "—"):
-                expected_units = sp_units_cat.get(category)
-                if expected_units:
-                    sp_low = cur_sp.lower()
-                    if not any(u in sp_low for u in expected_units):
-                        inst["set_point"] = "N/A"
-                        cleared_sp += 1
-                        cur_sp = "N/A"
+                # Validate current set-point's unit matches category
+                if sp_cfg.get("validate_units_by_category", True) and cur_sp and cur_sp not in ("N/A", "—"):
+                    expected_units = sp_units_cat.get(category)
+                    if expected_units:
+                        sp_low = cur_sp.lower()
+                        if not any(u in sp_low for u in expected_units):
+                            inst["set_point"] = "N/A"
+                            cleared_sp += 1
+                            cur_sp = "N/A"
 
-            if cur_sp in ("", "N/A", None):
-                if prefix in sp_switches:
-                    inst["set_point"] = sp_cfg.get("switch_default", "Field-adjustable")
-                    filled_sp += 1
-                elif prefix in sp_no_setpt:
-                    inst["set_point"] = sp_cfg.get("no_setpoint_marker", "—")
-                    filled_sp += 1
-                elif prefix in sp_cvalves:
-                    inst["set_point"] = sp_cfg.get("control_valve_default", "Set by DCS loop")
-                    filled_sp += 1
-                elif category in sp_unit_hint:
-                    inst["set_point"] = sp_unit_hint[category]
-                    filled_sp += 1
-                elif prefix and prefix[0] in sp_hint_letter:
-                    inst["set_point"] = sp_hint_letter[prefix[0]]
-                    filled_sp += 1
+                if cur_sp in ("", "N/A", None):
+                    if prefix in sp_switches:
+                        inst["set_point"] = sp_cfg.get("switch_default", "Field-adjustable")
+                        filled_sp += 1
+                    elif prefix in sp_no_setpt:
+                        inst["set_point"] = sp_cfg.get("no_setpoint_marker", "—")
+                        filled_sp += 1
+                    elif prefix in sp_cvalves:
+                        inst["set_point"] = sp_cfg.get("control_valve_default", "Set by DCS loop")
+                        filled_sp += 1
+                    elif category in sp_unit_hint:
+                        inst["set_point"] = sp_unit_hint[category]
+                        filled_sp += 1
+                    elif prefix and prefix[0] in sp_hint_letter:
+                        inst["set_point"] = sp_hint_letter[prefix[0]]
+                        filled_sp += 1
 
-        logger.info(
-            f"[SmartDefaults] fail_safe: cleared={cleared_fs} filled={filled_fs} | "
-            f"signal: cleared={cleared_sig} filled={filled_sig} | "
-            f"set_point: cleared={cleared_sp} filled={filled_sp}"
-        )
+            logger.info(
+                f"[SmartDefaults] fail_safe: cleared={cleared_fs} filled={filled_fs} | "
+                f"signal: cleared={cleared_sig} filled={filled_sig} | "
+                f"set_point: cleared={cleared_sp} filled={filled_sp}"
+            )
         return instruments
 
     # ────────────────────────────────────────────────────────────────────
