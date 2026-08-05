@@ -24,7 +24,6 @@ from .views import (
     InstrumentCrossCheckView,
     ExtractEquipmentTagsFromPidView,
     ExtractInstrumentTagsFromPidView,
-    ExtractInstrumentTagsStatusView,
     UsageLogListView,
     UsageSummaryView,
     TokenReportView,
@@ -55,7 +54,6 @@ INSTRUMENT_INDEXES_ACTIVATE_PATH = 'instrument-indexes/<uuid:instrument_index_id
 INSTRUMENT_CROSS_CHECK_PATH = 'instrument-cross-check/'
 EXTRACT_EQUIPMENT_TAGS_PATH = 'extract-equipment-tags/'
 EXTRACT_INSTRUMENT_TAGS_PATH = 'extract-instrument-tags/'
-EXTRACT_INSTRUMENT_TAGS_STATUS_PATH = 'extract-instrument-tags/status/<str:job_id>/'
 USAGE_LIST_PATH = 'usage/'
 USAGE_SUMMARY_PATH = 'usage/summary/'
 USAGE_REPORT_PATH = 'usage/report/'
@@ -110,8 +108,6 @@ urlpatterns = [
     # Dedicated Vision extractors used by cross-check panels (BYOK)
     path(EXTRACT_EQUIPMENT_TAGS_PATH, ExtractEquipmentTagsFromPidView.as_view(),
          name='extract-equipment-tags'),
-    path(EXTRACT_INSTRUMENT_TAGS_STATUS_PATH, ExtractInstrumentTagsStatusView.as_view(),
-         name='extract-instrument-tags-status'),
     path(EXTRACT_INSTRUMENT_TAGS_PATH, ExtractInstrumentTagsFromPidView.as_view(),
          name='extract-instrument-tags'),
     # Token usage / consolidated report — /usage/summary/ must precede /usage/

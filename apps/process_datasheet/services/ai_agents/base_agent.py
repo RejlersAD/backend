@@ -125,15 +125,17 @@ class BaseAgent(ABC):
             raise
     
     def call_llm_structured(self, prompt: str, schema: Dict,
-                           context: Optional[Dict] = None) -> Dict:
+                           context: Optional[Dict] = None,
+                           temperature: Optional[float] = None) -> Dict:
         """
         Call LLM and parse response as structured JSON
-        
+
         Args:
             prompt: User prompt
             schema: Expected JSON schema
             context: Additional context
-            
+            temperature: Override default temperature
+
         Returns:
             Parsed JSON response
         """
@@ -144,8 +146,8 @@ Return your response as a JSON object matching this schema:
 {json.dumps(schema, indent=2)}
 
 Return ONLY the JSON object, no additional text."""
-        
-        response_text = self.call_llm(json_prompt, context)
+
+        response_text = self.call_llm(json_prompt, context, temperature=temperature)
         
         # Extract and parse JSON
         try:

@@ -139,33 +139,47 @@ class EmployeeLeaveMonthlySerializer(serializers.ModelSerializer):
 class EmployeeLeaveRecordSerializer(serializers.ModelSerializer):
     monthly_breakdown = EmployeeLeaveMonthlySerializer(many=True, read_only=True)
     branch_display    = serializers.CharField(source='get_branch_display', read_only=True)
+    # EmployeeLeaveRecord has no leave_type FK — it's a single annual-entitlement
+    # aggregate imported from the HR Excel (see import_leave_excel.py /
+    # leave_accrual.py), not a per-leave-type breakdown. Every row here is the
+    # UAE-mandated Annual Leave entitlement, so surface that as a constant
+    # label rather than leaving the frontend's "Leave Type" column blank.
+    leave_type_name   = serializers.SerializerMethodField()
 
     class Meta:
         model  = EmployeeLeaveRecord
         fields = [
             'id', 'employee_code', 'employee_name', 'department',
             'job_title', 'joining_date', 'annual_entitlement', 'year',
-            'branch', 'branch_display',
+            'branch', 'branch_display', 'leave_type_name',
             'total_earned', 'total_taken', 'total_encashed', 'leave_balance',
             'carryforward', 'source_file', 'imported_at', 'monthly_breakdown',
         ]
         read_only_fields = ['id', 'imported_at']
 
+    def get_leave_type_name(self, obj):
+        return 'Annual Leave'
+
 
 class EmployeeLeaveRecordListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for list view (no monthly breakdown)."""
-    branch_display = serializers.CharField(source='get_branch_display', read_only=True)
+    branch_display  = serializers.CharField(source='get_branch_display', read_only=True)
+    # See EmployeeLeaveRecordSerializer above — no leave_type FK on this model.
+    leave_type_name = serializers.SerializerMethodField()
 
     class Meta:
         model  = EmployeeLeaveRecord
         fields = [
             'id', 'employee_code', 'employee_name', 'department',
             'job_title', 'joining_date', 'annual_entitlement', 'year',
-            'branch', 'branch_display',
+            'branch', 'branch_display', 'leave_type_name',
             'total_earned', 'total_taken', 'total_encashed', 'leave_balance',
             'carryforward', 'imported_at',
         ]
         read_only_fields = ['id', 'imported_at']
+
+    def get_leave_type_name(self, obj):
+        return 'Annual Leave'
 
 
 # ────────────────────────────────────────────────────────────────────────────────

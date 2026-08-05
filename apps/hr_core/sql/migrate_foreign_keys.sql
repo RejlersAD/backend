@@ -32,13 +32,14 @@ ALTER TABLE finance_employee_salary_components
 ADD COLUMN IF NOT EXISTS employee_master_id uuid;
 
 -- Populate from hr_employee_master using employee_code mapping
-UPDATE finance_employee_salary_components 
+UPDATE finance_employee_salary_components
 SET employee_master_id = (
-    SELECT em.id 
+    SELECT em.id
     FROM hr_employee_master em
     JOIN finance_employee_salary_info esi ON em.employee_code = esi.employee_code
     WHERE esi.id = finance_employee_salary_components.employee_salary_info_id
-);
+)
+WHERE employee_master_id IS NULL;
 
 -- 2. finance_salary_slips
 ALTER TABLE finance_salary_slips
@@ -46,11 +47,12 @@ ADD COLUMN IF NOT EXISTS employee_master_id uuid;
 
 UPDATE finance_salary_slips
 SET employee_master_id = (
-    SELECT em.id 
+    SELECT em.id
     FROM hr_employee_master em
     JOIN finance_employee_salary_info esi ON em.employee_code = esi.employee_code
     WHERE esi.id = finance_salary_slips.employee_salary_info_id
-);
+)
+WHERE employee_master_id IS NULL;
 
 -- 3. payroll_ai_insight_snapshot
 ALTER TABLE payroll_ai_insight_snapshot
@@ -58,11 +60,12 @@ ADD COLUMN IF NOT EXISTS employee_master_id uuid;
 
 UPDATE payroll_ai_insight_snapshot
 SET employee_master_id = (
-    SELECT em.id 
+    SELECT em.id
     FROM hr_employee_master em
     JOIN finance_employee_salary_info esi ON em.employee_code = esi.employee_code
     WHERE esi.id = payroll_ai_insight_snapshot.employee_salary_info_id
-);
+)
+WHERE employee_master_id IS NULL;
 
 -- 4. payroll_audit_alert
 ALTER TABLE payroll_audit_alert
@@ -70,11 +73,12 @@ ADD COLUMN IF NOT EXISTS employee_master_id uuid;
 
 UPDATE payroll_audit_alert
 SET employee_master_id = (
-    SELECT em.id 
+    SELECT em.id
     FROM hr_employee_master em
     JOIN finance_employee_salary_info esi ON em.employee_code = esi.employee_code
     WHERE esi.id = payroll_audit_alert.employee_salary_info_id
-);
+)
+WHERE employee_master_id IS NULL;
 
 -- 5. payroll_validation_log
 ALTER TABLE payroll_validation_log
@@ -82,11 +86,12 @@ ADD COLUMN IF NOT EXISTS employee_master_id uuid;
 
 UPDATE payroll_validation_log
 SET employee_master_id = (
-    SELECT em.id 
+    SELECT em.id
     FROM hr_employee_master em
     JOIN finance_employee_salary_info esi ON em.employee_code = esi.employee_code
     WHERE esi.id = payroll_validation_log.employee_salary_info_id
-);
+)
+WHERE employee_master_id IS NULL;
 
 \echo 'Step 2: Add new FK columns to onboarding tables...'
 
@@ -105,7 +110,8 @@ SET employee_master_id = (
     FROM hr_employee_master em
     JOIN onboarding_record orec ON em.user_id = orec.user_id
     WHERE orec.id = onboarding_access.onboarding_record_id
-);
+)
+WHERE employee_master_id IS NULL;
 
 -- 2. onboarding_checklist
 ALTER TABLE onboarding_checklist
@@ -117,7 +123,8 @@ SET employee_master_id = (
     FROM hr_employee_master em
     JOIN onboarding_record orec ON em.user_id = orec.user_id
     WHERE orec.id = onboarding_checklist.onboarding_record_id
-);
+)
+WHERE employee_master_id IS NULL;
 
 -- 3. onboarding_document
 ALTER TABLE onboarding_document
@@ -129,7 +136,8 @@ SET employee_master_id = (
     FROM hr_employee_master em
     JOIN onboarding_record orec ON em.user_id = orec.user_id
     WHERE orec.id = onboarding_document.onboarding_record_id
-);
+)
+WHERE employee_master_id IS NULL;
 
 -- 4. onboarding_equipment
 ALTER TABLE onboarding_equipment
@@ -141,7 +149,8 @@ SET employee_master_id = (
     FROM hr_employee_master em
     JOIN onboarding_record orec ON em.user_id = orec.user_id
     WHERE orec.id = onboarding_equipment.onboarding_record_id
-);
+)
+WHERE employee_master_id IS NULL;
 
 \echo 'Step 3: Verify data migration...'
 

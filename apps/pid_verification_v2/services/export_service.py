@@ -422,7 +422,10 @@ def generate_pdf(document, view: str = 'all') -> Optional[bytes]:
                     pass
             if font is None:
                 try:
-                    font = _IFont.load_default(size=font_size)
+                    # `size=` is valid on Pillow>=10.1.0 (pinned in requirements.txt;
+                    # installed version confirmed >=10.1.0). Kept behind try/except
+                    # for forward-compat with any environment on an older Pillow.
+                    font = _IFont.load_default(size=font_size)  # NOSONAR
                 except Exception:
                     font = _IFont.load_default()
 

@@ -338,20 +338,22 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                                 status=status.HTTP_400_BAD_REQUEST
                             )
                         
-                        # Generate unique S3 key
+                        # Generate unique filename
                         file_extension = photo.name.split('.')[-1] if '.' in photo.name else 'jpg'
-                        s3_key = f"media/onboarding_photos/{user.id}_{uuid.uuid4().hex[:8]}.{file_extension}"
-                        
+                        photo_filename = f"{user.id}_{uuid.uuid4().hex[:8]}.{file_extension}"
+
                         # Upload to S3
                         s3_service = S3Service()
-                        s3_service.upload_file(
+                        upload_result = s3_service.upload_file(
                             file_obj=photo.file,
-                            key=s3_key,
+                            folder_type='avatars',
+                            filename=photo_filename,
                             content_type=content_type
                         )
-                        
+                        s3_key = upload_result['key']
+
                         # Generate presigned URL (valid for 7 days)
-                        photo_url = s3_service.generate_presigned_url(s3_key, expiration=7*24*3600)
+                        photo_url = s3_service.get_presigned_url(s3_key, expiration=7*24*3600)
                         
                         # Update onboarding record with photo info
                         onboarding_record.photo_file_path = s3_key

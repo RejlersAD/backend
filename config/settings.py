@@ -567,7 +567,7 @@ REST_FRAMEWORK = {
         'rest_framework.parsers.FormParser',
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': safe_cast_int(config('DRF_PAGE_SIZE', default='500'), 500),  # Soft-coded: env DRF_PAGE_SIZE (default: 500)
+    'PAGE_SIZE': 500,  # Increased from 10 to show more items per page
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
 }

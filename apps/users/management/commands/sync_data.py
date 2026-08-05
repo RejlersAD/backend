@@ -95,8 +95,7 @@ SYNC_CONFIG = {
         },
         'production': {
             # Parse from DATABASE_URL or use individual settings
-            'url': os.getenv('RAILWAY_DATABASE_URL', 
-                           'postgresql://postgres:cJLHOrfvZxZXHKaMCWdLdRedgHgmIneU@shinkansen.proxy.rlwy.net:38534/railway'),
+            'url': os.getenv('RAILWAY_DATABASE_URL'),
         }
     }
 }

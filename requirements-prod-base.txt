@@ -1,0 +1,30 @@
+# =============================================================================
+# STABLE HEAVY ML/OCR BASE PACKAGES
+# =============================================================================
+# PURPOSE: These packages are installed in a SEPARATE Docker layer BEFORE the
+#          main requirements.txt.  Their versions are pinned and rarely change,
+#          so their Docker layer hash stays constant between deployments.
+#
+# WHY THIS MATTERS (Railway deploy speed):
+#   OCI-compliant registries (Docker Hub, Railway) are content-addressed.
+#   If a layer's content-hash matches one already in the registry, the push
+#   is skipped — no bytes transferred.
+#
+#   Before this split:  1 layer = easyocr + paddle + all app deps → 3.3 GB pushed every deploy
+#   After this split:
+#     Layer A (this file) = easyocr + paddle → 2.7 GB — pushed ONCE, then skipped
+#     Layer B (requirements.txt) = app deps  → ~0.5 GB — pushed occasionally
+#     Layer C (COPY . .)         = code      → ~50 MB  — pushed every deploy
+#
+#   Net result: after first deploy, each code push transfers ~50 MB instead of 3.3 GB.
+#
+# RULE: Only change versions here when you actually need to upgrade these packages.
+#       Every version bump here = one extra 2.7 GB push to Railway.
+# =============================================================================
+
+# EasyOCR — brings PyTorch as a dependency (~2 GB total)
+easyocr==1.7.2
+
+# PaddlePaddle + PaddleOCR (~700 MB total)
+paddlepaddle==3.3.0
+paddleocr==3.3.3
