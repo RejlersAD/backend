@@ -177,11 +177,7 @@ class PurchaseRequisition(TimeStampedModel):
         ('draft', 'Draft'),
         ('submitted', 'Submitted'),
         ('in_review', 'In Review'),
-        ('pending_level_2', 'Pending Level 2 Approval'),
         ('approved', 'Approved'),
-        ('pm_approved', 'PM Approved'),
-        ('vp_approved', 'VP Approved'),
-        ('fully_approved', 'Fully Approved'),
         ('rejected', 'Rejected'),
         ('cancelled', 'Cancelled'),
         ('converted', 'Converted to PO'),
@@ -334,6 +330,28 @@ class PurchaseRequisition(TimeStampedModel):
     
     def __str__(self):
         return f"PR-{self.pr_number}: {self.title}"
+
+
+class ProcurementNumberSequence(models.Model):
+    """Locked counter used to allocate procurement document numbers safely."""
+
+    document_type = models.CharField(max_length=10)
+    prefix = models.CharField(max_length=10)
+    year = models.PositiveIntegerField()
+    last_value = models.PositiveBigIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'procurement_number_sequences'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['document_type', 'prefix', 'year'],
+                name='proc_num_seq_scope_uniq',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.document_type}-{self.prefix}-{self.year}: {self.last_value}'
 
 
 class PurchaseOrder(TimeStampedModel):

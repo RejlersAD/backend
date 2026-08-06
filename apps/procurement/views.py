@@ -50,28 +50,9 @@ from .serializers import (
     CostCenterSerializer,
     BudgetSerializer,
 )
-
-
-def validate_rejection_reason(reason):
-    """Validate rejection reason with soft-coded business rules."""
-    min_length = 10
-    max_length = 1000
-
-    if reason is None:
-        return False, 'Please provide a reason for rejection.'
-
-    trimmed = str(reason).strip()
-    if not trimmed:
-        return False, 'Rejection reason cannot be empty or contain only whitespace.'
-
-    if len(trimmed) < min_length:
-        return False, f'Rejection reason must be at least {min_length} characters long.'
-
-    if len(trimmed) > max_length:
-        return False, f'Rejection reason cannot exceed {max_length} characters.'
-
-    return True, None
-
+from .services.requisition_workflow import RequisitionWorkflowService
+from .services.requisition_conversion import RequisitionConversionService
+from .services.requisition_status import canonicalize_pr_status, stored_values_for
 
 # Soft-coded pagination for vendor list - supports large page_size
 class VendorPagination(PageNumberPagination):
@@ -171,14 +152,21 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_requisitions'
     parser_classes = [FormParser, MultiPartParser, JSONParser]
-    
+
+    def get_permissions(self):
+        # Conversion creates a Purchase Order and therefore requires order
+        # module access in addition to authentication.
+        if getattr(self, 'action', None) == 'convert_to_po':
+            self.module_required = 'procurement_orders'
+        return super().get_permissions()
+
     def get_queryset(self):
         queryset = super().get_queryset()
         
         # Filter by status
         status_filter = self.request.query_params.get('status', None)
         if status_filter:
-            queryset = queryset.filter(status=status_filter)
+            queryset = queryset.filter(status__in=stored_values_for(status_filter))
         
         # Filter by priority
         priority_filter = self.request.query_params.get('priority', None)
@@ -235,340 +223,102 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
-    def _get_or_initialize_approval_hierarchy(self, pr):
-        """Return normalized approval hierarchy list with at least Stage 1 and Stage 2."""
-        hierarchy = pr.approval_workflow_config if isinstance(pr.approval_workflow_config, list) else []
-
-        if not hierarchy:
-            hierarchy = [
-                {
-                    'step': 1,
-                    'stage': 'Technical Review',
-                    'role': 'Project Manager',
-                    'status': 'pending',
-                    'approver_id': str(pr.pm_name_id) if pr.pm_name_id else None,
-                    'approver_name': pr.pm_name.get_full_name() if pr.pm_name else None,
-                },
-                {
-                    'step': 2,
-                    'stage': 'Procurement Manager Review',
-                    'role': 'Procurement Manager',
-                    'status': 'pending',
-                },
-            ]
-
-        for idx, stage in enumerate(hierarchy):
-            stage.setdefault('step', idx + 1)
-            stage.setdefault('stage', stage.get('role') or f"Stage {idx + 1}")
-            stage.setdefault('status', 'pending')
-
-        if len(hierarchy) == 1:
-            hierarchy.append({
-                'step': 2,
-                'stage': 'Procurement Manager Review',
-                'role': 'Procurement Manager',
-                'status': 'pending',
-            })
-
-        return hierarchy
-
     def _build_requisition_response(self, pr):
         """Ensure API response contains both status and approval_hierarchy."""
         serializer = self.get_serializer(pr)
         payload = dict(serializer.data)
-        payload['status'] = pr.status
+        payload['status'] = canonicalize_pr_status(pr.status)
         payload['approval_hierarchy'] = pr.approval_workflow_config if isinstance(pr.approval_workflow_config, list) else []
-        payload['convert_to_po_enabled'] = pr.status in ['approved', 'fully_approved']
+        payload['convert_to_po_enabled'] = canonicalize_pr_status(pr.status) == 'approved'
         return payload
-    
+
     @action(detail=True, methods=['post'])
     def pm_approve(self, request, pk=None):
-        """
-        Project Manager approval (first tier)
-        Requires: signature (optional)
-        """
-        pr = self.get_object()
-        
-        # Validate PR can be approved
-        if pr.pm_approval_status == 'approved':
-            return Response(
-                {'error': 'PR already approved by PM'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Update PM approval
-        pr.pm_name = request.user
-        pr.pm_signature = request.data.get('signature', '')
-        pr.pm_approval_status = 'approved'
-        pr.pm_approved_at = timezone.now()
-
-        hierarchy = self._get_or_initialize_approval_hierarchy(pr)
-
-        # Resolve Stage 1 / current user stage in hierarchy
-        current_idx = next(
-            (
-                idx for idx, stage in enumerate(hierarchy)
-                if (
-                    str(stage.get('approver_id') or '') == str(request.user.id) or
-                    (stage.get('role') or '').strip().lower() in ['project manager', 'technical review'] or
-                    int(stage.get('step', idx + 1)) == 1
-                ) and str(stage.get('status', '')).lower() in ['pending', 'in_review']
-            ),
-            None,
+        pr = RequisitionWorkflowService.approve(
+            pk,
+            request.user,
+            signature=request.data.get('signature', ''),
+            expected_stage_key='pm',
         )
-
-        if current_idx is None:
-            current_idx = 0
-
-        hierarchy[current_idx]['status'] = 'approved'
-        hierarchy[current_idx]['approved_at'] = timezone.now().isoformat()
-        hierarchy[current_idx]['approved_by_id'] = str(request.user.id)
-        hierarchy[current_idx]['approved_by_name'] = request.user.get_full_name() or request.user.username
-
-        # Determine the next required stage
-        next_pending_idx = next(
-            (idx for idx in range(current_idx + 1, len(hierarchy)) if str(hierarchy[idx].get('status', '')).lower() != 'approved'),
-            None,
-        )
-
-        if next_pending_idx is None:
-            # Final stage reached -> fully approved and ready for PO conversion
-            pr.status = 'approved'
-            pr.approved_by = request.user
-            pr.approved_at = timezone.now()
-            pr.current_approval_step = len(hierarchy)
-        else:
-            # More sign-off required -> next stage pending
-            hierarchy[next_pending_idx]['status'] = 'pending'
-            pr.status = 'pending_level_2' if int(hierarchy[next_pending_idx].get('step', next_pending_idx + 1)) == 2 else 'in_review'
-            pr.current_approval_step = next_pending_idx
-
-        pr.approval_workflow_config = hierarchy
-        pr.save()
-
         return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
     def pm_reject(self, request, pk=None):
-        """Project Manager rejection with mandatory reason validation"""
-        pr = self.get_object()
-        
-        # Validate rejection reason (soft-coded validation)
-        reason = request.data.get('reason', '')
-        is_valid, error_message = validate_rejection_reason(reason)
-        
-        if not is_valid:
-            return Response(
-                {'error': error_message},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        pr.pm_approval_status = 'not_approved'
-        pr.status = 'rejected'
-        pr.rejection_reason = reason.strip()
-        pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response(serializer.data)
+        pr = RequisitionWorkflowService.reject(
+            pk,
+            request.user,
+            request.data.get('reason', ''),
+            expected_stage_key='pm',
+        )
+        return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
     def vp_approve(self, request, pk=None):
-        """
-        VP Operations approval (second tier)
-        Requires: PM approval first, signature (optional)
-        """
-        pr = self.get_object()
-        
-        # Validate PM has approved first
-        if pr.pm_approval_status != 'approved':
-            return Response(
-                {'error': 'PM must approve before VP approval'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Validate VP hasn't already approved
-        if pr.vp_op_approval_status == 'approved':
-            return Response(
-                {'error': 'PR already approved by VP'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Update VP approval
-        pr.vp_op_name = request.user
-        pr.vp_op_signature = request.data.get('signature', '')
-        pr.vp_op_approval_status = 'approved'
-        pr.vp_op_approved_at = timezone.now()
-        
-        # Update overall status to fully approved
-        pr.status = 'fully_approved'
-        pr.approved_by = request.user
-        pr.approved_at = timezone.now()
-        
-        pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response(serializer.data)
+        pr = RequisitionWorkflowService.approve(
+            pk,
+            request.user,
+            signature=request.data.get('signature', ''),
+            expected_stage_key='vp',
+        )
+        return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
     def vp_reject(self, request, pk=None):
-        """VP Operations rejection with mandatory reason validation"""
-        pr = self.get_object()
-        
-        # Validate rejection reason (soft-coded validation)
-        reason = request.data.get('reason', '')
-        is_valid, error_message = validate_rejection_reason(reason)
-        
-        if not is_valid:
-            return Response(
-                {'error': error_message},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        pr.vp_op_approval_status = 'not_approved'
-        pr.status = 'rejected'
-        pr.rejection_reason = reason.strip()
-        pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response(serializer.data)
+        pr = RequisitionWorkflowService.reject(
+            pk,
+            request.user,
+            request.data.get('reason', ''),
+            expected_stage_key='vp',
+        )
+        return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
     def eng_manager_approve(self, request, pk=None):
-        """
-        Engineering Manager approval (new dynamic workflow tier)
-        """
-        pr = self.get_object()
-        
-        if pr.eng_manager_approval_status == 'approved':
-            return Response(
-                {'error': 'PR already approved by Engineering Manager'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        pr.eng_manager_name = request.user
-        pr.eng_manager_signature = request.data.get('signature', '')
-        pr.eng_manager_approval_status = 'approved'
-        pr.eng_manager_approved_at = timezone.now()
-        pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response(serializer.data)
+        pr = RequisitionWorkflowService.approve(
+            pk,
+            request.user,
+            signature=request.data.get('signature', ''),
+            expected_stage_key='eng_manager',
+        )
+        return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
     def eng_manager_reject(self, request, pk=None):
-        """Engineering Manager rejection with mandatory reason validation"""
-        pr = self.get_object()
-        
-        # Validate rejection reason (soft-coded validation)
-        reason = request.data.get('reason', '')
-        is_valid, error_message = validate_rejection_reason(reason)
-        
-        if not is_valid:
-            return Response(
-                {'error': error_message},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        pr.eng_manager_approval_status = 'not_approved'
-        pr.status = 'rejected'
-        pr.rejection_reason = reason.strip()
-        pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response(serializer.data)
+        pr = RequisitionWorkflowService.reject(
+            pk,
+            request.user,
+            request.data.get('reason', ''),
+            expected_stage_key='eng_manager',
+        )
+        return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
     def manager_projects_approve(self, request, pk=None):
-        """
-        Manager of Projects approval (new dynamic workflow tier)
-        """
-        pr = self.get_object()
-        
-        if pr.manager_projects_approval_status == 'approved':
-            return Response(
-                {'error': 'PR already approved by Manager of Projects'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        pr.manager_projects_name = request.user
-        pr.manager_projects_signature = request.data.get('signature', '')
-        pr.manager_projects_approval_status = 'approved'
-        pr.manager_projects_approved_at = timezone.now()
-        pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response(serializer.data)
+        pr = RequisitionWorkflowService.approve(
+            pk,
+            request.user,
+            signature=request.data.get('signature', ''),
+            expected_stage_key='manager_projects',
+        )
+        return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
     def manager_projects_reject(self, request, pk=None):
-        """Manager of Projects rejection with mandatory reason validation"""
-        pr = self.get_object()
-        
-        # Validate rejection reason (soft-coded validation)
-        reason = request.data.get('reason', '')
-        is_valid, error_message = validate_rejection_reason(reason)
-        
-        if not is_valid:
-            return Response(
-                {'error': error_message},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        pr.manager_projects_approval_status = 'not_approved'
-        pr.status = 'rejected'
-        pr.rejection_reason = reason.strip()
-        pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response(serializer.data)
+        pr = RequisitionWorkflowService.reject(
+            pk,
+            request.user,
+            request.data.get('reason', ''),
+            expected_stage_key='manager_projects',
+        )
+        return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
     def process_dynamic_approval(self, request, pk=None):
-        """
-        Process approval based on dynamic workflow configuration
-        Advances to next step in approval_workflow_config
-        """
-        pr = self.get_object()
-        workflow = self._get_or_initialize_approval_hierarchy(pr)
-
-        if not workflow or len(workflow) == 0:
-            return Response(
-                {'error': 'No approval workflow configured'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        current_step = pr.current_approval_step if pr.current_approval_step is not None else 0
-
-        if current_step >= len(workflow):
-            return Response(
-                {'error': 'All approval steps completed'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Get current step
-        step_config = workflow[current_step]
-
-        # Mark current step as approved
-        step_config['status'] = 'approved'
-        step_config['approved_at'] = timezone.now().isoformat()
-        step_config['approved_by_id'] = str(request.user.id)
-        step_config['approved_by_name'] = request.user.get_full_name()
-
-        # Move to next step
-        pr.current_approval_step = current_step + 1
-
-        # If all steps completed, mark as approved and enable conversion
-        if pr.current_approval_step >= len(workflow):
-            pr.status = 'approved'
-            pr.approved_by = request.user
-            pr.approved_at = timezone.now()
-        else:
-            pr.status = 'pending_level_2' if pr.current_approval_step == 1 else 'in_review'
-            workflow[pr.current_approval_step]['status'] = 'pending'
-
-        pr.approval_workflow_config = workflow
-        pr.save()
-
+        pr = RequisitionWorkflowService.approve(
+            pk,
+            request.user,
+            signature=request.data.get('signature', ''),
+        )
         return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
@@ -936,20 +686,19 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):
-        """Submit PR for approval (move from draft to submitted)"""
-        pr = self.get_object()
-        
-        if pr.status != 'draft':
-            return Response(
-                {'error': 'Only draft PRs can be submitted'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        pr.status = 'submitted'
-        pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response(serializer.data)
+        """Submit a draft into its configured approval workflow."""
+        pr = RequisitionWorkflowService.submit(pk, request.user)
+        return Response(self._build_requisition_response(pr))
+
+    @action(detail=True, methods=['post'])
+    def convert_to_po(self, request, pk=None):
+        """Atomically convert an approved requisition into one draft PO."""
+        pr, po = RequisitionConversionService.convert(pk, request.user)
+        return Response({
+            'message': f'Requisition converted to purchase order {po.po_number}.',
+            'requisition': self._build_requisition_response(pr),
+            'purchase_order': PurchaseOrderSerializer(po, context=self.get_serializer_context()).data,
+        }, status=status.HTTP_201_CREATED)
     
     @action(detail=True, methods=['post'])
     def upload_attachment(self, request, pk=None):
@@ -965,10 +714,10 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         
         # Use serializer's upload method
         serializer = self.get_serializer(pr)
-        serializer._upload_attachments(pr, files)
+        uploaded = serializer._upload_attachments(pr, files)
         
         return Response({
-            'message': f'{len(files)} file(s) uploaded successfully',
+            'message': f'{len(uploaded)} file(s) uploaded successfully',
             'attachments': pr.attachments
         })
 
@@ -977,8 +726,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         """Export approved requisition as an industry-standard PDF document download."""
         pr = self.get_object()
 
-        approved_statuses = ['approved', 'fully_approved', 'vp_approved']
-        if pr.status not in approved_statuses:
+        if canonicalize_pr_status(pr.status) != 'approved':
             return Response(
                 {'error': 'Only approved requisitions can be exported as PDF.'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -1224,25 +972,20 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def dashboard(self, request):
-        """Get PR dashboard statistics"""
+        """Return counts for the canonical PR lifecycle."""
         queryset = self.get_queryset()
-        
-        total = queryset.count()
-        draft = queryset.filter(status='draft').count()
-        submitted = queryset.filter(status='submitted').count()
-        pm_approved = queryset.filter(status='pm_approved').count()
-        fully_approved = queryset.filter(status='fully_approved').count()
-        rejected = queryset.filter(status='rejected').count()
-        converted = queryset.filter(status='converted').count()
-        
-        # Approval pending counts
-        pending_pm_approval = queryset.filter(
-            status='submitted', pm_approval_status='pending'
-        ).count()
-        
-        pending_vp_approval = queryset.filter(
-            status='pm_approved', vp_op_approval_status='pending'
-        ).count()
+
+        totals = {
+            lifecycle_status: queryset.filter(
+                status__in=stored_values_for(lifecycle_status)
+            ).count()
+            for lifecycle_status in (
+                'draft', 'submitted', 'in_review', 'approved',
+                'rejected', 'cancelled', 'converted',
+            )
+        }
+        totals['total'] = queryset.count()
+        totals['pending'] = totals['submitted'] + totals['in_review']
         
         by_priority = queryset.values('priority').annotate(
             count=Count('id')
@@ -1253,15 +996,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         
         return Response({
             'totals': {
-                'total': total,
-                'draft': draft,
-                'submitted': submitted,
-                'pm_approved': pm_approved,
-                'fully_approved': fully_approved,
-                'rejected': rejected,
-                'converted': converted,
-                'pending_pm_approval': pending_pm_approval,
-                'pending_vp_approval': pending_vp_approval,
+                **totals,
             },
             'by_priority': list(by_priority),
             'recent': recent_serializer.data
@@ -1270,59 +1005,23 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     # Legacy approve/reject endpoints (kept for backward compatibility)
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
-        """Legacy approve endpoint - redirects to VP approve"""
-        return self.vp_approve(request, pk)
-    
-    # Legacy approve/reject endpoints (kept for backward compatibility)
-    @action(detail=True, methods=['post'])
-    def approve(self, request, pk=None):
-        """Legacy approve endpoint - redirects to VP approve"""
-        return self.vp_approve(request, pk)
+        """Legacy endpoint: approve the current configured stage."""
+        pr = RequisitionWorkflowService.approve(
+            pk,
+            request.user,
+            signature=request.data.get('signature', ''),
+        )
+        return Response(self._build_requisition_response(pr))
     
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
-        """Reject a purchase requisition"""
-        pr = self.get_object()
-        reason = request.data.get('reason', '')
-        
-        if pr.status != 'submitted':
-            return Response(
-                {'error': 'Only submitted requisitions can be rejected'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        pr.status = 'rejected'
-        pr.rejection_reason = reason
-        pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response(serializer.data)
-    
-    @action(detail=False, methods=['get'])
-    def dashboard(self, request):
-        """Get PR dashboard statistics"""
-        total = self.get_queryset().count()
-        pending = self.get_queryset().filter(status='submitted').count()
-        approved = self.get_queryset().filter(status='approved').count()
-        rejected = self.get_queryset().filter(status='rejected').count()
-        
-        by_priority = self.get_queryset().values('priority').annotate(
-            count=Count('id')
+        """Legacy endpoint: reject the current configured stage."""
+        pr = RequisitionWorkflowService.reject(
+            pk,
+            request.user,
+            request.data.get('reason', ''),
         )
-        
-        recent = self.get_queryset()[:5]
-        recent_serializer = self.get_serializer(recent, many=True)
-        
-        return Response({
-            'totals': {
-                'total': total,
-                'pending': pending,
-                'approved': approved,
-                'rejected': rejected
-            },
-            'by_priority': list(by_priority),
-            'recent': recent_serializer.data
-        })
+        return Response(self._build_requisition_response(pr))
 
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):

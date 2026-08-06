@@ -41,8 +41,8 @@
       "status_weights": {
         "draft": 0.2,
         "submitted": 0.1,
-        "pm_approved": 0.1,
-        "fully_approved": 0.4,
+        "in_review": 0.1,
+        "approved": 0.4,
         "converted": 0.2
       },
       "priority_weights": {
