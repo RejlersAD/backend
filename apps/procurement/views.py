@@ -8,6 +8,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.exceptions import PermissionDenied, ValidationError
 
 # RBAC - Module-level access control (soft-coded)
 from apps.rbac.permissions import HasModuleAccess
@@ -206,6 +207,28 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             )
         
         return queryset
+
+    def _enforce_owner_mutation(self, pr, *, deletable=False):
+        if (
+            str(pr.issued_by_id) != str(self.request.user.id)
+            and not RequisitionWorkflowService._is_super_admin(self.request.user)
+        ):
+            raise PermissionDenied('Only the requisition issuer may modify this requisition.')
+
+        allowed_statuses = {'draft', 'rejected', 'cancelled'} if deletable else {'draft'}
+        if canonicalize_pr_status(pr.status) not in allowed_statuses:
+            action = 'deleted' if deletable else 'edited'
+            raise ValidationError({
+                'error': f'Only {", ".join(sorted(allowed_statuses))} requisitions can be {action}.'
+            })
+
+    def update(self, request, *args, **kwargs):
+        self._enforce_owner_mutation(self.get_object())
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        self._enforce_owner_mutation(self.get_object(), deletable=True)
+        return super().destroy(request, *args, **kwargs)
     
     def create(self, request, *args, **kwargs):
         """Create PR with file upload support"""
@@ -232,6 +255,49 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         payload['approval_hierarchy'] = pr.approval_workflow_config if isinstance(pr.approval_workflow_config, list) else []
         payload['convert_to_po_enabled'] = canonicalize_pr_status(pr.status) == 'approved'
         return payload
+
+    @action(detail=False, methods=['get'], url_path='pending-for-me')
+    def pending_for_me(self, request):
+        """Return only PRs whose current workflow stage is assigned to this approver."""
+        active_statuses = set()
+        for workflow_status in RequisitionWorkflowService.ACTIVE_REVIEW_STATUSES:
+            active_statuses.update(stored_values_for(workflow_status))
+
+        queryset = self.get_queryset().filter(status__in=active_statuses)
+        is_super_admin = RequisitionWorkflowService._is_super_admin(request.user)
+        assigned = []
+
+        for pr in queryset:
+            workflow = pr.approval_workflow_config
+            if not isinstance(workflow, list):
+                continue
+            current_stage = next(
+                (
+                    stage for stage in workflow
+                    if isinstance(stage, dict)
+                    and str(stage.get('status', 'pending')).lower() != 'approved'
+                ),
+                None,
+            )
+            if not current_stage:
+                continue
+            assigned_user_id = current_stage.get('user_id') or current_stage.get('approver_id')
+            if is_super_admin or str(assigned_user_id) == str(request.user.id):
+                assigned.append(pr)
+
+        count = len(assigned)
+        if str(request.query_params.get('count_only', '')).lower() == 'true':
+            return Response({'count': count, 'pending_count': count})
+
+        try:
+            limit = max(1, min(int(request.query_params.get('limit', 50)), 100))
+        except (TypeError, ValueError):
+            limit = 50
+
+        return Response({
+            'count': count,
+            'results': self.get_serializer(assigned[:limit], many=True).data,
+        })
 
     @action(detail=True, methods=['post'])
     def pm_approve(self, request, pk=None):
@@ -418,8 +484,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
 
         if role and role in role_title_mapping:
             job_titles = role_title_mapping[role]
-            from django.db.models import Q
-
             # Exact match first
             matched_qs = UserProfile.objects.filter(
                 status='active',
@@ -445,10 +509,20 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         # Always return the full active user list so the field lets the
         # requester choose/select any user, with job-title matches (if any)
         # surfaced first for convenience.
+        # Resolve RBAC eligibility in SQL. Calling has_module_access() once for
+        # every profile caused hundreds of remote database queries and left the
+        # approver dropdowns appearing empty while they waited.
         profiles = UserProfile.objects.filter(
+            Q(user__is_superuser=True)
+            | Q(
+                roles__is_active=True,
+                roles__modules__code='procurement_requisitions',
+                roles__modules__is_active=True,
+            ),
             status='active',
-            is_deleted=False
-        ).select_related('user')
+            is_deleted=False,
+            user__is_active=True,
+        ).select_related('user').distinct()
 
         # Sort so job-title matches appear first, then alphabetically
         profiles = sorted(
@@ -533,19 +607,28 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         
         # Source 1: Project master table
         try:
-            projects = Project.objects.filter(status='active')
+            projects = Project.objects.exclude(
+                status__in=['cancelled', 'archived']
+            ).select_related('cost_center')
             if search_query:
                 projects = projects.filter(
                     Q(project_name__icontains=search_query) |
-                    Q(project_code__icontains=search_query) |
-                    Q(department__icontains=search_query)
+                    Q(project_number__icontains=search_query) |
+                    Q(cost_center__name__icontains=search_query) |
+                    Q(cost_center__code__icontains=search_query) |
+                    Q(cost_center__department__icontains=search_query)
                 )
             
             for project in projects[:limit]:
+                department = ''
+                if project.cost_center:
+                    department = project.cost_center.department or project.cost_center.name
                 suggestions.append({
-                    'value': project.project_name,
-                    'label': f"{project.project_code} - {project.project_name}",
-                    'department': project.department,
+                    'project_id': str(project.id),
+                    'value': f"{project.project_name} ({project.project_number})",
+                    'label': f"{project.project_number} - {project.project_name}",
+                    'project_number': project.project_number,
+                    'department': department,
                     'source': 'master'
                 })
         except Exception:
@@ -597,13 +680,21 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             vendors = vendors.filter(
                 Q(name__icontains=search_query) |
                 Q(vendor_code__icontains=search_query) |
-                Q(trade_license_number__icontains=search_query)
+                Q(trade_license_number__icontains=search_query) |
+                Q(tax_id__icontains=search_query) |
+                Q(vat_number__icontains=search_query)
             )
         
         for vendor in vendors[:limit]:
             suggestions.append({
+                'vendor_id': str(vendor.id),
                 'supplier_name': vendor.name,
-                'supplier_business_id': vendor.trade_license_number or vendor.tax_registration_number,
+                'supplier_business_id': (
+                    vendor.trade_license_number
+                    or vendor.tax_id
+                    or vendor.vat_number
+                    or vendor.vendor_code
+                ),
                 'vendor_code': vendor.vendor_code,
                 'rating': vendor.rating,
                 'source': 'master'
@@ -657,7 +748,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         suggestions = []
         
         # Get PO numbers from PurchaseOrder table
-        pos = PurchaseOrder.objects.all()
+        pos = PurchaseOrder.objects.select_related('vendor').order_by('-created_at')
         
         if status_filter:
             pos = pos.filter(status=status_filter)
@@ -665,19 +756,18 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         if search_query:
             pos = pos.filter(
                 Q(po_number__icontains=search_query) |
-                Q(supplier_name__icontains=search_query) |
+                Q(vendor__name__icontains=search_query) |
+                Q(title__icontains=search_query) |
                 Q(description__icontains=search_query)
             )
-        
-        pos = pos.values('po_number', 'supplier_name', 'total_amount', 'currency', 'status').distinct()[:limit]
-        
-        for po in pos:
+
+        for po in pos[:limit]:
             suggestions.append({
-                'po_number': po['po_number'],
-                'supplier_name': po['supplier_name'],
-                'total_amount': str(po['total_amount']) if po['total_amount'] else None,
-                'currency': po['currency'],
-                'status': po['status']
+                'po_number': po.po_number,
+                'supplier_name': po.vendor.name,
+                'total_amount': str(po.total_amount) if po.total_amount is not None else None,
+                'currency': po.currency,
+                'status': po.status,
             })
         
         return Response({

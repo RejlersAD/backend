@@ -1,5 +1,6 @@
 """Transactional state transitions for Purchase Requisitions."""
 
+from decimal import Decimal
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.shortcuts import get_object_or_404
@@ -80,10 +81,11 @@ class RequisitionWorkflowService:
     @classmethod
     def _current_stage(cls, pr, workflow):
         for index, stage in enumerate(workflow):
-            if str(stage.get('status', 'pending')).lower() != 'approved':
+            stage_status = str(stage.get('status', 'pending')).lower()
+            if stage_status in ('pending', 'in_review'):
                 pr.current_approval_step = index
                 return index, stage
-        raise ValidationError({'error': 'All approval stages are already complete.'})
+        raise ValidationError({'error': 'No active approval stage awaiting action.'})
 
     @classmethod
     def _enforce_assigned_approver(cls, stage, actor):
@@ -132,7 +134,7 @@ class RequisitionWorkflowService:
     def _submit_locked(cls, pr, actor):
         if str(pr.issued_by_id) != str(actor.id) and not cls._is_super_admin(actor):
             raise PermissionDenied('Only the requisition issuer may submit this draft.')
-        # Treat client retries as success after the first transaction commits.
+        
         current_status = canonicalize_pr_status(pr.status)
         if current_status in cls.ACTIVE_REVIEW_STATUSES:
             return pr
@@ -141,16 +143,24 @@ class RequisitionWorkflowService:
 
         normalized_items = normalize_line_items(pr.items)
         if normalized_items:
-            if pr.total_price is None or pr.total_price != line_items_total(normalized_items):
+            calculated_total = Decimal(str(line_items_total(normalized_items) or 0)).quantize(Decimal('0.01'))
+            pr_total = Decimal(str(pr.total_price or 0)).quantize(Decimal('0.01'))
+            
+            if pr_total != calculated_total:
                 raise ValidationError({
-                    'error': 'Total price must equal the sum of the line items before submission.'
+                    'error': f'Total price ({pr_total}) must equal the sum of line items ({calculated_total}) before submission.'
                 })
             pr.items = normalized_items
 
         workflow = cls._workflow(pr)
+
+        # Pass 1: Validate all stages before mutating memory
         for index, stage in enumerate(workflow):
             if not (stage.get('user_id') or stage.get('approver_id')):
                 raise ValidationError({'error': f'Approval stage {index + 1} has no assigned approver.'})
+
+        # Pass 2: Clean and initialize
+        for index, stage in enumerate(workflow):
             stage['step'] = index + 1
             stage['status'] = 'pending'
             stage['approved_at'] = None
@@ -197,7 +207,7 @@ class RequisitionWorkflowService:
         next_index = next(
             (
                 index for index in range(current_index + 1, len(workflow))
-                if str(workflow[index].get('status', 'pending')).lower() != 'approved'
+                if str(workflow[index].get('status', 'pending')).lower() not in ('approved', 'rejected')
             ),
             None,
         )

@@ -238,6 +238,18 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                     f'Approval stage {index + 1} must reference an active user.'
                 )
 
+            try:
+                can_review_requisitions = (
+                    approver.is_superuser
+                    or approver.rbac_profile.has_module_access('procurement_requisitions')
+                )
+            except ObjectDoesNotExist:
+                can_review_requisitions = False
+            if not can_review_requisitions:
+                raise serializers.ValidationError(
+                    f'Approval stage {index + 1} approver requires Purchase Requisitions module access.'
+                )
+
             normalized_stage = {
                 'step': index + 1,
                 'role': role,
