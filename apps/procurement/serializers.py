@@ -9,6 +9,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
+from .services.purchase_order_numbering import PurchaseOrderNumberService
 from .services.requisition_numbering import RequisitionNumberService
 from .services.requisition_status import canonicalize_pr_status
 from .services.requisition_validation import (
@@ -436,6 +437,9 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     category_display = serializers.SerializerMethodField()
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True)
     approved_by_user_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True)
+    pr_number = serializers.CharField(source='pr_reference.pr_number', read_only=True, allow_null=True)
+    po_number_verified = serializers.SerializerMethodField()
+    po_number_verification_message = serializers.SerializerMethodField()
     
     # Project linkage fields (soft-coded relationship)
     project_name = serializers.CharField(source='project.project_name', read_only=True, allow_null=True)
@@ -446,7 +450,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         model = PurchaseOrder
         fields = [
             # Core PO fields
-            'id', 'po_number', 'pr_reference', 'pr_requester_name',
+            'id', 'po_number', 'po_number_verified', 'po_number_verification_message',
+            'pr_reference', 'pr_number', 'pr_requester_name',
             'vendor', 'vendor_name', 'title', 'description', 
             'status', 'status_display', 'category', 'category_display', 'form_note',
             
@@ -498,7 +503,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             # Timestamps
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'po_date', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'po_number', 'po_date', 'created_at', 'updated_at']
     
     def get_project_display(self, obj):
         """Get formatted project display string"""
@@ -508,8 +513,25 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
+
+    def _po_number_verification(self, obj):
+        pr_number = obj.pr_reference.pr_number if obj.pr_reference_id else None
+        return PurchaseOrderNumberService.verify(obj.po_number, pr_number)
+
+    def get_po_number_verified(self, obj):
+        return self._po_number_verification(obj)[0]
+
+    def get_po_number_verification_message(self, obj):
+        return self._po_number_verification(obj)[1]
     
+    @transaction.atomic
     def create(self, validated_data):
+        # Official PO identifiers are assigned only by the locked server-side sequence.
+        order_type = 'project' if any(
+            validated_data.get(field)
+            for field in ('project', 'project_number', 'rad_project_no')
+        ) else 'general'
+        validated_data['po_number'] = PurchaseOrderNumberService.next_number(order_type)
         validated_data['created_by'] = self.context['request'].user
         return super().create(validated_data)
 

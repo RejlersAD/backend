@@ -561,7 +561,7 @@ class PurchaseOrder(TimeStampedModel):
         ]
     
     def __str__(self):
-        return f"PO-{self.po_number}: {self.title}"
+        return f"{self.po_number}: {self.title}"
     
     # ═══ BUSINESS LOGIC METHODS (Soft-Coded) ═══
     

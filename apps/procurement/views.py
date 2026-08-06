@@ -52,6 +52,7 @@ from .serializers import (
 )
 from .services.requisition_workflow import RequisitionWorkflowService
 from .services.requisition_conversion import RequisitionConversionService
+from .services.purchase_order_numbering import PurchaseOrderNumberService
 from .services.requisition_status import canonicalize_pr_status, stored_values_for
 
 # Soft-coded pagination for vendor list - supports large page_size
@@ -1031,7 +1032,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     🔐 SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
     """
     
-    queryset = PurchaseOrder.objects.all().select_related('vendor').order_by('-created_at')
+    queryset = PurchaseOrder.objects.all().select_related('vendor', 'pr_reference').order_by('-created_at')
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_orders'
@@ -1069,6 +1070,16 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             return Response(
                 {'error': 'Only draft POs can be sent'},
                 status=status.HTTP_400_BAD_REQUEST
+            )
+
+        verified, message = PurchaseOrderNumberService.verify(
+            po.po_number,
+            po.pr_reference.pr_number if po.pr_reference_id else None,
+        )
+        if not verified:
+            return Response(
+                {'error': f'PO number verification failed: {message}'},
+                status=status.HTTP_400_BAD_REQUEST,
             )
         
         po.status = 'sent'

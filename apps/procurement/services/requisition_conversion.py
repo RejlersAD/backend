@@ -8,6 +8,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import ValidationError
 
 from ..models import PurchaseOrder, PurchaseRequisition, Vendor
+from .purchase_order_numbering import PurchaseOrderNumberService
 from .requisition_status import canonicalize_pr_status
 
 
@@ -17,12 +18,10 @@ class RequisitionConversionService:
     @classmethod
     def _po_number(cls, pr):
         """Derive a stable PO number from the unique PR number."""
-        pr_number = str(pr.pr_number or pr.id)
-        if '-PR-' in pr_number:
-            po_number = pr_number.replace('-PR-', '-PUR-', 1)
-        else:
-            po_number = f'PO-{pr_number}'
-        return po_number[:50]
+        try:
+            return PurchaseOrderNumberService.from_requisition(pr.pr_number)
+        except ValueError as exc:
+            raise ValidationError({'error': str(exc)}) from exc
 
     @classmethod
     def _total_amount(cls, pr):
