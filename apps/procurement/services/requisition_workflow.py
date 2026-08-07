@@ -89,16 +89,54 @@ class RequisitionWorkflowService:
 
     @classmethod
     def _enforce_assigned_approver(cls, stage, actor):
-        if cls._is_super_admin(actor):
-            return
-
         assigned_user_id = stage.get('user_id') or stage.get('approver_id')
         stage_name = stage.get('stage') or stage.get('role') or 'current approval stage'
 
         if not assigned_user_id:
             raise PermissionDenied(f'No approver is assigned to {stage_name}.')
+
+        # VP Operations is a controlled executive stage: the actor must be the
+        # selected user and must hold the matching position. Administrative
+        # access alone does not grant authority to approve on the VP's behalf.
+        if cls._stage_key(stage) == 'vp':
+            if str(assigned_user_id) != str(actor.id):
+                raise PermissionDenied(f'Only the assigned approver may act on {stage_name}.')
+            if not cls._holds_vp_operations_position(actor):
+                raise PermissionDenied(
+                    'Only the assigned Vice President of Operations may act on this stage.'
+                )
+            return
+
+        if cls._is_super_admin(actor):
+            return
+
         if str(assigned_user_id) != str(actor.id):
             raise PermissionDenied(f'Only the assigned approver may act on {stage_name}.')
+
+    @classmethod
+    def _holds_vp_operations_position(cls, actor):
+        """Return whether the actor has an active VP Operations title or role."""
+        try:
+            profile = actor.rbac_profile
+        except (AttributeError, ObjectDoesNotExist):
+            return False
+
+        position_values = [getattr(profile, 'job_title', '')]
+        try:
+            position_values.extend(
+                value
+                for role in profile.roles.filter(is_active=True)
+                for value in (getattr(role, 'name', ''), getattr(role, 'code', ''))
+            )
+        except (AttributeError, ObjectDoesNotExist):
+            pass
+
+        for value in position_values:
+            normalized = str(value or '').strip().lower().replace('_', ' ').replace('-', ' ')
+            is_vice_president = 'vice president' in normalized or 'vp' in normalized.split()
+            if is_vice_president and ('operation' in normalized or 'operations' in normalized):
+                return True
+        return False
 
     @classmethod
     def _enforce_expected_stage(cls, stage, expected_stage_key):
