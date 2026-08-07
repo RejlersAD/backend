@@ -115,28 +115,26 @@ class RequisitionWorkflowService:
 
     @classmethod
     def _holds_vp_operations_position(cls, actor):
-        """Return whether the actor has an active VP Operations title or role."""
+        """Return whether the actor's authoritative job title is VP Operations."""
         try:
             profile = actor.rbac_profile
         except (AttributeError, ObjectDoesNotExist):
             return False
 
-        position_values = [getattr(profile, 'job_title', '')]
-        try:
-            position_values.extend(
-                value
-                for role in profile.roles.filter(is_active=True)
-                for value in (getattr(role, 'name', ''), getattr(role, 'code', ''))
-            )
-        except (AttributeError, ObjectDoesNotExist):
-            pass
-
-        for value in position_values:
-            normalized = str(value or '').strip().lower().replace('_', ' ').replace('-', ' ')
-            is_vice_president = 'vice president' in normalized or 'vp' in normalized.split()
-            if is_vice_president and ('operation' in normalized or 'operations' in normalized):
-                return True
-        return False
+        normalized_title = ' '.join(
+            str(getattr(profile, 'job_title', '') or '')
+            .strip()
+            .lower()
+            .replace('_', ' ')
+            .replace('-', ' ')
+            .split()
+        )
+        return normalized_title in {
+            'vice president of operations',
+            'vice president operations',
+            'vp operations',
+            'vp of operations',
+        }
 
     @classmethod
     def _enforce_expected_stage(cls, stage, expected_stage_key):
