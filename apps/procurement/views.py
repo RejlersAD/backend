@@ -54,6 +54,7 @@ from .serializers import (
 from .services.requisition_workflow import RequisitionWorkflowService
 from .services.requisition_conversion import RequisitionConversionService
 from .services.purchase_order_numbering import PurchaseOrderNumberService
+from .services.goods_receipt import GoodsReceiptService
 from .services.requisition_status import canonicalize_pr_status, stored_values_for
 
 # Soft-coded pagination for vendor list - supports large page_size
@@ -1122,7 +1123,9 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     🔐 SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
     """
     
-    queryset = PurchaseOrder.objects.all().select_related('vendor', 'pr_reference').order_by('-created_at')
+    queryset = PurchaseOrder.objects.all().select_related(
+        'vendor', 'pr_reference'
+    ).prefetch_related('lines', 'receipts__lines').order_by('-created_at')
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_orders'
@@ -1194,6 +1197,12 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(po)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='receiving-summary')
+    def receiving_summary(self, request, pk=None):
+        """Line-level ordered, accepted, reserved, and remaining quantities."""
+        po = self.get_object()
+        return Response(GoodsReceiptService.receiving_summary(po))
     
     @action(detail=False, methods=['get'])
     def dashboard(self, request):
@@ -1237,10 +1246,15 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     🔐 SECURITY: Requires 'procurement_receipts' module access (soft-coded from rbac_config.py)
     """
     
-    queryset = Receipt.objects.all().select_related('purchase_order').order_by('-created_at')
+    queryset = Receipt.objects.all().select_related(
+        'purchase_order', 'received_by', 'inspected_by'
+    ).prefetch_related('lines__purchase_order_line').order_by('-created_at')
     serializer_class = ReceiptSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_receipts'
+    # Receipt lifecycle is controlled by the explicit submit/accept/reject/cancel
+    # actions. Accepted audit records must never be deleted through CRUD.
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1256,6 +1270,10 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(quality_check_passed=True)
         elif quality_filter == 'failed':
             queryset = queryset.filter(quality_check_passed=False)
+
+        purchase_order = self.request.query_params.get('purchase_order')
+        if purchase_order:
+            queryset = queryset.filter(purchase_order_id=purchase_order)
         
         # Search
         search = self.request.query_params.get('search', None)
@@ -1269,49 +1287,30 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return queryset
     
     @action(detail=True, methods=['post'])
+    def submit(self, request, pk=None):
+        receipt = GoodsReceiptService.submit(pk, request.user)
+        return Response(self.get_serializer(receipt).data)
+
+    @action(detail=True, methods=['post'])
     def accept(self, request, pk=None):
         """Accept received goods"""
-        receipt = self.get_object()
-        
-        if receipt.status != 'pending':
-            return Response(
-                {'error': 'Only pending receipts can be accepted'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        receipt.status = 'accepted'
-        receipt.quality_check_passed = True
-        
-        # Update PO status to completed
-        po = receipt.purchase_order
-        po.status = 'completed'
-        po.actual_delivery = timezone.now()
-        po.save()
-        
-        receipt.save()
-        
-        serializer = self.get_serializer(receipt)
-        return Response(serializer.data)
+        receipt = GoodsReceiptService.accept(pk, request.user)
+        return Response(self.get_serializer(receipt).data)
     
     @action(detail=True, methods=['post'])
     def reject_delivery(self, request, pk=None):
         """Reject received goods"""
-        receipt = self.get_object()
-        notes = request.data.get('notes', '')
-        
-        if receipt.status != 'pending':
-            return Response(
-                {'error': 'Only pending receipts can be rejected'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        receipt.status = 'rejected'
-        receipt.quality_check_passed = False
-        receipt.inspection_notes = notes
-        receipt.save()
-        
-        serializer = self.get_serializer(receipt)
-        return Response(serializer.data)
+        receipt = GoodsReceiptService.reject(
+            pk,
+            request.user,
+            request.data.get('reason') or request.data.get('notes'),
+        )
+        return Response(self.get_serializer(receipt).data)
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        receipt = GoodsReceiptService.cancel(pk, request.user, request.data.get('reason'))
+        return Response(self.get_serializer(receipt).data)
     
     @action(detail=False, methods=['get'])
     def dashboard(self, request):

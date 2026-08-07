@@ -15,7 +15,8 @@ from .models_master import (
 )
 
 __all__ = [
-    'Vendor', 'PurchaseRequisition', 'PurchaseOrder', 'Receipt', 'PODocument',
+    'Vendor', 'PurchaseRequisition', 'PurchaseOrder', 'PurchaseOrderLine',
+    'Receipt', 'ReceiptLine', 'PODocument',
     'Project', 'Budget', 'CostCenter',  # Master tables
 ]
 
@@ -628,21 +629,75 @@ class PurchaseOrder(TimeStampedModel):
             return False
 
 
+class PurchaseOrderLine(TimeStampedModel):
+    """A stable, receivable line on a Purchase Order."""
+
+    LINE_TYPE_CHOICES = [
+        ('goods', 'Goods'),
+        ('service', 'Service'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    purchase_order = models.ForeignKey(
+        PurchaseOrder,
+        on_delete=models.CASCADE,
+        related_name='lines',
+    )
+    line_number = models.PositiveIntegerField()
+    item_code = models.CharField(max_length=100, blank=True)
+    description = models.CharField(max_length=500)
+    line_type = models.CharField(max_length=20, choices=LINE_TYPE_CHOICES, default='goods')
+    ordered_quantity = models.DecimalField(max_digits=18, decimal_places=4)
+    unit_of_measure = models.CharField(max_length=30, default='EA')
+    unit_price = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    receipt_tolerance_percentage = models.DecimalField(max_digits=6, decimal_places=3, default=0)
+
+    class Meta:
+        db_table = 'procurement_order_lines'
+        ordering = ['line_number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['purchase_order', 'line_number'],
+                name='proc_po_line_number_uniq',
+            ),
+            models.CheckConstraint(
+                check=models.Q(ordered_quantity__gt=0),
+                name='proc_po_line_qty_positive',
+            ),
+            models.CheckConstraint(
+                check=models.Q(unit_price__gte=0),
+                name='proc_po_line_price_nonnegative',
+            ),
+            models.CheckConstraint(
+                check=models.Q(receipt_tolerance_percentage__gte=0),
+                name='proc_po_line_tolerance_nonnegative',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['purchase_order', 'line_number'], name='proc_po_line_lookup_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.purchase_order.po_number}/{self.line_number}: {self.description}'
+
+
 class Receipt(TimeStampedModel):
     """
     Goods Receipt - Track deliveries and receiving
     """
     
     STATUS_CHOICES = [
+        ('draft', 'Draft'),
         ('pending', 'Pending Inspection'),
         ('accepted', 'Accepted'),
         ('rejected', 'Rejected'),
         ('partial', 'Partially Accepted'),
+        ('cancelled', 'Cancelled'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     receipt_number = models.CharField(max_length=50, unique=True, db_index=True)
-    purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.CASCADE, related_name='receipts')
+    purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, related_name='receipts')
     
     # Receipt details
     receipt_date = models.DateField(auto_now_add=True)
@@ -654,7 +709,7 @@ class Receipt(TimeStampedModel):
     # Example: [{'item': 'Laptop', 'ordered_qty': 2, 'received_qty': 2, 'accepted_qty': 2}]
     
     # Quality check
-    quality_check_passed = models.BooleanField(default=True)
+    quality_check_passed = models.BooleanField(null=True, blank=True, default=None)
     inspection_notes = models.TextField(blank=True)
     
     # Oil & Gas Quality & Compliance
@@ -673,6 +728,17 @@ class Receipt(TimeStampedModel):
     delivery_note_number = models.CharField(max_length=100, blank=True)
     notes = models.TextField(blank=True)
     attachments = models.JSONField(default=list, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    inspected_at = models.DateTimeField(null=True, blank=True)
+    inspected_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='receipts_inspected',
+    )
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancellation_reason = models.TextField(blank=True)
     
     class Meta:
         db_table = 'procurement_receipts'
@@ -685,6 +751,61 @@ class Receipt(TimeStampedModel):
     
     def __str__(self):
         return f"GRN-{self.receipt_number} for {self.purchase_order.po_number}"
+
+
+class ReceiptLine(TimeStampedModel):
+    """Line-level delivery and inspection quantities matched to one PO line."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    receipt = models.ForeignKey(Receipt, on_delete=models.CASCADE, related_name='lines')
+    purchase_order_line = models.ForeignKey(
+        PurchaseOrderLine,
+        on_delete=models.PROTECT,
+        related_name='receipt_lines',
+    )
+    delivered_quantity = models.DecimalField(max_digits=18, decimal_places=4)
+    accepted_quantity = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    rejected_quantity = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    rejection_reason = models.TextField(blank=True)
+    batch_number = models.CharField(max_length=100, blank=True)
+    heat_number = models.CharField(max_length=100, blank=True)
+    serial_numbers = models.JSONField(default=list, blank=True)
+    inspection_notes = models.TextField(blank=True)
+
+    class Meta:
+        db_table = 'procurement_receipt_lines'
+        ordering = ['purchase_order_line__line_number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['receipt', 'purchase_order_line'],
+                name='proc_gr_po_line_uniq',
+            ),
+            models.CheckConstraint(
+                check=models.Q(delivered_quantity__gt=0),
+                name='proc_gr_line_delivered_positive',
+            ),
+            models.CheckConstraint(
+                check=models.Q(accepted_quantity__gte=0),
+                name='proc_gr_line_accepted_nonnegative',
+            ),
+            models.CheckConstraint(
+                check=models.Q(rejected_quantity__gte=0),
+                name='proc_gr_line_rejected_nonnegative',
+            ),
+            models.CheckConstraint(
+                check=models.Q(
+                    delivered_quantity__gte=models.F('accepted_quantity') + models.F('rejected_quantity')
+                ),
+                name='proc_gr_line_disposition_within_delivery',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['purchase_order_line'], name='proc_gr_po_line_idx'),
+            models.Index(fields=['receipt'], name='proc_gr_receipt_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.receipt.receipt_number}/{self.purchase_order_line.line_number}'
 
 
 class PODocument(TimeStampedModel):

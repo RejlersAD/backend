@@ -8,7 +8,11 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 
-from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
+from .models import (
+    Vendor, PurchaseRequisition, PurchaseOrder, PurchaseOrderLine,
+    Receipt, ReceiptLine, PODocument, PROCUREMENT_CATEGORIES,
+)
+from .services.goods_receipt import GoodsReceiptService
 from .services.purchase_order_numbering import PurchaseOrderNumberService
 from .services.requisition_numbering import RequisitionNumberService
 from .services.requisition_status import canonicalize_pr_status
@@ -441,6 +445,17 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         return uploaded
 
 
+class PurchaseOrderLineSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PurchaseOrderLine
+        fields = [
+            'id', 'line_number', 'item_code', 'description', 'line_type',
+            'ordered_quantity', 'unit_of_measure', 'unit_price',
+            'receipt_tolerance_percentage',
+        ]
+        read_only_fields = fields
+
+
 class PurchaseOrderSerializer(serializers.ModelSerializer):
     """Serializer for Purchase Order"""
     
@@ -457,6 +472,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     project_name = serializers.CharField(source='project.project_name', read_only=True, allow_null=True)
     project_display = serializers.SerializerMethodField()
     budget_allocation_display = serializers.CharField(source='budget_allocation.description', read_only=True, allow_null=True)
+    lines = PurchaseOrderLineSerializer(many=True, read_only=True)
     
     class Meta:
         model = PurchaseOrder
@@ -484,7 +500,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'payment_milestones', 'workshop_rates',
             
             # Items & pricing
-            'items',
+            'items', 'lines',
             
             # Dates
             'po_date', 'start_date', 'end_date', 'expected_delivery', 'actual_delivery',
@@ -515,7 +531,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             # Timestamps
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'po_number', 'po_date', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'po_number', 'po_date', 'status', 'actual_delivery',
+            'created_by', 'approved_by', 'created_at', 'updated_at',
+        ]
     
     def get_project_display(self, obj):
         """Get formatted project display string"""
@@ -545,7 +564,38 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         ) else 'general'
         validated_data['po_number'] = PurchaseOrderNumberService.next_number(order_type)
         validated_data['created_by'] = self.context['request'].user
-        return super().create(validated_data)
+        instance = super().create(validated_data)
+        GoodsReceiptService.ensure_po_lines(instance)
+        return instance
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        items_changed = 'items' in validated_data
+        instance = super().update(instance, validated_data)
+        if items_changed and not ReceiptLine.objects.filter(
+            purchase_order_line__purchase_order=instance
+        ).exists():
+            instance.lines.all().delete()
+            GoodsReceiptService.ensure_po_lines(instance)
+        return instance
+
+
+class ReceiptLineSerializer(serializers.ModelSerializer):
+    purchase_order_line_id = serializers.UUIDField(source='purchase_order_line.id', read_only=True)
+    line_number = serializers.IntegerField(source='purchase_order_line.line_number', read_only=True)
+    description = serializers.CharField(source='purchase_order_line.description', read_only=True)
+    unit_of_measure = serializers.CharField(source='purchase_order_line.unit_of_measure', read_only=True)
+    purchase_order_line = serializers.PrimaryKeyRelatedField(queryset=PurchaseOrderLine.objects.all())
+
+    class Meta:
+        model = ReceiptLine
+        fields = [
+            'id', 'purchase_order_line', 'purchase_order_line_id', 'line_number',
+            'description', 'unit_of_measure', 'delivered_quantity',
+            'accepted_quantity', 'rejected_quantity', 'rejection_reason',
+            'batch_number', 'heat_number', 'serial_numbers', 'inspection_notes',
+        ]
+        read_only_fields = ['id', 'purchase_order_line_id', 'line_number', 'description', 'unit_of_measure']
 
 
 class ReceiptSerializer(serializers.ModelSerializer):
@@ -554,20 +604,35 @@ class ReceiptSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     received_by_name = serializers.CharField(source='received_by.get_full_name', read_only=True, allow_null=True)
     po_number = serializers.CharField(source='purchase_order.po_number', read_only=True)
+    lines = ReceiptLineSerializer(many=True)
     
     class Meta:
         model = Receipt
         fields = [
             'id', 'receipt_number', 'purchase_order', 'po_number', 'receipt_date',
             'received_by', 'received_by_name', 'status', 'status_display',
-            'items_received', 'quality_check_passed', 'inspection_notes',
-            'delivery_note_number', 'notes', 'attachments', 'created_at', 'updated_at'
+            'items_received', 'lines', 'quality_check_passed', 'inspection_notes',
+            'certificates_received', 'heat_numbers', 'inspector_name', 'inspection_agency',
+            'inspection_report_number', 'ndt_performed', 'ndt_results',
+            'dimensional_check_passed', 'visual_inspection_passed',
+            'material_verification_passed', 'delivery_note_number', 'notes', 'attachments',
+            'submitted_at', 'inspected_at', 'inspected_by', 'cancelled_at',
+            'cancellation_reason', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'receipt_date', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'receipt_number', 'receipt_date', 'received_by', 'status',
+            'items_received', 'submitted_at', 'inspected_at', 'inspected_by',
+            'cancelled_at', 'cancellation_reason', 'created_at', 'updated_at',
+        ]
     
     def create(self, validated_data):
-        validated_data['received_by'] = self.context['request'].user
-        return super().create(validated_data)
+        return GoodsReceiptService.create(validated_data, self.context['request'].user)
+
+    def update(self, instance, validated_data):
+        if instance.status != 'draft':
+            raise serializers.ValidationError('Only draft receipts can be edited.')
+        validated_data.pop('lines', None)
+        return super().update(instance, validated_data)
 
 
 class ProcurementCategorySerializer(serializers.Serializer):
