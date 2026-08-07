@@ -21,10 +21,40 @@ from django.db import models as django_models
 from django.http import HttpResponse
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, Flowable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import io
+
+
+class RADAILogoMark(Flowable):
+    """Resolution-independent RADAI mark for controlled PDF exports."""
+
+    def __init__(self, size=42):
+        super().__init__()
+        self.width = size
+        self.height = size
+
+    def draw(self):
+        canvas = self.canv
+        scale = self.width / 60
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor('#2B3A55'))
+        canvas.setLineWidth(7 * scale)
+        canvas.setLineCap(1)
+        canvas.setLineJoin(1)
+
+        outer = canvas.beginPath()
+        outer.moveTo(8 * scale, 8 * scale)
+        outer.lineTo(52 * scale, 8 * scale)
+        outer.lineTo(52 * scale, 52 * scale)
+        canvas.drawPath(outer, stroke=1, fill=0)
+
+        diagonal = canvas.beginPath()
+        diagonal.moveTo(8 * scale, 8 * scale)
+        diagonal.lineTo(34 * scale, 35 * scale)
+        canvas.drawPath(diagonal, stroke=1, fill=0)
+        canvas.restoreState()
 
 from .models import (
     Vendor, 
@@ -861,9 +891,28 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         style_table_cell = ParagraphStyle('TableCell', parent=styles['Normal'], fontName='Helvetica', fontSize=8, leading=11, textColor=SLATE_DARK)
 
         # Header section
+        brand_identity = Table(
+            [[
+                RADAILogoMark(42),
+                Paragraph(
+                    '<b>RADAI PROCUREMENT</b><br/>'
+                    '<font size="8" color="#64748B">Oil &amp; Gas Standard Compliance</font>',
+                    style_company,
+                ),
+            ]],
+            colWidths=[0.68 * inch, 2.57 * inch],
+        )
+        brand_identity.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 0),
+            ('RIGHTPADDING', (0, 0), (0, 0), 8),
+            ('RIGHTPADDING', (1, 0), (1, 0), 0),
+            ('TOPPADDING', (0, 0), (-1, -1), 0),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+        ]))
         header_data = [
             [
-                Paragraph('<b>RADAI PROCUREMENT</b><br/><font size="8" color="#64748B">Oil &amp; Gas Standard Compliance</font>', style_company),
+                brand_identity,
                 [
                     Paragraph('<b>PURCHASE REQUISITION</b>', style_doc_title),
                     Paragraph('STATUS: <b>APPROVED</b>', style_badge),
@@ -873,6 +922,10 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         header_table = Table(header_data, colWidths=[3.25 * inch, 4.25 * inch])
         header_table.setStyle(TableStyle([
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 0),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+            ('TOPPADDING', (0, 0), (-1, -1), 0),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
         ]))
         story.append(header_table)
         story.append(Spacer(1, 10))
@@ -1289,7 +1342,17 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):
         receipt = GoodsReceiptService.submit(pk, request.user)
-        return Response(self.get_serializer(receipt).data)
+        response_data = dict(self.get_serializer(receipt).data)
+        # The service is transactional, so reaching this response means both the
+        # receipt and its submitted lifecycle state have committed successfully.
+        response_data.update({
+            'database_confirmed': True,
+            'message': (
+                f'Goods Receipt {receipt.receipt_number} was saved in the database '
+                'and submitted successfully.'
+            ),
+        })
+        return Response(response_data)
 
     @action(detail=True, methods=['post'])
     def accept(self, request, pk=None):

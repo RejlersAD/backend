@@ -604,12 +604,16 @@ class ReceiptSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     received_by_name = serializers.CharField(source='received_by.get_full_name', read_only=True, allow_null=True)
     po_number = serializers.CharField(source='purchase_order.po_number', read_only=True)
+    po_title = serializers.CharField(source='purchase_order.title', read_only=True)
+    vendor_name = serializers.CharField(source='purchase_order.vendor.name', read_only=True)
+    project_number = serializers.CharField(source='purchase_order.project_number', read_only=True)
     lines = ReceiptLineSerializer(many=True)
     
     class Meta:
         model = Receipt
         fields = [
-            'id', 'receipt_number', 'purchase_order', 'po_number', 'receipt_date',
+            'id', 'receipt_number', 'purchase_order', 'po_number', 'po_title',
+            'vendor_name', 'project_number', 'receipt_date',
             'received_by', 'received_by_name', 'status', 'status_display',
             'items_received', 'lines', 'quality_check_passed', 'inspection_notes',
             'certificates_received', 'heat_numbers', 'inspector_name', 'inspection_agency',
