@@ -108,7 +108,7 @@ class UserViewSet(viewsets.ModelViewSet):
 
 from rest_framework.decorators import api_view, permission_classes
 from datetime import datetime, timedelta
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Avg
 from django.utils import timezone
 
 
@@ -121,8 +121,10 @@ def dashboard_metrics(request):
     Returns: Real-time system statistics and utilization metrics.
     """
     from apps.pid_analysis.models import PIDDrawing
-    from apps.pfd_converter.models import PFDDocument
+    from apps.pfd_converter.models import PFDDocument, PIDConversion
     from apps.qhse.models import QHSERunningProject
+    from apps.electrical_checklist.models import ChecklistExtractionJob
+    from apps.usage_tracking.models import UsageLog
     
     # Time filters
     today = timezone.now().date()
@@ -153,7 +155,8 @@ def dashboard_metrics(request):
     active_users = User.objects.filter(
         last_login__gte=timezone.now() - timedelta(days=30)
     ).count()
-    
+    total_active_users = User.objects.filter(is_active=True).count()
+
     # Active users previous period (for trend)
     active_users_prev = User.objects.filter(
         last_login__gte=timezone.now() - timedelta(days=60),
@@ -186,7 +189,41 @@ def dashboard_metrics(request):
     pid_yesterday = PIDDrawing.objects.filter(created_at__date=yesterday).count()
     pfd_yesterday = PFDDocument.objects.filter(created_at__date=yesterday).count()
     documents_yesterday = pid_yesterday + pfd_yesterday
-    
+
+    pfd_avg_confidence = PIDConversion.objects.filter(
+        confidence_score__gt=0
+    ).aggregate(avg=Avg('confidence_score'))['avg'] or 0
+
+    checklist_avg_confidence = ChecklistExtractionJob.objects.filter(
+        confidence_score__isnull=False
+    ).aggregate(avg=Avg('confidence_score'))['avg'] or 0
+
+    usage_today = UsageLog.objects.filter(
+        timestamp__date=timezone.now().date()
+    ).count()
+
+    usage_30d = UsageLog.objects.filter(
+        timestamp__gte=timezone.now() - timedelta(days=30)
+    ).count()
+
+    cutoff_30d = timezone.now() - timedelta(days=30)
+
+    feature_usage = (
+        UsageLog.objects
+        .filter(timestamp__gte=cutoff_30d)
+        .values('discipline_key', 'discipline_label')
+        .annotate(count=Count('id'))
+        .order_by('-count')[:50]
+    )
+
+    feature_usage_map = {
+        f['discipline_key']: {
+            'count': f['count'],
+            'label': f['discipline_label']
+        }
+        for f in feature_usage
+    }
+
     # =======================================================================
     # FEATURE UTILIZATION METRICS
     # =======================================================================
@@ -306,6 +343,7 @@ def dashboard_metrics(request):
             'inactive_users_count': inactive_users_count,  # Inactive users
             'active_users': active_users,
             'active_users_previous': active_users_prev,
+            'total_active_users': total_active_users,
             'new_users_today': users_today,
             'new_users_yesterday': users_yesterday,
             'note': 'total_users shows active users only (is_active=True)'
@@ -318,7 +356,9 @@ def dashboard_metrics(request):
             'pid_drawings': pid_count,
             'pfd_documents': pfd_count,
             'qhse_documents': qhse_count,
-            'crs_documents': crs_count
+            'crs_documents': crs_count,
+            'pfd_confidence': round(float(pfd_avg_confidence), 1),
+            'checklist_confidence': round(float(checklist_avg_confidence), 1)
         },
         'features': {
             'total_usage': total_feature_runs,
@@ -326,7 +366,9 @@ def dashboard_metrics(request):
             'most_used_feature': most_used['feature_name'] if most_used else 'N/A',
             'most_used_count': most_used['usage_count'] if most_used else 0,
             'ai_features_usage': ai_features_count,
-            'utilization_percentage': round(feature_utilization, 1)
+            'utilization_percentage': round(feature_utilization, 1),
+            'usage_log_today': usage_today,
+            'usage_log_30d': usage_30d
         },
         'business': {
             'active_projects': active_projects,
@@ -342,7 +384,8 @@ def dashboard_metrics(request):
             'timestamp': timezone.now().isoformat(),
             'period': 'real-time',
             'timezone': str(timezone.get_current_timezone())
-        }
+        },
+        'feature_usage_map': feature_usage_map,
     }
     
     return Response(metrics)
@@ -964,70 +1007,60 @@ def usage_daily(request):
     """
     try:
         from apps.usage_tracking.models import UsageLog
-        from django.db.models import Count, Avg, Q
+        from django.db.models import Count, Avg
         from django.db.models.functions import TruncDate
 
-        # ── Sanitise input ───────────────────────────────────────────────────
         days_back  = min(max(int(request.GET.get('days', 30)), 1), 365)
         start_date = timezone.now() - timedelta(days=days_back)
 
         qs = UsageLog.objects.filter(timestamp__gte=start_date)
 
-        # ── Daily totals ─────────────────────────────────────────────────────
+        # Single query for daily totals
         by_day = (
             qs.annotate(date=TruncDate('timestamp'))
               .values('date')
-              .annotate(
-                  total   = Count('id'),
-                  success = Count('id', filter=Q(success=True)),
-                  failed  = Count('id', filter=Q(success=False)),
-              )
+              .annotate(total=Count('id'))
               .order_by('date')
         )
+        date_map = {str(r['date']): r['total'] for r in by_day}
 
-        date_map   = {str(r['date']): r for r in by_day}
         date_range = [
             (start_date.date() + timedelta(days=i)).isoformat()
             for i in range(days_back)
         ]
         daily_totals = [
-            {
-                'date':    d,
-                'total':   date_map[d]['total']   if d in date_map else 0,
-                'success': date_map[d]['success'] if d in date_map else 0,
-                'failed':  date_map[d]['failed']  if d in date_map else 0,
-            }
+            {'date': d, 'total': date_map.get(d, 0), 'success': date_map.get(d, 0), 'failed': 0}
             for d in date_range
         ]
 
-        # ── Discipline breakdown ──────────────────────────────────────────────
-        disc_qs     = (
+        # Single aggregation query
+        agg = qs.aggregate(total=Count('id'), avg_ms=Avg('response_time_ms'))
+        total_ct = agg['total'] or 0
+
+        # Discipline breakdown - single query
+        disc_qs = (
             qs.values('discipline_key', 'discipline_label')
               .annotate(count=Count('id'))
-              .order_by('-count')
+              .order_by('-count')[:20]
         )
-        grand_total = sum(r['count'] for r in disc_qs) or 1
+        grand_total = total_ct or 1
         discipline_breakdown = [
             {
-                'key':        r['discipline_key'],
-                'label':      r['discipline_label'],
-                'count':      r['count'],
+                'key': r['discipline_key'],
+                'label': r['discipline_label'],
+                'count': r['count'],
                 'percentage': round(r['count'] / grand_total * 100, 1),
             }
             for r in disc_qs
             if r['discipline_key'] not in ('other', '')
         ][:10]
 
-        # ── Summary ───────────────────────────────────────────────────────────
-        agg = qs.aggregate(
-            total      = Count('id'),
-            success_ct = Count('id', filter=Q(success=True)),
-            avg_ms     = Avg('response_time_ms'),
-        )
+        # Active users and peak - lightweight queries
         active_users = qs.values('user_email').exclude(user_email='').distinct().count()
-        total_ct     = agg['total'] or 0
-        success_rate = round(agg['success_ct'] / total_ct * 100, 1) if total_ct else 100.0
-        peak         = max(daily_totals, key=lambda d: d['total'], default={'date': None, 'total': 0})
+        peak = max(daily_totals, key=lambda d: d['total'], default={'date': None, 'total': 0})
+
+        success_ct = qs.filter(success=True).count()
+        success_rate = round(success_ct / total_ct * 100, 1) if total_ct else 100.0
 
         return Response({
             'summary': {

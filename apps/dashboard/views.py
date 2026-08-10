@@ -171,42 +171,77 @@ def _get_notifications_summary(user):
         return {'unread_count': 0, 'recent': []}
 
 
-def _get_usage_stats(user):
+def _get_usage_stats(user, role_code='viewer'):
     """Return user's personal 30-day usage aggregated by discipline."""
     try:
         from apps.usage_tracking.models import UsageLog
         cutoff = timezone.now() - timedelta(days=USAGE_CHART_DAYS)
-        logs = (
-            UsageLog.objects
-            .filter(user_email=user.email, timestamp__gte=cutoff)
-            .values('discipline_label', 'discipline_key')
-            .annotate(
-                count=__import__('django.db.models', fromlist=['Count']).Count('id')
-            )
-            .order_by('-count')
-        )
         from apps.usage_tracking.models import UsageLog
         from django.db.models import Count as DjCount
-        logs = (
-            UsageLog.objects
-            .filter(user_email=user.email, timestamp__gte=cutoff)
-            .values('discipline_label', 'discipline_key')
-            .annotate(count=DjCount('id'))
-            .order_by('-count')
-        )
-        total = UsageLog.objects.filter(user_email=user.email, timestamp__gte=cutoff).count()
-        today = UsageLog.objects.filter(
-            user_email=user.email,
-            timestamp__gte=timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        ).count()
+        if role_code == 'super_admin':
+            logs = (
+                UsageLog.objects
+                .filter(timestamp__gte=cutoff)
+                .values('discipline_label', 'discipline_key')
+                .annotate(count=DjCount('id'))
+                .order_by('-count')
+            )
+        else:
+            logs = (
+                UsageLog.objects
+                .filter(user_email=user.email, timestamp__gte=cutoff)
+                .values('discipline_label', 'discipline_key')
+                .annotate(count=DjCount('id'))
+                .order_by('-count')
+            )
+        if role_code == 'super_admin':
+            total = UsageLog.objects.filter(timestamp__gte=cutoff).count()
+            today = UsageLog.objects.filter(
+                timestamp__gte=timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            ).count()
+        else:
+            total = UsageLog.objects.filter(user_email=user.email, timestamp__gte=cutoff).count()
+            today = UsageLog.objects.filter(
+                user_email=user.email,
+                timestamp__gte=timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            ).count()
+
+        from django.db.models.functions import TruncDate
+
+        if role_code == 'super_admin':
+            weekly = (
+                UsageLog.objects
+                .filter(
+                    timestamp__gte=timezone.now() - timedelta(days=7)
+                )
+                .annotate(date=TruncDate('timestamp'))
+                .values('date')
+                .annotate(count=DjCount('id'))
+                .order_by('date')
+            )
+        else:
+            weekly = (
+                UsageLog.objects
+                .filter(
+                    user_email=user.email,
+                    timestamp__gte=timezone.now() - timedelta(days=7)
+                )
+                .annotate(date=TruncDate('timestamp'))
+                .values('date')
+                .annotate(count=DjCount('id'))
+                .order_by('date')
+            )
+        weekly_totals = {str(w['date']): w['count'] for w in weekly}
+
         return {
             'total_30d': total,
             'today': today,
             'by_discipline': list(logs[:8]),
+            'weekly_totals': weekly_totals,
         }
     except Exception as e:
         logger.warning('usage stats error: %s', e)
-        return {'total_30d': 0, 'today': 0, 'by_discipline': []}
+        return {'total_30d': 0, 'today': 0, 'by_discipline': [], 'weekly_totals': {}}
 
 
 def _get_my_modules(user):
@@ -360,17 +395,12 @@ class PersonalDashboardView(APIView):
         user = request.user
 
         # Super admin / staff → frontend handles global view
-        if user.is_superuser or user.is_staff:
-            return Response({'redirect': 'global'}, status=204)
-
         role_code = _get_primary_role_code(user)
-
-        # Also redirect super_admin role to global view
-        if role_code == 'super_admin':
-            return Response({'redirect': 'global'}, status=204)
+        if user.is_superuser or user.is_staff or role_code == 'super_admin':
+            role_code = 'super_admin'
 
         # Gather data in order
-        usage_stats = _get_usage_stats(user)
+        usage_stats = _get_usage_stats(user, role_code)
         notifications_summary = _get_notifications_summary(user)
         activity_feed = _get_activity_feed(user, role_code)
         my_modules = _get_my_modules(user)
