@@ -1,10 +1,50 @@
-"""
+﻿"""
 Procurement Management Serializers
 API data serialization for procurement workflows
 """
 
 from rest_framework import serializers
+from django.contrib.auth import get_user_model
+from django.core.exceptions import ObjectDoesNotExist
+from django.db import transaction
+
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
+from .services.purchase_order_numbering import PurchaseOrderNumberService
+from .services.requisition_numbering import RequisitionNumberService
+from .services.requisition_status import canonicalize_pr_status
+from .services.requisition_validation import (
+    line_items_total,
+    normalize_line_items,
+    validate_attachments,
+)
+
+
+PR_SERVER_CONTROLLED_FIELDS = {
+    'issued_by',
+    'status',
+    'current_approval_step',
+    'pm_name',
+    'pm_signature',
+    'pm_approval_status',
+    'pm_approved_at',
+    'eng_manager_name',
+    'eng_manager_signature',
+    'eng_manager_approval_status',
+    'eng_manager_approved_at',
+    'manager_projects_name',
+    'manager_projects_signature',
+    'manager_projects_approval_status',
+    'manager_projects_approved_at',
+    'vp_op_name',
+    'vp_op_signature',
+    'vp_op_approval_status',
+    'vp_op_approved_at',
+    'requested_by',
+    'approved_by',
+    'approved_at',
+    'rejection_reason',
+    'approval_hierarchy',
+}
 
 
 class VendorSerializer(serializers.ModelSerializer):
@@ -60,7 +100,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     
     # Display fields
     requisition_type_display = serializers.CharField(source='get_requisition_type_display', read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    status_display = serializers.SerializerMethodField()
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     pm_approval_status_display = serializers.CharField(source='get_pm_approval_status_display', read_only=True)
     vp_op_approval_status_display = serializers.CharField(source='get_vp_op_approval_status_display', read_only=True)
@@ -88,6 +128,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         required=False,
         help_text='Upload multiple files (will be stored in S3)'
     )
+
+    # API alias for frontend compatibility
+    approval_hierarchy = serializers.JSONField(source='approval_workflow_config', read_only=True)
+
+    SERVER_CONTROLLED_FIELDS = PR_SERVER_CONTROLLED_FIELDS
     
     class Meta:
         model = PurchaseRequisition
@@ -101,8 +146,14 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             # Vendor Integration (Smart linking)
             'vendor', 'vendor_details', 'vendor_name', 'vendor_selection_reason', 'ai_vendor_recommendations',
             
+            # Enhanced Vendor Selection (Feedback: Multiple vendors with ICV)
+            'selected_vendors', 'single_source_justification',
+            
             # Project/Product Section (Fields 6-7)
             'product_service', 'project_department',
+            
+            # Enhanced Project Selection (Feedback: Multiple projects)
+            'project_details',
             
             # Description Section (Field 8)
             'description_reason',
@@ -113,14 +164,17 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             # Pricing Section (Fields 10-13)
             'price_description', 'total_price', 'currency', 'price_remarks', 'net_total_excl_vat', 'price_remarks_data',
             
-            # Reference Section (Field 14)
-            'po_number_reference',
+            # Management Approval (Feedback: For PR > AED 100k)
+            'management_approval', 'management_approval_remarks', 'management_approval_evidence',
+            
+            # Reference Section (Field 14) - Enhanced with PO Applicable
+            'po_applicable', 'po_number_reference',
             
             # Purchase Recommendation Section (Field 15) - RENAMED from special_notes
             'purchase_recommendation',
             
             # Dynamic Approval Workflow
-            'approval_workflow_config', 'current_approval_step',
+            'approval_workflow_config', 'approval_hierarchy', 'current_approval_step',
             
             # Approvals Section (Fields 16-21) - Enhanced with new tiers
             'pm_name', 'pm_name_display', 'pm_signature', 'pm_approval_status', 'pm_approval_status_display', 'pm_approved_at',
@@ -136,7 +190,10 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'requested_by', 'requested_by_name', 'department', 'project', 'status',
             'status_display', 'priority', 'priority_display', 'required_date',
             'estimated_budget', 'items', 'approved_by', 'approved_by_name',
-            'approved_at', 'rejection_reason', 'notes', 
+            'approved_at', 'rejection_reason', 'notes',
+            
+            # Review Deadline & Resolution (Feedback fields)
+            'review_due_at', 'resolution_referral', 
             
             # Attachments
             'attachments', 'attachments_files',
@@ -144,14 +201,158 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             # Timestamps
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'pr_number', 'created_at', 'updated_at', 'attachments']
+        read_only_fields = [
+            'id', 'pr_number', 'created_at', 'updated_at', 'attachments',
+            *PR_SERVER_CONTROLLED_FIELDS,
+        ]
+
+    def _is_super_admin(self, user):
+        if getattr(user, 'is_superuser', False):
+            return True
+
+        try:
+            return user.rbac_profile.roles.filter(
+                code='super_admin',
+                is_active=True,
+            ).exists()
+        except (AttributeError, ObjectDoesNotExist):
+            return False
+
+    def validate_approval_workflow_config(self, value):
+        """Validate approver assignments and discard client-supplied approval state."""
+        if not isinstance(value, list):
+            raise serializers.ValidationError('Approval workflow must be a list of stages.')
+
+        if len(value) > 20:
+            raise serializers.ValidationError('Approval workflow cannot contain more than 20 stages.')
+
+        User = get_user_model()
+        normalized_workflow = []
+
+        for index, stage in enumerate(value):
+            if not isinstance(stage, dict):
+                raise serializers.ValidationError(f'Approval stage {index + 1} must be an object.')
+
+            role = str(stage.get('role') or '').strip()
+            if not role:
+                raise serializers.ValidationError(f'Approval stage {index + 1} requires a role.')
+            if len(role) > 100:
+                raise serializers.ValidationError(f'Approval stage {index + 1} role is too long.')
+
+            assigned_user_id = stage.get('user_id') or stage.get('approver_id')
+            if not assigned_user_id:
+                raise serializers.ValidationError(f'Approval stage {index + 1} requires an approver.')
+
+            try:
+                approver = User.objects.get(pk=assigned_user_id, is_active=True)
+            except (User.DoesNotExist, ValueError, TypeError):
+                raise serializers.ValidationError(
+                    f'Approval stage {index + 1} must reference an active user.'
+                )
+
+            try:
+                can_review_requisitions = (
+                    approver.is_superuser
+                    or approver.rbac_profile.has_module_access('procurement_requisitions')
+                )
+            except ObjectDoesNotExist:
+                can_review_requisitions = False
+            if not can_review_requisitions:
+                raise serializers.ValidationError(
+                    f'Approval stage {index + 1} approver requires Purchase Requisitions module access.'
+                )
+
+            normalized_stage = {
+                'step': index + 1,
+                'role': role,
+                'user_id': str(approver.pk),
+                'user_name': approver.get_full_name() or approver.email,
+                'status': 'pending',
+                'approved_at': None,
+            }
+
+            stage_name = str(stage.get('stage') or '').strip()
+            if stage_name:
+                normalized_stage['stage'] = stage_name[:150]
+
+            normalized_workflow.append(normalized_stage)
+
+        return normalized_workflow
+
+    def validate_items(self, value):
+        return normalize_line_items(value)
+
+    def validate_attachments_files(self, value):
+        existing = self.instance.attachments if self.instance else []
+        return validate_attachments(value, existing)
+
+    def validate(self, attrs):
+        attempted_server_fields = self.SERVER_CONTROLLED_FIELDS.intersection(self.initial_data.keys())
+        if attempted_server_fields:
+            raise serializers.ValidationError({
+                field: 'This field is controlled by the requisition workflow.'
+                for field in sorted(attempted_server_fields)
+            })
+
+        if self.instance and 'approval_workflow_config' in attrs:
+            if self.instance.status != 'draft':
+                raise serializers.ValidationError({
+                    'approval_workflow_config': 'Approval assignments can only be changed while the requisition is a draft.'
+                })
+
+            request = self.context.get('request')
+            user = getattr(request, 'user', None)
+            if (
+                not user
+                or (
+                    str(self.instance.issued_by_id) != str(user.id)
+                    and not self._is_super_admin(user)
+                )
+            ):
+                raise serializers.ValidationError({
+                    'approval_workflow_config': 'Only the requisition issuer may change draft approval assignments.'
+                })
+
+        if 'items' in attrs and attrs['items']:
+            calculated_total = line_items_total(attrs['items'])
+            requested_total = attrs.get(
+                'total_price',
+                getattr(self.instance, 'total_price', None) if self.instance else None,
+            )
+            if requested_total is None:
+                attrs['total_price'] = calculated_total
+                attrs.setdefault('net_total_excl_vat', calculated_total)
+            elif requested_total != calculated_total:
+                raise serializers.ValidationError({
+                    'total_price': 'Total price must equal the sum of the line items.'
+                })
+
+        return attrs
     
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
+
+    def get_status_display(self, obj):
+        return canonicalize_pr_status(obj.status).replace('_', ' ').title()
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['status'] = canonicalize_pr_status(instance.status)
+        return data
     
+    @transaction.atomic
     def create(self, validated_data):
         # Extract files if present
         files = validated_data.pop('attachments_files', [])
+<<<<<<< HEAD
+=======
+        management_evidence = validated_data.pop('management_approval_evidence_file', None)
+        # This JSON column is NOT NULL. Normalize omitted/null multipart data
+        # before constructing the model instance.
+        validated_data['management_approval_evidence'] = (
+            validated_data.get('management_approval_evidence') or []
+        )
+>>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         
         # Set issued_by to current user if not provided
         if not validated_data.get('issued_by'):
@@ -164,7 +365,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         
         # Auto-generate PR number if not provided
         if not validated_data.get('pr_number'):
-            validated_data['pr_number'] = self._generate_pr_number()
+            validated_data['pr_number'] = RequisitionNumberService.next_number(
+                validated_data.get('requisition_type', 'project')
+            )
         
         # Auto-generate title from product_service if not provided
         if not validated_data.get('title') and validated_data.get('product_service'):
@@ -179,9 +382,18 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         
         return instance
     
+    @transaction.atomic
     def update(self, instance, validated_data):
         # Extract files if present
         files = validated_data.pop('attachments_files', [])
+<<<<<<< HEAD
+=======
+        management_evidence = validated_data.pop('management_approval_evidence_file', None)
+        if 'management_approval_evidence' in validated_data:
+            validated_data['management_approval_evidence'] = (
+                validated_data.get('management_approval_evidence') or []
+            )
+>>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         
         # Update the instance
         instance = super().update(instance, validated_data)
@@ -192,53 +404,35 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         
         return instance
     
-    def _generate_pr_number(self):
-        """Generate unique PR number in format: RAD-PRJ-PR-XXXX_YYYY"""
-        from datetime import datetime
-        from django.db.models import Max
-        
-        # Get current year
-        year = datetime.now().year
-        
-        # Get latest PR number for this year
-        latest_pr = PurchaseRequisition.objects.filter(
-            pr_number__endswith=f'_{year}'
-        ).aggregate(Max('pr_number'))
-        
-        if latest_pr['pr_number__max']:
-            # Extract number and increment
-            last_num = int(latest_pr['pr_number__max'].split('-')[3].split('_')[0])
-            new_num = last_num + 1
-        else:
-            new_num = 1
-        
-        return f"RAD-PRJ-PR-{new_num:04d}_{year}"
-    
     def _upload_attachments(self, instance, files):
         """Upload files to S3 and update attachments field"""
         from apps.core.s3_utils import S3Client
-        from datetime import datetime
+        from django.utils import timezone
         import logging
+        import uuid
         
         logger = logging.getLogger(__name__)
         s3_client = S3Client()
         
-        attachments = instance.attachments or []
+        attachments = list(instance.attachments or [])
+        validated_files = validate_attachments(files, attachments)
+        uploaded = []
         
-        for file in files:
+        for file in validated_files:
             try:
-                # Generate S3 key
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                s3_key = f"procurement/requisitions/{instance.pr_number}/{timestamp}_{file.name}"
+                safe_name = file.safe_name
+                object_id = uuid.uuid4().hex
+                s3_key = f"procurement/requisitions/{instance.pr_number}/{object_id}_{safe_name}"
                 
                 # Upload to S3
                 success = s3_client.upload_file(
                     file_obj=file,
                     s3_key=s3_key,
+                    content_type=file.verified_content_type,
                     metadata={
                         'pr_number': instance.pr_number,
                         'uploaded_by': self.context['request'].user.email,
-                        'original_filename': file.name
+                        'original_filename': safe_name,
                     }
                 )
                 
@@ -248,23 +442,32 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                     
                     # Add to attachments
                     attachments.append({
-                        'filename': file.name,
+                        'filename': safe_name,
                         's3_key': s3_key,
                         's3_url': s3_url,
-                        'uploaded_at': datetime.now().isoformat(),
+                        'uploaded_at': timezone.now().isoformat(),
                         'uploaded_by': self.context['request'].user.email,
                         'file_size': file.size,
-                        'content_type': file.content_type
+                        'content_type': file.verified_content_type,
                     })
-                    logger.info(f"Uploaded {file.name} to S3: {s3_key}")
+                    uploaded.append(attachments[-1])
+                    logger.info(f"Uploaded {safe_name} to S3: {s3_key}")
                 else:
-                    logger.error(f"Failed to upload {file.name} to S3")
+                    raise serializers.ValidationError(
+                        {'attachments_files': f'Failed to store {safe_name}.'}
+                    )
+            except serializers.ValidationError:
+                raise
             except Exception as e:
-                logger.error(f"Error uploading {file.name}: {str(e)}")
+                logger.error(f"Error uploading attachment: {type(e).__name__}")
+                raise serializers.ValidationError(
+                    {'attachments_files': f'Failed to store {file.safe_name}.'}
+                ) from e
         
         # Save updated attachments
         instance.attachments = attachments
         instance.save(update_fields=['attachments'])
+        return uploaded
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
@@ -275,6 +478,9 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     category_display = serializers.SerializerMethodField()
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True)
     approved_by_user_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True)
+    pr_number = serializers.CharField(source='pr_reference.pr_number', read_only=True, allow_null=True)
+    po_number_verified = serializers.SerializerMethodField()
+    po_number_verification_message = serializers.SerializerMethodField()
     
     # Project linkage fields (soft-coded relationship)
     project_name = serializers.CharField(source='project.project_name', read_only=True, allow_null=True)
@@ -285,7 +491,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         model = PurchaseOrder
         fields = [
             # Core PO fields
-            'id', 'po_number', 'pr_reference', 'pr_requester_name',
+            'id', 'po_number', 'po_number_verified', 'po_number_verification_message',
+            'pr_reference', 'pr_number', 'pr_requester_name',
             'vendor', 'vendor_name', 'title', 'description', 
             'status', 'status_display', 'category', 'category_display', 'form_note',
             
@@ -321,6 +528,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             # Approval section
             'approved_by', 'approved_by_user_name', 'approved_by_name', 'approved_by_title', 'approved_date',
             'approval_signature', 'approval_stamp',
+            'technical_approver', 'financial_approver', 'management_approver',
+            'approval_log', 'final_approver_notes',
             
             # Order confirmation (vendor response)
             'confirmation_date', 'seller_contact_person', 'seller_phone', 'seller_fax', 'seller_email',
@@ -335,7 +544,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             # Timestamps
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'po_date', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'po_number', 'po_date', 'created_at', 'updated_at']
     
     def get_project_display(self, obj):
         """Get formatted project display string"""
@@ -345,8 +554,25 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
+
+    def _po_number_verification(self, obj):
+        pr_number = obj.pr_reference.pr_number if obj.pr_reference_id else None
+        return PurchaseOrderNumberService.verify(obj.po_number, pr_number)
+
+    def get_po_number_verified(self, obj):
+        return self._po_number_verification(obj)[0]
+
+    def get_po_number_verification_message(self, obj):
+        return self._po_number_verification(obj)[1]
     
+    @transaction.atomic
     def create(self, validated_data):
+        # Official PO identifiers are assigned only by the locked server-side sequence.
+        order_type = 'project' if any(
+            validated_data.get(field)
+            for field in ('project', 'project_number', 'rad_project_no')
+        ) else 'general'
+        validated_data['po_number'] = PurchaseOrderNumberService.next_number(order_type)
         validated_data['created_by'] = self.context['request'].user
         return super().create(validated_data)
 
@@ -401,9 +627,9 @@ class PODocumentSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 # MASTER DATABASE SERIALIZERS - Professional Project-Based Procurement
-# ══════════════════════════════════════════════════════════════════════════════
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 
 class CostCenterSerializer(serializers.ModelSerializer):
     """Cost Center master table serializer"""
@@ -494,7 +720,7 @@ class ProjectListSerializer(serializers.ModelSerializer):
     def get_project_manager_display(self, obj):
         if obj.project_manager:
             return obj.project_manager.get_full_name()
-        return obj.project_manager_name or '—'
+        return obj.project_manager_name or 'ΓÇö'
     
     def get_total_budget(self, obj):
         return float(obj.get_total_budget())

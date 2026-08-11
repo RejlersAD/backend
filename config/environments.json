@@ -26,11 +26,11 @@
       },
       "database": {
         "engine": "postgresql",
-        "name": "radai_preprod",
-        "user": "postgres",
-        "password": "postgres",
-        "host": "host.docker.internal",
-        "port": 5434
+        "name": "radai_dev",
+        "user": "radai_user",
+        "password": "radai_local_pass_123",
+        "host": "postgres_local",
+        "port": 5432
       },
       "redis": {
         "host": "redis",

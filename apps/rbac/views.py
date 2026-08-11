@@ -18,7 +18,7 @@ from .models import (
 from .serializers import (
     OrganizationSerializer, ModuleSerializer, PermissionSerializer,
     RoleSerializer, RoleListSerializer, RolePermissionSerializer, RoleModuleSerializer,
-    UserProfileSerializer, UserProfileListSerializer, UserRoleSerializer,
+    UserProfileSerializer, UserProfileSelfSerializer, UserProfileListSerializer, UserRoleSerializer,
     UserStorageSerializer, AuditLogSerializer,
     UserPermissionCheckSerializer, UserModuleCheckSerializer,
     AccessRequestSerializer,
@@ -569,7 +569,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         if role_code:
             queryset = queryset.filter(roles__code=role_code, roles__is_active=True)
 
-        return queryset
+        # Keep pagination stable so records cannot move between API pages.
+        return queryset.order_by('user__first_name', 'user__last_name', 'user__email')
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -1543,16 +1544,20 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             print(f"[DEBUG /rbac/users/me/] User authenticated: {request.user.is_authenticated}")
             print(f"[DEBUG /rbac/users/me/] User email: {getattr(request.user, 'email', 'N/A')}")
             
-            # Try to get existing profile with optimized query
-            # Use select_related and prefetch_related to avoid N+1 queries
-            profile = UserProfile.objects.select_related(
-                'user', 
-                'organization'
-            ).prefetch_related(
-                'roles',
-                'roles__permissions',  # Prefetch permissions through roles
-                'userrole_set__role'
-            ).filter(
+            profile_view = request.query_params.get('view') == 'profile'
+            profile_queryset = UserProfile.objects.select_related(
+                'user', 'organization', 'manager__user', 'engineer_profile'
+            )
+            if not profile_view:
+                # Access-control consumers need the full role graph. The
+                # Profile screen deliberately skips it via ?view=profile.
+                profile_queryset = profile_queryset.prefetch_related(
+                    'roles',
+                    'roles__permissions',
+                    'userrole_set__role'
+                )
+
+            profile = profile_queryset.filter(
                 user=request.user,
                 is_deleted=False
             ).first()
@@ -1576,7 +1581,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             
             # Try to serialize the profile
             print(f"[DEBUG /rbac/users/me/] Serializing profile...")
-            serializer = self.get_serializer(profile)
+            serializer = (
+                UserProfileSelfSerializer(profile, context={'request': request})
+                if profile_view
+                else self.get_serializer(profile)
+            )
             data = serializer.data
             print(f"[DEBUG /rbac/users/me/] Serialization successful")
             print(f"[DEBUG /rbac/users/me/] Roles count: {len(data.get('roles', []))}")
@@ -1712,7 +1721,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             )
             
             # Return updated profile
-            serializer = self.get_serializer(profile)
+            serializer = (
+                UserProfileSelfSerializer(profile, context={'request': request})
+                if request.query_params.get('view') == 'profile'
+                else self.get_serializer(profile)
+            )
             response_data = serializer.data
             print(f"[DEBUG] Profile response - phone: {response_data.get('phone')}, profile_photo: {response_data.get('profile_photo')}")
             return Response(response_data)

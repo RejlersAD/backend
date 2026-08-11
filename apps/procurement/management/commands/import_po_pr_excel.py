@@ -121,9 +121,8 @@ STATUS_NORMALIZATION = {
     'pr': {
         'draft': ['draft', 'new', 'pending'],
         'submitted': ['submitted', 'pending approval', 'submitted for approval'],
-        'pm_approved': ['pm approved', 'manager approved', 'approved by pm'],
-        'vp_approved': ['vp approved', 'senior approved'],
-        'fully_approved': ['approved', 'fully approved', 'final approval'],
+        'in_review': ['in review', 'pm approved', 'manager approved', 'approved by pm'],
+        'approved': ['approved', 'fully approved', 'final approval', 'vp approved', 'senior approved'],
         'rejected': ['rejected', 'not approved', 'declined'],
         'cancelled': ['cancelled', 'canceled', 'void'],
         'converted': ['converted', 'po created', 'converted to po'],
