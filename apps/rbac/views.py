@@ -5,10 +5,12 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.views import APIView
 from django.utils import timezone
 from django.db.models import Q, Count
 from django_filters.rest_framework import DjangoFilterBackend
+from django.http import FileResponse
 
 from .models import (
     Organization, Module, Permission, Role, RolePermission, RoleModule,
@@ -1691,10 +1693,59 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 if isinstance(ep_raw, dict):
                     from apps.rbac.models import EngineerProfile
                     ep_obj, _ = EngineerProfile.objects.get_or_create(user_profile=profile)
+
+                    def normalize_names(values, field_name, max_items):
+                        if not isinstance(values, list):
+                            raise ValueError(f'{field_name} must be a list.')
+                        if len(values) > max_items:
+                            raise ValueError(f'{field_name} cannot contain more than {max_items} entries.')
+                        normalized = []
+                        seen = set()
+                        for value in values:
+                            name = ' '.join(str(value or '').strip().split())
+                            if not name or len(name) > 100:
+                                raise ValueError(f'Each {field_name} entry must be between 1 and 100 characters.')
+                            key = name.casefold()
+                            if key not in seen:
+                                normalized.append(name)
+                                seen.add(key)
+                        return normalized
+
+                    try:
+                        disciplines = normalize_names(
+                            ep_raw.get('engineering_disciplines', ep_obj.engineering_disciplines),
+                            'engineering discipline',
+                            30,
+                        )
+                        raw_skills = ep_raw.get('technical_skills', ep_obj.technical_skills)
+                        if not isinstance(raw_skills, list) or len(raw_skills) > 100:
+                            raise ValueError('Technical skills must be a list containing no more than 100 entries.')
+                        skills = []
+                        seen_skills = set()
+                        for skill in raw_skills:
+                            if not isinstance(skill, dict):
+                                raise ValueError('Each technical skill must contain a name and proficiency.')
+                            name = ' '.join(str(skill.get('name', '')).strip().split())
+                            if not name or len(name) > 100:
+                                raise ValueError('Each technical skill name must be between 1 and 100 characters.')
+                            key = name.casefold()
+                            if key in seen_skills:
+                                continue
+                            proficiency = int(skill.get('proficiency', 3))
+                            if proficiency < 1 or proficiency > 5:
+                                raise ValueError('Technical skill proficiency must be between 1 and 5.')
+                            skills.append({'name': name, 'proficiency': proficiency})
+                            seen_skills.add(key)
+                    except (TypeError, ValueError) as validation_error:
+                        return Response(
+                            {'engineer_profile': [str(validation_error)]},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+
                     ep_obj.expertise_level          = ep_raw.get('expertise_level', ep_obj.expertise_level)
                     ep_obj.years_experience         = int(ep_raw.get('years_experience') or ep_obj.years_experience or 0)
-                    ep_obj.engineering_disciplines  = ep_raw.get('engineering_disciplines', ep_obj.engineering_disciplines)
-                    ep_obj.technical_skills         = ep_raw.get('technical_skills', ep_obj.technical_skills)
+                    ep_obj.engineering_disciplines  = disciplines
+                    ep_obj.technical_skills         = skills
                     ep_obj.languages                = ep_raw.get('languages', ep_obj.languages)
                     ep_obj.certifications           = ep_raw.get('certifications', ep_obj.certifications)
                     ep_obj.availability_status      = ep_raw.get('availability_status', ep_obj.availability_status)
@@ -3123,6 +3174,11 @@ class AchievementViewSet(viewsets.ModelViewSet):
         """Return user's own achievements, or all if admin."""
         from .models import Achievement
         user = self.request.user
+
+        # Profile screens must remain scoped to the signed-in user, including
+        # when that user also has staff/admin privileges.
+        if self.request.query_params.get('mine', '').lower() in ('1', 'true', 'yes'):
+            return Achievement.objects.filter(user_profile=user.rbac_profile)
         
         # Admins can see all achievements
         if user.is_superuser or user.is_staff:
@@ -3187,6 +3243,9 @@ class WorkExperienceViewSet(viewsets.ModelViewSet):
         """Return user's own experience, or all if admin."""
         from .models import WorkExperience
         user = self.request.user
+
+        if self.request.query_params.get('mine', '').lower() in ('1', 'true', 'yes'):
+            return WorkExperience.objects.filter(user_profile=user.rbac_profile)
         
         # Admins can see all
         if user.is_superuser or user.is_staff:
@@ -3241,6 +3300,9 @@ class SocialMediaLinkViewSet(viewsets.ModelViewSet):
         """Return user's own social links, or all if admin."""
         from .models import SocialMediaLink
         user = self.request.user
+
+        if self.request.query_params.get('mine', '').lower() in ('1', 'true', 'yes'):
+            return SocialMediaLink.objects.filter(user_profile=user.rbac_profile)
         
         # Admins can see all
         if user.is_superuser or user.is_staff:
@@ -3291,6 +3353,114 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
     filterset_fields = ['document_type', 'verification_status', 'is_active']
     ordering_fields = ['document_type', 'created_at', 'expiry_date']
     ordering = ['-created_at']
+
+    def _require_document_reviewer(self, request):
+        """Enforce RBAC ownership of organization-wide document review."""
+        if not (request.user.is_superuser or request.user.is_staff):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Only authorized RBAC administrators can review profile documents.')
+
+    @action(detail=False, methods=['get'], url_path='pending-verification')
+    def pending_verification(self, request):
+        """Return active profile documents awaiting administrator verification."""
+        self._require_document_reviewer(request)
+        from .models import ProfileDocument
+
+        queryset = ProfileDocument.objects.filter(
+            verification_status='pending',
+            is_active=True,
+        ).select_related('user_profile__user', 'verified_by').order_by('created_at')
+
+        if request.query_params.get('count_only', '').lower() in ('1', 'true', 'yes'):
+            return Response({'count': queryset.count()})
+
+        try:
+            limit = min(max(int(request.query_params.get('limit', 50)), 1), 200)
+        except (TypeError, ValueError):
+            limit = 50
+        serializer = self.get_serializer(queryset[:limit], many=True)
+        return Response({'count': queryset.count(), 'results': serializer.data})
+
+    @action(detail=True, methods=['get'], url_path='content')
+    def content(self, request, pk=None):
+        """Stream a profile document inline through the authenticated API."""
+        import mimetypes
+        import os
+
+        document = self.get_object()
+        if not document.document_file:
+            return Response(
+                {'detail': 'Document file not available.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            document.document_file.open('rb')
+            filename = os.path.basename(document.document_file.name)
+            content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+            response = FileResponse(
+                document.document_file,
+                content_type=content_type,
+                as_attachment=False,
+                filename=filename,
+            )
+            response['Cache-Control'] = 'private, no-store'
+            response['X-Content-Type-Options'] = 'nosniff'
+            return response
+        except FileNotFoundError:
+            return Response(
+                {'detail': 'The stored document file could not be found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+    @action(
+        detail=False,
+        methods=['post'],
+        url_path='extract-metadata',
+        parser_classes=[MultiPartParser, FormParser],
+    )
+    def extract_metadata(self, request):
+        """Extract editable metadata from an uploaded PDF or image locally."""
+        uploaded_file = request.FILES.get('document_file')
+        if not uploaded_file:
+            return Response(
+                {'document_file': ['A document file is required.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png'}
+        from pathlib import Path
+        extension = Path(uploaded_file.name or '').suffix.lower()
+        if extension not in allowed_extensions:
+            return Response(
+                {'document_file': ['Only PDF, JPG, JPEG, and PNG files can be analyzed.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if uploaded_file.size > 10 * 1024 * 1024:
+            return Response(
+                {'document_file': ['The document must not exceed 10 MB.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            from .profile_document_extractor import extract_profile_document_metadata
+            result = extract_profile_document_metadata(
+                uploaded_file.read(),
+                uploaded_file.name,
+                uploaded_file.content_type or '',
+                request.data.get('document_type', ''),
+            )
+            return Response(result)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception('Profile document extraction failed')
+            return Response(
+                {
+                    'detail': 'The document could not be analyzed. You can still enter its details manually.',
+                    'extraction_error': str(exc) if request.user.is_staff else None,
+                },
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
     
     def get_serializer_class(self):
         from .serializers import ProfileDocumentSerializer
@@ -3372,12 +3542,13 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def verify(self, request, pk=None):
         """Admin-only: Verify a document."""
+        self._require_document_reviewer(request)
         document = self.get_object()
-        
-        # Check admin permission
-        if not (request.user.is_superuser or request.user.is_staff):
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('Only admins can verify documents.')
+        if document.verification_status != 'pending':
+            return Response(
+                {'detail': f'Document is already {document.verification_status}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         
         from django.utils import timezone
         
@@ -3387,6 +3558,18 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
         document.verified_at = timezone.now()
         document.rejection_reason = ''
         document.save()
+
+        create_audit_log(
+            user=request.user,
+            action='verify',
+            resource_type='ProfileDocument',
+            resource_id=document.id,
+            resource_repr=str(document),
+            changes={'verification_status': {'old': 'pending', 'new': 'verified'}},
+            metadata={'document_owner': document.user_profile.user.email},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+        )
         
         serializer = self.get_serializer(document)
         return Response(serializer.data)
@@ -3394,19 +3577,40 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def reject(self, request, pk=None):
         """Admin-only: Reject a document."""
+        self._require_document_reviewer(request)
         document = self.get_object()
-        
-        # Check admin permission
-        if not (request.user.is_superuser or request.user.is_staff):
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('Only admins can reject documents.')
-        
-        reason = request.data.get('reason', 'Document rejected by admin')
+        if document.verification_status != 'pending':
+            return Response(
+                {'detail': f'Document is already {document.verification_status}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        reason = str(request.data.get('reason', '')).strip()
+        if not reason:
+            return Response(
+                {'reason': ['A rejection reason is required.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         
         # Update rejection
         document.verification_status = 'rejected'
         document.rejection_reason = reason
         document.save()
+
+        create_audit_log(
+            user=request.user,
+            action='reject',
+            resource_type='ProfileDocument',
+            resource_id=document.id,
+            resource_repr=str(document),
+            changes={
+                'verification_status': {'old': 'pending', 'new': 'rejected'},
+                'rejection_reason': reason,
+            },
+            metadata={'document_owner': document.user_profile.user.email},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+        )
         
         serializer = self.get_serializer(document)
         return Response(serializer.data)
