@@ -795,6 +795,26 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return instance
 
 
+class UserProfileSelfSerializer(UserProfileSerializer):
+    """Lightweight current-user profile payload for the Profile screen.
+
+    The full serializer resolves the complete permission and module graph. That
+    data is necessary for access-control consumers, but it is not used by the
+    personal profile editor and can make a remote-database request needlessly
+    expensive.
+    """
+
+    class Meta(UserProfileSerializer.Meta):
+        fields = [
+            'id', 'user', 'organization', 'organization_name', 'status',
+            'is_mfa_enabled', 'employee_id', 'department', 'job_title',
+            'manager_name', 'manager_detail', 'last_login_ip', 'last_login_at',
+            'must_change_password', 'profile_photo', 'phone', 'bio', 'location',
+            'engineer_profile', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
 class UserProfileListSerializer(serializers.ModelSerializer):
     """
     Optimized user profile serializer for lists.

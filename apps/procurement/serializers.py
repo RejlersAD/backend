@@ -344,6 +344,15 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         # Extract files if present
         files = validated_data.pop('attachments_files', [])
+<<<<<<< HEAD
+=======
+        management_evidence = validated_data.pop('management_approval_evidence_file', None)
+        # This JSON column is NOT NULL. Normalize omitted/null multipart data
+        # before constructing the model instance.
+        validated_data['management_approval_evidence'] = (
+            validated_data.get('management_approval_evidence') or []
+        )
+>>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         
         # Set issued_by to current user if not provided
         if not validated_data.get('issued_by'):
@@ -377,6 +386,14 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         # Extract files if present
         files = validated_data.pop('attachments_files', [])
+<<<<<<< HEAD
+=======
+        management_evidence = validated_data.pop('management_approval_evidence_file', None)
+        if 'management_approval_evidence' in validated_data:
+            validated_data['management_approval_evidence'] = (
+                validated_data.get('management_approval_evidence') or []
+            )
+>>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         
         # Update the instance
         instance = super().update(instance, validated_data)
