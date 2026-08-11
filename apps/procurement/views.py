@@ -1,4 +1,4 @@
-﻿"""
+"""
 Procurement Management Views
 API endpoints for procurement workflows
 """
@@ -21,13 +21,11 @@ from django.db import models as django_models
 from django.http import HttpResponse
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, Flowable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import io
 
-<<<<<<< HEAD
-=======
 
 class RADAILogoMark(Flowable):
     """Resolution-independent RADAI mark for controlled PDF exports."""
@@ -59,7 +57,6 @@ class RADAILogoMark(Flowable):
         canvas.restoreState()
 
 
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
 from .models import (
     Vendor, 
     PurchaseRequisition, 
@@ -105,7 +102,7 @@ class VendorViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Vendor management
     
-    ≡ƒöÉ SECURITY: Requires 'procurement_vendors' module access (soft-coded from rbac_config.py)
+    =��� SECURITY: Requires 'procurement_vendors' module access (soft-coded from rbac_config.py)
     """
     
     queryset = Vendor.objects.all().order_by('-created_at')
@@ -176,11 +173,11 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     Features:
     - Multi-part file upload to S3
-    - Two-tier approval workflow (PM ΓåÆ VP)
+    - Two-tier approval workflow (PM G�� VP)
     - Advanced filtering and search
     - PDF generation aligned with template
     
-    ≡ƒöÉ SECURITY: Requires 'procurement_requisitions' module access (soft-coded from rbac_config.py)
+    =��� SECURITY: Requires 'procurement_requisitions' module access (soft-coded from rbac_config.py)
     """
     
     queryset = PurchaseRequisition.objects.all().order_by('-created_at')
@@ -277,8 +274,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         self.perform_create(serializer)
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
-<<<<<<< HEAD
-=======
     
     @action(detail=False, methods=['post'])
     def check_pr_number(self, request):
@@ -321,7 +316,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'exists': False,
             'message': f'PR number "{pr_number}" is available'
         })
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
 
     def _build_requisition_response(self, pr):
         """Ensure API response contains both status and approval_hierarchy."""
@@ -587,12 +581,9 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'manager_projects': ['Manager of Projects', 'Manager - Projects', 'Projects Manager'],
             'vp_operations': ['VP Operations', 'Vice President Operations', 'VP - Operations', 'Vice President of Operation'],
         }
-<<<<<<< HEAD
         # Soft-coded: the dropdown must always let the requester pick ANY active
-        # user as the approver ΓÇö job_title is only used to surface the most
+        # user as the approver G�� job_title is only used to surface the most
         # relevant users FIRST, never to hide the rest of the user base.
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         matched_user_ids = set()
 
         if role and role in role_title_mapping:
@@ -681,7 +672,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'count': len(products_list),
             'suggestions': products_list
         })
-<<<<<<< HEAD
     
     @action(detail=False, methods=['get'])
     def get_projects_departments(self, request):
@@ -693,33 +683,12 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         - q: search query (optional)
         - limit: max results (default 50)
         """
-=======
-
-    @action(detail=False, methods=['get'], url_path='check-pr-number')
-    def check_pr_number_endpoint(self, request):
-        number = str(request.query_params.get('number', '') or '').strip()
-        exclude_id = request.query_params.get('exclude_id')
-        queryset = PurchaseRequisition.objects.filter(pr_number__iexact=number)
-        if exclude_id:
-            queryset = queryset.exclude(pk=exclude_id)
-        return Response({
-            'number': number,
-            'available': bool(number) and not queryset.exists(),
-            'message': '' if number and not queryset.exists() else 'This PR number already exists.',
-        })
-    
-    @action(detail=False, methods=['get'])
-    def get_projects_departments(self, request):
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         search_query = request.query_params.get('q', '').strip()
         limit = int(request.query_params.get('limit', 50))
         
         suggestions = []
-<<<<<<< HEAD
         
         # Source 1: Project master table
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         try:
             projects = Project.objects.exclude(
                 status__in=['cancelled', 'archived']
@@ -774,8 +743,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=False, methods=['get'])
-<<<<<<< HEAD
-=======
     def get_ongoing_projects(self, request):
         """Return current projects for the Purchase Recommendation selector."""
         search_query = request.query_params.get('q', '').strip()
@@ -821,7 +788,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=False, methods=['get'])
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     def get_suppliers(self, request):
         search_query = request.query_params.get('q', '').strip()
         limit = int(request.query_params.get('limit', 50))
@@ -884,20 +850,13 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     def get_po_numbers(self, request):
         search_query = request.query_params.get('q', '').strip()
         limit = int(request.query_params.get('limit', 50))
-<<<<<<< HEAD
         status_filter = request.query_params.get('status', None)
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         
         suggestions = []
         pos = PurchaseOrder.objects.select_related('vendor').order_by('-created_at')
-<<<<<<< HEAD
         
         if status_filter:
             pos = pos.filter(status=status_filter)
-=======
-        pos = pos.filter(status='completed')
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         
         if search_query:
             pos = pos.filter(
@@ -920,85 +879,10 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'count': len(suggestions),
             'suggestions': suggestions
         })
-<<<<<<< HEAD
     
     @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):
         """Submit a draft into its configured approval workflow."""
-=======
-
-    @action(detail=True, methods=['post'], url_path='refer-rejection')
-    def refer_rejection(self, request, pk=None):
-        pr = self.get_object()
-        if canonicalize_pr_status(pr.status) != 'rejected':
-            raise ValidationError({'error': 'Only rejected recommendations can be referred.'})
-        if str(pr.issued_by_id) != str(request.user.id) and not RequisitionWorkflowService._is_super_admin(request.user):
-            raise PermissionDenied('Only the issuer may refer this rejected recommendation.')
-
-        target = str(request.data.get('target', '') or '').strip().lower()
-        if target not in {'moe', 'mop'}:
-            raise ValidationError({'target': 'Select MoE or MoP.'})
-        remarks = str(request.data.get('remarks', '') or '').strip()
-        if len(remarks) < 10:
-            raise ValidationError({'remarks': 'Add at least 10 characters explaining the discussion required.'})
-
-        pr.resolution_referral = {
-            'target': target,
-            'target_label': 'Manager of Engineering' if target == 'moe' else 'Manager of Projects',
-            'remarks': remarks[:2000],
-            'referred_by_id': str(request.user.id),
-            'referred_by_name': request.user.get_full_name() or request.user.email,
-            'referred_at': timezone.now().isoformat(),
-            'status': 'open',
-        }
-        pr.save(update_fields=['resolution_referral', 'updated_at'])
-        return Response(self._build_requisition_response(pr))
-    
-    @action(detail=False, methods=['get'], url_path='check_po_conflict')
-    def check_po_conflict(self, request):
-        po_number = request.query_params.get('po_number', '').strip()
-        pr_id = request.query_params.get('pr_id', '').strip()
-        
-        if not po_number:
-            return Response({
-                'conflict': False,
-                'message': 'No PO number provided'
-            })
-        
-        conflicting_prs = PurchaseRequisition.objects.filter(
-            po_manually_entered=po_number
-        )
-        
-        if pr_id:
-            conflicting_prs = conflicting_prs.exclude(pk=pr_id)
-        
-        if conflicting_prs.exists():
-            first_conflict = conflicting_prs.first()
-            return Response({
-                'conflict': True,
-                'existing_pr': first_conflict.pr_number,
-                'message': f'PO number "{po_number}" is already used in PR #{first_conflict.pr_number}'
-            })
-        
-        return Response({
-            'conflict': False,
-            'message': 'PO number is available'
-        })
-    
-    @action(detail=True, methods=['post'])
-    def submit(self, request, pk=None):
-        pr = self.get_object()
-        workflow = request.data.get('approval_workflow_config')
-        if workflow is not None and canonicalize_pr_status(pr.status) == 'draft':
-            self._enforce_owner_mutation(pr)
-            serializer = self.get_serializer(
-                pr,
-                data={'approval_workflow_config': workflow},
-                partial=True,
-            )
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         pr = RequisitionWorkflowService.submit(pk, request.user)
         return Response(self._build_requisition_response(pr))
 
@@ -1074,29 +958,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         style_table_header = ParagraphStyle('TableHeader', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8, leading=10, textColor=colors.white)
         style_table_cell = ParagraphStyle('TableCell', parent=styles['Normal'], fontName='Helvetica', fontSize=8, leading=11, textColor=SLATE_DARK)
 
-<<<<<<< HEAD
         # Header section
-=======
-        brand_identity = Table(
-            [[
-                RADAILogoMark(42),
-                Paragraph(
-                    '<b>RADAI PROCUREMENT</b><br/>'
-                    '<font size="8" color="#64748B">Oil &amp; Gas Standard Compliance</font>',
-                    style_company,
-                ),
-            ]],
-            colWidths=[0.68 * inch, 2.57 * inch],
-        )
-        brand_identity.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 0),
-            ('RIGHTPADDING', (0, 0), (0, 0), 8),
-            ('RIGHTPADDING', (1, 0), (1, 0), 0),
-            ('TOPPADDING', (0, 0), (-1, -1), 0),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-        ]))
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         header_data = [
             [
                 Paragraph('<b>RADAI PROCUREMENT</b><br/><font size="8" color="#64748B">Oil &amp; Gas Standard Compliance</font>', style_company),
@@ -1344,224 +1206,16 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             request.data.get('reason', ''),
         )
         return Response(self._build_requisition_response(pr))
-<<<<<<< HEAD
 
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Purchase Order management
     
-    ≡ƒöÉ SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
+    =��� SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
     """
     
     queryset = PurchaseOrder.objects.all().select_related('vendor', 'pr_reference').order_by('-created_at')
-=======
-    
-    @action(detail=False, methods=['get'], url_path='export-to-excel')
-    def export_to_excel(self, request):
-        import io
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment
-        from django.http import HttpResponse
-        
-        queryset = self.get_queryset()
-        
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Purchase Requisitions"
-        
-        headers = [
-            'PR No.', 'PO Number', 'Description', 'Project Details',
-            'Supplier Name', 'PR Value', 'Currency', 'Approval Status',
-            'Priority', 'Created Date', 'Required Date'
-        ]
-        
-        header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
-        header_font = Font(bold=True, color='FFFFFF')
-        
-        for col_num, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col_num)
-            cell.value = header
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal='center', vertical='center')
-        
-        for row_num, pr in enumerate(queryset, 2):
-            approval_status = pr.get_detailed_approval_status()
-            
-            ws.cell(row=row_num, column=1, value=pr.pr_number)
-            ws.cell(row=row_num, column=2, value=pr.po_manually_entered or pr.po_number_reference or 'N/A')
-            ws.cell(row=row_num, column=3, value=pr.product_service or pr.description_reason)
-            ws.cell(row=row_num, column=4, value=pr.project_department or pr.project)
-            ws.cell(row=row_num, column=5, value=pr.supplier_name or 'N/A')
-            ws.cell(row=row_num, column=6, value=float(pr.total_price) if pr.total_price else 0)
-            ws.cell(row=row_num, column=7, value=pr.currency)
-            ws.cell(row=row_num, column=8, value=approval_status['display'])
-            ws.cell(row=row_num, column=9, value=pr.get_priority_display())
-            ws.cell(row=row_num, column=10, value=pr.created_at.strftime('%Y-%m-%d') if pr.created_at else '')
-            ws.cell(row=row_num, column=11, value=pr.required_date.strftime('%Y-%m-%d') if pr.required_date else '')
-        
-        for column in ws.columns:
-            max_length = 0
-            column_letter = column[0].column_letter
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = min(max_length + 2, 50)
-            ws.column_dimensions[column_letter].width = adjusted_width
-        
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        
-        response = HttpResponse(
-            output.read(),
-            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-        response['Content-Disposition'] = 'attachment; filename=purchase_requisitions.xlsx'
-        
-        return response
-    
-    @action(detail=False, methods=['get'], url_path='pending-approvals-dashboard')
-    def pending_approvals_dashboard(self, request):
-        pending_prs = self.get_queryset().filter(
-            status__in=['submitted', 'pm_approved', 'vp_approved']
-        )
-        
-        dashboard_data = {
-            'total_pending': pending_prs.count(),
-            'under_review': [],
-            'overdue': [],
-            'by_level': {},
-            'by_priority': {},
-            'by_department': {},
-            'recent_rejections': [],
-            'escalated_rejections': []
-        }
-        
-        for pr in pending_prs:
-            detailed_status = pr.get_detailed_approval_status()
-            
-            pr_data = {
-                'id': str(pr.id),
-                'pr_number': pr.pr_number,
-                'po_number': pr.po_manually_entered or pr.po_number_reference or 'N/A',
-                'description': pr.product_service or pr.description_reason,
-                'project': pr.project_department or pr.project,
-                'supplier': pr.supplier_name,
-                'value': float(pr.total_price) if pr.total_price else 0,
-                'currency': pr.currency,
-                'priority': pr.priority,
-                'status': detailed_status['status'],
-                'status_display': detailed_status['display'],
-                'is_overdue': detailed_status.get('is_overdue', False),
-                'days_pending': detailed_status.get('days_pending', 0),
-                'current_level': pr.current_approval_level,
-                'created_at': pr.created_at.isoformat() if pr.created_at else None
-            }
-            
-            if detailed_status.get('is_overdue'):
-                dashboard_data['overdue'].append(pr_data)
-            else:
-                dashboard_data['under_review'].append(pr_data)
-            
-            level_key = f"Level {pr.current_approval_level}"
-            dashboard_data['by_level'][level_key] = dashboard_data['by_level'].get(level_key, 0) + 1
-            dashboard_data['by_priority'][pr.priority] = dashboard_data['by_priority'].get(pr.priority, 0) + 1
-            
-            dept = pr.department or 'Unknown'
-            dashboard_data['by_department'][dept] = dashboard_data['by_department'].get(dept, 0) + 1
-        
-        recent_rejections = self.get_queryset().filter(status='rejected').order_by('-updated_at')[:10]
-        dashboard_data['recent_rejections'] = [
-            {
-                'id': str(pr.id),
-                'pr_number': pr.pr_number,
-                'description': pr.product_service or pr.description_reason,
-                'rejection_reason': pr.rejection_reason,
-                'rejected_at': pr.updated_at.isoformat() if pr.updated_at else None,
-                'escalated': pr.rejection_escalated_to_moe or pr.rejection_escalated_to_mop
-            }
-            for pr in recent_rejections
-        ]
-        
-        escalated = self.get_queryset().filter(
-            Q(rejection_escalated_to_moe=True) | Q(rejection_escalated_to_mop=True)
-        ).order_by('-escalation_initiated_at')
-        dashboard_data['escalated_rejections'] = [
-            {
-                'id': str(pr.id),
-                'pr_number': pr.pr_number,
-                'description': pr.product_service or pr.description_reason,
-                'escalated_to': 'MoE' if pr.rejection_escalated_to_moe else 'MoP',
-                'escalation_notes': pr.escalation_notes,
-                'resolved': pr.escalation_resolved,
-                'escalated_at': pr.escalation_initiated_at.isoformat() if pr.escalation_initiated_at else None
-            }
-            for pr in escalated
-        ]
-        
-        dashboard_data['summary'] = {
-            'total_pending': dashboard_data['total_pending'],
-            'under_review_count': len(dashboard_data['under_review']),
-            'overdue_count': len(dashboard_data['overdue']),
-            'urgent_count': dashboard_data['by_priority'].get('urgent', 0),
-            'escalated_count': len(dashboard_data['escalated_rejections'])
-        }
-        
-        return Response(dashboard_data)
-    
-    @action(detail=True, methods=['post'], url_path='escalate-rejection')
-    def escalate_rejection(self, request, pk=None):
-        pr = self.get_object()
-        
-        if pr.status != 'rejected':
-            return Response(
-                {'error': 'Only rejected PRs can be escalated'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        escalate_to = request.data.get('escalate_to', '').lower()
-        escalation_notes = request.data.get('escalation_notes', '')
-        
-        if escalate_to not in ['moe', 'mop']:
-            return Response(
-                {'error': 'escalate_to must be "moe" or "mop"'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        if not escalation_notes:
-            return Response(
-                {'error': 'escalation_notes is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        if escalate_to == 'moe':
-            pr.rejection_escalated_to_moe = True
-        else:
-            pr.rejection_escalated_to_mop = True
-        
-        pr.escalation_notes = escalation_notes
-        pr.escalation_initiated_by = request.user
-        pr.escalation_initiated_at = timezone.now()
-        pr.escalation_resolved = False
-        pr.save()
-        
-        serializer = self.get_serializer(pr)
-        return Response({
-            'message': f'PR escalated to {escalate_to.upper()} successfully',
-            'data': serializer.data
-        })
-
-
-class PurchaseOrderViewSet(viewsets.ModelViewSet):
-    queryset = PurchaseOrder.objects.all().select_related(
-        'vendor', 'pr_reference'
-    ).prefetch_related('lines', 'receipts__lines').order_by('-created_at')
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_orders'
@@ -1628,14 +1282,11 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(po)
         return Response(serializer.data)
-<<<<<<< HEAD
-=======
 
     @action(detail=True, methods=['get'], url_path='receiving-summary')
     def receiving_summary(self, request, pk=None):
         po = self.get_object()
         return Response(GoodsReceiptService.receiving_summary(po))
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     
     @action(detail=False, methods=['get'])
     def dashboard(self, request):
@@ -1669,60 +1320,19 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             'top_vendors': list(by_vendor),
             'recent': recent_serializer.data
         })
-<<<<<<< HEAD
 
 
 class ReceiptViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Goods Receipt management
     
-    ≡ƒöÉ SECURITY: Requires 'procurement_receipts' module access (soft-coded from rbac_config.py)
+    =��� SECURITY: Requires 'procurement_receipts' module access (soft-coded from rbac_config.py)
     """
     
     queryset = Receipt.objects.all().select_related('purchase_order').order_by('-created_at')
     serializer_class = ReceiptSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_receipts'
-=======
-    
-    @action(detail=False, methods=['get'], url_path='by_number/(?P<po_number>[^/.]+)')
-    def by_number(self, request, po_number=None):
-        if not po_number:
-            return Response(
-                {'error': 'PO number is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        try:
-            po = PurchaseOrder.objects.select_related('vendor').get(po_number=po_number)
-            return Response({
-                'id': str(po.id),
-                'po_number': po.po_number,
-                'status': po.status,
-                'vendor_name': po.vendor.name if po.vendor else None,
-                'vendor_id': str(po.vendor.id) if po.vendor else None,
-                'total_amount': str(po.total_amount) if po.total_amount else '0',
-                'currency': po.currency,
-                'title': po.title,
-                'description': po.description,
-                'created_at': po.created_at.isoformat() if po.created_at else None
-            })
-        except PurchaseOrder.DoesNotExist:
-            return Response(
-                {'error': f'Purchase Order with number "{po_number}" not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-
-class ReceiptViewSet(viewsets.ModelViewSet):
-    queryset = Receipt.objects.all().select_related(
-        'purchase_order', 'received_by', 'inspected_by'
-    ).prefetch_related('lines__purchase_order_line').order_by('-created_at')
-    serializer_class = ReceiptSerializer
-    permission_classes = [IsAuthenticated, HasModuleAccess]
-    module_required = 'procurement_receipts'
-    http_method_names = ['get', 'post', 'patch', 'head', 'options']
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1748,7 +1358,6 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return queryset
     
     @action(detail=True, methods=['post'])
-<<<<<<< HEAD
     def accept(self, request, pk=None):
         """Accept received goods"""
         receipt = self.get_object()
@@ -1792,38 +1401,6 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(receipt)
         return Response(serializer.data)
-=======
-    def submit(self, request, pk=None):
-        receipt = GoodsReceiptService.submit(pk, request.user)
-        response_data = dict(self.get_serializer(receipt).data)
-        response_data.update({
-            'database_confirmed': True,
-            'message': (
-                f'Goods Receipt {receipt.receipt_number} was saved in the database '
-                'and submitted successfully.'
-            ),
-        })
-        return Response(response_data)
-
-    @action(detail=True, methods=['post'])
-    def accept(self, request, pk=None):
-        receipt = GoodsReceiptService.accept(pk, request.user)
-        return Response(self.get_serializer(receipt).data)
-    
-    @action(detail=True, methods=['post'])
-    def reject_delivery(self, request, pk=None):
-        receipt = GoodsReceiptService.reject(
-            pk,
-            request.user,
-            request.data.get('reason') or request.data.get('notes'),
-        )
-        return Response(self.get_serializer(receipt).data)
-
-    @action(detail=True, methods=['post'])
-    def cancel(self, request, pk=None):
-        receipt = GoodsReceiptService.cancel(pk, request.user, request.data.get('reason'))
-        return Response(self.get_serializer(receipt).data)
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     
     @action(detail=False, methods=['get'])
     def dashboard(self, request):
@@ -1862,17 +1439,14 @@ def get_categories(request):
 
 
 class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
-<<<<<<< HEAD
     """
-    ViewSet for PODocument ΓÇö read-only list/detail plus the AI extraction action.
+    ViewSet for PODocument — read-only list/detail plus the AI extraction action.
     The `extract_from_pdf` action is the primary entry point: it accepts a PDF
     upload, stores it in S3, runs the AI extractor, and returns the result.
     
-    ≡ƒöÉ SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
+    🔒 SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
     """
 
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     queryset = PODocument.objects.all().order_by('-created_at')
     serializer_class = PODocumentSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
@@ -1885,18 +1459,15 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['post'], url_path='extract_from_pdf',
             parser_classes=[MultiPartParser, FormParser])
     def extract_from_pdf(self, request):
-<<<<<<< HEAD
         """
         POST /api/v1/procurement/po-documents/extract_from_pdf/
 
         Multipart form fields:
-            file  ΓÇö PDF file (required)
+            file  G�� PDF file (required)
 
         Returns structured JSON with all extractable PO/PR fields plus
         S3 storage reference and extraction metadata.
         """
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         import logging
         logger = logging.getLogger(__name__)
 
@@ -1993,15 +1564,12 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class CostCenterViewSet(viewsets.ModelViewSet):
-<<<<<<< HEAD
     """
     Cost Center API - Master organizational cost center registry.
     Soft-coded for departmental budget tracking and financial reporting.
     
-    ≡ƒöÉ SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
+    =��� SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
     """
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     queryset = CostCenter.objects.all()
     serializer_class = CostCenterSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
@@ -2025,15 +1593,12 @@ class CostCenterViewSet(viewsets.ModelViewSet):
 
 
 class BudgetViewSet(viewsets.ModelViewSet):
-<<<<<<< HEAD
     """
     Budget Allocation API - Project budget lines with spend tracking.
     Soft-coded for professional financial control and variance analysis.
     
-    ≡ƒöÉ SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
+    =��� SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
     """
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     queryset = Budget.objects.all()
     serializer_class = BudgetSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
@@ -2067,7 +1632,6 @@ class BudgetViewSet(viewsets.ModelViewSet):
 
 
 class ProjectViewSet(viewsets.ModelViewSet):
-<<<<<<< HEAD
     """
     Project Master Registry API - Central project database.
     Professional project-based procurement with budget tracking.
@@ -2079,10 +1643,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
       - Invoice reconciliation (A/P + A/R)
       - Soft-coded filtering and search
     
-    ≡ƒöÉ SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
+    =��� SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
     """
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     queryset = Project.objects.all()
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement'
