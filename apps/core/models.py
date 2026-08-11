@@ -418,6 +418,100 @@ class CrossDisciplineRecommendation(BaseModel):
             models.Index(fields=['source_discipline', 'target_discipline']),
             models.Index(fields=['recommendation_type', 'created_at']),
         ]
-    
+
     def __str__(self):
         return f"{self.source_discipline} → {self.target_discipline}: {self.recommendation_type}"
+
+
+class ApiUsageLog(models.Model):
+    """
+    Maps to the pre-existing `api_usage_logs` table (created outside Django's
+    migrations, no migration record for it). managed=False so `migrate` never
+    tries to create/alter/drop it — Django only reads/writes rows.
+    """
+    id = models.BigAutoField(primary_key=True)
+    endpoint = models.CharField(max_length=255)
+    method = models.CharField(max_length=10)
+    user_id = models.IntegerField()
+    status_code = models.IntegerField()
+    response_time_ms = models.IntegerField()
+    timestamp = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = 'api_usage_logs'
+        indexes = [
+            models.Index(fields=['endpoint', 'timestamp']),
+            models.Index(fields=['user_id', 'timestamp']),
+        ]
+
+    def __str__(self):
+        return f"{self.method} {self.endpoint} [{self.status_code}] {self.response_time_ms}ms"
+
+
+class Document(models.Model):
+    """
+    Maps to the pre-existing `documents` table (created outside Django's
+    migrations; index-name hashing shows a Django model once generated this
+    schema, but nothing currently in this codebase writes to it). Used as a
+    lightweight shadow registry so per-app document records — e.g.
+    apps.crs_documents.CRSDocument — can be referenced via document_id from
+    DocumentAccessLog below, which has a real DB-level FK to this table.
+    managed=False: Django never issues DDL against this table.
+    """
+    id = models.UUIDField(primary_key=True)
+    document_type = models.CharField(max_length=50)
+    owner_service = models.CharField(max_length=100, db_index=True)
+    file = models.CharField(max_length=100)
+    filename = models.CharField(max_length=255)
+    file_size = models.BigIntegerField()
+    mime_type = models.CharField(max_length=100)
+    checksum = models.CharField(max_length=64)
+    metadata = models.JSONField(default=dict)
+    tags = models.JSONField(default=list)
+    current_version = models.IntegerField(default=1)
+    is_latest = models.BooleanField(default=True)
+    status = models.CharField(max_length=20, db_index=True)
+    created_by_user_id = models.IntegerField()
+    created_by_role = models.CharField(max_length=50)
+    is_public = models.BooleanField(default=False)
+    allowed_roles = models.JSONField(default=list)
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = 'documents'
+        indexes = [
+            models.Index(fields=['status', 'is_latest']),
+        ]
+
+    def __str__(self):
+        return f'{self.filename} ({self.owner_service})'
+
+
+class DocumentAccessLog(models.Model):
+    """
+    Maps to the pre-existing `document_access_logs` table (same situation as
+    Document above). document_id has a DB-level FK to `documents`, so any
+    document being logged must first have a matching Document row — see
+    apps.core.document_access_logging.get_or_create_shadow_document().
+    """
+    id = models.BigAutoField(primary_key=True)
+    user_id = models.IntegerField(db_index=True)
+    document = models.ForeignKey(Document, on_delete=models.DO_NOTHING, db_column='document_id')
+    access_type = models.CharField(max_length=20)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=255)
+    accessed_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        managed = False
+        db_table = 'document_access_logs'
+        indexes = [
+            models.Index(fields=['document', 'accessed_at']),
+            models.Index(fields=['user_id', 'accessed_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.access_type} on {self.document_id} by user {self.user_id}'

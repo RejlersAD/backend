@@ -206,7 +206,6 @@ INSTALLED_APPS = [
     'apps.onboarding',           # Onboarding & Offboarding — employee lifecycle management (joining, exit, equipment, documents)
     'apps.site_visits',          # Site Visit Tracking — GPS-based attendance for off-site engineers
     'apps.dashboard',             # Personal Dashboard — role-scoped data bundles + AI insights
-    'apps.planning_intelligence', # RADAI Project Planning Application — AI-assisted FEED/DEFINE schedule generation
 ]
 
 # ✨ SMART APP LOADING - Only load apps that exist (prevents deployment crashes)
@@ -231,6 +230,7 @@ INSTALLED_APPS.extend([
     
     # AWS S3 Storage (always include - it's in requirements.txt)
     'storages',
+    'apps.planning_intelligence',
     # Add new features here - no core changes needed!
 ])
 
@@ -252,6 +252,7 @@ MIDDLEWARE = [
     'apps.rbac.middleware.RBACMiddleware',
     'apps.activity.tracker.ActivityMiddleware',  # Activity tracking middleware
     'apps.usage_tracking.middleware.UsageTrackingMiddleware',  # Usage metering - Internal Analytics
+    'apps.core.middleware.ApiUsageLoggingMiddleware',  # Writes to api_usage_logs table
     # AI Champion telemetry — captures every authenticated API request as an
     # ActivityEvent so the leaderboard / cost dashboard at /admin/ai-champion
     # receives LIVE data. Soft-coded URL→application/feature mapping; never
@@ -1027,7 +1028,14 @@ else:
 from celery.schedules import crontab  # noqa: E402
 CELERY_BEAT_SCHEDULE = {
     'auto-generate-monthly-payroll': {
-        'task': 'apps.finance.tasks.auto_generate_monthly_payroll',
+        # Must match the @shared_task(name=...) registered name, not the
+        # dotted module path — Celery Beat dispatches by registry name.
+        # Both apps/finance/tasks.py and apps/finance/payroll_automation.py
+        # register a task under this same name; only tasks.py is picked up
+        # by app.autodiscover_tasks() (payroll_automation.py is only ever
+        # imported by the generate_payroll_automated management command),
+        # so this dispatches to apps/finance/tasks.py's implementation.
+        'task': 'finance.auto_generate_monthly_payroll',
         'schedule': crontab(hour=2, minute=0),
     },
 }

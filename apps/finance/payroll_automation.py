@@ -204,7 +204,12 @@ def auto_generate_monthly_payroll(self, year=None, month=None, force=False):
                 f'Payroll generation complete: {stats["created"]} slips created, '
                 f'Gross: {stats["total_gross"]} {DEFAULT_CURRENCY}'
             )
-        
+
+        # ── AUDIT ALERTS ──────────────────────────────────────────────────────
+        # Compare against the previous run and flag anomalies. Never raises.
+        from apps.finance.payroll_audit_alerts import generate_audit_alerts
+        generate_audit_alerts(payroll_run)
+
         # ── POST-GENERATION ACTIONS ───────────────────────────────────────────
         
         # Send notifications to stakeholders

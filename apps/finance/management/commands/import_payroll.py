@@ -420,6 +420,10 @@ class Command(BaseCommand):
         payroll_run.status = 'completed'
         payroll_run.save()
 
+        if not dry_run:
+            from apps.finance.payroll_audit_alerts import generate_audit_alerts
+            generate_audit_alerts(payroll_run)
+
         return stats
 
     def process_employee(self, emp_data, payroll_run, month, year):

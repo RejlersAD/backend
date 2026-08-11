@@ -6,11 +6,13 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db import transaction
 from django.core.files.storage import default_storage
-from django.http import HttpResponse
+from django.http import HttpResponse, FileResponse
 from django.conf import settings
 from io import BytesIO
 import json
 import os
+
+from apps.core.document_access_logging import log_document_access
 
 from .models import CRSDocument, CRSComment, CRSActivity, GoogleSheetConfig
 from .serializers import (
@@ -73,7 +75,41 @@ class CRSDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         if self.action == 'retrieve':
             return CRSDocumentDetailSerializer
         return CRSDocumentSerializer
-    
+
+    def _log_document_access(self, request, document, access_type):
+        """Write a document_access_logs row for this CRSDocument. Never raises."""
+        log_document_access(
+            request,
+            owner_service='crs',
+            source_pk=document.pk,
+            access_type=access_type,
+            filename=document.pdf_file.name if document.pdf_file else document.document_name,
+            file_field=str(document.pdf_file) if document.pdf_file else '',
+            mime_type='application/pdf' if document.pdf_file else '',
+            status=document.status,
+            created_by_user_id=document.uploaded_by_id,
+        )
+
+    def retrieve(self, request, *args, **kwargs):
+        """Same as ModelViewSet's default retrieve; logs a 'view' access."""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        self._log_document_access(request, instance, 'view')
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def download(self, request, pk=None):
+        """NEW ACTION: serve the raw PDF and log a 'download' access event."""
+        document = self.get_object()
+        if not document.pdf_file:
+            return Response({'error': 'No PDF file attached to this document'}, status=status.HTTP_404_NOT_FOUND)
+        self._log_document_access(request, document, 'download')
+        return FileResponse(
+            document.pdf_file.open('rb'),
+            as_attachment=True,
+            filename=os.path.basename(document.pdf_file.name),
+        )
+
     def perform_create(self, serializer):
         """Set uploaded_by to current user"""
         serializer.save(uploaded_by=self.request.user)
@@ -113,7 +149,9 @@ class CRSDocumentViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                 description=f'Document "{new_instance.document_name}" updated',
                 performed_by=self.request.user
             )
-    
+
+        self._log_document_access(self.request, new_instance, 'edit')
+
     @action(detail=True, methods=['post'])
     def extract_pdf_comments(self, request, pk=None):
         """

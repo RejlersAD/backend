@@ -3,8 +3,10 @@ ULTRA-SIMPLE CORS Middleware
 Guaranteed to work without any imports that could fail
 """
 import re
+import time
 from django.conf import settings
 from django.http import HttpResponse
+from django.utils import timezone
 
 # RFC 1034/1035: underscores are not valid in hostnames.
 # Docker container names (e.g. backend_local, aiflow_backend_local) contain underscores,
@@ -77,3 +79,61 @@ class CorsMiddleware:
         
         print("[CorsMiddleware] CORS headers added")
         return response
+
+
+# Soft-coded: paths to skip (prefix match on request.path)
+API_USAGE_LOG_SKIP_PREFIXES = (
+    '/health/',
+    '/static/',
+    '/media/',
+    '/admin/',
+)
+
+
+class ApiUsageLoggingMiddleware:
+    """
+    Logs every authenticated request to the `api_usage_logs` table
+    (apps.core.models.ApiUsageLog). Mirrors the apps.usage_tracking
+    middleware's pattern: request.user_id is NOT NULL on this table, so
+    unauthenticated requests are skipped rather than logged with a
+    placeholder id. Never raises — a failure here must not affect the
+    actual API response.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        start = time.monotonic()
+        response = self.get_response(request)
+
+        try:
+            self._log(request, response, start)
+        except Exception:
+            pass  # Never let logging affect the response
+
+        return response
+
+    def _log(self, request, response, start):
+        path = request.path
+
+        for prefix in API_USAGE_LOG_SKIP_PREFIXES:
+            if path.startswith(prefix):
+                return
+
+        # user_id is NOT NULL on api_usage_logs — nothing meaningful to log for anonymous requests
+        if not getattr(request, 'user', None) or not request.user.is_authenticated:
+            return
+
+        from .models import ApiUsageLog
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+
+        ApiUsageLog.objects.create(
+            endpoint=path[:255],
+            method=request.method,
+            user_id=request.user.id,
+            status_code=response.status_code,
+            response_time_ms=elapsed_ms,
+            timestamp=timezone.now(),
+        )

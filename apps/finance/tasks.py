@@ -269,6 +269,10 @@ def auto_generate_monthly_payroll(self) -> dict:
         run.run_code, processed, total,
     )
 
+    # ── 5b. Audit alerts — compare against previous run, flag anomalies ─────
+    from apps.finance.payroll_audit_alerts import generate_audit_alerts
+    generate_audit_alerts(run)
+
     # ── 6. Fan-out PDF generation tasks (one per slip) ───────────────────────
     slip_ids = list(slips_qs.values_list('id', flat=True))
     for sid in slip_ids:

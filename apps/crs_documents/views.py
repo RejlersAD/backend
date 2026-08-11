@@ -17,7 +17,7 @@ from .serializers import CRSDocumentSerializer, CRSDocumentVersionSerializer
 # NEW: Import helper modules for PDF extraction and CRS population
 try:
     # Use unified extractor - single source of truth
-from apps.core.helpers.unified_comment_extractor import extract_reviewer_comments, convert_comments_to_dict_list, get_comment_statistics
+    from apps.core.helpers.unified_comment_extractor import extract_reviewer_comments, convert_comments_to_dict_list, get_comment_statistics
     from .helpers.template_populator import populate_crs_template, validate_template
     from .helpers.template_manager import get_crs_template, get_template_info
     HELPERS_AVAILABLE = True
@@ -53,7 +53,7 @@ class CRSDocumentViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Set uploaded_by to current user"""
         serializer.save(uploaded_by=self.request.user)
-    
+
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         """Approve a document"""
