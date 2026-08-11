@@ -51,6 +51,7 @@ htmlcov/
 !.env.example
 docker-compose*.yml
 Dockerfile*
+!Dockerfile
 docker-entrypoint*.sh
 
 # Generated at runtime (not needed in deployment)
