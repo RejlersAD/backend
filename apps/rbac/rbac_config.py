@@ -569,6 +569,15 @@ ROLE_MODULE_POLICY = {
         'hr_onboarding',      # 4.5 Onboarding | Offboarding
     ],
 
+    # Onboarding/Offboarding Specialist: Focused HR access for onboarding/offboarding workflows
+    # SOFT-CODED: Specialized role for HR staff focused on employee lifecycle management
+    # Lira Viaga uses this role for onboarding/offboarding management
+    'onboarding': [
+        'hr_management',      # 4.1 Human Resources Dashboard (read-only access)
+        'hr_self_service',    # 4.4 My Profile (Employee Self-Service)
+        'hr_onboarding',      # 4.5 Onboarding | Offboarding (full access)
+    ],
+
     # Super-admins bypass module checks in the app, but listed for completeness
     'super_admin': [],
 
