@@ -1,4 +1,4 @@
-"""
+﻿"""
 Procurement Management Views
 API endpoints for procurement workflows
 """
@@ -71,7 +71,7 @@ class VendorViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Vendor management
     
-    🔐 SECURITY: Requires 'procurement_vendors' module access (soft-coded from rbac_config.py)
+    ≡ƒöÉ SECURITY: Requires 'procurement_vendors' module access (soft-coded from rbac_config.py)
     """
     
     queryset = Vendor.objects.all().order_by('-created_at')
@@ -142,11 +142,11 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     Features:
     - Multi-part file upload to S3
-    - Two-tier approval workflow (PM → VP)
+    - Two-tier approval workflow (PM ΓåÆ VP)
     - Advanced filtering and search
     - PDF generation aligned with template
     
-    🔐 SECURITY: Requires 'procurement_requisitions' module access (soft-coded from rbac_config.py)
+    ≡ƒöÉ SECURITY: Requires 'procurement_requisitions' module access (soft-coded from rbac_config.py)
     """
     
     queryset = PurchaseRequisition.objects.all().order_by('-created_at')
@@ -455,6 +455,64 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'recommendations': recommendations[:5]
         })
     
+    @action(detail=False, methods=['get'], url_path='vendor-options')
+    def vendor_options(self, request):
+        """
+        Get vendor options for dropdown selection in PR form
+        Supports search by name/code and filtering by ID
+        """
+        from .models import Vendor
+        
+        # Get query parameters
+        search_query = request.query_params.get('q', '').strip()
+        vendor_id = request.query_params.get('id', '').strip()
+        try:
+            limit = int(request.query_params.get('limit', 30))
+            limit = min(max(1, limit), 100)  # Clamp between 1 and 100
+        except (TypeError, ValueError):
+            limit = 30
+        
+        # Start with active vendors only
+        queryset = Vendor.objects.filter(status='active')
+        
+        # Filter by specific vendor ID if provided
+        if vendor_id:
+            try:
+                queryset = queryset.filter(id=vendor_id)
+            except (ValueError, TypeError):
+                pass
+        # Otherwise filter by search query
+        elif search_query:
+            queryset = queryset.filter(
+                Q(name__icontains=search_query) |
+                Q(vendor_code__icontains=search_query) |
+                Q(email__icontains=search_query)
+            )
+        
+        # Order by rating and name
+        queryset = queryset.order_by('-rating', 'name')[:limit]
+        
+        # Format response for frontend dropdown
+        suggestions = []
+        for vendor in queryset:
+            suggestions.append({
+                'id': vendor.id,
+                'name': vendor.name,
+                'vendor_code': vendor.vendor_code,
+                'email': vendor.email,
+                'rating': vendor.rating,
+                'status': vendor.status,
+                'icv_percentage': float(vendor.icv_percentage) if vendor.icv_percentage else None,
+                'icv_expiry_date': vendor.icv_expiry_date.strftime('%Y-%m-%d') if vendor.icv_expiry_date else None,
+                'is_icv_certified': vendor.is_icv_certified,
+                'adnoc_approved': vendor.adnoc_approved,
+            })
+        
+        return Response({
+            'suggestions': suggestions,
+            'count': len(suggestions)
+        })
+    
     @action(detail=False, methods=['get'])
     def get_approvers(self, request):
         """
@@ -478,7 +536,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'vp_operations': ['VP Operations', 'Vice President Operations', 'VP - Operations', 'Vice President of Operation'],
         }
         # Soft-coded: the dropdown must always let the requester pick ANY active
-        # user as the approver — job_title is only used to surface the most
+        # user as the approver ΓÇö job_title is only used to surface the most
         # relevant users FIRST, never to hide the rest of the user base.
         matched_user_ids = set()
 
@@ -1119,7 +1177,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Purchase Order management
     
-    🔐 SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
+    ≡ƒöÉ SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
     """
     
     queryset = PurchaseOrder.objects.all().select_related('vendor', 'pr_reference').order_by('-created_at')
@@ -1234,7 +1292,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Goods Receipt management
     
-    🔐 SECURITY: Requires 'procurement_receipts' module access (soft-coded from rbac_config.py)
+    ≡ƒöÉ SECURITY: Requires 'procurement_receipts' module access (soft-coded from rbac_config.py)
     """
     
     queryset = Receipt.objects.all().select_related('purchase_order').order_by('-created_at')
@@ -1353,11 +1411,11 @@ def get_categories(request):
 
 class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    ViewSet for PODocument — read-only list/detail plus the AI extraction action.
+    ViewSet for PODocument ΓÇö read-only list/detail plus the AI extraction action.
     The `extract_from_pdf` action is the primary entry point: it accepts a PDF
     upload, stores it in S3, runs the AI extractor, and returns the result.
     
-    🔐 SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
+    ≡ƒöÉ SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
     """
 
     queryset = PODocument.objects.all().order_by('-created_at')
@@ -1376,7 +1434,7 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
         POST /api/v1/procurement/po-documents/extract_from_pdf/
 
         Multipart form fields:
-            file  — PDF file (required)
+            file  ΓÇö PDF file (required)
 
         Returns structured JSON with all extractable PO/PR fields plus
         S3 storage reference and extraction metadata.
@@ -1493,7 +1551,7 @@ class CostCenterViewSet(viewsets.ModelViewSet):
     Cost Center API - Master organizational cost center registry.
     Soft-coded for departmental budget tracking and financial reporting.
     
-    🔐 SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
+    ≡ƒöÉ SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
     """
     queryset = CostCenter.objects.all()
     serializer_class = CostCenterSerializer
@@ -1524,7 +1582,7 @@ class BudgetViewSet(viewsets.ModelViewSet):
     Budget Allocation API - Project budget lines with spend tracking.
     Soft-coded for professional financial control and variance analysis.
     
-    🔐 SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
+    ≡ƒöÉ SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
     """
     queryset = Budget.objects.all()
     serializer_class = BudgetSerializer
@@ -1578,7 +1636,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
       - Invoice reconciliation (A/P + A/R)
       - Soft-coded filtering and search
     
-    🔐 SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
+    ≡ƒöÉ SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
     """
     queryset = Project.objects.all()
     permission_classes = [IsAuthenticated, HasModuleAccess]

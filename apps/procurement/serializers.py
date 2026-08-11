@@ -1,4 +1,4 @@
-"""
+﻿"""
 Procurement Management Serializers
 API data serialization for procurement workflows
 """
@@ -146,8 +146,14 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             # Vendor Integration (Smart linking)
             'vendor', 'vendor_details', 'vendor_name', 'vendor_selection_reason', 'ai_vendor_recommendations',
             
+            # Enhanced Vendor Selection (Feedback: Multiple vendors with ICV)
+            'selected_vendors', 'single_source_justification',
+            
             # Project/Product Section (Fields 6-7)
             'product_service', 'project_department',
+            
+            # Enhanced Project Selection (Feedback: Multiple projects)
+            'project_details',
             
             # Description Section (Field 8)
             'description_reason',
@@ -158,8 +164,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             # Pricing Section (Fields 10-13)
             'price_description', 'total_price', 'currency', 'price_remarks', 'net_total_excl_vat', 'price_remarks_data',
             
-            # Reference Section (Field 14)
-            'po_number_reference',
+            # Management Approval (Feedback: For PR > AED 100k)
+            'management_approval', 'management_approval_remarks', 'management_approval_evidence',
+            
+            # Reference Section (Field 14) - Enhanced with PO Applicable
+            'po_applicable', 'po_number_reference',
             
             # Purchase Recommendation Section (Field 15) - RENAMED from special_notes
             'purchase_recommendation',
@@ -181,7 +190,10 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'requested_by', 'requested_by_name', 'department', 'project', 'status',
             'status_display', 'priority', 'priority_display', 'required_date',
             'estimated_budget', 'items', 'approved_by', 'approved_by_name',
-            'approved_at', 'rejection_reason', 'notes', 
+            'approved_at', 'rejection_reason', 'notes',
+            
+            # Review Deadline & Resolution (Feedback fields)
+            'review_due_at', 'resolution_referral', 
             
             # Attachments
             'attachments', 'attachments_files',
@@ -598,9 +610,9 @@ class PODocumentSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 # MASTER DATABASE SERIALIZERS - Professional Project-Based Procurement
-# ══════════════════════════════════════════════════════════════════════════════
+# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
 
 class CostCenterSerializer(serializers.ModelSerializer):
     """Cost Center master table serializer"""
@@ -691,7 +703,7 @@ class ProjectListSerializer(serializers.ModelSerializer):
     def get_project_manager_display(self, obj):
         if obj.project_manager:
             return obj.project_manager.get_full_name()
-        return obj.project_manager_name or '—'
+        return obj.project_manager_name or 'ΓÇö'
     
     def get_total_budget(self, obj):
         return float(obj.get_total_budget())

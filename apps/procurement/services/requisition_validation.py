@@ -1,4 +1,4 @@
-"""Validation and normalization for Purchase Requisition input."""
+﻿"""Validation and normalization for Purchase Requisition input."""
 
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path

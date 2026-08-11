@@ -184,9 +184,9 @@ class PurchaseRequisition(TimeStampedModel):
     ]
     
     PRIORITY_CHOICES = [
-        ('urgent', 'Urgent'),
-        ('high', 'High'),
-        ('normal', 'Normal'),
+        ('urgent', 'Urgent - Same Day Review'),
+        ('high', 'High - 1 Day Review'),
+        ('normal', 'Normal - 2 Days Review'),
         ('low', 'Low'),
     ]
     
@@ -198,9 +198,22 @@ class PurchaseRequisition(TimeStampedModel):
     
     # === HEADER SECTION (Fields 1-3) ===
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    pr_number = models.CharField(max_length=50, unique=True, db_index=True, help_text='Auto-generated PR No (e.g., RAD-PRJ-PR-0021_2025)')
+    pr_number = models.CharField(max_length=50, unique=True, db_index=True, help_text='Manually assigned PR number (system validates for duplicates). Feedback: PR Number to be Manual enter with duplicate alert')
     issued_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='prs_issued', help_text='Person who issued the PR')
     issued_date = models.DateField(null=True, blank=True, help_text='Date when PR was issued')
+    
+    # === PRIORITY AND REVIEW DEADLINE (Feedback: Priority levels with review cycles) ===
+    priority = models.CharField(
+        max_length=20,
+        choices=PRIORITY_CHOICES,
+        default='normal',
+        help_text='Priority level determining review cycle: Normal=2 days, High=1 day, Urgent=same day'
+    )
+    review_due_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text='Submission review deadline derived from priority (urgent=same day, high=1 day, normal=2 days).'
+    )
     
     # === SUPPLIER SECTION (Fields 4-5) ===
     supplier_name = models.CharField(max_length=300, blank=True, help_text='Preferred supplier name (e.g., Velimor Middle East Consultancy LLC)')
@@ -233,10 +246,10 @@ class PurchaseRequisition(TimeStampedModel):
     preferred_supplier_if_any = models.CharField(max_length=300, blank=True, help_text='Preferred Supplier (if any)')
     
     # === PRICING SECTION (Fields 10-13) ===
-    price_description = models.TextField(blank=True, help_text='Item/Service description for pricing')
+    price_description = models.TextField(blank=True, help_text='Item/Service description for pricing (Feedback: Renamed to Purchase Description)')
     total_price = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True, help_text='Total Price (e.g., USD 4,000.00)')
     currency = models.CharField(max_length=3, default='USD', help_text='Currency code (USD, AED, EUR, etc.)')
-    price_remarks = models.TextField(blank=True, help_text='Pricing remarks (e.g., Included in HSE budget)')
+    price_remarks = models.TextField(blank=True, help_text='Negotiation remarks: outcome, savings, commercial clarifications, or final terms (Feedback: Renamed from Discount %)')
     net_total_excl_vat = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True, help_text='Net Total, excluding VAT')
     
     # === ADVANCED PRICE REMARKS DATA (Dynamic) ===
@@ -246,8 +259,46 @@ class PurchaseRequisition(TimeStampedModel):
         help_text='Advanced pricing data: {"budget_allocation": "HSE", "cost_center": "CC-001", "payment_terms": "Net 45", "discount_percentage": 10, "discount_amount": 400, "comparative_prices": [{"vendor": "Vendor A", "price": 4200}, ...], "price_history": [...]}'
     )
     
-    # === REFERENCE SECTION (Field 14) ===
-    po_number_reference = models.CharField(max_length=100, blank=True, help_text='Related PO number (e.g., RAD-PRJ-PUR-0014_JAN2025)')
+    # === ENHANCED VENDOR SELECTION (Feedback: Multiple vendor selection with ICV) ===
+    selected_vendors = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Vendor shortlist captured from the vendor master, including ICV details. Format: [{"vendor_id": "uuid", "vendor_name": "...", "icv_value": 0.75, "icv_validity": "2025-12-31"}]'
+    )
+    single_source_justification = models.TextField(
+        blank=True,
+        help_text='Required justification when only one vendor is shortlisted (Feedback: Single source justification to be provided)'
+    )
+    
+    # === PROJECT DETAILS (Feedback: Multiple project selection) ===
+    project_details = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='One or more linked project/department selections. Format: [{"project_id": "...", "project_name": "...", "department": "...", "type": "project|internal"}]'
+    )
+    
+    # === MANAGEMENT APPROVAL (Feedback: For PR Value above AED 100k) ===
+    management_approval = models.BooleanField(
+        blank=True,
+        null=True,
+        help_text='Management approval confirmation; mandatory for AED-equivalent values above 100,000.'
+    )
+    management_approval_remarks = models.TextField(
+        blank=True,
+        help_text='Remarks or notes regarding management approval'
+    )
+    management_approval_evidence = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Evidence of management approval attachments. Format: [{"filename": "approval.pdf", "s3_url": "https://...", "uploaded_at": "..."}]'
+    )
+    
+    # === REFERENCE SECTION (Field 14) - Enhanced with PO Applicable ===
+    po_applicable = models.BooleanField(
+        default=False,
+        help_text='Indicates whether a Purchase Order is applicable for this requisition (Feedback: PO applicable Yes/No checkbox)'
+    )
+    po_number_reference = models.CharField(max_length=100, blank=True, help_text='Related PO number (e.g., RAD-PRJ-PUR-0014_JAN2025). Manual entry with conflict validation.')
     
     # === PURCHASE RECOMMENDATION SECTION (Field 15) - RENAMED from special_notes ===
     purchase_recommendation = models.TextField(blank=True, help_text='Purchase Recommendation (previously Special Notes)')
@@ -300,11 +351,19 @@ class PurchaseRequisition(TimeStampedModel):
     department = models.CharField(max_length=200, blank=True)
     project = models.CharField(max_length=200, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
-    priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default='normal')
+    # priority field moved to header section with review_due_at
     required_date = models.DateField(null=True, blank=True)
     estimated_budget = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
     items = models.JSONField(default=list, blank=True)
     rejection_reason = models.TextField(blank=True)
+    
+    # === RESOLUTION REFERRAL (Feedback: Option to send to MoE/MoP for discussion after rejection) ===
+    resolution_referral = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='MoE/MoP discussion referral recorded after rejection. Format: {"referred_to": "MoE", "referred_by": "user_id", "referred_at": "...", "discussion_notes": "..."}'
+    )
+    
     notes = models.TextField(blank=True)
     
     # File attachments stored in S3
