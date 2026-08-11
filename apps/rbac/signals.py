@@ -5,7 +5,7 @@ from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from .models import UserProfile, Organization, UserRole
+from .models import UserProfile, Organization, UserRole, RoleModule
 from .utils import create_audit_log
 
 User = get_user_model()
@@ -36,6 +36,32 @@ def clear_user_permissions_cache(sender, instance, **kwargs):
     cache.delete(f'user_permissions_{profile_id}')
     cache.delete(f'user_modules_{profile_id}')
     print(f"[Cache] Cleared permissions and modules cache for user {profile_id}")
+
+
+@receiver(post_save, sender=RoleModule)
+@receiver(post_delete, sender=RoleModule)
+def clear_role_users_cache(sender, instance, **kwargs):
+    """
+    Clear module cache for ALL users who have this role when modules are added/removed from the role
+    CRITICAL: Fixes issue where custom role module changes don't reflect until cache expires
+    """
+    role_id = instance.role_id
+    
+    # Get all user profiles that have this role
+    profile_ids = UserRole.objects.filter(
+        role_id=role_id,
+        role__is_active=True
+    ).values_list('user_profile_id', flat=True)
+    
+    # Clear cache for each affected user
+    cleared_count = 0
+    for profile_id in profile_ids:
+        cache.delete(f'user_permissions_{profile_id}')
+        cache.delete(f'user_modules_{profile_id}')
+        cleared_count += 1
+    
+    if cleared_count > 0:
+        print(f"[Cache] Cleared cache for {cleared_count} user(s) affected by role {role_id} module change")
 
 
 # Soft-coded: read the default role code from rbac_config so a single config
