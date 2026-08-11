@@ -46,6 +46,34 @@ def list_features(request):
         
         # Get features for user
         features = registry.get_features_for_user(user_permissions, user_department)
+
+        # Filter by user's accessible module codes (RBAC)
+        try:
+            from apps.rbac.models import UserProfile
+            profile = UserProfile.objects.prefetch_related('roles__modules').get(user=request.user)
+            user_module_codes = set(
+                mod.code
+                for role in profile.roles.filter(is_active=True)
+                for mod in role.modules.filter(is_active=True)
+            )
+            if not (request.user.is_superuser or request.user.is_staff):
+                # Feature registry ids don't always match RBAC Module.code —
+                # alias the ones that diverge (verified against live rbac_modules table)
+                FEATURE_ID_TO_MODULE_CODE = {
+                    'pfd_converter':      'pfd_to_pid',
+                    'user_management':    'user_mgmt',
+                    'sales_dashboard':    'sales',
+                    'sales_crm':          'sales',
+                    'sales_pipeline':     'sales',
+                    'sales_ai_insights':  'sales',
+                    'project_management': 'project_control',
+                }
+                features = [
+                    f for f in features
+                    if FEATURE_ID_TO_MODULE_CODE.get(f.id, f.id) in user_module_codes
+                ]
+        except Exception:
+            pass
         print(f"[DEBUG list_features] get_features_for_user returned {len(features)} features")
         
         # Apply additional filters

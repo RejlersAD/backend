@@ -54,21 +54,24 @@ class S3Service:
     
     def __init__(self):
         """Initialize S3 client with credentials from environment"""
-        self.bucket_name = os.environ.get('AWS_STORAGE_BUCKET_NAME', 'user-management-rejlers')
-        self.region = os.environ.get('AWS_S3_REGION_NAME', 'us-east-1')
-        
+        from django.conf import settings as django_settings
+        self.bucket_name = getattr(django_settings, 'AWS_STORAGE_BUCKET_NAME', None) or os.environ.get('AWS_STORAGE_BUCKET_NAME', 'user-management-rejlers')
+        self.region = getattr(django_settings, 'AWS_S3_REGION_NAME', None) or os.environ.get('AWS_S3_REGION_NAME', 'us-east-1')
+        aws_key = getattr(django_settings, 'AWS_ACCESS_KEY_ID', None) or os.environ.get('AWS_ACCESS_KEY_ID')
+        aws_secret = getattr(django_settings, 'AWS_SECRET_ACCESS_KEY', None) or os.environ.get('AWS_SECRET_ACCESS_KEY')
+
         self.s3_client = boto3.client(
             's3',
             region_name=self.region,
-            aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
-            aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY')
+            aws_access_key_id=aws_key,
+            aws_secret_access_key=aws_secret,
         )
-        
+
         self.s3_resource = boto3.resource(
             's3',
             region_name=self.region,
-            aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
-            aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY')
+            aws_access_key_id=aws_key,
+            aws_secret_access_key=aws_secret,
         )
         
         logger.info(f"[S3Service] Initialized with bucket: {self.bucket_name}, region: {self.region}")

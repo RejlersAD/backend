@@ -98,6 +98,26 @@ def _get_primary_role_code(user):
     return 'viewer'
 
 
+def _get_primary_role_name(user):
+    """Return the display name of the user's most privileged active role."""
+    try:
+        from apps.rbac.models import UserProfile
+        profile = UserProfile.objects.select_related().prefetch_related('roles').get(user=user)
+        roles = profile.roles.filter(is_active=True).order_by('level')
+        if roles.exists():
+            role = roles.first()
+            if role.name:
+                return role.name
+            return role.code.replace('_', ' ').title()
+    except Exception:
+        pass
+    if user.is_superuser:
+        return 'Super Administrator'
+    if user.is_staff:
+        return 'Administrator'
+    return 'Standard User'
+
+
 def _get_user_module_codes(user):
     """Return list of module codes accessible to this user."""
     try:
@@ -396,11 +416,65 @@ class PersonalDashboardView(APIView):
 
         # Super admin / staff → frontend handles global view
         role_code = _get_primary_role_code(user)
+        role_name = _get_primary_role_name(user)
         if user.is_superuser or user.is_staff or role_code == 'super_admin':
             role_code = 'super_admin'
+            role_name = 'Super Administrator'
 
         # Gather data in order
         usage_stats = _get_usage_stats(user, role_code)
+
+        # Per-user/team feature usage breakdown
+        try:
+            from apps.usage_tracking.models import UsageLog
+            from django.db.models import Count as DjCount
+            from apps.rbac.models import UserProfile
+            cutoff_30d = timezone.now() - timedelta(days=30)
+
+            if role_code == 'super_admin':
+                feature_qs = UsageLog.objects.filter(timestamp__gte=cutoff_30d)
+            elif role_code in ('manager', 'project_manager', 'human_resource',
+                               'admin', 'project_control', 'procurement_manager'):
+                # Manager sees combined team usage
+                try:
+                    dept = UserProfile.objects.get(user=user).department
+                    team_emails = list(
+                        UserProfile.objects.filter(
+                            department=dept,
+                            user__is_active=True
+                        ).values_list('user__email', flat=True)
+                    )
+                    feature_qs = UsageLog.objects.filter(
+                        user_email__in=team_emails,
+                        timestamp__gte=cutoff_30d
+                    )
+                except Exception:
+                    feature_qs = UsageLog.objects.filter(
+                        user_email=user.email,
+                        timestamp__gte=cutoff_30d
+                    )
+            else:
+                feature_qs = UsageLog.objects.filter(
+                    user_email=user.email,
+                    timestamp__gte=cutoff_30d
+                )
+
+            feature_usage = (
+                feature_qs
+                .values('discipline_key', 'discipline_label')
+                .annotate(count=DjCount('id'))
+                .order_by('-count')[:20]
+            )
+            user_feature_map = {
+                f['discipline_key']: {
+                    'count': f['count'],
+                    'label': f['discipline_label']
+                }
+                for f in feature_usage
+            }
+        except Exception as e:
+            logger.warning('feature usage error: %s', e)
+            user_feature_map = {}
         notifications_summary = _get_notifications_summary(user)
         activity_feed = _get_activity_feed(user, role_code)
         my_modules = _get_my_modules(user)
@@ -437,6 +511,7 @@ class PersonalDashboardView(APIView):
                 'name': user.get_full_name() or user.username,
                 'email': user.email,
                 'role_code': role_code,
+                'role_name': role_name,
                 'persona': persona,
                 'department': department,
                 'job_title': job_title,
@@ -449,6 +524,7 @@ class PersonalDashboardView(APIView):
             'pending_actions': pending_actions,
             'usage_stats': usage_stats,
             'team_snapshot': team_snapshot,
+            'feature_usage_map': user_feature_map,
             'generated_at': timezone.now().isoformat(),
         }
 

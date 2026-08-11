@@ -11,6 +11,9 @@ from django.contrib.auth import get_user_model
 from django.conf import settings
 from apps.users.serializers import UserSerializer, UserRegistrationSerializer
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -1091,4 +1094,265 @@ def usage_daily(request):
             'status': 'error',
             'message': str(e),
         }, status=200)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def aws_status(request):
+    """GET /api/v1/dashboard/aws-status/"""
+    user = request.user
+
+    # Determine role level securely from DB
+    role_level = 10
+    role_name = 'User'
+    try:
+        from apps.rbac.models import UserProfile
+        profile = UserProfile.objects.prefetch_related('roles').get(user=user)
+        role = profile.roles.filter(is_active=True).order_by('level').first()
+        if role:
+            role_level = role.level
+            role_name = role.name
+    except Exception:
+        pass
+
+    if user.is_superuser or user.is_staff:
+        role_level = 1
+        role_name = 'Super Administrator'
+
+    # Try S3
+    try:
+        from apps.core.s3_service import get_s3_service
+        s3 = get_s3_service()
+
+        def get_file_breakdown(files):
+            from collections import Counter
+            ext_counter = Counter(
+                f['key'].split('.')[-1].lower()
+                for f in files
+                if not f.get('key','').endswith('/') and '.' in f.get('key','').split('/')[-1]
+            )
+            total = sum(ext_counter.values()) or 1
+            return [
+                {'type': k.upper(), 'count': v, 'percentage': round(v/total*100,1)}
+                for k, v in ext_counter.most_common(5)
+            ]
+
+        if role_level <= 2:
+            # Admin — full bucket
+            from django.contrib.auth import get_user_model
+            info = s3.get_bucket_size()
+            if not info.get('success'):
+                raise Exception('S3 unavailable')
+            from collections import Counter
+            import boto3
+            from django.conf import settings
+
+            # Direct S3 paginator — no presigned URLs, no 1000 cap
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+                region_name=settings.AWS_S3_REGION_NAME,
+            )
+            ext_counter = Counter()
+            paginator = s3_client.get_paginator('list_objects_v2')
+            for page in paginator.paginate(Bucket=settings.AWS_STORAGE_BUCKET_NAME):
+                for obj in page.get('Contents', []):
+                    key = obj['Key']
+                    if not key.endswith('/') and '.' in key.split('/')[-1]:
+                        ext_counter[key.split('.')[-1].lower()] += 1
+
+            total_ext = sum(ext_counter.values()) or 1
+            file_breakdown = [
+                {'type': k.upper(), 'count': v, 'percentage': round(v / total_ext * 100, 1)}
+                for k, v in ext_counter.most_common(5)
+            ]
+            size_gb = round(info['total_size_mb'] / 1024, 2)
+
+            return Response({
+                'status': 'connected',
+                'view': 'admin',
+                'role_name': role_name,
+                'total_files': info['total_count'],
+                'total_size_gb': size_gb,
+                'total_users': get_user_model().objects.filter(is_active=True).count(),
+                'file_breakdown': file_breakdown,
+            })
+
+        elif role_level == 3:
+            try:
+                from apps.rbac.models import UserProfile
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                manager_profile = UserProfile.objects.get(user=user)
+                department = manager_profile.department or ''
+                team_profiles = UserProfile.objects.filter(department=department, user__is_active=True).exclude(user=user).select_related('user')
+                team_count = team_profiles.count()
+                total_files, total_size, user_file_counts = 0, 0, {}
+                all_dept_files = []
+                for uid in team_profiles.values_list('user__id', flat=True):
+                    r = s3.list_files(prefix=f'users/{uid}/')
+                    if r.get('success'):
+                        files = r.get('files', [])
+                        all_dept_files.extend(files)
+                        total_files += len(files)
+                        total_size += sum(f.get('size', 0) for f in files)
+                        if files: user_file_counts[uid] = len(files)
+                most_uid = max(user_file_counts, key=user_file_counts.get) if user_file_counts else None
+                most_name = None
+                if most_uid:
+                    try:
+                        u = User.objects.get(id=most_uid)
+                        most_name = u.get_full_name() or u.email
+                    except Exception: pass
+                last_upload = max(
+                    (f.get('last_modified') for f in all_dept_files),
+                    default=None
+                )
+                return Response({'status': 'connected', 'view': 'manager', 'role_name': role_name, 'department': department, 'team_members': team_count, 'total_files': total_files, 'total_size_gb': round(total_size / (1024**3), 2), 'most_active_user': most_name, 'last_upload': str(last_upload) if last_upload else None, 'file_breakdown': get_file_breakdown(all_dept_files)})
+            except Exception as e:
+                logger.warning('aws manager error: %s', e)
+                return Response({'status': 'offline', 'view': 'manager', 'role_name': role_name, 'message': 'Department data unavailable'})
+
+        else:
+            # Engineer/User — own files only
+            # Use user.id (server-side, cannot be tampered)
+            result = s3.list_files(prefix=f'users/{user.id}/')
+            files = result.get('files', []) if result.get('success') else []
+            size_mb = round(sum(f.get('size', 0) for f in files) / (1024 * 1024), 2)
+            last_upload = max(
+                (f.get('last_modified') for f in files),
+                default=None
+            )
+            return Response({
+                'status': 'connected',
+                'view': 'user',
+                'role_name': role_name,
+                'total_files': len(files),
+                'total_size_mb': size_mb,
+                'last_upload': str(last_upload) if last_upload else None,
+                'file_breakdown': get_file_breakdown(files),
+            })
+
+    except Exception as e:
+        # Log server-side only — never expose S3 errors to client
+        logger.warning('aws_status error for user %s: %s', user.id, e)
+        return Response({
+            'status': 'offline',
+            'view': 'admin' if role_level <= 2 else 'user',
+            'role_name': role_name,
+            'message': 'Storage service unavailable',
+        })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def aws_report(request):
+    """GET /api/v1/dashboard/aws-report/?format=xlsx|csv|pdf"""
+    print(f'[AWS_REPORT] START - user={request.user.email}, format={request.GET.get("format")}')
+    import io
+    from django.http import HttpResponse
+    from apps.rbac.models import UserProfile
+
+    user = request.user
+    fmt = 'xlsx'
+
+    # Role level
+    role_level = 10
+    try:
+        profile = UserProfile.objects.prefetch_related('roles').get(user=user)
+        role = profile.roles.filter(is_active=True).order_by('level').first()
+        if role:
+            role_level = role.level
+    except Exception:
+        pass
+    if user.is_superuser or user.is_staff:
+        role_level = 1
+
+    try:
+        from apps.core.s3_service import get_s3_service
+        s3 = get_s3_service()
+        rows = []
+        title = 'AWS Storage Report'
+
+        if role_level <= 2:
+            title = 'Full S3 Storage Report'
+            import boto3
+            from apps.core.s3_service import get_s3_service as _get_s3
+            _svc = _get_s3()
+            s3c = _svc.s3_client
+            bucket = _svc.bucket_name
+            paginator = s3c.get_paginator('list_objects_v2')
+            for page in paginator.paginate(Bucket=bucket):
+                for obj in page.get('Contents', []):
+                    key = obj['Key']
+                    if not key.endswith('/'):
+                        rows.append({
+                            'File': key,
+                            'Size (KB)': round(obj['Size'] / 1024, 2),
+                            'Last Modified': obj['LastModified'].strftime('%Y-%m-%d'),
+                            'Type': key.split('.')[-1].upper() if '.' in key else '—',
+                        })
+
+        elif role_level == 3:
+            title = 'Department Storage Report'
+            dept = UserProfile.objects.get(user=user).department or ''
+            team = UserProfile.objects.filter(
+                department=dept, user__is_active=True
+            ).exclude(user=user).select_related('user')
+            for tp in team:
+                r = s3.list_files(prefix=f'users/{tp.user.id}/')
+                for f in (r.get('files', []) if r.get('success') else []):
+                    key = f.get('key', '')
+                    if not key.endswith('/'):
+                        rows.append({
+                            'User': tp.user.get_full_name() or tp.user.email,
+                            'File': key,
+                            'Size (KB)': round(f.get('size', 0) / 1024, 2),
+                            'Last Modified': str(f.get('last_modified', ''))[:10],
+                            'Type': key.split('.')[-1].upper() if '.' in key else '—',
+                        })
+
+        else:
+            title = 'My Storage Report'
+            r = s3.list_files(prefix=f'users/{user.id}/')
+            for f in (r.get('files', []) if r.get('success') else []):
+                key = f.get('key', '')
+                if not key.endswith('/'):
+                    rows.append({
+                        'File': key,
+                        'Size (KB)': round(f.get('size', 0) / 1024, 2),
+                        'Last Modified': str(f.get('last_modified', ''))[:10],
+                        'Type': key.split('.')[-1].upper() if '.' in key else '—',
+                    })
+
+    except Exception as e:
+        import traceback
+        logger.warning('aws_report error user %s: %s', user.id, e)
+        traceback.print_exc()
+        return Response({'error': 'Report generation failed'}, status=500)
+
+    headers = list(rows[0].keys()) if rows else []
+
+    # Excel (default)
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Report'
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color='FFFFFF')
+        cell.fill = PatternFill('solid', fgColor='F97316')
+        cell.alignment = Alignment(horizontal='center')
+    for row in rows:
+        ws.append([row.get(h,'') for h in headers])
+    for col in ws.columns:
+        ws.column_dimensions[col[0].column_letter].width = 22
+    buf = io.BytesIO()
+    wb.save(buf)
+    res = HttpResponse(buf.getvalue(),
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    res['Content-Disposition'] = f'attachment; filename="{title}.xlsx"'
+    return res
 

@@ -286,17 +286,15 @@ SENSITIVE_MODULE_CODES = ['hr_management', 'payroll', 'timesheet', 'hr_onboardin
 # Set a module to False to globally disable it for ALL users (including super_admin)
 # Environment variable override: RADAI_ENABLE_HR_MODULE=true (default: false)
 # ─────────────────────────────────────────────────────────────────────────────
-import os
-
 MODULE_FEATURE_FLAGS = {
     # ⚠️ HR Module Suite — DISABLED by default
     # Controls visibility and access to all HR-related features
     # Set RADAI_ENABLE_HR_MODULE=true in environment to re-enable
     # NOTE: hr_self_service (My Profile) is now in COMMON section and always enabled for all users
-    'hr_management':  os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
-    'payroll':        os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
-    'timesheet':      os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
-    'hr_onboarding':  os.getenv('RADAI_ENABLE_HR_MODULE', 'false').lower() == 'true',
+    'hr_management':  True,
+    'payroll':        True,
+    'timesheet':      True,
+    'hr_onboarding':  True,
 }
 
 def is_module_enabled(module_code):
