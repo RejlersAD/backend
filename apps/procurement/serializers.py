@@ -376,6 +376,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         # Upload files to S3 if any
         if files:
             self._upload_attachments(instance, files)
+        if management_evidence:
+            instance.management_approval_evidence = self._upload_attachments(instance, [management_evidence])
+            instance.save(update_fields=['management_approval_evidence'])
         
         return instance
     
@@ -395,6 +398,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         # Upload files to S3 if any
         if files:
             self._upload_attachments(instance, files)
+        if management_evidence:
+            instance.management_approval_evidence = self._upload_attachments(instance, [management_evidence])
+            instance.save(update_fields=['management_approval_evidence'])
         
         return instance
     

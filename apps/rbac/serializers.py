@@ -1027,7 +1027,9 @@ class AchievementSerializer(serializers.ModelSerializer):
             'is_public', 'is_verified', 'display_order',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'is_verified']
+        # Ownership is assigned from request.user by the viewset.  Keeping this
+        # read-only also prevents a client from creating records for another user.
+        read_only_fields = ['id', 'user_profile', 'created_at', 'updated_at', 'is_verified']
     
     def get_category_label(self, obj):
         """Return human-readable category label."""
@@ -1087,7 +1089,7 @@ class WorkExperienceSerializer(serializers.ModelSerializer):
             'is_public', 'display_order',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user_profile', 'created_at', 'updated_at']
     
     def get_duration_text(self, obj):
         """Calculate and return human-readable duration."""
@@ -1157,7 +1159,7 @@ class SocialMediaLinkSerializer(serializers.ModelSerializer):
             'is_verified', 'is_public', 'display_order',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'is_verified']
+        read_only_fields = ['id', 'user_profile', 'created_at', 'updated_at', 'is_verified']
     
     def get_platform_label(self, obj):
         """Return human-readable platform name."""
@@ -1199,6 +1201,23 @@ class SocialMediaLinkSerializer(serializers.ModelSerializer):
         
         return value
 
+    def validate(self, attrs):
+        """Give a clear error when the user already linked this platform."""
+        request = self.context.get('request')
+        platform = attrs.get('platform') or getattr(self.instance, 'platform', None)
+        if request and platform and hasattr(request.user, 'rbac_profile'):
+            existing = SocialMediaLink.objects.filter(
+                user_profile=request.user.rbac_profile,
+                platform=platform,
+            )
+            if self.instance:
+                existing = existing.exclude(pk=self.instance.pk)
+            if existing.exists():
+                raise serializers.ValidationError({
+                    'platform': 'This platform is already linked. Edit the existing link instead.'
+                })
+        return attrs
+
 
 class ProfileDocumentSerializer(serializers.ModelSerializer):
     """
@@ -1231,7 +1250,7 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = [
-            'id', 'created_at', 'updated_at',
+            'id', 'user_profile', 'created_at', 'updated_at',
             'verified_by', 'verified_at', 'is_expired', 'expires_soon',
             'document_file_url', 'document_file_name',
         ]
