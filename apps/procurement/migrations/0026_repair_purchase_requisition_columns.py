@@ -36,7 +36,7 @@ def add_missing_columns(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('procurement', '0025_remove_purchaserequisition_proc_pr_appr_step_idx_and_more'),
+        ('procurement', '0022_rename_procurement_budget_idx1_procurement_project_cf65fc_idx_and_more'),
     ]
 
     operations = [

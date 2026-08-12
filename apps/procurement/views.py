@@ -25,9 +25,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import io
+from reportlab.platypus import Flowable
+# from .services import GoodsReceiptService  # TODO: GoodsReceiptService not yet implemented
 
-<<<<<<< HEAD
-=======
 
 class RADAILogoMark(Flowable):
     """Resolution-independent RADAI mark for controlled PDF exports."""
@@ -59,7 +59,6 @@ class RADAILogoMark(Flowable):
         canvas.restoreState()
 
 
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
 from .models import (
     Vendor, 
     PurchaseRequisition, 
@@ -277,8 +276,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         self.perform_create(serializer)
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
-<<<<<<< HEAD
-=======
     
     @action(detail=False, methods=['post'])
     def check_pr_number(self, request):
@@ -321,7 +318,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'exists': False,
             'message': f'PR number "{pr_number}" is available'
         })
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
 
     def _build_requisition_response(self, pr):
         """Ensure API response contains both status and approval_hierarchy."""
@@ -587,12 +583,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'manager_projects': ['Manager of Projects', 'Manager - Projects', 'Projects Manager'],
             'vp_operations': ['VP Operations', 'Vice President Operations', 'VP - Operations', 'Vice President of Operation'],
         }
-<<<<<<< HEAD
-        # Soft-coded: the dropdown must always let the requester pick ANY active
-        # user as the approver ΓÇö job_title is only used to surface the most
-        # relevant users FIRST, never to hide the rest of the user base.
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         matched_user_ids = set()
 
         if role and role in role_title_mapping:
@@ -681,19 +671,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'count': len(products_list),
             'suggestions': products_list
         })
-<<<<<<< HEAD
-    
-    @action(detail=False, methods=['get'])
-    def get_projects_departments(self, request):
-        """
-        Get autocomplete suggestions for Project/Department field
-        Returns distinct values from existing PRs and Project master table
-        
-        Query params:
-        - q: search query (optional)
-        - limit: max results (default 50)
-        """
-=======
 
     @action(detail=False, methods=['get'], url_path='check-pr-number')
     def check_pr_number_endpoint(self, request):
@@ -710,16 +687,10 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'])
     def get_projects_departments(self, request):
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         search_query = request.query_params.get('q', '').strip()
         limit = int(request.query_params.get('limit', 50))
         
         suggestions = []
-<<<<<<< HEAD
-        
-        # Source 1: Project master table
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         try:
             projects = Project.objects.exclude(
                 status__in=['cancelled', 'archived']
@@ -774,8 +745,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=False, methods=['get'])
-<<<<<<< HEAD
-=======
     def get_ongoing_projects(self, request):
         """Return current projects for the Purchase Recommendation selector."""
         search_query = request.query_params.get('q', '').strip()
@@ -821,7 +790,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=False, methods=['get'])
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     def get_suppliers(self, request):
         search_query = request.query_params.get('q', '').strip()
         limit = int(request.query_params.get('limit', 50))
@@ -884,20 +852,10 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     def get_po_numbers(self, request):
         search_query = request.query_params.get('q', '').strip()
         limit = int(request.query_params.get('limit', 50))
-<<<<<<< HEAD
-        status_filter = request.query_params.get('status', None)
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         
         suggestions = []
         pos = PurchaseOrder.objects.select_related('vendor').order_by('-created_at')
-<<<<<<< HEAD
-        
-        if status_filter:
-            pos = pos.filter(status=status_filter)
-=======
         pos = pos.filter(status='completed')
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         
         if search_query:
             pos = pos.filter(
@@ -920,12 +878,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'count': len(suggestions),
             'suggestions': suggestions
         })
-<<<<<<< HEAD
-    
-    @action(detail=True, methods=['post'])
-    def submit(self, request, pk=None):
-        """Submit a draft into its configured approval workflow."""
-=======
 
     @action(detail=True, methods=['post'], url_path='refer-rejection')
     def refer_rejection(self, request, pk=None):
@@ -998,7 +950,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             )
             serializer.is_valid(raise_exception=True)
             serializer.save()
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         pr = RequisitionWorkflowService.submit(pk, request.user)
         return Response(self._build_requisition_response(pr))
 
@@ -1074,9 +1025,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         style_table_header = ParagraphStyle('TableHeader', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8, leading=10, textColor=colors.white)
         style_table_cell = ParagraphStyle('TableCell', parent=styles['Normal'], fontName='Helvetica', fontSize=8, leading=11, textColor=SLATE_DARK)
 
-<<<<<<< HEAD
-        # Header section
-=======
         brand_identity = Table(
             [[
                 RADAILogoMark(42),
@@ -1096,7 +1044,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             ('TOPPADDING', (0, 0), (-1, -1), 0),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
         ]))
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         header_data = [
             [
                 Paragraph('<b>RADAI PROCUREMENT</b><br/><font size="8" color="#64748B">Oil &amp; Gas Standard Compliance</font>', style_company),
@@ -1344,18 +1291,6 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             request.data.get('reason', ''),
         )
         return Response(self._build_requisition_response(pr))
-<<<<<<< HEAD
-
-
-class PurchaseOrderViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for Purchase Order management
-    
-    ≡ƒöÉ SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
-    """
-    
-    queryset = PurchaseOrder.objects.all().select_related('vendor', 'pr_reference').order_by('-created_at')
-=======
     
     @action(detail=False, methods=['get'], url_path='export-to-excel')
     def export_to_excel(self, request):
@@ -1561,7 +1496,6 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all().select_related(
         'vendor', 'pr_reference'
     ).prefetch_related('lines', 'receipts__lines').order_by('-created_at')
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_orders'
@@ -1628,14 +1562,11 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(po)
         return Response(serializer.data)
-<<<<<<< HEAD
-=======
 
     @action(detail=True, methods=['get'], url_path='receiving-summary')
     def receiving_summary(self, request, pk=None):
         po = self.get_object()
         return Response(GoodsReceiptService.receiving_summary(po))
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     
     @action(detail=False, methods=['get'])
     def dashboard(self, request):
@@ -1669,21 +1600,6 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             'top_vendors': list(by_vendor),
             'recent': recent_serializer.data
         })
-<<<<<<< HEAD
-
-
-class ReceiptViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet for Goods Receipt management
-    
-    ≡ƒöÉ SECURITY: Requires 'procurement_receipts' module access (soft-coded from rbac_config.py)
-    """
-    
-    queryset = Receipt.objects.all().select_related('purchase_order').order_by('-created_at')
-    serializer_class = ReceiptSerializer
-    permission_classes = [IsAuthenticated, HasModuleAccess]
-    module_required = 'procurement_receipts'
-=======
     
     @action(detail=False, methods=['get'], url_path='by_number/(?P<po_number>[^/.]+)')
     def by_number(self, request, po_number=None):
@@ -1722,7 +1638,6 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_receipts'
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1748,51 +1663,6 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return queryset
     
     @action(detail=True, methods=['post'])
-<<<<<<< HEAD
-    def accept(self, request, pk=None):
-        """Accept received goods"""
-        receipt = self.get_object()
-        
-        if receipt.status != 'pending':
-            return Response(
-                {'error': 'Only pending receipts can be accepted'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        receipt.status = 'accepted'
-        receipt.quality_check_passed = True
-        
-        # Update PO status to completed
-        po = receipt.purchase_order
-        po.status = 'completed'
-        po.actual_delivery = timezone.now()
-        po.save()
-        
-        receipt.save()
-        
-        serializer = self.get_serializer(receipt)
-        return Response(serializer.data)
-    
-    @action(detail=True, methods=['post'])
-    def reject_delivery(self, request, pk=None):
-        """Reject received goods"""
-        receipt = self.get_object()
-        notes = request.data.get('notes', '')
-        
-        if receipt.status != 'pending':
-            return Response(
-                {'error': 'Only pending receipts can be rejected'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        receipt.status = 'rejected'
-        receipt.quality_check_passed = False
-        receipt.inspection_notes = notes
-        receipt.save()
-        
-        serializer = self.get_serializer(receipt)
-        return Response(serializer.data)
-=======
     def submit(self, request, pk=None):
         receipt = GoodsReceiptService.submit(pk, request.user)
         response_data = dict(self.get_serializer(receipt).data)
@@ -1823,7 +1693,6 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     def cancel(self, request, pk=None):
         receipt = GoodsReceiptService.cancel(pk, request.user, request.data.get('reason'))
         return Response(self.get_serializer(receipt).data)
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     
     @action(detail=False, methods=['get'])
     def dashboard(self, request):
@@ -1862,17 +1731,6 @@ def get_categories(request):
 
 
 class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
-<<<<<<< HEAD
-    """
-    ViewSet for PODocument ΓÇö read-only list/detail plus the AI extraction action.
-    The `extract_from_pdf` action is the primary entry point: it accepts a PDF
-    upload, stores it in S3, runs the AI extractor, and returns the result.
-    
-    ≡ƒöÉ SECURITY: Requires 'procurement_orders' module access (soft-coded from rbac_config.py)
-    """
-
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     queryset = PODocument.objects.all().order_by('-created_at')
     serializer_class = PODocumentSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
@@ -1885,18 +1743,6 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['post'], url_path='extract_from_pdf',
             parser_classes=[MultiPartParser, FormParser])
     def extract_from_pdf(self, request):
-<<<<<<< HEAD
-        """
-        POST /api/v1/procurement/po-documents/extract_from_pdf/
-
-        Multipart form fields:
-            file  ΓÇö PDF file (required)
-
-        Returns structured JSON with all extractable PO/PR fields plus
-        S3 storage reference and extraction metadata.
-        """
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
         import logging
         logger = logging.getLogger(__name__)
 
@@ -1993,15 +1839,6 @@ class PODocumentViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class CostCenterViewSet(viewsets.ModelViewSet):
-<<<<<<< HEAD
-    """
-    Cost Center API - Master organizational cost center registry.
-    Soft-coded for departmental budget tracking and financial reporting.
-    
-    ≡ƒöÉ SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
-    """
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     queryset = CostCenter.objects.all()
     serializer_class = CostCenterSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
@@ -2025,15 +1862,6 @@ class CostCenterViewSet(viewsets.ModelViewSet):
 
 
 class BudgetViewSet(viewsets.ModelViewSet):
-<<<<<<< HEAD
-    """
-    Budget Allocation API - Project budget lines with spend tracking.
-    Soft-coded for professional financial control and variance analysis.
-    
-    ≡ƒöÉ SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
-    """
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     queryset = Budget.objects.all()
     serializer_class = BudgetSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
@@ -2067,22 +1895,6 @@ class BudgetViewSet(viewsets.ModelViewSet):
 
 
 class ProjectViewSet(viewsets.ModelViewSet):
-<<<<<<< HEAD
-    """
-    Project Master Registry API - Central project database.
-    Professional project-based procurement with budget tracking.
-    
-    Features:
-      - List/Detail views with different serializers
-      - Project-based PO aggregation
-      - Budget tracking and variance analysis
-      - Invoice reconciliation (A/P + A/R)
-      - Soft-coded filtering and search
-    
-    ≡ƒöÉ SECURITY: Requires 'procurement' module access (soft-coded from rbac_config.py)
-    """
-=======
->>>>>>> f3a316b (Save local backend updates, procurement fixes, and new migrations)
     queryset = Project.objects.all()
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement'
