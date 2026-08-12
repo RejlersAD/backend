@@ -60,7 +60,6 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'user_mgmt',              'name': 'User Management',              'icon': 'Users',       'order': 51, 'description': 'Manage users, roles, and permissions'},
     {'code': 'role_access_mgmt',       'name': 'Role & Access Management',     'icon': 'ShieldCheck', 'order': 52, 'description': 'Roles, module permissions & access request approvals'},
     {'code': 'wrench_integration',     'name': 'Wrench Integration',           'icon': 'Wrench',      'order': 53, 'description': 'Wrench Smart Project Platform integration and sync'},
-    {'code': 'ai_champion',            'name': 'AI Champion',                  'icon': 'Trophy',      'order': 54, 'description': 'AI Champion leaderboard, badges and engagement analytics'},
     {'code': 'enquiry_management',     'name': 'Enquiry Management',           'icon': 'Envelope',    'order': 55, 'description': 'Customer enquiries from public contact form'},
     {'code': 'org_settings',           'name': 'Organization Settings',        'icon': 'Settings',    'order': 56, 'description': 'Configure organization settings and preferences'},
     {'code': 'audit_logs',             'name': 'Audit Logs',                   'icon': 'FileSearch',  'order': 57, 'description': 'View system audit logs and activity (append-only per data-management spec)'},
