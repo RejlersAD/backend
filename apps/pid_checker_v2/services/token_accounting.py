@@ -84,18 +84,20 @@ def price_lookup(provider: str, model_name: str) -> dict[str, float]:
 
 def _try_db_override(provider: str, model_name: str) -> Optional[dict[str, float]]:
     try:
-        from apps.rbac.ai_champion_models import AIPricingConfig
-        row = (AIPricingConfig.objects
-               .filter(provider=provider, model_name=model_name, is_active=True)
-               .order_by('-effective_from')
-               .first())
-        if row is None:
-            return None
-        # AIPricingConfig stores USD per 1K; convert to per-1M for uniformity.
-        return {
-            'input':  float(row.input_cost_per_1k) * 1000.0,
-            'output': float(row.output_cost_per_1k) * 1000.0,
-        }
+        # NOTE: AIPricingConfig removed with AI Champion feature
+        # from apps.rbac.ai_champion_models import AIPricingConfig
+        # row = (AIPricingConfig.objects
+        #        .filter(provider=provider, model_name=model_name, is_active=True)
+        #        .order_by('-effective_from')
+        #        .first())
+        # if row is None:
+        #     return None
+        # # AIPricingConfig stores USD per 1K; convert to per-1M for uniformity.
+        # return {
+        #     'input':  float(row.input_cost_per_1k) * 1000.0,
+        #     'output': float(row.output_cost_per_1k) * 1000.0,
+        # }
+        return None
     except Exception as exc:  # noqa: BLE001
         logger.debug('AIPricingConfig lookup skipped (%s / %s): %s',
                      provider, model_name, exc)
