@@ -1,4 +1,4 @@
-﻿"""
+"""
 Procurement Management Serializers
 API data serialization for procurement workflows
 """
@@ -376,6 +376,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         # Upload files to S3 if any
         if files:
             self._upload_attachments(instance, files)
+        if management_evidence:
+            instance.management_approval_evidence = self._upload_attachments(instance, [management_evidence])
+            instance.save(update_fields=['management_approval_evidence'])
         
         return instance
     
@@ -395,6 +398,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         # Upload files to S3 if any
         if files:
             self._upload_attachments(instance, files)
+        if management_evidence:
+            instance.management_approval_evidence = self._upload_attachments(instance, [management_evidence])
+            instance.save(update_fields=['management_approval_evidence'])
         
         return instance
     
@@ -621,9 +627,9 @@ class PODocumentSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ============================================================================
 # MASTER DATABASE SERIALIZERS - Professional Project-Based Procurement
-# ΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉΓòÉ
+# ============================================================================
 
 class CostCenterSerializer(serializers.ModelSerializer):
     """Cost Center master table serializer"""
@@ -714,7 +720,7 @@ class ProjectListSerializer(serializers.ModelSerializer):
     def get_project_manager_display(self, obj):
         if obj.project_manager:
             return obj.project_manager.get_full_name()
-        return obj.project_manager_name or 'ΓÇö'
+        return obj.project_manager_name or 'N/A'
     
     def get_total_budget(self, obj):
         return float(obj.get_total_budget())

@@ -98,6 +98,16 @@ echo ""
     # Just run the main migrate command with a reasonable timeout
     if timeout 300 python manage.py migrate --noinput 2>&1; then
         echo "✅ Database migrations completed successfully"
+        
+        # 🔐 SYNC RBAC CONFIGURATION (Critical for role-based access)
+        echo ""
+        echo "🔐 Syncing RBAC role-module mappings from rbac_config.py..."
+        if timeout 60 python manage.py sync_role_modules 2>&1; then
+            echo "✅ RBAC configuration synced successfully"
+        else
+            echo "⚠️  RBAC sync failed (non-critical)"
+            echo "   Run manually: railway run python manage.py sync_role_modules"
+        fi
     else
         echo "⚠️  Database migrations failed or timed out (non-critical)"
         echo "   Service will continue running"

@@ -1022,17 +1022,26 @@ def usage_daily(request):
         by_day = (
             qs.annotate(date=TruncDate('timestamp'))
               .values('date')
-              .annotate(total=Count('id'))
+              .annotate(
+                  total      = Count('id'),
+                  success_ct = Count('id', filter=Q(success=True)),
+                  failed_ct  = Count('id', filter=Q(success=False)),
+              )
               .order_by('date')
         )
-        date_map = {str(r['date']): r['total'] for r in by_day}
+        date_map = {str(r['date']): r for r in by_day}
 
         date_range = [
             (start_date.date() + timedelta(days=i)).isoformat()
             for i in range(days_back)
         ]
         daily_totals = [
-            {'date': d, 'total': date_map.get(d, 0), 'success': date_map.get(d, 0), 'failed': 0}
+            {
+                'date':    d,
+                'total':   date_map[d]['total']      if d in date_map else 0,
+                'success': date_map[d]['success_ct'] if d in date_map else 0,
+                'failed':  date_map[d]['failed_ct']  if d in date_map else 0,
+            }
             for d in date_range
         ]
 

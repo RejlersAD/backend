@@ -18,11 +18,7 @@ from .views import (
 from .dashboard_views import (
     user_dashboard_stats, user_files_list, user_activity_timeline
 )
-from .ai_champion_views import AIChampionViewSet
-from .activity_report_views import ActivityReportViewSet
 from apps.users.views_password import change_password
-from .views_admin_fix import fix_user_django_flags
-from .views_admin_utils import create_radai_managers
 
 router = DefaultRouter()
 # RBAC Core
@@ -45,12 +41,6 @@ router.register(r'analytics/feature-usage', FeatureUsageAnalyticsViewSet, basena
 router.register(r'analytics/error-logs', ErrorLogAnalyticsViewSet, basename='error-logs')
 router.register(r'analytics/health-checks', SystemHealthCheckViewSet, basename='health-checks')
 
-# AI Champion of the Month — gamification, tracking, cost analytics
-router.register(r'ai-champion', AIChampionViewSet, basename='ai-champion')
-
-# Activity Reports — admin-only engagement analytics (weekly, monthly, by-user, by-feature)
-router.register(r'activity-reports', ActivityReportViewSet, basename='activity-reports')
-
 # Enhanced User Profile — Achievements, Experience, Social Media Links, Documents
 router.register(r'achievements', AchievementViewSet, basename='achievement')
 router.register(r'work-experience', WorkExperienceViewSet, basename='work-experience')
@@ -60,10 +50,6 @@ router.register(r'profile-documents', ProfileDocumentViewSet, basename='profile-
 urlpatterns = [
     # User Export — must come BEFORE router.urls to prevent users/{pk}/ swallowing 'export' as a pk
     path('users/export/', UserExportView.as_view(), name='user-export-users'),
-    # Emergency admin fix for Django flags (TEMPORARY)
-    path('admin/fix-user-flags/', fix_user_django_flags, name='admin-fix-user-flags'),
-    # Admin utility: Create RadAI managers
-    path('admin/create-radai-managers/', create_radai_managers, name='admin-create-radai-managers'),
     path('', include(router.urls)),
     # User Dashboard endpoints
     path('dashboard/stats/', user_dashboard_stats, name='user-dashboard-stats'),

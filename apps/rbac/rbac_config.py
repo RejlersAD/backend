@@ -60,7 +60,6 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'user_mgmt',              'name': 'User Management',              'icon': 'Users',       'order': 51, 'description': 'Manage users, roles, and permissions'},
     {'code': 'role_access_mgmt',       'name': 'Role & Access Management',     'icon': 'ShieldCheck', 'order': 52, 'description': 'Roles, module permissions & access request approvals'},
     {'code': 'wrench_integration',     'name': 'Wrench Integration',           'icon': 'Wrench',      'order': 53, 'description': 'Wrench Smart Project Platform integration and sync'},
-    {'code': 'ai_champion',            'name': 'AI Champion',                  'icon': 'Trophy',      'order': 54, 'description': 'AI Champion leaderboard, badges and engagement analytics'},
     {'code': 'enquiry_management',     'name': 'Enquiry Management',           'icon': 'Envelope',    'order': 55, 'description': 'Customer enquiries from public contact form'},
     {'code': 'org_settings',           'name': 'Organization Settings',        'icon': 'Settings',    'order': 56, 'description': 'Configure organization settings and preferences'},
     {'code': 'audit_logs',             'name': 'Audit Logs',                   'icon': 'FileSearch',  'order': 57, 'description': 'View system audit logs and activity (append-only per data-management spec)'},
@@ -115,77 +114,12 @@ SYSTEM_ROLES_CONFIG = [
         'badge_color': 'orange',
     },
     {
-        'code': 'ict_admin',
-        'name': 'ICT Administrator',
-        'level': 2,
-        'description': 'ICT & System Administrator — full access to admin section only (Dashboard, Users, Roles, Wrench, AI Champion, Enquiries). No access to Engineering, HR, or Finance modules.',
-        'is_system_role': True,
-        'badge_color': 'indigo',
-        'department_restricted': 'ICT',  # Soft-coded department restriction
-    },
-    {
-        'code': 'process_engineer',
-        'name': 'Process Engineer',
-        'level': 4,
-        'description': 'Process discipline engineer — access to process datasheets, P&ID, PFD tools.',
-        'is_system_role': True,
-        'badge_color': 'blue',
-    },
-    {
-        'code': 'electrical_engineer',
-        'name': 'Electrical Engineer',
-        'level': 4,
-        'description': 'Electrical discipline engineer — access to electrical datasheets and SLD analysis.',
-        'is_system_role': True,
-        'badge_color': 'yellow',
-    },
-    {
-        'code': 'instrument_engineer',
-        'name': 'Instrument Engineer',
-        'level': 4,
-        'description': 'Instrument discipline engineer — access to instrument datasheets and index.',
-        'is_system_role': True,
-        'badge_color': 'purple',
-    },
-    {
-        'code': 'mechanical_engineer',
-        'name': 'Mechanical Engineer',
-        'level': 4,
-        'description': 'Mechanical discipline engineer — access to mechanical datasheets.',
-        'is_system_role': True,
-        'badge_color': 'gray',
-    },
-    {
-        'code': 'civil_engineer',
-        'name': 'Civil Engineer',
-        'level': 4,
-        'description': 'Civil/structural discipline engineer — access to civil datasheets.',
-        'is_system_role': True,
-        'badge_color': 'green',
-    },
-    {
-        'code': 'piping_engineer',
-        'name': 'Piping Engineer',
-        'level': 4,
-        'description': 'Piping discipline engineer — access to piping datasheets and PMS.',
-        'is_system_role': True,
-        'badge_color': 'indigo',
-    },
-    {
         'code': 'qhse_engineer',
         'name': 'QHSE Engineer',
         'level': 4,
         'description': 'Quality, Health, Safety and Environment engineer.',
         'is_system_role': True,
         'badge_color': 'teal',
-    },
-    {
-        'code': 'design_engineer',
-        'name': 'Design Engineer',
-        'level': 4,
-        'description': 'Design/digital twin engineer — DesignIQ, PFD to P&ID, P&ID analysis.',
-        'is_system_role': True,
-        'badge_color': 'cyan',
     },
     {
         'code': 'project_manager',
@@ -225,19 +159,6 @@ SYSTEM_ROLES_CONFIG = [
         'sensitive': True,
         'sensitive_modules': ['hr_management', 'payroll', 'timesheet', 'hr_onboarding'],
     },
-    {
-        # SOFT-CODED: Human Resource role — full access to all HR modules
-        # Covers: HR Management, Payroll, Timesheet, Onboarding/Offboarding, My Profile
-        # Assignable from /admin/roles page to any user
-        'code': 'human_resource',
-        'name': 'Human Resource',
-        'level': 3,
-        'description': 'Complete access to all Human Resource features including HR Management, Payroll, Timesheet, Onboarding/Offboarding, and Employee Self-Service.',
-        'is_system_role': True,
-        'badge_color': 'rose',
-        'sensitive': True,
-        'sensitive_modules': ['hr_management', 'payroll', 'timesheet', 'hr_onboarding', 'hr_self_service'],
-    },
 ]
 
 # Module Assignment Strategy
@@ -273,10 +194,10 @@ SUPERADMIN_ROLE_CODES = ['super_admin', 'superadmin']
 # Only these roles have full HR approval access (leave, payroll final approval)
 # Super admins and regular admins do NOT automatically get HR Manager privileges
 # Add new HR roles here to grant them full HR approval access
-HR_MANAGER_ROLE_CODES = ['hr_admin', 'hr_manager', 'human_resource']
+HR_MANAGER_ROLE_CODES = ['hr_admin', 'hr_manager']
 
 # Sensitive roles — only Super Admin may grant these
-SENSITIVE_ROLE_CODES = ['hr_admin', 'human_resource']
+SENSITIVE_ROLE_CODES = ['hr_admin']
 
 # Sensitive module codes — restricted to hr_admin, human_resource and super_admin
 SENSITIVE_MODULE_CODES = ['hr_management', 'payroll', 'timesheet', 'hr_onboarding']
@@ -485,29 +406,8 @@ ROLE_MODULE_POLICY = {
     # default grant, edit ENGINEERING_SECTION_MODULES above — not here.
     # ─────────────────────────────────────────────────────────────────────
 
-    # Process-focused engineers: full Engineering section
-    'process_engineer': ENGINEERING_SECTION_MODULES,
-
-    # Electrical discipline: full Engineering section
-    'electrical_engineer': ENGINEERING_SECTION_MODULES,
-
-    # Instrument discipline: full Engineering section
-    'instrument_engineer': ENGINEERING_SECTION_MODULES,
-
-    # Mechanical discipline: full Engineering section
-    'mechanical_engineer': ENGINEERING_SECTION_MODULES,
-
-    # Civil / structural discipline: full Engineering section
-    'civil_engineer': ENGINEERING_SECTION_MODULES,
-
-    # Piping discipline: full Engineering section
-    'piping_engineer': ENGINEERING_SECTION_MODULES,
-
     # QHSE discipline: full Engineering section
     'qhse_engineer': ENGINEERING_SECTION_MODULES,
-
-    # DesignIQ / digital twin roles: full Engineering section
-    'design_engineer': ENGINEERING_SECTION_MODULES,
 
     # Project managers: full Engineering section + reports
     'project_manager': ENGINEERING_SECTION_MODULES + ['reports'],
@@ -533,35 +433,13 @@ ROLE_MODULE_POLICY = {
         'procurement_receipts',
     ],
 
-    # ICT Admin: ONLY admin section modules (9. Admin) - NO engineering, HR, or finance access
-    # SOFT-CODED: Single source of truth for ICT admin access
-    'ict_admin': [
-        'admin_dashboard',       # 9.1 Dashboard
-        'user_mgmt',             # 9.2 User Management
-        'role_access_mgmt',      # 9.3 Role & Access Management
-        'wrench_integration',    # 9.4 Wrench Integration
-        'ai_champion',           # 9.5 AI Champion
-        'enquiry_management',    # 9.6 Enquiry Management
-    ],
-
     # Default: standard engineering + common + hr_self_service (see DEFAULT_ROLE_MODULES)
     'default': DEFAULT_ROLE_MODULES,
 
-    # HR & Payroll Administrator: ALL HR modules (same as human_resource)
+    # HR & Payroll Administrator: ALL HR modules
     # SOFT-CODED: Complete access to section "4. Human Resource" in sidebar
     # Michelle uses this role for HR management
     'hr_admin': [
-        'hr_management',      # 4.1 Human Resources Dashboard
-        'payroll',            # 4.2 Payroll Engine
-        'timesheet',          # 4.3 Timesheet & Attendance
-        'hr_self_service',    # 4.4 My Profile (Employee Self-Service)
-        'hr_onboarding',      # 4.5 Onboarding | Offboarding
-    ],
-
-    # Human Resource: ALL HR modules (HR Management, Payroll, Timesheet, Onboarding, My Profile)
-    # SOFT-CODED: Complete access to section "4. Human Resource" in sidebar
-    # Same modules as hr_admin - kept separate for role assignment flexibility
-    'human_resource': [
         'hr_management',      # 4.1 Human Resources Dashboard
         'payroll',            # 4.2 Payroll Engine
         'timesheet',          # 4.3 Timesheet & Attendance
