@@ -95,6 +95,34 @@ class Module(TimeStampedModel):
         return self.name
 
 
+def _sync_module_catalogue():
+    """
+    Idempotently create any ALL_MODULES_CATALOGUE entry missing from the DB.
+    Shared by ModuleViewSet (admin UI) and the super_admin bypass in
+    UserProfile.get_all_modules() so Module is never left empty just because
+    nobody has opened Role Management yet in this environment.
+    """
+    from apps.rbac.rbac_config import ALL_MODULES_CATALOGUE
+    existing_codes = set(Module.objects.values_list('code', flat=True))
+    missing = [m for m in ALL_MODULES_CATALOGUE if m['code'] not in existing_codes]
+    if not missing:
+        return
+    Module.objects.bulk_create(
+        [
+            Module(
+                code=m['code'],
+                name=m['name'],
+                description=m.get('description', ''),
+                icon=m.get('icon', ''),
+                order=m.get('order', 0),
+                is_active=True,
+            )
+            for m in missing
+        ],
+        ignore_conflicts=True,
+    )
+
+
 class Permission(TimeStampedModel):
     """
     Granular permissions for actions within modules
@@ -154,6 +182,9 @@ class Role(TimeStampedModel):
     level = models.IntegerField(choices=ROLE_LEVEL_CHOICES, default=6)
     is_active = models.BooleanField(default=True)
     is_system_role = models.BooleanField(default=False)  # Cannot be deleted
+    # False once an admin manually edits this role's modules/permissions via the UI —
+    # excludes it from the destructive deploy-time ROLE_MODULE_POLICY resync (sync_role_modules).
+    auto_sync_enabled = models.BooleanField(default=True)
     
     # Permissions
     permissions = models.ManyToManyField(
@@ -335,8 +366,19 @@ class UserProfile(TimeStampedModel):
                 self.employee_id = str(self.employee_id).strip()
         super().save(*args, **kwargs)
     
+    def is_super_admin(self):
+        """True for Django is_superuser or an active super_admin role — bypasses all module/permission gating."""
+        if getattr(self.user, 'is_superuser', False):
+            return True
+        from apps.rbac.models import UserRole
+        return UserRole.objects.filter(
+            user_profile=self, role__code='super_admin', role__is_active=True
+        ).exists()
+
     def has_permission(self, permission_code):
         """Check if user has specific permission through any active role"""
+        if self.is_super_admin():
+            return True
         from apps.rbac.models import UserRole
         user_role_ids = UserRole.objects.filter(
             user_profile=self,
@@ -358,6 +400,9 @@ class UserProfile(TimeStampedModel):
         # Check if module is globally disabled
         if not is_module_enabled(module_code):
             return False
+
+        if self.is_super_admin():
+            return True
         
         from apps.rbac.models import UserRole
         user_role_ids = UserRole.objects.filter(
@@ -377,10 +422,13 @@ class UserProfile(TimeStampedModel):
         permissions = cache.get(cache_key)
         
         if permissions is None:
-            permissions = list(Permission.objects.filter(
-                roles__in=self.roles.filter(is_active=True),
-                is_active=True
-            ).distinct())
+            if self.is_super_admin():
+                permissions = list(Permission.objects.filter(is_active=True))
+            else:
+                permissions = list(Permission.objects.filter(
+                    roles__in=self.roles.filter(is_active=True),
+                    is_active=True
+                ).distinct())
             # Cache for 5 minutes
             cache.set(cache_key, permissions, 300)
         
@@ -398,17 +446,25 @@ class UserProfile(TimeStampedModel):
         modules = cache.get(cache_key)
         
         if modules is None:
-            # Get role IDs through UserRole relationship — only active roles
-            user_role_ids = UserRole.objects.filter(
-                user_profile=self,
-                role__is_active=True
-            ).values_list('role_id', flat=True)
-            
-            # Get modules linked to these roles through RoleModule
-            modules = list(Module.objects.filter(
-                rolemodule__role_id__in=user_role_ids,
-                is_active=True
-            ).distinct())
+            if self.is_super_admin():
+                # Bypass role-based gating entirely — super admin sees every active module
+                # regardless of how sparsely RoleModule rows are seeded in this environment's DB.
+                # Self-heal: ensure the Module table actually has the full catalogue —
+                # it's normally only lazy-synced when /rbac/modules/ (Role Management) is hit.
+                _sync_module_catalogue()
+                modules = list(Module.objects.filter(is_active=True))
+            else:
+                # Get role IDs through UserRole relationship — only active roles
+                user_role_ids = UserRole.objects.filter(
+                    user_profile=self,
+                    role__is_active=True
+                ).values_list('role_id', flat=True)
+                
+                # Get modules linked to these roles through RoleModule
+                modules = list(Module.objects.filter(
+                    rolemodule__role_id__in=user_role_ids,
+                    is_active=True
+                ).distinct())
 
             # Soft-coded global access modules (for all authenticated users)
             try:

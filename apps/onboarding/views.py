@@ -870,3 +870,615 @@ class ChecklistViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(offboarding_record_id=offboarding_id)
         
         return queryset.select_related('completed_by')
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EXIT/RESIGNATION WORKFLOW VIEWS
+# ═══════════════════════════════════════════════════════════════════════════
+
+class ExitRequestViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for exit/resignation requests
+    
+    Features:
+    - Employee can initiate exit request
+    - Manager approval workflow
+    - HR approval workflow
+    - Activity tracking
+    - Clearance management
+    - Integration with OffboardingRecord
+    
+    Custom Actions:
+    - statistics: Get exit statistics
+    - submit_request: Employee submits exit request
+    - manager_action: Manager approves/rejects
+    - hr_action: HR approves/rejects
+    - withdraw: Employee withdraws request
+    - create_clearances: Auto-create department clearances
+    - update_clearance: Update clearance status
+    - initiate_exit_process: Start exit activities
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+    
+    def get_serializer_class(self):
+        """Use lightweight serializer for list, full serializer for detail"""
+        if self.action == 'list':
+            from .serializers import ExitRequestListSerializer
+            return ExitRequestListSerializer
+        from .serializers import ExitRequestSerializer
+        return ExitRequestSerializer
+    
+    def get_queryset(self):
+        """
+        Filter exit requests based on user role and query params
+        """
+        from .models import ExitRequest
+        from django.db.models import Count, Q
+        
+        queryset = ExitRequest.objects.all()
+        user = self.request.user
+        
+        # Role-based filtering
+        view_mode = self.request.query_params.get('view_mode', 'my_requests')
+        
+        if view_mode == 'my_requests':
+            # Employee sees their own requests
+            queryset = queryset.filter(user=user)
+        elif view_mode == 'pending_manager_approval':
+            # Manager sees requests pending their approval
+            queryset = queryset.filter(
+                reporting_manager=user,
+                manager_approval_status='pending',
+                overall_status='pending_manager'
+            )
+        elif view_mode == 'pending_hr_approval':
+            # HR sees requests pending HR approval
+            queryset = queryset.filter(
+                hr_approval_status='pending',
+                overall_status='pending_hr'
+            )
+        elif view_mode == 'all':
+            # HR/Admin sees all requests (add RBAC check here)
+            pass
+        
+        # Filter by status
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(overall_status=status_filter)
+        
+        # Filter by request type
+        request_type = self.request.query_params.get('request_type')
+        if request_type:
+            queryset = queryset.filter(request_type=request_type)
+        
+        # Filter by department
+        department = self.request.query_params.get('department')
+        if department:
+            queryset = queryset.filter(department__icontains=department)
+        
+        # Search by employee name or email
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(employee_name__icontains=search) |
+                Q(employee_email__icontains=search) |
+                Q(employee_id__icontains=search)
+            )
+        
+        # Annotate counts for list view
+        if self.action == 'list':
+            queryset = queryset.annotate(
+                activities_count=Count('activities', distinct=True),
+                clearances_count=Count('clearances', distinct=True),
+                clearances_completed_count=Count(
+                    'clearances',
+                    filter=Q(clearances__clearance_status='cleared'),
+                    distinct=True
+                )
+            )
+        else:
+            # Prefetch related for detail view
+            queryset = queryset.prefetch_related(
+                'activities', 'clearances', 'activities__performed_by',
+                'clearances__cleared_by'
+            )
+        
+        return queryset.select_related(
+            'user', 'reporting_manager', 'manager_approved_by',
+            'hr_approved_by', 'exit_interview_conducted_by', 'offboarding_record'
+        ).order_by('-created_at')
+    
+    @action(detail=False, methods=['get'])
+    def statistics(self, request):
+        """Get exit request statistics for dashboard"""
+        from .models import ExitRequest
+        from django.db.models import Count, Q
+        from datetime import date, timedelta
+        
+        stats = {
+            'total_requests': ExitRequest.objects.count(),
+            'pending_manager': ExitRequest.objects.filter(overall_status='pending_manager').count(),
+            'pending_hr': ExitRequest.objects.filter(overall_status='pending_hr').count(),
+            'approved': ExitRequest.objects.filter(overall_status='approved').count(),
+            'in_progress': ExitRequest.objects.filter(overall_status='processing').count(),
+            'completed': ExitRequest.objects.filter(overall_status='completed').count(),
+            'rejected': ExitRequest.objects.filter(overall_status='rejected').count(),
+            'withdrawn': ExitRequest.objects.filter(overall_status='withdrawn').count(),
+        }
+        
+        # Exits this month
+        today = date.today()
+        month_start = today.replace(day=1)
+        next_month = month_start + timedelta(days=32)
+        next_month_start = next_month.replace(day=1)
+        
+        stats['exits_this_month'] = ExitRequest.objects.filter(
+            proposed_last_working_day__gte=month_start,
+            proposed_last_working_day__lt=next_month_start
+        ).count()
+        
+        # By request type
+        stats['by_type'] = list(
+            ExitRequest.objects.values('request_type')
+            .annotate(count=Count('id'))
+            .order_by('-count')
+        )
+        
+        # By department
+        stats['by_department'] = list(
+            ExitRequest.objects.values('department')
+            .annotate(count=Count('id'))
+            .order_by('-count')[:10]
+        )
+        
+        return Response(stats)
+    
+    @action(detail=False, methods=['post'])
+    def submit_request(self, request):
+        """
+        Employee submits an exit/resignation request
+        """
+        from .models import ExitRequest, ExitActivity, NoticePeriodPolicy
+        from apps.hr_core.models import EmployeeMaster
+        from datetime import datetime, date
+        
+        with transaction.atomic():
+            data = request.data
+            user = request.user
+            
+            # Get employee details
+            try:
+                employee = EmployeeMaster.objects.get(user=user)
+            except EmployeeMaster.DoesNotExist:
+                return Response(
+                    {'error': 'Employee profile not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Validate required fields
+            required_fields = ['exit_reason', 'proposed_last_working_day']
+            missing = [f for f in required_fields if not data.get(f)]
+            if missing:
+                return Response(
+                    {'error': f'Missing required fields: {", ".join(missing)}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Parse date
+            try:
+                lwd = datetime.strptime(data['proposed_last_working_day'], '%Y-%m-%d').date()
+            except ValueError:
+                return Response(
+                    {'error': 'Invalid date format. Use YYYY-MM-DD'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Calculate notice period
+            notice_days = (lwd - date.today()).days
+            if notice_days < 0:
+                return Response(
+                    {'error': 'Last working day cannot be in the past'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get standard notice period from policy
+            try:
+                policy = NoticePeriodPolicy.objects.filter(
+                    is_active=True,
+                    designation_level__icontains=employee.designation or ''
+                ).first()
+                standard_notice = policy.standard_notice_days if policy else 30
+            except:
+                standard_notice = 30
+            
+            # Get reporting manager (EmployeeMaster uses 'manager' field)
+            reporting_manager = employee.manager
+            if not reporting_manager:
+                return Response(
+                    {'error': 'No reporting manager found. Please contact HR.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Create exit request
+            exit_request = ExitRequest.objects.create(
+                user=user,
+                employee_name=employee.get_full_name(),
+                employee_email=user.email,
+                employee_id=employee.employee_number,
+                position=employee.designation or '',
+                department=employee.department or '',
+                reporting_manager=reporting_manager.user,  # ForeignKey to User, not EmployeeMaster
+                request_type=data.get('request_type', 'resignation'),
+                exit_reason=data['exit_reason'],
+                exit_reason_detail=data.get('exit_reason_detail', ''),
+                proposed_last_working_day=lwd,
+                notice_period_days=notice_days,
+                standard_notice_period=standard_notice,
+                overall_status='pending_manager',
+                exit_process_status='not_started'
+            )
+            
+            # Handle resignation letter upload
+            if 'resignation_letter_file' in request.FILES:
+                file = request.FILES['resignation_letter_file']
+                try:
+                    s3 = S3Service()
+                    file_path, presigned_url = s3.upload_file(
+                        file,
+                        folder='exit_documents',
+                        object_name=f'resignation_letter_{exit_request.id}_{file.name}'
+                    )
+                    exit_request.resignation_letter = file_path
+                    exit_request.resignation_letter_url = presigned_url
+                    exit_request.save()
+                except Exception as e:
+                    # Non-critical failure, continue
+                    print(f"File upload failed: {e}")
+            
+            # Log activity
+            ExitActivity.objects.create(
+                exit_request=exit_request,
+                activity_type='request_submitted',
+                activity_description=f'{employee.get_full_name()} submitted exit request',
+                performed_by=user,
+                metadata={
+                    'exit_reason': data['exit_reason'],
+                    'proposed_lwd': str(lwd),
+                    'notice_days': notice_days
+                }
+            )
+            
+            # Notify manager (TODO: Send email/notification)
+            ExitActivity.objects.create(
+                exit_request=exit_request,
+                activity_type='manager_notified',
+                activity_description=f'Notification sent to manager {reporting_manager.get_full_name()}',
+                performed_by=user,
+                metadata={'manager_email': reporting_manager.email}
+            )
+            
+            serializer = self.get_serializer(exit_request)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
+    @action(detail=True, methods=['post'])
+    def manager_action(self, request, pk=None):
+        """
+        Manager approves or rejects exit request
+        """
+        from .models import ExitActivity
+        
+        exit_request = self.get_object()
+        user = request.user
+        
+        # Verify user is the reporting manager
+        if exit_request.reporting_manager != user:
+            return Response(
+                {'error': 'Only the reporting manager can approve/reject this request'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if already actioned
+        if exit_request.manager_approval_status != 'pending':
+            return Response(
+                {'error': 'This request has already been actioned by the manager'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        action_type = request.data.get('action')  # 'approve' or 'reject'
+        comments = request.data.get('comments', '')
+        
+        if action_type not in ['approve', 'reject']:
+            return Response(
+                {'error': 'Action must be either "approve" or "reject"'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        with transaction.atomic():
+            if action_type == 'approve':
+                exit_request.manager_approval_status = 'approved'
+                exit_request.overall_status = 'pending_hr'
+                activity_type = 'manager_approved'
+                activity_desc = f'Manager {user.get_full_name()} approved the exit request'
+            else:
+                exit_request.manager_approval_status = 'rejected'
+                exit_request.overall_status = 'rejected'
+                activity_type = 'manager_rejected'
+                activity_desc = f'Manager {user.get_full_name()} rejected the exit request'
+            
+            exit_request.manager_approved_by = user
+            exit_request.manager_approval_date = timezone.now()
+            exit_request.manager_comments = comments
+            exit_request.save()
+            
+            # Log activity
+            ExitActivity.objects.create(
+                exit_request=exit_request,
+                activity_type=activity_type,
+                activity_description=activity_desc,
+                performed_by=user,
+                metadata={
+                    'action': action_type,
+                    'comments': comments
+                }
+            )
+            
+            # If approved, notify HR
+            if action_type == 'approve':
+                ExitActivity.objects.create(
+                    exit_request=exit_request,
+                    activity_type='hr_notified',
+                    activity_description='HR team notified for approval',
+                    performed_by=user
+                )
+            
+            serializer = self.get_serializer(exit_request)
+            return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def hr_action(self, request, pk=None):
+        """
+        HR approves or rejects exit request
+        Can also adjust the final LWD
+        """
+        from .models import ExitActivity, OffboardingRecord
+        from datetime import datetime
+        
+        exit_request = self.get_object()
+        user = request.user
+        
+        # TODO: Add RBAC check - user must have hr_onboarding module access
+        
+        # Check if already actioned
+        if exit_request.hr_approval_status != 'pending':
+            return Response(
+                {'error': 'This request has already been actioned by HR'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        action_type = request.data.get('action')  # 'approve' or 'reject'
+        comments = request.data.get('comments', '')
+        final_lwd_str = request.data.get('final_approved_lwd')  # Optional: HR can adjust LWD
+        
+        if action_type not in ['approve', 'reject']:
+            return Response(
+                {'error': 'Action must be either "approve" or "reject"'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        final_lwd = None
+        if final_lwd_str:
+            try:
+                final_lwd = datetime.strptime(final_lwd_str, '%Y-%m-%d').date()
+            except ValueError:
+                return Response(
+                    {'error': 'Invalid date format for final_approved_lwd. Use YYYY-MM-DD'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        with transaction.atomic():
+            if action_type == 'approve':
+                exit_request.hr_approval_status = 'approved'
+                exit_request.overall_status = 'approved'
+                exit_request.final_approved_lwd = final_lwd or exit_request.proposed_last_working_day
+                activity_type = 'hr_approved'
+                activity_desc = f'HR {user.get_full_name()} approved the exit request'
+                
+                # Create OffboardingRecord automatically
+                offboarding = OffboardingRecord.objects.create(
+                    employee_name=exit_request.employee_name,
+                    employee_email=exit_request.employee_email,
+                    employee_id=exit_request.employee_id,
+                    user=exit_request.user,
+                    position=exit_request.position,
+                    department=exit_request.department,
+                    reporting_manager=exit_request.reporting_manager,
+                    exit_reason=exit_request.exit_reason,
+                    last_working_day=exit_request.final_approved_lwd or exit_request.proposed_last_working_day,
+                    initiated_date=timezone.now().date(),
+                    status='initiated',
+                    created_by=user,
+                    assigned_to=user
+                )
+                exit_request.offboarding_record = offboarding
+                
+                # Log offboarding creation
+                ExitActivity.objects.create(
+                    exit_request=exit_request,
+                    activity_type='offboarding_created',
+                    activity_description=f'Offboarding record #{offboarding.id} created',
+                    performed_by=user,
+                    metadata={'offboarding_id': offboarding.id}
+                )
+            else:
+                exit_request.hr_approval_status = 'rejected'
+                exit_request.overall_status = 'rejected'
+                activity_type = 'hr_rejected'
+                activity_desc = f'HR {user.get_full_name()} rejected the exit request'
+            
+            exit_request.hr_approved_by = user
+            exit_request.hr_approval_date = timezone.now()
+            exit_request.hr_comments = comments
+            exit_request.save()
+            
+            # Log activity
+            metadata = {'action': action_type, 'comments': comments}
+            if final_lwd:
+                metadata['final_lwd'] = str(final_lwd)
+                metadata['lwd_adjusted'] = final_lwd != exit_request.proposed_last_working_day
+            
+            ExitActivity.objects.create(
+                exit_request=exit_request,
+                activity_type=activity_type,
+                activity_description=activity_desc,
+                performed_by=user,
+                metadata=metadata
+            )
+            
+            serializer = self.get_serializer(exit_request)
+            return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def withdraw(self, request, pk=None):
+        """
+        Employee withdraws their exit request
+        Can only withdraw if pending manager or HR approval
+        """
+        from .models import ExitActivity
+        
+        exit_request = self.get_object()
+        user = request.user
+        
+        # Verify user owns the request
+        if exit_request.user != user:
+            return Response(
+                {'error': 'You can only withdraw your own exit request'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if can withdraw
+        if not exit_request.can_withdraw():
+            return Response(
+                {'error': 'This request cannot be withdrawn at its current stage'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        reason = request.data.get('reason', '')
+        
+        with transaction.atomic():
+            exit_request.overall_status = 'withdrawn'
+            exit_request.withdrawn_at = timezone.now()
+            exit_request.withdrawal_reason = reason
+            exit_request.save()
+            
+            # Log activity
+            ExitActivity.objects.create(
+                exit_request=exit_request,
+                activity_type='request_withdrawn',
+                activity_description=f'{user.get_full_name()} withdrew the exit request',
+                performed_by=user,
+                metadata={'reason': reason}
+            )
+            
+            serializer = self.get_serializer(exit_request)
+            return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def create_clearances(self, request, pk=None):
+        """
+        Auto-create department clearances for approved exit request
+        """
+        from .models import ExitClearance, CLEARANCE_DEPARTMENTS, ExitActivity
+        
+        exit_request = self.get_object()
+        
+        # Check if approved
+        if exit_request.overall_status != 'approved':
+            return Response(
+                {'error': 'Clearances can only be created for approved requests'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get selected departments or use defaults
+        departments = request.data.get('departments', [dept[0] for dept in CLEARANCE_DEPARTMENTS])
+        
+        created_clearances = []
+        with transaction.atomic():
+            for dept_code in departments:
+                clearance, created = ExitClearance.objects.get_or_create(
+                    exit_request=exit_request,
+                    department=dept_code,
+                    defaults={'clearance_status': 'pending'}
+                )
+                if created:
+                    created_clearances.append(clearance)
+            
+            # Log activity
+            if created_clearances:
+                ExitActivity.objects.create(
+                    exit_request=exit_request,
+                    activity_type='status_changed',
+                    activity_description=f'Created {len(created_clearances)} department clearances',
+                    performed_by=request.user,
+                    metadata={'departments': departments}
+                )
+        
+        from .serializers import ExitClearanceSerializer
+        serializer = ExitClearanceSerializer(created_clearances, many=True)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
+    @action(detail=True, methods=['patch'])
+    def update_clearance(self, request, pk=None):
+        """
+        Update a specific department clearance
+        """
+        from .models import ExitClearance, ExitActivity
+        
+        exit_request = self.get_object()
+        department = request.data.get('department')
+        
+        if not department:
+            return Response(
+                {'error': 'Department is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            clearance = ExitClearance.objects.get(
+                exit_request=exit_request,
+                department=department
+            )
+        except ExitClearance.DoesNotExist:
+            return Response(
+                {'error': f'Clearance for department {department} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Update clearance
+        old_status = clearance.clearance_status
+        clearance.clearance_status = request.data.get('clearance_status', clearance.clearance_status)
+        clearance.pending_items = request.data.get('pending_items', clearance.pending_items)
+        clearance.comments = request.data.get('comments', clearance.comments)
+        
+        if clearance.clearance_status == 'cleared' and old_status != 'cleared':
+            clearance.cleared_by = request.user
+            clearance.clearance_date = timezone.now()
+        
+        clearance.save()
+        
+        # Log activity
+        ExitActivity.objects.create(
+            exit_request=exit_request,
+            activity_type='clearance_completed' if clearance.clearance_status == 'cleared' else 'status_changed',
+            activity_description=f'{department} clearance updated to {clearance.get_clearance_status_display()}',
+            performed_by=request.user,
+            metadata={
+                'department': department,
+                'old_status': old_status,
+                'new_status': clearance.clearance_status
+            }
+        )
+        
+        from .serializers import ExitClearanceSerializer
+        serializer = ExitClearanceSerializer(clearance)
+        return Response(serializer.data)

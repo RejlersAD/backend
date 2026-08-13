@@ -31,7 +31,6 @@ from .permissions import (
 from .utils import create_audit_log
 from .s3_service import S3Service
 from .pagination import FlexiblePageNumberPagination
-from .rbac_config import ALL_MODULES_CATALOGUE
 
 
 class OrganizationViewSet(viewsets.ModelViewSet):
@@ -117,29 +116,12 @@ class ModuleViewSet(viewsets.ModelViewSet):
     def _sync_catalogue_modules():
         """
         Idempotently create any ALL_MODULES_CATALOGUE entry that doesn't yet
-        exist in the DB (matched by code). Cheap — two queries, and only
-        writes when a genuinely new module code is detected. Never touches
-        an existing Module row, so manual edits (e.g. is_active toggles)
-        made via Django admin are preserved.
+        exist in the DB (matched by code). Delegates to the shared helper in
+        models.py (also used by UserProfile.get_all_modules() super_admin
+        bypass) so the two call sites never drift.
         """
-        existing_codes = set(Module.objects.values_list('code', flat=True))
-        missing = [m for m in ALL_MODULES_CATALOGUE if m['code'] not in existing_codes]
-        if not missing:
-            return
-        Module.objects.bulk_create(
-            [
-                Module(
-                    code=m['code'],
-                    name=m['name'],
-                    description=m.get('description', ''),
-                    icon=m.get('icon', ''),
-                    order=m.get('order', 0),
-                    is_active=True,
-                )
-                for m in missing
-            ],
-            ignore_conflicts=True,
-        )
+        from apps.rbac.models import _sync_module_catalogue
+        _sync_module_catalogue()
 
     def get_permissions(self):
         """
@@ -229,6 +211,18 @@ class RoleViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated(), IsAdmin()]
         return [IsAuthenticated(), CanManageRoles()]
 
+    @staticmethod
+    def _lock_from_auto_sync(role):
+        """
+        Once an admin manually edits a policy-governed role's modules/permissions,
+        exclude it from future deploy-time ROLE_MODULE_POLICY resyncs
+        (sync_role_modules) so the manual change isn't silently reverted.
+        """
+        from apps.rbac.rbac_config import ROLE_MODULE_POLICY
+        if role.code in ROLE_MODULE_POLICY and role.auto_sync_enabled:
+            role.auto_sync_enabled = False
+            role.save(update_fields=['auto_sync_enabled'])
+
     def perform_create(self, serializer):
         role = serializer.save()
         create_audit_log(
@@ -287,6 +281,7 @@ class RoleViewSet(viewsets.ModelViewSet):
                 permission=permission,
                 defaults={'granted_by': request.user}
             )
+            self._lock_from_auto_sync(role)
             
             create_audit_log(
                 user=request.user,
@@ -324,6 +319,7 @@ class RoleViewSet(viewsets.ModelViewSet):
         ).delete()[0]
         
         if deleted_count > 0:
+            self._lock_from_auto_sync(role)
             create_audit_log(
                 user=request.user,
                 action='permission_revoke',
@@ -356,6 +352,7 @@ class RoleViewSet(viewsets.ModelViewSet):
                 module=module,
                 defaults={'granted_by': request.user}
             )
+            self._lock_from_auto_sync(role)
             
             return Response({'status': 'module assigned'})
         except Module.DoesNotExist:
@@ -380,6 +377,9 @@ class RoleViewSet(viewsets.ModelViewSet):
             role=role,
             module_id=module_id
         ).delete()[0]
+        
+        if deleted_count > 0:
+            self._lock_from_auto_sync(role)
         
         return Response({'status': 'module revoked', 'count': deleted_count})
 

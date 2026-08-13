@@ -13,6 +13,9 @@ router.register(r'documents', views.DocumentViewSet, basename='documents')
 router.register(r'access', views.AccessProvisioningViewSet, basename='access')
 router.register(r'checklist', views.ChecklistViewSet, basename='checklist')
 
+# Exit/Resignation Workflow
+router.register(r'exit-requests', views.ExitRequestViewSet, basename='exit-request')
+
 urlpatterns = [
     path('', include(router.urls)),
 ]
