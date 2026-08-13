@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 
 
 class EnvironmentConfig:
@@ -89,9 +90,13 @@ class EnvironmentConfig:
                 return 'dev'
 
         # 3. FRONTEND_URL points to the production domain → must be production
-        frontend_url = os.environ.get('FRONTEND_URL', '').lower()
-        if 'radai.ae' in frontend_url:
-            return 'production'
+        # Exact hostname match — a substring check ('radai.ae' in url) would also
+        # match subdomains like test.radai.ae (preprod), misclassifying them as production.
+        frontend_url = os.environ.get('FRONTEND_URL', '').strip()
+        if frontend_url:
+            hostname = (urlparse(frontend_url).hostname or '').lower()
+            if hostname in ('radai.ae', 'www.radai.ae'):
+                return 'production'
 
         # 4. RAILWAY_GIT_BRANCH heuristic
         if os.environ.get('DATABASE_URL'):
