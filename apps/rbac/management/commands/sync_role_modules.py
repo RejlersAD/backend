@@ -42,11 +42,18 @@ class Command(BaseCommand):
             action='store_true',
             help='Also sync roles whose policy list is empty (e.g. super_admin) — DANGEROUS: strips ALL their modules.',
         )
+        parser.add_argument(
+            '--force',
+            action='store_true',
+            help='Also sync roles manually customized via the UI (auto_sync_enabled=False), '
+                 'resetting them back to the hardcoded policy and re-enabling auto sync.',
+        )
 
     def handle(self, *args, **options):
         role_filter = options.get('role', '').strip()
         dry_run = options.get('dry_run', False)
         include_empty = options.get('include_empty_policy', False)
+        force = options.get('force', False)
 
         sep = '=' * 70
         self.stdout.write(f'\n{sep}')
@@ -72,6 +79,16 @@ class Command(BaseCommand):
             except Role.DoesNotExist:
                 self.stdout.write(f'  skip (role not in DB): {role_code}')
                 continue
+
+            if not role.auto_sync_enabled and not force:
+                self.stdout.write(
+                    f'  skip (manually customized, use --force to override): {role_code}'
+                )
+                continue
+
+            if force and not role.auto_sync_enabled and not dry_run:
+                role.auto_sync_enabled = True
+                role.save(update_fields=['auto_sync_enabled'])
 
             current_modules = set(
                 RoleModule.objects.filter(role=role).values_list('module__code', flat=True)

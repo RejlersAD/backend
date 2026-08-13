@@ -229,6 +229,18 @@ class RoleViewSet(viewsets.ModelViewSet):
             return [IsAuthenticated(), IsAdmin()]
         return [IsAuthenticated(), CanManageRoles()]
 
+    @staticmethod
+    def _lock_from_auto_sync(role):
+        """
+        Once an admin manually edits a policy-governed role's modules/permissions,
+        exclude it from future deploy-time ROLE_MODULE_POLICY resyncs
+        (sync_role_modules) so the manual change isn't silently reverted.
+        """
+        from apps.rbac.rbac_config import ROLE_MODULE_POLICY
+        if role.code in ROLE_MODULE_POLICY and role.auto_sync_enabled:
+            role.auto_sync_enabled = False
+            role.save(update_fields=['auto_sync_enabled'])
+
     def perform_create(self, serializer):
         role = serializer.save()
         create_audit_log(
@@ -287,6 +299,7 @@ class RoleViewSet(viewsets.ModelViewSet):
                 permission=permission,
                 defaults={'granted_by': request.user}
             )
+            self._lock_from_auto_sync(role)
             
             create_audit_log(
                 user=request.user,
@@ -324,6 +337,7 @@ class RoleViewSet(viewsets.ModelViewSet):
         ).delete()[0]
         
         if deleted_count > 0:
+            self._lock_from_auto_sync(role)
             create_audit_log(
                 user=request.user,
                 action='permission_revoke',
@@ -356,6 +370,7 @@ class RoleViewSet(viewsets.ModelViewSet):
                 module=module,
                 defaults={'granted_by': request.user}
             )
+            self._lock_from_auto_sync(role)
             
             return Response({'status': 'module assigned'})
         except Module.DoesNotExist:
@@ -380,6 +395,9 @@ class RoleViewSet(viewsets.ModelViewSet):
             role=role,
             module_id=module_id
         ).delete()[0]
+        
+        if deleted_count > 0:
+            self._lock_from_auto_sync(role)
         
         return Response({'status': 'module revoked', 'count': deleted_count})
 
