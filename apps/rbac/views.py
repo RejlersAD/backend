@@ -261,7 +261,78 @@ class RoleViewSet(viewsets.ModelViewSet):
             user_agent=self.request.META.get('HTTP_USER_AGENT', '')
         )
         instance.delete()
-    
+
+    @action(detail=True, methods=['post'])
+    def duplicate(self, request, pk=None):
+        """
+        Duplicate a role — copies its module and permission grants under a
+        new name/code. Super-admin only (enforced by get_permissions()).
+
+        The duplicate is always a plain, freely-editable custom role
+        (is_system_role=False), even when cloning a system role like Admin —
+        this is the soft-coded way to let a super admin build a custom
+        variant of any existing role without touching the original.
+
+        POST /api/v1/rbac/roles/{id}/duplicate/
+        Body: { "name": "New Role Name", "description": "optional" }
+        """
+        from django.utils.text import slugify
+
+        source = self.get_object()
+        new_name = (request.data.get('name') or '').strip()
+        if not new_name:
+            return Response(
+                {'error': 'name is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if Role.objects.filter(name=new_name).exists():
+            return Response(
+                {'error': f'A role named "{new_name}" already exists.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Soft-coded unique code generation — slugify the name, disambiguate
+        # with a numeric suffix on collision (mirrors custom_role_prefix style).
+        base_code = slugify(new_name).replace('-', '_') or 'role'
+        code = base_code
+        suffix = 1
+        while Role.objects.filter(code=code).exists():
+            suffix += 1
+            code = f'{base_code}_{suffix}'
+
+        new_role = Role.objects.create(
+            name=new_name,
+            code=code,
+            description=request.data.get('description', source.description),
+            level=source.level,
+            is_active=True,
+            is_system_role=False,
+            auto_sync_enabled=True,
+        )
+
+        for role_module in RoleModule.objects.filter(role=source):
+            RoleModule.objects.create(
+                role=new_role, module=role_module.module, granted_by=request.user
+            )
+        for role_permission in RolePermission.objects.filter(role=source):
+            RolePermission.objects.create(
+                role=new_role, permission=role_permission.permission, granted_by=request.user
+            )
+
+        create_audit_log(
+            user=request.user,
+            action='create',
+            resource_type='Role',
+            resource_id=new_role.id,
+            resource_repr=str(new_role),
+            metadata={'duplicated_from': source.code},
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+        )
+
+        serializer = self.get_serializer(new_role)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=['post'])
     def assign_permission(self, request, pk=None):
         """Assign permission to role"""
