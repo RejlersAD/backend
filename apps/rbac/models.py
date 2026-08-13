@@ -95,6 +95,34 @@ class Module(TimeStampedModel):
         return self.name
 
 
+def _sync_module_catalogue():
+    """
+    Idempotently create any ALL_MODULES_CATALOGUE entry missing from the DB.
+    Shared by ModuleViewSet (admin UI) and the super_admin bypass in
+    UserProfile.get_all_modules() so Module is never left empty just because
+    nobody has opened Role Management yet in this environment.
+    """
+    from apps.rbac.rbac_config import ALL_MODULES_CATALOGUE
+    existing_codes = set(Module.objects.values_list('code', flat=True))
+    missing = [m for m in ALL_MODULES_CATALOGUE if m['code'] not in existing_codes]
+    if not missing:
+        return
+    Module.objects.bulk_create(
+        [
+            Module(
+                code=m['code'],
+                name=m['name'],
+                description=m.get('description', ''),
+                icon=m.get('icon', ''),
+                order=m.get('order', 0),
+                is_active=True,
+            )
+            for m in missing
+        ],
+        ignore_conflicts=True,
+    )
+
+
 class Permission(TimeStampedModel):
     """
     Granular permissions for actions within modules
@@ -421,6 +449,9 @@ class UserProfile(TimeStampedModel):
             if self.is_super_admin():
                 # Bypass role-based gating entirely — super admin sees every active module
                 # regardless of how sparsely RoleModule rows are seeded in this environment's DB.
+                # Self-heal: ensure the Module table actually has the full catalogue —
+                # it's normally only lazy-synced when /rbac/modules/ (Role Management) is hit.
+                _sync_module_catalogue()
                 modules = list(Module.objects.filter(is_active=True))
             else:
                 # Get role IDs through UserRole relationship — only active roles

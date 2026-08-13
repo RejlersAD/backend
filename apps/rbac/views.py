@@ -31,7 +31,6 @@ from .permissions import (
 from .utils import create_audit_log
 from .s3_service import S3Service
 from .pagination import FlexiblePageNumberPagination
-from .rbac_config import ALL_MODULES_CATALOGUE
 
 
 class OrganizationViewSet(viewsets.ModelViewSet):
@@ -117,29 +116,12 @@ class ModuleViewSet(viewsets.ModelViewSet):
     def _sync_catalogue_modules():
         """
         Idempotently create any ALL_MODULES_CATALOGUE entry that doesn't yet
-        exist in the DB (matched by code). Cheap — two queries, and only
-        writes when a genuinely new module code is detected. Never touches
-        an existing Module row, so manual edits (e.g. is_active toggles)
-        made via Django admin are preserved.
+        exist in the DB (matched by code). Delegates to the shared helper in
+        models.py (also used by UserProfile.get_all_modules() super_admin
+        bypass) so the two call sites never drift.
         """
-        existing_codes = set(Module.objects.values_list('code', flat=True))
-        missing = [m for m in ALL_MODULES_CATALOGUE if m['code'] not in existing_codes]
-        if not missing:
-            return
-        Module.objects.bulk_create(
-            [
-                Module(
-                    code=m['code'],
-                    name=m['name'],
-                    description=m.get('description', ''),
-                    icon=m.get('icon', ''),
-                    order=m.get('order', 0),
-                    is_active=True,
-                )
-                for m in missing
-            ],
-            ignore_conflicts=True,
-        )
+        from apps.rbac.models import _sync_module_catalogue
+        _sync_module_catalogue()
 
     def get_permissions(self):
         """
