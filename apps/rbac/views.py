@@ -488,6 +488,78 @@ class RoleViewSet(viewsets.ModelViewSet):
             ),
         })
 
+    @action(detail=False, methods=['get'], url_path='access-diagnostics',
+            permission_classes=[IsAuthenticated, IsSuperAdmin])
+    def access_diagnostics(self, request):
+        """
+        Read-only diagnostic — inspect why a user may not be seeing an expected
+        module, without needing direct database access. Super-admin only.
+
+        GET /api/v1/rbac/roles/access-diagnostics/?role_code=rad403&user_email=lira.viaga@rejlers.ae
+        """
+        role_code = request.query_params.get('role_code', '').strip()
+        user_email = request.query_params.get('user_email', '').strip()
+        result = {}
+
+        if role_code:
+            role = Role.objects.filter(code=role_code).first()
+            if not role:
+                result['role'] = {'error': f"No role found with code '{role_code}'"}
+            else:
+                granted_modules = list(
+                    RoleModule.objects.filter(role=role).values_list('module__code', 'module__is_active')
+                )
+                result['role'] = {
+                    'code': role.code,
+                    'name': role.name,
+                    'is_active': role.is_active,
+                    'is_system_role': role.is_system_role,
+                    'auto_sync_enabled': role.auto_sync_enabled,
+                    'granted_modules': [
+                        {'code': code, 'module_is_active': active} for code, active in granted_modules
+                    ],
+                    'assigned_user_count': UserRole.objects.filter(role=role).count(),
+                }
+
+        if user_email:
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            user = User.objects.filter(email__iexact=user_email).first()
+            if not user:
+                result['user'] = {'error': f"No user found with email '{user_email}'"}
+            else:
+                profile = UserProfile.objects.filter(user=user).first()
+                if not profile:
+                    result['user'] = {'error': 'User has no rbac_profile'}
+                else:
+                    roles = UserRole.objects.filter(user_profile=profile).select_related('role')
+                    from apps.rbac.rbac_config import is_module_enabled
+                    accessible = profile.get_all_modules()
+                    result['user'] = {
+                        'email': user.email,
+                        'is_superuser': user.is_superuser,
+                        'is_active_profile': profile.status,
+                        'assigned_roles': [
+                            {
+                                'code': ur.role.code, 'name': ur.role.name,
+                                'is_primary': ur.is_primary, 'role_is_active': ur.role.is_active,
+                            } for ur in roles
+                        ],
+                        'computed_accessible_modules': sorted(m.code for m in accessible),
+                    }
+                    if role_code:
+                        result['user']['has_target_role'] = any(
+                            ur.role.code == role_code for ur in roles
+                        )
+
+        if not role_code and not user_email:
+            return Response(
+                {'error': 'Provide role_code and/or user_email query params'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(result)
+
 
 class UserProfileViewSet(viewsets.ModelViewSet):
     """
