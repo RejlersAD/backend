@@ -154,6 +154,9 @@ class Role(TimeStampedModel):
     level = models.IntegerField(choices=ROLE_LEVEL_CHOICES, default=6)
     is_active = models.BooleanField(default=True)
     is_system_role = models.BooleanField(default=False)  # Cannot be deleted
+    # False once an admin manually edits this role's modules/permissions via the UI —
+    # excludes it from the destructive deploy-time ROLE_MODULE_POLICY resync (sync_role_modules).
+    auto_sync_enabled = models.BooleanField(default=True)
     
     # Permissions
     permissions = models.ManyToManyField(

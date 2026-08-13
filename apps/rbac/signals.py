@@ -5,7 +5,7 @@ from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from .models import UserProfile, Organization, UserRole, RoleModule
+from .models import UserProfile, Organization, UserRole, RoleModule, RolePermission
 from .utils import create_audit_log
 
 User = get_user_model()
@@ -62,6 +62,29 @@ def clear_role_users_cache(sender, instance, **kwargs):
     
     if cleared_count > 0:
         print(f"[Cache] Cleared cache for {cleared_count} user(s) affected by role {role_id} module change")
+
+
+@receiver(post_save, sender=RolePermission)
+@receiver(post_delete, sender=RolePermission)
+def clear_role_permission_users_cache(sender, instance, **kwargs):
+    """
+    Clear permissions cache for ALL users who have this role when permissions
+    are added/removed from the role (mirrors clear_role_users_cache for modules).
+    """
+    role_id = instance.role_id
+
+    profile_ids = UserRole.objects.filter(
+        role_id=role_id,
+        role__is_active=True
+    ).values_list('user_profile_id', flat=True)
+
+    cleared_count = 0
+    for profile_id in profile_ids:
+        cache.delete(f'user_permissions_{profile_id}')
+        cleared_count += 1
+
+    if cleared_count > 0:
+        print(f"[Cache] Cleared permissions cache for {cleared_count} user(s) affected by role {role_id} permission change")
 
 
 # Soft-coded: read the default role code from rbac_config so a single config
