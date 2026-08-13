@@ -338,8 +338,19 @@ class UserProfile(TimeStampedModel):
                 self.employee_id = str(self.employee_id).strip()
         super().save(*args, **kwargs)
     
+    def is_super_admin(self):
+        """True for Django is_superuser or an active super_admin role — bypasses all module/permission gating."""
+        if getattr(self.user, 'is_superuser', False):
+            return True
+        from apps.rbac.models import UserRole
+        return UserRole.objects.filter(
+            user_profile=self, role__code='super_admin', role__is_active=True
+        ).exists()
+
     def has_permission(self, permission_code):
         """Check if user has specific permission through any active role"""
+        if self.is_super_admin():
+            return True
         from apps.rbac.models import UserRole
         user_role_ids = UserRole.objects.filter(
             user_profile=self,
@@ -361,6 +372,9 @@ class UserProfile(TimeStampedModel):
         # Check if module is globally disabled
         if not is_module_enabled(module_code):
             return False
+
+        if self.is_super_admin():
+            return True
         
         from apps.rbac.models import UserRole
         user_role_ids = UserRole.objects.filter(
@@ -380,10 +394,13 @@ class UserProfile(TimeStampedModel):
         permissions = cache.get(cache_key)
         
         if permissions is None:
-            permissions = list(Permission.objects.filter(
-                roles__in=self.roles.filter(is_active=True),
-                is_active=True
-            ).distinct())
+            if self.is_super_admin():
+                permissions = list(Permission.objects.filter(is_active=True))
+            else:
+                permissions = list(Permission.objects.filter(
+                    roles__in=self.roles.filter(is_active=True),
+                    is_active=True
+                ).distinct())
             # Cache for 5 minutes
             cache.set(cache_key, permissions, 300)
         
@@ -401,17 +418,22 @@ class UserProfile(TimeStampedModel):
         modules = cache.get(cache_key)
         
         if modules is None:
-            # Get role IDs through UserRole relationship — only active roles
-            user_role_ids = UserRole.objects.filter(
-                user_profile=self,
-                role__is_active=True
-            ).values_list('role_id', flat=True)
-            
-            # Get modules linked to these roles through RoleModule
-            modules = list(Module.objects.filter(
-                rolemodule__role_id__in=user_role_ids,
-                is_active=True
-            ).distinct())
+            if self.is_super_admin():
+                # Bypass role-based gating entirely — super admin sees every active module
+                # regardless of how sparsely RoleModule rows are seeded in this environment's DB.
+                modules = list(Module.objects.filter(is_active=True))
+            else:
+                # Get role IDs through UserRole relationship — only active roles
+                user_role_ids = UserRole.objects.filter(
+                    user_profile=self,
+                    role__is_active=True
+                ).values_list('role_id', flat=True)
+                
+                # Get modules linked to these roles through RoleModule
+                modules = list(Module.objects.filter(
+                    rolemodule__role_id__in=user_role_ids,
+                    is_active=True
+                ).distinct())
 
             # Soft-coded global access modules (for all authenticated users)
             try:
