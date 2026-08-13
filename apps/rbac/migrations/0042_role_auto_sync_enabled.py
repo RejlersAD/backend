@@ -8,9 +8,26 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='role',
-            name='auto_sync_enabled',
-            field=models.BooleanField(default=True),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunSQL(
+                    sql=(
+                        'ALTER TABLE rbac_roles '
+                        'ADD COLUMN IF NOT EXISTS auto_sync_enabled '
+                        'boolean NOT NULL DEFAULT true;'
+                    ),
+                    reverse_sql=(
+                        'ALTER TABLE rbac_roles '
+                        'DROP COLUMN IF EXISTS auto_sync_enabled;'
+                    ),
+                ),
+            ],
+            state_operations=[
+                migrations.AddField(
+                    model_name='role',
+                    name='auto_sync_enabled',
+                    field=models.BooleanField(default=True),
+                ),
+            ],
         ),
     ]
