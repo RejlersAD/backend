@@ -3487,13 +3487,31 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Return user's own documents, or all if admin."""
         from .models import ProfileDocument
+        from rest_framework.exceptions import ValidationError
+
         user = self.request.user
         
         # Admins can see all documents
         if user.is_superuser or user.is_staff:
-            return ProfileDocument.objects.select_related(
+            queryset = ProfileDocument.objects.select_related(
                 'user_profile__user', 'verified_by'
             ).all()
+
+            # Employee detail screens must be able to scope the organization-wide
+            # admin queryset to the employee being viewed. Keep accepting the old
+            # parameter temporarily so existing clients do not expose every record.
+            target_user_id = (
+                self.request.query_params.get('user_id')
+                or self.request.query_params.get('user_profile__user')
+            )
+            if target_user_id:
+                try:
+                    target_user_id = int(target_user_id)
+                except (TypeError, ValueError):
+                    raise ValidationError({'user_id': 'A valid employee user ID is required.'})
+                queryset = queryset.filter(user_profile__user_id=target_user_id)
+
+            return queryset
         
         # Regular users see only their own active documents
         try:
@@ -3505,23 +3523,35 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
             return ProfileDocument.objects.none()
     
     def perform_create(self, serializer):
-        """Auto-assign current user's profile and handle file upload."""
-        try:
-            profile = self.request.user.rbac_profile
-            
-            # Mark existing documents of same type as inactive (replaced)
-            from .models import ProfileDocument
-            ProfileDocument.objects.filter(
-                user_profile=profile,
-                document_type=serializer.validated_data.get('document_type'),
-                is_active=True
-            ).update(is_active=False)
-            
-            # Save new document
-            serializer.save(user_profile=profile, is_active=True)
-        except Exception as e:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied(f'Failed to create document: {str(e)}')
+        """Assign uploads to self, or to an explicitly selected employee for admins."""
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+        from .models import ProfileDocument
+
+        user = self.request.user
+        target_user_id = self.request.data.get('target_user_id')
+
+        if target_user_id and str(target_user_id) != str(user.pk):
+            if not (user.is_superuser or user.is_staff):
+                raise PermissionDenied('Only authorized administrators can upload documents for another employee.')
+            try:
+                profile = UserProfile.objects.get(user_id=target_user_id)
+            except (UserProfile.DoesNotExist, ValueError, TypeError):
+                raise ValidationError({'target_user_id': 'The selected employee profile does not exist.'})
+        else:
+            try:
+                profile = user.rbac_profile
+            except UserProfile.DoesNotExist:
+                raise ValidationError({'target_user_id': 'The selected employee profile does not exist.'})
+
+        # Replacing a document type must affect the target employee, not the
+        # administrator performing the upload.
+        ProfileDocument.objects.filter(
+            user_profile=profile,
+            document_type=serializer.validated_data.get('document_type'),
+            is_active=True
+        ).update(is_active=False)
+
+        serializer.save(user_profile=profile, is_active=True)
     
     def perform_update(self, serializer):
         """Update document, auto-expire if expiry_date is past."""

@@ -14,6 +14,17 @@ from django.conf import settings
 from django.db import models
 
 
+def get_io_list_document_storage():
+    """Return the configured I/O List storage backend.
+
+    FileField accepts a storage instance or a callable, not a dotted-path
+    string. Keeping this as a callable also lets Django serialize the field
+    correctly in migrations and select the S3/local implementation at runtime.
+    """
+    from apps.core.storage_backends import IOListDocumentStorage
+    return IOListDocumentStorage()
+
+
 class IOListProject(models.Model):
     """
     Project container for grouping I/O List documents.
@@ -102,7 +113,7 @@ class IOListDocument(models.Model):
     # Storage
     pdf_file          = models.FileField(
         upload_to='instrument_io_workflow/%Y/%m/',
-        storage='apps.core.storage_backends.IOListDocumentStorage',
+        storage=get_io_list_document_storage,
     )
     pdf_sha256        = models.CharField(max_length=64, db_index=True)
 

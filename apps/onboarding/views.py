@@ -74,6 +74,17 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
         department = self.request.query_params.get('department')
         if department:
             queryset = queryset.filter(department__icontains=department)
+
+        # Scope employee detail views to the selected user. This avoids relying
+        # on names or email addresses, which can change or be duplicated.
+        user_id = self.request.query_params.get('user_id')
+        if user_id:
+            try:
+                user_id = int(user_id)
+            except (TypeError, ValueError):
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({'user_id': 'A valid employee user ID is required.'})
+            queryset = queryset.filter(user_id=user_id)
         
         # Search by employee name or email
         search = self.request.query_params.get('search')
