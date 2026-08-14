@@ -1736,6 +1736,35 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                                 raise ValueError('Technical skill proficiency must be between 1 and 5.')
                             skills.append({'name': name, 'proficiency': proficiency})
                             seen_skills.add(key)
+
+                        raw_projects = ep_raw.get('current_projects', ep_obj.current_projects)
+                        if not isinstance(raw_projects, list) or len(raw_projects) > 50:
+                            raise ValueError('Current projects must be a list containing no more than 50 entries.')
+                        pom_users = {
+                            str(user_role.user_profile.user_id): user_role.user_profile.user
+                            for user_role in UserRole.objects.filter(
+                                role__code__in=['project_manager', 'manager'],
+                                role__is_active=True,
+                                user_profile__is_deleted=False,
+                                user_profile__user__is_active=True,
+                            ).select_related('user_profile__user')
+                        }
+                        projects = []
+                        for project in raw_projects:
+                            if not isinstance(project, dict):
+                                raise ValueError('Each current project must be an object.')
+                            normalized_project = dict(project)
+                            pom_id = normalized_project.get('project_manager_id')
+                            if pom_id not in (None, ''):
+                                pom_user = pom_users.get(str(pom_id))
+                                if not pom_user:
+                                    raise ValueError('The selected Project Manager is not an active PoM user.')
+                                normalized_project['project_manager_id'] = pom_user.id
+                                normalized_project['project_manager_name'] = (
+                                    pom_user.get_full_name() or pom_user.email or pom_user.username
+                                )
+                                normalized_project['project_manager_email'] = pom_user.email or ''
+                            projects.append(normalized_project)
                     except (TypeError, ValueError) as validation_error:
                         return Response(
                             {'engineer_profile': [str(validation_error)]},
@@ -1753,7 +1782,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     ep_obj.next_available_date      = ep_raw.get('next_available_date') or None
                     ep_obj.max_concurrent_projects  = int(ep_raw.get('max_concurrent_projects') or ep_obj.max_concurrent_projects or 2)
                     ep_obj.preferred_project_types  = ep_raw.get('preferred_project_types', ep_obj.preferred_project_types)
-                    ep_obj.current_projects         = ep_raw.get('current_projects', ep_obj.current_projects)
+                    ep_obj.current_projects         = projects
                     ep_obj.save()
                     changes['engineer_profile'] = 'updated'
 

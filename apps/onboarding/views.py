@@ -8,7 +8,8 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q, Count, Prefetch
 from django.utils import timezone
 from django.contrib.auth import get_user_model
@@ -19,7 +20,13 @@ import mimetypes
 
 from .models import (
     OnboardingRecord, OffboardingRecord, Equipment,
-    Document, AccessProvisioning, Checklist
+    Document, AccessProvisioning, Checklist,
+    ONBOARDING_ACTIVE_STATUSES, OFFBOARDING_ACTIVE_STATUSES,
+    CHECKLIST_STAGE_PRE_HIRE, CHECKLIST_STAGE_IT_PROVISIONING,
+    CHECKLIST_STAGE_FIRST_DAY, CHECKLIST_STAGE_FINAL_VALIDATION,
+    CHECKLIST_STAGE_EXIT_INITIATION, CHECKLIST_STAGE_ACCESS_REVOCATION,
+    CHECKLIST_STAGE_ASSET_RETURN, CHECKLIST_STAGE_EXIT_CLEARANCE,
+    CHECKLIST_STAGE_FINAL_SETTLEMENT,
 )
 from .serializers import (
     OnboardingRecordSerializer, OnboardingRecordListSerializer,
@@ -28,13 +35,247 @@ from .serializers import (
     AccessProvisioningSerializer, ChecklistSerializer
 )
 from apps.core.s3_service import S3Service
+from apps.notifications.services import NotificationService
 
 # Employee management - using new EmployeeMaster system
 from apps.hr_core.models import EmployeeMaster
 from apps.hr_core.services import EmployeeService
 from apps.rbac.models import UserProfile as RBACUserProfile, Organization
+from .rbac import (
+    can_manage_offboarding, can_manage_onboarding_stage,
+    can_start_onboarding_stage, can_manage_offboarding_stage,
+    can_start_offboarding_stage,
+)
+from .project_assignments import get_active_project_assignments, get_profile_project_manager
 
 User = get_user_model()
+
+
+def _resolve_exit_reporting_manager(user, employee=None):
+    """Use the latest active project PoM, falling back to the line manager."""
+    project_manager, _assignment = get_profile_project_manager(user)
+    if project_manager:
+        return project_manager.get_full_name() or project_manager.email or project_manager.username
+    if employee is None and user:
+        employee = EmployeeMaster.objects.filter(user=user).select_related('manager').first()
+    return employee.manager.get_full_name() if employee and employee.manager else ''
+
+
+def _notify_project_managers_of_exit(record):
+    """Notify each PoM responsible for an active project assigned to the employee."""
+    projects = get_active_project_assignments(record.user)
+    recipients = {}
+    recipient_projects = {}
+    for project in projects:
+        for manager in project['managers']:
+            if not manager or manager.id == record.user_id:
+                continue
+            recipients[manager.id] = manager
+            recipient_projects.setdefault(manager.id, []).append(project)
+
+    for user_id, recipient in recipients.items():
+        assigned_projects = recipient_projects[user_id]
+        project_labels = ', '.join(
+            f"{project['code']} - {project['name']}" for project in assigned_projects
+        )
+        notification = NotificationService.create_notification(
+            recipient=recipient,
+            sender=record.created_by,
+            title='Employee initiated an exit process',
+            message=(
+                f'{record.employee_name} ({record.employee_id or record.employee_email}) '
+                f'has initiated an exit process and is assigned to your active '
+                f'project(s): {project_labels}. Last working day: {record.last_working_day}.'
+            ),
+            category='PROJECT',
+            priority='HIGH',
+            action_url=f'/hr/onboarding?tab=offboarding&record_id={record.id}',
+            action_label='Review Offboarding',
+            metadata={
+                'offboarding_id': record.id,
+                'employee_id': record.employee_id,
+                'project_ids': [project['id'] for project in assigned_projects],
+                'event': 'employee_exit_initiated',
+            },
+        )
+        if notification and notification.send_in_app and notification.status == 'PENDING':
+            notification.status = 'SENT'
+            notification.save(update_fields=['status', 'updated_at'])
+
+    return projects
+
+ONBOARDING_CHECKLIST_TEMPLATES = {
+    CHECKLIST_STAGE_PRE_HIRE: (
+        ('Verify approved hiring request and employee profile', 'high'),
+        ('Collect and validate required identity documents', 'critical'),
+        ('Issue and record the signed offer or employment contract', 'critical'),
+        ('Confirm joining date, position, department, and branch', 'high'),
+        ('Assign reporting manager and onboarding owner', 'high'),
+        ('Prepare the employee master profile and base RBAC role', 'high'),
+    ),
+    CHECKLIST_STAGE_IT_PROVISIONING: (
+        ('Prepare and assign workstation or laptop', 'high'),
+        ('Create corporate email and Microsoft 365 account', 'high'),
+        ('Create Active Directory or domain account', 'high'),
+        ('Configure MFA and security policies', 'critical'),
+        ('Configure VPN and remote access', 'medium'),
+        ('Grant role-based application and shared-drive access', 'high'),
+        ('Issue building access card or ID badge', 'medium'),
+        ('Complete IT handover and employee acknowledgement', 'medium'),
+    ),
+    CHECKLIST_STAGE_FIRST_DAY: (
+        ('Complete HR welcome and company induction', 'high'),
+        ('Introduce reporting manager, team, and key contacts', 'medium'),
+        ('Complete office, safety, and emergency orientation', 'high'),
+        ('Review policies, code of conduct, and confidentiality', 'critical'),
+        ('Confirm workstation, accounts, and required access are operational', 'high'),
+    ),
+    CHECKLIST_STAGE_FINAL_VALIDATION: (
+        ('Validate completion of all onboarding stage checklists', 'critical'),
+        ('Confirm employee documents and master data are complete', 'critical'),
+        ('Confirm equipment and system access records', 'high'),
+        ('Confirm payroll and benefits enrollment', 'high'),
+        ('Obtain employee and reporting-manager acknowledgement', 'high'),
+        ('Complete final HR review and close onboarding', 'critical'),
+    ),
+}
+
+IT_ONBOARDING_CHECKLIST_TEMPLATE = ONBOARDING_CHECKLIST_TEMPLATES[CHECKLIST_STAGE_IT_PROVISIONING]
+
+ONBOARDING_STAGE_START_STATE = {
+    CHECKLIST_STAGE_PRE_HIRE: ('documentation', 20),
+    CHECKLIST_STAGE_IT_PROVISIONING: ('equipment', 40),
+    CHECKLIST_STAGE_FIRST_DAY: ('training', 70),
+    CHECKLIST_STAGE_FINAL_VALIDATION: ('training', 90),
+}
+
+OFFBOARDING_CHECKLIST_TEMPLATES = {
+    CHECKLIST_STAGE_EXIT_INITIATION: (
+        ('Confirm resignation or termination approval', 'critical'),
+        ('Verify last working day and notice period', 'high'),
+        ('Notify HR, reporting manager, ICT, and Finance', 'high'),
+        ('Confirm handover owner and transition plan', 'high'),
+    ),
+    CHECKLIST_STAGE_ACCESS_REVOCATION: (
+        ('Schedule email and directory account deactivation', 'critical'),
+        ('Revoke VPN, MFA, and remote access', 'critical'),
+        ('Remove application and shared-folder permissions', 'critical'),
+        ('Transfer mailbox, files, and service ownership', 'high'),
+        ('Confirm access revocation evidence', 'high'),
+    ),
+    CHECKLIST_STAGE_ASSET_RETURN: (
+        ('Collect laptop, desktop, and monitors', 'critical'),
+        ('Collect mobile phone, SIM, and accessories', 'high'),
+        ('Collect access card, keys, and identification badge', 'critical'),
+        ('Inspect returned assets and record condition', 'high'),
+        ('Update asset register and custody records', 'high'),
+    ),
+    CHECKLIST_STAGE_EXIT_CLEARANCE: (
+        ('Complete knowledge and document handover', 'critical'),
+        ('Conduct exit interview', 'medium'),
+        ('Obtain department and project clearance', 'high'),
+        ('Confirm confidentiality and data obligations', 'critical'),
+    ),
+    CHECKLIST_STAGE_FINAL_SETTLEMENT: (
+        ('Confirm attendance, leave, and payroll inputs', 'critical'),
+        ('Calculate and approve final settlement', 'critical'),
+        ('Confirm benefits and insurance closure', 'high'),
+        ('Issue service and employment documents', 'medium'),
+        ('Complete final HR review and close offboarding', 'critical'),
+    ),
+}
+
+OFFBOARDING_STAGE_START_STATE = {
+    CHECKLIST_STAGE_EXIT_INITIATION: ('initiated', 10),
+    CHECKLIST_STAGE_ACCESS_REVOCATION: ('access_revocation', 30),
+    CHECKLIST_STAGE_ASSET_RETURN: ('equipment_return', 50),
+    CHECKLIST_STAGE_EXIT_CLEARANCE: ('exit_interview', 70),
+    CHECKLIST_STAGE_FINAL_SETTLEMENT: ('final_settlement', 90),
+}
+
+
+def complete_onboarding_if_ready(record):
+    """Close an onboarding workflow as soon as every required checklist is complete."""
+    if not record or record.status in {'completed', 'cancelled'}:
+        return False
+
+    required_stages = set(ONBOARDING_CHECKLIST_TEMPLATES)
+    stage_rows = record.checklist_items.filter(stage__in=required_stages)
+    present_stages = set(stage_rows.values_list('stage', flat=True).distinct())
+    if present_stages != required_stages or stage_rows.filter(completed=False).exists():
+        return False
+
+    record.status = 'completed'
+    record.progress_percentage = 100
+    record.actual_completion_date = timezone.now()
+    record.save(update_fields=[
+        'status', 'progress_percentage', 'actual_completion_date', 'updated_at',
+    ])
+    return True
+
+
+def complete_offboarding_if_ready(record):
+    """Close an offboarding workflow when every required stage is complete."""
+    if not record or record.status in {'completed', 'cancelled', 'rejected'}:
+        return False
+
+    required_stages = set(OFFBOARDING_CHECKLIST_TEMPLATES)
+    stage_rows = record.checklist_items.filter(stage__in=required_stages)
+    present_stages = set(stage_rows.values_list('stage', flat=True).distinct())
+    if present_stages != required_stages or stage_rows.filter(completed=False).exists():
+        return False
+
+    record.status = 'completed'
+    record.progress_percentage = 100
+    record.actual_completion_date = timezone.now()
+    record.save(update_fields=[
+        'status', 'progress_percentage', 'actual_completion_date', 'updated_at',
+    ])
+    return True
+
+
+def ensure_onboarding_record(employee, created_by=None):
+    """Return an employee's onboarding record, creating an initiated cycle if absent."""
+    identity = Q(user_id=employee.user_id)
+    if employee.email:
+        identity |= Q(employee_email__iexact=employee.email.strip())
+    if employee.employee_number:
+        identity |= Q(employee_id=employee.employee_number)
+
+    existing = OnboardingRecord.objects.filter(identity).order_by('-created_at').first()
+    if existing:
+        return existing, False
+
+    joining_date = employee.join_date or date.today()
+    employee_name = (
+        employee.get_full_name()
+        or employee.user.get_full_name()
+        or employee.email.split('@')[0]
+    ).strip()
+    position = employee.job_title_uae or employee.job_title_finland or employee.designation or 'Not assigned'
+    department = employee.division or employee.department or 'Not assigned'
+    manager_name = employee.manager.get_full_name() if employee.manager else ''
+    branch = employee.branch if employee.branch in {'RAD', 'RIN'} else 'RAD'
+
+    return OnboardingRecord.objects.get_or_create(
+        employee_email=employee.email.strip().lower(),
+        defaults={
+            'employee_name': employee_name,
+            'employee_id': employee.employee_number,
+            'user': employee.user,
+            'position': position,
+            'department': department,
+            'reporting_manager': manager_name,
+            'branch': branch,
+            'joining_date': joining_date,
+            'initiated_date': timezone.now(),
+            'target_completion_date': joining_date,
+            'status': 'initiated',
+            'progress_percentage': 0,
+            'created_by': created_by,
+            'notes': 'Onboarding cycle automatically initiated because no workflow record existed.',
+        },
+    )
 
 
 class OnboardingRecordViewSet(viewsets.ModelViewSet):
@@ -44,7 +285,7 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
     Includes passport photo upload to S3
     """
     permission_classes = [IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     queryset = OnboardingRecord.objects.all()
     
     def get_serializer_class(self):
@@ -115,7 +356,101 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Set created_by to current user"""
         serializer.save(created_by=self.request.user)
-    
+
+    @action(detail=False, methods=['post'], url_path='ensure-employee-workflow')
+    def ensure_employee_workflow(self, request):
+        """Create an initiated onboarding cycle when the selected user has none."""
+        user_id = request.data.get('user_id')
+        try:
+            user_id = int(user_id)
+        except (TypeError, ValueError):
+            return Response(
+                {'user_id': 'A valid employee user ID is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        employee = EmployeeMaster.objects.filter(
+            user_id=user_id,
+            user__is_active=True,
+        ).select_related('user', 'manager').first()
+        if not employee:
+            return Response(
+                {'detail': 'Active employee profile not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        record, created = ensure_onboarding_record(employee, request.user)
+        return Response(
+            OnboardingRecordSerializer(record, context={'request': request}).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=['post'], url_path='sync-missing')
+    def sync_missing(self, request):
+        """Initiate onboarding for every active employee without a workflow."""
+        active_employees = EmployeeMaster.objects.filter(user__is_active=True)
+        checked_count = active_employees.count()
+        onboarded_user_ids = OnboardingRecord.objects.filter(
+            user_id__isnull=False,
+        ).values('user_id')
+        employees = active_employees.exclude(
+            user_id__in=onboarded_user_ids,
+        ).select_related('user', 'manager')
+        created_ids = []
+
+        for employee in employees.iterator():
+            record, created = ensure_onboarding_record(employee, request.user)
+            if created:
+                created_ids.append(record.id)
+
+        return Response({
+            'checked_count': checked_count,
+            'created_count': len(created_ids),
+            'created_record_ids': created_ids,
+        })
+
+    @action(detail=False, methods=['get'], url_path='command-center-pending')
+    def command_center_pending(self, request):
+        """Return active onboarding and offboarding requests for HR Command Center."""
+        onboarding_requests = OnboardingRecord.objects.filter(
+            status__in=ONBOARDING_ACTIVE_STATUSES
+        ).values(
+            'id', 'user_id', 'employee_name', 'employee_email', 'employee_id',
+            'department', 'status', 'joining_date', 'initiated_date', 'created_at',
+        )
+        offboarding_requests = OffboardingRecord.objects.filter(
+            status__in=OFFBOARDING_ACTIVE_STATUSES
+        ).values(
+            'id', 'user_id', 'employee_name', 'employee_email', 'employee_id',
+            'department', 'status', 'last_working_day', 'initiated_date', 'created_at',
+        )
+
+        rows = [
+            {
+                **record,
+                'id': f"onboarding-{record['id']}",
+                'request_id': record['id'],
+                'request_type': 'Onboarding',
+                'effective_date': record.get('joining_date'),
+                'display_status': 'Initiated' if record['status'] == 'initiated' else 'In Progress',
+            }
+            for record in onboarding_requests
+        ]
+        rows.extend([
+            {
+                **record,
+                'id': f"offboarding-{record['id']}",
+                'request_id': record['id'],
+                'request_type': 'Offboarding',
+                'effective_date': record.get('last_working_day'),
+                'display_status': 'Initiated' if record['status'] == 'initiated' else 'In Progress',
+            }
+            for record in offboarding_requests
+        ])
+        rows.sort(key=lambda row: row.get('created_at') or row.get('initiated_date'), reverse=True)
+
+        return Response(rows)
+
     @action(detail=False, methods=['get'])
     def statistics(self, request):
         """
@@ -170,6 +505,19 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
     def mark_completed(self, request, pk=None):
         """Mark onboarding as completed"""
         record = self.get_object()
+        if not can_manage_onboarding_stage(request.user, CHECKLIST_STAGE_FINAL_VALIDATION, record):
+            raise PermissionDenied('Only HR may complete final onboarding validation.')
+
+        stage_rows = record.checklist_items.filter(
+            stage__in=ONBOARDING_CHECKLIST_TEMPLATES.keys(),
+        )
+        present_stages = set(stage_rows.values_list('stage', flat=True))
+        missing_stages = set(ONBOARDING_CHECKLIST_TEMPLATES) - present_stages
+        if missing_stages or stage_rows.filter(completed=False).exists():
+            return Response(
+                {'detail': 'Every onboarding checklist stage must be started and completed before final validation.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         record.status = 'completed'
         record.progress_percentage = 100
         record.actual_completion_date = timezone.now()
@@ -177,6 +525,54 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(record)
         return Response(serializer.data)
+
+    def _start_checklist_stage(self, request, record, stage):
+        if stage not in ONBOARDING_CHECKLIST_TEMPLATES:
+            raise ValidationError({'stage': 'A valid onboarding checklist stage is required.'})
+        if not can_start_onboarding_stage(request.user, stage, record):
+            raise PermissionDenied('Your RBAC role cannot start this onboarding checklist stage.')
+
+        existing_names = set(
+            record.checklist_items.filter(stage=stage).values_list('task_name', flat=True)
+        )
+        due_date = record.target_completion_date or record.joining_date
+        new_items = [
+            Checklist(
+                onboarding_record=record,
+                task_name=task_name,
+                description=f'{stage} onboarding checklist task',
+                stage=stage,
+                due_date=due_date,
+                priority=priority,
+            )
+            for task_name, priority in ONBOARDING_CHECKLIST_TEMPLATES[stage]
+            if task_name not in existing_names
+        ]
+        Checklist.objects.bulk_create(new_items)
+
+        next_status, minimum_progress = ONBOARDING_STAGE_START_STATE[stage]
+        if record.status not in {'completed', 'cancelled'} and record.progress_percentage < minimum_progress:
+            record.status = next_status
+            record.progress_percentage = minimum_progress
+            record.save(update_fields=['status', 'progress_percentage', 'updated_at'])
+
+        record.refresh_from_db()
+        serializer = self.get_serializer(record)
+        return Response({**serializer.data, 'created_checklist_count': len(new_items)})
+
+    @action(detail=True, methods=['post'], url_path='start-checklist-stage')
+    def start_checklist_stage(self, request, pk=None):
+        """Start one RBAC-controlled onboarding checklist stage."""
+        return self._start_checklist_stage(request, self.get_object(), request.data.get('stage'))
+
+    @action(detail=True, methods=['post'], url_path='start-it-checklist')
+    def start_it_checklist(self, request, pk=None):
+        """Backward-compatible shortcut for the IT provisioning checklist."""
+        return self._start_checklist_stage(
+            request,
+            self.get_object(),
+            CHECKLIST_STAGE_IT_PROVISIONING,
+        )
     
     @action(detail=False, methods=['post'])
     def create_employee(self, request):
@@ -532,11 +928,120 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
                 'equipment', 'documents', 'access_records', 'checklist_items'
             )
         
-        return queryset.select_related('created_by', 'assigned_to', 'user')
+        return queryset.select_related('created_by', 'assigned_to', 'rejected_by', 'user')
     
     def perform_create(self, serializer):
-        """Set created_by to current user"""
-        serializer.save(created_by=self.request.user)
+        """Allow HR to initiate any exit while employees may initiate only their own."""
+        if can_manage_offboarding(self.request.user):
+            selected_user = serializer.validated_data.get('user')
+            reporting_manager = _resolve_exit_reporting_manager(selected_user)
+            save_values = {'created_by': self.request.user}
+            if reporting_manager:
+                save_values['reporting_manager'] = reporting_manager
+            record = serializer.save(**save_values)
+            _notify_project_managers_of_exit(record)
+            return
+
+        selected_user = serializer.validated_data.get('user')
+        if not selected_user or selected_user.id != self.request.user.id:
+            raise PermissionDenied('Employees may initiate an exit process only for their own profile.')
+
+        employee = EmployeeMaster.objects.filter(user=self.request.user).select_related('manager').first()
+        if not employee:
+            raise PermissionDenied('Your Employee Master profile is required before initiating an exit process.')
+        rbac_profile = RBACUserProfile.objects.filter(
+            user=self.request.user,
+            is_deleted=False,
+        ).first()
+
+        employee_name = ' '.join(filter(None, [employee.first_name, employee.last_name])).strip()
+        record = serializer.save(
+            created_by=self.request.user,
+            user=self.request.user,
+            employee_name=employee_name or self.request.user.get_full_name() or self.request.user.username,
+            employee_email=employee.email or self.request.user.email,
+            employee_id=employee.employee_number or employee.employment_id or getattr(rbac_profile, 'employee_id', '') or str(self.request.user.id),
+            position=employee.job_title_uae or employee.job_title_finland or employee.designation or getattr(rbac_profile, 'job_title', '') or '',
+            department=employee.department or employee.division or employee.business_unit or getattr(rbac_profile, 'department', '') or '',
+            reporting_manager=_resolve_exit_reporting_manager(self.request.user, employee),
+            branch=employee.branch or 'RAD',
+        )
+        _notify_project_managers_of_exit(record)
+
+    def update(self, request, *args, **kwargs):
+        if not can_manage_offboarding(request.user):
+            raise PermissionDenied('Only HR or an administrator may update an offboarding process.')
+        if request.data.get('status') == 'rejected':
+            raise ValidationError({'detail': 'Use the Reject action to validate active project assignments.'})
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        """Only lifecycle HR/admin users may permanently delete an offboarding."""
+        if not can_manage_offboarding(request.user):
+            raise PermissionDenied('Only HR or an administrator may delete an offboarding process.')
+        return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Reject an active offboarding when the employee remains on an active project."""
+        if not can_manage_offboarding(request.user):
+            raise PermissionDenied('Only HR or an administrator may reject an offboarding process.')
+        record = self.get_object()
+        if record.status not in OFFBOARDING_ACTIVE_STATUSES:
+            raise ValidationError({'detail': 'Only an active offboarding process can be rejected.'})
+
+        active_projects = get_active_project_assignments(record.user)
+        if not active_projects:
+            raise ValidationError({
+                'detail': 'Rejection is only available while the employee is assigned to an active project.'
+            })
+
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            reason = 'Employee is assigned to an active project.'
+        project_labels = ', '.join(
+            f"{project['code']} - {project['name']}" for project in active_projects
+        )
+        record.status = 'rejected'
+        record.rejection_reason = f'{reason} Active project(s): {project_labels}'
+        record.rejected_by = request.user
+        record.rejected_at = timezone.now()
+        record.save(update_fields=[
+            'status', 'rejection_reason', 'rejected_by', 'rejected_at', 'updated_at'
+        ])
+
+        if record.user_id:
+            notification = NotificationService.create_notification(
+                recipient=record.user,
+                sender=request.user,
+                title='Offboarding request rejected',
+                message=record.rejection_reason,
+                category='APPROVAL',
+                priority='HIGH',
+                action_url=f'/hr/onboarding?tab=offboarding&record_id={record.id}',
+                action_label='View Request',
+                metadata={'offboarding_id': record.id, 'event': 'offboarding_rejected'},
+            )
+            if notification and notification.send_in_app and notification.status == 'PENDING':
+                notification.status = 'SENT'
+                notification.save(update_fields=['status', 'updated_at'])
+
+        return Response(self.get_serializer(record).data)
+
+    @action(detail=False, methods=['get'], url_path='active-employees')
+    def active_employees(self, request):
+        """Return employee identities that already have an active offboarding."""
+        records = OffboardingRecord.objects.filter(
+            status__in=OFFBOARDING_ACTIVE_STATUSES
+        ).values(
+            'id',
+            'user_id',
+            'employee_email',
+            'status',
+            'last_working_day',
+        )
+
+        return Response(list(records))
     
     @action(detail=False, methods=['get'])
     def statistics(self, request):
@@ -598,6 +1103,15 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
     def mark_completed(self, request, pk=None):
         """Mark offboarding as completed"""
         record = self.get_object()
+        if not can_manage_offboarding_stage(request.user, CHECKLIST_STAGE_FINAL_SETTLEMENT, record):
+            raise PermissionDenied('Only HR or Finance may complete final offboarding settlement.')
+        stage_rows = record.checklist_items.filter(stage__in=OFFBOARDING_CHECKLIST_TEMPLATES)
+        present_stages = set(stage_rows.values_list('stage', flat=True))
+        if present_stages != set(OFFBOARDING_CHECKLIST_TEMPLATES) or stage_rows.filter(completed=False).exists():
+            return Response(
+                {'detail': 'Every offboarding checklist stage must be started and completed before closure.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         record.status = 'completed'
         record.progress_percentage = 100
         record.actual_completion_date = timezone.now()
@@ -605,6 +1119,45 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(record)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='start-checklist-stage')
+    def start_checklist_stage(self, request, pk=None):
+        record = self.get_object()
+        stage = request.data.get('stage')
+        if stage not in OFFBOARDING_CHECKLIST_TEMPLATES:
+            raise ValidationError({'stage': 'A valid offboarding checklist stage is required.'})
+        if record.status in {'completed', 'cancelled', 'rejected'}:
+            raise ValidationError({'detail': 'Completed, cancelled, or rejected offboarding workflows are read-only.'})
+        if not can_start_offboarding_stage(request.user, stage, record):
+            raise PermissionDenied('Your RBAC role cannot start this offboarding checklist stage.')
+
+        existing_names = set(record.checklist_items.filter(stage=stage).values_list('task_name', flat=True))
+        due_date = record.target_completion_date or record.last_working_day
+        new_items = [
+            Checklist(
+                offboarding_record=record,
+                task_name=task_name,
+                description=f'{stage} offboarding checklist task',
+                stage=stage,
+                due_date=due_date,
+                priority=priority,
+            )
+            for task_name, priority in OFFBOARDING_CHECKLIST_TEMPLATES[stage]
+            if task_name not in existing_names
+        ]
+        Checklist.objects.bulk_create(new_items)
+
+        next_status, minimum_progress = OFFBOARDING_STAGE_START_STATE[stage]
+        if record.progress_percentage < minimum_progress:
+            record.status = next_status
+            record.progress_percentage = minimum_progress
+            record.save(update_fields=['status', 'progress_percentage', 'updated_at'])
+
+        record.refresh_from_db()
+        return Response({
+            **self.get_serializer(record).data,
+            'created_checklist_count': len(new_items),
+        })
 
 
 class EquipmentViewSet(viewsets.ModelViewSet):
@@ -880,4 +1433,56 @@ class ChecklistViewSet(viewsets.ModelViewSet):
         if offboarding_id:
             queryset = queryset.filter(offboarding_record_id=offboarding_id)
         
-        return queryset.select_related('completed_by')
+        return queryset.select_related('completed_by', 'onboarding_record', 'offboarding_record')
+
+    def _assert_manage_permission(self, item, stage=None):
+        if item.onboarding_record_id:
+            if item.onboarding_record.status in {'completed', 'cancelled'}:
+                raise PermissionDenied('Completed or cancelled onboarding checklists are read-only.')
+            checklist_stage = stage or item.stage
+            if not can_manage_onboarding_stage(
+                self.request.user, checklist_stage, item.onboarding_record
+            ):
+                raise PermissionDenied('Your RBAC role cannot update this onboarding checklist stage.')
+        elif item.offboarding_record_id:
+            if item.offboarding_record.status in {'completed', 'cancelled', 'rejected'}:
+                raise PermissionDenied('Completed, cancelled, or rejected offboarding checklists are read-only.')
+            if not can_manage_offboarding_stage(
+                self.request.user, stage or item.stage, item.offboarding_record
+            ):
+                raise PermissionDenied('Your RBAC role cannot update this offboarding checklist stage.')
+
+    def perform_create(self, serializer):
+        onboarding_record = serializer.validated_data.get('onboarding_record')
+        offboarding_record = serializer.validated_data.get('offboarding_record')
+        stage = serializer.validated_data.get('stage')
+        if onboarding_record and not can_manage_onboarding_stage(
+            self.request.user, stage, onboarding_record
+        ):
+            raise PermissionDenied('Your RBAC role cannot create this onboarding checklist item.')
+        if offboarding_record and not can_manage_offboarding_stage(
+            self.request.user, stage, offboarding_record
+        ):
+            raise PermissionDenied('Your RBAC role cannot create this offboarding checklist item.')
+        serializer.save()
+
+    def perform_update(self, serializer):
+        self._assert_manage_permission(
+            serializer.instance,
+            serializer.validated_data.get('stage', serializer.instance.stage),
+        )
+        completed = serializer.validated_data.get('completed')
+        if completed is True:
+            item = serializer.save(completed_by=self.request.user, completed_date=timezone.now())
+            if item.onboarding_record_id:
+                complete_onboarding_if_ready(item.onboarding_record)
+            elif item.offboarding_record_id:
+                complete_offboarding_if_ready(item.offboarding_record)
+        elif completed is False:
+            serializer.save(completed_by=None, completed_date=None)
+        else:
+            serializer.save()
+
+    def perform_destroy(self, instance):
+        self._assert_manage_permission(instance)
+        instance.delete()
