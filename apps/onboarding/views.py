@@ -36,6 +36,7 @@ from .serializers import (
 )
 from apps.core.s3_service import S3Service
 from apps.notifications.services import NotificationService
+from apps.notifications.models import Notification
 
 # Employee management - using new EmployeeMaster system
 from apps.hr_core.models import EmployeeMaster
@@ -73,6 +74,10 @@ def _notify_project_managers_of_exit(record):
             recipients[manager.id] = manager
             recipient_projects.setdefault(manager.id, []).append(project)
 
+    if recipients and record.project_manager_approval_status != 'pending':
+        record.project_manager_approval_status = 'pending'
+        record.save(update_fields=['project_manager_approval_status', 'updated_at'])
+
     for user_id, recipient in recipients.items():
         assigned_projects = recipient_projects[user_id]
         project_labels = ', '.join(
@@ -87,7 +92,7 @@ def _notify_project_managers_of_exit(record):
                 f'has initiated an exit process and is assigned to your active '
                 f'project(s): {project_labels}. Last working day: {record.last_working_day}.'
             ),
-            category='PROJECT',
+            category='APPROVAL',
             priority='HIGH',
             action_url=f'/hr/onboarding?tab=offboarding&record_id={record.id}',
             action_label='Review Offboarding',
@@ -96,6 +101,8 @@ def _notify_project_managers_of_exit(record):
                 'employee_id': record.employee_id,
                 'project_ids': [project['id'] for project in assigned_projects],
                 'event': 'employee_exit_initiated',
+                'action_type': 'offboarding_project_manager_decision',
+                'decision_status': 'pending',
             },
         )
         if notification and notification.send_in_app and notification.status == 'PENDING':
@@ -935,7 +942,10 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
         if can_manage_offboarding(self.request.user):
             selected_user = serializer.validated_data.get('user')
             reporting_manager = _resolve_exit_reporting_manager(selected_user)
-            save_values = {'created_by': self.request.user}
+            save_values = {
+                'created_by': self.request.user,
+                'project_manager_approval_status': 'not_required',
+            }
             if reporting_manager:
                 save_values['reporting_manager'] = reporting_manager
             record = serializer.save(**save_values)
@@ -957,6 +967,7 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
         employee_name = ' '.join(filter(None, [employee.first_name, employee.last_name])).strip()
         record = serializer.save(
             created_by=self.request.user,
+            project_manager_approval_status='not_required',
             user=self.request.user,
             employee_name=employee_name or self.request.user.get_full_name() or self.request.user.username,
             employee_email=employee.email or self.request.user.email,
@@ -1027,6 +1038,106 @@ class OffboardingRecordViewSet(viewsets.ModelViewSet):
                 notification.save(update_fields=['status', 'updated_at'])
 
         return Response(self.get_serializer(record).data)
+
+    @action(detail=True, methods=['post'], url_path='project-manager-decision')
+    def project_manager_decision(self, request, pk=None):
+        """Allow an assigned active-project PoM to approve or reject an exit request."""
+        decision = (request.data.get('decision') or '').strip().lower()
+        if decision not in {'approved', 'rejected'}:
+            raise ValidationError({'decision': 'Decision must be approved or rejected.'})
+
+        with transaction.atomic():
+            record = OffboardingRecord.objects.select_for_update().get(pk=pk)
+            active_projects = get_active_project_assignments(record.user)
+            manager_ids = {
+                manager.id
+                for project in active_projects
+                for manager in project['managers']
+                if manager
+            }
+            notified_as_project_manager = any(
+                str(notification.metadata.get('offboarding_id')) == str(record.id)
+                for notification in Notification.objects.filter(
+                    recipient=request.user,
+                    metadata__event='employee_exit_initiated',
+                )
+            )
+            if request.user.id not in manager_ids and not notified_as_project_manager:
+                raise PermissionDenied(
+                    'Only a Project Manager assigned to this employee may decide the exit process.'
+                )
+            if record.project_manager_approval_status != 'pending':
+                raise ValidationError({
+                    'detail': (
+                        'This exit process has already been decided by a Project Manager '
+                        f'({record.project_manager_approval_status}).'
+                    )
+                })
+            if record.status not in OFFBOARDING_ACTIVE_STATUSES:
+                raise ValidationError({'detail': 'This offboarding process is no longer active.'})
+
+            note = (request.data.get('note') or '').strip()
+            now = timezone.now()
+            record.project_manager_approval_status = decision
+            record.project_manager_decided_by = request.user
+            record.project_manager_decided_at = now
+            record.project_manager_decision_note = note
+            update_fields = [
+                'project_manager_approval_status', 'project_manager_decided_by',
+                'project_manager_decided_at', 'project_manager_decision_note', 'updated_at',
+            ]
+            if decision == 'rejected':
+                record.status = 'rejected'
+                record.rejection_reason = note or 'Project Manager rejected the exit process.'
+                record.rejected_by = request.user
+                record.rejected_at = now
+                update_fields.extend(['status', 'rejection_reason', 'rejected_by', 'rejected_at'])
+            record.save(update_fields=update_fields)
+
+            related_notifications = Notification.objects.filter(
+                metadata__event='employee_exit_initiated'
+            )
+            for notification in related_notifications:
+                if str(notification.metadata.get('offboarding_id')) != str(record.id):
+                    continue
+                notification.metadata = {
+                    **notification.metadata,
+                    'decision_status': decision,
+                    'decided_by': request.user.get_full_name() or request.user.username,
+                    'decided_at': now.isoformat(),
+                }
+                notification.mark_as_read()
+                notification.save(update_fields=['metadata', 'updated_at'])
+
+            if record.user_id:
+                manager_name = request.user.get_full_name() or request.user.username
+                decision_label = 'approved' if decision == 'approved' else 'rejected'
+                notification = NotificationService.create_notification(
+                    recipient=record.user,
+                    sender=request.user,
+                    title=f'Exit process {decision_label} by Project Manager',
+                    message=(
+                        f'{manager_name} {decision_label} your exit process.'
+                        + (f' Note: {note}' if note else '')
+                    ),
+                    category='APPROVAL',
+                    priority='HIGH',
+                    action_url=f'/hr/onboarding?tab=offboarding&record_id={record.id}',
+                    action_label='View Exit Process',
+                    metadata={
+                        'offboarding_id': record.id,
+                        'event': f'offboarding_project_manager_{decision}',
+                    },
+                )
+                if notification and notification.send_in_app and notification.status == 'PENDING':
+                    notification.status = 'SENT'
+                    notification.save(update_fields=['status', 'updated_at'])
+
+        return Response({
+            'detail': f'Exit process {decision} successfully.',
+            'decision': decision,
+            'offboarding': self.get_serializer(record).data,
+        })
 
     @action(detail=False, methods=['get'], url_path='active-employees')
     def active_employees(self, request):

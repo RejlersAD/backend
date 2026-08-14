@@ -3,11 +3,10 @@
 from django.contrib.auth import get_user_model
 
 from apps.core.project_models import Project
-from apps.rbac.models import EngineerProfile, UserProfile as RBACUserProfile, UserRole
+from apps.rbac.models import EngineerProfile, UserProfile as RBACUserProfile
 
 
 User = get_user_model()
-POM_ROLE_CODES = ('project_manager', 'manager')
 
 
 def get_active_project_assignments(user):
@@ -56,16 +55,9 @@ def get_active_project_assignments(user):
         for project in active_profile_projects
         if project.get('project_manager_id') not in (None, '')
     }
-    eligible_manager_ids = set(UserRole.objects.filter(
-        role__code__in=POM_ROLE_CODES,
-        role__is_active=True,
-        user_profile__is_deleted=False,
-        user_profile__user__is_active=True,
-        user_profile__user_id__in=manager_ids,
-    ).values_list('user_profile__user_id', flat=True))
     manager_users = {
         str(manager.id): manager
-        for manager in User.objects.filter(id__in=eligible_manager_ids, is_active=True)
+        for manager in User.objects.filter(id__in=manager_ids, is_active=True)
     }
 
     for project in active_profile_projects:

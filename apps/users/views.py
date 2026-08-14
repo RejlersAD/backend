@@ -116,34 +116,31 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
 
     @action(detail=False, methods=['get'], url_path='project-managers')
     def project_managers(self, request):
-        """Return active PoM users directly from RBAC role assignments."""
-        from apps.rbac.models import UserRole
-
-        role_assignments = UserRole.objects.filter(
-            role__code__in=EMPLOYEE_ROLE_FILTERS['project_manager'],
-            role__is_active=True,
-            user_profile__is_deleted=False,
-            user_profile__user__is_active=True,
-        ).select_related('user_profile__user', 'role').order_by(
-            'user_profile__user__first_name',
-            'user_profile__user__last_name',
-        )
+        """Return searchable active employees eligible for selection as a PoM."""
+        search_query = request.query_params.get('search', '').strip()
+        employees = EmployeeMaster.objects.filter(user__is_active=True).select_related('user')
+        if search_query:
+            for search_term in search_query.split():
+                employees = employees.filter(
+                    Q(first_name__icontains=search_term) |
+                    Q(last_name__icontains=search_term) |
+                    Q(email__icontains=search_term) |
+                    Q(employee_number__icontains=search_term) |
+                    Q(employment_id__icontains=search_term)
+                )
+        employees = employees.order_by('first_name', 'last_name')[:50]
         managers = []
-        seen_user_ids = set()
-        for assignment in role_assignments:
-            profile = assignment.user_profile
-            user = profile.user
-            if user.id in seen_user_ids:
-                continue
-            seen_user_ids.add(user.id)
+        for employee in employees:
+            user = employee.user
             managers.append({
                 'id': user.id,
                 'user_id': user.id,
-                'first_name': user.first_name or '',
-                'last_name': user.last_name or '',
-                'email': user.email or '',
-                'position': profile.job_title or assignment.role.name,
-                'role_code': assignment.role.code,
+                'first_name': employee.first_name or user.first_name or '',
+                'last_name': employee.last_name or user.last_name or '',
+                'email': employee.email or user.email or '',
+                'employee_number': employee.employee_number or '',
+                'position': employee.job_title_uae or employee.job_title_finland or '',
+                'department': employee.department or employee.division or '',
             })
         return Response(managers)
 

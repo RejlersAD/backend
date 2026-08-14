@@ -265,6 +265,24 @@ class OffboardingRecord(models.Model):
         related_name='offboarding_rejected'
     )
     rejected_at = models.DateTimeField(null=True, blank=True)
+
+    # Project-manager clearance for employees assigned to active projects.
+    project_manager_approval_status = models.CharField(
+        max_length=20,
+        choices=[
+            ('not_required', 'Not Required'),
+            ('pending', 'Pending'),
+            ('approved', 'Approved'),
+            ('rejected', 'Rejected'),
+        ],
+        default='not_required',
+    )
+    project_manager_decided_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='offboarding_project_manager_decisions'
+    )
+    project_manager_decided_at = models.DateTimeField(null=True, blank=True)
+    project_manager_decision_note = models.TextField(blank=True, null=True)
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)

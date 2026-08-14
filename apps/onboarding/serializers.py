@@ -245,6 +245,9 @@ class OffboardingRecordSerializer(serializers.ModelSerializer):
     has_ongoing_projects = serializers.SerializerMethodField(read_only=True)
     can_manage_actions = serializers.SerializerMethodField(read_only=True)
     rejected_by_name = serializers.CharField(source='rejected_by.get_full_name', read_only=True)
+    project_manager_decided_by_name = serializers.CharField(
+        source='project_manager_decided_by.get_full_name', read_only=True
+    )
     
     class Meta:
         model = OffboardingRecord
@@ -257,11 +260,18 @@ class OffboardingRecordSerializer(serializers.ModelSerializer):
             'created_by', 'created_by_name', 'assigned_to', 'assigned_to_name',
             'notes', 'rejection_reason', 'rejected_by', 'rejected_by_name',
             'rejected_at', 'created_at', 'updated_at',
+            'project_manager_approval_status', 'project_manager_decided_by',
+            'project_manager_decided_by_name', 'project_manager_decided_at',
+            'project_manager_decision_note',
             'equipment', 'documents', 'access_records', 'checklist_items',
             'days_until_exit', 'days_since_initiated', 'checklist_stage_permissions',
             'ongoing_projects', 'has_ongoing_projects', 'can_manage_actions'
         ]
-        read_only_fields = ['rejection_reason', 'rejected_by', 'rejected_at']
+        read_only_fields = [
+            'rejection_reason', 'rejected_by', 'rejected_at',
+            'project_manager_approval_status', 'project_manager_decided_by',
+            'project_manager_decided_at', 'project_manager_decision_note',
+        ]
 
     def get_ongoing_projects(self, obj):
         return _ongoing_project_summaries(obj)
@@ -354,6 +364,8 @@ class OffboardingRecordListSerializer(serializers.ModelSerializer):
             'status', 'progress_percentage',
             'created_by_name', 'assigned_to_name',
             'rejection_reason', 'rejected_at',
+            'project_manager_approval_status', 'project_manager_decided_at',
+            'project_manager_decision_note',
             'created_at', 'updated_at',
             'days_until_exit',
             'equipment_count', 'documents_count', 'access_count',

@@ -34,9 +34,8 @@ class NotificationViewSet(PersonalDataMixin, viewsets.ModelViewSet):
     API endpoints for notifications
     
     🔐 Data Visibility:
-    - Users see only their own notifications (personal data)
+    - Every user, including administrators, sees only their own notifications
     - No team sharing
-    - Admins see all notifications
     
     list: Get all notifications for current user
     retrieve: Get specific notification
@@ -54,38 +53,39 @@ class NotificationViewSet(PersonalDataMixin, viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'priority', 'is_read']
     ordering = ['-created_at']
     queryset = Notification.objects.all()
-    
+    visibility_logging = False
+
+    def get_queryset(self):
+        """Return only the current user's notifications using the recipient index."""
+        queryset = Notification.objects.filter(
+            recipient_id=self.request.user.id,
+        ).select_related('category', 'recipient', 'sender')
+
+        status_filter = self.request.query_params.get('status')
+        if status_filter == 'unread':
+            queryset = queryset.filter(is_read=False)
+        elif status_filter == 'read':
+            queryset = queryset.filter(is_read=True)
+
+        priority_filter = self.request.query_params.get('priority')
+        if priority_filter:
+            queryset = queryset.filter(priority=priority_filter.upper())
+
+        category_filter = self.request.query_params.get('category')
+        if category_filter:
+            queryset = queryset.filter(category__name=category_filter.upper())
+
+        if self.request.query_params.get('exclude_expired', 'false').lower() == 'true':
+            queryset = queryset.filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+            )
+
+        return queryset.order_by('-created_at')
+
     def get_serializer_class(self):
         if self.action == 'list':
             return NotificationListSerializer
         return NotificationSerializer
-        
-        # Filter by status
-        status_filter = self.request.query_params.get('status')
-        if status_filter:
-            if status_filter == 'unread':
-                queryset = queryset.filter(is_read=False)
-            elif status_filter == 'read':
-                queryset = queryset.filter(is_read=True)
-        
-        # Filter by priority
-        priority_filter = self.request.query_params.get('priority')
-        if priority_filter:
-            queryset = queryset.filter(priority=priority_filter.upper())
-        
-        # Filter by category
-        category_filter = self.request.query_params.get('category')
-        if category_filter:
-            queryset = queryset.filter(category__name=category_filter)
-        
-        # Exclude expired
-        exclude_expired = self.request.query_params.get('exclude_expired', 'false')
-        if exclude_expired.lower() == 'true':
-            queryset = queryset.filter(
-                Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
-            )
-        
-        return queryset
     
     def retrieve(self, request, *args, **kwargs):
         """Get notification and optionally mark as read"""
