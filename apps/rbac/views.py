@@ -3434,17 +3434,34 @@ class AchievementViewSet(viewsets.ModelViewSet):
             profile = user.rbac_profile
         except AttributeError:
             # User model doesn't have rbac_profile accessor, create it
-            from .models import UserProfile
+            from .models import UserProfile, Organization
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            # Get or create default organization
+            organization = Organization.objects.filter(is_active=True).first()
+            if not organization:
+                organization, org_created = Organization.objects.get_or_create(
+                    code='default',
+                    defaults={
+                        'name': 'Rejlers Engineering',
+                        'description': 'Default organization',
+                        'is_active': True,
+                    }
+                )
+                if org_created:
+                    logger.warning(f'Auto-created default organization: {organization.name}')
+            
             profile, created = UserProfile.objects.get_or_create(
                 user=user,
                 defaults={
+                    'organization': organization,
                     'bio': '',
                     'job_title': user.username,
                 }
             )
             if created:
-                import logging
-                logging.getLogger(__name__).info(
+                logger.info(
                     f'Auto-created UserProfile for user {user.id} ({user.email}) in AchievementViewSet'
                 )
         serializer.save(user_profile=profile)
@@ -3517,16 +3534,34 @@ class WorkExperienceViewSet(viewsets.ModelViewSet):
             profile = user.rbac_profile
         except AttributeError:
             # User model doesn't have rbac_profile accessor, create it
+            from .models import Organization
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            # Get or create default organization
+            organization = Organization.objects.filter(is_active=True).first()
+            if not organization:
+                organization, org_created = Organization.objects.get_or_create(
+                    code='default',
+                    defaults={
+                        'name': 'Rejlers Engineering',
+                        'description': 'Default organization',
+                        'is_active': True,
+                    }
+                )
+                if org_created:
+                    logger.warning(f'Auto-created default organization: {organization.name}')
+            
             profile, created = UserProfile.objects.get_or_create(
                 user=user,
                 defaults={
+                    'organization': organization,
                     'bio': '',
                     'job_title': user.username,
                 }
             )
             if created:
-                import logging
-                logging.getLogger(__name__).info(
+                logger.info(
                     f'Auto-created UserProfile for user {user.id} ({user.email}) in WorkExperienceViewSet'
                 )
         serializer.save(user_profile=profile)
@@ -3589,16 +3624,34 @@ class SocialMediaLinkViewSet(viewsets.ModelViewSet):
             profile = user.rbac_profile
         except AttributeError:
             # User model doesn't have rbac_profile accessor, create it
+            from .models import Organization
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            # Get or create default organization
+            organization = Organization.objects.filter(is_active=True).first()
+            if not organization:
+                organization, org_created = Organization.objects.get_or_create(
+                    code='default',
+                    defaults={
+                        'name': 'Rejlers Engineering',
+                        'description': 'Default organization',
+                        'is_active': True,
+                    }
+                )
+                if org_created:
+                    logger.warning(f'Auto-created default organization: {organization.name}')
+            
             profile, created = UserProfile.objects.get_or_create(
                 user=user,
                 defaults={
+                    'organization': organization,
                     'bio': '',
                     'job_title': user.username,
                 }
             )
             if created:
-                import logging
-                logging.getLogger(__name__).info(
+                logger.info(
                     f'Auto-created UserProfile for user {user.id} ({user.email}) in SocialMediaLinkViewSet'
                 )
         serializer.save(user_profile=profile)
@@ -3834,22 +3887,39 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
                 profile = user.rbac_profile
             except AttributeError:
                 # User model doesn't have rbac_profile accessor, create it
+                from .models import Organization
+                import logging
+                logger = logging.getLogger(__name__)
+                
                 try:
+                    # Get or create default organization
+                    organization = Organization.objects.filter(is_active=True).first()
+                    if not organization:
+                        organization, org_created = Organization.objects.get_or_create(
+                            code='default',
+                            defaults={
+                                'name': 'Rejlers Engineering',
+                                'description': 'Default organization',
+                                'is_active': True,
+                            }
+                        )
+                        if org_created:
+                            logger.warning(f'Auto-created default organization: {organization.name}')
+                    
                     profile, created = UserProfile.objects.get_or_create(
                         user=user,
                         defaults={
+                            'organization': organization,
                             'bio': '',
                             'job_title': user.username,
                         }
                     )
                     if created:
-                        import logging
-                        logging.getLogger(__name__).info(
-                            f'Auto-created UserProfile for user {user.id} ({user.email})'
+                        logger.info(
+                            f'Auto-created UserProfile for user {user.id} ({user.email}) in ProfileDocumentViewSet'
                         )
                 except Exception as create_err:
-                    import logging
-                    logging.getLogger(__name__).exception(
+                    logger.exception(
                         f'Failed to create UserProfile for user {user.id}'
                     )
                     raise ValidationError({
