@@ -25,9 +25,9 @@ try:
         get_database_url as get_centralized_db_url,
     )
     CENTRALIZED_CONFIG_AVAILABLE = True
-    print(f"[CONFIG] ✅ Centralized configuration loaded")
+    print(f"[CONFIG] [OK] Centralized configuration loaded")
 except ImportError as e:
-    print(f"[CONFIG] ⚠️  Centralized configuration not available: {e}")
+    print(f"[CONFIG] [WARNING] Centralized configuration not available: {e}")
     CENTRALIZED_CONFIG_AVAILABLE = False
     env_config = None
     get_environment = lambda: 'local'
@@ -432,15 +432,15 @@ _env_labels = {
     'production': '🏭 PRODUCTION',
     'prod':       '🏭 PRODUCTION',
     'staging':    '🚀 STAGING',
-    'preprod':    '🚀 PREPROD',
-    'development':'🔧 DEVELOPMENT (local)',
-    'dev':        '🔧 DEVELOPMENT (local)',
-    'local':      '🔧 LOCAL',
-    'testing':    '🧪 TESTING',
-    'test':       '🧪 TESTING',
+    'preprod':    '[PREPROD]',
+    'development':'[DEVELOPMENT] (local)',
+    'dev':        '[DEVELOPMENT] (local)',
+    'local':      '[LOCAL]',
+    'testing':    '[TESTING]',
+    'test':       '[TESTING]',
 }
-print(f"[DJANGO] {_env_labels.get(ENVIRONMENT.lower(), f'🔧 {ENVIRONMENT.upper()}')} Environment")
-print(f"[DJANGO] 🗄️  DB host: {DATABASE_URL.split('@')[-1]}")
+print(f"[DJANGO] {_env_labels.get(ENVIRONMENT.lower(), f'[{ENVIRONMENT.upper()}]')} Environment")
+print(f"[DJANGO] DB host: {DATABASE_URL.split('@')[-1]}")
 
 # Parse database configuration
 db_config = dj_database_url.parse(DATABASE_URL)
