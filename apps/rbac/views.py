@@ -3427,44 +3427,69 @@ class AchievementViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Auto-assign current user's profile.
         
-        ✅ SOFT-CODED: Auto-create UserProfile if missing
+        ✅ SOFT-CODED: Auto-create UserProfile if missing with comprehensive error logging
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         user = self.request.user
+        logger.info(f'[AchievementViewSet] Creating achievement for user {user.id} ({user.email})')
+        
         try:
             profile = user.rbac_profile
-        except AttributeError:
+            logger.info(f'[AchievementViewSet] Found existing UserProfile: {profile.id}')
+        except AttributeError as e:
             # User model doesn't have rbac_profile accessor, create it
             from .models import UserProfile, Organization
-            import logging
-            logger = logging.getLogger(__name__)
+            from rest_framework.exceptions import ValidationError
             
-            # Get or create default organization
-            organization = Organization.objects.filter(is_active=True).first()
-            if not organization:
-                organization, org_created = Organization.objects.get_or_create(
-                    code='default',
+            logger.warning(f'[AchievementViewSet] UserProfile not found for user {user.id}, creating...')
+            
+            try:
+                # Get or create default organization
+                organization = Organization.objects.filter(is_active=True).first()
+                if not organization:
+                    logger.warning('[AchievementViewSet] No active organization found, creating default...')
+                    organization, org_created = Organization.objects.get_or_create(
+                        code='default',
+                        defaults={
+                            'name': 'Rejlers Engineering',
+                            'description': 'Default organization',
+                            'is_active': True,
+                        }
+                    )
+                    if org_created:
+                        logger.warning(f'[AchievementViewSet] Auto-created default organization: {organization.name}')
+                else:
+                    logger.info(f'[AchievementViewSet] Using organization: {organization.name}')
+                
+                profile, created = UserProfile.objects.get_or_create(
+                    user=user,
                     defaults={
-                        'name': 'Rejlers Engineering',
-                        'description': 'Default organization',
-                        'is_active': True,
+                        'organization': organization,
+                        'bio': '',
+                        'job_title': user.username or user.email.split('@')[0],
                     }
                 )
-                if org_created:
-                    logger.warning(f'Auto-created default organization: {organization.name}')
-            
-            profile, created = UserProfile.objects.get_or_create(
-                user=user,
-                defaults={
-                    'organization': organization,
-                    'bio': '',
-                    'job_title': user.username,
-                }
-            )
-            if created:
-                logger.info(
-                    f'Auto-created UserProfile for user {user.id} ({user.email}) in AchievementViewSet'
-                )
-        serializer.save(user_profile=profile)
+                if created:
+                    logger.info(
+                        f'[AchievementViewSet] ✅ Auto-created UserProfile {profile.id} for user {user.id} ({user.email})'
+                    )
+                else:
+                    logger.info(f'[AchievementViewSet] Found existing UserProfile {profile.id} during get_or_create')
+            except Exception as create_err:
+                logger.exception(f'[AchievementViewSet] ❌ Failed to create UserProfile for user {user.id}: {str(create_err)}')
+                raise ValidationError({
+                    'user_profile': f'Could not create user profile. Please contact administrator. Error: {str(create_err)}'
+                })
+        
+        try:
+            logger.info(f'[AchievementViewSet] Saving achievement with data: {serializer.validated_data}')
+            serializer.save(user_profile=profile)
+            logger.info(f'[AchievementViewSet] ✅ Achievement saved successfully')
+        except Exception as save_err:
+            logger.exception(f'[AchievementViewSet] ❌ Failed to save achievement: {str(save_err)}')
+            raise
     
     @action(detail=False, methods=['get'])
     def categories(self, request):
