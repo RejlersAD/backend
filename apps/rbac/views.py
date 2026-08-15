@@ -3425,13 +3425,29 @@ class AchievementViewSet(viewsets.ModelViewSet):
             return Achievement.objects.none()
     
     def perform_create(self, serializer):
-        """Auto-assign current user's profile."""
+        """Auto-assign current user's profile.
+        
+        ✅ SOFT-CODED: Auto-create UserProfile if missing
+        """
+        user = self.request.user
         try:
-            profile = self.request.user.rbac_profile
-            serializer.save(user_profile=profile)
-        except:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('User profile not found.')
+            profile = user.rbac_profile
+        except AttributeError:
+            # User model doesn't have rbac_profile accessor, create it
+            from .models import UserProfile
+            profile, created = UserProfile.objects.get_or_create(
+                user=user,
+                defaults={
+                    'bio': '',
+                    'job_title': user.username,
+                }
+            )
+            if created:
+                import logging
+                logging.getLogger(__name__).info(
+                    f'Auto-created UserProfile for user {user.id} ({user.email}) in AchievementViewSet'
+                )
+        serializer.save(user_profile=profile)
     
     @action(detail=False, methods=['get'])
     def categories(self, request):
