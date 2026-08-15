@@ -1053,6 +1053,21 @@ class AchievementSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         return super().to_internal_value(_blank_optional_dates_to_none(data, ['achieved_date']))
+    
+    def validate(self, attrs):
+        """Validate achievement data with specific error messages."""
+        # Check required fields with helpful messages
+        if not attrs.get('title'):
+            raise serializers.ValidationError({
+                'title': 'Achievement title is required. Please enter a title for your achievement.'
+            })
+        
+        if not attrs.get('category'):
+            raise serializers.ValidationError({
+                'category': 'Achievement category is required. Please select a category (sports, academic, professional, etc.).'
+            })
+        
+        return attrs
 
     def get_category_label(self, obj):
         """Return human-readable category label."""

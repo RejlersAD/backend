@@ -3428,13 +3428,28 @@ class AchievementViewSet(viewsets.ModelViewSet):
         """Auto-assign current user's profile (auto-provisioned if missing)."""
         from .profile_utils import get_or_create_profile, ProfileProvisioningError
         from rest_framework.exceptions import ValidationError
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        logger.info(f'[AchievementViewSet] Creating achievement for user: {self.request.user.email}')
+        logger.info(f'[AchievementViewSet] Request data: {self.request.data}')
 
         try:
             profile = get_or_create_profile(self.request.user, source='AchievementViewSet')
+            logger.info(f'[AchievementViewSet] Profile obtained: {profile.id}')
         except ProfileProvisioningError as exc:
+            logger.error(f'[AchievementViewSet] Profile provisioning failed: {exc}')
             raise ValidationError({'user_profile': str(exc)})
+        except Exception as exc:
+            logger.exception(f'[AchievementViewSet] Unexpected error getting profile')
+            raise ValidationError({'user_profile': f'Failed to get user profile: {str(exc)}'})
 
-        serializer.save(user_profile=profile)
+        try:
+            instance = serializer.save(user_profile=profile)
+            logger.info(f'[AchievementViewSet] Achievement created successfully: {instance.id}')
+        except Exception as exc:
+            logger.exception(f'[AchievementViewSet] Failed to save achievement')
+            raise
     
     @action(detail=False, methods=['get'])
     def categories(self, request):
@@ -3498,13 +3513,28 @@ class WorkExperienceViewSet(viewsets.ModelViewSet):
         """Auto-assign current user's profile (auto-provisioned if missing)."""
         from .profile_utils import get_or_create_profile, ProfileProvisioningError
         from rest_framework.exceptions import ValidationError
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        logger.info(f'[WorkExperienceViewSet] Creating experience for user: {self.request.user.email}')
+        logger.info(f'[WorkExperienceViewSet] Request data: {self.request.data}')
 
         try:
             profile = get_or_create_profile(self.request.user, source='WorkExperienceViewSet')
+            logger.info(f'[WorkExperienceViewSet] Profile obtained: {profile.id}')
         except ProfileProvisioningError as exc:
+            logger.error(f'[WorkExperienceViewSet] Profile provisioning failed: {exc}')
             raise ValidationError({'user_profile': str(exc)})
+        except Exception as exc:
+            logger.exception(f'[WorkExperienceViewSet] Unexpected error getting profile')
+            raise ValidationError({'user_profile': f'Failed to get user profile: {str(exc)}'})
 
-        serializer.save(user_profile=profile)
+        try:
+            instance = serializer.save(user_profile=profile)
+            logger.info(f'[WorkExperienceViewSet] Experience created successfully: {instance.id}')
+        except Exception as exc:
+            logger.exception(f'[WorkExperienceViewSet] Failed to save experience')
+            raise
     
     @action(detail=False, methods=['get'])
     def employment_types(self, request):
@@ -3558,13 +3588,28 @@ class SocialMediaLinkViewSet(viewsets.ModelViewSet):
         """Auto-assign current user's profile (auto-provisioned if missing)."""
         from .profile_utils import get_or_create_profile, ProfileProvisioningError
         from rest_framework.exceptions import ValidationError
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        logger.info(f'[SocialMediaLinkViewSet] Creating social link for user: {self.request.user.email}')
+        logger.info(f'[SocialMediaLinkViewSet] Request data: {self.request.data}')
 
         try:
             profile = get_or_create_profile(self.request.user, source='SocialMediaLinkViewSet')
+            logger.info(f'[SocialMediaLinkViewSet] Profile obtained: {profile.id}')
         except ProfileProvisioningError as exc:
+            logger.error(f'[SocialMediaLinkViewSet] Profile provisioning failed: {exc}')
             raise ValidationError({'user_profile': str(exc)})
+        except Exception as exc:
+            logger.exception(f'[SocialMediaLinkViewSet] Unexpected error getting profile')
+            raise ValidationError({'user_profile': f'Failed to get user profile: {str(exc)}'})
 
-        serializer.save(user_profile=profile)
+        try:
+            instance = serializer.save(user_profile=profile)
+            logger.info(f'[SocialMediaLinkViewSet] Social link created successfully: {instance.id}')
+        except Exception as exc:
+            logger.exception(f'[SocialMediaLinkViewSet] Failed to save social link')
+            raise
     
     @action(detail=False, methods=['get'])
     def platforms(self, request):
