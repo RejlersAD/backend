@@ -10,6 +10,7 @@ from django.db import transaction
 
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
 from .services.purchase_order_numbering import PurchaseOrderNumberService
+from .services.receipt_numbering import ReceiptNumberService
 from .services.requisition_numbering import RequisitionNumberService
 from .services.requisition_status import canonicalize_pr_status
 from .services.requisition_validation import (
@@ -590,11 +591,16 @@ class ReceiptSerializer(serializers.ModelSerializer):
             'id', 'receipt_number', 'purchase_order', 'po_number', 'receipt_date',
             'received_by', 'received_by_name', 'status', 'status_display',
             'items_received', 'quality_check_passed', 'inspection_notes',
+            'certificates_received', 'heat_numbers', 'inspector_name',
+            'inspection_agency', 'inspection_report_number', 'ndt_performed',
+            'ndt_results', 'dimensional_check_passed',
+            'visual_inspection_passed', 'material_verification_passed',
             'delivery_note_number', 'notes', 'attachments', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'receipt_date', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'receipt_number', 'receipt_date', 'received_by', 'created_at', 'updated_at']
     
     def create(self, validated_data):
+        validated_data['receipt_number'] = ReceiptNumberService.next_number()
         validated_data['received_by'] = self.context['request'].user
         return super().create(validated_data)
 

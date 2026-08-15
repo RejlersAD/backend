@@ -33,6 +33,10 @@ EMPLOYEE_FIELD_MAPPING = {
 
 # HR Manager role codes for filtering (from apps.rbac.rbac_config)
 HR_MANAGER_ROLE_CODES = ['hr_admin', 'hr_manager']
+EMPLOYEE_ROLE_FILTERS = {
+    'hr_manager': HR_MANAGER_ROLE_CODES,
+    'project_manager': ['project_manager', 'manager'],
+}
 
 # Minimum fields required for employee selection dropdown (performance optimization)
 EMPLOYEE_DROPDOWN_MIN_FIELDS = [
@@ -110,6 +114,36 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
     def get_serializer_class(self):
         return UserProfileSerializer
 
+    @action(detail=False, methods=['get'], url_path='project-managers')
+    def project_managers(self, request):
+        """Return searchable active employees eligible for selection as a PoM."""
+        search_query = request.query_params.get('search', '').strip()
+        employees = EmployeeMaster.objects.filter(user__is_active=True).select_related('user')
+        if search_query:
+            for search_term in search_query.split():
+                employees = employees.filter(
+                    Q(first_name__icontains=search_term) |
+                    Q(last_name__icontains=search_term) |
+                    Q(email__icontains=search_term) |
+                    Q(employee_number__icontains=search_term) |
+                    Q(employment_id__icontains=search_term)
+                )
+        employees = employees.order_by('first_name', 'last_name')[:50]
+        managers = []
+        for employee in employees:
+            user = employee.user
+            managers.append({
+                'id': user.id,
+                'user_id': user.id,
+                'first_name': employee.first_name or user.first_name or '',
+                'last_name': employee.last_name or user.last_name or '',
+                'email': employee.email or user.email or '',
+                'employee_number': employee.employee_number or '',
+                'position': employee.job_title_uae or employee.job_title_finland or '',
+                'department': employee.department or employee.division or '',
+            })
+        return Response(managers)
+
     @action(detail=False, methods=['get'])
     def active_employees(self, request):
         """
@@ -118,8 +152,11 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
         
         Query Parameters:
         - search: Filter by name, email, employee number
-        - role_filter: 'hr_manager' to filter HR managers only
+        - role_filter: 'hr_manager' or 'project_manager' to filter by RBAC role
         - minimal: 'true' to return only essential fields for dropdowns
+        - onboarding_active: 'true' to return only employees with an active onboarding workflow
+        - onboarding_status: Filter active onboarding by workflow status
+        - onboarding_branch: Filter active onboarding by branch
         
         ✅ MIGRATED: Now uses EmployeeMaster instead of UserProfile
         ✅ ENHANCED: Smart field mapping for legacy compatibility
@@ -127,20 +164,38 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
         search_query = request.query_params.get('search', '').strip()
         role_filter = request.query_params.get('role_filter', '').strip().lower()
         minimal = request.query_params.get('minimal', '').lower() == 'true'
+        onboarding_active = request.query_params.get('onboarding_active', '').lower() == 'true'
+        onboarding_status = request.query_params.get('onboarding_status', '').strip()
+        onboarding_branch = request.query_params.get('onboarding_branch', '').strip()
         
         # Get all active employees using EmployeeMaster
         employees_query = EmployeeMaster.objects.filter(
             user__is_active=True
         ).select_related('user', 'manager')
+
+        if onboarding_active:
+            from apps.onboarding.models import ONBOARDING_ACTIVE_STATUSES, OnboardingRecord
+            active_workflows = OnboardingRecord.objects.filter(
+                status__in=ONBOARDING_ACTIVE_STATUSES,
+            )
+            if onboarding_status:
+                active_workflows = active_workflows.filter(status=onboarding_status)
+            if onboarding_branch:
+                active_workflows = active_workflows.filter(branch=onboarding_branch)
+            employees_query = employees_query.filter(
+                user_id__in=active_workflows.values('user_id'),
+            ).distinct()
+        else:
+            active_workflows = None
         
-        # Apply role filtering for HR managers
-        if role_filter == 'hr_manager':
+        # Apply supported RBAC role filters for dropdowns.
+        if role_filter in EMPLOYEE_ROLE_FILTERS:
             from apps.rbac.models import UserProfile as RBACUserProfile, UserRole
-            hr_user_ids = UserRole.objects.filter(
-                role__code__in=HR_MANAGER_ROLE_CODES,
+            role_user_ids = UserRole.objects.filter(
+                role__code__in=EMPLOYEE_ROLE_FILTERS[role_filter],
                 role__is_active=True  # Check Role.is_active, not UserRole.is_active
             ).values_list('user_profile__user_id', flat=True)
-            employees_query = employees_query.filter(user_id__in=hr_user_ids)
+            employees_query = employees_query.filter(user_id__in=role_user_ids)
         
         # Apply search filter if provided
         if search_query:
@@ -176,8 +231,50 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
         
         # Serialize the data
         employee_data = []
+        from apps.rbac.models import EngineerProfile, UserProfile as RBACUserProfile, UserRole
+        rbac_profiles = {
+            profile.user_id: profile
+            for profile in RBACUserProfile.objects.filter(
+                user_id__in=employees_query.values_list('user_id', flat=True),
+                is_deleted=False,
+            ).select_related('engineer_profile')
+        }
+        pom_users = {
+            str(assignment.user_profile.user_id): assignment.user_profile.user
+            for assignment in UserRole.objects.filter(
+                role__code__in=EMPLOYEE_ROLE_FILTERS['project_manager'],
+                role__is_active=True,
+                user_profile__is_deleted=False,
+                user_profile__user__is_active=True,
+            ).select_related('user_profile__user')
+        }
+
+        def get_profile_project_manager(profile):
+            try:
+                projects = profile.engineer_profile.current_projects if profile else []
+            except EngineerProfile.DoesNotExist:
+                projects = []
+            for project in reversed(projects or []):
+                if not isinstance(project, dict) or project.get('status', 'active') != 'active':
+                    continue
+                manager = pom_users.get(str(project.get('project_manager_id')))
+                if manager:
+                    return manager, project
+            return None, None
+        workflow_by_user = {}
+        if active_workflows is not None:
+            for workflow in active_workflows.select_related('assigned_to').order_by('-created_at'):
+                workflow_by_user.setdefault(workflow.user_id, workflow)
+
         for employee in employees_query:
             user = employee.user
+            rbac_profile = rbac_profiles.get(user.id)
+            project_manager, reporting_project = get_profile_project_manager(rbac_profile)
+            line_manager_name = get_mapped_field(employee, 'reporting_manager')
+            reporting_manager_name = (
+                project_manager.get_full_name() or project_manager.email or project_manager.username
+                if project_manager else line_manager_name
+            )
             
             # Build base employee data object
             employee_dict = {
@@ -191,11 +288,27 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
             
             # Add computed/mapped fields (ALWAYS included for compatibility)
             employee_dict.update({
-                'position': get_mapped_field(employee, 'position'),
-                'reporting_manager': get_mapped_field(employee, 'reporting_manager'),
-                'department': get_mapped_field(employee, 'department'),
+                'position': get_mapped_field(employee, 'position') or getattr(rbac_profile, 'job_title', '') or '',
+                'reporting_manager': reporting_manager_name,
+                'reporting_manager_id': project_manager.id if project_manager else employee.manager_id,
+                'reporting_manager_source': 'project_manager' if project_manager else 'line_manager',
+                'reporting_project_name': reporting_project.get('name', '') if reporting_project else '',
+                'department': get_mapped_field(employee, 'department') or getattr(rbac_profile, 'department', '') or '',
                 'branch': employee.branch or 'RAD',
+                'employee_number': employee.employee_number or getattr(rbac_profile, 'employee_id', '') or '',
+                'employment_id': employee.employment_id or '',
             })
+
+            workflow = workflow_by_user.get(user.id)
+            if workflow:
+                employee_dict.update({
+                    'onboarding_record_id': workflow.id,
+                    'onboarding_status': workflow.status,
+                    'onboarding_progress': workflow.progress_percentage,
+                    'onboarding_joining_date': workflow.joining_date.isoformat(),
+                    'onboarding_target_date': workflow.target_completion_date.isoformat(),
+                    'onboarding_assigned_to': workflow.assigned_to.get_full_name() if workflow.assigned_to else '',
+                })
             
             # If minimal mode, return only essential fields
             if minimal:
@@ -215,7 +328,7 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                 'manager_id': employee.manager_id,
                 'manager_name': employee.manager.get_full_name() if employee.manager else '',
                 'initials': employee.initials or '',
-                'employee_number': employee.employee_number or '',
+                'employee_number': employee.employee_number or getattr(rbac_profile, 'employee_id', '') or '',
                 'account_name': employee.account_name or '',
                 'employment_id': employee.employment_id or '',
                 'candidate_id': employee.candidate_id or '',

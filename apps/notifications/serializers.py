@@ -87,7 +87,7 @@ class NotificationListSerializer(serializers.ModelSerializer):
             'id', 'title', 'message', 'priority', 
             'category_name', 'category_icon',
             'is_read', 'created_at', 'time_ago',
-            'action_url', 'action_label'
+            'action_url', 'action_label', 'metadata'
         ]
     
     def get_time_ago(self, obj):

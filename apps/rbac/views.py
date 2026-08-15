@@ -1808,6 +1808,97 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                                 raise ValueError('Technical skill proficiency must be between 1 and 5.')
                             skills.append({'name': name, 'proficiency': proficiency})
                             seen_skills.add(key)
+
+                        raw_projects = ep_raw.get('current_projects', ep_obj.current_projects)
+                        if not isinstance(raw_projects, list) or len(raw_projects) > 50:
+                            raise ValueError('Current projects must be a list containing no more than 50 entries.')
+                        from apps.hr_core.models import EmployeeMaster
+                        pom_users = {
+                            str(employee.user_id): employee.user
+                            for employee in EmployeeMaster.objects.filter(
+                                user__is_active=True,
+                            ).select_related('user')
+                        }
+                        existing_projects = {
+                            str(project.get('id')): project
+                            for project in (ep_obj.current_projects or [])
+                            if isinstance(project, dict) and project.get('id') not in (None, '')
+                        }
+                        used_project_ids = {
+                            str(project.get('project_id')).strip()
+                            for project in (ep_obj.current_projects or [])
+                            if isinstance(project, dict) and project.get('project_id')
+                        }
+                        current_year = timezone.localdate().year
+
+                        def next_project_id(project_name, project_year):
+                            import re
+                            suffix = re.compile(rf'-(\d{{4}})-{project_year}$')
+                            sequences = []
+                            for project_id in used_project_ids:
+                                match = suffix.search(project_id)
+                                if match:
+                                    sequences.append(int(match.group(1)))
+                            sequence = max(sequences, default=0) + 1
+                            generated = f'{project_name}-{sequence:04d}-{project_year}'
+                            while generated in used_project_ids:
+                                sequence += 1
+                                generated = f'{project_name}-{sequence:04d}-{project_year}'
+                            used_project_ids.add(generated)
+                            return generated
+
+                        projects = []
+                        for project in raw_projects:
+                            if not isinstance(project, dict):
+                                raise ValueError('Each current project must be an object.')
+                            normalized_project = dict(project)
+                            project_name = ' '.join(str(normalized_project.get('name', '')).strip().split())
+                            if not project_name or len(project_name) > 150:
+                                raise ValueError('Each project name must be between 1 and 150 characters.')
+                            normalized_project['name'] = project_name
+                            existing_project = existing_projects.get(str(normalized_project.get('id')))
+                            pom_id = normalized_project.get('project_manager_id')
+                            if pom_id not in (None, ''):
+                                pom_user = pom_users.get(str(pom_id))
+                                if not pom_user:
+                                    existing_pom_id = (
+                                        str(existing_project.get('project_manager_id'))
+                                        if existing_project else ''
+                                    )
+                                    if existing_pom_id != str(pom_id):
+                                        raise ValueError('The selected Project Manager is not an active employee.')
+                                    normalized_project['project_manager_name'] = existing_project.get(
+                                        'project_manager_name',
+                                        normalized_project.get('project_manager_name', ''),
+                                    )
+                                    normalized_project['project_manager_email'] = existing_project.get(
+                                        'project_manager_email',
+                                        normalized_project.get('project_manager_email', ''),
+                                    )
+                                else:
+                                    normalized_project['project_manager_id'] = pom_user.id
+                                    normalized_project['project_manager_name'] = (
+                                        pom_user.get_full_name() or pom_user.email or pom_user.username
+                                    )
+                                    normalized_project['project_manager_email'] = pom_user.email or ''
+                            existing_project_id = (
+                                str(existing_project.get('project_id')).strip()
+                                if existing_project and existing_project.get('project_id') else ''
+                            )
+                            if existing_project_id:
+                                normalized_project['project_id'] = existing_project_id
+                            else:
+                                start_date = str(normalized_project.get('start_date') or '')
+                                project_year = (
+                                    int(start_date[:4])
+                                    if len(start_date) >= 4 and start_date[:4].isdigit()
+                                    else current_year
+                                )
+                                normalized_project['project_id'] = next_project_id(
+                                    project_name,
+                                    project_year,
+                                )
+                            projects.append(normalized_project)
                     except (TypeError, ValueError) as validation_error:
                         return Response(
                             {'engineer_profile': [str(validation_error)]},
@@ -1825,7 +1916,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     ep_obj.next_available_date      = ep_raw.get('next_available_date') or None
                     ep_obj.max_concurrent_projects  = int(ep_raw.get('max_concurrent_projects') or ep_obj.max_concurrent_projects or 2)
                     ep_obj.preferred_project_types  = ep_raw.get('preferred_project_types', ep_obj.preferred_project_types)
-                    ep_obj.current_projects         = ep_raw.get('current_projects', ep_obj.current_projects)
+                    ep_obj.current_projects         = projects
                     ep_obj.save()
                     changes['engineer_profile'] = 'updated'
 
