@@ -1289,6 +1289,12 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
             'verified_by', 'verified_at', 'is_expired', 'expires_soon',
             'document_file_url', 'document_file_name',
         ]
+        # ✅ SOFT-CODED: Make document_file optional for updates (PATCH)
+        # Users should be able to update document details without re-uploading the file
+        extra_kwargs = {
+            'document_file': {'required': False},
+            'document_type': {'required': True},
+        }
 
     def to_internal_value(self, data):
         return super().to_internal_value(_blank_optional_dates_to_none(data, ['issue_date', 'expiry_date']))
@@ -1368,6 +1374,14 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
     
     def validate_document_file(self, value):
         """Validate document file size and format."""
+        # ✅ SOFT-CODED: Allow None for updates (editing details without file)
+        if value is None:
+            # Only validate if this is a create operation (no instance)
+            if not self.instance:
+                raise serializers.ValidationError("Document file is required for new uploads")
+            # For updates, None is acceptable (user is just updating metadata)
+            return value
+        
         import os
         from apps.rbac.profile_config import get_document_type
         
@@ -1410,4 +1424,20 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
                 # Allow past dates but auto-mark as expired
                 pass
         return value
+    
+    def validate(self, attrs):
+        """✅ SOFT-CODED: Cross-field validation for document uploads."""
+        # For new documents (POST), document_file is required
+        if not self.instance and not attrs.get('document_file'):
+            raise serializers.ValidationError({
+                'document_file': 'Document file is required for new uploads'
+            })
+        
+        # Ensure document_type is provided
+        if not attrs.get('document_type') and not self.instance:
+            raise serializers.ValidationError({
+                'document_type': 'Document type is required'
+            })
+        
+        return attrs
 

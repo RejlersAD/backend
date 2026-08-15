@@ -3774,10 +3774,13 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
             return ProfileDocument.objects.none()
     
     def perform_create(self, serializer):
-        """Assign uploads to self, or to an explicitly selected employee for admins."""
+        """✅ SOFT-CODED: Assign uploads to self, or to an explicitly selected employee for admins."""
         from rest_framework.exceptions import PermissionDenied, ValidationError
         from .models import ProfileDocument
         from .profile_utils import get_or_create_profile, ProfileProvisioningError
+        import logging
+        
+        logger = logging.getLogger(__name__)
 
         user = self.request.user
         target_user_id = self.request.data.get('target_user_id')
@@ -3787,33 +3790,69 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
                 raise PermissionDenied('Only authorized administrators can upload documents for another employee.')
             try:
                 profile = UserProfile.objects.get(user_id=target_user_id)
+                logger.info(f'[ProfileDocument] Admin {user.email} uploading document for user {profile.user.email}')
             except (UserProfile.DoesNotExist, ValueError, TypeError):
                 raise ValidationError({'target_user_id': 'The selected employee profile does not exist.'})
         else:
             try:
                 profile = get_or_create_profile(user, source='ProfileDocumentViewSet')
+                logger.info(f'[ProfileDocument] User {user.email} uploading document for themselves')
             except ProfileProvisioningError as exc:
+                logger.error(f'[ProfileDocument] Profile provisioning error for user {user.email}: {str(exc)}')
                 raise ValidationError({'user_profile': str(exc)})
+
+        # Validate that document_file is provided for new uploads
+        if 'document_file' not in self.request.FILES:
+            logger.warning(f'[ProfileDocument] Upload attempt without file by user {user.email}')
+            raise ValidationError({'document_file': 'Document file is required for new uploads'})
 
         # Replacing a document type must affect the target employee, not the
         # administrator performing the upload.
-        ProfileDocument.objects.filter(
+        document_type = serializer.validated_data.get('document_type')
+        existing_docs = ProfileDocument.objects.filter(
             user_profile=profile,
-            document_type=serializer.validated_data.get('document_type'),
+            document_type=document_type,
             is_active=True
-        ).update(is_active=False)
+        )
+        
+        if existing_docs.exists():
+            logger.info(f'[ProfileDocument] Replacing existing {document_type} document for user {profile.user.email}')
+            existing_docs.update(is_active=False)
 
-        serializer.save(user_profile=profile, is_active=True)
+        try:
+            serializer.save(user_profile=profile, is_active=True)
+            logger.info(f'[ProfileDocument] Successfully created document {document_type} for user {profile.user.email}')
+        except Exception as exc:
+            logger.error(f'[ProfileDocument] Failed to save document for user {profile.user.email}: {str(exc)}')
+            raise
     
     def perform_update(self, serializer):
-        """Update document, auto-expire if expiry_date is past."""
+        """✅ SOFT-CODED: Update document with enhanced validation and logging."""
         from django.utils import timezone
+        import logging
         
-        expiry_date = serializer.validated_data.get('expiry_date')
+        logger = logging.getLogger(__name__)
+        
+        # Log the update operation for debugging
+        instance = serializer.instance
+        updated_fields = list(serializer.validated_data.keys())
+        logger.info(f'[ProfileDocument] Updating document {instance.id} for user {instance.user_profile.user.email}. Fields: {updated_fields}')
+        
+        # Check if document_file is being updated
+        has_new_file = 'document_file' in serializer.validated_data and serializer.validated_data['document_file'] is not None
+        
+        if has_new_file:
+            logger.info(f'[ProfileDocument] New file uploaded for document {instance.id}')
+        
+        # Auto-expire if expiry_date is in the past
+        expiry_date = serializer.validated_data.get('expiry_date', instance.expiry_date)
         if expiry_date and expiry_date < timezone.now().date():
+            logger.info(f'[ProfileDocument] Document {instance.id} expired on {expiry_date}, marking as expired')
             serializer.save(verification_status='expired')
         else:
             serializer.save()
+        
+        logger.info(f'[ProfileDocument] Successfully updated document {instance.id}')
     
     @action(detail=False, methods=['get'])
     def document_types(self, request):
