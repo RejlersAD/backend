@@ -1006,6 +1006,22 @@ class AccessRequestSerializer(serializers.ModelSerializer):
 # Enhanced Profile Serializers — Achievements, Experience, Social Media
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _blank_optional_dates_to_none(data, date_fields):
+    """
+    DRF's DateField rejects '' with "wrong format" — it only accepts a real
+    date string or None. HTML date inputs left empty submit '' though, so any
+    optional (null=True) date field needs this coercion before validation.
+    Soft-coded: pass the list of field names to treat this way per serializer.
+    """
+    if not hasattr(data, 'get'):
+        return data
+    cleaned = data.copy() if hasattr(data, 'copy') else dict(data)
+    for field in date_fields:
+        if cleaned.get(field) == '':
+            cleaned[field] = None
+    return cleaned
+
+
 class AchievementSerializer(serializers.ModelSerializer):
     """Serializer for user achievements — sports, academics, professional, genius records."""
     
@@ -1034,7 +1050,10 @@ class AchievementSerializer(serializers.ModelSerializer):
         # Ownership is assigned from request.user by the viewset.  Keeping this
         # read-only also prevents a client from creating records for another user.
         read_only_fields = ['id', 'user_profile', 'created_at', 'updated_at', 'is_verified']
-    
+
+    def to_internal_value(self, data):
+        return super().to_internal_value(_blank_optional_dates_to_none(data, ['achieved_date']))
+
     def get_category_label(self, obj):
         """Return human-readable category label."""
         from apps.rbac.profile_config import get_achievement_category
@@ -1097,7 +1116,10 @@ class WorkExperienceSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'user_profile', 'created_at', 'updated_at']
-    
+
+    def to_internal_value(self, data):
+        return super().to_internal_value(_blank_optional_dates_to_none(data, ['end_date']))
+
     def get_duration_text(self, obj):
         """Calculate and return human-readable duration."""
         from datetime import date
@@ -1267,7 +1289,10 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
             'verified_by', 'verified_at', 'is_expired', 'expires_soon',
             'document_file_url', 'document_file_name',
         ]
-    
+
+    def to_internal_value(self, data):
+        return super().to_internal_value(_blank_optional_dates_to_none(data, ['issue_date', 'expiry_date']))
+
     def get_document_type_label(self, obj):
         """Return human-readable document type name."""
         from apps.rbac.profile_config import get_document_type
