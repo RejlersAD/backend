@@ -1009,6 +1009,10 @@ class AccessRequestSerializer(serializers.ModelSerializer):
 class AchievementSerializer(serializers.ModelSerializer):
     """Serializer for user achievements — sports, academics, professional, genius records."""
     
+    # Explicitly read-only: assigned by the viewset from request.user, never client input.
+    # Declared directly (not just via Meta.read_only_fields) so it can never be required.
+    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
+    
     # Read-only computed fields
     category_label = serializers.SerializerMethodField()
     category_icon = serializers.SerializerMethodField()
@@ -1072,6 +1076,9 @@ class AchievementSerializer(serializers.ModelSerializer):
 
 class WorkExperienceSerializer(serializers.ModelSerializer):
     """Serializer for work experience entries."""
+    
+    # Explicitly read-only: assigned by the viewset from request.user, never client input.
+    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
     
     # Read-only computed fields
     duration_text = serializers.SerializerMethodField()
@@ -1144,6 +1151,9 @@ class WorkExperienceSerializer(serializers.ModelSerializer):
 
 class SocialMediaLinkSerializer(serializers.ModelSerializer):
     """Serializer for social media and professional network links."""
+    
+    # Explicitly read-only: assigned by the viewset from request.user, never client input.
+    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
     
     # Read-only computed fields
     platform_label = serializers.SerializerMethodField()
@@ -1224,6 +1234,9 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
     Serializer for profile documents (Emirates ID, Driving License, etc.)
     Handles S3 file uploads and soft-coded document type metadata.
     """
+    
+    # Explicitly read-only: assigned by the viewset from request.user, never client input.
+    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
     
     # Read-only computed fields from soft-coded config
     document_type_label = serializers.SerializerMethodField()
