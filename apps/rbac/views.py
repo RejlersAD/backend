@@ -3492,13 +3492,28 @@ class WorkExperienceViewSet(viewsets.ModelViewSet):
             return WorkExperience.objects.none()
     
     def perform_create(self, serializer):
-        """Auto-assign current user's profile."""
+        """Auto-assign current user's profile.
+        
+        ✅ SOFT-CODED: Auto-create UserProfile if missing
+        """
+        user = self.request.user
         try:
-            profile = self.request.user.rbac_profile
-            serializer.save(user_profile=profile)
-        except:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('User profile not found.')
+            profile = user.rbac_profile
+        except AttributeError:
+            # User model doesn't have rbac_profile accessor, create it
+            profile, created = UserProfile.objects.get_or_create(
+                user=user,
+                defaults={
+                    'bio': '',
+                    'job_title': user.username,
+                }
+            )
+            if created:
+                import logging
+                logging.getLogger(__name__).info(
+                    f'Auto-created UserProfile for user {user.id} ({user.email}) in WorkExperienceViewSet'
+                )
+        serializer.save(user_profile=profile)
     
     @action(detail=False, methods=['get'])
     def employment_types(self, request):
@@ -3549,13 +3564,28 @@ class SocialMediaLinkViewSet(viewsets.ModelViewSet):
             return SocialMediaLink.objects.none()
     
     def perform_create(self, serializer):
-        """Auto-assign current user's profile."""
+        """Auto-assign current user's profile.
+        
+        ✅ SOFT-CODED: Auto-create UserProfile if missing
+        """
+        user = self.request.user
         try:
-            profile = self.request.user.rbac_profile
-            serializer.save(user_profile=profile)
-        except:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('User profile not found.')
+            profile = user.rbac_profile
+        except AttributeError:
+            # User model doesn't have rbac_profile accessor, create it
+            profile, created = UserProfile.objects.get_or_create(
+                user=user,
+                defaults={
+                    'bio': '',
+                    'job_title': user.username,
+                }
+            )
+            if created:
+                import logging
+                logging.getLogger(__name__).info(
+                    f'Auto-created UserProfile for user {user.id} ({user.email}) in SocialMediaLinkViewSet'
+                )
+        serializer.save(user_profile=profile)
     
     @action(detail=False, methods=['get'])
     def platforms(self, request):
@@ -3654,7 +3684,12 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
         parser_classes=[MultiPartParser, FormParser],
     )
     def extract_metadata(self, request):
-        """Extract editable metadata from an uploaded PDF or image locally."""
+        """Extract editable metadata from an uploaded PDF or image locally.
+        
+        ✅ SOFT-CODED: This endpoint is fully optional. If extraction fails
+        (e.g., pytesseract not installed in production), frontend can still
+        proceed with manual document upload.
+        """
         uploaded_file = request.FILES.get('document_file')
         if not uploaded_file:
             return Response(
@@ -3677,23 +3712,44 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
             )
 
         try:
-            from .profile_document_extractor import extract_profile_document_metadata
+            # ✅ SOFT-CODED: Try importing extractor dependencies
+            # If pytesseract/PIL not available in production, return graceful error
+            try:
+                from .profile_document_extractor import extract_profile_document_metadata
+            except ImportError as import_err:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f'Document extraction dependencies not available: {import_err}'
+                )
+                return Response(
+                    {
+                        'detail': 'Automatic extraction not available on this server. Please enter document details manually.',
+                        'detected_fields': [],
+                        'extraction_available': False,
+                    },
+                    status=status.HTTP_200_OK,  # 200 so frontend continues with upload
+                )
+            
             result = extract_profile_document_metadata(
                 uploaded_file.read(),
                 uploaded_file.name,
                 uploaded_file.content_type or '',
                 request.data.get('document_type', ''),
             )
+            result['extraction_available'] = True
             return Response(result)
         except Exception as exc:
             import logging
             logging.getLogger(__name__).exception('Profile document extraction failed')
+            # ✅ SOFT-CODED: Return 200 so frontend can continue with manual upload
             return Response(
                 {
-                    'detail': 'The document could not be analyzed. You can still enter its details manually.',
+                    'detail': 'Could not analyze document automatically. Please enter details manually.',
                     'extraction_error': str(exc) if request.user.is_staff else None,
+                    'detected_fields': [],
+                    'extraction_available': False,
                 },
-                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status=status.HTTP_200_OK,  # 200 so frontend continues with upload
             )
     
     def get_serializer_class(self):
@@ -3739,7 +3795,10 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
             return ProfileDocument.objects.none()
     
     def perform_create(self, serializer):
-        """Assign uploads to self, or to an explicitly selected employee for admins."""
+        """Assign uploads to self, or to an explicitly selected employee for admins.
+        
+        ✅ SOFT-CODED: Auto-create UserProfile if missing for current user
+        """
         from rest_framework.exceptions import PermissionDenied, ValidationError
         from .models import ProfileDocument
 
@@ -3754,10 +3813,32 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
             except (UserProfile.DoesNotExist, ValueError, TypeError):
                 raise ValidationError({'target_user_id': 'The selected employee profile does not exist.'})
         else:
+            # ✅ SOFT-CODED: Auto-create UserProfile if it doesn't exist
             try:
                 profile = user.rbac_profile
-            except UserProfile.DoesNotExist:
-                raise ValidationError({'target_user_id': 'The selected employee profile does not exist.'})
+            except AttributeError:
+                # User model doesn't have rbac_profile accessor, create it
+                try:
+                    profile, created = UserProfile.objects.get_or_create(
+                        user=user,
+                        defaults={
+                            'bio': '',
+                            'job_title': user.username,
+                        }
+                    )
+                    if created:
+                        import logging
+                        logging.getLogger(__name__).info(
+                            f'Auto-created UserProfile for user {user.id} ({user.email})'
+                        )
+                except Exception as create_err:
+                    import logging
+                    logging.getLogger(__name__).exception(
+                        f'Failed to create UserProfile for user {user.id}'
+                    )
+                    raise ValidationError({
+                        'user_profile': f'Could not create user profile: {str(create_err)}'
+                    })
 
         # Replacing a document type must affect the target employee, not the
         # administrator performing the upload.
