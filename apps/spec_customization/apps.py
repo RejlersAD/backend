@@ -83,7 +83,7 @@ def _apply_cors_async():
         client = boto3.client(
             "s3",
             region_name=region,
-            endpoint_url=f"https://s3.{region}.amazonaws.com",
+            # Let boto3 auto-detect the correct endpoint for the region
             aws_access_key_id=getattr(settings, "AWS_ACCESS_KEY_ID", None)
                 or os.environ.get("AWS_ACCESS_KEY_ID"),
             aws_secret_access_key=getattr(settings, "AWS_SECRET_ACCESS_KEY", None)
