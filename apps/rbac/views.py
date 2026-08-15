@@ -1879,6 +1879,97 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                                 raise ValueError('Technical skill proficiency must be between 1 and 5.')
                             skills.append({'name': name, 'proficiency': proficiency})
                             seen_skills.add(key)
+
+                        raw_projects = ep_raw.get('current_projects', ep_obj.current_projects)
+                        if not isinstance(raw_projects, list) or len(raw_projects) > 50:
+                            raise ValueError('Current projects must be a list containing no more than 50 entries.')
+                        from apps.hr_core.models import EmployeeMaster
+                        pom_users = {
+                            str(employee.user_id): employee.user
+                            for employee in EmployeeMaster.objects.filter(
+                                user__is_active=True,
+                            ).select_related('user')
+                        }
+                        existing_projects = {
+                            str(project.get('id')): project
+                            for project in (ep_obj.current_projects or [])
+                            if isinstance(project, dict) and project.get('id') not in (None, '')
+                        }
+                        used_project_ids = {
+                            str(project.get('project_id')).strip()
+                            for project in (ep_obj.current_projects or [])
+                            if isinstance(project, dict) and project.get('project_id')
+                        }
+                        current_year = timezone.localdate().year
+
+                        def next_project_id(project_name, project_year):
+                            import re
+                            suffix = re.compile(rf'-(\d{{4}})-{project_year}$')
+                            sequences = []
+                            for project_id in used_project_ids:
+                                match = suffix.search(project_id)
+                                if match:
+                                    sequences.append(int(match.group(1)))
+                            sequence = max(sequences, default=0) + 1
+                            generated = f'{project_name}-{sequence:04d}-{project_year}'
+                            while generated in used_project_ids:
+                                sequence += 1
+                                generated = f'{project_name}-{sequence:04d}-{project_year}'
+                            used_project_ids.add(generated)
+                            return generated
+
+                        projects = []
+                        for project in raw_projects:
+                            if not isinstance(project, dict):
+                                raise ValueError('Each current project must be an object.')
+                            normalized_project = dict(project)
+                            project_name = ' '.join(str(normalized_project.get('name', '')).strip().split())
+                            if not project_name or len(project_name) > 150:
+                                raise ValueError('Each project name must be between 1 and 150 characters.')
+                            normalized_project['name'] = project_name
+                            existing_project = existing_projects.get(str(normalized_project.get('id')))
+                            pom_id = normalized_project.get('project_manager_id')
+                            if pom_id not in (None, ''):
+                                pom_user = pom_users.get(str(pom_id))
+                                if not pom_user:
+                                    existing_pom_id = (
+                                        str(existing_project.get('project_manager_id'))
+                                        if existing_project else ''
+                                    )
+                                    if existing_pom_id != str(pom_id):
+                                        raise ValueError('The selected Project Manager is not an active employee.')
+                                    normalized_project['project_manager_name'] = existing_project.get(
+                                        'project_manager_name',
+                                        normalized_project.get('project_manager_name', ''),
+                                    )
+                                    normalized_project['project_manager_email'] = existing_project.get(
+                                        'project_manager_email',
+                                        normalized_project.get('project_manager_email', ''),
+                                    )
+                                else:
+                                    normalized_project['project_manager_id'] = pom_user.id
+                                    normalized_project['project_manager_name'] = (
+                                        pom_user.get_full_name() or pom_user.email or pom_user.username
+                                    )
+                                    normalized_project['project_manager_email'] = pom_user.email or ''
+                            existing_project_id = (
+                                str(existing_project.get('project_id')).strip()
+                                if existing_project and existing_project.get('project_id') else ''
+                            )
+                            if existing_project_id:
+                                normalized_project['project_id'] = existing_project_id
+                            else:
+                                start_date = str(normalized_project.get('start_date') or '')
+                                project_year = (
+                                    int(start_date[:4])
+                                    if len(start_date) >= 4 and start_date[:4].isdigit()
+                                    else current_year
+                                )
+                                normalized_project['project_id'] = next_project_id(
+                                    project_name,
+                                    project_year,
+                                )
+                            projects.append(normalized_project)
                     except (TypeError, ValueError) as validation_error:
                         return Response(
                             {'engineer_profile': [str(validation_error)]},
@@ -1896,7 +1987,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                     ep_obj.next_available_date      = ep_raw.get('next_available_date') or None
                     ep_obj.max_concurrent_projects  = int(ep_raw.get('max_concurrent_projects') or ep_obj.max_concurrent_projects or 2)
                     ep_obj.preferred_project_types  = ep_raw.get('preferred_project_types', ep_obj.preferred_project_types)
-                    ep_obj.current_projects         = ep_raw.get('current_projects', ep_obj.current_projects)
+                    ep_obj.current_projects         = projects
                     ep_obj.save()
                     changes['engineer_profile'] = 'updated'
 
@@ -3612,13 +3703,31 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Return user's own documents, or all if admin."""
         from .models import ProfileDocument
+        from rest_framework.exceptions import ValidationError
+
         user = self.request.user
         
         # Admins can see all documents
         if user.is_superuser or user.is_staff:
-            return ProfileDocument.objects.select_related(
+            queryset = ProfileDocument.objects.select_related(
                 'user_profile__user', 'verified_by'
             ).all()
+
+            # Employee detail screens must be able to scope the organization-wide
+            # admin queryset to the employee being viewed. Keep accepting the old
+            # parameter temporarily so existing clients do not expose every record.
+            target_user_id = (
+                self.request.query_params.get('user_id')
+                or self.request.query_params.get('user_profile__user')
+            )
+            if target_user_id:
+                try:
+                    target_user_id = int(target_user_id)
+                except (TypeError, ValueError):
+                    raise ValidationError({'user_id': 'A valid employee user ID is required.'})
+                queryset = queryset.filter(user_profile__user_id=target_user_id)
+
+            return queryset
         
         # Regular users see only their own active documents
         try:
@@ -3630,23 +3739,35 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
             return ProfileDocument.objects.none()
     
     def perform_create(self, serializer):
-        """Auto-assign current user's profile and handle file upload."""
-        try:
-            profile = self.request.user.rbac_profile
-            
-            # Mark existing documents of same type as inactive (replaced)
-            from .models import ProfileDocument
-            ProfileDocument.objects.filter(
-                user_profile=profile,
-                document_type=serializer.validated_data.get('document_type'),
-                is_active=True
-            ).update(is_active=False)
-            
-            # Save new document
-            serializer.save(user_profile=profile, is_active=True)
-        except Exception as e:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied(f'Failed to create document: {str(e)}')
+        """Assign uploads to self, or to an explicitly selected employee for admins."""
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+        from .models import ProfileDocument
+
+        user = self.request.user
+        target_user_id = self.request.data.get('target_user_id')
+
+        if target_user_id and str(target_user_id) != str(user.pk):
+            if not (user.is_superuser or user.is_staff):
+                raise PermissionDenied('Only authorized administrators can upload documents for another employee.')
+            try:
+                profile = UserProfile.objects.get(user_id=target_user_id)
+            except (UserProfile.DoesNotExist, ValueError, TypeError):
+                raise ValidationError({'target_user_id': 'The selected employee profile does not exist.'})
+        else:
+            try:
+                profile = user.rbac_profile
+            except UserProfile.DoesNotExist:
+                raise ValidationError({'target_user_id': 'The selected employee profile does not exist.'})
+
+        # Replacing a document type must affect the target employee, not the
+        # administrator performing the upload.
+        ProfileDocument.objects.filter(
+            user_profile=profile,
+            document_type=serializer.validated_data.get('document_type'),
+            is_active=True
+        ).update(is_active=False)
+
+        serializer.save(user_profile=profile, is_active=True)
     
     def perform_update(self, serializer):
         """Update document, auto-expire if expiry_date is past."""

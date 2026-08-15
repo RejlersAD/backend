@@ -1051,3 +1051,12 @@ class ProfileDocument(TimeStampedModel):
         from datetime import timedelta
         threshold = timezone.now().date() + timedelta(days=days)
         return self.expiry_date <= threshold and not self.is_expired
+
+
+# Re-export the AI Champion models so Django discovers them as part of this app.
+from .ai_champion_models import (  # noqa: E402,F401
+    AIPricingConfig,
+    AIUsageLog,
+    ActivityEvent,
+    MonthlyChampion,
+)

@@ -25,7 +25,7 @@ TOOL_CONFIG = {
     'pid': {
         'name':           'P&ID QC',
         'full_name':      'P&ID Quality Control',
-        'path':           '/engineering/process/pid-verification',
+        'path':           '/engineering/process/pid-verification-v1',  # SOFT-CODED: Updated to V1 route
         'color':          'from-blue-600 to-indigo-600',
         'description':    'Verify tag compliance, symbol standards & drawing quality',
         'companion_type': 'pfd',
