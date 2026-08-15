@@ -3425,71 +3425,16 @@ class AchievementViewSet(viewsets.ModelViewSet):
             return Achievement.objects.none()
     
     def perform_create(self, serializer):
-        """Auto-assign current user's profile.
-        
-        ✅ SOFT-CODED: Auto-create UserProfile if missing with comprehensive error logging
-        """
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        user = self.request.user
-        logger.info(f'[AchievementViewSet] Creating achievement for user {user.id} ({user.email})')
-        
+        """Auto-assign current user's profile (auto-provisioned if missing)."""
+        from .profile_utils import get_or_create_profile, ProfileProvisioningError
+        from rest_framework.exceptions import ValidationError
+
         try:
-            profile = user.rbac_profile
-            logger.info(f'[AchievementViewSet] Found existing UserProfile: {profile.id}')
-        except AttributeError as e:
-            # User model doesn't have rbac_profile accessor, create it
-            from .models import UserProfile, Organization
-            from rest_framework.exceptions import ValidationError
-            
-            logger.warning(f'[AchievementViewSet] UserProfile not found for user {user.id}, creating...')
-            
-            try:
-                # Get or create default organization
-                organization = Organization.objects.filter(is_active=True).first()
-                if not organization:
-                    logger.warning('[AchievementViewSet] No active organization found, creating default...')
-                    organization, org_created = Organization.objects.get_or_create(
-                        code='default',
-                        defaults={
-                            'name': 'Rejlers Engineering',
-                            'description': 'Default organization',
-                            'is_active': True,
-                        }
-                    )
-                    if org_created:
-                        logger.warning(f'[AchievementViewSet] Auto-created default organization: {organization.name}')
-                else:
-                    logger.info(f'[AchievementViewSet] Using organization: {organization.name}')
-                
-                profile, created = UserProfile.objects.get_or_create(
-                    user=user,
-                    defaults={
-                        'organization': organization,
-                        'bio': '',
-                        'job_title': user.username or user.email.split('@')[0],
-                    }
-                )
-                if created:
-                    logger.info(
-                        f'[AchievementViewSet] ✅ Auto-created UserProfile {profile.id} for user {user.id} ({user.email})'
-                    )
-                else:
-                    logger.info(f'[AchievementViewSet] Found existing UserProfile {profile.id} during get_or_create')
-            except Exception as create_err:
-                logger.exception(f'[AchievementViewSet] ❌ Failed to create UserProfile for user {user.id}: {str(create_err)}')
-                raise ValidationError({
-                    'user_profile': f'Could not create user profile. Please contact administrator. Error: {str(create_err)}'
-                })
-        
-        try:
-            logger.info(f'[AchievementViewSet] Saving achievement with data: {serializer.validated_data}')
-            serializer.save(user_profile=profile)
-            logger.info(f'[AchievementViewSet] ✅ Achievement saved successfully')
-        except Exception as save_err:
-            logger.exception(f'[AchievementViewSet] ❌ Failed to save achievement: {str(save_err)}')
-            raise
+            profile = get_or_create_profile(self.request.user, source='AchievementViewSet')
+        except ProfileProvisioningError as exc:
+            raise ValidationError({'user_profile': str(exc)})
+
+        serializer.save(user_profile=profile)
     
     @action(detail=False, methods=['get'])
     def categories(self, request):
@@ -3550,45 +3495,15 @@ class WorkExperienceViewSet(viewsets.ModelViewSet):
             return WorkExperience.objects.none()
     
     def perform_create(self, serializer):
-        """Auto-assign current user's profile.
-        
-        ✅ SOFT-CODED: Auto-create UserProfile if missing
-        """
-        user = self.request.user
+        """Auto-assign current user's profile (auto-provisioned if missing)."""
+        from .profile_utils import get_or_create_profile, ProfileProvisioningError
+        from rest_framework.exceptions import ValidationError
+
         try:
-            profile = user.rbac_profile
-        except AttributeError:
-            # User model doesn't have rbac_profile accessor, create it
-            from .models import Organization
-            import logging
-            logger = logging.getLogger(__name__)
-            
-            # Get or create default organization
-            organization = Organization.objects.filter(is_active=True).first()
-            if not organization:
-                organization, org_created = Organization.objects.get_or_create(
-                    code='default',
-                    defaults={
-                        'name': 'Rejlers Engineering',
-                        'description': 'Default organization',
-                        'is_active': True,
-                    }
-                )
-                if org_created:
-                    logger.warning(f'Auto-created default organization: {organization.name}')
-            
-            profile, created = UserProfile.objects.get_or_create(
-                user=user,
-                defaults={
-                    'organization': organization,
-                    'bio': '',
-                    'job_title': user.username,
-                }
-            )
-            if created:
-                logger.info(
-                    f'Auto-created UserProfile for user {user.id} ({user.email}) in WorkExperienceViewSet'
-                )
+            profile = get_or_create_profile(self.request.user, source='WorkExperienceViewSet')
+        except ProfileProvisioningError as exc:
+            raise ValidationError({'user_profile': str(exc)})
+
         serializer.save(user_profile=profile)
     
     @action(detail=False, methods=['get'])
@@ -3640,45 +3555,15 @@ class SocialMediaLinkViewSet(viewsets.ModelViewSet):
             return SocialMediaLink.objects.none()
     
     def perform_create(self, serializer):
-        """Auto-assign current user's profile.
-        
-        ✅ SOFT-CODED: Auto-create UserProfile if missing
-        """
-        user = self.request.user
+        """Auto-assign current user's profile (auto-provisioned if missing)."""
+        from .profile_utils import get_or_create_profile, ProfileProvisioningError
+        from rest_framework.exceptions import ValidationError
+
         try:
-            profile = user.rbac_profile
-        except AttributeError:
-            # User model doesn't have rbac_profile accessor, create it
-            from .models import Organization
-            import logging
-            logger = logging.getLogger(__name__)
-            
-            # Get or create default organization
-            organization = Organization.objects.filter(is_active=True).first()
-            if not organization:
-                organization, org_created = Organization.objects.get_or_create(
-                    code='default',
-                    defaults={
-                        'name': 'Rejlers Engineering',
-                        'description': 'Default organization',
-                        'is_active': True,
-                    }
-                )
-                if org_created:
-                    logger.warning(f'Auto-created default organization: {organization.name}')
-            
-            profile, created = UserProfile.objects.get_or_create(
-                user=user,
-                defaults={
-                    'organization': organization,
-                    'bio': '',
-                    'job_title': user.username,
-                }
-            )
-            if created:
-                logger.info(
-                    f'Auto-created UserProfile for user {user.id} ({user.email}) in SocialMediaLinkViewSet'
-                )
+            profile = get_or_create_profile(self.request.user, source='SocialMediaLinkViewSet')
+        except ProfileProvisioningError as exc:
+            raise ValidationError({'user_profile': str(exc)})
+
         serializer.save(user_profile=profile)
     
     @action(detail=False, methods=['get'])
@@ -3889,12 +3774,10 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
             return ProfileDocument.objects.none()
     
     def perform_create(self, serializer):
-        """Assign uploads to self, or to an explicitly selected employee for admins.
-        
-        ✅ SOFT-CODED: Auto-create UserProfile if missing for current user
-        """
+        """Assign uploads to self, or to an explicitly selected employee for admins."""
         from rest_framework.exceptions import PermissionDenied, ValidationError
         from .models import ProfileDocument
+        from .profile_utils import get_or_create_profile, ProfileProvisioningError
 
         user = self.request.user
         target_user_id = self.request.data.get('target_user_id')
@@ -3907,49 +3790,10 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
             except (UserProfile.DoesNotExist, ValueError, TypeError):
                 raise ValidationError({'target_user_id': 'The selected employee profile does not exist.'})
         else:
-            # ✅ SOFT-CODED: Auto-create UserProfile if it doesn't exist
             try:
-                profile = user.rbac_profile
-            except AttributeError:
-                # User model doesn't have rbac_profile accessor, create it
-                from .models import Organization
-                import logging
-                logger = logging.getLogger(__name__)
-                
-                try:
-                    # Get or create default organization
-                    organization = Organization.objects.filter(is_active=True).first()
-                    if not organization:
-                        organization, org_created = Organization.objects.get_or_create(
-                            code='default',
-                            defaults={
-                                'name': 'Rejlers Engineering',
-                                'description': 'Default organization',
-                                'is_active': True,
-                            }
-                        )
-                        if org_created:
-                            logger.warning(f'Auto-created default organization: {organization.name}')
-                    
-                    profile, created = UserProfile.objects.get_or_create(
-                        user=user,
-                        defaults={
-                            'organization': organization,
-                            'bio': '',
-                            'job_title': user.username,
-                        }
-                    )
-                    if created:
-                        logger.info(
-                            f'Auto-created UserProfile for user {user.id} ({user.email}) in ProfileDocumentViewSet'
-                        )
-                except Exception as create_err:
-                    logger.exception(
-                        f'Failed to create UserProfile for user {user.id}'
-                    )
-                    raise ValidationError({
-                        'user_profile': f'Could not create user profile: {str(create_err)}'
-                    })
+                profile = get_or_create_profile(user, source='ProfileDocumentViewSet')
+            except ProfileProvisioningError as exc:
+                raise ValidationError({'user_profile': str(exc)})
 
         # Replacing a document type must affect the target employee, not the
         # administrator performing the upload.

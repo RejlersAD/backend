@@ -30,12 +30,20 @@ def log_user_login(sender, instance, created, **kwargs):
 @receiver(post_delete, sender=UserRole)
 def clear_user_permissions_cache(sender, instance, **kwargs):
     """
-    Clear user permissions and modules cache when roles are assigned/removed
+    Clear user permissions and modules cache when roles are assigned/removed.
+
+    Cache invalidation is best-effort: a Redis hiccup here must never roll
+    back the UserRole save/delete that triggered it (that previously broke
+    UserProfile auto-creation whenever Redis had a transient auth/connection
+    error — see profile_utils.get_or_create_profile).
     """
     profile_id = instance.user_profile_id
-    cache.delete(f'user_permissions_{profile_id}')
-    cache.delete(f'user_modules_{profile_id}')
-    print(f"[Cache] Cleared permissions and modules cache for user {profile_id}")
+    try:
+        cache.delete(f'user_permissions_{profile_id}')
+        cache.delete(f'user_modules_{profile_id}')
+        print(f"[Cache] Cleared permissions and modules cache for user {profile_id}")
+    except Exception as exc:
+        print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
 
 
 @receiver(post_save, sender=RoleModule)
@@ -53,12 +61,15 @@ def clear_role_users_cache(sender, instance, **kwargs):
         role__is_active=True
     ).values_list('user_profile_id', flat=True)
     
-    # Clear cache for each affected user
+    # Clear cache for each affected user (best-effort — see comment above)
     cleared_count = 0
     for profile_id in profile_ids:
-        cache.delete(f'user_permissions_{profile_id}')
-        cache.delete(f'user_modules_{profile_id}')
-        cleared_count += 1
+        try:
+            cache.delete(f'user_permissions_{profile_id}')
+            cache.delete(f'user_modules_{profile_id}')
+            cleared_count += 1
+        except Exception as exc:
+            print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
     
     if cleared_count > 0:
         print(f"[Cache] Cleared cache for {cleared_count} user(s) affected by role {role_id} module change")
@@ -80,8 +91,11 @@ def clear_role_permission_users_cache(sender, instance, **kwargs):
 
     cleared_count = 0
     for profile_id in profile_ids:
-        cache.delete(f'user_permissions_{profile_id}')
-        cleared_count += 1
+        try:
+            cache.delete(f'user_permissions_{profile_id}')
+            cleared_count += 1
+        except Exception as exc:
+            print(f"[Cache] WARNING Failed to clear cache for user {profile_id}: {exc}")
 
     if cleared_count > 0:
         print(f"[Cache] Cleared permissions cache for {cleared_count} user(s) affected by role {role_id} permission change")
@@ -126,3 +140,7 @@ def assign_default_role_on_profile_creation(sender, instance, created, **kwargs)
     except Role.DoesNotExist:
         # Default role not yet seeded (e.g. fresh migrations) — skip silently.
         pass
+    except Exception as exc:
+        # Never let default-role assignment block profile creation itself —
+        # the profile has already been saved by this point.
+        print(f"[RBAC] WARNING Failed to assign default role to profile {instance.id}: {exc}")
