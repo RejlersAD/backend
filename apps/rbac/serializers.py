@@ -1006,28 +1006,8 @@ class AccessRequestSerializer(serializers.ModelSerializer):
 # Enhanced Profile Serializers — Achievements, Experience, Social Media
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _blank_optional_dates_to_none(data, date_fields):
-    """
-    DRF's DateField rejects '' with "wrong format" — it only accepts a real
-    date string or None. HTML date inputs left empty submit '' though, so any
-    optional (null=True) date field needs this coercion before validation.
-    Soft-coded: pass the list of field names to treat this way per serializer.
-    """
-    if not hasattr(data, 'get'):
-        return data
-    cleaned = data.copy() if hasattr(data, 'copy') else dict(data)
-    for field in date_fields:
-        if cleaned.get(field) == '':
-            cleaned[field] = None
-    return cleaned
-
-
 class AchievementSerializer(serializers.ModelSerializer):
     """Serializer for user achievements — sports, academics, professional, genius records."""
-    
-    # Explicitly read-only: assigned by the viewset from request.user, never client input.
-    # Declared directly (not just via Meta.read_only_fields) so it can never be required.
-    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
     
     # Read-only computed fields
     category_label = serializers.SerializerMethodField()
@@ -1050,25 +1030,7 @@ class AchievementSerializer(serializers.ModelSerializer):
         # Ownership is assigned from request.user by the viewset.  Keeping this
         # read-only also prevents a client from creating records for another user.
         read_only_fields = ['id', 'user_profile', 'created_at', 'updated_at', 'is_verified']
-
-    def to_internal_value(self, data):
-        return super().to_internal_value(_blank_optional_dates_to_none(data, ['achieved_date']))
     
-    def validate(self, attrs):
-        """Validate achievement data with specific error messages."""
-        # Check required fields with helpful messages
-        if not attrs.get('title'):
-            raise serializers.ValidationError({
-                'title': 'Achievement title is required. Please enter a title for your achievement.'
-            })
-        
-        if not attrs.get('category'):
-            raise serializers.ValidationError({
-                'category': 'Achievement category is required. Please select a category (sports, academic, professional, etc.).'
-            })
-        
-        return attrs
-
     def get_category_label(self, obj):
         """Return human-readable category label."""
         from apps.rbac.profile_config import get_achievement_category
@@ -1111,9 +1073,6 @@ class AchievementSerializer(serializers.ModelSerializer):
 class WorkExperienceSerializer(serializers.ModelSerializer):
     """Serializer for work experience entries."""
     
-    # Explicitly read-only: assigned by the viewset from request.user, never client input.
-    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
-    
     # Read-only computed fields
     duration_text = serializers.SerializerMethodField()
     employment_type_label = serializers.SerializerMethodField()
@@ -1131,10 +1090,7 @@ class WorkExperienceSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'user_profile', 'created_at', 'updated_at']
-
-    def to_internal_value(self, data):
-        return super().to_internal_value(_blank_optional_dates_to_none(data, ['end_date']))
-
+    
     def get_duration_text(self, obj):
         """Calculate and return human-readable duration."""
         from datetime import date
@@ -1188,9 +1144,6 @@ class WorkExperienceSerializer(serializers.ModelSerializer):
 
 class SocialMediaLinkSerializer(serializers.ModelSerializer):
     """Serializer for social media and professional network links."""
-    
-    # Explicitly read-only: assigned by the viewset from request.user, never client input.
-    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
     
     # Read-only computed fields
     platform_label = serializers.SerializerMethodField()
@@ -1272,9 +1225,6 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
     Handles S3 file uploads and soft-coded document type metadata.
     """
     
-    # Explicitly read-only: assigned by the viewset from request.user, never client input.
-    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
-    
     # Read-only computed fields from soft-coded config
     document_type_label = serializers.SerializerMethodField()
     document_type_icon = serializers.SerializerMethodField()
@@ -1304,16 +1254,7 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
             'verified_by', 'verified_at', 'is_expired', 'expires_soon',
             'document_file_url', 'document_file_name',
         ]
-        # ✅ SOFT-CODED: Make document_file optional for updates (PATCH)
-        # Users should be able to update document details without re-uploading the file
-        extra_kwargs = {
-            'document_file': {'required': False},
-            'document_type': {'required': True},
-        }
-
-    def to_internal_value(self, data):
-        return super().to_internal_value(_blank_optional_dates_to_none(data, ['issue_date', 'expiry_date']))
-
+    
     def get_document_type_label(self, obj):
         """Return human-readable document type name."""
         from apps.rbac.profile_config import get_document_type
@@ -1389,14 +1330,6 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
     
     def validate_document_file(self, value):
         """Validate document file size and format."""
-        # ✅ SOFT-CODED: Allow None for updates (editing details without file)
-        if value is None:
-            # Only validate if this is a create operation (no instance)
-            if not self.instance:
-                raise serializers.ValidationError("Document file is required for new uploads")
-            # For updates, None is acceptable (user is just updating metadata)
-            return value
-        
         import os
         from apps.rbac.profile_config import get_document_type
         
@@ -1439,20 +1372,4 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
                 # Allow past dates but auto-mark as expired
                 pass
         return value
-    
-    def validate(self, attrs):
-        """✅ SOFT-CODED: Cross-field validation for document uploads."""
-        # For new documents (POST), document_file is required
-        if not self.instance and not attrs.get('document_file'):
-            raise serializers.ValidationError({
-                'document_file': 'Document file is required for new uploads'
-            })
-        
-        # Ensure document_type is provided
-        if not attrs.get('document_type') and not self.instance:
-            raise serializers.ValidationError({
-                'document_type': 'Document type is required'
-            })
-        
-        return attrs
 
