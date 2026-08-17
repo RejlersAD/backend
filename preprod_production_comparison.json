@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-17T09:48:47.675155",
+  "timestamp": "2026-08-17T10:37:22.714370",
   "aligned": false,
   "table_comparison": {
     "production_count": 296,
@@ -238,8 +238,8 @@
     {
       "table": "django_migrations",
       "production": 308,
-      "preprod": 364,
-      "difference": -56
+      "preprod": 365,
+      "difference": -57
     },
     {
       "table": "electrical_datasheets",
@@ -500,12 +500,6 @@
       "difference": 32
     },
     {
-      "table": "qhse_running_projects",
-      "production": 53,
-      "preprod": 0,
-      "difference": 53
-    },
-    {
       "table": "rbac_audit_logs",
       "production": 59485,
       "preprod": 30,
@@ -597,6 +591,62 @@
         "project_id"
       ],
       "missing_in_production": []
+    },
+    {
+      "table": "procurement_requisitions",
+      "missing_in_preprod": [
+        "vendor_selection_reason",
+        "vp_op_approval_status",
+        "po_number_reference",
+        "eng_manager_signature",
+        "eng_manager_name_id",
+        "vendor_id",
+        "price_description",
+        "pm_approved_at",
+        "single_source_justification",
+        "net_total_excl_vat",
+        "eng_manager_approved_at",
+        "project_details",
+        "management_approval",
+        "eng_manager_approval_status",
+        "manager_projects_approved_at",
+        "current_approval_step",
+        "form_reference",
+        "preferred_supplier_if_any",
+        "price_remarks_data",
+        "price_remarks",
+        "total_price",
+        "selected_vendors",
+        "manager_projects_name_id",
+        "currency",
+        "pm_name_id",
+        "vp_op_signature",
+        "vp_op_approved_at",
+        "review_due_at",
+        "ai_vendor_recommendations",
+        "pm_approval_status",
+        "supplier_business_id",
+        "po_applicable",
+        "resolution_referral",
+        "purchase_recommendation",
+        "management_approval_evidence",
+        "approval_workflow_config",
+        "pm_signature",
+        "product_service",
+        "project_department",
+        "vp_op_name_id",
+        "manager_projects_approval_status",
+        "manager_projects_signature",
+        "management_approval_remarks",
+        "page_number",
+        "issued_by_id",
+        "issued_date",
+        "description_reason",
+        "supplier_name"
+      ],
+      "missing_in_production": [
+        "description"
+      ]
     }
   ]
 }

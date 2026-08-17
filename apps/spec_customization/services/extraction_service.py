@@ -62,19 +62,28 @@ def _extract_json_blob(raw: str) -> Optional[Dict[str, Any]]:
 class PaperSpecExtractionService:
     """Stateless service — instantiate once per Celery task or per chunk."""
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, user_api_key: str = "", user_provider: str = "", user_model: str = ""):
         self.config = {**SPEC_EXTRACTION_CONFIG, **(config or {})}
         self._gemini_client = None
         self._openai_client = None
+        self._claude_client = None
         self._gemini_quota_exceeded = False
         self._openai_quota_exceeded = False
+        self._claude_quota_exceeded = False
         self._ai_pages_used = 0
+        
+        # BYOK (Bring Your Own Key) support
+        self._user_api_key = (user_api_key or "").strip()
+        self._user_provider = (user_provider or "").lower()  # "openai", "claude", or ""
+        self._user_model = (user_model or "").strip()
         
         # Token usage tracking (for cost calculation)
         self._gemini_prompt_tokens = 0
         self._gemini_completion_tokens = 0
         self._openai_prompt_tokens = 0
         self._openai_completion_tokens = 0
+        self._claude_prompt_tokens = 0
+        self._claude_completion_tokens = 0
 
     # ── Lazy client init ────────────────────────────────────────────────
     def _get_gemini(self):
@@ -102,15 +111,43 @@ class PaperSpecExtractionService:
             return self._openai_client
         try:
             import openai  # type: ignore
-            api_key = os.environ.get("OPENAI_API_KEY")
-            if not api_key:
-                logger.info("[SpecExtraction] OPENAI_API_KEY not set — OpenAI disabled")
-                return None
+            # BYOK: Use user-supplied API key if provider is OpenAI
+            if self._user_provider == "openai" and self._user_api_key:
+                api_key = self._user_api_key
+                logger.info("[SpecExtraction] Using user-provided OpenAI API key (BYOK)")
+            else:
+                api_key = os.environ.get("OPENAI_API_KEY")
+                if not api_key:
+                    logger.info("[SpecExtraction] OPENAI_API_KEY not set — OpenAI disabled")
+                    return None
             self._openai_client = openai.OpenAI(api_key=api_key)
             logger.info("[SpecExtraction] ✅ OpenAI ready")
             return self._openai_client
         except Exception as e:
             logger.info("[SpecExtraction] OpenAI unavailable: %s", e)
+            return None
+
+    def _get_claude(self):
+        if self._claude_quota_exceeded:
+            return None
+        if self._claude_client is not None:
+            return self._claude_client
+        try:
+            from anthropic import Anthropic  # type: ignore
+            # BYOK: Use user-supplied API key if provider is Claude
+            if self._user_provider == "claude" and self._user_api_key:
+                api_key = self._user_api_key
+                logger.info("[SpecExtraction] Using user-provided Claude API key (BYOK)")
+            else:
+                api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY")
+                if not api_key:
+                    logger.info("[SpecExtraction] ANTHROPIC_API_KEY not set — Claude disabled")
+                    return None
+            self._claude_client = Anthropic(api_key=api_key)
+            logger.info("[SpecExtraction] ✅ Claude ready")
+            return self._claude_client
+        except Exception as e:
+            logger.info("[SpecExtraction] Claude unavailable: %s", e)
             return None
 
     # ── PDF helpers ─────────────────────────────────────────────────────
@@ -253,8 +290,12 @@ class PaperSpecExtractionService:
                     "type": "image_url",
                     "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
                 })
+            
+            # Use user-specified model if BYOK, else default
+            model = self._user_model if (self._user_provider == "openai" and self._user_model) else self.config["openai_model"]
+            
             resp = client.chat.completions.create(
-                model=self.config["openai_model"],
+                model=model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": content},
@@ -284,6 +325,69 @@ class PaperSpecExtractionService:
                 logger.warning("[SpecExtraction] OpenAI quota — disabling for remainder of job")
             else:
                 logger.warning("[SpecExtraction] OpenAI failed: %s", e)
+            return None
+
+    # ── Engine: Claude Vision ───────────────────────────────────────────
+    def extract_via_claude(self, images_b64: List[str], page_range: Tuple[int, int]) -> Optional[Dict[str, Any]]:
+        """Extract piping specs using Claude (Anthropic) vision API."""
+        client = self._get_claude()
+        if not client or not images_b64:
+            return None
+        try:
+            # Build content array with text prompt + images
+            content: List[Dict[str, Any]] = [
+                {"type": "text", "text": build_extraction_prompt()},
+            ]
+            for b64 in images_b64:
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": b64,
+                    },
+                })
+            
+            # Use user-specified model if BYOK, else default
+            model = self._user_model if (self._user_provider == "claude" and self._user_model) else self.config["claude_model"]
+            
+            message = client.messages.create(
+                model=model,
+                max_tokens=self.config["claude_max_tokens"],
+                temperature=self.config["claude_temperature"],
+                system=SYSTEM_PROMPT,
+                messages=[
+                    {"role": "user", "content": content},
+                ],
+            )
+            
+            # Track token usage for cost calculation
+            if hasattr(message, 'usage') and message.usage:
+                self._claude_prompt_tokens += getattr(message.usage, 'input_tokens', 0)
+                self._claude_completion_tokens += getattr(message.usage, 'output_tokens', 0)
+            
+            # Extract text from response
+            raw = ""
+            if hasattr(message, 'content') and message.content:
+                # Claude returns a list of content blocks
+                for block in message.content:
+                    if hasattr(block, 'text'):
+                        raw += block.text
+            
+            blob = _extract_json_blob(raw)
+            if not blob:
+                return None
+            for c in blob.get("piping_classes", []):
+                c.setdefault("_engine", "claude_vision")
+                c.setdefault("_source_pages", [page_range[0] + 1, page_range[1] + 1])
+            return blob
+        except Exception as e:
+            msg = str(e).lower()
+            if "quota" in msg or "rate" in msg or "429" in msg or "overloaded" in msg:
+                self._claude_quota_exceeded = True
+                logger.warning("[SpecExtraction] Claude quota — disabling for remainder of job")
+            else:
+                logger.warning("[SpecExtraction] Claude failed: %s", e)
             return None
 
     # ── Engine: Tesseract OCR fallback (text-only header detection) ─────
@@ -531,7 +635,7 @@ class PaperSpecExtractionService:
         Mirrors the pattern used by electrical_checklist.handwriting_extractor:
         compute cost once based on accumulated tokens, no async post-processing.
         """
-        from .config import GEMINI_PRICING_PER_1M_TOKENS, OPENAI_PRICING_PER_1M_TOKENS
+        from .config import GEMINI_PRICING_PER_1M_TOKENS, OPENAI_PRICING_PER_1M_TOKENS, CLAUDE_PRICING_PER_1M_TOKENS
         from decimal import Decimal
         
         gemini_cost = (
@@ -542,12 +646,20 @@ class PaperSpecExtractionService:
             (self._openai_prompt_tokens / 1_000_000) * OPENAI_PRICING_PER_1M_TOKENS["input"]
             + (self._openai_completion_tokens / 1_000_000) * OPENAI_PRICING_PER_1M_TOKENS["output"]
         )
-        total_cost_usd = Decimal(str(round(gemini_cost + openai_cost, 6)))
+        claude_cost = (
+            (self._claude_prompt_tokens / 1_000_000) * CLAUDE_PRICING_PER_1M_TOKENS["input"]
+            + (self._claude_completion_tokens / 1_000_000) * CLAUDE_PRICING_PER_1M_TOKENS["output"]
+        )
+        total_cost_usd = Decimal(str(round(gemini_cost + openai_cost + claude_cost, 6)))
         
         return {
             "gemini_prompt_tokens": self._gemini_prompt_tokens,
             "gemini_completion_tokens": self._gemini_completion_tokens,
             "openai_prompt_tokens": self._openai_prompt_tokens,
             "openai_completion_tokens": self._openai_completion_tokens,
+            "claude_prompt_tokens": self._claude_prompt_tokens,
+            "claude_completion_tokens": self._claude_completion_tokens,
             "cost_usd": total_cost_usd,
+            "byok_provider": self._user_provider if self._user_api_key else None,
+            "byok_model": self._user_model if self._user_api_key else None,
         }

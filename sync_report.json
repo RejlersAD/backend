@@ -1,11 +1,260 @@
 {
-  "timestamp": "2026-08-17T10:08:30.258315",
+  "timestamp": "2026-08-17T10:38:28.965197",
   "mode": "live",
   "stats": {
-    "tables_synced": 0,
-    "records_synced": 0,
-    "tables_skipped": 66,
-    "errors": []
+    "tables_synced": 1,
+    "records_synced": 53,
+    "tables_skipped": 3,
+    "errors": [
+      {
+        "table": "notification_logs",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pidv_projects",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pid_conversions",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "electrical_equipment_types",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pid_analysis_pidissue",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pfdq_projects",
+        "error": "insert or update on table \"pfdq_projects\" violates foreign key constraint \"pfdq_projects_created_by_id_89887a47_fk_users_id\"\nDETAIL:  Key (created_by_id)=(10) is not present in table \"users\".\n"
+      },
+      {
+        "table": "notification_preferences",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "rbac_permissions",
+        "error": "insert or update on table \"rbac_permissions\" violates foreign key constraint \"rbac_permissions_module_id_124b9c49_fk_rbac_modules_id\"\nDETAIL:  Key (module_id)=(17fa694e-0a90-46ec-a00d-9ca59afc05a6) is not present in table \"rbac_modules\".\n"
+      },
+      {
+        "table": "rbac_subscription_features",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "rbac_engineer_profiles",
+        "error": "column \"engineering_disciplines\" is of type jsonb but expression is of type text[]\nLINE 1: ..., '779ac2eb-4e16-4ea8-80a2-ddc7893fee28', '', 16, ARRAY['Pro...\n                                                             ^\nHINT:  You will need to rewrite or cast the expression.\n"
+      },
+      {
+        "table": "crs_revision_activities",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pidv_legend_sheets",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "process_datasheet_templates",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pfd_verification_reports",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "procurement_orders",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pid_projects",
+        "error": "insert or update on table \"pid_projects\" violates foreign key constraint \"pid_projects_created_by_id_8a919465_fk_users_id\"\nDETAIL:  Key (created_by_id)=(10) is not present in table \"users\".\n"
+      },
+      {
+        "table": "finance_approval",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "notifications",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "rbac_audit_logs",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "procurement_requisitions",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "crs_revisions",
+        "error": "insert or update on table \"crs_revisions\" violates foreign key constraint \"crs_revisions_chain_id_4cf2e985_fk_crs_revision_chains_id\"\nDETAIL:  Key (chain_id)=(12) is not present in table \"crs_revision_chains\".\n"
+      },
+      {
+        "table": "auth_permission",
+        "error": "insert or update on table \"auth_permission\" violates foreign key constraint \"auth_permission_content_type_id_2f476e4b_fk_django_co\"\nDETAIL:  Key (content_type_id)=(145) is not present in table \"django_content_type\".\n"
+      },
+      {
+        "table": "pfd_projects",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "rbac_user_profiles",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "process_equipment_types",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "crs_revision_chains",
+        "error": "insert or update on table \"crs_revision_chains\" violates foreign key constraint \"crs_revision_chains_created_by_id_90964016_fk_users_id\"\nDETAIL:  Key (created_by_id)=(10) is not present in table \"users\".\n"
+      },
+      {
+        "table": "pfd_issues",
+        "error": "insert or update on table \"pfd_issues\" violates foreign key constraint \"pfd_issues_report_id_e7c758ad_fk_pfd_verification_reports_id\"\nDETAIL:  Key (report_id)=(7) is not present in table \"pfd_verification_reports\".\n"
+      },
+      {
+        "table": "procurement_receipts",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pidv_drawings",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "core_project",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "crs_documents",
+        "error": "insert or update on table \"crs_documents\" violates foreign key constraint \"crs_documents_uploaded_by_id_67f755f6_fk_users_id\"\nDETAIL:  Key (uploaded_by_id)=(10) is not present in table \"users\".\n"
+      },
+      {
+        "table": "finance_employee_salary_info",
+        "error": "insert or update on table \"finance_employee_salary_info\" violates foreign key constraint \"finance_employee_salary_info_user_id_2b4d3bd0_fk_users_id\"\nDETAIL:  Key (user_id)=(10) is not present in table \"users\".\n"
+      },
+      {
+        "table": "pidv_instrument_symbols",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "designiq_engineering_list_items",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pid_equipment_items",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "electrical_datasheets",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pfdq_findings",
+        "error": "insert or update on table \"pfdq_findings\" violates foreign key constraint \"pfdq_findings_drawing_id_dbb6b93b_fk_pfdq_drawings_id\"\nDETAIL:  Key (drawing_id)=(3) is not present in table \"pfdq_drawings\".\n"
+      },
+      {
+        "table": "pfdq_documents",
+        "error": "insert or update on table \"pfdq_documents\" violates foreign key constraint \"pfdq_documents_uploaded_by_id_d75c5f5f_fk_users_id\"\nDETAIL:  Key (uploaded_by_id)=(10) is not present in table \"users\".\n"
+      },
+      {
+        "table": "process_datasheet_extraction_jobs",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pidv_documents",
+        "error": "insert or update on table \"pidv_documents\" violates foreign key constraint \"pidv_documents_project_id_3f337dba_fk_pidv_projects_id\"\nDETAIL:  Key (project_id)=(13) is not present in table \"pidv_projects\".\n"
+      },
+      {
+        "table": "pidv_findings",
+        "error": "insert or update on table \"pidv_findings\" violates foreign key constraint \"pidv_findings_drawing_id_6bc8a058_fk_pidv_drawings_id\"\nDETAIL:  Key (drawing_id)=(15) is not present in table \"pidv_drawings\".\n"
+      },
+      {
+        "table": "django_content_type",
+        "error": "duplicate key value violates unique constraint \"django_content_type_app_label_model_76bd3d3b_uniq\"\nDETAIL:  Key (app_label, model)=(pid_verification, pidvlegendsheet) already exists.\n"
+      },
+      {
+        "table": "designiq_projects",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pfd_documents",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pid_analysis_pidanalysisreport",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "finance_invoice",
+        "error": "insert or update on table \"finance_invoice\" violates foreign key constraint \"finance_invoice_submitted_by_id_acdbb6e5_fk_users_id\"\nDETAIL:  Key (submitted_by_id)=(10) is not present in table \"users\".\n"
+      },
+      {
+        "table": "pfdq_drawings",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "rbac_role_modules",
+        "error": "insert or update on table \"rbac_role_modules\" violates foreign key constraint \"rbac_role_modules_module_id_27113de8_fk_rbac_modules_id\"\nDETAIL:  Key (module_id)=(17fa694e-0a90-46ec-a00d-9ca59afc05a6) is not present in table \"rbac_modules\".\n"
+      },
+      {
+        "table": "rbac_role_permissions",
+        "error": "insert or update on table \"rbac_role_permissions\" violates foreign key constraint \"rbac_role_permission_permission_id_f5e1e866_fk_rbac_perm\"\nDETAIL:  Key (permission_id)=(f014682a-6e38-499c-8c66-1efc2082fd35) is not present in table \"rbac_permissions\".\n"
+      },
+      {
+        "table": "rbac_user_roles",
+        "error": "insert or update on table \"rbac_user_roles\" violates foreign key constraint \"rbac_user_roles_assigned_by_id_c373c42c_fk_users_id\"\nDETAIL:  Key (assigned_by_id)=(10) is not present in table \"users\".\n"
+      },
+      {
+        "table": "notification_categories",
+        "error": "duplicate key value violates unique constraint \"notification_categories_name_key\"\nDETAIL:  Key (name)=(INFO) already exists.\n"
+      },
+      {
+        "table": "admin_user_activity_analytics",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pump_calculation_data",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "pid_analysis_piddrawing",
+        "error": "insert or update on table \"pid_analysis_piddrawing\" violates foreign key constraint \"pid_analysis_piddrawing_uploaded_by_id_703c0717_fk_users_id\"\nDETAIL:  Key (uploaded_by_id)=(10) is not present in table \"users\".\n"
+      },
+      {
+        "table": "pfd_uploads",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "procurement_vendors",
+        "error": "column \"adnoc_approved\" of relation \"procurement_vendors\" does not exist\nLINE 1: ...authority\", \"icv_percentage\", \"is_icv_certified\", \"adnoc_app...\n                                                             ^\n"
+      },
+      {
+        "table": "sld_projects",
+        "error": "insert or update on table \"sld_projects\" violates foreign key constraint \"sld_projects_created_by_id_52c68107_fk_users_id\"\nDETAIL:  Key (created_by_id)=(10) is not present in table \"users\".\n"
+      },
+      {
+        "table": "pid_analysis_referencedocument",
+        "error": "insert or update on table \"pid_analysis_referencedocument\" violates foreign key constraint \"pid_analysis_referen_uploaded_by_id_0c854dbd_fk_users_id\"\nDETAIL:  Key (uploaded_by_id)=(10) is not present in table \"users\".\n"
+      },
+      {
+        "table": "finance_auditlog",
+        "error": "insert or update on table \"finance_auditlog\" violates foreign key constraint \"finance_auditlog_invoice_id_99b130c8_fk_finance_invoice_id\"\nDETAIL:  Key (invoice_id)=(6) is not present in table \"finance_invoice\".\n"
+      },
+      {
+        "table": "crs_comments",
+        "error": "insert or update on table \"crs_comments\" violates foreign key constraint \"crs_comments_document_id_6c5a3a30_fk_crs_documents_id\"\nDETAIL:  Key (document_id)=(3) is not present in table \"crs_documents\".\n"
+      },
+      {
+        "table": "rbac_subscription_plans",
+        "error": "can't adapt type 'dict'"
+      },
+      {
+        "table": "crs_ai_insights",
+        "error": "insert or update on table \"crs_ai_insights\" violates foreign key constraint \"crs_ai_insights_revision_id_f8bfe313_fk_crs_revisions_id\"\nDETAIL:  Key (revision_id)=(30) is not present in table \"crs_revisions\".\n"
+      }
+    ]
   },
   "missing_tables_count": 148,
   "common_tables_count": 148

@@ -234,8 +234,11 @@ class PaperSpecExtractionJob(models.Model):
 
     # BYOK (Bring Your Own Key) — optional user-supplied fields for attribution and custom API usage.
     engineer_name = models.CharField(max_length=255, blank=True, default='', help_text='Optional engineer attribution (e.g. site inspector name)')
-    # User API key (BYOK). Never persisted long-term — wiped immediately after extraction completes.
+    # User API keys (BYOK). Never persisted long-term — wiped immediately after extraction completes.
     user_openai_api_key = models.TextField(blank=True, default='', help_text='Optional user-supplied OpenAI API key (wiped post-extraction)')
+    user_claude_api_key = models.TextField(blank=True, default='', help_text='Optional user-supplied Claude API key (wiped post-extraction)')
+    user_ai_provider = models.CharField(max_length=20, blank=True, default='', help_text='AI provider used: "openai" or "claude"')
+    user_ai_model = models.CharField(max_length=100, blank=True, default='', help_text='Specific AI model ID (e.g. "gpt-4o", "claude-3-5-sonnet-20241022")')
 
 
 

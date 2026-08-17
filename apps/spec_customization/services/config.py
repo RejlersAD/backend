@@ -63,6 +63,11 @@ SPEC_EXTRACTION_CONFIG = {
     "openai_temperature":       0.1,
     "gemini_temperature":       0.1,
 
+    # ── Claude models (BYOK support) ─────────────────────────────────────
+    "claude_model":            "claude-3-5-sonnet-20241022",  # Default Claude model
+    "claude_max_tokens":        16000,
+    "claude_temperature":       0.1,
+
     # ── Cost guard rails ────────────────────────────────────────────────
     # If a page already has ≥ this many chars from PyMuPDF text-layer,
     # do NOT send it to Vision AI — saves $$ on bulk PDFs.
@@ -217,6 +222,42 @@ SIZE_EXPANSION_CONFIG = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Custom Size Range Configuration — User-Defined Range Entries
+# ─────────────────────────────────────────────────────────────────────────────
+# For PipingCommodityFilter sheet: generate additional entries with custom
+# from-to size ranges. These are user-defined bins for better size filtering
+# granularity in SmartPlant 3D material selection.
+# 
+# User requirement: "whenever you find 1.5" (11/2), introduce records ranging from
+# 0.25 to 0.5, 0.5 to 0.75, 0.75 to 1.0, 1.0 to 1.25, 1.25 to 1.50"
+# ─────────────────────────────────────────────────────────────────────────────
+CUSTOM_SIZE_RANGE_CONFIG = {
+    # Enable generation of custom size range entries
+    "enable_custom_ranges": True,
+    
+    # Trigger NPD: When this size is encountered, generate the custom ranges below
+    # (11/2" = 1.5 inches nominal pipe diameter)
+    "trigger_size": 1.5,
+    
+    # Custom size ranges to generate (from, to) pairs in inches
+    # These create granular filtering entries for SmartPlant commodity selection
+    "custom_ranges": [
+        {"from": 0.25, "to": 0.5,  "label": "1/4\" to 1/2\""},
+        {"from": 0.5,  "to": 0.75, "label": "1/2\" to 3/4\""},
+        {"from": 0.75, "to": 1.0,  "label": "3/4\" to 1\""},
+        {"from": 1.0,  "to": 1.25, "label": "1\" to 1-1/4\""},
+        {"from": 1.25, "to": 1.5,  "label": "1-1/4\" to 1-1/2\""},
+    ],
+    
+    # Include full-range entry (0.25 to trigger_size) in addition to sub-ranges
+    "include_full_range": True,
+    
+    # Log when custom ranges are generated
+    "log_custom_ranges": True,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Component Type Detection — Enhanced AI Extraction Guidance
 # ─────────────────────────────────────────────────────────────────────────────
 COMPONENT_TYPE_DETECTION_CONFIG = {
@@ -305,6 +346,59 @@ GEMINI_PRICING_PER_1M_TOKENS = {
 OPENAI_PRICING_PER_1M_TOKENS = {
     "input":  float(os.environ.get("OPENAI_INPUT_PRICE_PER_1M", "2.50") or 2.50),    # gpt-4o ~$2.50/1M input
     "output": float(os.environ.get("OPENAI_OUTPUT_PRICE_PER_1M", "10.00") or 10.00), # gpt-4o ~$10.00/1M output
+}
+
+CLAUDE_PRICING_PER_1M_TOKENS = {
+    "input":  float(os.environ.get("CLAUDE_INPUT_PRICE_PER_1M", "3.00") or 3.00),    # claude-3-5-sonnet ~$3.00/1M input
+    "output": float(os.environ.get("CLAUDE_OUTPUT_PRICE_PER_1M", "15.00") or 15.00), # claude-3-5-sonnet ~$15.00/1M output
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BYOK (Bring Your Own Key) Configuration — Soft-coded provider & model options
+# ─────────────────────────────────────────────────────────────────────────────
+BYOK_CONFIG = {
+    "enabled": True,  # Master switch for BYOK feature
+    
+    # Supported AI providers for BYOK
+    "supported_providers": ["openai", "claude"],
+    
+    # OpenAI models available for BYOK (soft-coded list)
+    "openai_models": [
+        {"id": "gpt-4o", "label": "GPT-4o (Latest)", "description": "Most capable, best for complex specs", "recommended": True},
+        {"id": "gpt-4o-mini", "label": "GPT-4o Mini", "description": "Faster, more cost-effective"},
+        {"id": "gpt-4-turbo", "label": "GPT-4 Turbo", "description": "Previous generation, still powerful"},
+    ],
+    
+    # Claude models available for BYOK (soft-coded list)
+    "claude_models": [
+        {"id": "claude-3-5-sonnet-20241022", "label": "Claude 3.5 Sonnet (Latest)", "description": "Best balance of speed and accuracy", "recommended": True},
+        {"id": "claude-3-5-haiku-20241022", "label": "Claude 3.5 Haiku", "description": "Fastest, most cost-effective"},
+        {"id": "claude-3-opus-20240229", "label": "Claude 3 Opus", "description": "Most capable, highest quality"},
+        {"id": "claude-3-sonnet-20240229", "label": "Claude 3 Sonnet", "description": "Previous generation balanced model"},
+    ],
+    
+    # Default models per provider
+    "default_models": {
+        "openai": "gpt-4o",
+        "claude": "claude-3-5-sonnet-20241022",
+    },
+    
+    # API key validation patterns (soft-coded regex)
+    "api_key_patterns": {
+        "openai": r"^sk-[A-Za-z0-9_\-]{18,}$",  # OpenAI: sk-...
+        "claude": r"^sk-ant-[A-Za-z0-9_\-]{20,}$",  # Claude: sk-ant-...
+    },
+    
+    # Security: maximum API key storage duration (seconds)
+    # Keys are stored temporarily during extraction and wiped after completion
+    "api_key_retention_seconds": 3600,  # 1 hour max
+    
+    # Display labels for UI
+    "provider_labels": {
+        "openai": "Your OpenAI API Key",
+        "claude": "Your Claude API Key (Anthropic)",
+    },
 }
 
 
