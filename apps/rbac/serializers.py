@@ -1008,14 +1008,15 @@ class AccessRequestSerializer(serializers.ModelSerializer):
 
 class AchievementSerializer(serializers.ModelSerializer):
     """Serializer for user achievements — sports, academics, professional, genius records."""
-    
+
     # Read-only computed fields
     category_label = serializers.SerializerMethodField()
     category_icon = serializers.SerializerMethodField()
     category_color = serializers.SerializerMethodField()
     level_label = serializers.SerializerMethodField()
     level_icon = serializers.SerializerMethodField()
-    
+    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
+
     class Meta:
         model = Achievement
         fields = [
@@ -1076,7 +1077,8 @@ class WorkExperienceSerializer(serializers.ModelSerializer):
     # Read-only computed fields
     duration_text = serializers.SerializerMethodField()
     employment_type_label = serializers.SerializerMethodField()
-    
+    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
+
     class Meta:
         model = WorkExperience
         fields = [
@@ -1149,7 +1151,8 @@ class SocialMediaLinkSerializer(serializers.ModelSerializer):
     platform_label = serializers.SerializerMethodField()
     platform_icon = serializers.SerializerMethodField()
     platform_color = serializers.SerializerMethodField()
-    
+    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
+
     class Meta:
         model = SocialMediaLink
         fields = [
@@ -1237,7 +1240,8 @@ class ProfileDocumentSerializer(serializers.ModelSerializer):
     # User details for admin view
     user_email = serializers.SerializerMethodField()
     user_name = serializers.SerializerMethodField()
-    
+    user_profile = serializers.PrimaryKeyRelatedField(read_only=True)
+
     class Meta:
         model = ProfileDocument
         fields = [
