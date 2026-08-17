@@ -1,0 +1,602 @@
+{
+  "timestamp": "2026-08-17T09:48:47.675155",
+  "aligned": false,
+  "table_comparison": {
+    "production_count": 296,
+    "preprod_count": 152,
+    "common_count": 148,
+    "missing_in_preprod": [
+      "activity_event",
+      "ai_pricing_config",
+      "ai_usage_log",
+      "api_usage_logs",
+      "audit_logs",
+      "crs_documents_crsdocument",
+      "crs_documents_crsdocumentversion",
+      "dashboard_userdashboardinsight",
+      "data_mining_documents",
+      "data_mining_projects",
+      "dataset_transformations",
+      "dataset_versions",
+      "datasets",
+      "designiq_pid_line_annotations",
+      "designiq_pid_source_drawings",
+      "designiq_processed_pid_outputs",
+      "document_access_logs",
+      "document_versions",
+      "documents",
+      "electrical_checklist_jobs",
+      "electrical_checklist_project_members",
+      "electrical_checklist_projects",
+      "electrical_datasheet_cell_edits",
+      "electrical_datasheet_share_links",
+      "electrical_generated_datasheet_comments",
+      "electrical_generated_datasheet_snapshots",
+      "electrical_generated_datasheets",
+      "finance_payroll_schedule",
+      "finance_payroll_workflow",
+      "finance_workflow_notification_log",
+      "hr_employee_master",
+      "instrument_io_workflow_iolistdocument",
+      "instrument_io_workflow_iolistextractedcomment",
+      "instrument_io_workflow_iolistextractedrow",
+      "instrument_io_workflow_iolistproject",
+      "invoice_tracker_customerinvoice",
+      "invoice_tracker_invoiceattachment",
+      "monthly_champion",
+      "non_teff_metadata_nonteffproject",
+      "offboarding_record",
+      "onboarding_access",
+      "onboarding_checklist",
+      "onboarding_document",
+      "onboarding_equipment",
+      "onboarding_record",
+      "payroll_ai_insight_snapshot",
+      "payroll_attendance_override",
+      "payroll_audit_alert",
+      "payroll_chatbot_message",
+      "payroll_daily_work_log",
+      "payroll_employee_leave_monthly",
+      "payroll_employee_leave_record",
+      "payroll_engine_adjustment",
+      "payroll_engine_comparison",
+      "payroll_engine_comparison_row",
+      "payroll_engine_employee",
+      "payroll_engine_line_item",
+      "payroll_engine_line_item_change_log",
+      "payroll_engine_payslip",
+      "payroll_engine_run",
+      "payroll_engine_run_upload",
+      "payroll_engine_workflow_log",
+      "payroll_leave_encashment_run",
+      "payroll_leave_request",
+      "payroll_leave_type",
+      "payroll_master_import",
+      "payroll_master_row",
+      "payroll_monthly_leave_accrual_log",
+      "payroll_project_cost_allocation",
+      "payroll_public_holiday",
+      "payroll_salary_component",
+      "payroll_salary_history",
+      "payroll_salary_structure",
+      "payroll_validation_log",
+      "payroll_workflow_log",
+      "pid_checker_v2_equipment_list_row",
+      "pid_checker_v2_equipment_list_upload",
+      "pid_checker_v2_extraction",
+      "pid_checker_v2_instrument_index_row",
+      "pid_checker_v2_instrument_index_upload",
+      "pid_checker_v2_legend_sheet",
+      "pid_checker_v2_line_list_row",
+      "pid_checker_v2_line_list_upload",
+      "pid_checker_v2_line_tag",
+      "pid_checker_v2_project",
+      "pid_checker_v2_usage_log",
+      "pidv2_ai_check_runs",
+      "pidv2_comparison_findings",
+      "pidv2_comparison_findings_source_extractions",
+      "pidv2_documents",
+      "pidv2_drawings",
+      "pidv2_extraction_pages",
+      "pidv2_extraction_results",
+      "pidv2_findings",
+      "pidv2_instrument_symbols",
+      "pidv2_legend_sheets",
+      "pidv2_projects",
+      "pidv2_reference_data",
+      "pidv_ai_check_runs",
+      "pidv_reference_data",
+      "planning_intelligence_planningfile",
+      "planning_intelligence_planninggeneration",
+      "planning_intelligence_planningproject",
+      "procurement_budget",
+      "procurement_costcenter",
+      "procurement_number_sequences",
+      "procurement_order_lines",
+      "procurement_orders_related_invoices",
+      "procurement_po_documents",
+      "procurement_project",
+      "procurement_project_team_members",
+      "procurement_receipt_lines",
+      "project_control_changeevent",
+      "project_control_costsnapshot",
+      "project_control_estimate",
+      "project_control_estimatelineitem",
+      "project_control_planningpackage",
+      "project_control_projectdocument",
+      "project_control_wbsnode",
+      "rbac_access_requests",
+      "rbac_profile_documents",
+      "rbac_social_media_links",
+      "rbac_user_achievements",
+      "rbac_work_experience",
+      "sales_approval_routes",
+      "sales_ariba_integration_logs",
+      "sales_document_approvals",
+      "sales_document_comments",
+      "sales_documents",
+      "security_events",
+      "site_visit_check_in",
+      "site_visit_client_site",
+      "site_visit_request",
+      "spec_customization_componentmatchingresult",
+      "spec_customization_matchingrule",
+      "spec_customization_matchingworkbookset",
+      "spec_customization_paperspecdocument",
+      "spec_customization_paperspecextractionjob",
+      "spec_customization_pipingclass",
+      "spec_customization_pipingclasscomponent",
+      "spec_customization_specproject",
+      "spec_customization_workbookcelloverride",
+      "timesheet_biometricusermaster",
+      "timesheet_dailyattendancesummary",
+      "timesheet_timesheetevent",
+      "transformation_pipelines",
+      "transformation_steps",
+      "version_comparisons"
+    ],
+    "missing_in_production": [
+      "electrical_excel_documents",
+      "electrical_parsed_items",
+      "electrical_sheet_metadata",
+      "electrical_validation_issues"
+    ]
+  },
+  "record_differences": [
+    {
+      "table": "admin_user_activity_analytics",
+      "production": 77,
+      "preprod": 57,
+      "difference": 20
+    },
+    {
+      "table": "auth_permission",
+      "production": 1182,
+      "preprod": 1174,
+      "difference": 8
+    },
+    {
+      "table": "core_project",
+      "production": 9,
+      "preprod": 0,
+      "difference": 9
+    },
+    {
+      "table": "crs_ai_insights",
+      "production": 1,
+      "preprod": 0,
+      "difference": 1
+    },
+    {
+      "table": "crs_comments",
+      "production": 1103,
+      "preprod": 0,
+      "difference": 1103
+    },
+    {
+      "table": "crs_documents",
+      "production": 75,
+      "preprod": 0,
+      "difference": 75
+    },
+    {
+      "table": "crs_revision_activities",
+      "production": 196,
+      "preprod": 0,
+      "difference": 196
+    },
+    {
+      "table": "crs_revision_chains",
+      "production": 80,
+      "preprod": 1,
+      "difference": 79
+    },
+    {
+      "table": "crs_revisions",
+      "production": 75,
+      "preprod": 0,
+      "difference": 75
+    },
+    {
+      "table": "designiq_engineering_list_items",
+      "production": 516,
+      "preprod": 0,
+      "difference": 516
+    },
+    {
+      "table": "designiq_projects",
+      "production": 3,
+      "preprod": 0,
+      "difference": 3
+    },
+    {
+      "table": "django_content_type",
+      "production": 295,
+      "preprod": 293,
+      "difference": 2
+    },
+    {
+      "table": "django_migrations",
+      "production": 308,
+      "preprod": 364,
+      "difference": -56
+    },
+    {
+      "table": "electrical_datasheets",
+      "production": 1,
+      "preprod": 0,
+      "difference": 1
+    },
+    {
+      "table": "electrical_equipment_types",
+      "production": 12,
+      "preprod": 11,
+      "difference": 1
+    },
+    {
+      "table": "finance_approval",
+      "production": 190,
+      "preprod": 0,
+      "difference": 190
+    },
+    {
+      "table": "finance_auditlog",
+      "production": 385,
+      "preprod": 0,
+      "difference": 385
+    },
+    {
+      "table": "finance_employee_salary_info",
+      "production": 165,
+      "preprod": 164,
+      "difference": 1
+    },
+    {
+      "table": "finance_invoice",
+      "production": 74,
+      "preprod": 0,
+      "difference": 74
+    },
+    {
+      "table": "non_teff_metadata_nonteffbatch",
+      "production": 3,
+      "preprod": 0,
+      "difference": 3
+    },
+    {
+      "table": "non_teff_metadata_nonteffbatchitem",
+      "production": 276,
+      "preprod": 0,
+      "difference": 276
+    },
+    {
+      "table": "notification_categories",
+      "production": 11,
+      "preprod": 1,
+      "difference": 10
+    },
+    {
+      "table": "notification_logs",
+      "production": 2712,
+      "preprod": 6,
+      "difference": 2706
+    },
+    {
+      "table": "notification_preferences",
+      "production": 186,
+      "preprod": 3,
+      "difference": 183
+    },
+    {
+      "table": "notifications",
+      "production": 2710,
+      "preprod": 6,
+      "difference": 2704
+    },
+    {
+      "table": "pfd_documents",
+      "production": 132,
+      "preprod": 0,
+      "difference": 132
+    },
+    {
+      "table": "pfd_issues",
+      "production": 68,
+      "preprod": 0,
+      "difference": 68
+    },
+    {
+      "table": "pfd_projects",
+      "production": 5,
+      "preprod": 0,
+      "difference": 5
+    },
+    {
+      "table": "pfd_uploads",
+      "production": 23,
+      "preprod": 0,
+      "difference": 23
+    },
+    {
+      "table": "pfd_verification_reports",
+      "production": 9,
+      "preprod": 0,
+      "difference": 9
+    },
+    {
+      "table": "pfdq_documents",
+      "production": 2,
+      "preprod": 0,
+      "difference": 2
+    },
+    {
+      "table": "pfdq_drawings",
+      "production": 1,
+      "preprod": 0,
+      "difference": 1
+    },
+    {
+      "table": "pfdq_findings",
+      "production": 5,
+      "preprod": 0,
+      "difference": 5
+    },
+    {
+      "table": "pfdq_projects",
+      "production": 1,
+      "preprod": 0,
+      "difference": 1
+    },
+    {
+      "table": "pid_analysis_pidanalysisreport",
+      "production": 131,
+      "preprod": 0,
+      "difference": 131
+    },
+    {
+      "table": "pid_analysis_piddrawing",
+      "production": 144,
+      "preprod": 0,
+      "difference": 144
+    },
+    {
+      "table": "pid_analysis_pidissue",
+      "production": 2260,
+      "preprod": 0,
+      "difference": 2260
+    },
+    {
+      "table": "pid_analysis_referencedocument",
+      "production": 37,
+      "preprod": 0,
+      "difference": 37
+    },
+    {
+      "table": "pid_conversions",
+      "production": 147,
+      "preprod": 0,
+      "difference": 147
+    },
+    {
+      "table": "pid_equipment_items",
+      "production": 76,
+      "preprod": 0,
+      "difference": 76
+    },
+    {
+      "table": "pid_equipment_types",
+      "production": 4,
+      "preprod": 0,
+      "difference": 4
+    },
+    {
+      "table": "pid_projects",
+      "production": 35,
+      "preprod": 0,
+      "difference": 35
+    },
+    {
+      "table": "pidv_documents",
+      "production": 65,
+      "preprod": 4,
+      "difference": 61
+    },
+    {
+      "table": "pidv_drawings",
+      "production": 65,
+      "preprod": 4,
+      "difference": 61
+    },
+    {
+      "table": "pidv_findings",
+      "production": 2260,
+      "preprod": 108,
+      "difference": 2152
+    },
+    {
+      "table": "pidv_instrument_symbols",
+      "production": 74,
+      "preprod": 0,
+      "difference": 74
+    },
+    {
+      "table": "pidv_legend_sheets",
+      "production": 1,
+      "preprod": 0,
+      "difference": 1
+    },
+    {
+      "table": "pidv_projects",
+      "production": 13,
+      "preprod": 1,
+      "difference": 12
+    },
+    {
+      "table": "process_datasheet_extraction_jobs",
+      "production": 11,
+      "preprod": 0,
+      "difference": 11
+    },
+    {
+      "table": "process_datasheet_templates",
+      "production": 1,
+      "preprod": 0,
+      "difference": 1
+    },
+    {
+      "table": "process_equipment_types",
+      "production": 1,
+      "preprod": 0,
+      "difference": 1
+    },
+    {
+      "table": "procurement_orders",
+      "production": 121,
+      "preprod": 0,
+      "difference": 121
+    },
+    {
+      "table": "procurement_receipts",
+      "production": 1,
+      "preprod": 0,
+      "difference": 1
+    },
+    {
+      "table": "procurement_requisitions",
+      "production": 39,
+      "preprod": 0,
+      "difference": 39
+    },
+    {
+      "table": "procurement_vendors",
+      "production": 179,
+      "preprod": 0,
+      "difference": 179
+    },
+    {
+      "table": "pump_calculation_data",
+      "production": 32,
+      "preprod": 0,
+      "difference": 32
+    },
+    {
+      "table": "qhse_running_projects",
+      "production": 53,
+      "preprod": 0,
+      "difference": 53
+    },
+    {
+      "table": "rbac_audit_logs",
+      "production": 59485,
+      "preprod": 30,
+      "difference": 59455
+    },
+    {
+      "table": "rbac_engineer_profiles",
+      "production": 15,
+      "preprod": 0,
+      "difference": 15
+    },
+    {
+      "table": "rbac_permissions",
+      "production": 43,
+      "preprod": 8,
+      "difference": 35
+    },
+    {
+      "table": "rbac_role_modules",
+      "production": 4588,
+      "preprod": 521,
+      "difference": 4067
+    },
+    {
+      "table": "rbac_role_permissions",
+      "production": 1230,
+      "preprod": 24,
+      "difference": 1206
+    },
+    {
+      "table": "rbac_roles",
+      "production": 194,
+      "preprod": 200,
+      "difference": -6
+    },
+    {
+      "table": "rbac_subscription_features",
+      "production": 13,
+      "preprod": 0,
+      "difference": 13
+    },
+    {
+      "table": "rbac_subscription_plans",
+      "production": 4,
+      "preprod": 3,
+      "difference": 1
+    },
+    {
+      "table": "rbac_user_profiles",
+      "production": 349,
+      "preprod": 55,
+      "difference": 294
+    },
+    {
+      "table": "rbac_user_roles",
+      "production": 548,
+      "preprod": 43,
+      "difference": 505
+    },
+    {
+      "table": "sld_projects",
+      "production": 1,
+      "preprod": 0,
+      "difference": 1
+    },
+    {
+      "table": "system_activity",
+      "production": 8,
+      "preprod": 328,
+      "difference": -320
+    },
+    {
+      "table": "usage_log",
+      "production": 8,
+      "preprod": 328,
+      "difference": -320
+    },
+    {
+      "table": "users",
+      "production": 348,
+      "preprod": 350,
+      "difference": -2
+    }
+  ],
+  "schema_differences": [
+    {
+      "table": "non_teff_metadata_nonteffextractionjob",
+      "missing_in_preprod": [
+        "project_id"
+      ],
+      "missing_in_production": []
+    }
+  ]
+}
