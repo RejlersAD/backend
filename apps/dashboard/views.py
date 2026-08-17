@@ -416,10 +416,18 @@ class PersonalDashboardView(APIView):
 
         # Super admin / staff → frontend handles global view
         role_code = _get_primary_role_code(user)
-        role_name = _get_primary_role_name(user)
-        if user.is_superuser or user.is_staff or role_code == 'super_admin':
+        from apps.rbac.models import Role
+        try:
+            role_level = Role.objects.filter(
+                code=role_code, is_active=True
+            ).values_list('level', flat=True).first() or 10
+        except Exception:
+            role_level = 10
+
+        if user.is_superuser or user.is_staff or role_level <= 2:
             role_code = 'super_admin'
             role_name = 'Super Administrator'
+        role_name_display = _get_primary_role_name(user)
 
         # Gather data in order
         usage_stats = _get_usage_stats(user, role_code)
@@ -511,7 +519,7 @@ class PersonalDashboardView(APIView):
                 'name': user.get_full_name() or user.username,
                 'email': user.email,
                 'role_code': role_code,
-                'role_name': role_name,
+                'role_name': role_name_display,
                 'persona': persona,
                 'department': department,
                 'job_title': job_title,

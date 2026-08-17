@@ -31,6 +31,33 @@ def classify_pages(pdf_bytes: bytes) -> List[Dict]:
             page = doc[i]
             text = page.get_text('text') or ''
             lower = text.lower()
+
+            # Continuation pages in a CRS repeat the sheet title but not the
+            # column headers. Treat that title as an authoritative signature
+            # so every page in a multi-page review table reaches the extractor.
+            if ('comments resolution sheet' in lower
+                    or 'comment resolution sheet' in lower):
+                out.append({
+                    'page_index': i,
+                    'page_type': 'comments_sheet',
+                    'text': text,
+                    'hits': 1,
+                })
+                continue
+
+            # CAD cable-block sheets are a valid source of partial I/O rows.
+            # They expose drawing titles through native text even when their
+            # instrument annotations require local OCR.
+            if ('instrument cable block diagram' in lower
+                    and 'diagram layout' in lower):
+                out.append({
+                    'page_index': i,
+                    'page_type': 'io_drawing',
+                    'text': text,
+                    'hits': 2,
+                })
+                continue
+
             best_type, best_hits = 'unknown', 0
             for ptype, keywords in PAGE_TYPES.items():
                 hits = sum(1 for kw in keywords if kw in lower)

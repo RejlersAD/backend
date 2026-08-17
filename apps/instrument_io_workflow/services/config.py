@@ -31,6 +31,12 @@ VISION_MAX_PAGES_PER_DOC = int(getattr(settings, 'INSTRUMENT_IO_VISION_MAX_PAGES
 # instead of re-extracting. Major cost saver on repeat uploads / reviews.
 ENABLE_HASH_CACHE = getattr(settings, 'INSTRUMENT_IO_HASH_CACHE', True)
 
+# Local Tesseract OCR for vector/CAD drawing sheets whose visible annotations
+# are not exposed through the PDF text layer. This remains an offline, $0 path.
+ENABLE_LOCAL_OCR = getattr(settings, 'INSTRUMENT_IO_ENABLE_LOCAL_OCR', True)
+LOCAL_OCR_RENDER_DPI = int(getattr(settings, 'INSTRUMENT_IO_OCR_DPI', 230))
+LOCAL_OCR_THRESHOLD = int(getattr(settings, 'INSTRUMENT_IO_OCR_THRESHOLD', 235))
+
 
 # ───────────────────────────────────────────────────────────────────────
 # Page classifier — heuristic keywords (case-insensitive, regex-friendly)
@@ -51,6 +57,10 @@ PAGE_TYPES = {
         'tag number', 'loop number', 'i/o type', 'signal type',
         'hmi description', 'instrument type', 'dcs', 'esd',
         'marsh cab', 'jb number', 'cable no',
+    ],
+    'io_drawing':      [
+        'instrument cable block diagram',
+        'diagram layout',
     ],
 }
 

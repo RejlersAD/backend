@@ -32,6 +32,14 @@ ONBOARDING_STATUS_CHOICES = [
     (STATUS_CANCELLED, 'Cancelled'),
 ]
 
+ONBOARDING_ACTIVE_STATUSES = (
+    STATUS_INITIATED,
+    STATUS_DOCUMENTATION,
+    STATUS_EQUIPMENT,
+    STATUS_ACCESS_PROVISIONING,
+    STATUS_TRAINING,
+)
+
 # Offboarding Status
 OFFBOARDING_STATUS_INITIATED = 'initiated'
 OFFBOARDING_STATUS_ACCESS_REVOCATION = 'access_revocation'
@@ -40,6 +48,7 @@ OFFBOARDING_STATUS_EXIT_INTERVIEW = 'exit_interview'
 OFFBOARDING_STATUS_FINAL_SETTLEMENT = 'final_settlement'
 OFFBOARDING_STATUS_COMPLETED = 'completed'
 OFFBOARDING_STATUS_CANCELLED = 'cancelled'
+OFFBOARDING_STATUS_REJECTED = 'rejected'
 
 OFFBOARDING_STATUS_CHOICES = [
     (OFFBOARDING_STATUS_INITIATED, 'Initiated'),
@@ -49,6 +58,39 @@ OFFBOARDING_STATUS_CHOICES = [
     (OFFBOARDING_STATUS_FINAL_SETTLEMENT, 'Final Settlement'),
     (OFFBOARDING_STATUS_COMPLETED, 'Completed'),
     (OFFBOARDING_STATUS_CANCELLED, 'Cancelled'),
+    (OFFBOARDING_STATUS_REJECTED, 'Rejected'),
+]
+
+OFFBOARDING_ACTIVE_STATUSES = (
+    OFFBOARDING_STATUS_INITIATED,
+    OFFBOARDING_STATUS_ACCESS_REVOCATION,
+    OFFBOARDING_STATUS_EQUIPMENT_RETURN,
+    OFFBOARDING_STATUS_EXIT_INTERVIEW,
+    OFFBOARDING_STATUS_FINAL_SETTLEMENT,
+)
+
+CHECKLIST_STAGE_GENERAL = 'general'
+CHECKLIST_STAGE_PRE_HIRE = 'pre_hire'
+CHECKLIST_STAGE_IT_PROVISIONING = 'it_provisioning'
+CHECKLIST_STAGE_FIRST_DAY = 'first_day'
+CHECKLIST_STAGE_FINAL_VALIDATION = 'final_validation'
+CHECKLIST_STAGE_EXIT_INITIATION = 'exit_initiation'
+CHECKLIST_STAGE_ACCESS_REVOCATION = 'access_revocation'
+CHECKLIST_STAGE_ASSET_RETURN = 'asset_return'
+CHECKLIST_STAGE_EXIT_CLEARANCE = 'exit_clearance'
+CHECKLIST_STAGE_FINAL_SETTLEMENT = 'final_settlement'
+
+CHECKLIST_STAGE_CHOICES = [
+    (CHECKLIST_STAGE_GENERAL, 'General'),
+    (CHECKLIST_STAGE_PRE_HIRE, 'Pre-Hire Initiation'),
+    (CHECKLIST_STAGE_IT_PROVISIONING, 'IT Provisioning'),
+    (CHECKLIST_STAGE_FIRST_DAY, 'First Day Orientation'),
+    (CHECKLIST_STAGE_FINAL_VALIDATION, 'Final Checklist Validation'),
+    (CHECKLIST_STAGE_EXIT_INITIATION, 'Exit Initiation'),
+    (CHECKLIST_STAGE_ACCESS_REVOCATION, 'Access Revocation'),
+    (CHECKLIST_STAGE_ASSET_RETURN, 'Asset Return'),
+    (CHECKLIST_STAGE_EXIT_CLEARANCE, 'Exit Interview & Clearance'),
+    (CHECKLIST_STAGE_FINAL_SETTLEMENT, 'Final Settlement'),
 ]
 
 # Equipment Types
@@ -217,6 +259,30 @@ class OffboardingRecord(models.Model):
     
     # Notes
     notes = models.TextField(blank=True, null=True)
+    rejection_reason = models.TextField(blank=True, null=True)
+    rejected_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='offboarding_rejected'
+    )
+    rejected_at = models.DateTimeField(null=True, blank=True)
+
+    # Project-manager clearance for employees assigned to active projects.
+    project_manager_approval_status = models.CharField(
+        max_length=20,
+        choices=[
+            ('not_required', 'Not Required'),
+            ('pending', 'Pending'),
+            ('approved', 'Approved'),
+            ('rejected', 'Rejected'),
+        ],
+        default='not_required',
+    )
+    project_manager_decided_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='offboarding_project_manager_decisions'
+    )
+    project_manager_decided_at = models.DateTimeField(null=True, blank=True)
+    project_manager_decision_note = models.TextField(blank=True, null=True)
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
@@ -347,6 +413,12 @@ class Checklist(models.Model):
     
     task_name = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
+    stage = models.CharField(
+        max_length=30,
+        choices=CHECKLIST_STAGE_CHOICES,
+        default=CHECKLIST_STAGE_GENERAL,
+        db_index=True,
+    )
     
     completed = models.BooleanField(default=False)
     completed_date = models.DateTimeField(null=True, blank=True)

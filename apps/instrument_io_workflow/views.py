@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 
 from django.db import transaction
-from django.http import HttpResponse, Http404
+from django.http import FileResponse, HttpResponse, Http404
 
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
@@ -228,6 +228,30 @@ class IOListDocumentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
         return Response(self.get_serializer(document).data)
+
+    # ---- stream original PDF for an authenticated in-app preview ----
+    @action(detail=True, methods=['get'], url_path='original-pdf')
+    def original_pdf(self, request, pk=None):
+        document = self.get_object()
+        if not document.pdf_file:
+            raise Http404('Original PDF not found')
+        try:
+            pdf = document.pdf_file.open('rb')
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            logger.warning(
+                '[IOWF] Original PDF unavailable for doc %s: %s',
+                document.id,
+                exc,
+            )
+            raise Http404('Original PDF not found') from exc
+
+        filename = document.pdf_file.name.rsplit('/', 1)[-1]
+        return FileResponse(
+            pdf,
+            content_type='application/pdf',
+            as_attachment=False,
+            filename=filename,
+        )
 
     # ---- patch a single extracted row --------------------------------
     @action(

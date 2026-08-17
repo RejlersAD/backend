@@ -54,7 +54,7 @@ def extract_document(pdf_bytes: bytes) -> Dict[str, Any]:
     comment_page_idx = [p['page_index'] for p in pages
                         if p['page_type'] == 'comments_sheet']
     io_page_idx      = [p['page_index'] for p in pages
-                        if p['page_type'] == 'io_table']
+                        if p['page_type'] in ('io_table', 'io_drawing')]
 
     comments = extract_comments_from_pages(pdf_bytes, comment_page_idx)
     io_rows  = extract_io_rows_from_pages(pdf_bytes, io_page_idx)
@@ -77,6 +77,10 @@ def extract_document(pdf_bytes: bytes) -> Dict[str, Any]:
             'io_table_pages':       len(io_page_idx),
             'comments_found':       len(comments),
             'io_rows_found':        len(io_rows),
+            'local_ocr_rows_found': sum(
+                1 for row in io_rows
+                if 'local OCR' in (row.get('remarks') or '')
+            ),
             'linked_comments':      sum(1 for c in comments if c.get('linked_tags')),
             'elapsed_seconds':      round(time.time() - started, 2),
             # Precomputed breakdown so the frontend chart never needs to
@@ -93,6 +97,10 @@ def extract_document(pdf_bytes: bytes) -> Dict[str, Any]:
             'vision_fallback_used': False,  # always False until opt-in wires it
             'vision_enabled':       ENABLE_VISION_FALLBACK,
             'llm_tokens_estimated': 0,
+            'local_ocr_used':       any(
+                'local OCR' in (row.get('remarks') or '')
+                for row in io_rows
+            ),
         },
     }
 
