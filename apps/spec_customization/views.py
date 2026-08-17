@@ -46,6 +46,7 @@ from .services.config import (
     SPEC_EXTRACTION_CONFIG,
     PROGRESS_CACHE_KEY_TPL,
     PARTIAL_CACHE_KEY_TPL,
+    BYOK_CONFIG,
 )
 from .services.file_normalizer import (
     SUPPORTED_FORMATS,
@@ -78,15 +79,35 @@ def _sha256_of_file(django_file) -> str:
     return h.hexdigest()
 
 
-def _page_count(django_file_path: str) -> int:
+def _page_count(file_field) -> int:
+    """
+    Count pages in a PDF file, works with both local and S3 storage.
+    
+    Args:
+        file_field: Django FileField (works with .path or .open())
+    
+    Returns:
+        Number of pages, or 0 if unable to determine
+    """
     try:
         import fitz
-        with fitz.open(django_file_path) as doc:
-            return doc.page_count
+        # For S3 storage, we need to read the file into memory
+        try:
+            # Try local path first (faster if available)
+            file_path = file_field.path
+            with fitz.open(file_path) as doc:
+                return doc.page_count
+        except (NotImplementedError, AttributeError):
+            # S3 storage doesn't support .path, read from file-like object
+            with file_field.open('rb') as f:
+                pdf_bytes = f.read()
+                with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                    return doc.page_count
     except Exception:
         try:
             import PyPDF2
-            with open(django_file_path, 'rb') as f:
+            # Try with file-like object (works with both local and S3)
+            with file_field.open('rb') as f:
                 return len(PyPDF2.PdfReader(f).pages)
         except Exception:
             return 0
@@ -122,7 +143,9 @@ def _ingest_paper_spec_file(
     title: str,
     document_number: str,
     engineer_name: str,       # BYOK attribution field
-    user_api_key: str,        # BYOK user-supplied OpenAI API key (optional)
+    user_api_key: str,        # BYOK user-supplied API key (OpenAI or Claude)
+    user_provider: str,       # BYOK provider: "openai", "claude", or ""
+    user_model: str,          # BYOK model ID (provider-specific)
     request_user,
 ):
     """Returns a DRF ``Response`` — same shape as the legacy upload view."""
@@ -169,7 +192,7 @@ def _ingest_paper_spec_file(
         document_number=document_number,
         uploaded_by=request_user if getattr(request_user, 'is_authenticated', False) else None,
     )
-    doc.total_pages = _page_count(doc.file.path)
+    doc.total_pages = _page_count(doc.file)
     doc.save(update_fields=['total_pages'])
 
     # BACKWARD COMPATIBILITY: Build job creation kwargs conditionally
@@ -184,7 +207,15 @@ def _ingest_paper_spec_file(
     if _model_has_field(PaperSpecExtractionJob, 'engineer_name'):
         job_kwargs['engineer_name'] = engineer_name
     if _model_has_field(PaperSpecExtractionJob, 'user_openai_api_key'):
-        job_kwargs['user_openai_api_key'] = user_api_key  # Stored temporarily; wiped after extraction completes
+        # Store API key temporarily; will be wiped after extraction completes
+        job_kwargs['user_openai_api_key'] = user_api_key if user_provider == "openai" else ""
+    # Add Claude BYOK fields if migration has been applied
+    if _model_has_field(PaperSpecExtractionJob, 'user_claude_api_key'):
+        job_kwargs['user_claude_api_key'] = user_api_key if user_provider == "claude" else ""
+    if _model_has_field(PaperSpecExtractionJob, 'user_ai_provider'):
+        job_kwargs['user_ai_provider'] = user_provider
+    if _model_has_field(PaperSpecExtractionJob, 'user_ai_model'):
+        job_kwargs['user_ai_model'] = user_model
     
     job = PaperSpecExtractionJob.objects.create(**job_kwargs)
 
@@ -254,7 +285,9 @@ def upload_paper_spec(request):
             title=request.data.get('title') or '',
             document_number=request.data.get('document_number') or '',
             engineer_name=request.data.get('engineer_name') or '',          # BYOK attribution
-            user_api_key=request.data.get('user_openai_api_key') or '',     # BYOK user API key
+            user_api_key=request.data.get('user_api_key') or '',            # BYOK user API key (OpenAI or Claude)
+            user_provider=request.data.get('user_ai_provider') or '',       # BYOK provider: "openai" or "claude"
+            user_model=request.data.get('user_ai_model') or '',             # BYOK model ID
             request_user=request.user,
         )
     except Exception as e:
@@ -352,7 +385,9 @@ def complete_paper_spec_upload(request):
     title             = request.data.get('title') or ''
     document_number   = request.data.get('document_number') or ''
     engineer_name     = request.data.get('engineer_name') or ''          # BYOK attribution
-    user_api_key      = request.data.get('user_openai_api_key') or ''   # BYOK user API key
+    user_api_key      = request.data.get('user_api_key') or ''           # BYOK user API key (OpenAI or Claude)
+    user_provider     = request.data.get('user_ai_provider') or ''       # BYOK provider: "openai" or "claude"
+    user_model        = request.data.get('user_ai_model') or ''          # BYOK model ID
 
     if not s3_key or not original_filename:
         return Response(
@@ -381,7 +416,9 @@ def complete_paper_spec_upload(request):
             title=title,
             document_number=document_number,
             engineer_name=engineer_name,      # BYOK attribution
-            user_api_key=user_api_key,        # BYOK user API key
+            user_api_key=user_api_key,        # BYOK user API key (OpenAI or Claude)
+            user_provider=user_provider,      # BYOK provider: "openai" or "claude"
+            user_model=user_model,            # BYOK model ID
             request_user=request.user,
         )
     finally:
@@ -599,6 +636,8 @@ def config_view(request):
             "max_bytes":           PRESIGNED_UPLOAD_CONFIG["max_bytes"],
             "url_expiry_seconds":  PRESIGNED_UPLOAD_CONFIG["url_expiry_seconds"],
         },
+        # BYOK configuration — provider options, models, validation patterns.
+        "byok": BYOK_CONFIG,
     })
 
 

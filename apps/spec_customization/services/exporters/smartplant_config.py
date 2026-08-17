@@ -3063,6 +3063,87 @@ def _pcf_short_code_for_component(c) -> str:
             'valve': 'Valve'}.get(ctype, 'Pipe Fitting')  # final fallback — never blank
 
 
+def _generate_custom_size_range_rows(base_row: dict, cls_token: str, prefix: str) -> list[dict]:
+    """Generate custom size range entries for PipingCommodityFilter.
+    
+    When the trigger size (e.g., 1.5") is encountered, this function generates
+    additional rows with custom from-to size ranges for better filtering granularity.
+    
+    User requirement: "whenever you find 1.5" (11/2), introduce records ranging from
+    0.25 to 0.5, 0.5 to 0.75, 0.75 to 1.0, 1.0 to 1.25, 1.25 to 1.50"
+    
+    Args:
+        base_row: The standard PCF row dict to use as a template
+        cls_token: Safe class token for ICC generation
+        prefix: ICC prefix (e.g., 'RAD_CMP')
+    
+    Returns:
+        List of custom range row dicts
+    """
+    try:
+        from ..config import CUSTOM_SIZE_RANGE_CONFIG
+    except ImportError:
+        return []
+    
+    if not CUSTOM_SIZE_RANGE_CONFIG.get('enable_custom_ranges', False):
+        return []
+    
+    custom_rows = []
+    trigger_size = CUSTOM_SIZE_RANGE_CONFIG.get('trigger_size', 1.5)
+    custom_ranges = CUSTOM_SIZE_RANGE_CONFIG.get('custom_ranges', [])
+    include_full_range = CUSTOM_SIZE_RANGE_CONFIG.get('include_full_range', True)
+    log_enabled = CUSTOM_SIZE_RANGE_CONFIG.get('log_custom_ranges', True)
+    
+    # Check if we should generate custom ranges (only when trigger_size appears)
+    current_size = _to_float_npd(base_row.get('FirstSizeFrom'))
+    if current_size != trigger_size:
+        return []
+    
+    if log_enabled:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"[CustomSizeRange] Generating {len(custom_ranges)} custom range entries "
+            f"for size {trigger_size}\" (SpecName: {base_row.get('SpecName')})"
+        )
+    
+    # Generate custom range entries
+    for range_spec in custom_ranges:
+        from_size = range_spec.get('from')
+        to_size = range_spec.get('to')
+        label = range_spec.get('label', f'{from_size}" to {to_size}"')
+        
+        # Create ICC for this range
+        from_token = _npd_token(from_size)
+        to_token = _npd_token(to_size)
+        range_icc = f'{prefix}_{cls_token}_{from_token}_to_{to_token}'
+        
+        # Clone base row and update size fields
+        range_row = dict(base_row)
+        range_row['CommodityCode'] = range_icc
+        range_row['FirstSizeFrom'] = _normalize_npd(from_size)
+        range_row['FirstSizeTo'] = _normalize_npd(to_size)
+        range_row['ShortCode'] = f"{base_row.get('ShortCode', '')} {label}".strip()
+        
+        custom_rows.append(range_row)
+    
+    # Optionally include a full-range entry (0.25 to 1.5)
+    if include_full_range and custom_ranges:
+        first_from = custom_ranges[0].get('from')
+        last_to = custom_ranges[-1].get('to')
+        full_range_icc = f'{prefix}_{cls_token}_{_npd_token(first_from)}_to_{_npd_token(last_to)}'
+        
+        full_range_row = dict(base_row)
+        full_range_row['CommodityCode'] = full_range_icc
+        full_range_row['FirstSizeFrom'] = _normalize_npd(first_from)
+        full_range_row['FirstSizeTo'] = _normalize_npd(last_to)
+        full_range_row['ShortCode'] = f"{base_row.get('ShortCode', '')} (1/4\" to 1-1/2\")".strip()
+        
+        custom_rows.append(full_range_row)
+    
+    return custom_rows
+
+
 def _rows_piping_commodity_filter(cls):
     """Emit one PCF row per (component × NPD).
 
@@ -3070,12 +3151,19 @@ def _rows_piping_commodity_filter(cls):
     the 25+ side columns (FluidCode, MaxTemp, BendRadius, etc.) are filled
     automatically by `PIPING_COMMODITY_FILTER_DEFAULTS` so this builder
     stays small and the side defaults remain editable from a single place.
+    
+    CUSTOM SIZE RANGES: When trigger_size (e.g., 1.5") is encountered,
+    additional rows with custom from-to ranges are automatically generated
+    per CUSTOM_SIZE_RANGE_CONFIG for improved filtering granularity.
     """
     rows = []
     spec_name = _spec_name(cls)
     cls_token = _safe_class_token(cls)
     pressure  = _normalize_pressure_class(cls.pressure_rating)
     fluid_code = _infer_fluid_from_spec_name(spec_name) if '_infer_fluid_from_spec_name' in globals() else ''
+    
+    # Track if we've generated custom ranges (to avoid duplicates)
+    custom_ranges_generated = False
 
     for c in cls.components.all().order_by('display_order'):
         sheet = route_component_to_cat_sheet(c)
@@ -3094,7 +3182,7 @@ def _rows_piping_commodity_filter(cls):
         for npd in npds:
             icc = f'{prefix}_{cls_token}_{_npd_token(npd)}'
             first_size = _normalize_npd(npd)
-            rows.append({
+            base_row = {
                 # ── Identification (canonical SPEC↔CAT join key) ──────────
                 'SpecName':            spec_name,
                 'CommodityCode':       commodity_code_override or icc,
@@ -3122,7 +3210,17 @@ def _rows_piping_commodity_filter(cls):
                 'GeometricIndustryStandard': c.material_standard or '',
                 # ── Fluid (mirrors GasketSelectionFilter inference) ───────
                 'FluidCode':           fluid_code or 'Process Fluid',
-            })
+            }
+            rows.append(base_row)
+            
+            # ── Generate custom size range entries (user-defined bins) ────
+            # Only generate once per class (when trigger_size is first encountered)
+            if not custom_ranges_generated:
+                custom_rows = _generate_custom_size_range_rows(base_row, cls_token, prefix)
+                if custom_rows:
+                    rows.extend(custom_rows)
+                    custom_ranges_generated = True
+    
     return rows
 
 
