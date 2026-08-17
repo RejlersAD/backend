@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-08-17T10:08:30.258315",
+  "mode": "live",
+  "stats": {
+    "tables_synced": 0,
+    "records_synced": 0,
+    "tables_skipped": 66,
+    "errors": []
+  },
+  "missing_tables_count": 148,
+  "common_tables_count": 148
+}
