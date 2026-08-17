@@ -3442,7 +3442,10 @@ class AchievementViewSet(viewsets.ModelViewSet):
             raise ValidationError({'user_profile': str(exc)})
         except Exception as exc:
             logger.exception(f'[AchievementViewSet] Unexpected error getting profile')
-            raise ValidationError({'user_profile': f'Failed to get user profile: {str(exc)}'})
+            # Try using request.user_profile set by middleware as fallback
+            profile = getattr(self.request, 'user_profile', None)
+            if profile is None:
+                raise ValidationError({'detail': f'Failed to get user profile: {str(exc)}'})
 
         try:
             instance = serializer.save(user_profile=profile)
@@ -3527,7 +3530,10 @@ class WorkExperienceViewSet(viewsets.ModelViewSet):
             raise ValidationError({'user_profile': str(exc)})
         except Exception as exc:
             logger.exception(f'[WorkExperienceViewSet] Unexpected error getting profile')
-            raise ValidationError({'user_profile': f'Failed to get user profile: {str(exc)}'})
+            # Try using request.user_profile set by middleware as fallback
+            profile = getattr(self.request, 'user_profile', None)
+            if profile is None:
+                raise ValidationError({'detail': f'Failed to get user profile: {str(exc)}'})
 
         try:
             instance = serializer.save(user_profile=profile)
@@ -3602,7 +3608,10 @@ class SocialMediaLinkViewSet(viewsets.ModelViewSet):
             raise ValidationError({'user_profile': str(exc)})
         except Exception as exc:
             logger.exception(f'[SocialMediaLinkViewSet] Unexpected error getting profile')
-            raise ValidationError({'user_profile': f'Failed to get user profile: {str(exc)}'})
+            # Try using request.user_profile set by middleware as fallback
+            profile = getattr(self.request, 'user_profile', None)
+            if profile is None:
+                raise ValidationError({'detail': f'Failed to get user profile: {str(exc)}'})
 
         try:
             instance = serializer.save(user_profile=profile)
@@ -3844,7 +3853,10 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
                 logger.info(f'[ProfileDocument] User {user.email} uploading document for themselves')
             except ProfileProvisioningError as exc:
                 logger.error(f'[ProfileDocument] Profile provisioning error for user {user.email}: {str(exc)}')
-                raise ValidationError({'user_profile': str(exc)})
+                profile = getattr(self.request, 'user_profile', None)
+                if profile is None:
+                    raise ValidationError({'detail': str(exc)})
+                logger.info(f'[ProfileDocument] Using middleware profile fallback for user {user.email}')
 
         # Validate that document_file is provided for new uploads
         if 'document_file' not in self.request.FILES:
