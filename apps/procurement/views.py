@@ -392,6 +392,12 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             if manual_overrides is not None and not isinstance(manual_overrides, dict):
                 raise SignedPRImportError('Manual corrections must be a JSON object.')
 
+            raw_signature_overrides = request.data.get('manual_signature_overrides', '')
+            try:
+                manual_signature_overrides = json.loads(raw_signature_overrides) if raw_signature_overrides else None
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise SignedPRImportError('Manual signature verification must be a valid JSON object.') from exc
+
             result = import_signed_pr_pdf(
                 pdf_bytes,
                 filename=pdf_file.name,
@@ -401,6 +407,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 approval_date=str(request.data.get('approval_date', '')).strip(),
                 expected_pr_number=expected_pr_number,
                 manual_overrides=manual_overrides,
+                manual_signature_overrides=manual_signature_overrides,
             )
         except SignedPRImportError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)

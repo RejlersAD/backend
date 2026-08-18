@@ -30,6 +30,42 @@ class SignedPRImportError(ValueError):
     pass
 
 
+APPROVAL_ROLES = ("pm", "moe", "mop", "vp")
+
+
+def _apply_manual_signature_overrides(detected: dict, overrides: dict | None) -> dict:
+    """Combine detector results with signatures visually verified by the reviewer."""
+    if overrides is not None and not isinstance(overrides, dict):
+        raise SignedPRImportError("Manual signature verification must be a JSON object.")
+
+    unknown_roles = set(overrides or {}) - set(APPROVAL_ROLES)
+    if unknown_roles:
+        raise SignedPRImportError("Manual signature verification contains an unknown approval role.")
+    if any(value is not True for value in (overrides or {}).values()):
+        raise SignedPRImportError("Each manually verified signature must be confirmed with true.")
+
+    automatic = {
+        role: bool((detected.get("signatures") or {}).get(role))
+        for role in APPROVAL_ROLES
+    }
+    manual = {
+        role: bool((overrides or {}).get(role)) and not automatic[role]
+        for role in APPROVAL_ROLES
+    }
+    effective = {role: automatic[role] or manual[role] for role in APPROVAL_ROLES}
+    return {
+        **detected,
+        "automated_signatures": automatic,
+        "manual_signature_overrides": manual,
+        "signatures": effective,
+        "signature_sources": {
+            role: "automatic" if automatic[role] else "manual" if manual[role] else "missing"
+            for role in APPROVAL_ROLES
+        },
+        "all_four_signatures": all(effective.values()),
+    }
+
+
 def _clean(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip(" |\n\r\t")
 
@@ -753,6 +789,7 @@ def import_signed_pr_pdf(
     approval_date: str = "",
     expected_pr_number: str = "",
     manual_overrides: dict | None = None,
+    manual_signature_overrides: dict | None = None,
 ) -> dict:
     fields = extract_signed_pr_fields(
         pdf_bytes, filename,
@@ -763,7 +800,9 @@ def import_signed_pr_pdf(
         raise SignedPRImportError(
             f"Uploaded PDF is {fields['pr_number']}, but the edited record is {expected_pr_number}. Nothing was changed."
         )
-    detected = detect_approval_evidence(pdf_bytes)
+    detected = _apply_manual_signature_overrides(
+        detect_approval_evidence(pdf_bytes), manual_signature_overrides,
+    )
     signatures_verified = detected["all_four_signatures"] if signatures_verified is None else (
         signatures_verified and detected["all_four_signatures"]
     )
@@ -832,18 +871,24 @@ def import_signed_pr_pdf(
             "table_detected": detected.get("table_detected", False),
             "rows": detected.get("approval_rows", []),
             "signatures": detected.get("signatures", {}),
+            "automated_signatures": detected.get("automated_signatures", {}),
+            "manual_signature_overrides": detected.get("manual_signature_overrides", {}),
+            "signature_sources": detected.get("signature_sources", {}),
             "approver_names": detected.get("approver_names", {}),
             "date_present": detected.get("date_present", False),
             "date_ocr": detected.get("date_ocr", []),
         },
     })
-    if manual_overrides:
+    if manual_overrides or any(detected.get("manual_signature_overrides", {}).values()):
         metadata["manual_ocr_review"] = {
             "applied": True,
             "reviewed_at": timezone.now().isoformat(),
             "reviewed_by_id": str(uploaded_by.id),
             "reviewed_by_name": uploaded_by.get_full_name() or uploaded_by.email,
-            "corrected_fields": sorted(manual_overrides.keys()),
+            "corrected_fields": sorted((manual_overrides or {}).keys()),
+            "verified_signatures": [
+                role for role, verified in detected.get("manual_signature_overrides", {}).items() if verified
+            ],
         }
     pr.price_remarks_data = metadata
 
@@ -902,7 +947,7 @@ def import_signed_pr_pdf(
             "approved_at": approved_at.isoformat() if status == "approved" else None,
             "source": "signed_purchase_requisition_pdf",
         })
-        if signatures_verified and not user:
+        if detected["signatures"].get(key) and not user:
             workflow_issues.append(f"{role} signer '{approval_names.get(key, '')}' was not matched to a RADAI user.")
 
     if not approved_on:
@@ -940,6 +985,6 @@ def import_signed_pr_pdf(
         },
         "mapping_issues": mapping_issues,
         "workflow_issues": workflow_issues,
-        "manual_review_applied": bool(manual_overrides),
+        "manual_review_applied": bool(manual_overrides) or any(detected.get("manual_signature_overrides", {}).values()),
         "extracted_data": _serialize_extracted_fields(fields),
     }
