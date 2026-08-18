@@ -24,6 +24,53 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
+
+@shared_task(
+    name='finance.process_vendor_invoice_ocr', bind=True,
+    max_retries=2, default_retry_delay=15, time_limit=180,
+)
+def process_vendor_invoice_ocr(self, job_id: str) -> dict:
+    """Run supplier-invoice OCR outside the API request lifecycle."""
+    from django.core.files.storage import default_storage
+    from apps.finance.models import InvoiceOCRJob, InvoiceOCRJobStatus
+    from apps.finance.services.vendor_invoice_import import VendorInvoiceImportService
+
+    try:
+        job = InvoiceOCRJob.objects.get(pk=job_id)
+    except InvoiceOCRJob.DoesNotExist:
+        return {'job_id': job_id, 'status': 'not_found'}
+
+    job.status = InvoiceOCRJobStatus.PROCESSING
+    job.started_at = timezone.now()
+    job.error_message = ''
+    job.save(update_fields=['status', 'started_at', 'error_message'])
+    try:
+        with default_storage.open(job.file_path, 'rb') as handle:
+            result = VendorInvoiceImportService().preview(handle.read(), job.original_filename)
+        job.result = result
+        job.status = InvoiceOCRJobStatus.COMPLETED
+        job.completed_at = timezone.now()
+        job.save(update_fields=['result', 'status', 'completed_at'])
+        return {'job_id': job_id, 'status': 'completed'}
+    except Exception as exc:
+        logger.exception('Vendor invoice OCR job %s failed', job_id)
+        if self.request.retries < self.max_retries:
+            try:
+                raise self.retry(exc=exc)
+            except self.MaxRetriesExceededError:
+                pass
+        job.status = InvoiceOCRJobStatus.FAILED
+        job.error_message = str(exc)
+        job.completed_at = timezone.now()
+        job.save(update_fields=['status', 'error_message', 'completed_at'])
+        return {'job_id': job_id, 'status': 'failed', 'error': str(exc)}
+    finally:
+        if job.status in (InvoiceOCRJobStatus.COMPLETED, InvoiceOCRJobStatus.FAILED):
+            try:
+                default_storage.delete(job.file_path)
+            except Exception:
+                logger.warning('Could not delete OCR staging file %s', job.file_path)
+
 # ── Soft-coded retry / timeout constants ──────────────────────────────────────
 _PDF_MAX_RETRIES     = 3
 _PDF_RETRY_BACKOFF_S = 30

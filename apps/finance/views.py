@@ -21,11 +21,11 @@ import uuid
 # Import Data Visibility for Row-Level Security
 from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
 
-from .models import Invoice, Approval, ApprovalRoute, InvoiceStatus
+from .models import Invoice, Approval, ApprovalRoute, InvoiceStatus, InvoiceOCRJob
 from .serializers import (
     InvoiceListSerializer, InvoiceDetailSerializer, InvoiceUploadSerializer,
     ApprovalSerializer, ApprovalRouteSerializer, ApprovalDecisionSerializer,
-    InvoiceExportFilterSerializer
+    InvoiceExportFilterSerializer, InvoiceOCRJobSerializer, PayablePaymentSerializer,
 )
 from .services.workflow_service import FinanceWorkflowService
 from .services.export_service import InvoiceExportService
@@ -52,7 +52,15 @@ class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     queryset = Invoice.objects.all().order_by('-created_at')
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'finance'
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    @staticmethod
+    def _read_invoice_pdf(request):
+        uploaded_file = request.FILES.get('file')
+        if not uploaded_file:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'file': 'Select a supplier invoice PDF.'})
+        return uploaded_file, uploaded_file.read()
     
     def get_serializer_class(self):
         if self.action == 'list':
@@ -182,6 +190,113 @@ class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
                 {'error': 'Upload failed', 'details': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=False, methods=['post'], url_path='import-preview')
+    def import_preview(self, request):
+        """Queue OCR and return immediately with a durable polling identifier."""
+        import hashlib
+        from django.core.files.base import ContentFile
+        from .services.vendor_invoice_import import VendorInvoiceImportService
+        from .tasks import process_vendor_invoice_ocr
+
+        uploaded_file, pdf_bytes = self._read_invoice_pdf(request)
+        service = VendorInvoiceImportService()
+        service.validate_pdf(pdf_bytes, uploaded_file.name)
+        source_hash = hashlib.sha256(pdf_bytes).hexdigest()
+        duplicate = Invoice.objects.filter(source_file_sha256=source_hash).first()
+        if duplicate:
+            return Response({
+                'file': 'This exact PDF has already been recorded.',
+                'duplicate_invoice_id': duplicate.pk,
+                'duplicate_invoice_number': duplicate.invoice_number,
+            }, status=status.HTTP_400_BAD_REQUEST)
+        staged_path = default_storage.save(
+            f'invoice_ocr_queue/{uuid.uuid4()}.pdf', ContentFile(pdf_bytes),
+        )
+        job = InvoiceOCRJob.objects.create(
+            original_filename=uploaded_file.name[:500], file_path=staged_path[:1000],
+            source_file_sha256=source_hash, requested_by=request.user,
+        )
+        try:
+            process_vendor_invoice_ocr.delay(str(job.id))
+        except Exception:
+            default_storage.delete(staged_path)
+            job.delete()
+            raise
+        return Response({
+            'job_id': str(job.id), 'status': job.status,
+            'message': 'Invoice OCR queued for background processing.',
+        }, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=False, methods=['get'], url_path=r'ocr-jobs/(?P<job_id>[^/.]+)')
+    def ocr_job(self, request, job_id=None):
+        job = get_object_or_404(InvoiceOCRJob, pk=job_id, requested_by=request.user)
+        return Response(InvoiceOCRJobSerializer(job).data)
+
+    @action(detail=False, methods=['post'], url_path='import-reviewed')
+    def import_reviewed(self, request):
+        """Persist manually reviewed OCR fields and an explicitly confirmed PO match."""
+        from .services.vendor_invoice_import import (
+            VendorInvoiceImportService,
+            parse_reviewed_data,
+        )
+
+        uploaded_file, pdf_bytes = self._read_invoice_pdf(request)
+        reviewed_data = parse_reviewed_data(request.data.get('reviewed_data'))
+        invoice = VendorInvoiceImportService().save_reviewed(
+            pdf_bytes=pdf_bytes,
+            filename=uploaded_file.name,
+            reviewed_data=reviewed_data,
+            user=request.user,
+            expected_sha256=request.data.get('source_file_sha256', ''),
+        )
+        return Response(
+            {
+                'message': f'Successfully recorded {invoice.invoice_number}!',
+                'invoice': InvoiceDetailSerializer(invoice).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=False, methods=['get'], url_path='combined-summary')
+    def combined_summary(self, request):
+        """Read-only A/R + A/P summary; each currency remains isolated."""
+        from .services.combined_invoice_summary import build_combined_invoice_summary
+
+        return Response(build_combined_invoice_summary(payables=self.get_queryset()))
+
+    @action(detail=True, methods=['post'], url_path='reconcile-status')
+    def reconcile_status(self, request, pk=None):
+        from .services.payables import reconcile_invoice_status
+        invoice = self.get_object()
+        changed = reconcile_invoice_status(invoice, user=request.user)
+        invoice.refresh_from_db()
+        return Response({'changed_fields': changed, 'invoice': InvoiceDetailSerializer(invoice).data})
+
+    @action(detail=True, methods=['post'], url_path='run-three-way-match')
+    def run_three_way_match(self, request, pk=None):
+        from .services.payables import evaluate_three_way_match
+        invoice = self.get_object()
+        allocations = [
+            evaluate_three_way_match(allocation, user=request.user)
+            for allocation in invoice.po_allocations.select_related('purchase_order').all()
+        ]
+        invoice.refresh_from_db()
+        return Response({
+            'allocations_checked': len(allocations),
+            'invoice': InvoiceDetailSerializer(invoice).data,
+        })
+
+    @action(detail=True, methods=['post'], url_path='payment-operations')
+    def payment_operations(self, request, pk=None):
+        from .services.payables import record_payment_operation
+        invoice = self.get_object()
+        entry = record_payment_operation(invoice, request.data, request.user)
+        invoice.refresh_from_db()
+        return Response({
+            'operation': PayablePaymentSerializer(entry).data,
+            'invoice': InvoiceDetailSerializer(invoice).data,
+        }, status=status.HTTP_201_CREATED)
     
     @action(detail=True, methods=['get'])
     @method_decorator(xframe_options_exempt)

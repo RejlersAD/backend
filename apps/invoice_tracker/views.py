@@ -22,6 +22,7 @@ from rest_framework.decorators import action
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
 
 from .models import CustomerInvoice, InvoiceAttachment, PaymentStatus, InvoiceCategory
 from .serializers import CustomerInvoiceSerializer, InvoiceAttachmentSerializer
@@ -31,6 +32,12 @@ from .services.finance_engine import FINANCE_RULES, recompute
 
 # Soft-coded: aggregations exposed by /stats/
 STATS_STATUS_KEYS = [s.value for s in PaymentStatus]
+
+
+class CustomerInvoicePagination(PageNumberPagination):
+    page_size = 50
+    page_size_query_param = 'page_size'
+    max_page_size = 200
 
 
 class CustomerInvoiceViewSet(viewsets.ModelViewSet):
@@ -47,6 +54,7 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
     ordering_fields = ['invoice_date', 'due_date', 'grand_total',
                        'invoice_amount', 'payment_status', 'created_at']
     ordering = ['-invoice_date', '-id']
+    pagination_class = CustomerInvoicePagination
 
     # ── List filtering ─────────────────────────────────────────────
     def get_queryset(self):

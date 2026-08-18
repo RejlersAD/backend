@@ -94,13 +94,13 @@ class RequisitionWorkflowService:
         try:
             explicit_level = stage.get('level')
             if explicit_level not in (None, ''):
-                return max(1, int(explicit_level))
+                return max(0, int(explicit_level))
             # Compatibility for records created while the API was stripping
             # the explicit level field (for example "Level 1 - Approver 2").
             label = f"{stage.get('stage', '')} {stage.get('role', '')}"
             match = re.search(r'\blevel\s*(\d+)\b', label, re.IGNORECASE)
             if match:
-                return max(1, int(match.group(1)))
+                return max(0, int(match.group(1)))
             return index + 1
         except (TypeError, ValueError):
             return index + 1

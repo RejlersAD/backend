@@ -102,6 +102,17 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
         self.assertEqual([stage['status'] for stage in pr.approval_workflow_config], ['pending', 'pending'])
         self.assertNotIn('approved_by_id', pr.approval_workflow_config[0])
 
+    def test_level_zero_is_the_first_active_approval_level(self):
+        workflow = [
+            {'level': 0, 'role': 'Procurement Department', 'status': 'pending'},
+            {'level': 1, 'role': 'Level 1 Approver', 'status': 'pending'},
+        ]
+
+        level, stages = RequisitionWorkflowService._active_level_stages(self._pr(), workflow)
+
+        self.assertEqual(level, 0)
+        self.assertEqual(stages[0][1]['role'], 'Procurement Department')
+
     def test_only_issuer_can_submit(self):
         pr = self._pr()
 

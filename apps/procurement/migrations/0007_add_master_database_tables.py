@@ -11,7 +11,10 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('procurement', '0006_add_comprehensive_po_fields'),
-        ('finance', '__latest__'),  # Dependency on finance app for Invoice M2M
+        # PurchaseOrder.related_invoices only requires Invoice, created in
+        # finance.0001.  Never depend on ``__latest__`` across apps: doing so
+        # makes every later Finance -> Procurement relation circular.
+        ('finance', '0001_initial'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

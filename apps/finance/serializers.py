@@ -2,7 +2,16 @@
 Finance API Serializers
 """
 from rest_framework import serializers
-from .models import Invoice, Approval, AuditLog, ApprovalRoute
+from .models import (
+    Invoice,
+    InvoiceLineItem,
+    InvoicePurchaseOrderAllocation,
+    InvoiceOCRJob,
+    PayablePayment,
+    Approval,
+    AuditLog,
+    ApprovalRoute,
+)
 
 
 class AuditLogSerializer(serializers.ModelSerializer):
@@ -22,16 +31,84 @@ class ApprovalSerializer(serializers.ModelSerializer):
         read_only_fields = ['approval_token']
 
 
+class InvoiceLineItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InvoiceLineItem
+        fields = [
+            'id', 'line_number', 'description', 'quantity', 'unit_price',
+            'net_amount', 'tax_rate', 'tax_amount', 'total_amount', 'currency',
+            'po_item_reference', 'source_data', 'ocr_confidence',
+            'manually_verified', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class InvoicePurchaseOrderAllocationSerializer(serializers.ModelSerializer):
+    purchase_order_number = serializers.CharField(source='purchase_order.po_number', read_only=True)
+    receipt_numbers = serializers.SlugRelatedField(
+        source='receipts',
+        many=True,
+        read_only=True,
+        slug_field='receipt_number',
+    )
+
+    class Meta:
+        model = InvoicePurchaseOrderAllocation
+        fields = [
+            'id', 'purchase_order', 'purchase_order_number', 'receipt_numbers',
+            'allocated_amount', 'currency', 'match_method', 'match_status',
+            'match_confidence', 'po_amount_at_match', 'invoice_amount_at_match',
+            'amount_variance', 'tolerance_percentage', 'amount_within_tolerance',
+            'vendor_matched', 'currency_matched', 'receipt_required',
+            'exception_codes', 'match_evidence', 'line_items_matched',
+            'receipt_quantities_matched', 'review_notes', 'matched_by', 'matched_at',
+            'verified_by', 'verified_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class PayablePaymentSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PayablePayment
+        fields = [
+            'id', 'operation', 'amount', 'currency', 'effective_date',
+            'reference', 'notes', 'metadata', 'created_by',
+            'created_by_name', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_by_name', 'created_at']
+
+    def get_created_by_name(self, obj):
+        if not obj.created_by:
+            return None
+        return obj.created_by.get_full_name() or obj.created_by.email
+
+
+class InvoiceOCRJobSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InvoiceOCRJob
+        fields = [
+            'id', 'status', 'original_filename', 'source_file_sha256',
+            'result', 'error_message', 'created_at', 'started_at', 'completed_at',
+        ]
+        read_only_fields = fields
+
+
 class InvoiceListSerializer(serializers.ModelSerializer):
     invoice_type_display = serializers.CharField(source='get_invoice_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    vendor_master_name = serializers.CharField(source='vendor.name', read_only=True, allow_null=True)
     
     class Meta:
         model = Invoice
         fields = [
-            'id', 'tracking_id', 'invoice_number', 'vendor_name', 'invoice_date',
+            'id', 'tracking_id', 'invoice_number', 'vendor', 'vendor_master_name',
+            'vendor_name', 'invoice_date', 'received_date', 'due_date',
             'total_amount', 'currency', 'invoice_type', 'invoice_type_display',
-            'status', 'status_display', 'created_at', 'updated_at'
+            'status', 'status_display', 'procurement_status', 'match_status',
+            'payment_status', 'manual_review_required', 'po_reference_text',
+            'created_at', 'updated_at'
         ]
 
 
@@ -40,23 +117,34 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
     audit_logs = AuditLogSerializer(many=True, read_only=True)
     invoice_type_display = serializers.CharField(source='get_invoice_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    vendor_master_name = serializers.CharField(source='vendor.name', read_only=True, allow_null=True)
+    structured_line_items = InvoiceLineItemSerializer(many=True, read_only=True)
+    po_allocations = InvoicePurchaseOrderAllocationSerializer(many=True, read_only=True)
+    payment_operations = PayablePaymentSerializer(many=True, read_only=True)
     
     class Meta:
         model = Invoice
         fields = [
-            'id', 'tracking_id', 'invoice_number', 'vendor_name', 'invoice_date',
-            'amount', 'tax_amount', 'total_amount', 'currency',
+            'id', 'tracking_id', 'invoice_number', 'vendor', 'vendor_master_name',
+            'vendor_name', 'invoice_date', 'received_date', 'due_date', 'payment_terms',
+            'amount', 'tax_amount', 'total_amount', 'currency', 'vat_percentage',
+            'vat_registration_number', 'po_reference_text',
             'invoice_type', 'invoice_type_display',
             'classification_confidence', 'classification_reasoning',
-            'extracted_text', 'line_items',
+            'extracted_text', 'line_items', 'structured_line_items',
+            'ocr_metadata', 'ocr_confidence', 'manual_review_required',
+            'source_file_sha256', 'po_allocations',
             'original_filename', 'file_path',
-            'status', 'status_display',
+            'status', 'status_display', 'procurement_status', 'match_status',
+            'payment_status', 'procurement_reviewed_by', 'procurement_reviewed_at',
+            'finance_reviewed_by', 'finance_reviewed_at', 'scheduled_payment_date',
+            'payment_date', 'payment_reference', 'paid_amount',
             'submitted_by', 'created_at', 'updated_at', 'processed_at',
-            'approvals', 'audit_logs'
+            'approvals', 'audit_logs', 'payment_operations'
         ]
         read_only_fields = [
             'extracted_text', 'classification_confidence',
-            'classification_reasoning'
+            'classification_reasoning', 'structured_line_items', 'po_allocations'
         ]
 
 

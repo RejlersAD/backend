@@ -44,6 +44,24 @@ class PurchaseOrderNumberServiceTests(SimpleTestCase):
         with self.assertRaisesMessage(ValueError, 'company numbering standard'):
             PurchaseOrderNumberService.from_requisition('PR-42')
 
+    @patch.object(PurchaseOrderNumberService, 'next_number')
+    def test_reservation_uses_pr_scope_and_year(self, next_number):
+        next_number.return_value = 'RAD-GEN-PUR-0101_2025'
+
+        number = PurchaseOrderNumberService.next_for_requisition('RAD-GEN-PR-0042_2025')
+
+        self.assertEqual(number, 'RAD-GEN-PUR-0101_2025')
+        next_number.assert_called_once_with('general', year=2025)
+
+    def test_verification_rejects_short_manual_sequence(self):
+        verified, message = PurchaseOrderNumberService.verify(
+            'RAD-PRJ-PUR-42_2026',
+            'RAD-PRJ-PR-0042_2026',
+        )
+
+        self.assertFalse(verified)
+        self.assertIn('RAD-{GEN|PRJ}-PUR-####_YYYY', message)
+
     def test_verification_checks_pr_scope_and_year_but_allows_independent_sequence(self):
         verified, _ = PurchaseOrderNumberService.verify(
             'RAD-PRJ-PUR-0042_2026',

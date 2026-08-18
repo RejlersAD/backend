@@ -85,6 +85,7 @@ from .serializers import (
 from .services.requisition_workflow import RequisitionWorkflowService
 from .services.requisition_conversion import RequisitionConversionService
 from .services.purchase_order_numbering import PurchaseOrderNumberService
+from .services.purchase_order_approvals import pending_entries_for, record_decision
 from .services.requisition_status import canonicalize_pr_status, stored_values_for
 
 # Soft-coded pagination for vendor list - supports large page_size
@@ -196,6 +197,24 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     parser_classes = [FormParser, MultiPartParser, JSONParser]
 
     def get_permissions(self):
+        # Approval stages may be assigned to any active employee. The workflow
+        # service verifies that the signed-in user owns the current stage, so
+        # those employees do not also need procurement module access.
+        approval_actions = {
+            'pending_for_me',
+            'pm_approve',
+            'pm_reject',
+            'vp_approve',
+            'vp_reject',
+            'eng_manager_approve',
+            'eng_manager_reject',
+            'manager_projects_approve',
+            'manager_projects_reject',
+            'process_dynamic_approval',
+        }
+        if getattr(self, 'action', None) in approval_actions:
+            return [IsAuthenticated()]
+
         # Conversion creates a Purchase Order and therefore requires order
         # module access in addition to authentication.
         if getattr(self, 'action', None) == 'convert_to_po':
@@ -692,7 +711,25 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'project_manager': ['Project Manager', 'PM', 'Manager - Projects'],
             'engineering_manager': ['Engineering Manager', 'Manager - Engineering', 'Eng Manager'],
             'manager_projects': ['Manager of Projects', 'Manager - Projects', 'Projects Manager'],
-            'vp_operations': ['VP Operations', 'Vice President Operations', 'VP - Operations', 'Vice President of Operation'],
+            'vp_operations': ['VP Delivery', 'Vice President Delivery', 'VP Operations', 'Vice President Operations', 'VP - Operations', 'Vice President of Operation', 'Project Delivery', 'Operations & Project Delivery'],
+            'finance': ['Finance Manager', 'Finance Controller', 'Financial Controller', 'Accountant'],
+            'procurement_head': ['Head of Procurement', 'Procurement Head'],
+            'ict_head_admin': ['ICT Administrator', 'ICT Head Admin', 'Head of ICT'],
+            'super_admin': ['Super Administrator'],
+        }
+        assigned_role_mapping = {
+            'procurement_head': {
+                'codes': ['head_of_procurement', 'head_procurement', 'procurement_head'],
+                'names': ['Head of Procurement', 'Procurement Head'],
+            },
+            'ict_head_admin': {
+                'codes': ['ict_admin', 'ict_head_admin', 'head_of_ict'],
+                'names': ['ICT Administrator', 'ICT Head Admin', 'Head of ICT'],
+            },
+            'super_admin': {
+                'codes': ['super_admin', 'superadmin'],
+                'names': ['Super Administrator', 'Super Admin'],
+            },
         }
         # Soft-coded: the dropdown must always let the requester pick ANY active
         # user as the approver G�� job_title is only used to surface the most
@@ -724,7 +761,32 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         profiles = UserProfile.objects.filter(
             status='active', is_deleted=False, user__is_active=True,
         ).select_related('user').distinct()
-        if role != 'any_active':
+        if role in assigned_role_mapping:
+            assigned_role_q = Q()
+            for code in assigned_role_mapping[role]['codes']:
+                assigned_role_q |= Q(roles__code__iexact=code)
+            for name in assigned_role_mapping[role]['names']:
+                assigned_role_q |= Q(roles__name__iexact=name)
+            if role == 'super_admin':
+                profiles = profiles.filter(
+                    Q(user__is_superuser=True)
+                    | Q(assigned_role_q, roles__is_active=True)
+                ).distinct()
+            else:
+                profiles = profiles.filter(
+                    assigned_role_q,
+                    roles__is_active=True,
+                ).distinct()
+        elif role == 'finance':
+            profiles = profiles.filter(
+                Q(department__icontains='finance')
+                | Q(department__icontains='financial')
+                | Q(department__icontains='account')
+                | Q(roles__is_active=True, roles__modules__code__istartswith='finance', roles__modules__is_active=True)
+                | Q(roles__is_active=True, roles__modules__code__istartswith='invoice', roles__modules__is_active=True)
+                | Q(roles__is_active=True, roles__modules__code__istartswith='account', roles__modules__is_active=True)
+            ).distinct()
+        elif role != 'any_active':
             profiles = profiles.filter(
                 Q(user__is_superuser=True)
                 | Q(
@@ -747,6 +809,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         for profile in profiles:
             users_list.append({
                 'id': str(profile.user.id),
+                'username': profile.user.get_username(),
                 'email': profile.user.email,
                 'full_name': profile.user.get_full_name(),
                 'first_name': profile.user.first_name,
@@ -755,6 +818,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 'department': profile.department,
                 'employee_id': profile.employee_id,
                 'job_title_match': profile.user_id in matched_user_ids,
+                'is_current_user': profile.user_id == request.user.id,
             })
         
         return Response({
@@ -1616,11 +1680,19 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all().select_related(
         'vendor', 'pr_reference'
-    ).prefetch_related('receipts').order_by('-created_at')
+    ).prefetch_related('receipts').order_by('-created_at', '-id')
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_orders'
     pagination_class = VendorPagination
+
+    def get_permissions(self):
+        # Any active employee may be selected as a PO approver. Assignment is
+        # enforced inside the approval actions, so procurement module access is
+        # not required merely to view or action that employee's own queue.
+        if self.action in {'pending_for_me', 'approve', 'reject'}:
+            return [IsAuthenticated()]
+        return super().get_permissions()
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1641,7 +1713,206 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
                 Q(vendor__name__icontains=search)
             )
         
-        return queryset
+        return queryset.order_by('-created_at', '-id')
+
+    @action(detail=False, methods=['get'], url_path='pending-for-me')
+    def pending_for_me(self, request):
+        queue = pending_entries_for(
+            request.user,
+            self.get_queryset().select_related('created_by'),
+        )
+        if str(request.query_params.get('count_only') or '').lower() == 'true':
+            return Response({'count': len(queue), 'pending_count': len(queue), 'results': []})
+
+        results = []
+        for order, index, entry in queue[:100]:
+            payload = self.get_serializer(order).data
+            payload.update({
+                'approval_queue_id': f'{order.id}:{index}',
+                'approval_stage': entry.get('stage'),
+                'approval_status': entry.get('status'),
+                'approver_name': entry.get('approver'),
+            })
+            results.append(payload)
+        return Response({'count': len(queue), 'pending_count': len(queue), 'results': results})
+
+    def _record_approval_decision(self, request, decision):
+        order = self.get_object()
+        note = request.data.get('note') or request.data.get('reason') or ''
+        stage = request.data.get('approval_stage') or ''
+        updated, entry = record_decision(order, request.user, decision, stage=stage, comment=note)
+        return Response({
+            'message': f"{entry['stage']} {entry['status'].lower()} successfully.",
+            'approval': entry,
+            'purchase_order': self.get_serializer(updated).data,
+        })
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        return self._record_approval_decision(request, 'approve')
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        return self._record_approval_decision(request, 'reject')
+
+    @action(detail=False, methods=['get'], url_path='available-requisitions')
+    def available_requisitions(self, request):
+        """All existing PRs available for Purchase Order linkage."""
+        queryset = PurchaseRequisition.objects.select_related(
+            'issued_by', 'vendor', 'requested_by', 'approved_by', 'pm_name',
+            'eng_manager_name', 'manager_projects_name', 'vp_op_name',
+        ).all().order_by('-created_at')
+
+        search = str(request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(pr_number__icontains=search)
+                | Q(title__icontains=search)
+                | Q(product_service__icontains=search)
+                | Q(supplier_name__icontains=search)
+                | Q(project_department__icontains=search)
+            )
+
+        serializer = PurchaseRequisitionSerializer(
+            queryset,
+            many=True,
+            context=self.get_serializer_context(),
+        )
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='available-projects')
+    def available_projects(self, request):
+        """Unified procurement-master and company-core projects for PO linkage."""
+        queryset = Project.objects.select_related(
+            'cost_center', 'project_manager', 'lead_engineer'
+        ).prefetch_related('team_members', 'budgets').order_by('project_number', 'project_name')
+        core_queryset = CoreProject.objects.all().order_by('code', 'name')
+
+        search = str(request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(project_number__icontains=search)
+                | Q(project_name__icontains=search)
+            )
+            core_queryset = core_queryset.filter(
+                Q(code__icontains=search) | Q(name__icontains=search)
+            )
+
+        master_projects = ProjectListSerializer(
+            queryset,
+            many=True,
+            context=self.get_serializer_context(),
+        ).data
+        for project in master_projects:
+            project['source'] = 'procurement_master'
+
+        master_numbers = {
+            str(project['project_number']).strip().lower()
+            for project in master_projects
+        }
+        core_projects = [
+            {
+                'id': f'core:{project.id}',
+                'source_project_id': str(project.id),
+                'source': 'core',
+                'project_number': project.code,
+                'project_name': project.name,
+                'status': project.status,
+                'status_display': project.get_status_display(),
+                'client_name': project.client_name,
+                'is_active': project.status not in {'cancelled'},
+            }
+            for project in core_queryset
+            if str(project.code).strip().lower() not in master_numbers
+        ]
+        combined = [*master_projects, *core_projects]
+        combined.sort(key=lambda project: (
+            str(project.get('project_number') or '').lower(),
+            str(project.get('project_name') or '').lower(),
+        ))
+        return Response(combined)
+
+    @action(detail=False, methods=['post'], url_path='create-project')
+    def create_project(self, request):
+        """Create a minimal master project while preparing a Purchase Order."""
+        source_project_id = request.data.get('source_project_id')
+        source_project = None
+        if source_project_id:
+            source_project = CoreProject.objects.filter(pk=source_project_id).first()
+            if source_project is None:
+                return Response(
+                    {'source_project_id': 'The selected company project was not found.'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+        project_number = str(
+            source_project.code if source_project else request.data.get('project_number') or ''
+        ).strip()
+        project_name = str(
+            source_project.name if source_project else request.data.get('project_name') or request.data.get('title') or ''
+        ).strip()
+        errors = {}
+        if not project_number:
+            errors['project_number'] = 'Project number is required.'
+        if not project_name:
+            errors['project_name'] = 'Project title is required.'
+        if errors:
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+
+        existing = Project.objects.filter(project_number__iexact=project_number).first()
+        if existing:
+            if source_project:
+                payload = ProjectListSerializer(existing, context=self.get_serializer_context()).data
+                payload['source'] = 'procurement_master'
+                return Response(payload, status=status.HTTP_200_OK)
+            return Response(
+                {'project_number': f'Project number {existing.project_number} already exists.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        project_data = {'project_number': project_number, 'project_name': project_name}
+        if source_project:
+            project_data.update({
+                'client_name': source_project.client_name,
+                'status': source_project.status if source_project.status in {
+                    'planning', 'active', 'on_hold', 'completed', 'cancelled'
+                } else 'planning',
+            })
+        serializer = ProjectListSerializer(
+            data=project_data,
+            context=self.get_serializer_context(),
+        )
+        serializer.is_valid(raise_exception=True)
+        project = serializer.save()
+        payload = ProjectListSerializer(project, context=self.get_serializer_context()).data
+        payload['source'] = 'procurement_master'
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], url_path='reserve-number')
+    def reserve_number(self, request):
+        """Reserve the next authoritative PO number for a selected PR."""
+        pr_id = request.data.get('pr_reference')
+        if not pr_id:
+            return Response(
+                {'pr_reference': 'Select an existing Purchase Requisition.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            requisition = PurchaseRequisition.objects.get(pk=pr_id)
+            po_number = PurchaseOrderNumberService.next_for_requisition(requisition.pr_number)
+        except PurchaseRequisition.DoesNotExist:
+            return Response(
+                {'pr_reference': 'The selected Purchase Requisition was not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except ValueError as exc:
+            return Response({'pr_reference': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'po_number': po_number,
+            'pr_reference': str(requisition.id),
+            'pr_number': requisition.pr_number,
+        })
 
     @action(
         detail=False,

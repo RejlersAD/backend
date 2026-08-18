@@ -4,6 +4,7 @@ Converted from SQLAlchemy to Django ORM
 """
 from django.db import models
 from django.contrib.auth import get_user_model
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.utils import timezone
 import uuid
 
@@ -34,6 +35,47 @@ class ApprovalStatus(models.TextChoices):
     REJECTED = 'rejected', 'Rejected'
 
 
+class ProcurementInvoiceStatus(models.TextChoices):
+    """A/P lifecycle layered over the legacy extraction/approval status."""
+    OCR_REVIEW = 'ocr_review', 'OCR Review'
+    READY_FOR_MATCHING = 'ready_for_matching', 'Ready for Matching'
+    PROCUREMENT_REVIEW = 'procurement_review', 'Procurement Review'
+    FINANCE_REVIEW = 'finance_review', 'Finance Review'
+    APPROVED_FOR_PAYMENT = 'approved_for_payment', 'Approved for Payment'
+    REJECTED = 'rejected', 'Rejected'
+    CLOSED = 'closed', 'Closed'
+
+
+class InvoiceMatchStatus(models.TextChoices):
+    UNMATCHED = 'unmatched', 'Unmatched'
+    AUTO_MATCHED = 'auto_matched', 'Automatically Matched'
+    MANUAL_MATCHED = 'manual_matched', 'Manually Matched'
+    EXCEPTION = 'exception', 'Matching Exception'
+    VERIFIED = 'verified', 'Verified'
+
+
+class InvoicePaymentStatus(models.TextChoices):
+    NOT_SCHEDULED = 'not_scheduled', 'Not Scheduled'
+    SCHEDULED = 'scheduled', 'Scheduled'
+    PARTIAL = 'partial', 'Partially Paid'
+    PAID = 'paid', 'Paid'
+    ON_HOLD = 'on_hold', 'On Hold'
+    CANCELLED = 'cancelled', 'Cancelled'
+
+
+class AllocationMatchMethod(models.TextChoices):
+    AUTOMATIC = 'automatic', 'Automatic'
+    MANUAL = 'manual', 'Manual'
+    IMPORTED = 'imported', 'Imported'
+
+
+class InvoiceOCRJobStatus(models.TextChoices):
+    QUEUED = 'queued', 'Queued'
+    PROCESSING = 'processing', 'Processing'
+    COMPLETED = 'completed', 'Completed'
+    FAILED = 'failed', 'Failed'
+
+
 class Invoice(models.Model):
     """Invoice model - stores all invoice data and processing status"""
     
@@ -49,15 +91,38 @@ class Invoice(models.Model):
     email_date = models.DateTimeField(null=True, blank=True)
     
     # Invoice details
-    invoice_number = models.CharField(max_length=100, unique=True, db_index=True)
+    # Supplier invoice numbers are only unique inside a vendor account. Two
+    # different suppliers can legitimately issue the same invoice number.
+    invoice_number = models.CharField(max_length=100, db_index=True)
     vendor_name = models.CharField(max_length=500, null=True, blank=True)  # Increased from 255
     invoice_date = models.DateField(null=True, blank=True)
+    received_date = models.DateField(null=True, blank=True, db_index=True)
+    due_date = models.DateField(null=True, blank=True, db_index=True)
+    payment_terms = models.CharField(max_length=300, blank=True, default='')
     
     # Amounts
     amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     currency = models.CharField(max_length=10, default='AED')
     tax_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    vat_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    vat_registration_number = models.CharField(max_length=100, blank=True, default='')
+
+    # Procurement master-data linkage. Keep vendor_name for OCR and legacy rows.
+    vendor = models.ForeignKey(
+        'procurement.Vendor',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='vendor_invoices',
+    )
+    po_reference_text = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text='PO reference captured from the invoice before confirmed allocation.',
+    )
     
     # Classification
     invoice_type = models.CharField(
@@ -72,6 +137,16 @@ class Invoice(models.Model):
     # Extracted data
     extracted_text = models.TextField(null=True, blank=True)
     line_items = models.JSONField(null=True, blank=True)  # Store as JSON
+    ocr_metadata = models.JSONField(default=dict, blank=True)
+    ocr_confidence = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    manual_review_required = models.BooleanField(default=True, db_index=True)
+    source_file_sha256 = models.CharField(max_length=64, blank=True, default='', db_index=True)
     
     # File storage
     original_filename = models.CharField(max_length=500)  # Increased from 255
@@ -83,6 +158,46 @@ class Invoice(models.Model):
         choices=InvoiceStatus.choices,
         default=InvoiceStatus.PENDING_EXTRACTION
     )
+    procurement_status = models.CharField(
+        max_length=30,
+        choices=ProcurementInvoiceStatus.choices,
+        default=ProcurementInvoiceStatus.OCR_REVIEW,
+        db_index=True,
+    )
+    match_status = models.CharField(
+        max_length=20,
+        choices=InvoiceMatchStatus.choices,
+        default=InvoiceMatchStatus.UNMATCHED,
+        db_index=True,
+    )
+    payment_status = models.CharField(
+        max_length=20,
+        choices=InvoicePaymentStatus.choices,
+        default=InvoicePaymentStatus.NOT_SCHEDULED,
+        db_index=True,
+    )
+
+    # Procurement / Finance review and settlement audit fields.
+    procurement_reviewed_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='procurement_reviewed_vendor_invoices',
+    )
+    procurement_reviewed_at = models.DateTimeField(null=True, blank=True)
+    finance_reviewed_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='finance_reviewed_vendor_invoices',
+    )
+    finance_reviewed_at = models.DateTimeField(null=True, blank=True)
+    scheduled_payment_date = models.DateField(null=True, blank=True)
+    payment_date = models.DateField(null=True, blank=True)
+    payment_reference = models.CharField(max_length=150, blank=True, default='')
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     
     # Submitter (optional - linked to RAD AI user)
     submitted_by = models.ForeignKey(
@@ -105,6 +220,30 @@ class Invoice(models.Model):
             models.Index(fields=['status']),
             models.Index(fields=['invoice_type']),
             models.Index(fields=['created_at']),
+            models.Index(fields=['vendor', 'procurement_status']),
+            models.Index(fields=['match_status', 'payment_status']),
+            models.Index(fields=['due_date', 'payment_status']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(paid_amount__gte=0),
+                name='finance_invoice_paid_amount_nonnegative',
+            ),
+            models.UniqueConstraint(
+                fields=['source_file_sha256'],
+                condition=~models.Q(source_file_sha256=''),
+                name='finance_invoice_unique_source_hash',
+            ),
+            models.UniqueConstraint(
+                models.functions.Lower('invoice_number'), 'vendor',
+                condition=models.Q(vendor__isnull=False),
+                name='finance_invoice_unique_number_per_vendor_ci',
+            ),
+            models.UniqueConstraint(
+                models.functions.Lower('invoice_number'),
+                condition=models.Q(vendor__isnull=True),
+                name='finance_invoice_unique_unlinked_number_ci',
+            ),
         ]
     
     def __str__(self):
@@ -113,14 +252,222 @@ class Invoice(models.Model):
     def save(self, *args, **kwargs):
         """Override save to generate tracking_id if not present"""
         if not self.tracking_id:
-            from datetime import datetime
             # Generate tracking ID: RAD-INV-YYYYMMDD-XXXX
-            date_str = datetime.now().strftime('%Y%m%d')
+            today = timezone.localdate()
+            date_str = today.strftime('%Y%m%d')
             # Get count of invoices created today
-            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            today_count = Invoice.objects.filter(created_at__gte=today_start).count() + 1
+            today_count = Invoice.objects.filter(created_at__date=today).count() + 1
             self.tracking_id = f"RAD-INV-{date_str}-{today_count:04d}"
         super().save(*args, **kwargs)
+
+
+class InvoiceLineItem(models.Model):
+    """Normalized invoice line used by OCR review and later three-way matching."""
+
+    invoice = models.ForeignKey(
+        Invoice,
+        on_delete=models.CASCADE,
+        related_name='structured_line_items',
+    )
+    line_number = models.PositiveIntegerField()
+    description = models.TextField(blank=True, default='')
+    quantity = models.DecimalField(max_digits=18, decimal_places=4, null=True, blank=True)
+    unit_price = models.DecimalField(max_digits=18, decimal_places=4, null=True, blank=True)
+    net_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    tax_rate = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    tax_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    total_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=10, blank=True, default='')
+    po_item_reference = models.CharField(max_length=100, blank=True, default='')
+    source_data = models.JSONField(default=dict, blank=True)
+    ocr_confidence = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    manually_verified = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['line_number', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['invoice', 'line_number'],
+                name='finance_invoice_unique_line_number',
+            ),
+        ]
+        indexes = [models.Index(fields=['invoice', 'line_number'])]
+
+    def __str__(self):
+        return f"{self.invoice.invoice_number} line {self.line_number}"
+
+
+class InvoicePurchaseOrderAllocation(models.Model):
+    """Auditable allocation and match evidence between an invoice and a PO."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    invoice = models.ForeignKey(
+        Invoice,
+        on_delete=models.CASCADE,
+        related_name='po_allocations',
+    )
+    purchase_order = models.ForeignKey(
+        'procurement.PurchaseOrder',
+        on_delete=models.PROTECT,
+        related_name='invoice_allocations',
+    )
+    receipts = models.ManyToManyField(
+        'procurement.Receipt',
+        blank=True,
+        related_name='invoice_allocations',
+    )
+    allocated_amount = models.DecimalField(max_digits=18, decimal_places=2)
+    currency = models.CharField(max_length=10, default='AED')
+    match_method = models.CharField(
+        max_length=20,
+        choices=AllocationMatchMethod.choices,
+        default=AllocationMatchMethod.MANUAL,
+    )
+    match_status = models.CharField(
+        max_length=20,
+        choices=InvoiceMatchStatus.choices,
+        default=InvoiceMatchStatus.UNMATCHED,
+        db_index=True,
+    )
+    match_confidence = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    po_amount_at_match = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    invoice_amount_at_match = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    amount_variance = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    tolerance_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=5,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    amount_within_tolerance = models.BooleanField(default=False)
+    vendor_matched = models.BooleanField(default=False)
+    currency_matched = models.BooleanField(default=False)
+    receipt_required = models.BooleanField(default=True)
+    exception_codes = models.JSONField(default=list, blank=True)
+    match_evidence = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Snapshot of PO, invoice-line, and receipt quantity/value checks.',
+    )
+    line_items_matched = models.BooleanField(default=False)
+    receipt_quantities_matched = models.BooleanField(default=False)
+    review_notes = models.TextField(blank=True, default='')
+    matched_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='matched_vendor_invoice_allocations',
+    )
+    matched_at = models.DateTimeField(null=True, blank=True)
+    verified_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='verified_vendor_invoice_allocations',
+    )
+    verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['invoice', 'purchase_order'],
+                name='finance_invoice_unique_po_allocation',
+            ),
+            models.CheckConstraint(
+                check=models.Q(allocated_amount__gte=0),
+                name='finance_invoice_allocation_nonnegative',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['purchase_order', 'match_status']),
+            models.Index(fields=['invoice', 'match_status']),
+        ]
+
+    def __str__(self):
+        return f"{self.invoice.invoice_number} -> {self.purchase_order.po_number}"
+
+
+class InvoiceOCRJob(models.Model):
+    """Durable asynchronous OCR job used by the A/P import preview."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    status = models.CharField(
+        max_length=20,
+        choices=InvoiceOCRJobStatus.choices,
+        default=InvoiceOCRJobStatus.QUEUED,
+        db_index=True,
+    )
+    original_filename = models.CharField(max_length=500)
+    file_path = models.CharField(max_length=1000)
+    source_file_sha256 = models.CharField(max_length=64, db_index=True)
+    result = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True, default='')
+    requested_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='invoice_ocr_jobs',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['requested_by', 'status', '-created_at'])]
+
+
+class PayablePayment(models.Model):
+    """Immutable payment-operation ledger for supplier invoices."""
+
+    class Operation(models.TextChoices):
+        SCHEDULE = 'schedule', 'Schedule'
+        PAYMENT = 'payment', 'Payment'
+        HOLD = 'hold', 'Hold'
+        RELEASE = 'release', 'Release Hold'
+        CANCEL = 'cancel', 'Cancel'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name='payment_operations')
+    operation = models.CharField(max_length=20, choices=Operation.choices, db_index=True)
+    amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=10, default='AED')
+    effective_date = models.DateField(null=True, blank=True)
+    reference = models.CharField(max_length=150, blank=True, default='')
+    notes = models.TextField(blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='payable_payment_operations',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['invoice', 'operation', '-created_at'])]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(amount__isnull=True) | models.Q(amount__gt=0),
+                name='finance_payable_payment_positive_amount',
+            ),
+        ]
 
 
 class Approval(models.Model):

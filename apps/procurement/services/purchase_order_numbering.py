@@ -8,8 +8,8 @@ from django.utils import timezone
 from ..models import ProcurementNumberSequence, PurchaseOrder
 
 
-PO_NUMBER_PATTERN = re.compile(r'^RAD-(GEN|PRJ)-PUR-(\d+)_(\d{4})$')
-PR_NUMBER_PATTERN = re.compile(r'^RAD-(GEN|PRJ)-PR-(\d+)_(\d{4})$')
+PO_NUMBER_PATTERN = re.compile(r'^RAD-(GEN|PRJ)-PUR-(\d{4,})_(\d{4})$')
+PR_NUMBER_PATTERN = re.compile(r'^RAD-(GEN|PRJ)-PR-(\d{4,})_(\d{4})$')
 
 
 class PurchaseOrderNumberService:
@@ -55,6 +55,16 @@ class PurchaseOrderNumberService:
             raise ValueError('Source PR number does not follow the company numbering standard.')
         prefix, sequence, year = match.groups()
         return f'RAD-{prefix}-PUR-{int(sequence):04d}_{year}'
+
+    @classmethod
+    def next_for_requisition(cls, pr_number):
+        """Allocate the next PO number using the source PR scope and year."""
+        match = PR_NUMBER_PATTERN.fullmatch(str(pr_number or '').strip())
+        if not match:
+            raise ValueError('Source PR number does not follow the company numbering standard.')
+        prefix, _, year = match.groups()
+        order_type = 'general' if prefix == 'GEN' else 'project'
+        return cls.next_number(order_type, year=int(year))
 
     @classmethod
     def verify(cls, po_number, pr_number=None):

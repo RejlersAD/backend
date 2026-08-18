@@ -10,6 +10,7 @@ from django.db import transaction
 
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
 from .services.purchase_order_numbering import PurchaseOrderNumberService
+from .services.purchase_order_approvals import normalize_assignments, notify_assigned_approvers
 from .services.receipt_numbering import ReceiptNumberService
 from .services.requisition_numbering import RequisitionNumberService
 from .services.requisition_status import canonicalize_pr_status
@@ -253,7 +254,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 )
 
             try:
-                level = max(1, int(stage.get('level', index + 1)))
+                level = max(0, int(stage.get('level', index + 1)))
             except (TypeError, ValueError):
                 raise serializers.ValidationError(f'Approval stage {index + 1} has an invalid level.')
 
@@ -264,27 +265,18 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 )
             assigned_user_ids.add(approver_id)
 
-            # Level 1 is intentionally open to every active employee. Later
-            # levels retain module-access validation for operational safety.
-            if level != 1:
-                try:
-                    can_review_requisitions = (
-                        approver.is_superuser
-                        or approver.rbac_profile.has_module_access('procurement_requisitions')
-                    )
-                except ObjectDoesNotExist:
-                    can_review_requisitions = False
-                if not can_review_requisitions:
-                    raise serializers.ValidationError(
-                        f'Approval stage {index + 1} approver requires Purchase Requisitions module access.'
-                    )
-
             normalized_stage = {
                 'step': index + 1,
                 'level': level,
                 'role': role,
                 'user_id': str(approver.pk),
                 'user_name': approver.get_full_name() or approver.email,
+                'username': (
+                    approver.get_username()
+                    if callable(getattr(approver, 'get_username', None))
+                    else getattr(approver, 'username', '')
+                ),
+                'user_email': approver.email,
                 'status': 'pending',
                 'approved_at': None,
             }
@@ -494,7 +486,8 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
     """Serializer for Purchase Order"""
-    
+
+    po_number = serializers.CharField(required=False, allow_blank=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     vendor_name = serializers.CharField(source='vendor.name', read_only=True)
     category_display = serializers.SerializerMethodField()
@@ -566,7 +559,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             # Timestamps
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'po_number', 'po_date', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'po_date', 'created_at', 'updated_at']
     
     def get_project_display(self, obj):
         """Get formatted project display string"""
@@ -586,17 +579,73 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 
     def get_po_number_verification_message(self, obj):
         return self._po_number_verification(obj)[1]
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        pr = attrs.get('pr_reference')
+
+        # Existing legacy POs may not have a PR. Do not prevent unrelated edits
+        # to those records, but every newly-created PO must start from an
+        # existing requisition. A requisition may support multiple POs.
+        if self.instance is None and pr is None:
+            raise serializers.ValidationError({
+                'pr_reference': 'Select an existing Purchase Requisition before creating a Purchase Order.'
+            })
+
+        po_number = str(attrs.get('po_number') or '').strip().upper()
+        if po_number:
+            verified, message = PurchaseOrderNumberService.verify(po_number, pr.pr_number if pr else None)
+            if not verified:
+                raise serializers.ValidationError({'po_number': message})
+            duplicate = PurchaseOrder.objects.filter(po_number=po_number)
+            if self.instance is not None:
+                duplicate = duplicate.exclude(pk=self.instance.pk)
+            if duplicate.exists():
+                raise serializers.ValidationError({'po_number': 'This Purchase Order number is already in use.'})
+            attrs['po_number'] = po_number
+
+        if 'approval_log' in attrs:
+            existing_log = self.instance.approval_log if self.instance is not None else []
+            requisition = pr or (self.instance.pr_reference if self.instance is not None else None)
+            attrs['approval_log'] = normalize_assignments(
+                attrs.get('approval_log'),
+                existing_log=existing_log,
+                require_core=attrs.get('status', getattr(self.instance, 'status', 'draft')) != 'draft',
+                require_management=bool(
+                    attrs.get('status', getattr(self.instance, 'status', 'draft')) != 'draft'
+                    and requisition
+                    and requisition.requisition_type == 'project'
+                ),
+            )
+            by_stage = {entry['stage']: entry for entry in attrs['approval_log']}
+            attrs['technical_approver'] = by_stage.get('Technical Approval', {}).get('approver', '')
+            attrs['financial_approver'] = by_stage.get('Financial Approval', {}).get('approver', '')
+            attrs['management_approver'] = by_stage.get('Final Management Sign-off', {}).get('approver', '')
+
+        return attrs
     
     @transaction.atomic
     def create(self, validated_data):
-        # Official PO identifiers are assigned only by the locked server-side sequence.
-        order_type = 'project' if any(
-            validated_data.get(field)
-            for field in ('project', 'project_number', 'rad_project_no')
-        ) else 'general'
-        validated_data['po_number'] = PurchaseOrderNumberService.next_number(order_type)
+        # Lock the selected PR while the PO relationship is recorded.
+        selected_pr = validated_data['pr_reference']
+        locked_pr = PurchaseRequisition.objects.select_for_update().get(pk=selected_pr.pk)
+        validated_data['pr_reference'] = locked_pr
+        if not validated_data.get('po_number'):
+            validated_data['po_number'] = PurchaseOrderNumberService.next_for_requisition(locked_pr.pr_number)
         validated_data['created_by'] = self.context['request'].user
-        return super().create(validated_data)
+        order = super().create(validated_data)
+
+        locked_pr.status = 'converted'
+        locked_pr.po_number_reference = order.po_number
+        locked_pr.save(update_fields=['status', 'po_number_reference', 'updated_at'])
+        transaction.on_commit(lambda: notify_assigned_approvers(order))
+        return order
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        order = super().update(instance, validated_data)
+        transaction.on_commit(lambda: notify_assigned_approvers(order))
+        return order
 
 
 class ReceiptSerializer(serializers.ModelSerializer):
