@@ -582,6 +582,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        if self.instance is not None and self.instance.status == 'completed':
+            raise serializers.ValidationError(
+                'Completed purchase orders are read-only and cannot be edited.'
+            )
         pr = attrs.get('pr_reference')
 
         # Existing legacy POs may not have a PR. Do not prevent unrelated edits
