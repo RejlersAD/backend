@@ -26,6 +26,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import io
+import json
 
 class RADAILogoMark(Flowable):
     """Resolution-independent RADAI mark for controlled PDF exports."""
@@ -343,21 +344,44 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         if pdf_file.size > 15 * 1024 * 1024:
             return Response({'error': 'PDF file must not exceed 15 MB.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        from .services.signed_pr_pdf_import import SignedPRImportError, import_signed_pr_pdf
+        from .services.signed_pr_pdf_import import (
+            SignedPRImportError,
+            import_signed_pr_pdf,
+            preview_signed_pr_pdf,
+        )
         approvals = {
             key: str(request.data.get(f'{key}_name', '')).strip()
             for key in ('pm', 'moe', 'mop', 'vp')
         }
         approvals = {key: value for key, value in approvals.items() if value}
         try:
+            pdf_bytes = pdf_file.read()
+            expected_pr_number = str(request.data.get('expected_pr_number', '')).strip()
+            if str(request.data.get('preview_only', '')).lower() in {'1', 'true', 'yes'}:
+                result = preview_signed_pr_pdf(
+                    pdf_bytes,
+                    filename=pdf_file.name,
+                    expected_pr_number=expected_pr_number,
+                )
+                return Response(result, status=status.HTTP_200_OK)
+
+            raw_overrides = request.data.get('manual_overrides', '')
+            try:
+                manual_overrides = json.loads(raw_overrides) if raw_overrides else None
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise SignedPRImportError('Manual corrections must be a valid JSON object.') from exc
+            if manual_overrides is not None and not isinstance(manual_overrides, dict):
+                raise SignedPRImportError('Manual corrections must be a JSON object.')
+
             result = import_signed_pr_pdf(
-                pdf_file.read(),
+                pdf_bytes,
                 filename=pdf_file.name,
                 uploaded_by=request.user,
                 approvals=approvals,
                 signatures_verified=None,
                 approval_date=str(request.data.get('approval_date', '')).strip(),
-                expected_pr_number=str(request.data.get('expected_pr_number', '')).strip(),
+                expected_pr_number=expected_pr_number,
+                manual_overrides=manual_overrides,
             )
         except SignedPRImportError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
