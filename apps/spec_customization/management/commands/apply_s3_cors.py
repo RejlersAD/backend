@@ -113,12 +113,11 @@ class Command(BaseCommand):
             or os.environ.get("AWS_REGION")
             or "us-east-1"
         )
-        endpoint_url = f"https://s3.{region}.amazonaws.com"
 
         client = boto3.client(
             "s3",
             region_name=region,
-            endpoint_url=endpoint_url,
+            # Let boto3 auto-detect the correct endpoint for the region
             aws_access_key_id=getattr(settings, "AWS_ACCESS_KEY_ID", None)
                 or os.environ.get("AWS_ACCESS_KEY_ID"),
             aws_secret_access_key=getattr(settings, "AWS_SECRET_ACCESS_KEY", None)

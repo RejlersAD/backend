@@ -906,3 +906,17 @@ def get_required_onboarding_documents():
         ],
         key=lambda x: x.get('display_order', 999)
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Profile Auto-Provisioning Defaults — Soft-Coded
+# ═════════════════════════════════════════════════════════════════════════════
+# Single source of truth for the fallback UserProfile created on-demand the
+# first time a user saves an Achievement / Experience / Social Link / Document
+# without an existing profile (see apps.rbac.profile_utils.get_or_create_profile).
+# Change these values here only — never hardcode them at call sites.
+PROFILE_AUTO_PROVISION = {
+    'organization_code': 'default',
+    'organization_name': 'Rejlers Engineering',
+    'organization_description': 'Default organization (auto-provisioned)',
+}

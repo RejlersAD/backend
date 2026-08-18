@@ -1,0 +1,36 @@
+{
+  "description": "Configuration file for database synchronization",
+  "version": "1.0",
+  "sync_options": {
+    "batch_size": 1000,
+    "dry_run": false,
+    "sync_data_only": false,
+    "skip_tables": [
+      "django_session",
+      "django_admin_log"
+    ],
+    "priority_tables": [
+      "auth_user",
+      "users",
+      "rbac_roles",
+      "rbac_permissions",
+      "core_project"
+    ]
+  },
+  "database_mapping": {
+    "source": {
+      "env_var": "PROD_DATABASE_URL",
+      "description": "Production database (source)"
+    },
+    "target": {
+      "env_var": "TEST_DATABASE_URL",
+      "alt_env_var": "PREPROD_DATABASE_URL",
+      "description": "Preprod/staging database (target)"
+    }
+  },
+  "safety_checks": {
+    "require_confirmation": true,
+    "backup_before_sync": false,
+    "max_records_per_table": null
+  }
+}
