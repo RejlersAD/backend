@@ -71,7 +71,7 @@ def _section(text: str, start: str, end: str) -> str:
     return _clean(match.group("body")) if match else ""
 
 
-def extract_signed_pr_fields(pdf_bytes: bytes, filename: str) -> dict:
+def extract_signed_pr_fields(pdf_bytes: bytes, filename: str, *, allow_missing_pr_number: bool = False) -> dict:
     if not pdf_bytes.startswith(b"%PDF"):
         raise SignedPRImportError("The uploaded file is not a valid PDF.")
     text = extract_text_from_pdf_tesseract(pdf_bytes)
@@ -80,8 +80,10 @@ def extract_signed_pr_fields(pdf_bytes: bytes, filename: str) -> dict:
     if not pr_number:
         pr_number = re.sub(r"\.pdf$", "", filename, flags=re.IGNORECASE)
     pr_number = re.sub(r"(RAD-(?:GEN|PRJ)-PR-\d{4})[\s_-]+(\d{4})", r"\1_\2", pr_number, flags=re.IGNORECASE)
-    if not re.fullmatch(r"RAD-(?:GEN|PRJ)-PR-\d{4}_\d{4}", pr_number):
+    if not re.fullmatch(r"RAD-(?:GEN|PRJ)-PR-\d{4}_\d{4}", pr_number) and not allow_missing_pr_number:
         raise SignedPRImportError("The PDF does not contain a valid RAD PR number.")
+    if not re.fullmatch(r"RAD-(?:GEN|PRJ)-PR-\d{4}_\d{4}", pr_number):
+        pr_number = ""
 
     issued_by_name = _capture(r"Issued by:\s*(.+?)(?=\s+PR\s+No\.|\n|$)", text)
     product = _capture(r"Product/\s*Service:\s*(.+?)(?=\s+Supplier:|\n|$)", text)
@@ -364,6 +366,142 @@ def extract_signed_pr_fields(pdf_bytes: bytes, filename: str) -> dict:
     }
 
 
+def _serialize_extracted_fields(fields: dict) -> dict:
+    return {
+        **fields,
+        "issued_date": fields["issued_date"].isoformat() if fields.get("issued_date") else None,
+        "net_total": str(fields["net_total"]) if fields.get("net_total") is not None else None,
+    }
+
+
+def _apply_manual_overrides(fields: dict, overrides: dict | None) -> dict:
+    """Apply reviewed OCR corrections using a strict, field-level allow-list."""
+    if not overrides:
+        return fields
+
+    corrected = dict(fields)
+    text_fields = {
+        "pr_number": 40,
+        "issued_by_name": 200,
+        "product_service": 2000,
+        "supplier_name": 500,
+        "supplier_business_id": 100,
+        "project_department": 1000,
+        "project_number": 100,
+        "description_reason": 5000,
+        "preferred_supplier": 500,
+        "po_reference": 100,
+        "special_notes": 5000,
+        "attachment_reference": 500,
+        "budget_in_aed": 30,
+        "net_total_aed": 30,
+    }
+    for field, max_length in text_fields.items():
+        if field in overrides:
+            corrected[field] = _clean(str(overrides.get(field) or ""))[:max_length]
+
+    if "issued_date" in overrides:
+        corrected["issued_date"] = _date(str(overrides.get("issued_date") or ""))
+        if overrides.get("issued_date") and not corrected["issued_date"]:
+            raise SignedPRImportError("Issued date must use YYYY-MM-DD format.")
+
+    if "currency" in overrides:
+        currency = _clean(str(overrides.get("currency") or "")).upper()
+        if currency not in {"AED", "USD", "EUR", "GBP"}:
+            raise SignedPRImportError("Currency must be AED, USD, EUR, or GBP.")
+        corrected["currency"] = currency
+
+    if "net_total" in overrides:
+        try:
+            corrected["net_total"] = Decimal(str(overrides.get("net_total") or "").replace(",", ""))
+        except Exception as exc:
+            raise SignedPRImportError("Total price must be a valid number.") from exc
+        if corrected["net_total"] < 0:
+            raise SignedPRImportError("Total price cannot be negative.")
+
+    for money_field, label in (("budget_in_aed", "Budget in AED"), ("net_total_aed", "Net total in AED")):
+        if money_field not in overrides or corrected.get(money_field) in (None, ""):
+            continue
+        try:
+            amount = Decimal(str(corrected[money_field]).replace(",", ""))
+        except Exception as exc:
+            raise SignedPRImportError(f"{label} must be a valid number.") from exc
+        if amount < 0:
+            raise SignedPRImportError(f"{label} cannot be negative.")
+        corrected[money_field] = str(amount)
+
+    corrected["pr_number"] = re.sub(
+        r"(RAD-(?:GEN|PRJ)-PR-\d{4})[\s_-]+(\d{4})", r"\1_\2",
+        corrected.get("pr_number", ""), flags=re.IGNORECASE,
+    ).upper()
+    if not re.fullmatch(r"RAD-(?:GEN|PRJ)-PR-\d{4}_\d{4}", corrected["pr_number"]):
+        raise SignedPRImportError("Enter a valid PR number using RAD-{GEN|PRJ}-PR-####_YYYY.")
+
+    required = {
+        "issued_by_name": "Issued by",
+        "issued_date": "Issued date",
+        "product_service": "Product / Service",
+        "supplier_name": "Supplier",
+        "description_reason": "Description and reason",
+        "net_total": "Total price",
+        "currency": "Currency",
+    }
+    missing = [label for field, label in required.items() if corrected.get(field) in (None, "")]
+    if missing:
+        raise SignedPRImportError(f"Complete the required reviewed fields: {', '.join(missing)}.")
+
+    corrected["price_lines"] = [{
+        "description": corrected["description_reason"] or corrected["product_service"],
+        "total": str(corrected["net_total"]),
+        "currency": corrected["currency"],
+    }]
+    confidence = dict(corrected.get("field_confidence") or {})
+    override_confidence_keys = {
+        "issued_by_name": "issued_by", "issued_date": "issued_date",
+        "product_service": "product_service", "supplier_name": "supplier",
+        "description_reason": "description", "net_total": "price", "currency": "currency",
+    }
+    for override_field, confidence_field in override_confidence_keys.items():
+        if override_field in overrides:
+            confidence[confidence_field] = "manual"
+    corrected["field_confidence"] = confidence
+    corrected["extraction_issues"] = [
+        issue for issue in corrected.get("extraction_issues", [])
+        if not any(label.lower() in issue.lower() for label in required.values())
+    ]
+    corrected["manual_review_applied"] = True
+    return corrected
+
+
+def preview_signed_pr_pdf(pdf_bytes: bytes, *, filename: str, expected_pr_number: str = "") -> dict:
+    """Extract an editable preview without modifying a requisition or storing the PDF."""
+    fields = extract_signed_pr_fields(pdf_bytes, filename, allow_missing_pr_number=True)
+    detected = detect_approval_evidence(pdf_bytes)
+    mapping_issues = list(fields.get("extraction_issues") or [])
+    if not fields.get("pr_number"):
+        mapping_issues.insert(0, "OCR could not confidently read the PR number. Enter it manually.")
+    elif expected_pr_number and fields["pr_number"].casefold() != expected_pr_number.strip().casefold():
+        mapping_issues.insert(0, f"Detected PR {fields['pr_number']} does not match {expected_pr_number}.")
+
+    database_match = False
+    if fields.get("pr_number"):
+        database_match = PurchaseRequisition.objects.filter(pr_number=fields["pr_number"]).exists()
+        if not database_match:
+            mapping_issues.append(f"PR {fields['pr_number']} does not exist in RADAI.")
+
+    return {
+        "success": True,
+        "preview_only": True,
+        "requires_manual_review": bool(mapping_issues),
+        "database_match": database_match,
+        "pr_number": fields.get("pr_number", ""),
+        "extracted_data": _serialize_extracted_fields(fields),
+        "approval_detection": detected,
+        "mapping_issues": mapping_issues,
+        "workflow_issues": [],
+    }
+
+
 def _find_user(full_name: str):
     normalized = _clean(full_name).lower().replace("-", " ")
     if not normalized:
@@ -614,8 +752,13 @@ def import_signed_pr_pdf(
     signatures_verified: bool | None = None,
     approval_date: str = "",
     expected_pr_number: str = "",
+    manual_overrides: dict | None = None,
 ) -> dict:
-    fields = extract_signed_pr_fields(pdf_bytes, filename)
+    fields = extract_signed_pr_fields(
+        pdf_bytes, filename,
+        allow_missing_pr_number=bool((manual_overrides or {}).get("pr_number")),
+    )
+    fields = _apply_manual_overrides(fields, manual_overrides)
     if expected_pr_number and fields["pr_number"].casefold() != expected_pr_number.strip().casefold():
         raise SignedPRImportError(
             f"Uploaded PDF is {fields['pr_number']}, but the edited record is {expected_pr_number}. Nothing was changed."
@@ -694,6 +837,14 @@ def import_signed_pr_pdf(
             "date_ocr": detected.get("date_ocr", []),
         },
     })
+    if manual_overrides:
+        metadata["manual_ocr_review"] = {
+            "applied": True,
+            "reviewed_at": timezone.now().isoformat(),
+            "reviewed_by_id": str(uploaded_by.id),
+            "reviewed_by_name": uploaded_by.get_full_name() or uploaded_by.email,
+            "corrected_fields": sorted(manual_overrides.keys()),
+        }
     pr.price_remarks_data = metadata
 
     digest = hashlib.sha256(pdf_bytes).hexdigest()
@@ -789,9 +940,6 @@ def import_signed_pr_pdf(
         },
         "mapping_issues": mapping_issues,
         "workflow_issues": workflow_issues,
-        "extracted_data": {
-            **fields,
-            "issued_date": fields["issued_date"].isoformat() if fields["issued_date"] else None,
-            "net_total": str(fields["net_total"]) if fields["net_total"] is not None else None,
-        },
+        "manual_review_applied": bool(manual_overrides),
+        "extracted_data": _serialize_extracted_fields(fields),
     }
