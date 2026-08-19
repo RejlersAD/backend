@@ -694,10 +694,12 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         """
         user = self.request.user
         queryset = UserProfile.objects.select_related(
-            'user', 'organization'
+            'user', 'organization', 'manager__user',
+            'user__employee_master', 'user__employee_master__manager',
         ).prefetch_related(
             'roles',
-            'userrole_set__role'  # Fix N+1 for primary_role lookup
+            'userrole_set__role',  # Fix N+1 for primary_role lookup
+            'user__offboarding_records',
         ).filter(is_deleted=False)
 
         # Super admin sees all
@@ -1342,11 +1344,17 @@ class UserProfileViewSet(viewsets.ModelViewSet):
 
         return Response({'status': 'primary role updated', 'role': role.name})
 
-
+    @action(
+        detail=False,
+        methods=['post'],
+        parser_classes=[MultiPartParser, FormParser],
+        url_path='bulk_upload',
+    )
+    def bulk_upload(self, request):
         """
         Bulk upload users from CSV/Excel with Email Notifications
-        Expected CSV format: email,first_name,last_name,password,department,job_title,phone,role_codes,module_codes
-        role_codes and module_codes should be comma-separated (e.g., "admin,engineer" or "PID,PFD")
+        Accepts CSV and Excel workbooks. Human-readable template headings are
+        normalized to the API field names before validation.
         
         New Features:
         - Sends welcome email with credentials to each user
@@ -1355,11 +1363,15 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         """
         import csv
         import io
+        import json
+        import re
+        from openpyxl import load_workbook
         from django.contrib.auth import get_user_model
+        from django.core.exceptions import ValidationError
+        from django.core.validators import validate_email
         from django.db import transaction
-        from apps.users.email_service import send_email
-        from apps.users.email_templates import get_email_template
-        from django.conf import settings
+        from django.utils.dateparse import parse_datetime
+        from django.utils import timezone
         import secrets
         import string
         
@@ -1373,11 +1385,22 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         
         file = request.FILES['file']
         organization_id = request.data.get('organization_id')
+        preview_only = str(request.data.get('preview_only', '')).lower() in {'1', 'true', 'yes'}
+        try:
+            requested_update_fields = json.loads(request.data.get('update_fields', '[]'))
+        except (TypeError, json.JSONDecodeError):
+            requested_update_fields = []
+        allowed_update_fields = {
+            'first_name', 'last_name', 'username', 'department', 'job_title',
+            'phone', 'employee_id', 'location', 'status', 'role_codes',
+            'organization_name', 'created_at', 'last_login_at',
+        }
+        update_fields = {field for field in requested_update_fields if field in allowed_update_fields}
         
-        # Validate file extension
-        if not file.name.endswith(('.csv', '.txt')):
+        extension = file.name.lower().rsplit('.', 1)[-1] if '.' in file.name else ''
+        if extension not in {'csv', 'txt', 'xlsx', 'xlsm'}:
             return Response(
-                {'error': 'Invalid file format. Please upload a CSV file.'},
+                {'error': 'Invalid file format. Upload CSV or Excel (.xlsx/.xlsm).'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -1390,20 +1413,194 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Parse CSV
+        def normalize_header(value):
+            key = re.sub(r'[^a-z0-9]+', '_', str(value or '').strip().lower()).strip('_')
+            return {
+                'roles': 'role_codes',
+                'organization': 'organization_name',
+                'created_at': 'created_at',
+                'last_login': 'last_login_at',
+            }.get(key, key)
+
+        def parse_optional_datetime(value):
+            if not value:
+                return None
+            if hasattr(value, 'tzinfo') and hasattr(value, 'year'):
+                parsed = value
+            else:
+                parsed = parse_datetime(str(value).strip())
+            if parsed and timezone.is_naive(parsed):
+                parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+            return parsed
+
+        # Parse CSV or the first worksheet in an Excel workbook.
         try:
-            decoded_file = file.read().decode('utf-8')
-            io_string = io.StringIO(decoded_file)
-            reader = csv.DictReader(io_string)
+            if extension in {'xlsx', 'xlsm'}:
+                workbook = load_workbook(file, read_only=True, data_only=True)
+                worksheet = workbook.active
+                values = worksheet.iter_rows(values_only=True)
+                raw_headers = next(values, None)
+                if not raw_headers:
+                    raise ValueError('The Excel worksheet is empty.')
+                headers = [normalize_header(header) for header in raw_headers]
+                reader = [
+                    {
+                        header: (value.isoformat() if hasattr(value, 'isoformat') else str(value).strip()) if value is not None else ''
+                        for header, value in zip(headers, row)
+                        if header
+                    }
+                    for row in values
+                    if any(value not in (None, '') for value in row)
+                ]
+            else:
+                decoded_file = file.read().decode('utf-8-sig')
+                csv_reader = csv.DictReader(io.StringIO(decoded_file))
+                reader = [
+                    {normalize_header(key): value for key, value in row.items() if key is not None}
+                    for row in csv_reader
+                ]
+
+            # Build lookup indexes once. This keeps a 500-row preview to a
+            # handful of queries instead of several queries per spreadsheet row.
+            existing_profiles = UserProfile.objects.select_related('user', 'organization').prefetch_related('userrole_set__role').filter(is_deleted=False)
+            profiles_by_email = {profile.user.email.strip().casefold(): profile for profile in existing_profiles if profile.user.email}
+            profiles_by_employee_id = {profile.employee_id.strip().casefold(): profile for profile in existing_profiles if profile.employee_id}
+            profiles_by_username = {profile.user.username.strip().casefold(): profile for profile in existing_profiles if profile.user.username}
+            organizations = list(Organization.objects.all())
+            organizations_by_name = {item.name.strip().casefold(): item for item in organizations}
+            organizations_by_code = {item.code.strip().casefold(): item for item in organizations}
+            default_organization = next((item for item in organizations if 'default' in item.name.casefold()), None) or (organizations[0] if organizations else None)
+            active_roles = list(Role.objects.filter(is_active=True))
+            roles_by_code = {item.code.strip().casefold(): item for item in active_roles}
+            roles_by_name = {item.name.strip().casefold(): item for item in active_roles}
+
+            def find_organization(value):
+                key = str(value or '').strip().casefold()
+                return organizations_by_name.get(key) or organizations_by_code.get(key)
+
+            def find_role(value):
+                key = str(value or '').strip().casefold()
+                return roles_by_code.get(key) or roles_by_name.get(key)
+
+            def find_existing_profile(row):
+                email = row.get('email', '').strip()
+                employee_id = row.get('employee_id', '').strip()
+                username = row.get('username', '').strip()
+                if email:
+                    match = profiles_by_email.get(email.casefold())
+                    if match:
+                        return match, 'email'
+                if employee_id:
+                    match = profiles_by_employee_id.get(employee_id.casefold())
+                    if match:
+                        return match, 'employee_id'
+                if username:
+                    match = profiles_by_username.get(username.casefold())
+                    if match:
+                        return match, 'username'
+                return None, None
+
+            preview_columns = [
+                {'id': 'first_name', 'label': 'First Name'},
+                {'id': 'last_name', 'label': 'Last Name'},
+                {'id': 'username', 'label': 'Username'},
+                {'id': 'department', 'label': 'Department'},
+                {'id': 'job_title', 'label': 'Job Title'},
+                {'id': 'phone', 'label': 'Phone'},
+                {'id': 'employee_id', 'label': 'Employee ID'},
+                {'id': 'location', 'label': 'Location'},
+                {'id': 'status', 'label': 'Status'},
+                {'id': 'role_codes', 'label': 'Roles'},
+                {'id': 'organization_name', 'label': 'Organization'},
+                {'id': 'created_at', 'label': 'Created At'},
+                {'id': 'last_login_at', 'label': 'Last Login'},
+            ]
+
+            if preview_only:
+                preview_rows = []
+                counts = {'new': 0, 'existing': 0, 'invalid': 0}
+                for row_num, row in enumerate(reader, start=2):
+                    email = row.get('email', '').strip()
+                    if not email:
+                        counts['invalid'] += 1
+                        preview_rows.append({'row': row_num, 'state': 'invalid', 'email': '', 'name': '', 'match_by': None, 'changed_fields': [], 'error': 'Email is required'})
+                        continue
+                    validation_errors = []
+                    try:
+                        validate_email(email)
+                    except ValidationError:
+                        validation_errors.append('Invalid email address')
+                    incoming_status = row.get('status', '').strip().lower().replace(' ', '_')
+                    if incoming_status and incoming_status not in {choice[0] for choice in UserProfile.STATUS_CHOICES}:
+                        validation_errors.append(f'Invalid status "{incoming_status}"')
+                    organization_name = row.get('organization_name', '').strip()
+                    if organization_name and not find_organization(organization_name):
+                        validation_errors.append(f'Organization "{organization_name}" was not found')
+                    role_codes = row.get('role_codes', '').strip()
+                    if role_codes:
+                        for token in [item.strip() for item in re.split(r'[,;]', role_codes) if item.strip()]:
+                            if not find_role(token):
+                                validation_errors.append(f'Role "{token}" was not found')
+                    if validation_errors:
+                        counts['invalid'] += 1
+                        preview_rows.append({'row': row_num, 'state': 'invalid', 'email': email, 'name': '', 'match_by': None, 'changed_fields': [], 'error': '; '.join(validation_errors)})
+                        continue
+                    existing, match_by = find_existing_profile(row)
+                    state = 'existing' if existing else 'new'
+                    counts[state] += 1
+                    current = {}
+                    if existing:
+                        current = {
+                            'first_name': existing.user.first_name,
+                            'last_name': existing.user.last_name,
+                            'username': existing.user.username,
+                            'department': existing.department,
+                            'job_title': existing.job_title,
+                            'phone': existing.phone,
+                            'employee_id': existing.employee_id,
+                            'location': existing.location,
+                            'status': existing.status,
+                            'role_codes': ', '.join(link.role.code for link in existing.userrole_set.all() if link.role.is_active),
+                            'organization_name': existing.organization.name if existing.organization else '',
+                            'created_at': existing.created_at.isoformat() if existing.created_at else '',
+                            'last_login_at': existing.last_login_at.isoformat() if existing.last_login_at else '',
+                        }
+                    incoming = {column['id']: row.get(column['id'], '').strip() for column in preview_columns}
+                    changed_fields = [field for field, value in incoming.items() if value and str(current.get(field, '')).strip().casefold() != value.casefold()] if existing else []
+                    preview_rows.append({
+                        'row': row_num,
+                        'state': state,
+                        'email': email,
+                        'name': f"{row.get('first_name', '').strip()} {row.get('last_name', '').strip()}".strip(),
+                        'match_by': match_by,
+                        'changed_fields': changed_fields,
+                        'incoming': incoming,
+                        'current': current,
+                        'error': None,
+                    })
+                return Response({
+                    'preview': True,
+                    'columns': preview_columns,
+                    'summary': {'total': len(preview_rows), **counts},
+                    'rows': preview_rows,
+                })
             
             results = {
                 'success': [],
+                'updated': [],
                 'failed': [],
                 'skipped': []
             }
+            welcome_email_jobs = []
+            users_to_update = {}
+            profiles_to_update = {}
+            user_update_fields = set()
+            profile_update_fields = set()
+            role_replacements = {}
             
             with transaction.atomic():
                 for row_num, row in enumerate(reader, start=2):  # Start at 2 (1 is header)
+                    savepoint = None
                     try:
                         # Validate required fields
                         email = row.get('email', '').strip()
@@ -1414,14 +1611,113 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                                 'error': 'Email is required'
                             })
                             continue
+                        try:
+                            validate_email(email)
+                        except ValidationError:
+                            raise ValueError('Invalid email address')
                         
-                        # Check if user already exists (exclude soft-deleted users)
-                        existing_profile = UserProfile.objects.filter(
-                            user__email=email, 
-                            is_deleted=False
-                        ).first()
+                        existing_profile, matched_by = find_existing_profile(row)
                         
                         if existing_profile:
+                            if update_fields:
+                                user = existing_profile.user
+                                user_changed = []
+                                profile_changed = []
+
+                                for field_name in ('first_name', 'last_name'):
+                                    incoming_value = row.get(field_name, '').strip()
+                                    if field_name in update_fields and incoming_value and getattr(user, field_name) != incoming_value:
+                                        setattr(user, field_name, incoming_value)
+                                        user_changed.append(field_name)
+
+                                incoming_username = row.get('username', '').strip()
+                                if 'username' in update_fields and incoming_username and incoming_username.casefold() != user.username.casefold():
+                                    username_owner = profiles_by_username.get(incoming_username.casefold())
+                                    if username_owner and username_owner.user_id != user.id:
+                                        raise ValueError(f'Username "{incoming_username}" is already in use')
+                                    user.username = incoming_username
+                                    user_changed.append('username')
+
+                                profile_field_map = {
+                                    'department': 'department', 'job_title': 'job_title',
+                                    'phone': 'phone', 'employee_id': 'employee_id',
+                                    'location': 'location',
+                                }
+                                for upload_field, model_field in profile_field_map.items():
+                                    incoming_value = row.get(upload_field, '').strip()
+                                    if upload_field in update_fields and incoming_value and getattr(existing_profile, model_field) != incoming_value:
+                                        setattr(existing_profile, model_field, incoming_value)
+                                        profile_changed.append(model_field)
+
+                                incoming_status = row.get('status', '').strip().lower().replace(' ', '_')
+                                if 'status' in update_fields and incoming_status:
+                                    allowed_statuses = {choice[0] for choice in UserProfile.STATUS_CHOICES}
+                                    if incoming_status not in allowed_statuses:
+                                        raise ValueError(f'Invalid status "{incoming_status}"')
+                                    existing_profile.status = incoming_status
+                                    profile_changed.append('status')
+                                    user.is_active = incoming_status not in {'inactive', 'suspended'}
+                                    if 'is_active' not in user_changed:
+                                        user_changed.append('is_active')
+
+                                organization_name = row.get('organization_name', '').strip()
+                                if 'organization_name' in update_fields and organization_name:
+                                    matched_organization = find_organization(organization_name)
+                                    if not matched_organization:
+                                        raise ValueError(f'Organization "{organization_name}" was not found')
+                                    existing_profile.organization = matched_organization
+                                    profile_changed.append('organization')
+
+                                role_codes = row.get('role_codes', '').strip()
+                                if 'role_codes' in update_fields and role_codes:
+                                    role_tokens = [token.strip() for token in re.split(r'[,;]', role_codes) if token.strip()]
+                                    resolved_roles = []
+                                    unresolved_roles = []
+                                    for token in role_tokens:
+                                        role = find_role(token)
+                                        if role and role not in resolved_roles:
+                                            resolved_roles.append(role)
+                                        elif not role:
+                                            unresolved_roles.append(token)
+                                    if unresolved_roles:
+                                        raise ValueError(f'Unknown role(s): {", ".join(unresolved_roles)}')
+                                    existing_role_ids = {link.role_id for link in existing_profile.userrole_set.all() if link.role.is_active}
+                                    resolved_role_ids = {role.id for role in resolved_roles}
+                                    if existing_role_ids != resolved_role_ids:
+                                        role_replacements[existing_profile.id] = (existing_profile, resolved_roles)
+
+                                timestamp_updates = {}
+                                if 'created_at' in update_fields:
+                                    created_at = parse_optional_datetime(row.get('created_at'))
+                                    if created_at:
+                                        timestamp_updates['created_at'] = created_at
+                                if 'last_login_at' in update_fields:
+                                    last_login_at = parse_optional_datetime(row.get('last_login_at'))
+                                    if last_login_at:
+                                        timestamp_updates['last_login_at'] = last_login_at
+                                        user.last_login = last_login_at
+                                        user_changed.append('last_login')
+                                for field_name, field_value in timestamp_updates.items():
+                                    setattr(existing_profile, field_name, field_value)
+                                    profile_changed.append(field_name)
+
+                                if user_changed:
+                                    users_to_update[user.id] = user
+                                    user_update_fields.update(user_changed)
+                                if profile_changed:
+                                    existing_profile.updated_at = timezone.now()
+                                    profiles_to_update[existing_profile.id] = existing_profile
+                                    profile_update_fields.update(profile_changed)
+                                    profile_update_fields.add('updated_at')
+
+                                results['updated'].append({
+                                    'row': row_num,
+                                    'email': email,
+                                    'name': user.get_full_name(),
+                                    'matched_by': matched_by,
+                                    'fields': sorted(update_fields),
+                                })
+                                continue
                             results['skipped'].append({
                                 'row': row_num,
                                 'email': email,
@@ -1429,8 +1725,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                             })
                             continue
                         
-                        # Generate unique username from email
-                        base_username = email.split('@')[0]
+                        # New records perform writes immediately, so isolate each
+                        # row behind a savepoint. Existing updates are batched.
+                        savepoint = transaction.savepoint()
+                        # Respect an uploaded username, then make it unique when needed.
+                        base_username = row.get('username', '').strip() or email.split('@')[0]
                         username = base_username
                         counter = 1
                         while User.objects.filter(username=username).exists():
@@ -1462,21 +1761,63 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                             password=password
                         )
                         
-                        # Create user profile (using 'phone' not 'phone_number' to align with form)
+                        row_organization = organization
+                        organization_name = row.get('organization_name', '').strip()
+                        if organization_name:
+                            row_organization = find_organization(organization_name)
+                            if not row_organization:
+                                raise ValueError(f'Organization "{organization_name}" was not found')
+                        if not row_organization:
+                            row_organization = default_organization
+                        if not row_organization:
+                            raise ValueError('No organization is available for this employee')
+
+                        uploaded_status = row.get('status', '').strip().lower().replace(' ', '_') or 'active'
+                        allowed_statuses = {choice[0] for choice in UserProfile.STATUS_CHOICES}
+                        if uploaded_status not in allowed_statuses:
+                            raise ValueError(f'Invalid status "{uploaded_status}"')
+                        user.is_active = uploaded_status not in {'inactive', 'suspended'}
+                        user.save(update_fields=['is_active'])
+
                         profile = UserProfile.objects.create(
                             user=user,
-                            organization=organization,
+                            organization=row_organization,
                             department=row.get('department', '').strip(),
                             job_title=row.get('job_title', '').strip(),
-                            phone_number=row.get('phone', '').strip() or row.get('phone_number', '').strip(),
-                            status='active'
+                            phone=row.get('phone', '').strip() or row.get('phone_number', '').strip(),
+                            employee_id=row.get('employee_id', '').strip(),
+                            location=row.get('location', '').strip(),
+                            status=uploaded_status,
                         )
+
+                        created_at = parse_optional_datetime(row.get('created_at'))
+                        last_login_at = parse_optional_datetime(row.get('last_login_at'))
+                        timestamp_updates = {}
+                        if created_at:
+                            timestamp_updates['created_at'] = created_at
+                        if last_login_at:
+                            timestamp_updates['last_login_at'] = last_login_at
+                            user.last_login = last_login_at
+                            user.save(update_fields=['last_login'])
+                        if timestamp_updates:
+                            UserProfile.objects.filter(pk=profile.pk).update(**timestamp_updates)
+                            for field_name, field_value in timestamp_updates.items():
+                                setattr(profile, field_name, field_value)
                         
                         # Assign roles
                         role_codes = row.get('role_codes', '').strip()
                         if role_codes:
-                            role_code_list = [r.strip() for r in role_codes.split(',')]
-                            roles = Role.objects.filter(code__in=role_code_list, is_active=True)
+                            role_tokens = [token.strip() for token in re.split(r'[,;]', role_codes) if token.strip()]
+                            roles = []
+                            unresolved_roles = []
+                            for token in role_tokens:
+                                role = find_role(token)
+                                if role and role not in roles:
+                                    roles.append(role)
+                                elif not role:
+                                    unresolved_roles.append(token)
+                            if unresolved_roles:
+                                raise ValueError(f'Unknown role(s): {", ".join(unresolved_roles)}')
                             for idx, role in enumerate(roles):
                                 UserRole.objects.create(
                                     user_profile=profile,
@@ -1514,59 +1855,52 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                             'username': username
                         })
                         
-                        # Send welcome email with credentials
-                        try:
-                            login_url = f"{settings.FRONTEND_URL}/login" if hasattr(settings, 'FRONTEND_URL') else 'https://radai.ae/login'
-                            
-                            email_context = {
-                                'first_name': user.first_name or 'User',
-                                'last_name': user.last_name or '',
-                                'email': user.email,
-                                'username': username,
-                                'temp_password': original_password,
-                                'login_url': login_url
-                            }
-                            
-                            email_template = get_email_template('welcome', email_context)
-                            
-                            send_email(
-                                to_email=user.email,
-                                subject=email_template['subject'],
-                                html_body=email_template['html_body'],
-                                text_body=email_template['text_body']
-                            )
-                            
-                            # Update result to indicate email sent
-                            results['success'][-1]['email_sent'] = True
-                            
-                        except Exception as email_error:
-                            # Log email error but don't fail user creation
-                            print(f"⚠️ Failed to send welcome email to {email}: {str(email_error)}")
-                            results['success'][-1]['email_sent'] = False
-                            results['success'][-1]['email_error'] = str(email_error)
-                        
-                        # Create audit log
-                        create_audit_log(
-                            user=request.user,
-                            action='bulk_create',
-                            resource_type='UserProfile',
-                            resource_id=profile.id,
-                            resource_repr=str(profile),
-                            metadata={'source': 'bulk_upload', 'email_sent': results['success'][-1].get('email_sent', False)},
-                            ip_address=request.META.get('REMOTE_ADDR'),
-                            user_agent=request.META.get('HTTP_USER_AGENT', '')
-                        )
+                        results['success'][-1]['email_sent'] = False
+                        results['success'][-1]['email_queued'] = False
+                        welcome_email_jobs.append((str(user.id), original_password, len(results['success']) - 1))
+                        transaction.savepoint_commit(savepoint)
                         
                     except Exception as e:
+                        if savepoint is not None:
+                            if transaction.get_rollback():
+                                transaction.set_rollback(False)
+                            transaction.savepoint_rollback(savepoint)
                         results['failed'].append({
                             'row': row_num,
                             'email': row.get('email', 'N/A'),
                             'error': str(e)
                         })
+
+                if users_to_update and user_update_fields:
+                    User.objects.bulk_update(list(users_to_update.values()), sorted(user_update_fields), batch_size=500)
+                if profiles_to_update and profile_update_fields:
+                    UserProfile.objects.bulk_update(list(profiles_to_update.values()), sorted(profile_update_fields), batch_size=500)
+                if role_replacements:
+                    replacement_profile_ids = list(role_replacements)
+                    UserRole.objects.filter(user_profile_id__in=replacement_profile_ids).delete()
+                    replacement_links = []
+                    for profile, replacement_roles in role_replacements.values():
+                        replacement_links.extend(
+                            UserRole(user_profile=profile, role=role, assigned_by=request.user, is_primary=index == 0)
+                            for index, role in enumerate(replacement_roles)
+                        )
+                    UserRole.objects.bulk_create(replacement_links, batch_size=1000)
             
+            # Queue welcome mail only after the database transaction commits.
+            # SMTP latency must never hold the import HTTP request open.
+            if welcome_email_jobs:
+                try:
+                    from apps.rbac.tasks import send_bulk_welcome_email
+                    for user_id, password, result_index in welcome_email_jobs:
+                        send_bulk_welcome_email.delay(user_id, password)
+                        results['success'][result_index]['email_queued'] = True
+                except Exception as queue_error:
+                    logger.warning('Could not queue bulk welcome emails: %s', queue_error)
+
             # Calculate email statistics
             emails_sent = sum(1 for item in results['success'] if item.get('email_sent', False))
-            emails_failed = sum(1 for item in results['success'] if not item.get('email_sent', False))
+            emails_failed = sum(1 for item in results['success'] if not item.get('email_sent', False) and not item.get('email_queued', False))
+            emails_queued = sum(1 for item in results['success'] if item.get('email_queued', False))
             
             # Create summary audit log
             create_audit_log(
@@ -1577,9 +1911,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 resource_repr='Bulk User Upload',
                 metadata={
                     'success_count': len(results['success']),
+                    'updated_count': len(results['updated']),
                     'failed_count': len(results['failed']),
                     'skipped_count': len(results['skipped']),
                     'emails_sent': emails_sent,
+                    'emails_queued': emails_queued,
                     'emails_failed': emails_failed
                 },
                 ip_address=request.META.get('REMOTE_ADDR'),
@@ -1589,11 +1925,14 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             return Response({
                 'message': 'Bulk upload completed successfully!',
                 'summary': {
-                    'total_processed': len(results['success']) + len(results['failed']) + len(results['skipped']),
+                    'total_processed': len(results['success']) + len(results['updated']) + len(results['failed']) + len(results['skipped']),
                     'successful': len(results['success']),
+                    'created': len(results['success']),
+                    'updated': len(results['updated']),
                     'failed': len(results['failed']),
                     'skipped': len(results['skipped']),
                     'emails_sent': emails_sent,
+                    'emails_queued': emails_queued,
                     'emails_failed': emails_failed
                 },
                 'details': results
@@ -1608,69 +1947,69 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def download_template(self, request):
         """
-        Download CSV template for bulk upload
-        Template aligned with registration form fields
+        Download the Excel employee bulk-upload template.
         """
-        import csv
+        from io import BytesIO
         from django.http import HttpResponse
-        
-        response = HttpResponse(content_type='text/csv')
-        response['Content-Disposition'] = 'attachment; filename="user_bulk_upload_template.csv"'
-        
-        writer = csv.writer(response)
-        
-        # Header row - aligned with registration form
-        writer.writerow([
-            'email',           # Required - User's email address
-            'first_name',      # Required - User's first name
-            'last_name',       # Required - User's last name
-            'password',        # Optional - Leave empty for auto-generated password
-            'department',      # Optional - e.g., Engineering, Finance
-            'job_title',       # Optional - e.g., Senior Engineer
-            'phone',           # Optional - Phone number (aligned with form field name)
-            'role_codes',      # Optional - Comma-separated role codes (e.g., engineer,reviewer)
-            'module_codes'     # Optional - Comma-separated module codes (e.g., PID,PFD,CRS)
-        ])
-        
-        # Example row 1 - Engineer with specific password
-        writer.writerow([
-            'john.doe@company.com', 
-            'John', 
-            'Doe', 
-            'SecurePass@123',
-            'Engineering', 
-            'Senior Engineer', 
-            '+971501234567',
-            'engineer,reviewer', 
-            'PID,PFD,CRS'
-        ])
-        
-        # Example row 2 - Manager with auto-generated password
-        writer.writerow([
-            'jane.smith@company.com', 
-            'Jane', 
-            'Smith', 
-            '',  # Empty password = auto-generated
-            'Management', 
-            'Project Manager', 
-            '+971507654321',
-            'manager', 
-            'PID,PFD,CRS,PROJECT_CONTROL'
-        ])
-        
-        # Example row 3 - Test user with email xerxez.in@gmail.com
-        writer.writerow([
-            'xerxez.in@gmail.com', 
-            'Test', 
-            'User', 
-            '',  # Auto-generated password
-            'Testing', 
-            'Test Engineer', 
-            '+971501112233',
-            'engineer', 
-            'PID,PFD'
-        ])
-        
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.worksheet.datavalidation import DataValidation
+
+        headers = [
+            'First Name', 'Last Name', 'Email', 'Username', 'Department',
+            'Job Title', 'Phone', 'Employee ID', 'Location', 'Status', 'Roles',
+            'Organization', 'Created At', 'Last Login',
+        ]
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = 'Employees'
+        worksheet.append(headers)
+        worksheet.freeze_panes = 'A2'
+        worksheet.auto_filter.ref = f'A1:N1'
+
+        header_fill = PatternFill('solid', fgColor='1E3A8A')
+        for index, cell in enumerate(worksheet[1], start=1):
+            cell.fill = header_fill
+            cell.font = Font(color='FFFFFF', bold=True)
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            worksheet.column_dimensions[cell.column_letter].width = 18 if index not in {3, 12, 13, 14} else 25
+        worksheet.row_dimensions[1].height = 24
+
+        status_validation = DataValidation(type='list', formula1='"active,inactive,suspended,pending,on_leave"', allow_blank=True)
+        status_validation.promptTitle = 'Employee status'
+        status_validation.prompt = 'Choose an approved account status. Blank defaults to active.'
+        worksheet.add_data_validation(status_validation)
+        status_validation.add('J2:J5000')
+
+        instructions = workbook.create_sheet('Instructions')
+        instructions.append(['Column', 'Guidance'])
+        guidance = {
+            'First Name': 'Employee first name.',
+            'Last Name': 'Employee last name.',
+            'Email': 'Required and must be unique.',
+            'Username': 'Optional. Blank uses the email prefix; duplicates receive a numeric suffix.',
+            'Status': 'Optional: active, inactive, suspended, pending, or on_leave.',
+            'Roles': 'Optional role codes or names separated by commas or semicolons.',
+            'Organization': 'Optional existing organization name or code. Blank uses the default organization.',
+            'Created At': 'Optional ISO date/time, for example 2026-08-19T09:00:00+04:00.',
+            'Last Login': 'Optional ISO date/time.',
+        }
+        for header in headers:
+            instructions.append([header, guidance.get(header, 'Optional employee profile value.')])
+        instructions.freeze_panes = 'A2'
+        instructions.column_dimensions['A'].width = 22
+        instructions.column_dimensions['B'].width = 85
+        for cell in instructions[1]:
+            cell.fill = header_fill
+            cell.font = Font(color='FFFFFF', bold=True)
+
+        output = BytesIO()
+        workbook.save(output)
+        response = HttpResponse(
+            output.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = 'attachment; filename="employee_bulk_upload_template.xlsx"'
         return response
 
     @action(detail=False, methods=['get', 'patch'], url_path='me')
