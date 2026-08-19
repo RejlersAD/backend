@@ -16,6 +16,7 @@ from django.db.models import Q, Count, Sum, Avg
 from django.utils import timezone
 from datetime import timedelta
 from apps.core.project_models import Project as CoreProject
+from .services.document_filenames import build_procurement_pdf_filename
 
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db import models as django_models
@@ -1183,8 +1184,11 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        safe_pr_number = (pr.pr_number or str(pr.id)).replace('/', '-').replace(' ', '_')
-        filename = f"{safe_pr_number}_Approved.pdf"
+        filename = build_procurement_pdf_filename(
+            pr.pr_number or pr.id,
+            'pr',
+            pr.issued_date or timezone.localdate(),
+        )
 
         response = HttpResponse(content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
