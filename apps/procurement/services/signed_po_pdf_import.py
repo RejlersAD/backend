@@ -12,12 +12,12 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.db import transaction
 from django.db.models import Case, IntegerField, Q, Value, When
-from django.utils.text import get_valid_filename
 
 from ..models import PODocument, PurchaseOrder, PurchaseRequisition, Vendor
 from ..models_master import Project
 from .po_excel_import import canonical_po_number
 from .po_tesseract_extractor import extract_text_from_pdf_tesseract
+from .document_filenames import build_procurement_pdf_filename
 from .pr_excel_import import _match_vendor
 from .purchase_order_numbering import PurchaseOrderNumberService
 
@@ -211,9 +211,13 @@ def import_signed_po_pdf(
     digest = hashlib.sha256(pdf_bytes).hexdigest()
     document = PODocument.objects.filter(extracted_data__source_sha256=digest).first()
     if not document:
-        safe_name = get_valid_filename(filename) or f"{po_number}.pdf"
+        safe_name = build_procurement_pdf_filename(
+            po_number,
+            "po",
+            fields["po_date"] or timezone.localdate(),
+        )
         storage_key = default_storage.save(
-            f"procurement/signed_documents/{fields['po_date'].year if fields['po_date'] else 'unknown'}/{digest[:12]}_{safe_name}",
+            f"procurement/signed_documents/{fields['po_date'].year if fields['po_date'] else timezone.localdate().year}/{safe_name}",
             ContentFile(pdf_bytes),
         )
         document = PODocument.objects.create(

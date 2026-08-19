@@ -19,10 +19,10 @@ from django.db import transaction
 from django.db.models.functions import Concat
 from django.db.models import CharField, Value
 from django.utils import timezone
-from django.utils.text import get_valid_filename
 
 from ..models import PurchaseRequisition, Vendor
 from .po_tesseract_extractor import extract_text_from_pdf_tesseract
+from .document_filenames import build_procurement_pdf_filename
 from .pr_excel_import import _match_vendor
 
 
@@ -901,9 +901,10 @@ def import_signed_pr_pdf(
         storage_url = existing_attachment.get("url") or existing_attachment.get("s3_url")
         existing_attachment["signature_verified"] = signatures_verified
     else:
-        safe_name = get_valid_filename(filename) or f"{pr.pr_number}.pdf"
+        effective_date = fields["issued_date"] or timezone.localdate()
+        safe_name = build_procurement_pdf_filename(pr.pr_number, "pr", effective_date)
         key = default_storage.save(
-            f"procurement/signed_requisitions/{fields['issued_date'].year if fields['issued_date'] else 'unknown'}/{digest[:12]}_{safe_name}",
+            f"procurement/signed_requisitions/{effective_date.year}/{safe_name}",
             ContentFile(pdf_bytes),
         )
         storage_url = default_storage.url(key)
