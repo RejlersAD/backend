@@ -1,0 +1,255 @@
+"""
+Django Management Command: Fix Production Procurement
+Complete automated fix: migrations + data sync in one command
+"""
+
+from django.core.management.base import BaseCommand
+from django.db import connection, transaction
+from django.contrib.auth import get_user_model
+from apps.procurement.models import PurchaseOrder, PurchaseRequisition, Vendor
+import sys
+
+User = get_user_model()
+
+
+class Command(BaseCommand):
+    help = 'Fix production procurement: run migrations and optionally seed data'
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--check-only',
+            action='store_true',
+            help='Only check status, do not make changes',
+        )
+        parser.add_argument(
+            '--seed',
+            action='store_true',
+            help='Seed sample data after fixing migrations',
+        )
+
+    def handle(self, *args, **options):
+        check_only = options['check_only']
+        seed = options['seed']
+        
+        self.stdout.write("=" * 80)
+        self.stdout.write("PRODUCTION PROCUREMENT FIX")
+        self.stdout.write("=" * 80)
+        
+        # Step 1: Check migrations
+        self.stdout.write("\n[1/4] Checking migrations...")
+        migration_status = self._check_migrations()
+        
+        if not migration_status['0013'] or not migration_status['0014']:
+            if check_only:
+                self.stdout.write(self.style.ERROR("  Migrations NOT applied (check-only mode)"))
+            else:
+                self.stdout.write("  Migrations missing - attempting to apply...")
+                self._apply_migrations()
+        else:
+            self.stdout.write(self.style.SUCCESS("  Migrations already applied"))
+        
+        # Step 2: Verify columns
+        self.stdout.write("\n[2/4] Verifying database schema...")
+        columns_ok = self._verify_columns()
+        
+        if not columns_ok:
+            self.stdout.write(self.style.ERROR("  Schema issues detected"))
+            if not check_only:
+                self.stdout.write("  Attempting manual column creation...")
+                self._fix_schema()
+        else:
+            self.stdout.write(self.style.SUCCESS("  Schema OK"))
+        
+        # Step 3: Check data
+        self.stdout.write("\n[3/4] Checking data...")
+        data_counts = self._check_data()
+        self.stdout.write(f"  Purchase Requisitions: {data_counts['pr']}")
+        self.stdout.write(f"  Purchase Orders: {data_counts['po']}")
+        self.stdout.write(f"  Vendors: {data_counts['vendor']}")
+        
+        # Step 4: Smart data seeding
+        has_no_data = (data_counts['pr'] == 0 and data_counts['po'] == 0 and data_counts['vendor'] == 0)
+        
+        if check_only:
+            self.stdout.write("\n[4/4] Skipping data seeding (check-only mode)")
+        elif seed:
+            self.stdout.write("\n[4/4] Seeding data (explicit --seed flag)...")
+            self._seed_data()
+        elif has_no_data:
+            self.stdout.write("\n[4/4] Auto-seeding sample data (no data found)...")
+            self.stdout.write("  ℹ️  Creating minimal sample data for testing")
+            self._seed_data(minimal=True)
+        else:
+            self.stdout.write("\n[4/4] Data already exists - skipping seeding")
+            self.stdout.write(f"  ℹ️  Use --seed to force reseed")
+        
+        self.stdout.write("\n" + "=" * 80)
+        self.stdout.write(self.style.SUCCESS("COMPLETE"))
+        self.stdout.write("=" * 80)
+
+    def _check_migrations(self):
+        """Check if critical migrations are applied"""
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT name 
+                FROM django_migrations 
+                WHERE app = 'procurement'
+                AND (name LIKE '%0013%' OR name LIKE '%0014%')
+            """)
+            applied = [row[0] for row in cursor.fetchall()]
+            
+            return {
+                '0013': any('0013' in m for m in applied),
+                '0014': any('0014' in m for m in applied),
+            }
+
+    def _apply_migrations(self):
+        """Apply missing migrations"""
+        from django.core.management import call_command
+        try:
+            call_command('migrate', 'procurement', verbosity=0)
+            self.stdout.write(self.style.SUCCESS("  Migrations applied successfully"))
+            return True
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f"  Migration failed: {e}"))
+            return False
+
+    def _verify_columns(self):
+        """Verify required columns exist"""
+        required_columns = ['vendor_id', 'vendor_selection_reason', 'ai_vendor_recommendations']
+        
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'procurement_purchaserequisition'
+            """)
+            existing_columns = [row[0] for row in cursor.fetchall()]
+            
+            missing = [col for col in required_columns if col not in existing_columns]
+            
+            if missing:
+                self.stdout.write(self.style.WARNING(f"  Missing columns: {', '.join(missing)}"))
+                return False
+            
+            return True
+
+    def _fix_schema(self):
+        """Manually add missing columns via SQL"""
+        with connection.cursor() as cursor:
+            try:
+                with transaction.atomic():
+                    # Add vendor_id column and foreign key constraint (TWO separate statements)
+                    cursor.execute("""
+                        DO $$ 
+                        BEGIN
+                            -- Add column if not exists
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name = 'procurement_purchaserequisition' 
+                                AND column_name = 'vendor_id'
+                            ) THEN
+                                ALTER TABLE procurement_purchaserequisition 
+                                ADD COLUMN vendor_id uuid NULL;
+                            END IF;
+                            
+                            -- Add foreign key constraint if not exists
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.table_constraints 
+                                WHERE constraint_name = 'procurement_purchas_vendor_id_fk'
+                            ) THEN
+                                ALTER TABLE procurement_purchaserequisition 
+                                ADD CONSTRAINT procurement_purchas_vendor_id_fk 
+                                FOREIGN KEY (vendor_id) REFERENCES procurement_vendor(id) ON DELETE SET NULL;
+                            END IF;
+                            
+                            -- Add index if not exists
+                            IF NOT EXISTS (
+                                SELECT 1 FROM pg_indexes 
+                                WHERE indexname = 'procurement_purchas_vendor_id_idx'
+                            ) THEN
+                                CREATE INDEX procurement_purchas_vendor_id_idx 
+                                ON procurement_purchaserequisition(vendor_id);
+                            END IF;
+                        END $$;
+                    """)
+                    
+                    # Add vendor_selection_reason
+                    cursor.execute("""
+                        DO $$ 
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name = 'procurement_purchaserequisition' 
+                                AND column_name = 'vendor_selection_reason'
+                            ) THEN
+                                ALTER TABLE procurement_purchaserequisition 
+                                ADD COLUMN vendor_selection_reason text NOT NULL DEFAULT '';
+                            END IF;
+                        END $$;
+                    """)
+                    
+                    # Add ai_vendor_recommendations
+                    cursor.execute("""
+                        DO $$ 
+                        BEGIN
+                            IF NOT EXISTS (
+                                SELECT 1 FROM information_schema.columns 
+                                WHERE table_name = 'procurement_purchaserequisition' 
+                                AND column_name = 'ai_vendor_recommendations'
+                            ) THEN
+                                ALTER TABLE procurement_purchaserequisition 
+                                ADD COLUMN ai_vendor_recommendations jsonb NOT NULL DEFAULT '[]'::jsonb;
+                            END IF;
+                        END $$;
+                    """)
+                    
+                    # Record migrations
+                    cursor.execute("""
+                        INSERT INTO django_migrations (app, name, applied)
+                        SELECT 'procurement', '0013_enhance_pr_workflow_and_vendor_integration', NOW()
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM django_migrations 
+                            WHERE app = 'procurement' 
+                            AND name = '0013_enhance_pr_workflow_and_vendor_integration'
+                        )
+                    """)
+                    
+                    cursor.execute("""
+                        INSERT INTO django_migrations (app, name, applied)
+                        SELECT 'procurement', '0014_alter_purchaserequisition_ai_vendor_recommendations_and_more', NOW()
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM django_migrations 
+                            WHERE app = 'procurement' 
+                            AND name = '0014_alter_purchaserequisition_ai_vendor_recommendations_and_more'
+                        )
+                    """)
+                    
+                self.stdout.write(self.style.SUCCESS("  Schema fixed manually"))
+                return True
+            except Exception as e:
+                self.stdout.write(self.style.ERROR(f"  Schema fix failed: {e}"))
+                return False
+
+    def _check_data(self):
+        """Check current data counts"""
+        return {
+            'pr': PurchaseRequisition.objects.count(),
+            'po': PurchaseOrder.objects.count(),
+            'vendor': Vendor.objects.count(),
+        }
+
+    def _seed_data(self, minimal=False):
+        """Seed sample data"""
+        from django.core.management import call_command
+        try:
+            if minimal:
+                # Minimal seed: just enough to show the pages work
+                call_command('seed_procurement_data', '--vendors=5', '--prs=5', '--pos=5', verbosity=0)
+                self.stdout.write(self.style.SUCCESS("  Minimal sample data seeded (5 vendors, 5 PRs, 5 POs)"))
+            else:
+                # Full seed: good demo data
+                call_command('seed_procurement_data', '--vendors=10', '--prs=15', '--pos=10', verbosity=0)
+                self.stdout.write(self.style.SUCCESS("  Full sample data seeded (10 vendors, 15 PRs, 10 POs)"))
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f"  Seeding failed: {e}"))

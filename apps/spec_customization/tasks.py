@@ -1,0 +1,410 @@
+"""
+Spec Customization — Celery Orchestration
+==========================================
+
+`extract_paper_spec(job_id)` is the entry point invoked from the API view.
+It processes the PDF in chunks, writing live progress + partial results to
+Redis cache so the UI can poll status without waiting for the full run.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import tempfile
+from typing import Any, Dict, List
+
+from celery import shared_task
+from django.core.cache import cache
+from django.utils import timezone
+
+from .models import (
+    PaperSpecDocument,
+    PaperSpecExtractionJob,
+    PipingClass,
+    PipingClassComponent,
+)
+from .services.config import (
+    SPEC_EXTRACTION_CONFIG,
+    PROGRESS_CACHE_KEY_TPL,
+    PARTIAL_CACHE_KEY_TPL,
+    PROGRESS_CACHE_TIMEOUT,
+)
+from .services.extraction_service import PaperSpecExtractionService
+from .services.data_quality import process_extracted_classes
+from .services.advanced_validation import (
+    validate_extracted_classes,
+    ADVANCED_VALIDATION_CONFIG,
+)
+from .services.advanced_validation import (
+    validate_extracted_classes,
+    ADVANCED_VALIDATION_CONFIG,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _get_local_path(file_field):
+    """
+    Get a local filesystem path for a Django FileField, downloading from S3 if needed.
+    
+    Args:
+        file_field: Django FileField that may use local or S3 storage
+        
+    Returns:
+        tuple: (path_string, needs_cleanup_boolean)
+        - If local storage: returns (actual_path, False)
+        - If S3 storage: downloads to temp file, returns (temp_path, True)
+    """
+    try:
+        # Try to get local path directly
+        return (file_field.path, False)
+    except (NotImplementedError, AttributeError):
+        # S3 storage - download to temp file
+        logger.info("[SpecExtraction] Downloading file from S3 to temp location")
+        temp_fd, temp_path = tempfile.mkstemp(suffix='.pdf', prefix='spec_extraction_')
+        try:
+            with os.fdopen(temp_fd, 'wb') as tmp_file:
+                with file_field.open('rb') as s3_file:
+                    # Download in chunks to handle large files
+                    for chunk in s3_file.chunks():
+                        tmp_file.write(chunk)
+            logger.info("[SpecExtraction] File downloaded to: %s", temp_path)
+            return (temp_path, True)
+        except Exception as e:
+            # Clean up on error
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+            raise e
+
+
+def _write_progress(job_id: str, **fields: Any) -> None:
+    key = PROGRESS_CACHE_KEY_TPL.format(job_id=job_id)
+    existing = cache.get(key) or {}
+    existing.update(fields)
+    cache.set(key, existing, timeout=PROGRESS_CACHE_TIMEOUT)
+
+
+def _persist_classes(job: PaperSpecExtractionJob, merged: List[Dict[str, Any]]) -> int:
+    """Create PipingClass + PipingClassComponent rows. Returns class count."""
+    count = 0
+    min_components = SPEC_EXTRACTION_CONFIG["min_components_to_keep"]
+    for cls in merged:
+        code = (cls.get("class_code") or "").strip().upper()
+        if not code:
+            continue
+        components = cls.get("components", []) or []
+        # Keep classes with header-only detection too — user may want to see them.
+        # But discard truly empty entries that the AI hallucinated.
+        if len(components) < min_components and not cls.get("class_full_code"):
+            continue
+        pclass, _created = PipingClass.objects.update_or_create(
+            job=job,
+            class_code=code,
+            defaults={
+                "class_full_code":     cls.get("class_full_code", "") or "",
+                "material_grade":      cls.get("material_grade", "") or "",
+                "pressure_rating":     cls.get("pressure_rating", "") or "",
+                "flange_facing":       cls.get("flange_facing", "") or "",
+                "corrosion_allowance": cls.get("corrosion_allowance", "") or "",
+                "service_list":        cls.get("service_list", []) or [],
+                "pt_rating_table":     cls.get("pt_rating_table", []) or [],
+                "source_pages":        cls.get("_source_pages", []) or [],
+                "confidence_score":    float(cls.get("confidence", 0.0) or 0.0),
+                "raw_notes":           cls.get("raw_notes", "") or "",
+                "extraction_engine":   cls.get("_engine", "") or "",
+            },
+        )
+        # Replace components fresh.
+        PipingClassComponent.objects.filter(piping_class=pclass).delete()
+        rows: List[PipingClassComponent] = []
+        for idx, comp in enumerate(components):
+            rows.append(PipingClassComponent(
+                piping_class=pclass,
+                component_type=(comp.get("component_type") or "other").lower(),
+                sub_type=comp.get("sub_type", "") or "",
+                size_from=comp.get("size_from", "") or "",
+                size_to=comp.get("size_to", "") or "",
+                description=comp.get("description", "") or "",
+                schedule_or_rating=comp.get("schedule_or_rating", "") or "",
+                material_standard=comp.get("material_standard", "") or "",
+                end_connection=comp.get("end_connection", "") or "",
+                notes=comp.get("notes", "") or "",
+                display_order=idx,
+            ))
+        if rows:
+            PipingClassComponent.objects.bulk_create(rows)
+        count += 1
+    return count
+
+
+@shared_task(
+    bind=True,
+    soft_time_limit=SPEC_EXTRACTION_CONFIG["job_total_timeout_s"] - 30,
+    time_limit=SPEC_EXTRACTION_CONFIG["job_total_timeout_s"],
+)
+def extract_paper_spec(self, job_id: str) -> Dict[str, Any]:
+    """Orchestrate per-chunk extraction for one PaperSpecExtractionJob."""
+    try:
+        job = PaperSpecExtractionJob.objects.select_related("document").get(pk=job_id)
+    except PaperSpecExtractionJob.DoesNotExist:
+        logger.error("[SpecExtraction] Job %s not found", job_id)
+        return {"success": False, "error": "job not found"}
+
+    cfg = SPEC_EXTRACTION_CONFIG
+    job.status = PaperSpecExtractionJob.STATUS_PROCESSING
+    job.started_at = timezone.now()
+    job.celery_task_id = self.request.id or ""
+    job.config_snapshot = dict(cfg)
+    job.save(update_fields=["status", "started_at", "celery_task_id", "config_snapshot"])
+
+    # BYOK: Extract user-supplied API key and provider (if present)
+    user_api_key = ""
+    user_provider = ""
+    user_model = ""
+    
+    if hasattr(job, 'user_ai_provider') and job.user_ai_provider:
+        user_provider = job.user_ai_provider.lower()
+        if hasattr(job, 'user_ai_model') and job.user_ai_model:
+            user_model = job.user_ai_model
+        
+        # Get the appropriate API key based on provider
+        if user_provider == "openai" and hasattr(job, 'user_openai_api_key') and job.user_openai_api_key:
+            user_api_key = job.user_openai_api_key
+            logger.info("[SpecExtraction] Using BYOK: OpenAI (%s)", user_model or "default model")
+        elif user_provider == "claude" and hasattr(job, 'user_claude_api_key') and job.user_claude_api_key:
+            user_api_key = job.user_claude_api_key
+            logger.info("[SpecExtraction] Using BYOK: Claude (%s)", user_model or "default model")
+    
+    service = PaperSpecExtractionService(cfg, user_api_key=user_api_key, user_provider=user_provider, user_model=user_model)
+    
+    # Get local path for PDF (downloads from S3 if needed)
+    pdf_path, needs_cleanup = _get_local_path(job.document.file)
+    
+    try:
+        total_pages = service.get_page_count(pdf_path) or job.document.total_pages
+
+        if total_pages <= 0:
+            job.status = PaperSpecExtractionJob.STATUS_FAILED
+            job.error_message = "Unable to read PDF (zero pages)"
+            job.completed_at = timezone.now()
+            job.save()
+            return {"success": False, "error": job.error_message}
+
+        chunks = service.chunk_ranges(total_pages)
+        job.chunks_total = len(chunks)
+        job.save(update_fields=["chunks_total"])
+
+        _write_progress(
+            str(job.id),
+            state="PROGRESS",
+            status="Splitting PDF into chunks",
+            percent=cfg["chunk_progress_start"],
+            chunks_total=len(chunks),
+            chunks_done=0,
+            total_pages=total_pages,
+            classes_found=0,
+        )
+
+        all_results: List[List[Dict[str, Any]]] = []
+        ensemble_metrics_list: List[Dict[str, Any]] = []
+        classes_found = 0
+        cprog_start = cfg["chunk_progress_start"]
+        cprog_end = cfg["chunk_progress_end"]
+        band = max(1, cprog_end - cprog_start)
+        
+        # Enable ensemble extraction for better accuracy (98% target)
+        enable_ensemble = ADVANCED_VALIDATION_CONFIG.get("enable_ensemble_extraction", False)
+        if enable_ensemble:
+            logger.info("[SpecExtraction] Ensemble mode enabled for job %s", job_id)
+
+        for idx, (start_page, end_page) in enumerate(chunks):
+            # Cancellation check.
+            job.refresh_from_db(fields=["status"])
+            if job.status == PaperSpecExtractionJob.STATUS_CANCELLED:
+                logger.info("[SpecExtraction] Job %s cancelled mid-flight", job_id)
+                return {"success": False, "cancelled": True}
+
+            try:
+                chunk_result = service.extract_chunk(
+                    pdf_path, start_page, end_page,
+                    enable_ensemble=enable_ensemble,
+                    retry_attempt=0
+                )
+            except Exception as e:
+                logger.exception("[SpecExtraction] chunk %d-%d failed: %s", start_page, end_page, e)
+                chunk_result = {"piping_classes": [], "engine_used": "error"}
+
+            all_results.append(chunk_result.get("piping_classes", []))
+            
+            # Track ensemble metrics if available
+            if "ensemble_metrics" in chunk_result:
+                ensemble_metrics_list.append(chunk_result["ensemble_metrics"])
+            
+            classes_found = len({
+                (c.get("class_code") or "").upper()
+                for lst in all_results for c in lst
+                if (c.get("class_code") or "").strip()
+            })
+
+            pct = cprog_start + int(((idx + 1) / max(1, len(chunks))) * band)
+            job.pages_processed = end_page + 1
+            job.chunks_done = idx + 1
+            job.progress_percent = pct
+            job.current_phase = (
+                f"Pages {start_page + 1}-{end_page + 1} of {total_pages} "
+                f"· {classes_found} classes · engine={chunk_result.get('engine_used')}"
+            )
+            job.save(update_fields=["pages_processed", "chunks_done", "progress_percent", "current_phase"])
+
+            _write_progress(
+                str(job.id),
+                state="PROGRESS",
+                status=job.current_phase,
+                percent=pct,
+                chunks_total=len(chunks),
+                chunks_done=idx + 1,
+                pages_processed=end_page + 1,
+                total_pages=total_pages,
+                classes_found=classes_found,
+                engine_used=chunk_result.get("engine_used"),
+            )
+
+            # Stash partial classes for the UI to peek at.
+            cache.set(
+                PARTIAL_CACHE_KEY_TPL.format(job_id=str(job.id)),
+                [c for lst in all_results for c in lst],
+                timeout=PROGRESS_CACHE_TIMEOUT,
+            )
+
+        # ── Merge + Advanced Validation + Data Quality + Persist ──────────
+        _write_progress(
+            str(job.id),
+            state="PROGRESS",
+            status="Merging chunks & running AI-powered validation...",
+            percent=cprog_end + 5,
+        )
+        
+        merged = service.merge_classes(all_results)
+        
+        # ── ADVANCED VALIDATION (NEW: 98% accuracy target) ────────────────
+        validation_report = validate_extracted_classes(
+            merged,
+            context={
+                "job_id": str(job.id),
+                "document_id": str(job.document.id),
+                "total_pages": total_pages,
+                "ensemble_enabled": enable_ensemble,
+            }
+        )
+        
+        # Log validation results
+        logger.info(
+            "[SpecExtraction] Job %s validation: %s, %d classes, %d warnings, accuracy %.1f%%",
+            job_id,
+            validation_report["overall_status"],
+            validation_report["classes_validated"],
+            validation_report["warnings_total"],
+            validation_report.get("template_comparison", {}).get("accuracy_estimate", 0)
+        )
+        
+        # Run data quality pipeline (deduplication, validation, normalization)
+        cleaned_classes, quality_report = process_extracted_classes(
+            classes=merged,
+            project_id=job.document.project_id,
+            project_title=job.document.title,
+            document_number=job.document.document_number,
+        )
+        
+        logger.info(
+            "[SpecExtraction] Data quality report for job %s: %s",
+            job_id,
+            quality_report
+        )
+        
+        saved = _persist_classes(job, cleaned_classes)
+
+        # Calculate final accuracy estimate
+        accuracy_pct = validation_report.get("template_comparison", {}).get("accuracy_estimate", 0)
+        total_components = sum(len(cls.get("components", [])) for cls in cleaned_classes)
+        
+        # Extract token usage and cost from service (BACKWARD COMPATIBLE)
+        # Only set these fields if migration 0005 has been applied
+        usage_data = service.get_usage_and_cost()
+        update_fields = ["status", "progress_percent", "completed_at", "current_phase"]
+        
+        # Conditionally set cost tracking fields (soft-coded for migration 0005)
+        if hasattr(job, 'gemini_prompt_tokens'):
+            job.gemini_prompt_tokens = usage_data["gemini_prompt_tokens"]
+            update_fields.append("gemini_prompt_tokens")
+        if hasattr(job, 'gemini_completion_tokens'):
+            job.gemini_completion_tokens = usage_data["gemini_completion_tokens"]
+            update_fields.append("gemini_completion_tokens")
+        if hasattr(job, 'openai_prompt_tokens'):
+            job.openai_prompt_tokens = usage_data["openai_prompt_tokens"]
+            update_fields.append("openai_prompt_tokens")
+        if hasattr(job, 'openai_completion_tokens'):
+            job.openai_completion_tokens = usage_data["openai_completion_tokens"]
+            update_fields.append("openai_completion_tokens")
+        if hasattr(job, 'cost_usd'):
+            job.cost_usd = usage_data["cost_usd"]
+            update_fields.append("cost_usd")
+        
+        job.status = PaperSpecExtractionJob.STATUS_COMPLETED
+        job.progress_percent = 100
+        job.completed_at = timezone.now()
+        job.current_phase = (
+            f"Completed · {saved} classes · {total_components} components · "
+            f"{accuracy_pct:.1f}% accuracy · "
+            f"{quality_report['duplicates_removed']} dupes removed"
+        )
+        
+        # SECURITY: Wipe user-supplied API keys now that extraction is complete
+        # Keys are held temporarily during processing and wiped immediately after
+        if hasattr(job, 'user_openai_api_key') and job.user_openai_api_key:
+            job.user_openai_api_key = ""
+            if 'user_openai_api_key' not in update_fields:
+                update_fields.append('user_openai_api_key')
+            logger.info("[SpecExtraction] Wiped BYOK OpenAI API key for job %s", job_id)
+        if hasattr(job, 'user_claude_api_key') and job.user_claude_api_key:
+            job.user_claude_api_key = ""
+            if 'user_claude_api_key' not in update_fields:
+                update_fields.append('user_claude_api_key')
+            logger.info("[SpecExtraction] Wiped BYOK Claude API key for job %s", job_id)
+        
+        job.save(update_fields=update_fields)
+
+        _write_progress(
+            str(job.id),
+            state="SUCCESS",
+            status=job.current_phase,
+            percent=100,
+            chunks_total=len(chunks),
+            chunks_done=len(chunks),
+            classes_found=saved,
+            total_components=total_components,
+            accuracy_estimate=accuracy_pct,
+            quality_report=quality_report,
+            validation_report=validation_report,
+            ensemble_enabled=enable_ensemble,
+        )
+
+        return {
+            "success": True,
+            "job_id": str(job.id),
+            "classes": saved,
+            "total_components": total_components,
+            "accuracy_estimate": accuracy_pct,
+            "quality_report": quality_report,
+            "validation_report": validation_report,
+        }
+    finally:
+        # Clean up temporary file if we downloaded from S3
+        if needs_cleanup and pdf_path:
+            try:
+                import os
+                os.unlink(pdf_path)
+                logger.info("[SpecExtraction] Cleaned up temp file: %s", pdf_path)
+            except Exception as e:
+                logger.warning("[SpecExtraction] Failed to clean up temp file %s: %s", pdf_path, e)

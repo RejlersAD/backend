@@ -1,0 +1,161 @@
+# .railwayignore - Minimize deployment size and speed up builds
+# ========================================================================
+# CRITICAL: Excludes ~30MB+ of unnecessary files from Railway deployments
+# ========================================================================
+
+# CRITICAL: Always include Python requirements (must NOT be excluded)
+!requirements.txt
+!requirements-ml.txt
+!requirements-ocr.txt
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Large training data (CRITICAL - 20MB+)
+pfd_training_samples/
+pid_training_samples/
+pid_drawings/
+pfd_documents/
+media/pid_drawings/
+media/pfd_documents/
+training_data_cache/
+project_data/
+
+# Test files and outputs
+test_*/
+*_test.py
+test_*.py
+tests/
+test_outputs/
+.pytest_cache/
+htmlcov/
+.coverage
+.tox/
+.mypy_cache/
+
+# Development files
+.env
+.env.*
+!.env.example
+docker-compose*.yml
+Dockerfile*
+!Dockerfile
+docker-entrypoint*.sh
+
+# Generated at runtime (not needed in deployment)
+staticfiles/
+media/
+db.sqlite3
+*.log
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# IDE
+.vscode/
+.idea/
+.git/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Admin & Utility Scripts (development only)
+change_user_password.py
+cleanup_duplicate_emails.py
+configure_s3.py
+delete_user.py
+diagnose_user_sync.py
+reset_*_password.py
+reset_user_password.py
+smart_populate_area.py
+soft_delete_user.py
+remove_*.py
+generate_ui_comparison_report.py
+*_report.txt
+production_users_report.txt
+
+# Knowledge Base Files (should be in S3, not in deployment)
+*_knowledge_base.json
+*_training_examples.json
+pfd_knowledge_base.json
+pfd_training_examples.json
+pid_knowledge_base.json
+pid_training_examples.json
+
+# Build & Deployment Scripts (exclude dev scripts, KEEP Railway startup scripts)
+git_push.ps1
+push_to_github.bat
+*.bat
+*.ps1
+docker-entrypoint.sh
+railway_health_check.py
+verify_railway_cors.py
+
+# CRITICAL: Explicitly include Railway startup scripts
+!railway_start.sh
+!start.sh
+
+# Backup files
+*_backup.*
+*.log
+*.swp
+celerybeat-schedule
+celerybeat.pid
+*.bak
+*.backup
+*.old
+*_backup.json
+
+# Office files
+*.xlsx
+*.xls
+*.docx
+
+# Large binary/media files
+*.mp4
+*.avi
+*.mov
+*.pdf
+*.zip
+*.tar.gz
+
+# Training models (huge files)
+*.pkl
+*.joblib
+*.h5
+*.pth
+
+# Analysis and migration scripts (development only)
+analyze_*.py
+check_*.py
+create_*.py
+debug_*.py
+fix_*.py
+verify_*.py
+activate_*.py
+extract_*.py
+list_*.py
+seed_*.py
+setup_*.py
+browse_*.py
+build_*.py
+learn_*.py
+send_*.py
+troubleshoot_*.py
+validate_*.py
+system_*.py

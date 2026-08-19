@@ -1,0 +1,117 @@
+{
+  "version": "1.0.0",
+  "description": "CRS History Actions Configuration - Soft-coded feature flags",
+  
+  "upload_actions": {
+    "download": {
+      "enabled": true,
+      "label": "Download",
+      "icon": "⬇️",
+      "color": "blue",
+      "description": "Download original file"
+    },
+    "delete": {
+      "enabled": true,
+      "label": "Delete",
+      "icon": "🗑️",
+      "color": "red",
+      "description": "Remove file from storage",
+      "confirm_message": "Are you sure you want to delete this file? This action cannot be undone."
+    },
+    "reprocess": {
+      "enabled": true,
+      "label": "Re-process",
+      "icon": "🔄",
+      "color": "purple",
+      "description": "Process document again to extract comments"
+    },
+    "view_metadata": {
+      "enabled": true,
+      "label": "Details",
+      "icon": "ℹ️",
+      "color": "gray",
+      "description": "View file metadata and information"
+    },
+    "share": {
+      "enabled": true,
+      "label": "Share",
+      "icon": "🔗",
+      "color": "green",
+      "description": "Get shareable download link (expires in 1 hour)"
+    }
+  },
+  
+  "export_actions": {
+    "download": {
+      "enabled": true,
+      "label": "Re-download",
+      "icon": "⬇️",
+      "color": "green",
+      "description": "Download exported file"
+    },
+    "delete": {
+      "enabled": true,
+      "label": "Delete",
+      "icon": "🗑️",
+      "color": "red",
+      "description": "Remove export from storage",
+      "confirm_message": "Are you sure you want to delete this export? This action cannot be undone."
+    },
+    "view_metadata": {
+      "enabled": true,
+      "label": "Details",
+      "icon": "ℹ️",
+      "color": "gray",
+      "description": "View export metadata and information"
+    },
+    "share": {
+      "enabled": true,
+      "label": "Share",
+      "icon": "🔗",
+      "color": "blue",
+      "description": "Get shareable download link (expires in 1 hour)"
+    },
+    "preview": {
+      "enabled": true,
+      "label": "Preview",
+      "icon": "👁️",
+      "color": "indigo",
+      "description": "Preview file content (for supported formats)"
+    }
+  },
+  
+  "bulk_actions": {
+    "delete_all_uploads": {
+      "enabled": false,
+      "label": "Delete All Uploads",
+      "requires_admin": true
+    },
+    "delete_all_exports": {
+      "enabled": false,
+      "label": "Delete All Exports",
+      "requires_admin": true
+    },
+    "export_history": {
+      "enabled": true,
+      "label": "Export History Report",
+      "format": "csv"
+    }
+  },
+  
+  "security": {
+    "allow_delete": true,
+    "allow_reprocess": true,
+    "require_confirmation_for_delete": true,
+    "max_share_link_duration_hours": 1,
+    "allow_share_links": true
+  },
+  
+  "ui_preferences": {
+    "show_action_menu": true,
+    "action_menu_type": "dropdown",
+    "show_quick_actions": true,
+    "items_per_page": 50,
+    "enable_search": true,
+    "enable_filters": true
+  }
+}

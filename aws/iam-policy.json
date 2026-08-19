@@ -1,0 +1,69 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "IAM Policy for AIFlow P&ID Processing (Least Privilege)",
+  "Resources": {
+    "AIFlowS3Policy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "AIFlowPIDStoragePolicy",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "ListBucketContents",
+              "Effect": "Allow",
+              "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+              ],
+              "Resource": "arn:aws:s3:::aiflow-pid-drawings",
+              "Condition": {
+                "StringLike": {
+                  "s3:prefix": [
+                    "media/pid_drawings/*",
+                    "media/pid_reports/*",
+                    "media/avatars/*"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "ReadWritePIDDrawings",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:GetObjectVersion",
+                "s3:PutObject",
+                "s3:PutObjectAcl",
+                "s3:DeleteObject"
+              ],
+              "Resource": [
+                "arn:aws:s3:::aiflow-pid-drawings/media/pid_drawings/*",
+                "arn:aws:s3:::aiflow-pid-drawings/media/pid_reports/*",
+                "arn:aws:s3:::aiflow-pid-drawings/media/avatars/*"
+              ]
+            },
+            {
+              "Sid": "ReadWriteStaticFiles",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:PutObjectAcl"
+              ],
+              "Resource": "arn:aws:s3:::aiflow-pid-drawings/static/*"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "PolicyArn": {
+      "Description": "ARN of the created IAM policy",
+      "Value": {
+        "Ref": "AIFlowS3Policy"
+      }
+    }
+  }
+}

@@ -1,0 +1,134 @@
+{
+  "_comment": "Procurement Module Configuration - Soft-coded settings for data sync, seeding, and deployment",
+  
+  "data_sync": {
+    "enabled": true,
+    "export_directory": "data_exports",
+    "backup_before_import": true,
+    "max_file_size_mb": 50,
+    "supported_formats": ["json", "yaml", "xml"],
+    "default_format": "json"
+  },
+  
+  "seed_data": {
+    "vendors": {
+      "default_count": 10,
+      "max_count": 100,
+      "auto_generate_codes": true,
+      "code_prefix": "VEN",
+      "categories": [
+        "rotating_equipment",
+        "static_equipment",
+        "instrumentation",
+        "valves_fittings",
+        "piping_materials",
+        "electrical_materials",
+        "spare_parts",
+        "chemicals",
+        "maintenance_services",
+        "inspection_testing",
+        "engineering_services",
+        "safety_equipment",
+        "consumables",
+        "software_licenses"
+      ]
+    },
+    "purchase_requisitions": {
+      "default_count": 15,
+      "max_count": 500,
+      "number_format": "RAD-{type}-PR-{seq:04d}_{year}",
+      "types": ["GEN", "PRJ"],
+      "status_weights": {
+        "draft": 0.2,
+        "submitted": 0.1,
+        "in_review": 0.1,
+        "approved": 0.4,
+        "converted": 0.2
+      },
+      "priority_weights": {
+        "urgent": 0.1,
+        "high": 0.2,
+        "normal": 0.6,
+        "low": 0.1
+      },
+      "price_range": {
+        "min": 1000,
+        "max": 50000,
+        "currency": "USD"
+      }
+    },
+    "purchase_orders": {
+      "default_count": 10,
+      "max_count": 500,
+      "number_format": "RAD-PRJ-PUR-{seq:04d}_{year}",
+      "status_weights": {
+        "draft": 0.2,
+        "approved": 0.3,
+        "issued": 0.3,
+        "completed": 0.2
+      },
+      "price_range": {
+        "min": 5000,
+        "max": 100000,
+        "currency": "USD"
+      }
+    }
+  },
+  
+  "deployment": {
+    "environments": {
+      "local": {
+        "database_marker": "postgres_local",
+        "auto_migrate": true,
+        "seed_on_deploy": false,
+        "backup_enabled": true
+      },
+      "staging": {
+        "database_marker": "staging",
+        "auto_migrate": true,
+        "seed_on_deploy": true,
+        "backup_enabled": true
+      },
+      "production": {
+        "database_marker": "railway",
+        "auto_migrate": true,
+        "seed_on_deploy": false,
+        "backup_enabled": true,
+        "require_confirmation": true
+      }
+    },
+    "migration_strategy": {
+      "check_before_deploy": true,
+      "fail_on_migration_error": true,
+      "notify_on_migration": true
+    }
+  },
+  
+  "monitoring": {
+    "health_checks": {
+      "check_migrations": true,
+      "check_data_counts": true,
+      "alert_on_zero_data": true,
+      "alert_threshold": {
+        "vendors": 5,
+        "purchase_requisitions": 0,
+        "purchase_orders": 0
+      }
+    }
+  },
+  
+  "api_settings": {
+    "pagination": {
+      "default_page_size": 20,
+      "max_page_size": 100
+    },
+    "filtering": {
+      "enabled": true,
+      "fields": ["status", "priority", "vendor", "created_at"]
+    },
+    "search": {
+      "enabled": true,
+      "fields": ["pr_number", "po_number", "description", "supplier_name"]
+    }
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "_comment": "Soft-coded pump hydraulic extraction patterns. Each form field gets a list of regex patterns; the first capturing group is the value. Patterns are tried in order — first match wins. To add/edit a field, modify only this file; no Python change is needed.",
+  "version": "1.0",
+  "engines": {
+    "text_extraction": ["pdfplumber", "pymupdf"],
+    "vision_fallback": {
+      "enabled": true,
+      "model": "gpt-4o",
+      "max_pages": 4,
+      "image_dpi": 200,
+      "temperature": 0.0,
+      "skip_if_text_chars_gte": 800
+    }
+  },
+  "field_patterns": {
+    "agreement_no": [
+      "AGREEMENT\\s*(?:NO\\.?|NUMBER|#)\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9\\-/_]{2,30})",
+      "AGR(?:\\.|EEMENT)?\\s*(?:NO\\.?)?\\s*[:\\-]\\s*([A-Z0-9][A-Z0-9\\-/_]{2,30})"
+    ],
+    "project_no": [
+      "PROJECT\\s*(?:NO\\.?|NUMBER|#)\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9\\-/_]{2,30})",
+      "JOB\\s*(?:NO\\.?|NUMBER|#)\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9\\-/_]{2,30})"
+    ],
+    "document_no": [
+      "DOCUMENT\\s*(?:NO\\.?|NUMBER|#)\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9\\-/_\\.]{2,40})",
+      "DRAWING\\s*(?:NO\\.?|NUMBER|#)\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9\\-/_\\.]{2,40})",
+      "DOC\\.?\\s*NO\\.?\\s*[:\\-]\\s*([A-Z0-9][A-Z0-9\\-/_\\.]{2,40})"
+    ],
+    "revision": [
+      "REV(?:\\.|ISION)?\\s*[:\\-]?\\s*([A-Z0-9])\\b",
+      "\\bREV\\s+([A-Z0-9])\\b"
+    ],
+    "tag_no": [
+      "(?:PUMP\\s+)?TAG\\s*(?:NO\\.?|NUMBER|#)?\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9\\-/]{2,15})",
+      "ITEM\\s*(?:NO\\.?|NUMBER|#)?\\s*[:\\-]?\\s*((?:P|PMP|PUMP)[\\-/]?\\d{2,5}[A-Z]?)",
+      "\\b((?:P|PMP)[\\-/]?\\d{2,5}[A-Z]?)\\b"
+    ],
+    "service": [
+      "SERVICE\\s*[:\\-]?\\s*([A-Za-z0-9 \\-/&\\.,]{3,80})(?=\\n|REV|TAG|DOC|$)",
+      "DUTY\\s*[:\\-]?\\s*([A-Za-z0-9 \\-/&\\.,]{3,80})(?=\\n|REV|TAG|DOC|$)"
+    ],
+    "temperature": [
+      "(?:OPERATING|OPER\\.?|NORMAL)\\s*(?:TEMP(?:ERATURE)?|TEMP\\.?)\\s*[:\\-]?\\s*([\\-+]?\\d{1,4}(?:\\.\\d+)?)\\s*(?:°?\\s*C|DEG\\s*C)",
+      "TEMP(?:ERATURE)?\\.?\\s*[:\\-]?\\s*([\\-+]?\\d{1,4}(?:\\.\\d+)?)\\s*(?:°?\\s*C|DEG\\s*C)"
+    ],
+    "fluid_viscosity_at_temp": [
+      "VISCOSITY\\s*(?:@|AT)?\\s*(?:OPER(?:ATING)?\\s*TEMP)?\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:c[Pp]|mPa\\s*s)",
+      "VISC\\.?\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:c[Pp]|mPa\\s*s)"
+    ],
+    "density": [
+      "DENSITY\\s*(?:@|AT)?\\s*(?:OPER(?:ATING)?\\s*TEMP)?\\s*[:\\-]?\\s*(\\d{2,4}(?:\\.\\d+)?)\\s*(?:kg/m\\^?3|kg/m³|kg per m3)",
+      "SP(?:ECIFIC)?\\.?\\s*GR(?:AVITY)?\\.?\\s*[:\\-]?\\s*(0?\\.\\d{2,4}|1\\.\\d{2,4})"
+    ],
+    "vapor_pressure": [
+      "VAP(?:OUR|OR)\\s*PRESS(?:URE)?\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:bar|kpa|kg/cm)"
+    ],
+    "source_op_pressure": [
+      "(?:SUCTION|SOURCE)\\s*(?:VESSEL\\s*)?(?:OPERATING|OPER\\.?)\\s*PRESS(?:URE)?\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:bar|kpa|kg/cm)",
+      "SUPPLY\\s*PRESS(?:URE)?\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:bar|kpa)"
+    ],
+    "destination_pressure": [
+      "(?:DISCHARGE|DESTIN(?:ATION)?)\\s*(?:VESSEL\\s*)?(?:OPERATING|OPER\\.?)?\\s*PRESS(?:URE)?\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:bar|kpa|kg/cm)",
+      "DELIVERY\\s*PRESS(?:URE)?\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:bar|kpa)"
+    ],
+    "destination_description": [
+      "(?:DESTIN(?:ATION)?|DISCHARGE\\s*TO|DELIVERY\\s*TO)\\s*[:\\-]\\s*([A-Za-z0-9 \\-/&\\.,()]{3,80})(?=\\n|REV|TAG|$)"
+    ],
+    "destination_elevation": [
+      "(?:DESTIN(?:ATION)?|DISCHARGE)\\s*ELEV(?:ATION)?\\.?\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*m"
+    ],
+    "suction_elm": [
+      "SUCTION\\s*ELEV(?:ATION)?\\.?\\s*[:\\-]?\\s*([\\-+]?\\d+(?:\\.\\d+)?)\\s*m"
+    ],
+    "pump_centerline_elevation": [
+      "(?:PUMP\\s*)?(?:CENTERLINE|CENTRE\\s*LINE|C/L)\\s*ELEV(?:ATION)?\\.?\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*m"
+    ],
+    "elevation_source_btl": [
+      "(?:SOURCE|SUCTION)\\s*BTL\\s*ELEV(?:ATION)?\\.?\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*m",
+      "BTL\\s*ELEV(?:ATION)?\\.?\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*m"
+    ],
+    "hp": [
+      "(?:RATED\\s*)?(?:HP|HORSEPOWER)\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)"
+    ],
+    "motor_rating": [
+      "MOTOR\\s*RATING\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:kW|kw|HP)",
+      "MOTOR\\s*POWER\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:kW|kw|HP)"
+    ],
+    "motor_efficiency": [
+      "MOTOR\\s*EFF(?:ICIENCY)?\\.?\\s*[:\\-]?\\s*(\\d{2}(?:\\.\\d+)?)\\s*%?"
+    ],
+    "pump_efficiency": [
+      "PUMP\\s*EFF(?:ICIENCY)?\\.?\\s*[:\\-]?\\s*(\\d{2}(?:\\.\\d+)?)\\s*%?",
+      "EFF(?:ICIENCY)?\\.?\\s*[:\\-]?\\s*(\\d{2}(?:\\.\\d+)?)\\s*%"
+    ],
+    "type_of_motor": [
+      "TYPE\\s*OF\\s*MOTOR\\s*[:\\-]?\\s*([A-Za-z0-9 \\-/]{2,40})(?=\\n|$)",
+      "MOTOR\\s*TYPE\\s*[:\\-]?\\s*([A-Za-z0-9 \\-/]{2,40})(?=\\n|$)"
+    ]
+  },
+  "value_validators": {
+    "_comment": "Optional sanity bounds. If a value is outside the range it is dropped. Numeric only.",
+    "temperature":          {"min": -50,  "max": 600},
+    "density":              {"min": 100,  "max": 2500},
+    "fluid_viscosity_at_temp": {"min": 0.1, "max": 5000},
+    "vapor_pressure":       {"min": 0,    "max": 50},
+    "source_op_pressure":   {"min": 0,    "max": 200},
+    "destination_pressure": {"min": 0,    "max": 200},
+    "destination_elevation": {"min": -50, "max": 200},
+    "suction_elm":          {"min": -50,  "max": 200},
+    "pump_centerline_elevation": {"min": -50, "max": 200},
+    "elevation_source_btl": {"min": -50,  "max": 200},
+    "motor_rating":         {"min": 0.1,  "max": 50000},
+    "motor_efficiency":     {"min": 30,   "max": 100},
+    "pump_efficiency":      {"min": 20,   "max": 100},
+    "hp":                   {"min": 0.1,  "max": 50000}
+  },
+  "vision_field_hints": {
+    "_comment": "Field hints sent to GPT-4o when text extraction yields too little. The model is asked to return ONLY a JSON object using these exact keys. Units are stripped before storing.",
+    "agreement_no": "Agreement / contract number, alphanumeric",
+    "project_no": "Project or job number",
+    "document_no": "Document or drawing number",
+    "revision": "Single revision letter or digit",
+    "tag_no": "Pump tag number, e.g. P-101A or 06.5-P-2307",
+    "service": "Pump service or duty description",
+    "temperature": "Operating temperature in °C (number only)",
+    "fluid_viscosity_at_temp": "Viscosity at operating temperature in cP (number only)",
+    "density": "Fluid density in kg/m³ (number only)",
+    "vapor_pressure": "Vapour pressure in bar (number only)",
+    "source_op_pressure": "Suction / source operating pressure in bar (number only)",
+    "destination_pressure": "Discharge / destination operating pressure in bar (number only)",
+    "destination_description": "Destination vessel description",
+    "destination_elevation": "Destination elevation in metres (number only)",
+    "suction_elm": "Suction elevation in metres (number only)",
+    "pump_centerline_elevation": "Pump centerline elevation in metres (number only)",
+    "elevation_source_btl": "Source bottom-tangent-line elevation in metres (number only)",
+    "motor_rating": "Motor rated power in kW (number only)",
+    "motor_efficiency": "Motor efficiency in % (number only)",
+    "pump_efficiency": "Pump efficiency in % (number only)",
+    "type_of_motor": "Motor construction type, e.g. TEFC / IE3 / WPI"
+  }
+}

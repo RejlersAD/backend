@@ -1,0 +1,27 @@
+{
+  "_comment": "Soft-coded field bounds + dedup rules applied AFTER tag_validator.validate_and_filter_valves.  Edit this JSON to tighten/loosen MOV extraction without touching Python.",
+  "version": "1.0",
+  "enabled": true,
+  "duplicate_keys": ["tag_no"],
+  "drop_if_duplicate": true,
+  "string_normalisation": {
+    "trim_whitespace": true,
+    "uppercase_tag": true,
+    "blank_tokens": ["N/A", "n/a", "NA", "—", "-", "", "?", "TBD", "tbd"]
+  },
+  "field_validators": {
+    "_comment": "Numeric guards.  Out-of-range numeric values are dropped from the row but the row itself is kept so user can edit.",
+    "valve_size_inch":      {"min": 0.25, "max": 60,   "scrub_only": true},
+    "line_size_inch":       {"min": 0.25, "max": 96,   "scrub_only": true},
+    "design_pressure_barg": {"min": -1,   "max": 800,  "scrub_only": true},
+    "design_temp_degC":     {"min": -200, "max": 1200, "scrub_only": true},
+    "operating_pressure":   {"min": -1,   "max": 800,  "scrub_only": true},
+    "operating_temp":       {"min": -200, "max": 1200, "scrub_only": true}
+  },
+  "hallucination_filters": {
+    "drop_if_blank_tag": true,
+    "drop_if_service_contains": [
+      "example", "sample", "placeholder", "lorem", "dummy"
+    ]
+  }
+}
