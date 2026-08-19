@@ -1,0 +1,29 @@
+Hi {{ user.first_name }} {{ user.last_name }}!
+
+🎉 Congratulations! Your email address has been successfully verified.
+
+You now have full access to all RADAI features.
+
+📊 YOUR ACCOUNT DETAILS
+Email: {{ user.email }}
+Organization: {{ user_profile.organization.name }}
+Department: {{ user_profile.department|default:"Not specified" }}
+Job Title: {{ user_profile.job_title|default:"Team Member" }}
+
+🚀 GET STARTED
+• Explore Your Dashboard: {{ dashboard_url }}
+• Access Your Modules: Use the features assigned to you
+• Upload Documents: Begin processing PFD/PID documents
+• Collaborate: Work with your team members on projects
+
+💡 Tip: Bookmark your dashboard for quick access!
+
+Need help getting started? Our support team is here for you!
+Contact us at {{ support_email }}
+
+Best regards,
+The RADAI Team
+{{ company_name }}
+Engineering & Design Consultancy
+
+© 2025 {{ company_name }}. All rights reserved.

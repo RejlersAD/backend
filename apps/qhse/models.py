@@ -54,7 +54,7 @@ class QHSERunningProject(models.Model):
         verbose_name="Manhours Balance"
     )
     quality_billability_percent = models.CharField(
-        max_length=20, 
+        max_length=10, 
         default="0%",
         verbose_name="Quality Billability Percentage"
     )
@@ -125,17 +125,17 @@ class QHSERunningProject(models.Model):
     
     # Project Performance Metrics
     project_kpis_achieved_percent = models.CharField(
-        max_length=20, 
+        max_length=10, 
         default="0%",
         verbose_name="Project KPIs Achieved (%)"
     )
     project_completion_percent = models.CharField(
-        max_length=20, 
+        max_length=10, 
         default="0%",
         verbose_name="Project Completion (%)"
     )
     rejection_of_deliverables_percent = models.CharField(
-        max_length=20, 
+        max_length=10, 
         blank=True, 
         null=True,
         verbose_name="Rejection of Deliverables (%)"

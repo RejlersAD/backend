@@ -310,36 +310,38 @@ class InvoiceViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         
         User = get_user_model()
 
-        # Get token from query param
-        token = request.GET.get('token')
-        if not token:
-            return Response(
-                {'error': 'Token required'},
-                status=status.HTTP_401_UNAUTHORIZED
-            )
+        # Normal API callers authenticate with the Authorization header. Keep
+        # query-token support for legacy iframe URLs that cannot set headers.
+        user = request.user if request.user and request.user.is_authenticated else None
+        if user is None:
+            token = request.GET.get('token')
+            if not token:
+                return Response(
+                    {'error': 'Authentication required'},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
 
-        # Validate token
-        try:
-            access_token = AccessToken(token)
-            user = User.objects.get(id=access_token['user_id'])
-        except TokenError as e:
-            logger.error(f'Invalid token: {e}')
-            return Response(
-                {'error': 'Invalid or expired token'},
-                status=status.HTTP_401_UNAUTHORIZED
-            )
-        except User.DoesNotExist:
-            logger.error(f'User not found for token')
-            return Response(
-                {'error': 'User not found'},
-                status=status.HTTP_401_UNAUTHORIZED
-            )
-        except Exception as e:
-            logger.error(f'Token validation error: {e}', exc_info=True)
-            return Response(
-                {'error': 'Authentication failed'},
-                status=status.HTTP_401_UNAUTHORIZED
-            )
+            try:
+                access_token = AccessToken(token)
+                user = User.objects.get(id=access_token['user_id'])
+            except TokenError as e:
+                logger.error(f'Invalid token: {e}')
+                return Response(
+                    {'error': 'Invalid or expired token'},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+            except User.DoesNotExist:
+                logger.error('User not found for token')
+                return Response(
+                    {'error': 'User not found'},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+            except Exception as e:
+                logger.error(f'Token validation error: {e}', exc_info=True)
+                return Response(
+                    {'error': 'Authentication failed'},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
 
         # Get invoice
         try:

@@ -76,22 +76,6 @@ class QHSERunningProjectSerializer(serializers.ModelSerializer):
             'project_no': {'validators': []},  # Remove unique validator
         }
     
-    def to_representation(self, instance):
-        """
-        Clean projectNo to remove .0 from numeric strings
-        e.g., "5900738.0" -> "5900738"
-        """
-        representation = super().to_representation(instance)
-        
-        # Clean projectNo field - remove .0 from numeric strings
-        if 'projectNo' in representation and representation['projectNo']:
-            project_no = str(representation['projectNo'])
-            # If it ends with .0, remove it
-            if project_no.endswith('.0'):
-                representation['projectNo'] = project_no[:-2]
-        
-        return representation
-    
     def create(self, validated_data):
         """
         SOFT-CODED FIX: Auto-generate sr_no if not provided or if value is 0/invalid.

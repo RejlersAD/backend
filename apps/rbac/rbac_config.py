@@ -82,7 +82,7 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'planning_package',       'name': 'Planning Package',              'icon': 'Cube',        'order': 823, 'description': 'AI-assisted work package planning — WBS, schedule, EDDR, manhours and narrative generation'},
     {'code': 'procurement',              'name': 'Procurement',                'icon': 'ShoppingCart','order': 83, 'description': 'Procurement overview and dashboard'},
     {'code': 'procurement_vendors',      'name': 'Vendor Management',          'icon': 'Users',       'order': 84, 'description': 'Manage vendors and supplier records'},
-    {'code': 'procurement_requisitions', 'name': 'Purchase Requisitions',      'icon': 'DocumentText','order': 85, 'description': 'Purchase recommendations and requisitions'},
+    {'code': 'procurement_requisitions', 'name': 'Purchase Recommendations',  'icon': 'DocumentText','order': 85, 'description': 'Purchase recommendation workflow and approvals'},
     {'code': 'procurement_orders',       'name': 'Purchase Orders',            'icon': 'DocumentPlus','order': 86, 'description': 'Create and manage purchase orders'},
     {'code': 'procurement_receipts',     'name': 'Goods Receipt',              'icon': 'Folder',      'order': 87, 'description': 'Goods receipt and delivery confirmation'},
 ]
