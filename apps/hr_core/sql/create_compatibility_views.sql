@@ -1,19 +1,17 @@
-"""
-Database Views for Backward Compatibility
-
-These views maintain 100% backward compatibility with existing Django models
-while data is migrated to the new EmployeeMaster table.
-
-DEPLOYMENT INSTRUCTIONS:
-1. Apply hr_core migrations first: python manage.py migrate hr_core
-2. Run this SQL script: psql -d aiflow_db -f create_compatibility_views.sql
-3. Existing code continues working with ZERO changes
-4. Gradually migrate data using dual-write approach
-5. After full migration, drop views and old tables
-
-CRITICAL: These views are READ-ONLY. Updates must go through EmployeeService
-during the migration period to ensure dual-write works correctly.
-"""
+-- Database Views for Backward Compatibility
+--
+-- These views maintain backward compatibility with existing Django models
+-- while data is migrated to the new EmployeeMaster table.
+--
+-- DEPLOYMENT INSTRUCTIONS:
+-- 1. Apply hr_core migrations first: python manage.py migrate hr_core
+-- 2. Run this SQL script: psql -d aiflow_db -f create_compatibility_views.sql
+-- 3. Existing code continues working with zero changes
+-- 4. Gradually migrate data using the dual-write approach
+-- 5. After full migration, drop views and old tables
+--
+-- CRITICAL: These views are read-only. Updates must go through EmployeeService
+-- during the migration period to ensure dual-write works correctly.
 
 -- ========================================
 -- VIEW 1: user_profiles (from EmployeeMaster)

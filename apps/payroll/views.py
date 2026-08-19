@@ -927,15 +927,15 @@ def _is_senior_hr(user) -> bool:
     """True for superuser, staff, or roles with senior-level HR access."""
     if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
         return True
-    try:
-        roles = user.userprofile.roles.all()
-        for role in roles:
-            code = (role.code or '').lower()
-            if code.startswith('senior_hr') or code in ('admin', 'superadmin', 'manager'):
-                return True
-    except Exception:
-        pass
-    return False
+    profile = getattr(user, 'rbac_profile', None)
+    if not profile:
+        return False
+    role_codes = profile.roles.filter(is_active=True).values_list('code', flat=True)
+    return any(
+        (code or '').lower().startswith('senior_hr')
+        or (code or '').lower() in {'hr_admin', 'hr_manager', 'admin', 'super_admin', 'superadmin', 'manager'}
+        for code in role_codes
+    )
 
 
 # =============================================================================

@@ -1466,6 +1466,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             profiles_by_email = {profile.user.email.strip().casefold(): profile for profile in existing_profiles if profile.user.email}
             profiles_by_employee_id = {profile.employee_id.strip().casefold(): profile for profile in existing_profiles if profile.employee_id}
             profiles_by_username = {profile.user.username.strip().casefold(): profile for profile in existing_profiles if profile.user.username}
+            username_owners = {
+                username.strip().casefold(): user_id
+                for user_id, username in User.objects.exclude(username='').values_list('id', 'username')
+                if username and username.strip()
+            }
             organizations = list(Organization.objects.all())
             organizations_by_name = {item.name.strip().casefold(): item for item in organizations}
             organizations_by_code = {item.code.strip().casefold(): item for item in organizations}
@@ -1632,9 +1637,14 @@ class UserProfileViewSet(viewsets.ModelViewSet):
 
                                 incoming_username = row.get('username', '').strip()
                                 if 'username' in update_fields and incoming_username and incoming_username.casefold() != user.username.casefold():
-                                    username_owner = profiles_by_username.get(incoming_username.casefold())
-                                    if username_owner and username_owner.user_id != user.id:
+                                    incoming_username_key = incoming_username.casefold()
+                                    username_owner_id = username_owners.get(incoming_username_key)
+                                    if username_owner_id and username_owner_id != user.id:
                                         raise ValueError(f'Username "{incoming_username}" is already in use')
+                                    current_username_key = user.username.strip().casefold()
+                                    if username_owners.get(current_username_key) == user.id:
+                                        username_owners.pop(current_username_key)
+                                    username_owners[incoming_username_key] = user.id
                                     user.username = incoming_username
                                     user_changed.append('username')
 
@@ -1732,7 +1742,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                         base_username = row.get('username', '').strip() or email.split('@')[0]
                         username = base_username
                         counter = 1
-                        while User.objects.filter(username=username).exists():
+                        while username.casefold() in username_owners:
                             username = f"{base_username}{counter}"
                             counter += 1
                         
@@ -1854,6 +1864,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                             'name': f"{user.first_name} {user.last_name}".strip(),
                             'username': username
                         })
+                        username_owners[username.casefold()] = user.id
                         
                         results['success'][-1]['email_sent'] = False
                         results['success'][-1]['email_queued'] = False

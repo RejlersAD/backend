@@ -181,9 +181,9 @@ class CanManageUsers(permissions.BasePermission):
         try:
             profile = request.user.rbac_profile
             
-            # Super admin, admin, and ICT admin can manage users (soft-coded)
+            # Elevated administrative and HR roles can manage users (soft-coded)
             if profile.roles.filter(
-                code__in=['super_admin', 'admin', 'ict_admin'],
+                code__in=['super_admin', 'admin', 'ict_admin', 'hr_admin'],
                 is_active=True
             ).exists():
                 return True
