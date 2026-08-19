@@ -1,0 +1,12 @@
+# Requirements for RAD AI Attendance Sync Agent
+# Install with: pip install -r requirements-sync-agent.txt
+
+# SQL Server driver (choose one)
+pymssql>=2.2.0              # Recommended - self-contained
+# pyodbc>=4.0.0             # Alternative - requires ODBC Driver 17
+
+# HTTP client
+requests>=2.28.0
+
+# Configuration management
+python-decouple>=3.6

@@ -1,0 +1,9 @@
+# ML/OCR requirements (optional heavy dependencies)
+# These are only installed when ENABLE_ML_FEATURES=true in docker-compose.yml
+# This keeps the base image slim for local development
+
+# Currently empty - add ML packages here if needed:
+# paddleocr
+# easyocr  
+# opencv-python
+# mlflow
