@@ -25,3 +25,26 @@ class PurchaseOrderCompletedLockTests(SimpleTestCase):
         )
 
         self.assertTrue(serializer.is_valid(), serializer.errors)
+
+
+class PurchaseOrderOptionalDateTests(SimpleTestCase):
+    def test_blank_optional_dates_are_normalized_to_none(self):
+        serializer = PurchaseOrderSerializer()
+
+        for field_name in (
+            'start_date',
+            'end_date',
+            'expected_delivery',
+            'actual_delivery',
+            'approved_date',
+            'confirmation_date',
+        ):
+            with self.subTest(field=field_name):
+                self.assertIsNone(serializer.fields[field_name].run_validation(''))
+
+    def test_optional_dates_still_validate_real_dates(self):
+        serializer = PurchaseOrderSerializer()
+
+        value = serializer.fields['start_date'].run_validation('2026-08-20')
+
+        self.assertEqual(value.isoformat(), '2026-08-20')

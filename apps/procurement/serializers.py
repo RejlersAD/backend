@@ -484,10 +484,25 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         return uploaded
 
 
+class OptionalDateField(serializers.DateField):
+    """Treat an empty optional HTML/API date as an unset value."""
+
+    def to_internal_value(self, value):
+        if value == '':
+            return None
+        return super().to_internal_value(value)
+
+
 class PurchaseOrderSerializer(serializers.ModelSerializer):
     """Serializer for Purchase Order"""
 
     po_number = serializers.CharField(required=False, allow_blank=True)
+    start_date = OptionalDateField(required=False, allow_null=True)
+    end_date = OptionalDateField(required=False, allow_null=True)
+    expected_delivery = OptionalDateField(required=False, allow_null=True)
+    actual_delivery = OptionalDateField(required=False, allow_null=True)
+    approved_date = OptionalDateField(required=False, allow_null=True)
+    confirmation_date = OptionalDateField(required=False, allow_null=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     vendor_name = serializers.CharField(source='vendor.name', read_only=True)
     category_display = serializers.SerializerMethodField()
@@ -548,6 +563,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             
             # Order confirmation (vendor response)
             'confirmation_date', 'seller_contact_person', 'seller_phone', 'seller_fax', 'seller_email',
+            'seller_address',
             
             # Contract sections
             'scope_of_services', 'safety_requirements', 'variations_clause', 
@@ -822,7 +838,7 @@ class ProjectDetailSerializer(ProjectListSerializer):
     
     class Meta(ProjectListSerializer.Meta):
         fields = ProjectListSerializer.Meta.fields + [
-            'client_reference', 'lead_engineer', 'lead_engineer_name',
+            'client_reference', 'project_manager_name', 'lead_engineer', 'lead_engineer_name',
             'team_members', 'team_member_names', 'description', 'scope_of_work',
             'deliverables', 'actual_end_date', 'site_location', 'country',
             'region', 'payment_terms', 'notes', 'tags', 'is_internal',

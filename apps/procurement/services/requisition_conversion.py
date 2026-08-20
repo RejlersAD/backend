@@ -139,6 +139,7 @@ class RequisitionConversionService:
             seller_contact_person=vendor.contact_person or '',
             seller_phone=vendor.phone or '',
             seller_email=vendor.email or '',
+            seller_address=vendor.address or '',
             title=pr.product_service or pr.title or f'Purchase Order for {pr.pr_number}',
             description=pr.description_reason or '',
             category=pr.category or 'other',

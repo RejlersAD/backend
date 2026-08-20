@@ -585,6 +585,7 @@ class PurchaseOrder(TimeStampedModel):
     seller_phone = models.CharField(max_length=50, blank=True, help_text='Seller phone number')
     seller_fax = models.CharField(max_length=50, blank=True, help_text='Seller fax number')
     seller_email = models.CharField(max_length=200, blank=True, help_text='Seller email address')
+    seller_address = models.TextField(blank=True, help_text='Seller office or registered address')
     
     # ═══ CONTRACT SECTIONS (Template: Detailed requirements) ═══
     scope_of_services = models.TextField(blank=True, help_text='Detailed scope of work/services')
