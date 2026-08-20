@@ -1701,7 +1701,16 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         # Any active employee may be selected as a PO approver. Assignment is
         # enforced inside the approval actions, so procurement module access is
         # not required merely to view or action that employee's own queue.
-        if self.action in {'pending_for_me', 'approve', 'reject'}:
+        # Similarly, users with procurement_requisitions access should be able
+        # to create and update purchase orders (often converted from PRs).
+        # Helper actions like available-requisitions, available-projects, and
+        # create-project are also needed during PO creation.
+        if self.action in {
+            'pending_for_me', 'approve', 'reject',
+            'create', 'update', 'partial_update',
+            'available_requisitions', 'available_projects', 'create_project',
+            'reserve_number',
+        }:
             return [IsAuthenticated()]
         return super().get_permissions()
     
