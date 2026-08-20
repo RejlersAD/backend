@@ -34,6 +34,123 @@ class EmployeeService:
     - Handles dual-write during migration phase
     - Abstracts database structure from business logic
     """
+
+    @staticmethod
+    @transaction.atomic
+    def sync_from_rbac_profile(profile, changed_fields=None) -> EmployeeMaster:
+        """Mirror shared User/RBAC fields into the employee master record."""
+        changed = set(changed_fields or ())
+        sync_all = changed_fields is None
+        user = profile.user
+        employee = EmployeeMaster.objects.filter(user=user).first()
+        if employee is None:
+            employee = EmployeeService.create_employee(
+                user=user,
+                email=user.email,
+                first_name=user.first_name or '',
+                last_name=user.last_name or '',
+                department=profile.department or '',
+                designation=profile.job_title or '',
+            )
+
+        updates = {}
+
+        def requested(*names):
+            return sync_all or bool(changed.intersection(names))
+
+        if requested('first_name'):
+            updates['first_name'] = user.first_name or ''
+        if requested('last_name'):
+            updates['last_name'] = user.last_name or ''
+        if requested('email'):
+            updates['email'] = user.email
+        if requested('employee_id') and profile.employee_id:
+            employee_code = str(profile.employee_id).strip()
+            updates['employee_code'] = employee_code
+            updates['emp_code'] = employee_code[:20]
+        if requested('department'):
+            updates['department'] = profile.department or ''
+        if requested('job_title'):
+            title = profile.job_title or ''
+            updates['designation'] = title
+            updates['job_title_uae'] = title
+        if requested('phone'):
+            updates['phone_number'] = profile.phone or ''
+        if requested('location'):
+            updates['office'] = profile.location or ''
+        if requested('manager_id', 'manager'):
+            updates['manager'] = (
+                EmployeeService.sync_from_rbac_profile(profile.manager, ())
+                if profile.manager else None
+            )
+        if requested('status', 'is_active'):
+            if not user.is_active or profile.status == 'inactive':
+                updates['employment_status'] = 'suspended'
+            elif employee.employment_status == 'suspended':
+                updates['employment_status'] = 'active'
+
+        if updates:
+            for field, value in updates.items():
+                setattr(employee, field, value)
+            employee.save(update_fields=[*updates.keys(), 'updated_at'])
+        return employee
+
+    @staticmethod
+    @transaction.atomic
+    def sync_to_rbac_profile(employee: EmployeeMaster, changed_fields=None):
+        """Mirror shared EmployeeMaster fields back to User/RBAC consumers."""
+        from apps.rbac.models import UserProfile as RBACUserProfile
+
+        changed = set(changed_fields or ())
+        sync_all = changed_fields is None
+
+        def requested(*names):
+            return sync_all or bool(changed.intersection(names))
+
+        user_updates = {}
+        if requested('first_name'):
+            user_updates['first_name'] = employee.first_name or ''
+        if requested('last_name'):
+            user_updates['last_name'] = employee.last_name or ''
+        if requested('email'):
+            user_updates['email'] = employee.email
+        if user_updates:
+            User.objects.filter(pk=employee.user_id).update(**user_updates)
+
+        profile = RBACUserProfile.objects.filter(
+            user_id=employee.user_id, is_deleted=False
+        ).first()
+        if profile is None:
+            return None
+
+        profile_updates = {}
+        if requested('department'):
+            profile_updates['department'] = employee.department or ''
+        if requested('designation', 'job_title_uae', 'job_title_finland'):
+            profile_updates['job_title'] = (
+                employee.designation
+                or employee.job_title_uae
+                or employee.job_title_finland
+                or ''
+            )
+        if requested('phone_number'):
+            profile_updates['phone'] = employee.phone_number or ''
+        if requested('office'):
+            profile_updates['location'] = employee.office or ''
+        if requested('employee_code', 'emp_code'):
+            profile_updates['employee_id'] = employee.emp_code or employee.employee_code or ''
+        if requested('manager'):
+            profile_updates['manager'] = (
+                RBACUserProfile.objects.filter(
+                    user_id=employee.manager.user_id, is_deleted=False
+                ).first()
+                if employee.manager else None
+            )
+        if profile_updates:
+            RBACUserProfile.objects.filter(pk=profile.pk).update(**profile_updates)
+            for field, value in profile_updates.items():
+                setattr(profile, field, value)
+        return profile
     
     # ========================================
     # LOOKUP METHODS (Unified Employee Retrieval)

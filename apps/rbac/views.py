@@ -8,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.views import APIView
 from django.utils import timezone
+from django.db import transaction
 from django.db.models import Q, Count
 from django_filters.rest_framework import DjangoFilterBackend
 from django.http import FileResponse
@@ -724,9 +725,12 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             return UserProfileListSerializer
         return UserProfileSerializer
 
+    @transaction.atomic
     def perform_create(self, serializer):
         from apps.rbac.rbac_config import DEFAULT_ROLE_CONFIG
         profile = serializer.save()
+        from apps.hr_core.services import EmployeeService
+        EmployeeService.sync_from_rbac_profile(profile)
         create_audit_log(
             user=self.request.user,
             action='create',
@@ -750,8 +754,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             except Role.DoesNotExist:
                 pass
     
+    @transaction.atomic
     def perform_update(self, serializer):
         profile = serializer.save()
+        from apps.hr_core.services import EmployeeService
+        EmployeeService.sync_from_rbac_profile(profile, self.request.data.keys())
         create_audit_log(
             user=self.request.user,
             action='update',
@@ -773,19 +780,6 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 )
             except Exception:
                 pass
-            try:
-                from apps.hr_core.models import EmployeeMaster
-                if profile.manager:
-                    mgr_employee = EmployeeMaster.objects.filter(
-                        user=profile.manager.user
-                    ).first()
-                    EmployeeMaster.objects.filter(user=profile.user).update(
-                        manager=mgr_employee
-                    )
-                else:
-                    EmployeeMaster.objects.filter(user=profile.user).update(manager=None)
-            except Exception:
-                pass
 
     @action(detail=True, methods=['post'])
     def deactivate(self, request, pk=None):
@@ -795,6 +789,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         profile.user.is_active = False
         profile.save()
         profile.user.save()
+        from apps.hr_core.services import EmployeeService
+        EmployeeService.sync_from_rbac_profile(profile, {'status', 'is_active'})
         
         create_audit_log(
             user=request.user,
@@ -817,6 +813,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         profile.user.is_active = True
         profile.save()
         profile.user.save()
+        from apps.hr_core.services import EmployeeService
+        EmployeeService.sync_from_rbac_profile(profile, {'status', 'is_active'})
         
         create_audit_log(
             user=request.user,
@@ -841,6 +839,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         profile.user.is_active = False
         profile.save()
         profile.user.save()
+        from apps.hr_core.services import EmployeeService
+        EmployeeService.sync_from_rbac_profile(profile, {'status', 'is_active'})
         
         create_audit_log(
             user=request.user,
@@ -967,6 +967,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             profile.user.is_active = False
             profile.save()
             profile.user.save()
+            from apps.hr_core.services import EmployeeService
+            EmployeeService.sync_from_rbac_profile(profile, {'status', 'is_active'})
             
             deactivated_count += 1
             deactivated_user_ids.append(str(profile.id))
@@ -2108,6 +2110,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 'message': 'Profile temporarily unavailable'
             })
     
+    @transaction.atomic
     def update_my_profile(self, request):
         """Update current user's profile"""
         try:

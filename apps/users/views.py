@@ -9,6 +9,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from django.db import transaction
 from django.db.models import Q
 from .models import UserProfile  # ⚠️ DEPRECATED - keeping for backward compatibility
 from .serializers import UserProfileSerializer
@@ -465,6 +466,7 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
             )
 
     @action(detail=False, methods=['get', 'patch'], url_path='my-employee-profile')
+    @transaction.atomic
     def my_employee_profile(self, request):
         """
         GET/PATCH /api/v1/users/employees/my-employee-profile/
@@ -627,6 +629,9 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
             
             if employee_update_fields:
                 employee.save(update_fields=employee_update_fields)
+
+            # Keep every employee-facing RBAC view aligned with HR master.
+            EmployeeService.sync_to_rbac_profile(employee, request.data.keys())
             
             # ✅ SYNC: Update OnboardingRecord if it exists for bidirectional sync
             try:

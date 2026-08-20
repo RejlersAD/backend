@@ -265,6 +265,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, min_length=8)
     first_name = serializers.CharField(write_only=True, required=False)
     last_name = serializers.CharField(write_only=True, required=False)
+    is_active = serializers.BooleanField(write_only=True, required=False)
 
     # Reporting Manager — single source of truth for both Profile and Onboarding pages.
     # manager_id  : writable UUID → sets UserProfile.manager FK
@@ -377,6 +378,26 @@ class UserProfileSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({'email': 'Invalid email format'})
         
         return attrs
+
+    def validate_employee_id(self, value):
+        """Protect the shared biometric/payroll employee identifier."""
+        from apps.hr_core.models import EmployeeMaster
+        from django.db.models import Q
+
+        normalized = str(value or '').strip()
+        if not normalized:
+            return ''
+        matches = EmployeeMaster.objects.filter(
+            Q(employee_code__iexact=normalized)
+            | Q(emp_code__iexact=normalized)
+        )
+        if self.instance is not None:
+            matches = matches.exclude(user_id=self.instance.user_id)
+        if matches.exists():
+            raise serializers.ValidationError(
+                'This employee ID is already assigned to another employee.'
+            )
+        return normalized
     
     class Meta:
         model = UserProfile
@@ -390,7 +411,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'profile_photo', 'phone', 'bio', 'location', 'engineer_profile',
             'is_deleted', 'deleted_at', 'deleted_by',
             'created_at', 'updated_at',
-            'username', 'email', 'password', 'first_name', 'last_name', 'phone'
+            'username', 'email', 'password', 'first_name', 'last_name', 'is_active', 'phone'
         ]
         read_only_fields = [
             'id', 'user', 'last_login_ip', 'last_login_at', 'failed_login_attempts',
@@ -492,6 +513,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         password = validated_data.pop('password')
         first_name = validated_data.pop('first_name', '')
         last_name = validated_data.pop('last_name', '')
+        is_active = validated_data.pop('is_active', True)
         phone = validated_data.pop('phone', None)  # Extract phone but don't add to profile
         
         # Set organization from organization_id if provided
@@ -549,7 +571,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             user.set_password(password)
             user.last_password_change = timezone.now()
             user.phone_number = phone
-            user.is_active = True
+            user.is_active = is_active
             user.is_superuser = is_super_admin
             user.is_staff = is_super_admin
             user.is_first_login = True
@@ -567,7 +589,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
                 first_name=first_name,
                 last_name=last_name,
                 phone_number=phone,  # Add phone_number to User model
-                is_active=True,  # Explicitly set user as active
+                is_active=is_active,
                 is_superuser=is_super_admin,
                 is_staff=is_super_admin,
                 is_first_login=True,  # Mark as first login
@@ -767,6 +789,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if 'last_name' in validated_data:
             instance.user.last_name = validated_data.pop('last_name')
             instance.user.save()
+        if 'is_active' in validated_data:
+            instance.user.is_active = validated_data.pop('is_active')
+            instance.user.save(update_fields=['is_active'])
         if 'password' in validated_data:
             from django.utils import timezone
             instance.user.set_password(validated_data.pop('password'))
