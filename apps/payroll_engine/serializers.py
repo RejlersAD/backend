@@ -12,11 +12,15 @@ from .models import (
 
 class PayrollEmployeeSerializer(serializers.ModelSerializer):
     default_gross = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    employee_email = serializers.EmailField(source='user.email', read_only=True, allow_null=True)
+    hr_profile_id = serializers.SerializerMethodField()
+    profile_photo = serializers.SerializerMethodField()
 
     class Meta:
         model = PayrollEmployee
         fields = [
-            'id', 'employee_no', 'user', 'full_name', 'emirates_id', 'mol_no',
+            'id', 'employee_no', 'user', 'employee_email', 'hr_profile_id', 'profile_photo',
+            'full_name', 'emirates_id', 'mol_no',
             'iban', 'bank_name', 'routing_code',
             'department', 'discipline', 'designation', 'grade', 'nationality_group',
             'joining_date', 'leaving_date',
@@ -27,6 +31,51 @@ class PayrollEmployeeSerializer(serializers.ModelSerializer):
             'notes', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'default_gross', 'created_at', 'updated_at']
+
+    def get_hr_profile_id(self, obj):
+        profile = getattr(obj.user, 'rbac_profile', None) if obj.user_id else None
+        return str(profile.id) if profile and not profile.is_deleted else None
+
+    def get_profile_photo(self, obj):
+        profile = getattr(obj.user, 'rbac_profile', None) if obj.user_id else None
+        if not profile or profile.is_deleted or not profile.profile_photo:
+            return None
+        try:
+            url = profile.profile_photo.url
+            if url.startswith('http'):
+                return url
+            request = self.context.get('request')
+            return request.build_absolute_uri(url) if request else url
+        except Exception:
+            return None
+
+    def validate(self, attrs):
+        """Link payroll rows to the canonical RADAI employee by employee number.
+
+        The Excel roster historically created standalone payroll rows. Linking at
+        the serializer boundary keeps manually created/edited records aligned too.
+        """
+        explicit_user_link = 'user' in attrs
+        if not attrs.get('user'):
+            employee_no = attrs.get('employee_no') or getattr(self.instance, 'employee_no', '')
+            if employee_no:
+                from apps.rbac.models import UserProfile
+                profile = (UserProfile.objects
+                           .filter(employee_id=str(employee_no).strip(), is_deleted=False)
+                           .select_related('user')
+                           .first())
+                if profile:
+                    attrs['user'] = profile.user
+        link_user = attrs.get('user')
+        if link_user and (explicit_user_link or self.instance is None):
+            duplicate = PayrollEmployee.objects.filter(user=link_user)
+            if self.instance:
+                duplicate = duplicate.exclude(pk=self.instance.pk)
+            if duplicate.exists():
+                raise serializers.ValidationError({
+                    'user': 'This RADAI account is already linked to another payroll employee.'
+                })
+        return attrs
 
 
 class PayslipLineItemSerializer(serializers.ModelSerializer):

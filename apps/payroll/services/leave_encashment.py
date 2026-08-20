@@ -10,8 +10,8 @@ Formula (soft-coded constants below):
   encashment_pay  = days_to_encash × daily_rate
 
 Salary source:
-  Most recent MasterPayrollRow for the employee_code where the parent
-  MasterPayrollImport.workflow_stage is one of the approved stages.
+  Most recent approved MasterPayrollRow for the employee_code, falling back
+  to the linked PayrollEmployee live salary components.
   If no salary is found, encashment_pay is set to 0 and the employee_code
   is recorded in the run's missing_salaries list.
 
@@ -54,12 +54,17 @@ _DAY_PREC = Decimal('0.0001')
 _RELIABLE_STAGES = {'frozen', 'hr_approved', 'finance_review', 'finance_approved', 'released'}
 
 
+def _employee_key(value) -> str:
+    return str(value or '').strip().casefold()
+
+
 def _build_salary_lookup() -> dict[str, Decimal]:
     """
     Return { employee_code → employee_salary } from the most recent
     MasterPayrollRow per employee_code across all reliable payroll sessions.
     """
     from apps.payroll.models import MasterPayrollRow
+    from apps.payroll_engine.models import PayrollEmployee
 
     salary_map: dict[str, Decimal] = {}
     # Order by year desc, month desc so the latest entry wins
@@ -75,8 +80,19 @@ def _build_salary_lookup() -> dict[str, Decimal]:
     )
     for row in qs:
         # Only record the first (most recent) entry per employee_code
-        if row.employee_code not in salary_map:
-            salary_map[row.employee_code] = row.employee_salary
+        key = _employee_key(row.employee_code)
+        if key and key not in salary_map and row.employee_salary > Decimal('0'):
+            salary_map[key] = row.employee_salary
+
+    # Salary Management's live employee master is the operational fallback
+    # when no approved historical master-payroll export exists yet.
+    for employee in PayrollEmployee.objects.filter(is_active=True).only(
+        'employee_no', 'basic', 'housing', 'transport', 'home_leave'
+    ):
+        key = _employee_key(employee.employee_no)
+        gross = employee.default_gross
+        if key and key not in salary_map and gross > Decimal('0'):
+            salary_map[key] = gross
     return salary_map
 
 
@@ -115,13 +131,14 @@ def run_leave_encashment(
     """
     from apps.payroll.models import (
         EmployeeLeaveMonthly,
-        EmployeeLeaveRecord,
         LeaveEncashmentRun,
     )
 
     # ── Guard: prevent double-run ─────────────────────────────────────────────
     if not dry_run:
-        existing = LeaveEncashmentRun.objects.filter(year=year, month=month, status='success').first()
+        # Partial runs have already changed leave ledgers and must not be
+        # posted again. The period itself is the idempotency boundary.
+        existing = LeaveEncashmentRun.objects.filter(year=year, month=month).first()
         if existing:
             raise EncashmentAlreadyRunError(
                 f'Encashment for {year}-{month:02d} already completed on {existing.executed_at.date()}.'
@@ -146,7 +163,7 @@ def run_leave_encashment(
 
     # Collect DB updates (applied atomically if not dry_run)
     monthly_updates  = []   # (instance, days, pay)
-    record_increments= {}   # employee_code → days increment for EmployeeLeaveRecord
+    affected_records = {}   # record id -> EmployeeLeaveRecord
 
     for monthly in monthly_qs:
         records_processed += 1
@@ -157,7 +174,7 @@ def run_leave_encashment(
             (monthly.earned - monthly.taken).quantize(_DAY_PREC, rounding=ROUND_HALF_UP),
         )
 
-        salary = salary_map.get(emp_code)
+        salary = salary_map.get(_employee_key(emp_code))
         if salary is None or salary <= Decimal('0'):
             if emp_code and emp_code not in missing_salaries:
                 missing_salaries.append(emp_code)
@@ -171,7 +188,7 @@ def run_leave_encashment(
         total_pay  += enc_pay
 
         monthly_updates.append((monthly, days_to_encash, enc_pay))
-        record_increments[emp_code] = record_increments.get(emp_code, Decimal('0')) + days_to_encash
+        affected_records[monthly.record_id] = monthly.record
 
         preview.append({
             'employee_code': emp_code,
@@ -193,13 +210,11 @@ def run_leave_encashment(
                 monthly.encashment_pay = pay
                 monthly.save(update_fields=['encashed', 'encashment_pay'])
 
-            # Increment EmployeeLeaveRecord.total_encashed per employee
-            for emp_code, delta in record_increments.items():
-                if delta > Decimal('0'):
-                    from django.db.models import F
-                    (EmployeeLeaveRecord.objects
-                     .filter(employee_code=emp_code, year=year)
-                     .update(total_encashed=F('total_encashed') + delta))
+            # Recompute annual totals and monthly running balances after the
+            # encashed days are stored, keeping every employee view in sync.
+            from apps.payroll.services.leave_accrual import compute_accrual_for_record
+            for record in affected_records.values():
+                compute_accrual_for_record(record, year)
 
             # Create audit log
             status = 'partial' if missing_salaries else 'success'

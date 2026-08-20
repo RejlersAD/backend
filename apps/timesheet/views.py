@@ -36,6 +36,7 @@ from . import services as ts_services_sql
 from . import mirror_services as ts_services_mirror
 from . import sqlserver as ts_sql
 from .mirror_views import ingest_events, ingest_users  # re-exported via urls.py
+from .manual_import import import_daily_attendance
 from .sqlserver import TimesheetConnectionError, TimesheetDriverError
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,8 @@ def _svc():
     """Soft-coded backend dispatcher. Resolved at call time so flipping
     TIMESHEET_DATA_SOURCE in Railway env vars takes effect on the very next
     request without a code change."""
+    if ts_config.INPUT_MODE == 'manual':
+        return ts_services_mirror
     return ts_services_mirror if ts_config.DATA_SOURCE == 'mirror' else ts_services_sql
 
 
@@ -81,6 +84,21 @@ def _graceful_unavailable(exc: Exception, *, extra_keys: dict | None = None):
     return Response(payload)
 
 
+def _can_manage_attendance(user) -> bool:
+    if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
+        return True
+    try:
+        profile = user.rbac_profile
+        codes = profile.roles.values_list('code', flat=True)
+        return any(
+            str(code or '').lower().startswith(('hr', 'payroll'))
+            or str(code or '').lower() in ('admin', 'super_admin', 'superadmin', 'manager')
+            for code in codes
+        )
+    except Exception:
+        return False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Health + Discovery (Setup wizard)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -101,6 +119,30 @@ def health(request):
         logger.warning('[timesheet.health] config_status failed: %s', exc)
         cfg = {'configured': False, 'data_source': ts_config.DATA_SOURCE,
                'error': str(exc)}
+
+    if ts_config.INPUT_MODE == 'manual':
+        try:
+            from .models import DailyAttendanceSummary
+            manual_rows = DailyAttendanceSummary.objects.filter(
+                source=DailyAttendanceSummary.SOURCE_MANUAL,
+            )
+            latest = manual_rows.order_by('-computed_at').values_list('computed_at', flat=True).first()
+            ping = {
+                'ok': True,
+                'mode': 'manual',
+                'entry_count': manual_rows.count(),
+                'latest_upload': latest.isoformat() if latest else None,
+            }
+        except Exception as exc:
+            ping = {'ok': False, 'mode': 'manual', 'error': str(exc)}
+        return Response({
+            'driver': {'driver_in_use': 'excel-csv-upload', 'available': True},
+            'config': cfg,
+            'ping': ping,
+            'data_source': 'manual',
+            'sqlserver_host': '',
+            'sqlserver_port': 0,
+        })
 
     # ── Mirror mode: serve health from the Postgres mirror table only.
     # No outbound SQL Server ping (Railway has no route to the office LAN).
@@ -288,6 +330,28 @@ def monthly(request):
         return _graceful_unavailable(exc)
     except Exception as exc:
         return _error_response(exc)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def manual_attendance_upload(request):
+    """Import employee daily hours from long- or wide-format XLSX/CSV."""
+    if not _can_manage_attendance(request.user):
+        return Response({'detail': 'HR or payroll manager access is required.'}, status=status.HTTP_403_FORBIDDEN)
+    upload = request.FILES.get('file')
+    if not upload:
+        return Response({'detail': 'Choose an Excel or CSV file.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        year = int(request.data['year']) if request.data.get('year') else None
+        month = int(request.data['month']) if request.data.get('month') else None
+        result = import_daily_attendance(upload, year=year, month=month)
+        http_status = status.HTTP_200_OK if result['created'] or result['updated'] or result['removed'] else status.HTTP_400_BAD_REQUEST
+        return Response({'source': 'manual_upload', **result}, status=http_status)
+    except ValueError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as exc:
+        logger.exception('[timesheet.manual-upload] import failed')
+        return Response({'detail': f'Attendance import failed: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])

@@ -724,7 +724,7 @@ def leave_calendar(request):
     GET /api/v1/payroll/leave-calendar/?year=2026&month=6
 
     Returns approved leave for all employees in a given month, keyed by
-    employee_code → { YYYY-MM-DD: {code, name, color, badge_bg, badge_text, request_id} }.
+    employee_code → { YYYY-MM-DD: {code, name, employee_name, color, badge_bg, badge_text, request_id} }.
     Only working days (Mon–Fri) are included.  Used by the Summary attendance
     view to overlay leave codes on the biometric attendance pivot table.
     """
@@ -762,6 +762,7 @@ def leave_calendar(request):
                 calendar_data[emp][cur.isoformat()] = {
                     'code':       req.leave_type.code,
                     'name':       req.leave_type.name,
+                    'employee_name': req.employee_name or emp,
                     'color':      req.leave_type.color_hex,
                     'badge_bg':   req.leave_type.badge_bg,
                     'badge_text': req.leave_type.badge_text,
@@ -1304,6 +1305,91 @@ def annual_leave_balance(request):
         'balances':         result_by_code,    # keyed by employee_code
         'balances_by_name': result_by_name,    # keyed by normalised name
     })
+
+
+# =============================================================================
+# Leave Encashment
+# =============================================================================
+
+def _encashment_period(request):
+    """Validate and return the requested encashment (year, month)."""
+    source = request.data if request.method == 'POST' else request.query_params
+    try:
+        year = int(source.get('year', timezone.now().year))
+        month = int(source.get('month', timezone.now().month))
+    except (TypeError, ValueError):
+        raise ValueError('Year and month must be numbers.')
+    if not 2000 <= year <= 2100:
+        raise ValueError('Year must be between 2000 and 2100.')
+    if not 1 <= month <= 12:
+        raise ValueError('Month must be between 1 and 12.')
+    return year, month
+
+
+def _require_encashment_manager(user):
+    if not _is_hr_manager(user):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied('HR Manager role required to manage leave encashment.')
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def leave_encashment_status(request):
+    """Return the immutable audit status for one encashment period."""
+    _require_encashment_manager(request.user)
+    try:
+        year, month = _encashment_period(request)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    from apps.payroll.services.leave_encashment import get_encashment_status
+    result = get_encashment_status(year, month)
+    if result is None:
+        return Response(
+            {'detail': f'No encashment run found for {year}-{month:02d}.'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return Response(result)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def leave_encashment_preview(request):
+    """Preview employee days, salary rate and pay without changing data."""
+    _require_encashment_manager(request.user)
+    try:
+        year, month = _encashment_period(request)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    from apps.payroll.services.leave_encashment import run_leave_encashment
+    result = run_leave_encashment(year=year, month=month, dry_run=True)
+    return Response({'year': year, 'month': month, **result})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def leave_encashment_run(request):
+    """Post a reviewed encashment once and update employee leave balances."""
+    _require_encashment_manager(request.user)
+    try:
+        year, month = _encashment_period(request)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    from apps.payroll.services.leave_encashment import (
+        EncashmentAlreadyRunError,
+        run_leave_encashment,
+    )
+    try:
+        result = run_leave_encashment(
+            year=year,
+            month=month,
+            triggered_by_user=request.user,
+        )
+    except EncashmentAlreadyRunError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+    return Response({'year': year, 'month': month, **result}, status=status.HTTP_201_CREATED)
 
 
 # =============================================================================

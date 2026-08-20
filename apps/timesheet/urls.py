@@ -19,6 +19,7 @@ urlpatterns = [
     path('live/',                  views.live,             name='live'),
     path('daily/',                 views.daily,            name='daily'),
     path('monthly/',               views.monthly,          name='monthly'),
+    path('manual-upload/',         views.manual_attendance_upload, name='manual-attendance-upload'),
     path('user/',                  views.user_drill,       name='user'),
     path('lookup-by-code/',        views.lookup_by_code,   name='lookup-by-code'),
     path('lookup-debug/',          views.lookup_debug,     name='lookup-debug'),

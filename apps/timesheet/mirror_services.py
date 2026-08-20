@@ -485,7 +485,7 @@ def _resolve_user_aliases_mirror(employee_code: Optional[str],
 
 _HOURS_MODE          = ts_config.RULES.get('hours_mode', 'paired')
 _OPEN_SHIFT_MAX_H    = float(ts_config.RULES.get('open_shift_max_hours', 0.0))
-_FULL_DAY_H          = float(ts_config.RULES.get('full_day_hours', 8.0))
+_FULL_DAY_H          = float(ts_config.RULES.get('full_day_hours', 9.0))
 
 
 def _compute_paired_hours(punches: list[dict], *, now: dt.datetime | None = None) -> dict:
@@ -612,6 +612,7 @@ def _compute_and_save_day(employee_code: str, day: dt.date,
     summary, _ = DailyAttendanceSummary.objects.update_or_create(
         employee_code=employee_code,
         date=day,
+        source=DailyAttendanceSummary.SOURCE_BIOMETRIC,
         defaults={
             'paired_hours':        result['paired_hours'],
             'elapsed_hours':       result['elapsed_hours'],
@@ -665,6 +666,25 @@ def recompute_summaries_for_events(events: list[dict]) -> int:
 # Live status — latest punch per user today
 # ─────────────────────────────────────────────────────────────────────────────
 def live_status() -> dict:
+    if ts_config.INPUT_MODE == 'manual':
+        rows = daily_report(dt.date.today().isoformat())['rows']
+        for row in rows:
+            row['punch_time'] = None
+            row['punch_type'] = 'MANUAL'
+            row['is_in'] = False
+        present = sum(1 for row in rows if (row.get('hours_worked') or 0) > 0)
+        return {
+            'rows': rows,
+            'summary': {
+                **_empty_summary(),
+                'currently_out': present,
+                'total_seen_today': present,
+                'matched_to_radai': len(rows),
+            },
+            'variant': 'manual',
+            'attendance_source': 'manual_upload',
+            'as_of': dt.datetime.now().isoformat(),
+        }
     # ── Soft-coded rolling time window ───────────────────────────────────────
     # Replaces the old strict `event_time__date=today (UTC)` filter which
     # silently dropped punches whenever the office timezone (e.g. UAE UTC+4)
@@ -888,6 +908,42 @@ def _calculate_live_metrics(employee_code: str) -> dict:
 def daily_report(date: Optional[str] = None) -> dict:
     day = _parse_date(date)
 
+    if ts_config.INPUT_MODE == 'manual':
+        rows = []
+        summaries = DailyAttendanceSummary.objects.filter(
+            date=day, source=DailyAttendanceSummary.SOURCE_MANUAL,
+            effective_hours__gt=0,
+        )
+        for summary in summaries:
+            hours = float(summary.effective_hours or 0)
+            first_in = dt.datetime.combine(day, summary.time_in).isoformat() if summary.time_in else None
+            last_out = dt.datetime.combine(day, summary.time_out).isoformat() if summary.time_out else None
+            rows.append({
+                'employee_code': summary.employee_code,
+                'email': None,
+                'name': summary.employee_name or summary.employee_code,
+                'employee_name': summary.employee_name or summary.employee_code,
+                'department': summary.department or '',
+                'first_in': first_in,
+                'last_out': last_out,
+                'hours_worked': hours,
+                'overtime_hours': float(summary.overtime_hours or 0),
+                'paired_hours': hours,
+                'elapsed_hours': hours,
+                'paired_segments': 0,
+                'open_shift': False,
+                'punch_count_in': 0,
+                'punch_count_out': 0,
+                'is_late': False,
+                'is_full_day': hours >= _FULL_DAY_H,
+                'attendance_status': summary.attendance_status,
+                'hours_mode': 'manual',
+                'attendance_source': 'manual_upload',
+            })
+        rows = _enrich_with_rad_users(rows)
+        rows.sort(key=lambda r: r.get('radai_full_name') or r.get('name') or '')
+        return {'date': day.isoformat(), 'rows': rows, 'variant': 'manual', 'hours_mode': 'manual'}
+
     # Step 1: get all events for the day, grouped by employee
     events_qs = list(
         TimesheetEvent.objects
@@ -969,13 +1025,16 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
 
     # ── Read from DailyAttendanceSummary for already-computed days ───────────
     # For today (and any day without a summary), fall back to on-demand compute.
+    summary_query = DailyAttendanceSummary.objects.filter(date__gte=start, date__lt=end_exclusive)
+    if ts_config.INPUT_MODE == 'manual':
+        summary_query = summary_query.filter(source=DailyAttendanceSummary.SOURCE_MANUAL)
     existing_summaries: dict[tuple, DailyAttendanceSummary] = {
         (s.employee_code, s.date): s
-        for s in DailyAttendanceSummary.objects.filter(date__gte=start, date__lt=end_exclusive)
+        for s in summary_query
     }
 
     # Determine which employee+day combos have events but no summary yet
-    events_agg = list(
+    events_agg = [] if ts_config.INPUT_MODE == 'manual' else list(
         TimesheetEvent.objects
         .filter(event_time__gte=start, event_time__lt=end_exclusive)
         .values('employee_code', 'event_time__date')
@@ -1013,20 +1072,23 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
         slot = by_emp.setdefault(norm_code, {
             'employee_code': norm_code,   # store the normalised code
             'email':         m_.get('employee_email') or None,
-            'name':          m_.get('employee_name', ''),
-            'employee_name': m_.get('employee_name', ''),
-            'department':    m_.get('department', ''),
+            'name':          s.employee_name or m_.get('employee_name', ''),
+            'employee_name': s.employee_name or m_.get('employee_name', ''),
+            'department':    s.department or m_.get('department', ''),
             'days_present':  0,
             'full_days':     0,
             'half_days':     0,
             'late_arrivals': 0,
             'total_hours':   0.0,
+            'overtime_hours': 0.0,
             'open_shifts':   0,
             'days_detail':   [],
+            'attendance_source': s.source,
         })
         h = s.effective_hours or 0.0
         slot['days_present'] += 1
         slot['total_hours']  += h
+        slot['overtime_hours'] += float(s.overtime_hours or 0)
         if s.is_full_day:
             slot['full_days'] += 1
         else:
@@ -1037,17 +1099,45 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             slot['open_shifts'] += 1
         slot['days_detail'].append({
             'date':            str(day_date),
-            'first_in':        s.first_in.isoformat() if s.first_in else None,
-            'last_out':        s.last_out.isoformat() if s.last_out else None,
+            'first_in':        dt.datetime.combine(day_date, s.time_in).isoformat() if s.time_in else (s.first_in.isoformat() if s.first_in else None),
+            'last_out':        dt.datetime.combine(day_date, s.time_out).isoformat() if s.time_out else (s.last_out.isoformat() if s.last_out else None),
             'hours':           round(h, 2),
+            'overtime_hours':  round(float(s.overtime_hours or 0), 2),
+            'status':          s.attendance_status,
             'paired_segments': s.paired_segments,
             'open_shift':      s.open_shift,
             'hours_mode':      _HOURS_MODE,
+            'attendance_source': s.source,
         })
+
+    if ts_config.INPUT_MODE == 'manual':
+        from apps.rbac.models import UserProfile
+        profiles = UserProfile.objects.select_related('user').filter(
+            is_deleted=False, status='active', user__is_active=True,
+        ).exclude(employee_id='')
+        for profile in profiles:
+            code = str(profile.employee_id).strip()
+            by_emp.setdefault(code, {
+                'employee_code': code,
+                'email': profile.user.email,
+                'name': profile.user.get_full_name() or profile.user.email,
+                'employee_name': profile.user.get_full_name() or profile.user.email,
+                'department': profile.department or '',
+                'days_present': 0,
+                'full_days': 0,
+                'half_days': 0,
+                'late_arrivals': 0,
+                'total_hours': 0.0,
+                'overtime_hours': 0.0,
+                'open_shifts': 0,
+                'days_detail': [],
+                'attendance_source': 'not_uploaded',
+            })
 
     rows = list(by_emp.values())
     for slot in rows:
         slot['total_hours'] = round(slot['total_hours'], 2)
+        slot['overtime_hours'] = round(slot.get('overtime_hours', 0), 2)
         slot['avg_hours_per_day'] = (
             round(slot['total_hours'] / slot['days_present'], 2) if slot['days_present'] else 0
         )
@@ -1061,9 +1151,14 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
         'start': start.isoformat(),
         'end': end.isoformat(),
         'working_days_in_month': _working_days(start, end),
+        'standard_working_days': ts_config.RULES['standard_monthly_working_days'],
+        'standard_daily_hours': ts_config.RULES['standard_daily_hours'],
+        'standard_weekly_hours': ts_config.RULES['standard_weekly_hours'],
+        'annual_leave_days': ts_config.RULES['annual_leave_days'],
         'rows': rows,
-        'variant': _VARIANT,
-        'hours_mode': _HOURS_MODE,
+        'variant': 'manual' if ts_config.INPUT_MODE == 'manual' else _VARIANT,
+        'hours_mode': 'manual' if ts_config.INPUT_MODE == 'manual' else _HOURS_MODE,
+        'attendance_source': 'manual_upload' if ts_config.INPUT_MODE == 'manual' else 'biometric',
     }
 
 
@@ -1192,7 +1287,7 @@ def user_history(employee_code: Optional[str] = None,
         })
 
     # ── Consolidated summary across the whole range
-    full_day_hours = float(ts_config.RULES.get('full_day_hours', 8.0))
+    full_day_hours = float(ts_config.RULES.get('full_day_hours', 9.0))
     total_hours    = sum(r['hours_worked'] for r in rows)
     total_punches  = sum(r['punch_count'] or 0 for r in rows)
     days_present   = len(rows)

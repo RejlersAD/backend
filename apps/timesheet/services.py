@@ -896,6 +896,10 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
         'start': start.isoformat(),
         'end': end.isoformat(),
         'working_days_in_month': _working_days(start, end),
+        'standard_working_days': ts_config.RULES['standard_monthly_working_days'],
+        'standard_daily_hours': ts_config.RULES['standard_daily_hours'],
+        'standard_weekly_hours': ts_config.RULES['standard_weekly_hours'],
+        'annual_leave_days': ts_config.RULES['annual_leave_days'],
         'rows': rows,
         'variant': variant,
     }
@@ -1126,7 +1130,7 @@ def user_history(employee_code: Optional[str] = None,
             for r in rows
         ]
     # ── Consolidated summary + monthly breakdown + optional raw punches
-    full_day_hours = float(ts_config.RULES.get('full_day_hours', 8.0))
+    full_day_hours = float(ts_config.RULES.get('full_day_hours', 9.0))
     total_hours    = sum((r['hours'] or 0) for r in daily_rows)
     total_punches  = sum((r['punches'] or 0) for r in daily_rows)
     days_present   = len(daily_rows)
