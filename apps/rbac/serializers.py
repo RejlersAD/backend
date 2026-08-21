@@ -5,7 +5,6 @@ Enterprise-grade serializers for Role-Based Access Control
 import logging
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 from .models import (
     Organization, Module, Permission, Role, RolePermission, RoleModule,
@@ -848,11 +847,6 @@ class UserProfileListSerializer(serializers.ModelSerializer):
     profile_photo = serializers.SerializerMethodField()
     manager_name = serializers.SerializerMethodField()
     manager_detail = serializers.SerializerMethodField()
-    join_date = serializers.SerializerMethodField()
-    exit_date = serializers.SerializerMethodField()
-    employment_status = serializers.SerializerMethodField()
-    resignation_date = serializers.SerializerMethodField()
-    contract_end_date = serializers.SerializerMethodField()
 
     class Meta:
         model = UserProfile
@@ -863,7 +857,6 @@ class UserProfileListSerializer(serializers.ModelSerializer):
             'organization_name', 'primary_role', 'roles',
             # Employment
             'employee_id', 'department', 'job_title', 'manager_name', 'manager_detail',
-            'join_date', 'exit_date', 'employment_status', 'resignation_date', 'contract_end_date',
             # Contact / location
             'phone', 'location', 'bio',
             # Status & security
@@ -921,15 +914,8 @@ class UserProfileListSerializer(serializers.ModelSerializer):
     def _employee_master(obj):
         try:
             return obj.user.employee_master
-        except (AttributeError, ObjectDoesNotExist):
+        except AttributeError:
             return None
-
-    @staticmethod
-    def _offboarding(obj, reason=None):
-        records = list(obj.user.offboarding_records.all())
-        if reason:
-            records = [record for record in records if record.exit_reason == reason]
-        return records[0] if records else None
 
     def get_manager_name(self, obj):
         manager = obj.manager
@@ -954,7 +940,7 @@ class UserProfileListSerializer(serializers.ModelSerializer):
         if master and master.manager:
             try:
                 manager_profile = master.manager.user.rbac_profile
-            except (AttributeError, ObjectDoesNotExist):
+            except AttributeError:
                 manager_profile = None
             return {
                 'id': str(manager_profile.id) if manager_profile else None,
@@ -964,26 +950,6 @@ class UserProfileListSerializer(serializers.ModelSerializer):
                 'department': master.manager.department or '',
             }
         return None
-
-    def get_join_date(self, obj):
-        master = self._employee_master(obj)
-        return master.join_date if master else None
-
-    def get_exit_date(self, obj):
-        master = self._employee_master(obj)
-        return master.exit_date if master else None
-
-    def get_employment_status(self, obj):
-        master = self._employee_master(obj)
-        return master.employment_status if master else obj.status
-
-    def get_resignation_date(self, obj):
-        record = self._offboarding(obj, 'resignation')
-        return record.last_working_day if record else None
-
-    def get_contract_end_date(self, obj):
-        record = self._offboarding(obj, 'contract_end')
-        return record.last_working_day if record else None
 
     def get_profile_photo(self, obj):
         """Return absolute presigned URL for profile photo (same logic as detail serializer)."""
