@@ -91,11 +91,9 @@ def refresh_timesheet_cache(category: str, params: dict) -> dict:
         if not cache_service.CACHE_ENABLED or not cache_service.BACKGROUND_REFRESH:
             return {'status': 'skipped', 'reason': 'caching_disabled'}
         
-        # Import appropriate service based on data source
-        if ts_config.DATA_SOURCE == 'mirror':
-            from . import mirror_services as svc
-        else:
-            from . import services as svc
+        # Use the same manual/biometric/hybrid dispatcher as API and Payroll.
+        from . import get_service
+        svc = get_service()
         
         # Execute query and cache result
         if category == 'live':

@@ -125,10 +125,12 @@ DATA_SOURCE = config('TIMESHEET_DATA_SOURCE', default='sqlserver').lower().strip
 if DATA_SOURCE not in ('sqlserver', 'mirror'):
     DATA_SOURCE = 'sqlserver'
 
-# Attendance entry channel. Keep biometric connectivity available for later,
-# but use HR-uploaded daily hours as the source of truth until it is enabled.
+# Attendance entry channel:
+#   manual    -> uploaded sheets only
+#   biometric -> biometric source only
+#   hybrid    -> live biometric feed; biometric daily hours with manual fallback
 INPUT_MODE = config('TIMESHEET_INPUT_MODE', default='manual').lower().strip()
-if INPUT_MODE not in ('manual', 'biometric'):
+if INPUT_MODE not in ('manual', 'biometric', 'hybrid'):
     INPUT_MODE = 'manual'
 
 # Shared secret for the office agent → Railway ingest endpoint. Generate a

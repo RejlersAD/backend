@@ -22,6 +22,7 @@ duplicating. Designed for at-least-once delivery from the agent.
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
 
@@ -124,7 +125,7 @@ def ingest_events(request):
     if not expected:
         return Response({'error': 'mirror ingest disabled (no key configured)'},
                         status=status.HTTP_503_SERVICE_UNAVAILABLE)
-    if key_header != expected:
+    if not secrets.compare_digest(key_header, expected):
         return Response({'error': 'invalid mirror key'}, status=status.HTTP_403_FORBIDDEN)
 
     payload = request.data if isinstance(request.data, dict) else {}
@@ -242,7 +243,7 @@ def ingest_users(request):
     if not expected:
         return Response({'error': 'mirror ingest disabled (no key configured)'},
                         status=status.HTTP_503_SERVICE_UNAVAILABLE)
-    if key_header != expected:
+    if not secrets.compare_digest(key_header, expected):
         return Response({'error': 'invalid mirror key'}, status=status.HTTP_403_FORBIDDEN)
 
     payload = request.data if isinstance(request.data, dict) else {}

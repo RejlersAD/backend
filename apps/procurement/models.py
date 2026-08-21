@@ -452,6 +452,7 @@ class PurchaseOrder(TimeStampedModel):
     
     # ═══ BUYER REFERENCE CONTACTS (Template Section: Buyer Reference) ═══
     buyer_reference_pm = models.CharField(max_length=300, blank=True, help_text='Procurement Manager (e.g., Ms.Richa Thomas)')
+    buyer_reference_email = models.EmailField(blank=True, help_text='Email fetched from the selected RADAI employee')
     buyer_reference_pe = models.CharField(max_length=300, blank=True, help_text='Procurement Engineer (e.g., Ms.Sukanya Ravichandran)')
     
     # Details
@@ -513,6 +514,11 @@ class PurchaseOrder(TimeStampedModel):
     
     # Items
     items = models.JSONField(default=list, blank=True)
+    items_table_headers = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Editable column headings used by the PO items and pricing tables',
+    )
     # Example: [{'item': 'Laptop', 'qty': 2, 'unit_price': 1500, 'total': 3000}]
     
     # Dates (soft-coded for AI extraction)
@@ -565,6 +571,7 @@ class PurchaseOrder(TimeStampedModel):
     approved_by_name = models.CharField(max_length=300, blank=True, help_text='Approver name (soft-coded string, e.g., Jarmo Suominen)')
     approved_by_title = models.CharField(max_length=300, blank=True, help_text='Approver title (e.g., Senior VP, Middle East, CEO)')
     approved_date = models.DateField(null=True, blank=True, help_text='Date when PO was approved')
+    approved_at = models.DateTimeField(null=True, blank=True, help_text='Exact timestamp when final PO approval was recorded')
     approval_signature = models.CharField(max_length=500, blank=True, help_text='Digital signature (base64 or S3 URL)')
     approval_stamp = models.CharField(max_length=500, blank=True, help_text='Company stamp image (S3 URL)')
 

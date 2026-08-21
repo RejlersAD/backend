@@ -58,6 +58,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8000
 
-# Use JSON array format for CMD to prevent signal issues
-# TEST: Ultra-minimal startup to verify container can run
-CMD ["sh", "-c", "echo 'Container started! PORT=${PORT}' && gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 30 --log-level info"]
+# Apply committed schema changes before accepting application traffic. A failed
+# migration must fail the deployment instead of starting code against an older
+# database schema.
+CMD ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 30 --log-level info"]
