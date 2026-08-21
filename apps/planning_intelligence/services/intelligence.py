@@ -13,7 +13,7 @@ import json
 import re
 
 from ..config import (
-    CLAUDE_MAX_INPUT_CHARS, CLAUDE_INTELLIGENCE_MAX_TOKENS,
+    CLAUDE_MAX_INPUT_CHARS, CLAUDE_INTELLIGENCE_MAX_TOKENS, CLAUDE_SCOPE_MAX_TOKENS,
     DISCIPLINE_DEFAULT_DELIVERABLES, DEFAULT_HSE_STUDIES, DISCIPLINE_NAME_BY_CODE,
     DELIVERABLE_ALIASES,
 )
@@ -133,6 +133,20 @@ def _augment_with_claude(intelligence: dict, combined_text: str, project, user) 
     intelligence['ai_augmented'] = True
     intelligence['ai_provider_used'] = 'anthropic'
 
+    # Fill in baseline fields the deterministic regex pass missed — Claude
+    # reads the same source text and can often find these even when the
+    # exact "Project Title:" / "Effective Date:" phrasing isn't present.
+    # Never overrides a value the regex pass already found.
+    if not intelligence.get('detected_project_name') and parsed.get('project_name'):
+        intelligence['detected_project_name'] = str(parsed['project_name']).strip()[:255]
+    if not intelligence.get('detected_effective_date_text') and parsed.get('effective_date'):
+        intelligence['detected_effective_date_text'] = str(parsed['effective_date']).strip()
+    if not intelligence.get('detected_duration_months') and parsed.get('duration_months'):
+        try:
+            intelligence['detected_duration_months'] = int(parsed['duration_months'])
+        except (TypeError, ValueError):
+            pass
+
 
 _CLAUDE_SCOPE_SYSTEM_PROMPT = (
     'You are an oil & gas FEED/DEFINE project-controls scope analyst. You will '
@@ -157,11 +171,13 @@ _CLAUDE_SCOPE_SYSTEM_PROMPT = (
     '(d) "deliverable_hints" is the list of deliverables the SOW explicitly '
     'names that the catalogue is missing — return only genuinely new ones, do '
     'not repeat catalogue entries; '
-    '(e) "authoritative_deliverables_by_discipline" — ONLY populate this when '
-    'the user prompt says SOW-only mode is True; in that case, for every '
-    'discipline you marked in-scope, return the deliverables the SOW '
-    'EXPLICITLY requires (catalogue matches + new ones), in execution order. '
-    'Leave the object empty when SOW-only mode is False. '
+    '(e) "authoritative_deliverables_by_discipline" — for every discipline you '
+    'marked in-scope where the source text (SOW, MDR, EDDR, WBS — whichever '
+    'was provided) names specific deliverables, return that real, explicit '
+    'list (catalogue matches + new ones), in execution order. If the source '
+    'is genuinely silent on a discipline\'s deliverables, leave that '
+    'discipline out of this object entirely so the platform catalogue is '
+    'used as the fallback for it — do not guess or invent a list. '
     '(f) "scope_summary" is 1-2 sentences on why this scope was chosen.'
 )
 
@@ -199,7 +215,7 @@ def _augment_with_claude_scope(intelligence: dict, combined_text: str, project, 
         project,
         system_prompt=_CLAUDE_SCOPE_SYSTEM_PROMPT,
         user_prompt=user_prompt,
-        max_tokens=CLAUDE_INTELLIGENCE_MAX_TOKENS,
+        max_tokens=CLAUDE_SCOPE_MAX_TOKENS,
         feature='document_intelligence_scope',
         user=user,
     )
@@ -243,10 +259,14 @@ def _augment_with_claude_scope(intelligence: dict, combined_text: str, project, 
         else:
             info['in_scope'] = True
 
-        # SOW-only mode: when Claude returns an authoritative list for this
-        # in-scope discipline, REPLACE the catalogue fallback with it — the
-        # SOW is the source of truth and the catalogue was just a safety net.
-        if sow_only and code in authoritative and info.get('in_scope') is not False:
+        # When Claude (BYOK) returns an authoritative deliverable list for this
+        # in-scope discipline — from ANY upload mode, not just SOW-only —
+        # REPLACE the catalogue fallback with it: the source document is the
+        # ground truth, the catalogue is only ever a safety net for when
+        # Claude found nothing explicit (see _CLAUDE_SCOPE_SYSTEM_PROMPT rule e).
+        # Deterministic (no-BYOK) mode is unaffected — `authoritative` is only
+        # ever populated from a real Claude response.
+        if code in authoritative and info.get('in_scope') is not False:
             info['deliverables'] = list(authoritative[code])
             info['mentioned_in_source'] = [d for d in authoritative[code]
                                             if d in DISCIPLINE_DEFAULT_DELIVERABLES.get(code, [])]
@@ -281,8 +301,10 @@ def _augment_with_claude_scope(intelligence: dict, combined_text: str, project, 
         'disciplines_out_of_scope': sorted(out_of_scope_codes),
         'hse_studies_in_scope': valid_hse,
         'deliverable_hints': deliverable_hints,
-        'authoritative_deliverables_by_discipline': authoritative if sow_only else {},
-        'sow_only_authoritative_applied': bool(sow_only and authoritative),
+        # Applies in any upload mode now (see rule e / the per-discipline loop
+        # above) — this must mirror what was actually applied, not re-gate it.
+        'authoritative_deliverables_by_discipline': authoritative,
+        'sow_only_authoritative_applied': bool(authoritative),
         'scope_summary': scope_summary,
     }
 

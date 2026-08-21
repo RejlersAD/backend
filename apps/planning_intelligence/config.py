@@ -341,31 +341,25 @@ AI_PROVIDERS = [
 
 CLAUDE_MODEL_CHOICES = [
     {
-        'value': 'claude-opus-4-1-20250805',
-        'label': 'Claude Opus 4.1 (most capable — recommended for complex, multi-format documents)',
+        'value': 'claude-opus-5',
+        'label': 'Claude Opus 5 (most capable — recommended for complex documents) ★',
         'tier': 'opus',
         'recommended': True,
     },
     {
-        'value': 'claude-opus-4-20250514',
-        'label': 'Claude Opus 4',
-        'tier': 'opus',
-        'recommended': False,
-    },
-    {
-        'value': 'claude-sonnet-4-20250514',
-        'label': 'Claude Sonnet 4 (balanced cost/quality)',
+        'value': 'claude-sonnet-5',
+        'label': 'Claude Sonnet 5 (balanced cost/quality)',
         'tier': 'sonnet',
         'recommended': False,
     },
     {
-        'value': 'claude-3-5-haiku-20241022',
-        'label': 'Claude Haiku 3.5 (fastest / cheapest)',
+        'value': 'claude-haiku-4-5-20251001',
+        'label': 'Claude Haiku 4.5 (fastest / cheapest)',
         'tier': 'haiku',
         'recommended': False,
     },
 ]
-DEFAULT_CLAUDE_MODEL = 'claude-opus-4-1-20250805'
+DEFAULT_CLAUDE_MODEL = 'claude-opus-5'
 CLAUDE_MODEL_VALUES = {m['value'] for m in CLAUDE_MODEL_CHOICES}
 
 # Anthropic API keys always start with this prefix.
@@ -379,5 +373,10 @@ CLAUDE_BYOK_ENABLED = config('PLANNING_CLAUDE_BYOK_ENABLED', default=True, cast=
 # services/claude_client.py or services/intelligence.py.
 CLAUDE_MAX_INPUT_CHARS = int(config('PLANNING_CLAUDE_MAX_INPUT_CHARS', default='60000'))
 CLAUDE_INTELLIGENCE_MAX_TOKENS = int(config('PLANNING_CLAUDE_INTELLIGENCE_MAX_TOKENS', default='1500'))
+# Scope pass can be asked to enumerate authoritative_deliverables_by_discipline
+# for every in-scope discipline — a much longer response than the first pass's
+# name/date/duration/summary, so it gets its own, larger budget to avoid
+# truncating mid-JSON (which fails the whole pass, not just that one field).
+CLAUDE_SCOPE_MAX_TOKENS = int(config('PLANNING_CLAUDE_SCOPE_MAX_TOKENS', default='4000'))
 CLAUDE_NARRATIVE_MAX_TOKENS = int(config('PLANNING_CLAUDE_NARRATIVE_MAX_TOKENS', default='800'))
 CLAUDE_REQUEST_TIMEOUT_SECONDS = int(config('PLANNING_CLAUDE_TIMEOUT_SECONDS', default='45'))
