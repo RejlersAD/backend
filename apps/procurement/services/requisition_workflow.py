@@ -249,6 +249,19 @@ class RequisitionWorkflowService:
 
         workflow = cls._workflow(pr)
 
+        if getattr(pr, 'po_applicable', True) is False:
+            has_level_zero = any(cls._stage_level(stage, index) == 0 for index, stage in enumerate(workflow))
+            has_jarmo_level_five = any(
+                cls._stage_level(stage, index) == 5
+                and 'general manager' in f"{stage.get('role', '')} {stage.get('stage', '')}".lower()
+                and str(stage.get('user_name') or '').strip().lower() == 'jarmo suominen'
+                for index, stage in enumerate(workflow)
+            )
+            if not has_level_zero or not has_jarmo_level_five:
+                raise ValidationError({
+                    'error': 'When PO Applicable is No, the workflow requires Level 0 Procurement and Level 5 Jarmo Suominen (General Manager).'
+                })
+
         # Pass 1: Validate all stages before mutating memory
         assigned_ids = []
         for index, stage in enumerate(workflow):

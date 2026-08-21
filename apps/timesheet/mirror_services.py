@@ -41,12 +41,43 @@ def _month_range(year: int, month: int) -> tuple[dt.date, dt.date]:
 
 
 def _to_naive(t):
-    """Strip tz to keep frontend formatting consistent with sqlserver path."""
+    """Convert a stored timestamp to office-local naive time for the UI."""
     if t is None:
         return None
     if hasattr(t, 'tzinfo') and t.tzinfo is not None:
-        return t.astimezone(timezone.get_current_timezone()).replace(tzinfo=None)
+        return t.astimezone(_attendance_timezone()).replace(tzinfo=None)
     return t
+
+
+def _attendance_timezone() -> dt.tzinfo:
+    """Fixed office timezone used by the ingest contract (for example UTC+4)."""
+    return dt.timezone(dt.timedelta(hours=ts_config.INGEST_TZ_OFFSET_HOURS))
+
+
+def _attendance_date(value: dt.datetime) -> dt.date:
+    """Return the office-local calendar date for a stored event timestamp."""
+    if timezone.is_aware(value):
+        return value.astimezone(_attendance_timezone()).date()
+    return value.date()
+
+
+def _attendance_today() -> dt.date:
+    return timezone.now().astimezone(_attendance_timezone()).date()
+
+
+def _event_bounds(start: dt.date, end_exclusive: dt.date) -> tuple[dt.datetime, dt.datetime]:
+    """Translate office-local date bounds into aware timestamps for Postgres."""
+    office_tz = _attendance_timezone()
+    start_local = dt.datetime.combine(start, dt.time.min, tzinfo=office_tz)
+    end_local = dt.datetime.combine(end_exclusive, dt.time.min, tzinfo=office_tz)
+    return start_local.astimezone(dt.timezone.utc), end_local.astimezone(dt.timezone.utc)
+
+
+def _as_aware_attendance(value: dt.datetime | None) -> dt.datetime | None:
+    """Attach the office timezone before persisting a local calculation."""
+    if value is None or timezone.is_aware(value):
+        return value
+    return value.replace(tzinfo=_attendance_timezone())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -486,6 +517,13 @@ def _resolve_user_aliases_mirror(employee_code: Optional[str],
 _HOURS_MODE          = ts_config.RULES.get('hours_mode', 'paired')
 _OPEN_SHIFT_MAX_H    = float(ts_config.RULES.get('open_shift_max_hours', 0.0))
 _FULL_DAY_H          = float(ts_config.RULES.get('full_day_hours', 9.0))
+_MAX_DAILY_H         = float(ts_config.RULES.get('max_daily_hours', 9.0))
+
+
+def _cap_daily_hours(value: float) -> float:
+    """Apply the configured company-policy ceiling to every calculation."""
+    value = max(0.0, float(value or 0.0))
+    return round(min(value, _MAX_DAILY_H), 2) if _MAX_DAILY_H > 0 else round(value, 2)
 
 
 def _compute_paired_hours(punches: list[dict], *, now: dt.datetime | None = None) -> dict:
@@ -519,7 +557,9 @@ def _compute_paired_hours(punches: list[dict], *, now: dt.datetime | None = None
             'segments': [],
         }
 
-    _now = now or dt.datetime.now()
+    _now = now or dt.datetime.now(_attendance_timezone()).replace(tzinfo=None)
+    if timezone.is_aware(_now):
+        _now = _now.astimezone(_attendance_timezone()).replace(tzinfo=None)
     sorted_punches = sorted(punches, key=lambda p: p['event_time'])
 
     count_in  = sum(1 for p in sorted_punches if str(p.get('event_type', '')).upper() == 'IN')
@@ -530,8 +570,9 @@ def _compute_paired_hours(punches: list[dict], *, now: dt.datetime | None = None
 
     if _HOURS_MODE != 'paired':
         # Legacy elapsed mode: first punch → last punch
+        capped_elapsed = _cap_daily_hours(elapsed)
         return {
-            'paired_hours': elapsed, 'elapsed_hours': elapsed, 'effective_hours': elapsed,
+            'paired_hours': capped_elapsed, 'elapsed_hours': capped_elapsed, 'effective_hours': capped_elapsed,
             'first_in': first_time, 'last_out': last_time,
             'punch_count_in': count_in, 'punch_count_out': count_out,
             'paired_segments': 0, 'open_shift': False,
@@ -565,12 +606,12 @@ def _compute_paired_hours(punches: list[dict], *, now: dt.datetime | None = None
         since_in  = _hours_between(pending_in, _now)
         open_credited = round(min(since_in, _OPEN_SHIFT_MAX_H), 2)
 
-    paired_total  = round(paired_total + open_credited, 2)
+    paired_total  = _cap_daily_hours(paired_total + open_credited)
     effective     = paired_total
 
     return {
         'paired_hours':        paired_total,
-        'elapsed_hours':       round(elapsed, 2),
+        'elapsed_hours':       _cap_daily_hours(elapsed),
         'effective_hours':     effective,
         'first_in':            first_time,
         'last_out':            last_time,
@@ -594,9 +635,10 @@ def _compute_and_save_day(employee_code: str, day: dt.date,
     against the canonical form, preventing split-record duplicates.
     """
     employee_code = _norm_emp_code(employee_code)   # canonical form at write time
+    range_start, range_end = _event_bounds(day, day + dt.timedelta(days=1))
     punches = list(
         TimesheetEvent.objects
-        .filter(employee_code=employee_code, event_time__date=day)
+        .filter(employee_code=employee_code, event_time__gte=range_start, event_time__lt=range_end)
         .values('event_time', 'event_type')
         .order_by('event_time')
     )
@@ -617,13 +659,13 @@ def _compute_and_save_day(employee_code: str, day: dt.date,
             'paired_hours':        result['paired_hours'],
             'elapsed_hours':       result['elapsed_hours'],
             'effective_hours':     result['effective_hours'],
-            'first_in':            first_in,
-            'last_out':            result['last_out'],
+            'first_in':            _as_aware_attendance(first_in),
+            'last_out':            _as_aware_attendance(result['last_out']),
             'punch_count_in':      result['punch_count_in'],
             'punch_count_out':     result['punch_count_out'],
             'paired_segments':     result['paired_segments'],
             'open_shift':          result['open_shift'],
-            'open_shift_since':    result['open_shift_since'],
+            'open_shift_since':    _as_aware_attendance(result['open_shift_since']),
             'open_shift_credited': result['open_shift_credited'],
             'is_late':             is_late,
             'is_full_day':         is_full,
@@ -645,7 +687,10 @@ def recompute_summaries_for_events(events: list[dict]) -> int:
         evt  = ev.get('event_time')
         if code and evt:
             try:
-                d = evt.date() if hasattr(evt, 'date') else dt.date.fromisoformat(str(evt)[:10])
+                if isinstance(evt, dt.datetime):
+                    d = _attendance_date(evt)
+                else:
+                    d = dt.date.fromisoformat(str(evt)[:10])
                 affected.add((code, d))
             except (ValueError, AttributeError):
                 pass
@@ -667,7 +712,7 @@ def recompute_summaries_for_events(events: list[dict]) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 def live_status() -> dict:
     if ts_config.INPUT_MODE == 'manual':
-        rows = daily_report(dt.date.today().isoformat())['rows']
+        rows = daily_report(_attendance_today().isoformat())['rows']
         for row in rows:
             row['punch_time'] = None
             row['punch_type'] = 'MANUAL'
@@ -753,22 +798,60 @@ def live_status() -> dict:
             'punch_type': ev.event_type,
         })
 
+    # Hybrid mode keeps employees from HR's uploaded attendance roster visible
+    # even when they have no biometric punch in the live window.  They remain
+    # explicitly unknown; never classify a missing punch as OUT.
+    if ts_config.INPUT_MODE == 'hybrid':
+        known_codes = {str(row.get('employee_code') or '').strip() for row in rows}
+        roster_by_code = {}
+        today = _attendance_today()
+        roster_month_start = today.replace(day=1)
+        for summary_row in (
+            DailyAttendanceSummary.objects
+            .filter(
+                source=DailyAttendanceSummary.SOURCE_MANUAL,
+                date__gte=roster_month_start,
+                date__lte=today,
+            )
+            .order_by('employee_code', '-date', '-computed_at')
+        ):
+            code = str(summary_row.employee_code or '').strip()
+            if code and code not in roster_by_code:
+                roster_by_code[code] = summary_row
+        for code, roster in roster_by_code.items():
+            if code in known_codes:
+                continue
+            rows.append({
+                'employee_code': code,
+                'email': None,
+                'name': roster.employee_name or code,
+                'employee_name': roster.employee_name or code,
+                'department': roster.department or '',
+                'punch_time': None,
+                'punch_type': None,
+                'attendance_source': 'manual_roster',
+            })
+
     rows = _enrich_from_user_master_mirror(rows)
     rows = _enrich_with_rad_users(rows)
     rows = _backfill_email_from_matrix_name(rows)
 
     summary = _empty_summary()
+    summary['no_punch'] = 0
     for r in rows:
-        is_in = str(r.get('punch_type', '')).upper() == TimesheetEvent.EVENT_IN
+        punch_type = str(r.get('punch_type') or '').upper()
+        is_in = True if punch_type == TimesheetEvent.EVENT_IN else False if punch_type == TimesheetEvent.EVENT_OUT else None
         r['is_in'] = is_in
         r['is_late'] = _is_late(r)
-        if is_in:
+        if is_in is True:
             summary['currently_in'] += 1
-        else:
+        elif is_in is False:
             summary['currently_out'] += 1
+        else:
+            summary['no_punch'] += 1
         if r['is_late']:
             summary['late_today'] += 1
-    summary['total_seen_today'] = len(rows)
+    summary['total_seen_today'] = sum(1 for r in rows if r.get('punch_time'))
     summary['matched_to_radai'] = sum(1 for r in rows if r.get('radai_user_id'))
 
     rows.sort(key=lambda r: r.get('punch_time') or dt.datetime.min, reverse=True)
@@ -780,7 +863,8 @@ def live_status() -> dict:
     result = {
         'rows': rows,
         'summary': summary,
-        'variant': _VARIANT,
+        'variant': 'hybrid' if ts_config.INPUT_MODE == 'hybrid' else _VARIANT,
+        'attendance_source': 'hybrid' if ts_config.INPUT_MODE == 'hybrid' else 'biometric',
         'as_of': dt.datetime.now().isoformat(),
         # Soft-coded: expose the window so the frontend can show a helpful
         # diagnostic like "Showing punches from the last 20 h" instead of
@@ -905,53 +989,69 @@ def _calculate_live_metrics(employee_code: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Daily report
 # ─────────────────────────────────────────────────────────────────────────────
+def _manual_daily_rows(day: dt.date) -> list[dict]:
+    """Return uploaded daily rows without applying identity enrichment."""
+    rows = []
+    summaries = DailyAttendanceSummary.objects.filter(
+        date=day,
+        source=DailyAttendanceSummary.SOURCE_MANUAL,
+        effective_hours__gt=0,
+    )
+    for summary in summaries:
+        hours = float(summary.effective_hours or 0)
+        first_in = dt.datetime.combine(day, summary.time_in).isoformat() if summary.time_in else None
+        last_out = dt.datetime.combine(day, summary.time_out).isoformat() if summary.time_out else None
+        rows.append({
+            'employee_code': summary.employee_code,
+            'email': None,
+            'name': summary.employee_name or summary.employee_code,
+            'employee_name': summary.employee_name or summary.employee_code,
+            'department': summary.department or '',
+            'first_in': first_in,
+            'last_out': last_out,
+            'hours_worked': hours,
+            'overtime_hours': float(summary.overtime_hours or 0),
+            'paired_hours': hours,
+            'elapsed_hours': hours,
+            'paired_segments': 0,
+            'open_shift': False,
+            'punch_count_in': 0,
+            'punch_count_out': 0,
+            'is_late': False,
+            'is_full_day': hours >= _FULL_DAY_H,
+            'attendance_status': summary.attendance_status,
+            'hours_mode': 'manual',
+            'attendance_source': 'manual_upload',
+        })
+    return rows
+
+
 def daily_report(date: Optional[str] = None) -> dict:
-    day = _parse_date(date)
+    day = _parse_date(date, _attendance_today())
 
     if ts_config.INPUT_MODE == 'manual':
-        rows = []
-        summaries = DailyAttendanceSummary.objects.filter(
-            date=day, source=DailyAttendanceSummary.SOURCE_MANUAL,
-            effective_hours__gt=0,
-        )
-        for summary in summaries:
-            hours = float(summary.effective_hours or 0)
-            first_in = dt.datetime.combine(day, summary.time_in).isoformat() if summary.time_in else None
-            last_out = dt.datetime.combine(day, summary.time_out).isoformat() if summary.time_out else None
-            rows.append({
-                'employee_code': summary.employee_code,
-                'email': None,
-                'name': summary.employee_name or summary.employee_code,
-                'employee_name': summary.employee_name or summary.employee_code,
-                'department': summary.department or '',
-                'first_in': first_in,
-                'last_out': last_out,
-                'hours_worked': hours,
-                'overtime_hours': float(summary.overtime_hours or 0),
-                'paired_hours': hours,
-                'elapsed_hours': hours,
-                'paired_segments': 0,
-                'open_shift': False,
-                'punch_count_in': 0,
-                'punch_count_out': 0,
-                'is_late': False,
-                'is_full_day': hours >= _FULL_DAY_H,
-                'attendance_status': summary.attendance_status,
-                'hours_mode': 'manual',
-                'attendance_source': 'manual_upload',
-            })
+        rows = _manual_daily_rows(day)
         rows = _enrich_with_rad_users(rows)
         rows.sort(key=lambda r: r.get('radai_full_name') or r.get('name') or '')
         return {'date': day.isoformat(), 'rows': rows, 'variant': 'manual', 'hours_mode': 'manual'}
 
     # Step 1: get all events for the day, grouped by employee
+    range_start, range_end = _event_bounds(day, day + dt.timedelta(days=1))
     events_qs = list(
         TimesheetEvent.objects
-        .filter(event_time__date=day)
+        .filter(event_time__gte=range_start, event_time__lt=range_end)
         .values('employee_code', 'employee_name', 'employee_email', 'department', 'event_time', 'event_type')
         .order_by('employee_code', 'event_time')
     )
     if not events_qs:
+        if ts_config.INPUT_MODE == 'hybrid':
+            rows = _manual_daily_rows(day)
+            rows = _enrich_with_rad_users(rows)
+            rows.sort(key=lambda r: r.get('radai_full_name') or r.get('name') or '')
+            return {
+                'date': day.isoformat(), 'rows': rows, 'variant': 'hybrid',
+                'hours_mode': 'manual_fallback', 'attendance_source': 'hybrid',
+            }
         return {'date': day.isoformat(), 'rows': [], 'variant': _VARIANT}
 
     # Group by employee
@@ -999,7 +1099,15 @@ def daily_report(date: Optional[str] = None) -> dict:
             'is_late':             _is_late({'punch_time': result['first_in']}),
             'is_full_day':         result['effective_hours'] >= _FULL_DAY_H,
             'hours_mode':          _HOURS_MODE,
+            'attendance_source':   'biometric',
         })
+
+    if ts_config.INPUT_MODE == 'hybrid':
+        biometric_codes = {str(row.get('employee_code') or '').strip() for row in rows}
+        rows.extend(
+            row for row in _manual_daily_rows(day)
+            if str(row.get('employee_code') or '').strip() not in biometric_codes
+        )
 
     rows = _enrich_from_user_master_mirror(rows)
     rows = _enrich_with_rad_users(rows)
@@ -1008,8 +1116,9 @@ def daily_report(date: Optional[str] = None) -> dict:
     return {
         'date': day.isoformat(),
         'rows': rows,
-        'variant': _VARIANT,
+        'variant': 'hybrid' if ts_config.INPUT_MODE == 'hybrid' else _VARIANT,
         'hours_mode': _HOURS_MODE,
+        'attendance_source': 'hybrid' if ts_config.INPUT_MODE == 'hybrid' else 'biometric',
     }
 
 
@@ -1017,7 +1126,7 @@ def daily_report(date: Optional[str] = None) -> dict:
 # Monthly report
 # ─────────────────────────────────────────────────────────────────────────────
 def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> dict:
-    today = dt.date.today()
+    today = _attendance_today()
     y = int(year or today.year)
     m = int(month or today.month)
     start, end = _month_range(y, m)
@@ -1025,26 +1134,31 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
 
     # ── Read from DailyAttendanceSummary for already-computed days ───────────
     # For today (and any day without a summary), fall back to on-demand compute.
-    summary_query = DailyAttendanceSummary.objects.filter(date__gte=start, date__lt=end_exclusive)
+    summary_query = DailyAttendanceSummary.objects.filter(
+        date__gte=start, date__lt=end_exclusive,
+    )
     if ts_config.INPUT_MODE == 'manual':
         summary_query = summary_query.filter(source=DailyAttendanceSummary.SOURCE_MANUAL)
-    existing_summaries: dict[tuple, DailyAttendanceSummary] = {
-        (s.employee_code, s.date): s
-        for s in summary_query
-    }
+    elif ts_config.INPUT_MODE == 'biometric':
+        summary_query = summary_query.filter(source=DailyAttendanceSummary.SOURCE_BIOMETRIC)
+
+    # In hybrid mode both rows may exist for the same employee/day. Manual is
+    # the fallback; a biometric summary always replaces it when available.
+    existing_summaries: dict[tuple, DailyAttendanceSummary] = {}
+    for summary_row in summary_query.order_by('date', 'employee_code', 'source'):
+        key = (summary_row.employee_code, summary_row.date)
+        if key not in existing_summaries or summary_row.source == DailyAttendanceSummary.SOURCE_BIOMETRIC:
+            existing_summaries[key] = summary_row
 
     # Determine which employee+day combos have events but no summary yet
-    events_agg = [] if ts_config.INPUT_MODE == 'manual' else list(
-        TimesheetEvent.objects
-        .filter(event_time__gte=start, event_time__lt=end_exclusive)
-        .values('employee_code', 'event_time__date')
-        .distinct()
-    )
-    needs_compute = [
-        (r['employee_code'], r['event_time__date'])
-        for r in events_agg
-        if (r['employee_code'], r['event_time__date']) not in existing_summaries
-    ]
+    range_start, range_end = _event_bounds(start, end_exclusive)
+    event_pairs = set()
+    if ts_config.INPUT_MODE != 'manual':
+        for event in TimesheetEvent.objects.filter(
+            event_time__gte=range_start, event_time__lt=range_end,
+        ).values('employee_code', 'event_time'):
+            event_pairs.add((event['employee_code'], _attendance_date(event['event_time'])))
+    needs_compute = [pair for pair in event_pairs if pair not in existing_summaries]
     for code, day in needs_compute:
         try:
             s = _compute_and_save_day(code, day)
@@ -1057,7 +1171,7 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
     meta = {
         e['employee_code']: e
         for e in TimesheetEvent.objects
-        .filter(event_time__gte=start, event_time__lt=end_exclusive)
+        .filter(event_time__gte=range_start, event_time__lt=range_end)
         .values('employee_code', 'employee_name', 'employee_email', 'department')
         .distinct()
     }
@@ -1110,7 +1224,7 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             'attendance_source': s.source,
         })
 
-    if ts_config.INPUT_MODE == 'manual':
+    if ts_config.INPUT_MODE in ('manual', 'hybrid'):
         from apps.rbac.models import UserProfile
         profiles = UserProfile.objects.select_related('user').filter(
             is_deleted=False, status='active', user__is_active=True,
@@ -1156,9 +1270,13 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
         'standard_weekly_hours': ts_config.RULES['standard_weekly_hours'],
         'annual_leave_days': ts_config.RULES['annual_leave_days'],
         'rows': rows,
-        'variant': 'manual' if ts_config.INPUT_MODE == 'manual' else _VARIANT,
+        'variant': ts_config.INPUT_MODE if ts_config.INPUT_MODE in ('manual', 'hybrid') else _VARIANT,
         'hours_mode': 'manual' if ts_config.INPUT_MODE == 'manual' else _HOURS_MODE,
-        'attendance_source': 'manual_upload' if ts_config.INPUT_MODE == 'manual' else 'biometric',
+        'attendance_source': (
+            'manual_upload' if ts_config.INPUT_MODE == 'manual'
+            else 'hybrid' if ts_config.INPUT_MODE == 'hybrid'
+            else 'biometric'
+        ),
     }
 
 
@@ -1188,7 +1306,7 @@ def user_history(employee_code: Optional[str] = None,
                  to_date: Optional[str] = None,
                  include_punches: bool = False,
                  with_trace: bool = False) -> dict:
-    today = dt.date.today()
+    today = _attendance_today()
     start = _parse_date(from_date, today - dt.timedelta(days=30))
     end = _parse_date(to_date, today)
     end_exclusive = end + dt.timedelta(days=1)
@@ -1202,7 +1320,8 @@ def user_history(employee_code: Optional[str] = None,
     from django.db.models import Q
     import logging
     log = logging.getLogger(__name__)
-    qs = TimesheetEvent.objects.filter(event_time__gte=start, event_time__lt=end_exclusive)
+    range_start, range_end = _event_bounds(start, end_exclusive)
+    qs = TimesheetEvent.objects.filter(event_time__gte=range_start, event_time__lt=range_end)
     # OR-match: either identifier may resolve the record. Aliases include
     # alternate emails from the RAD AI UserProfile AND biometric employee_codes
     # discovered by fuzzy [employee_name] match — same multi-strategy logic

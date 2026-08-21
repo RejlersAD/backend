@@ -100,6 +100,7 @@ def normalize_assignments(approval_log, existing_log=None, require_core=True, re
             'approver_email': user.email,
             'status': previous.get('status', 'Pending') if same_assignee else 'Pending',
             'date': previous.get('date', '') if same_assignee else '',
+            'approved_at': previous.get('approved_at', previous.get('date', '')) if same_assignee else '',
             'comments': previous.get('comments', '') if same_assignee else '',
         })
     return normalized
@@ -176,8 +177,11 @@ def record_decision(order, actor, decision, stage='', comment=''):
         raise PermissionDenied('This Purchase Order has no pending approval assigned to you for the selected stage.')
 
     index, entry = candidate
+    decision_at = timezone.now()
     entry['status'] = 'Approved' if decision == 'approve' else 'Rejected'
-    entry['date'] = timezone.localdate().isoformat()
+    entry['date'] = decision_at.isoformat()
+    entry['approved_at'] = decision_at.isoformat() if decision == 'approve' else ''
+    entry['decided_at'] = decision_at.isoformat()
     entry['comments'] = str(comment or '').strip()
     workflow[index] = entry
     locked.approval_log = workflow
@@ -187,7 +191,8 @@ def record_decision(order, actor, decision, stage='', comment=''):
     if assigned_entries and all(str(item.get('status')).lower() == 'approved' for item in assigned_entries):
         locked.approved_by = actor
         locked.approved_by_name = actor.get_full_name() or actor.email
-        locked.approved_date = timezone.localdate()
-        update_fields.extend(['approved_by', 'approved_by_name', 'approved_date'])
+        locked.approved_date = timezone.localtime(decision_at).date()
+        locked.approved_at = decision_at
+        update_fields.extend(['approved_by', 'approved_by_name', 'approved_date', 'approved_at'])
     locked.save(update_fields=update_fields)
     return locked, entry

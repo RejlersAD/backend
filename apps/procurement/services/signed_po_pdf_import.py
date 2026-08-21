@@ -12,6 +12,7 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.db import transaction
 from django.db.models import Case, IntegerField, Q, Value, When
+from django.utils import timezone
 
 from ..models import PODocument, PurchaseOrder, PurchaseRequisition, Vendor
 from ..models_master import Project
@@ -200,9 +201,11 @@ def import_signed_po_pdf(
     po.seller_reference = fields["seller_reference"]
     po.quote_ref = fields["quote_ref"]
     po.seller_license_no = fields["vendor_license_no"]
+    approval_recorded_at = timezone.now() if signature_verified else None
     po.approved_by_name = approved_by_name if signature_verified else ""
     po.approved_by_title = approved_by_title if signature_verified else ""
     po.approved_date = _date(approved_date) if signature_verified else None
+    po.approved_at = approval_recorded_at
     po.save()
     if fields["po_date"]:
         PurchaseOrder.objects.filter(pk=po.pk).update(po_date=fields["po_date"])
@@ -234,7 +237,8 @@ def import_signed_po_pdf(
         "stage": "Signed PO document approval",
         "approver": approved_by_name,
         "status": "Approved" if signature_verified else "Evidence review required",
-        "date": approved_date,
+        "date": approval_recorded_at.isoformat() if approval_recorded_at else "",
+        "approved_at": approval_recorded_at.isoformat() if approval_recorded_at else "",
         "evidence_document_id": str(document.id),
         "signature_verified": signature_verified,
         "stamp_verified": stamp_verified,

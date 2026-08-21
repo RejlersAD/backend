@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
 from rest_framework.exceptions import ValidationError
@@ -8,6 +8,7 @@ from apps.procurement.services.purchase_order_approvals import (
     FINANCIAL_STAGE,
     TECHNICAL_STAGE,
     normalize_assignments,
+    record_decision,
 )
 
 
@@ -64,3 +65,28 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
         ], require_core=False)
 
         self.assertEqual(result, [])
+
+    @patch('apps.procurement.models.PurchaseOrder.objects.select_for_update')
+    def test_approval_records_full_timestamp(self, select_for_update):
+        actor = SimpleNamespace(id='jarmo-id', email='jarmo@example.com', get_full_name=lambda: 'Jarmo Suominen')
+        locked = SimpleNamespace(
+            id='po-id',
+            approval_log=[{
+                'stage': 'Final Management Sign-off',
+                'user_id': 'jarmo-id',
+                'status': 'Pending',
+            }],
+            approved_by=None,
+            approved_by_name='',
+            approved_date=None,
+            approved_at=None,
+            save=MagicMock(),
+        )
+        select_for_update.return_value.select_related.return_value.get.return_value = locked
+
+        updated, entry = record_decision.__wrapped__(SimpleNamespace(pk='po-id'), actor, 'approve')
+
+        self.assertEqual(entry['status'], 'Approved')
+        self.assertIn('T', entry['approved_at'])
+        self.assertIn('T', entry['decided_at'])
+        self.assertIsNotNone(updated.approved_at)

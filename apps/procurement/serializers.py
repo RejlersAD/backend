@@ -285,6 +285,17 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             if stage_name:
                 normalized_stage['stage'] = stage_name[:150]
 
+            # This is a presentation-only label for the first column of the
+            # approval table (for example L0, L1-A, or PM). Routing continues
+            # to use the numeric ``level`` above.
+            approval_label = str(stage.get('approval_label') or '').strip()
+            if len(approval_label) > 20:
+                raise serializers.ValidationError(
+                    f'Approval stage {index + 1} table label is too long.'
+                )
+            if approval_label:
+                normalized_stage['approval_label'] = approval_label
+
             if level == 1:
                 normalized_stage['approval_group'] = 'level_1'
                 normalized_stage['group_mode'] = 'all'
@@ -533,7 +544,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'invoicing_attn', 'invoicing_emails', 'company_fax',
             
             # Buyer reference contacts
-            'buyer_reference_pm', 'buyer_reference_pe',
+            'buyer_reference_pm', 'buyer_reference_email', 'buyer_reference_pe',
             
             # Financial
             'total_amount', 'currency', 'tax_amount', 'vat_percentage', 'discount_amount', 
@@ -543,7 +554,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'payment_milestones', 'workshop_rates',
             
             # Items & pricing
-            'items',
+            'items', 'items_table_headers',
             
             # Dates
             'po_date', 'start_date', 'end_date', 'expected_delivery', 'actual_delivery',
@@ -556,7 +567,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'end_client', 'contractor', 'subcontractor', 'company_agreement_no', 'rad_project_no',
             
             # Approval section
-            'approved_by', 'approved_by_user_name', 'approved_by_name', 'approved_by_title', 'approved_date',
+            'approved_by', 'approved_by_user_name', 'approved_by_name', 'approved_by_title', 'approved_date', 'approved_at',
             'approval_signature', 'approval_stamp',
             'technical_approver', 'financial_approver', 'management_approver',
             'approval_log', 'final_approver_notes',
@@ -575,7 +586,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             # Timestamps
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'po_date', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'po_date', 'approved_at', 'created_at', 'updated_at']
     
     def get_project_display(self, obj):
         """Get formatted project display string"""
@@ -630,16 +641,12 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             attrs['approval_log'] = normalize_assignments(
                 attrs.get('approval_log'),
                 existing_log=existing_log,
-                require_core=attrs.get('status', getattr(self.instance, 'status', 'draft')) != 'draft',
-                require_management=bool(
-                    attrs.get('status', getattr(self.instance, 'status', 'draft')) != 'draft'
-                    and requisition
-                    and requisition.requisition_type == 'project'
-                ),
+                require_core=False,
+                require_management=attrs.get('status', getattr(self.instance, 'status', 'draft')) != 'draft',
             )
             by_stage = {entry['stage']: entry for entry in attrs['approval_log']}
-            attrs['technical_approver'] = by_stage.get('Technical Approval', {}).get('approver', '')
-            attrs['financial_approver'] = by_stage.get('Financial Approval', {}).get('approver', '')
+            attrs['technical_approver'] = ''
+            attrs['financial_approver'] = ''
             attrs['management_approver'] = by_stage.get('Final Management Sign-off', {}).get('approver', '')
 
         return attrs

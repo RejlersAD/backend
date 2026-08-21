@@ -113,6 +113,26 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
         self.assertEqual(level, 0)
         self.assertEqual(stages[0][1]['role'], 'Procurement Department')
 
+    def test_no_po_submission_requires_level_zero_and_jarmo_level_five(self):
+        pr = self._pr()
+        pr.po_applicable = False
+
+        with self.assertRaisesMessage(ValidationError, 'Level 5 Jarmo Suominen'):
+            RequisitionWorkflowService._submit_locked(pr, self.issuer)
+
+        pr.approval_workflow_config = [
+            {'level': 0, 'role': 'Procurement Department', 'user_id': 'procurement'},
+            {
+                'level': 5,
+                'role': 'General Manager',
+                'user_id': 'jarmo',
+                'user_name': 'Jarmo Suominen',
+            },
+        ]
+        result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
+
+        self.assertEqual(result.status, 'submitted')
+
     def test_only_issuer_can_submit(self):
         pr = self._pr()
 
