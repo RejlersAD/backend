@@ -14,6 +14,32 @@ MANAGEMENT_STAGE = 'Final Management Sign-off'
 JARMO_NAME = 'Jarmo Suominen'
 
 
+def _entry_email(entry):
+    return str(entry.get('approver_email') or entry.get('user_email') or entry.get('email') or '').strip().lower()
+
+
+def _entry_matches_user(entry, user):
+    """Prefer email because numeric user IDs are different in each environment."""
+    assigned_email = _entry_email(entry)
+    user_email = str(getattr(user, 'email', '') or '').strip().lower()
+    if assigned_email and user_email:
+        return assigned_email == user_email
+    return bool(entry.get('user_id')) and str(entry.get('user_id')) == str(user.id)
+
+
+def _resolve_entry_user(entry):
+    User = get_user_model()
+    assigned_email = _entry_email(entry)
+    if assigned_email:
+        recipient = User.objects.filter(email__iexact=assigned_email, is_active=True).first()
+        if recipient:
+            entry['user_id'] = str(recipient.pk)
+            return recipient
+    if entry.get('user_id'):
+        return User.objects.filter(pk=entry['user_id'], is_active=True).first()
+    return None
+
+
 def _active_profiles(user_ids):
     return {
         str(profile.user_id): profile
@@ -111,17 +137,14 @@ def notify_assigned_approvers(order):
     from apps.notifications.models import Notification
     from apps.notifications.services import NotificationService
 
-    entries = [entry for entry in (order.approval_log or []) if entry.get('user_id')]
-    users = get_user_model().objects.filter(
-        id__in=[entry['user_id'] for entry in entries], is_active=True,
-    ).in_bulk()
+    entries = [entry for entry in (order.approval_log or []) if entry.get('user_id') or _entry_email(entry)]
+    repaired = False
     for entry in entries:
-        recipient = users.get(entry['user_id'])
-        if recipient is None:
-            # UUID keys returned by in_bulk can differ from JSON strings.
-            recipient = next((user for key, user in users.items() if str(key) == str(entry['user_id'])), None)
+        old_user_id = str(entry.get('user_id') or '')
+        recipient = _resolve_entry_user(entry)
         if recipient is None:
             continue
+        repaired = repaired or old_user_id != str(recipient.pk)
         metadata = {
             'po_id': str(order.id),
             'po_number': order.po_number,
@@ -144,13 +167,16 @@ def notify_assigned_approvers(order):
             action_label='Open Approval tab',
             metadata=metadata,
         )
+    if repaired:
+        order.approval_log = list(order.approval_log or [])
+        order.save(update_fields=['approval_log', 'updated_at'])
 
 
 def pending_entries_for(user, queryset):
     results = []
     for order in queryset:
         for index, entry in enumerate(order.approval_log or []):
-            if str(entry.get('user_id') or '') != str(user.id):
+            if not _entry_matches_user(entry, user):
                 continue
             if str(entry.get('status') or '').lower() != 'pending':
                 continue
@@ -166,7 +192,7 @@ def record_decision(order, actor, decision, stage='', comment=''):
     workflow = [dict(entry) for entry in (locked.approval_log or [])]
     candidate = None
     for index, entry in enumerate(workflow):
-        if str(entry.get('user_id') or '') != str(actor.id):
+        if not _entry_matches_user(entry, actor):
             continue
         if stage and str(entry.get('stage') or '') != str(stage):
             continue

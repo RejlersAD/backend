@@ -7,6 +7,7 @@ from rest_framework.exceptions import ValidationError
 from apps.procurement.services.purchase_order_approvals import (
     FINANCIAL_STAGE,
     TECHNICAL_STAGE,
+    _entry_matches_user,
     normalize_assignments,
     record_decision,
 )
@@ -65,6 +66,15 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
         ], require_core=False)
 
         self.assertEqual(result, [])
+
+    def test_migrated_assignment_uses_email_when_user_id_changed(self):
+        actor = SimpleNamespace(id='production-id', email='firaol.akawak@rejlers.ae')
+        entry = {
+            'user_id': 'preproduction-id',
+            'approver_email': 'FIRAOL.AKAWAK@rejlers.ae',
+        }
+
+        self.assertTrue(_entry_matches_user(entry, actor))
 
     @patch('apps.procurement.models.PurchaseOrder.objects.select_for_update')
     def test_approval_records_full_timestamp(self, select_for_update):

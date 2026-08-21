@@ -129,9 +129,9 @@ if DATA_SOURCE not in ('sqlserver', 'mirror'):
 #   manual    -> uploaded sheets only
 #   biometric -> biometric source only
 #   hybrid    -> live biometric feed; biometric daily hours with manual fallback
-INPUT_MODE = config('TIMESHEET_INPUT_MODE', default='manual').lower().strip()
+INPUT_MODE = config('TIMESHEET_INPUT_MODE', default='hybrid').lower().strip()
 if INPUT_MODE not in ('manual', 'biometric', 'hybrid'):
-    INPUT_MODE = 'manual'
+    INPUT_MODE = 'hybrid'
 
 # Shared secret for the office agent → Railway ingest endpoint. Generate a
 # strong random string and set this identically on both sides. Empty value
