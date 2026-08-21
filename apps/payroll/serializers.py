@@ -155,7 +155,15 @@ class EmployeeLeaveRecordSerializer(serializers.ModelSerializer):
             'total_earned', 'total_taken', 'total_encashed', 'leave_balance',
             'carryforward', 'source_file', 'imported_at', 'monthly_breakdown',
         ]
-        read_only_fields = ['id', 'imported_at']
+        # Only carryforward is editable via PATCH (HR/Admin — see
+        # EmployeeLeaveRecordViewSet.perform_update); every other field is
+        # HR-Excel-imported data and stays read-only through this serializer.
+        read_only_fields = [
+            'id', 'employee_code', 'employee_name', 'department',
+            'job_title', 'joining_date', 'annual_entitlement', 'year',
+            'branch', 'total_earned', 'total_taken', 'total_encashed',
+            'leave_balance', 'source_file', 'imported_at',
+        ]
 
     def get_leave_type_name(self, obj):
         return 'Annual Leave'
