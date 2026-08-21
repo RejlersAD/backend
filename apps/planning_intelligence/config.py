@@ -372,11 +372,11 @@ CLAUDE_BYOK_ENABLED = config('PLANNING_CLAUDE_BYOK_ENABLED', default=True, cast=
 # Cost/latency guardrails — soft-coded so they can be tuned without touching
 # services/claude_client.py or services/intelligence.py.
 CLAUDE_MAX_INPUT_CHARS = int(config('PLANNING_CLAUDE_MAX_INPUT_CHARS', default='60000'))
-CLAUDE_INTELLIGENCE_MAX_TOKENS = int(config('PLANNING_CLAUDE_INTELLIGENCE_MAX_TOKENS', default='1500'))
+CLAUDE_INTELLIGENCE_MAX_TOKENS = int(config('PLANNING_CLAUDE_INTELLIGENCE_MAX_TOKENS', default='6000'))
 # Scope pass can be asked to enumerate authoritative_deliverables_by_discipline
 # for every in-scope discipline — a much longer response than the first pass's
 # name/date/duration/summary, so it gets its own, larger budget to avoid
 # truncating mid-JSON (which fails the whole pass, not just that one field).
-CLAUDE_SCOPE_MAX_TOKENS = int(config('PLANNING_CLAUDE_SCOPE_MAX_TOKENS', default='4000'))
+CLAUDE_SCOPE_MAX_TOKENS = int(config('PLANNING_CLAUDE_SCOPE_MAX_TOKENS', default='6000'))
 CLAUDE_NARRATIVE_MAX_TOKENS = int(config('PLANNING_CLAUDE_NARRATIVE_MAX_TOKENS', default='800'))
 CLAUDE_REQUEST_TIMEOUT_SECONDS = int(config('PLANNING_CLAUDE_TIMEOUT_SECONDS', default='45'))
