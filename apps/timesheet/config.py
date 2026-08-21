@@ -34,7 +34,10 @@ Business rules:
     TIMESHEET_EXPECTED_LOGIN    default 9   (hour-of-day)
     TIMESHEET_EXPECTED_LOGOUT   default 18
     TIMESHEET_LATE_MIN          default 15  (minutes past expected login = "late")
-    TIMESHEET_FULL_DAY          default 8.0 (hours that count as a full day)
+    TIMESHEET_FULL_DAY          default 9.0 (hours that count as a full day)
+    TIMESHEET_STANDARD_WEEKLY_HOURS default 45
+    TIMESHEET_STANDARD_MONTHLY_WORK_DAYS default 22
+    TIMESHEET_ANNUAL_LEAVE_DAYS default 22
     TIMESHEET_WORK_DAYS         default 'Mon,Tue,Wed,Thu,Fri'
 
 UI:
@@ -122,6 +125,12 @@ DATA_SOURCE = config('TIMESHEET_DATA_SOURCE', default='sqlserver').lower().strip
 if DATA_SOURCE not in ('sqlserver', 'mirror'):
     DATA_SOURCE = 'sqlserver'
 
+# Attendance entry channel. Keep biometric connectivity available for later,
+# but use HR-uploaded daily hours as the source of truth until it is enabled.
+INPUT_MODE = config('TIMESHEET_INPUT_MODE', default='manual').lower().strip()
+if INPUT_MODE not in ('manual', 'biometric'):
+    INPUT_MODE = 'manual'
+
 # Shared secret for the office agent → Railway ingest endpoint. Generate a
 # strong random string and set this identically on both sides. Empty value
 # means ingest is disabled (returns 403).
@@ -155,7 +164,11 @@ RULES = {
     'expected_login_hour':  _env_first_int(['TIMESHEET_EXPECTED_LOGIN_HOUR',  'TIMESHEET_EXPECTED_LOGIN'],  9),
     'expected_logout_hour': _env_first_int(['TIMESHEET_EXPECTED_LOGOUT_HOUR', 'TIMESHEET_EXPECTED_LOGOUT'], 18),
     'late_threshold_min':   _env_first_int(['TIMESHEET_LATE_THRESHOLD_MIN',   'TIMESHEET_LATE_MIN'],        15),
-    'full_day_hours':       _env_first_float(['TIMESHEET_FULL_DAY_HOURS',    'TIMESHEET_FULL_DAY'],        8.0),
+    'standard_daily_hours': _env_first_float(['TIMESHEET_STANDARD_DAILY_HOURS'], 9.0),
+    'full_day_hours':       _env_first_float(['TIMESHEET_FULL_DAY_HOURS',    'TIMESHEET_FULL_DAY'],        9.0),
+    'standard_weekly_hours': _env_first_float(['TIMESHEET_STANDARD_WEEKLY_HOURS'], 45.0),
+    'standard_monthly_working_days': _env_first_int(['TIMESHEET_STANDARD_MONTHLY_WORK_DAYS'], 22),
+    'annual_leave_days':    _env_first_int(['TIMESHEET_ANNUAL_LEAVE_DAYS'], 22),
     
     # ── Maximum daily hours enforcement (user-approved 2026-06-26) ──────────
     # Caps ALL daily hours calculations to this value. Hours exceeding this
@@ -329,6 +342,8 @@ def is_configured() -> bool:
     """Quick check: do we have the bare minimum to attempt a query?"""
     if not FEATURE_ENABLED:
         return False
+    if INPUT_MODE == 'manual':
+        return True
     # Mirror mode needs no SQL Server creds — the Postgres table is always
     # there. Just check the feature is on; reads return empty list naturally.
     if DATA_SOURCE == 'mirror':
@@ -347,6 +362,7 @@ def configuration_status() -> dict:
     return {
         'feature_enabled':   FEATURE_ENABLED,
         'data_source':       DATA_SOURCE,
+        'input_mode':        INPUT_MODE,
         'host':              bool(SQLSERVER['host']),
         'credentials':       bool(SQLSERVER['user'] and SQLSERVER['password']),
         'database_selected': bool(SQLSERVER['database']),

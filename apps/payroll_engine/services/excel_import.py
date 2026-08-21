@@ -95,6 +95,14 @@ def _normalise_str(value, max_len: int = 255) -> str:
 
 def _upsert_employee(row: dict, summary: ImportSummary) -> PayrollEmployee:
     emp_no = str(row['employee_no']).strip()
+    # Employee numbers are the shared identity across RBAC, biometric,
+    # leave, timesheet and payroll modules. Preserve that relationship during
+    # every roster import instead of creating disconnected payroll records.
+    from apps.rbac.models import UserProfile
+    profile = (UserProfile.objects
+               .filter(employee_id=emp_no, is_deleted=False)
+               .select_related('user')
+               .first())
     defaults = {
         'full_name':         _normalise_str(row.get('full_name')),
         'mol_no':            _normalise_str(row.get('mol_no'), 32),
@@ -115,6 +123,10 @@ def _upsert_employee(row: dict, summary: ImportSummary) -> PayrollEmployee:
         'default_payment_mode': catalog.normalise_payment_mode(row.get('payment_mode')),
         'is_active':         True,
     }
+    # Never erase a pre-existing manual link when an imported employee number
+    # has no RADAI match; only set the relation when the match is exact.
+    if profile:
+        defaults['user'] = profile.user
     employee, created = PayrollEmployee.objects.update_or_create(
         employee_no=emp_no, defaults=defaults,
     )

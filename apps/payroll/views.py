@@ -724,7 +724,7 @@ def leave_calendar(request):
     GET /api/v1/payroll/leave-calendar/?year=2026&month=6
 
     Returns approved leave for all employees in a given month, keyed by
-    employee_code → { YYYY-MM-DD: {code, name, color, badge_bg, badge_text, request_id} }.
+    employee_code → { YYYY-MM-DD: {code, name, employee_name, color, badge_bg, badge_text, request_id} }.
     Only working days (Mon–Fri) are included.  Used by the Summary attendance
     view to overlay leave codes on the biometric attendance pivot table.
     """
@@ -762,6 +762,7 @@ def leave_calendar(request):
                 calendar_data[emp][cur.isoformat()] = {
                     'code':       req.leave_type.code,
                     'name':       req.leave_type.name,
+                    'employee_name': req.employee_name or emp,
                     'color':      req.leave_type.color_hex,
                     'badge_bg':   req.leave_type.badge_bg,
                     'badge_text': req.leave_type.badge_text,
@@ -779,9 +780,9 @@ def _is_hr_manager(user) -> bool:
     """Return True if the user holds an HR Manager (or admin) role.
 
     Soft-coded role codes live in apps.rbac -- we look for any role whose code
-    starts with 'hr' or equals 'admin'/'superadmin'/'super_admin'/'manager'.
-    This keeps the check forward-compatible: adding a new HR sub-role in the
-    RBAC admin will automatically grant access here without code changes.
+    starts with 'hr' or equals 'admin'/'superadmin'.  This keeps the check
+    forward-compatible: adding a new HR sub-role in the RBAC admin will
+    automatically grant access here without code changes.
 
     Falls back to user.is_staff / user.is_superuser so Django admin accounts
     always retain access even if RBAC is not fully configured.
@@ -789,11 +790,11 @@ def _is_hr_manager(user) -> bool:
     if user.is_superuser or user.is_staff:
         return True
     try:
-        roles = user.rbac_profile.roles.all()
-        for role in roles:
-            code = (role.code or '').lower()
-            if code.startswith('hr') or code in ('admin', 'superadmin', 'super_admin', 'manager'):
-                return True
+        from apps.rbac.models import UserProfile
+        profile = UserProfile.objects.filter(user=user, is_deleted=False).first()
+        if profile and profile.role:
+            code = (profile.role.code or '').lower()
+            return code.startswith('hr') or code in ('admin', 'superadmin', 'manager')
     except Exception:
         pass
     return False
@@ -927,15 +928,15 @@ def _is_senior_hr(user) -> bool:
     """True for superuser, staff, or roles with senior-level HR access."""
     if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
         return True
-    try:
-        roles = user.rbac_profile.roles.all()
-        for role in roles:
-            code = (role.code or '').lower()
-            if code.startswith('senior_hr') or code in ('hr_admin', 'hr_manager', 'admin', 'super_admin', 'superadmin', 'manager'):
-                return True
-    except Exception:
-        pass
-    return False
+    profile = getattr(user, 'rbac_profile', None)
+    if not profile:
+        return False
+    role_codes = profile.roles.filter(is_active=True).values_list('code', flat=True)
+    return any(
+        (code or '').lower().startswith('senior_hr')
+        or (code or '').lower() in {'hr_admin', 'hr_manager', 'admin', 'super_admin', 'superadmin', 'manager'}
+        for code in role_codes
+    )
 
 
 # =============================================================================
@@ -1304,6 +1305,91 @@ def annual_leave_balance(request):
         'balances':         result_by_code,    # keyed by employee_code
         'balances_by_name': result_by_name,    # keyed by normalised name
     })
+
+
+# =============================================================================
+# Leave Encashment
+# =============================================================================
+
+def _encashment_period(request):
+    """Validate and return the requested encashment (year, month)."""
+    source = request.data if request.method == 'POST' else request.query_params
+    try:
+        year = int(source.get('year', timezone.now().year))
+        month = int(source.get('month', timezone.now().month))
+    except (TypeError, ValueError):
+        raise ValueError('Year and month must be numbers.')
+    if not 2000 <= year <= 2100:
+        raise ValueError('Year must be between 2000 and 2100.')
+    if not 1 <= month <= 12:
+        raise ValueError('Month must be between 1 and 12.')
+    return year, month
+
+
+def _require_encashment_manager(user):
+    if not _is_hr_manager(user):
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied('HR Manager role required to manage leave encashment.')
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def leave_encashment_status(request):
+    """Return the immutable audit status for one encashment period."""
+    _require_encashment_manager(request.user)
+    try:
+        year, month = _encashment_period(request)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    from apps.payroll.services.leave_encashment import get_encashment_status
+    result = get_encashment_status(year, month)
+    if result is None:
+        return Response(
+            {'detail': f'No encashment run found for {year}-{month:02d}.'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return Response(result)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def leave_encashment_preview(request):
+    """Preview employee days, salary rate and pay without changing data."""
+    _require_encashment_manager(request.user)
+    try:
+        year, month = _encashment_period(request)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    from apps.payroll.services.leave_encashment import run_leave_encashment
+    result = run_leave_encashment(year=year, month=month, dry_run=True)
+    return Response({'year': year, 'month': month, **result})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def leave_encashment_run(request):
+    """Post a reviewed encashment once and update employee leave balances."""
+    _require_encashment_manager(request.user)
+    try:
+        year, month = _encashment_period(request)
+    except ValueError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    from apps.payroll.services.leave_encashment import (
+        EncashmentAlreadyRunError,
+        run_leave_encashment,
+    )
+    try:
+        result = run_leave_encashment(
+            year=year,
+            month=month,
+            triggered_by_user=request.user,
+        )
+    except EncashmentAlreadyRunError as exc:
+        return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+    return Response({'year': year, 'month': month, **result}, status=status.HTTP_201_CREATED)
 
 
 # =============================================================================
@@ -2449,77 +2535,3 @@ def master_payroll_download(request, import_id):
             .order_by('user__first_name', 'user__last_name')
         )
         return Response(DailyWorkLogSerializer(logs, many=True).data)
-
-
-# =============================================================================
-# Leave Encashment Views
-# =============================================================================
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def leave_encashment_status(request):
-    """
-    GET /api/v1/payroll/leave-encashment/status/?year=&month=
-    Returns the LeaveEncashmentRun for the given period, or 404 if not run yet.
-    """
-    if not _is_hr_manager(request.user):
-        return Response({'error': 'HR Manager role required.'}, status=403)
-
-    now = timezone.now()
-    year  = int(request.query_params.get('year',  now.year))
-    month = int(request.query_params.get('month', now.month))
-
-    from apps.payroll.services.leave_encashment import get_encashment_status
-    result = get_encashment_status(year=year, month=month)
-    if result is None:
-        return Response({'status': 'not_run', 'year': year, 'month': month}, status=404)
-    return Response(result)
-
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def leave_encashment_preview(request):
-    """
-    GET /api/v1/payroll/leave-encashment/preview/?year=&month=
-    Dry-run: compute per-employee encashment without writing to DB.
-    """
-    if not _is_hr_manager(request.user):
-        return Response({'error': 'HR Manager role required.'}, status=403)
-
-    now = timezone.now()
-    year  = int(request.query_params.get('year',  now.year))
-    month = int(request.query_params.get('month', now.month))
-
-    from apps.payroll.services.leave_encashment import run_leave_encashment
-    result = run_leave_encashment(year=year, month=month, triggered_by_user=request.user, dry_run=True)
-    return Response(result)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def run_leave_encashment_view(request):
-    """
-    POST /api/v1/payroll/leave-encashment/run/
-    Body: { year: int, month: int }
-    Triggers the leave encashment for the specified period.
-    Idempotent guard: raises 409 if already run.
-    """
-    if not _is_hr_manager(request.user):
-        return Response({'error': 'HR Manager role required.'}, status=403)
-
-    now = timezone.now()
-    year  = int(request.data.get('year',  now.year))
-    month = int(request.data.get('month', now.month))
-
-    from apps.payroll.services.leave_encashment import (
-        run_leave_encashment,
-        EncashmentAlreadyRunError,
-    )
-    try:
-        result = run_leave_encashment(year=year, month=month, triggered_by_user=request.user)
-        return Response(result, status=201)
-    except EncashmentAlreadyRunError as exc:
-        return Response({'error': str(exc)}, status=409)
-    except Exception as exc:
-        logger.exception('run_leave_encashment_view failed: %s', exc)
-        return Response({'error': 'Encashment run failed. Check server logs.'}, status=500)

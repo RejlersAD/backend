@@ -22,6 +22,8 @@ from . import config as ts_config
 
 def _svc():
     """Soft-coded backend dispatcher (mirrors views._svc)."""
+    if ts_config.INPUT_MODE == 'manual':
+        return ts_services_mirror
     return ts_services_mirror if ts_config.DATA_SOURCE == 'mirror' else ts_services_sql
 
 
@@ -241,7 +243,8 @@ def export_monthly_pdf(year: int | None = None, month: int | None = None) -> Htt
     elements.append(Spacer(1, 4 * mm))
     elements.append(Paragraph(
         f"Period: {payload['start']} to {payload['end']}<br/>"
-        f"Working days in month: {payload['working_days_in_month']}<br/>"
+        f"Contractual workdays: {payload.get('standard_working_days', 22)} "
+        f"(calendar weekdays: {payload['working_days_in_month']})<br/>"
         f"Total employees with attendance: {len(rows)}",
         styles['Normal'],
     ))
@@ -315,7 +318,10 @@ def export_summary_excel(year: int | None = None, month: int | None = None) -> H
 
     # Header row: Name | Code | 1 | 2 | ... | 31 | Total | Days | Normal | Diff
     std_hours = ts_config.RULES.get('standard_daily_hours', 9)
-    working_days = payload['working_days_in_month']
+    working_days = payload.get(
+        'standard_working_days',
+        ts_config.RULES.get('standard_monthly_working_days', 22),
+    )
     normal_total = working_days * std_hours
 
     fixed_hdrs = ['Name', 'Employee Code', 'Department']
@@ -390,7 +396,10 @@ def export_summary_pdf(year: int | None = None, month: int | None = None) -> Htt
     rows = _dedup_rows(payload['rows'])   # <- dedup safety net
     y, m = payload['year'], payload['month']
     std_hours = ts_config.RULES.get('standard_daily_hours', 9)
-    working_days = payload['working_days_in_month']
+    working_days = payload.get(
+        'standard_working_days',
+        ts_config.RULES.get('standard_monthly_working_days', 22),
+    )
     normal_total = working_days * std_hours
 
     buf = io.BytesIO()

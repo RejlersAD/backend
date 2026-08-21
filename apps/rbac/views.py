@@ -8,7 +8,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.views import APIView
 from django.utils import timezone
-from django.db.models import Q, Count
+from django.db import transaction
+from django.db.models import Q, Count, Prefetch
 from django_filters.rest_framework import DjangoFilterBackend
 from django.http import FileResponse
 
@@ -696,11 +697,61 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         queryset = UserProfile.objects.select_related(
             'user', 'organization', 'manager__user',
             'user__employee_master', 'user__employee_master__manager',
-        ).prefetch_related(
-            'roles',
-            'userrole_set__role',  # Fix N+1 for primary_role lookup
-            'user__offboarding_records',
         ).filter(is_deleted=False)
+
+        if self.action == 'list':
+            # The employee directory only needs a small subset of the very wide
+            # EmployeeMaster and OffboardingRecord tables. Fetching every column
+            # made the first /hr/employees request take ~50 seconds against the
+            # remote database. Keep list responses lean; retrieve still returns
+            # the complete profile when the user opens the detail drawer.
+            from apps.onboarding.models import OffboardingRecord
+
+            queryset = queryset.only(
+                'id', 'created_at', 'updated_at', 'user_id', 'organization_id',
+                'manager_id', 'employee_id', 'department', 'job_title', 'phone',
+                'location', 'bio', 'status', 'is_mfa_enabled', 'profile_photo',
+                'last_login_at', 'is_deleted',
+                'user__id', 'user__username', 'user__email', 'user__first_name',
+                'user__last_name', 'user__is_active', 'user__is_staff',
+                'user__is_superuser',
+                'organization__id', 'organization__name',
+                'manager__id', 'manager__job_title', 'manager__department',
+                'manager__user__id', 'manager__user__email',
+                'manager__user__first_name', 'manager__user__last_name',
+                'user__employee_master__id', 'user__employee_master__user_id',
+                'user__employee_master__join_date', 'user__employee_master__exit_date',
+                'user__employee_master__employment_status',
+                'user__employee_master__manager_id',
+                'user__employee_master__manager__id',
+                'user__employee_master__manager__email',
+                'user__employee_master__manager__first_name',
+                'user__employee_master__manager__last_name',
+                'user__employee_master__manager__designation',
+                'user__employee_master__manager__job_title_uae',
+                'user__employee_master__manager__department',
+            ).prefetch_related(
+                Prefetch(
+                    'userrole_set',
+                    queryset=UserRole.objects.select_related('role').only(
+                        'id', 'user_profile_id', 'role_id', 'is_primary',
+                        'role__id', 'role__name', 'role__code', 'role__level',
+                        'role__is_active',
+                    ),
+                ),
+                Prefetch(
+                    'user__offboarding_records',
+                    queryset=OffboardingRecord.objects.only(
+                        'id', 'user_id', 'exit_reason', 'last_working_day',
+                    ),
+                ),
+            )
+        else:
+            queryset = queryset.prefetch_related(
+                'roles',
+                'userrole_set__role',
+                'user__offboarding_records',
+            )
 
         # Super admin sees all
         try:
@@ -724,9 +775,12 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             return UserProfileListSerializer
         return UserProfileSerializer
 
+    @transaction.atomic
     def perform_create(self, serializer):
         from apps.rbac.rbac_config import DEFAULT_ROLE_CONFIG
         profile = serializer.save()
+        from apps.hr_core.services import EmployeeService
+        EmployeeService.sync_from_rbac_profile(profile)
         create_audit_log(
             user=self.request.user,
             action='create',
@@ -750,8 +804,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             except Role.DoesNotExist:
                 pass
     
+    @transaction.atomic
     def perform_update(self, serializer):
         profile = serializer.save()
+        from apps.hr_core.services import EmployeeService
+        EmployeeService.sync_from_rbac_profile(profile, self.request.data.keys())
         create_audit_log(
             user=self.request.user,
             action='update',
@@ -773,19 +830,6 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 )
             except Exception:
                 pass
-            try:
-                from apps.hr_core.models import EmployeeMaster
-                if profile.manager:
-                    mgr_employee = EmployeeMaster.objects.filter(
-                        user=profile.manager.user
-                    ).first()
-                    EmployeeMaster.objects.filter(user=profile.user).update(
-                        manager=mgr_employee
-                    )
-                else:
-                    EmployeeMaster.objects.filter(user=profile.user).update(manager=None)
-            except Exception:
-                pass
 
     @action(detail=True, methods=['post'])
     def deactivate(self, request, pk=None):
@@ -795,6 +839,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         profile.user.is_active = False
         profile.save()
         profile.user.save()
+        from apps.hr_core.services import EmployeeService
+        EmployeeService.sync_from_rbac_profile(profile, {'status', 'is_active'})
         
         create_audit_log(
             user=request.user,
@@ -817,6 +863,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         profile.user.is_active = True
         profile.save()
         profile.user.save()
+        from apps.hr_core.services import EmployeeService
+        EmployeeService.sync_from_rbac_profile(profile, {'status', 'is_active'})
         
         create_audit_log(
             user=request.user,
@@ -841,6 +889,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         profile.user.is_active = False
         profile.save()
         profile.user.save()
+        from apps.hr_core.services import EmployeeService
+        EmployeeService.sync_from_rbac_profile(profile, {'status', 'is_active'})
         
         create_audit_log(
             user=request.user,
@@ -967,6 +1017,8 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             profile.user.is_active = False
             profile.save()
             profile.user.save()
+            from apps.hr_core.services import EmployeeService
+            EmployeeService.sync_from_rbac_profile(profile, {'status', 'is_active'})
             
             deactivated_count += 1
             deactivated_user_ids.append(str(profile.id))
@@ -2108,6 +2160,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 'message': 'Profile temporarily unavailable'
             })
     
+    @transaction.atomic
     def update_my_profile(self, request):
         """Update current user's profile"""
         try:
@@ -4001,9 +4054,17 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
     ordering_fields = ['document_type', 'created_at', 'expiry_date']
     ordering = ['-created_at']
 
+    def _can_review_documents(self, request):
+        """Use the same authorization boundary as Employee Management."""
+        return bool(
+            request.user.is_superuser
+            or request.user.is_staff
+            or CanManageUsers().has_permission(request, self)
+        )
+
     def _require_document_reviewer(self, request):
         """Enforce RBAC ownership of organization-wide document review."""
-        if not (request.user.is_superuser or request.user.is_staff):
+        if not self._can_review_documents(request):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Only authorized RBAC administrators can review profile documents.')
 
@@ -4147,7 +4208,7 @@ class ProfileDocumentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         
         # Admins can see all documents
-        if user.is_superuser or user.is_staff:
+        if self._can_review_documents(self.request):
             queryset = ProfileDocument.objects.select_related(
                 'user_profile__user', 'verified_by'
             ).all()

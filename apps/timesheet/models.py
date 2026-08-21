@@ -104,8 +104,19 @@ class BiometricUserMaster(models.Model):
 #   • Monthly roll-up (avoids re-pairing for past days on every request)
 # ─────────────────────────────────────────────────────────────────────────────
 class DailyAttendanceSummary(models.Model):
+    SOURCE_BIOMETRIC = 'biometric'
+    SOURCE_MANUAL = 'manual'
+    SOURCE_CHOICES = [(SOURCE_BIOMETRIC, 'Biometric'), (SOURCE_MANUAL, 'Manual upload')]
+
     employee_code       = models.CharField(max_length=64, db_index=True)
     date                = models.DateField(db_index=True)
+    source              = models.CharField(max_length=16, choices=SOURCE_CHOICES, default=SOURCE_BIOMETRIC, db_index=True)
+    employee_name       = models.CharField(max_length=255, blank=True, default='')
+    department          = models.CharField(max_length=255, blank=True, default='')
+    attendance_status   = models.CharField(max_length=32, blank=True, default='present')
+    time_in             = models.TimeField(null=True, blank=True)
+    time_out            = models.TimeField(null=True, blank=True)
+    overtime_hours      = models.FloatField(default=0.0)
 
     # ── Paired-hours mode (anti-coffee-break abuse) ──
     paired_hours        = models.FloatField(
@@ -161,7 +172,7 @@ class DailyAttendanceSummary(models.Model):
     computed_at         = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = [('employee_code', 'date')]
+        unique_together = [('employee_code', 'date', 'source')]
         indexes = [
             models.Index(fields=['employee_code', '-date'], name='ts_daily_sum_code_date'),
             models.Index(fields=['-date', 'open_shift'],    name='ts_daily_sum_open'),

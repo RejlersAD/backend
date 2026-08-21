@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
+from django.db import transaction
 from django.db.models import Sum, Q
+from django.contrib.auth import get_user_model
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status as http_status, viewsets, mixins, filters
@@ -211,7 +213,7 @@ _EMPLOYEE_TO_SNAPSHOT_SYNC: dict = {
 
 
 class PayrollEmployeeViewSet(viewsets.ModelViewSet):
-    queryset = PayrollEmployee.objects.all()
+    queryset = PayrollEmployee.objects.select_related('user__rbac_profile').all()
     serializer_class = PayrollEmployeeSerializer
     permission_classes = [PayrollEmployeeWritePermission]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -258,6 +260,51 @@ class PayrollEmployeeViewSet(viewsets.ModelViewSet):
         if department:
             qs = qs.filter(department__iexact=department)
         return qs
+
+    @action(detail=True, methods=['post'], url_path='link-radai-account')
+    def link_radai_account(self, request, pk=None):
+        """Link one RADAI user to one payroll row, with explicit transfer support.
+
+        A conflict response identifies the payroll row that currently owns the
+        account. The client may retry with ``transfer=true`` after confirmation.
+        """
+        user_id = request.data.get('user_id')
+        transfer = str(request.data.get('transfer', '')).lower() in {'1', 'true', 'yes'}
+        if not user_id:
+            return Response({'error': 'user_id is required.'}, status=http_status.HTTP_400_BAD_REQUEST)
+
+        User = get_user_model()
+        radai_user = (User.objects
+                      .filter(pk=user_id, is_active=True, rbac_profile__is_deleted=False)
+                      .first())
+        if not radai_user:
+            return Response({'error': 'The selected active RADAI account was not found.'}, status=http_status.HTTP_404_NOT_FOUND)
+
+        with transaction.atomic():
+            employee = PayrollEmployee.objects.select_for_update().get(pk=pk)
+            owners = list(PayrollEmployee.objects.select_for_update().filter(user=radai_user).exclude(pk=employee.pk))
+            if owners and not transfer:
+                return Response({
+                    'code': 'account_already_linked',
+                    'error': 'This RADAI account is already linked to another payroll employee.',
+                    'linked_employee': PayrollEmployeeSerializer(owners[0], context={'request': request}).data,
+                }, status=http_status.HTTP_409_CONFLICT)
+
+            for owner in owners:
+                owner.user = None
+                owner.save(update_fields=['user', 'updated_at'])
+            employee.user = radai_user
+            employee.save(update_fields=['user', 'updated_at'])
+
+        employee = PayrollEmployee.objects.select_related('user__rbac_profile').get(pk=employee.pk)
+        return Response({
+            'employee': PayrollEmployeeSerializer(employee, context={'request': request}).data,
+            'unlinked_employees': [
+                PayrollEmployeeSerializer(owner, context={'request': request}).data
+                for owner in owners
+            ],
+            'transferred': bool(owners),
+        })
 
     @action(detail=False, methods=['post'], url_path='import-xlsx')
     def import_xlsx(self, request):

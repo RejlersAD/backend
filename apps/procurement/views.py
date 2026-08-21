@@ -1777,7 +1777,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='available-requisitions')
     def available_requisitions(self, request):
-        """All existing PRs available for Purchase Order linkage."""
+        """Existing PRs available for Purchase Order linkage and search."""
         queryset = PurchaseRequisition.objects.select_related(
             'issued_by', 'vendor', 'requested_by', 'approved_by', 'pm_name',
             'eng_manager_name', 'manager_projects_name', 'vp_op_name',

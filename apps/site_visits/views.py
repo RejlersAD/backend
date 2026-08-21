@@ -112,8 +112,10 @@ class SiteVisitRequestViewSet(viewsets.ModelViewSet):
             try:
                 from apps.rbac.models import UserProfile
                 profile = UserProfile.objects.get(user=self.request.user)
-                if profile.employee_code:
-                    qs = qs.filter(employee_code=profile.employee_code)
+                if profile.employee_id:
+                    qs = qs.filter(employee_code=profile.employee_id)
+                else:
+                    qs = qs.filter(employee=self.request.user)
             except:
                 qs = qs.filter(employee=self.request.user)
         
@@ -136,7 +138,7 @@ class SiteVisitRequestViewSet(viewsets.ModelViewSet):
         try:
             from apps.rbac.models import UserProfile
             profile = UserProfile.objects.get(user=employee)
-            data['employee_code'] = profile.employee_code or ''
+            data['employee_code'] = profile.employee_id or ''
             data['department'] = profile.department or ''
         except:
             pass
@@ -218,8 +220,10 @@ class SiteVisitCheckInViewSet(viewsets.ModelViewSet):
             try:
                 from apps.rbac.models import UserProfile
                 profile = UserProfile.objects.get(user=self.request.user)
-                if profile.employee_code:
-                    qs = qs.filter(employee_code=profile.employee_code)
+                if profile.employee_id:
+                    qs = qs.filter(employee_code=profile.employee_id)
+                else:
+                    qs = qs.filter(employee=self.request.user)
             except:
                 qs = qs.filter(employee=self.request.user)
         
@@ -251,7 +255,7 @@ class SiteVisitCheckInViewSet(viewsets.ModelViewSet):
         try:
             from apps.rbac.models import UserProfile
             profile = UserProfile.objects.get(user=employee)
-            data['employee_code'] = profile.employee_code or ''
+            data['employee_code'] = profile.employee_id or ''
         except:
             pass
         

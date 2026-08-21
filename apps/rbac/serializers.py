@@ -5,6 +5,7 @@ Enterprise-grade serializers for Role-Based Access Control
 import logging
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 from .models import (
     Organization, Module, Permission, Role, RolePermission, RoleModule,
@@ -264,6 +265,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, min_length=8)
     first_name = serializers.CharField(write_only=True, required=False)
     last_name = serializers.CharField(write_only=True, required=False)
+    is_active = serializers.BooleanField(write_only=True, required=False)
 
     # Reporting Manager — single source of truth for both Profile and Onboarding pages.
     # manager_id  : writable UUID → sets UserProfile.manager FK
@@ -376,6 +378,26 @@ class UserProfileSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({'email': 'Invalid email format'})
         
         return attrs
+
+    def validate_employee_id(self, value):
+        """Protect the shared biometric/payroll employee identifier."""
+        from apps.hr_core.models import EmployeeMaster
+        from django.db.models import Q
+
+        normalized = str(value or '').strip()
+        if not normalized:
+            return ''
+        matches = EmployeeMaster.objects.filter(
+            Q(employee_code__iexact=normalized)
+            | Q(emp_code__iexact=normalized)
+        )
+        if self.instance is not None:
+            matches = matches.exclude(user_id=self.instance.user_id)
+        if matches.exists():
+            raise serializers.ValidationError(
+                'This employee ID is already assigned to another employee.'
+            )
+        return normalized
     
     class Meta:
         model = UserProfile
@@ -389,7 +411,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'profile_photo', 'phone', 'bio', 'location', 'engineer_profile',
             'is_deleted', 'deleted_at', 'deleted_by',
             'created_at', 'updated_at',
-            'username', 'email', 'password', 'first_name', 'last_name', 'phone'
+            'username', 'email', 'password', 'first_name', 'last_name', 'is_active', 'phone'
         ]
         read_only_fields = [
             'id', 'user', 'last_login_ip', 'last_login_at', 'failed_login_attempts',
@@ -491,6 +513,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         password = validated_data.pop('password')
         first_name = validated_data.pop('first_name', '')
         last_name = validated_data.pop('last_name', '')
+        is_active = validated_data.pop('is_active', True)
         phone = validated_data.pop('phone', None)  # Extract phone but don't add to profile
         
         # Set organization from organization_id if provided
@@ -548,7 +571,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             user.set_password(password)
             user.last_password_change = timezone.now()
             user.phone_number = phone
-            user.is_active = True
+            user.is_active = is_active
             user.is_superuser = is_super_admin
             user.is_staff = is_super_admin
             user.is_first_login = True
@@ -566,7 +589,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
                 first_name=first_name,
                 last_name=last_name,
                 phone_number=phone,  # Add phone_number to User model
-                is_active=True,  # Explicitly set user as active
+                is_active=is_active,
                 is_superuser=is_super_admin,
                 is_staff=is_super_admin,
                 is_first_login=True,  # Mark as first login
@@ -766,6 +789,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if 'last_name' in validated_data:
             instance.user.last_name = validated_data.pop('last_name')
             instance.user.save()
+        if 'is_active' in validated_data:
+            instance.user.is_active = validated_data.pop('is_active')
+            instance.user.save(update_fields=['is_active'])
         if 'password' in validated_data:
             from django.utils import timezone
             instance.user.set_password(validated_data.pop('password'))
@@ -847,6 +873,11 @@ class UserProfileListSerializer(serializers.ModelSerializer):
     profile_photo = serializers.SerializerMethodField()
     manager_name = serializers.SerializerMethodField()
     manager_detail = serializers.SerializerMethodField()
+    join_date = serializers.SerializerMethodField()
+    exit_date = serializers.SerializerMethodField()
+    employment_status = serializers.SerializerMethodField()
+    resignation_date = serializers.SerializerMethodField()
+    contract_end_date = serializers.SerializerMethodField()
 
     class Meta:
         model = UserProfile
@@ -857,6 +888,7 @@ class UserProfileListSerializer(serializers.ModelSerializer):
             'organization_name', 'primary_role', 'roles',
             # Employment
             'employee_id', 'department', 'job_title', 'manager_name', 'manager_detail',
+            'join_date', 'exit_date', 'employment_status', 'resignation_date', 'contract_end_date',
             # Contact / location
             'phone', 'location', 'bio',
             # Status & security
@@ -914,8 +946,15 @@ class UserProfileListSerializer(serializers.ModelSerializer):
     def _employee_master(obj):
         try:
             return obj.user.employee_master
-        except AttributeError:
+        except (AttributeError, ObjectDoesNotExist):
             return None
+
+    @staticmethod
+    def _offboarding(obj, reason=None):
+        records = list(obj.user.offboarding_records.all())
+        if reason:
+            records = [record for record in records if record.exit_reason == reason]
+        return records[0] if records else None
 
     def get_manager_name(self, obj):
         manager = obj.manager
@@ -940,7 +979,7 @@ class UserProfileListSerializer(serializers.ModelSerializer):
         if master and master.manager:
             try:
                 manager_profile = master.manager.user.rbac_profile
-            except AttributeError:
+            except (AttributeError, ObjectDoesNotExist):
                 manager_profile = None
             return {
                 'id': str(manager_profile.id) if manager_profile else None,
@@ -950,6 +989,26 @@ class UserProfileListSerializer(serializers.ModelSerializer):
                 'department': master.manager.department or '',
             }
         return None
+
+    def get_join_date(self, obj):
+        master = self._employee_master(obj)
+        return master.join_date if master else None
+
+    def get_exit_date(self, obj):
+        master = self._employee_master(obj)
+        return master.exit_date if master else None
+
+    def get_employment_status(self, obj):
+        master = self._employee_master(obj)
+        return master.employment_status if master else obj.status
+
+    def get_resignation_date(self, obj):
+        record = self._offboarding(obj, 'resignation')
+        return record.last_working_day if record else None
+
+    def get_contract_end_date(self, obj):
+        record = self._offboarding(obj, 'contract_end')
+        return record.last_working_day if record else None
 
     def get_profile_photo(self, obj):
         """Return absolute presigned URL for profile photo (same logic as detail serializer)."""
