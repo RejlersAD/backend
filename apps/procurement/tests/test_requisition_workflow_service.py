@@ -113,6 +113,17 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
         self.assertEqual(level, 0)
         self.assertEqual(stages[0][1]['role'], 'Procurement Department')
 
+    def test_migrated_assignment_uses_email_when_user_id_changed(self):
+        stage = {
+            'user_id': 'preproduction-user-id',
+            'user_email': 'PM@EXAMPLE.COM',
+        }
+
+        self.assertTrue(RequisitionWorkflowService._stage_matches_user(stage, self.pm))
+        self.assertFalse(
+            RequisitionWorkflowService._stage_matches_user(stage, self.engineering_manager)
+        )
+
     def test_no_po_submission_requires_level_zero_and_jarmo_level_five(self):
         pr = self._pr()
         pr.po_applicable = False
