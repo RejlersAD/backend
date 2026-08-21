@@ -52,8 +52,10 @@ def _safe_monthly_report(year: int, month: int) -> dict:
     biometric DB is unreachable (Railway, network, etc.).
     """
     try:
-        from apps.timesheet.services import monthly_report  # local import — soft dep
-        return monthly_report(year, month) or {}
+        # Honour the same manual/biometric and SQL Server/mirror selection as
+        # the Time Sheet API. Production cannot connect to the office LAN.
+        from apps.timesheet import get_service  # local import — soft dep
+        return get_service().monthly_report(year, month) or {}
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning(
             '[payroll_engine.attendance] timesheet.monthly_report(%s, %s) failed: %s',

@@ -212,6 +212,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'manager_projects_approve',
             'manager_projects_reject',
             'process_dynamic_approval',
+            'process_dynamic_rejection',
         }
         if getattr(self, 'action', None) in approval_actions:
             return [IsAuthenticated()]
@@ -595,6 +596,15 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             pk,
             request.user,
             signature=request.data.get('signature', ''),
+        )
+        return Response(self._build_requisition_response(pr))
+
+    @action(detail=True, methods=['post'])
+    def process_dynamic_rejection(self, request, pk=None):
+        pr = RequisitionWorkflowService.reject(
+            pk,
+            request.user,
+            request.data.get('reason', ''),
         )
         return Response(self._build_requisition_response(pr))
     

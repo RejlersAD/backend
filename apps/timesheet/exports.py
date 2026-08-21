@@ -15,16 +15,13 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from . import services as ts_services_sql
-from . import mirror_services as ts_services_mirror
 from . import config as ts_config
 
 
 def _svc():
     """Soft-coded backend dispatcher (mirrors views._svc)."""
-    if ts_config.INPUT_MODE == 'manual':
-        return ts_services_mirror
-    return ts_services_mirror if ts_config.DATA_SOURCE == 'mirror' else ts_services_sql
+    from . import get_service
+    return get_service()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

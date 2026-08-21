@@ -32,8 +32,6 @@ from rest_framework.response import Response
 from . import config as ts_config
 from . import discovery as ts_discovery
 from . import exports as ts_exports
-from . import services as ts_services_sql
-from . import mirror_services as ts_services_mirror
 from . import sqlserver as ts_sql
 from .mirror_views import ingest_events, ingest_users  # re-exported via urls.py
 from .manual_import import import_daily_attendance
@@ -46,9 +44,8 @@ def _svc():
     """Soft-coded backend dispatcher. Resolved at call time so flipping
     TIMESHEET_DATA_SOURCE in Railway env vars takes effect on the very next
     request without a code change."""
-    if ts_config.INPUT_MODE == 'manual':
-        return ts_services_mirror
-    return ts_services_mirror if ts_config.DATA_SOURCE == 'mirror' else ts_services_sql
+    from . import get_service
+    return get_service()
 
 
 # Soft-coded copy returned when the SQL Server can't be reached from this
