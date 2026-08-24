@@ -182,7 +182,7 @@ class RoleViewSet(viewsets.ModelViewSet):
     from apps.rbac.rbac_config import MODULE_ASSIGNMENT_CONFIG as _mac
     _CUSTOM_PREFIX = _mac.get('custom_role_prefix', 'custom_')
 
-    queryset = Role.objects.prefetch_related('permissions', 'modules', 'user_profiles') \
+    queryset = Role.objects.prefetch_related('permissions', 'modules', 'modules__permissions', 'user_profiles') \
                            .filter(is_active=True) \
                            .exclude(code__startswith=_CUSTOM_PREFIX) \
                            .annotate(user_count_annotated=Count(

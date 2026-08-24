@@ -49,7 +49,10 @@ class ModuleSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
     
     def get_permission_count(self, obj):
-        return obj.permissions.filter(is_active=True).count()
+        # Reads the prefetched cache (obj.permissions.all()) instead of
+        # .filter().count(), which would bypass prefetch_related and hit the
+        # DB again for every module.
+        return sum(1 for p in obj.permissions.all() if p.is_active)
 
 
 class PermissionSerializer(serializers.ModelSerializer):
