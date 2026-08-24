@@ -182,14 +182,13 @@ class RoleViewSet(viewsets.ModelViewSet):
     from apps.rbac.rbac_config import MODULE_ASSIGNMENT_CONFIG as _mac
     _CUSTOM_PREFIX = _mac.get('custom_role_prefix', 'custom_')
 
+    # user_count is computed in RoleSerializer.get_user_count() from the
+    # prefetched 'user_profiles' relation below, not via annotate(Count(...)) —
+    # that annotation caused a PostgreSQL "column must appear in the GROUP BY
+    # clause" error in production.
     queryset = Role.objects.prefetch_related('permissions', 'modules', 'modules__permissions', 'user_profiles') \
                            .filter(is_active=True) \
-                           .exclude(code__startswith=_CUSTOM_PREFIX) \
-                           .annotate(user_count_annotated=Count(
-                               'user_profiles',
-                               filter=Q(user_profiles__is_deleted=False),
-                               distinct=True,
-                           ))
+                           .exclude(code__startswith=_CUSTOM_PREFIX)
     permission_classes = [IsAuthenticated, CanManageRoles]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['name', 'code']
