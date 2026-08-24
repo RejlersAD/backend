@@ -350,5 +350,15 @@ def analyze_project(files_qs, project=None, user=None) -> dict:
 
     _augment_with_claude(intelligence, combined_text, project, user)
     _augment_with_claude_scope(intelligence, combined_text, project, user)
+
+    # The baseline note above assumes no AI ran — correct it now that we
+    # actually know whether Claude augmented this analysis, so the UI never
+    # tells the user "no external AI API is configured" when BYOK just did.
+    if intelligence.get('ai_augmented'):
+        intelligence['notes'][0] = (
+            'Document intelligence combines the deterministic keyword/pattern '
+            'analyzer with a Claude BYOK review. Review before finalizing.'
+        )
+
     return intelligence
 
