@@ -133,8 +133,7 @@ class RequisitionWorkflowService:
                 return candidates[0]
         else:
             for entry in candidates:
-                assigned_id = entry[1].get('user_id') or entry[1].get('approver_id')
-                if str(assigned_id) == str(actor.id):
+                if cls._stage_matches_user(entry[1], actor):
                     return entry
 
         stage_name = active_stages[0][1].get('stage') or active_stages[0][1].get('role') or 'current approval level'
@@ -142,16 +141,55 @@ class RequisitionWorkflowService:
             raise ValidationError({'error': f'{stage_name} must be completed next.'})
         raise PermissionDenied(f'Only an assigned approver may act on {stage_name}.')
 
+    @staticmethod
+    def _stage_email(stage):
+        email = str(
+            stage.get('user_email')
+            or stage.get('approver_email')
+            or stage.get('email')
+            or ''
+        ).strip().lower()
+        if email:
+            return email
+        username = str(stage.get('username') or '').strip().lower()
+        return username if '@' in username else ''
+
+    @classmethod
+    def _stage_matches_user(cls, stage, user):
+        """Match migrated assignments by stable email before environment-specific IDs."""
+        assigned_email = cls._stage_email(stage)
+        user_email = str(getattr(user, 'email', '') or '').strip().lower()
+        if assigned_email and user_email:
+            return assigned_email == user_email
+        assigned_id = stage.get('user_id') or stage.get('approver_id')
+        return bool(assigned_id) and str(assigned_id) == str(user.id)
+
+    @classmethod
+    def _resolve_stage_user(cls, stage):
+        User = get_user_model()
+        assigned_email = cls._stage_email(stage)
+        if assigned_email:
+            recipient = User.objects.filter(email__iexact=assigned_email, is_active=True).first()
+            if recipient:
+                stage['user_id'] = str(recipient.pk)
+                return recipient
+        assigned_id = stage.get('user_id') or stage.get('approver_id')
+        if assigned_id:
+            return User.objects.filter(pk=assigned_id, is_active=True).first()
+        return None
+
     @classmethod
     def _notify_level(cls, pr, workflow, level):
         if not getattr(pr, 'pk', None):
             return
-        recipient_ids = {
-            stage.get('user_id') or stage.get('approver_id')
-            for index, stage in enumerate(workflow)
-            if cls._stage_level(stage, index) == level
-        }
-        recipient_ids.discard(None)
+        recipients = {}
+        for index, stage in enumerate(workflow):
+            if cls._stage_level(stage, index) != level:
+                continue
+            recipient = cls._resolve_stage_user(stage)
+            if recipient:
+                recipients[recipient.pk] = recipient
+        recipient_ids = set(recipients)
         pr_id = pr.pk
         pr_number = pr.pr_number
 
@@ -165,10 +203,9 @@ class RequisitionWorkflowService:
                     metadata__approval_level=level,
                 ).values_list('recipient_id', flat=True)
             )
-            users = get_user_model().objects.filter(
-                pk__in=recipient_ids, is_active=True,
-            ).exclude(pk__in=already_notified_ids)
-            for recipient in users:
+            for recipient_id, recipient in recipients.items():
+                if recipient_id in already_notified_ids:
+                    continue
                 NotificationService.create_notification(
                     recipient=recipient,
                     title=f'PR {pr_number} requires your approval',
@@ -187,12 +224,11 @@ class RequisitionWorkflowService:
         if cls._is_super_admin(actor):
             return
 
-        assigned_user_id = stage.get('user_id') or stage.get('approver_id')
         stage_name = stage.get('stage') or stage.get('role') or 'current approval stage'
 
-        if not assigned_user_id:
+        if not (stage.get('user_id') or stage.get('approver_id') or cls._stage_email(stage)):
             raise PermissionDenied(f'No approver is assigned to {stage_name}.')
-        if str(assigned_user_id) != str(actor.id):
+        if not cls._stage_matches_user(stage, actor):
             raise PermissionDenied(f'Only the assigned approver may act on {stage_name}.')
 
     @classmethod
