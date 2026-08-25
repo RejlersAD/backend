@@ -2,7 +2,9 @@ import datetime as dt
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.db import connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -179,8 +181,27 @@ class MaterializationAndAPITests(ScheduleFixture):
 
         self.assertEqual(owner_response.status_code, 200)
         self.assertEqual(len(owner_response.data['results']), 1)
+        self.assertEqual(owner_response.data['results'][0]['version_count'], 1)
         self.assertEqual(outsider_response.status_code, 200)
         self.assertEqual(len(outsider_response.data['results']), 0)
+
+    def test_schedule_list_for_new_project_avoids_outer_group_by(self):
+        new_project = PlanningProject.objects.create(
+            name='New Empty Project', effective_date=dt.date(2026, 8, 25), created_by=self.owner,
+        )
+        owner_client = APIClient()
+        owner_client.force_authenticate(self.owner)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = owner_client.get(
+                '/api/v1/planning-intelligence/schedules/', {'project': new_project.pk},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['results'], [])
+        executed_sql = '\n'.join(query['sql'].lower() for query in queries.captured_queries)
+        self.assertNotIn('left outer join "planning_intelligence_scheduleversion"', executed_sql)
+        self.assertNotIn('group by "planning_intelligence_schedule"."id"', executed_sql)
 
     def test_baseline_captures_immutable_snapshot(self):
         self.activity('A', 2)

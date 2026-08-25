@@ -2,7 +2,8 @@
 import hashlib
 from django.db import transaction
 from django.http import Http404, HttpResponse
-from django.db.models import Count, Max, Q
+from django.db.models import Count, IntegerField, Max, OuterRef, Q, Subquery, Value
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -147,9 +148,18 @@ class ScheduleViewSet(SoftDeleteViewSet):
     queryset = Schedule.objects.filter(is_deleted=False)
 
     def get_queryset(self):
+        active_versions = (
+            ScheduleVersion.objects.filter(schedule_id=OuterRef('pk'), is_deleted=False)
+            .order_by()
+            .values('schedule_id')
+            .annotate(total=Count('id'))
+            .values('total')[:1]
+        )
         queryset = (
             super().get_queryset().filter(project__in=accessible_projects(self.request.user))
-            .annotate(version_count=Count('versions', filter=Q(versions__is_deleted=False), distinct=True))
+            .annotate(version_count=Coalesce(
+                Subquery(active_versions, output_field=IntegerField()), Value(0),
+            ))
             .select_related('project', 'default_calendar', 'created_by')
             .order_by('-created_at')
         )
