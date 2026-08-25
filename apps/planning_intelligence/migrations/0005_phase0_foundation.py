@@ -3,6 +3,42 @@ from django.db import migrations, models
 import django.db.models.deletion
 
 
+LEGACY_ID_INDEXES = (
+    ('planning_intelligence_planningproject', 'planning_project_id_uniq'),
+    ('planning_intelligence_planninggeneration', 'planning_generation_id_uniq'),
+)
+
+
+def restore_legacy_id_uniqueness(apps, schema_editor):
+    """Repair legacy PostgreSQL tables that were synced without PK indexes."""
+    connection = schema_editor.connection
+    if connection.vendor != 'postgresql':
+        return
+
+    quote_name = connection.ops.quote_name
+    with connection.cursor() as cursor:
+        for table_name, index_name in LEGACY_ID_INDEXES:
+            constraints = connection.introspection.get_constraints(cursor, table_name)
+            id_is_unique = any(
+                constraint['unique'] and constraint['columns'] == ['id']
+                for constraint in constraints.values()
+            )
+            if not id_is_unique:
+                schema_editor.execute(
+                    f'CREATE UNIQUE INDEX {quote_name(index_name)} '
+                    f'ON {quote_name(table_name)} ({quote_name("id")})'
+                )
+
+
+def drop_legacy_id_uniqueness(apps, schema_editor):
+    if schema_editor.connection.vendor != 'postgresql':
+        return
+
+    quote_name = schema_editor.connection.ops.quote_name
+    for _, index_name in reversed(LEGACY_ID_INDEXES):
+        schema_editor.execute(f'DROP INDEX IF EXISTS {quote_name(index_name)}')
+
+
 class Migration(migrations.Migration):
     dependencies = [
         ('core', '0008_document_documentaccesslog'),
@@ -11,6 +47,15 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        # Some production databases contain these legacy tables without the
+        # primary-key indexes declared by 0001. PostgreSQL cannot create the
+        # new foreign keys below unless their referenced id columns are unique.
+        # Avoid adding redundant indexes on databases where the primary keys
+        # already exist (including every normally-created fresh database).
+        migrations.RunPython(
+            code=restore_legacy_id_uniqueness,
+            reverse_code=drop_legacy_id_uniqueness,
+        ),
         migrations.AddField(
             model_name='planningproject', name='enterprise_project',
             field=models.OneToOneField(
