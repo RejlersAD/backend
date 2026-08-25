@@ -141,12 +141,14 @@ class CalendarExceptionViewSet(SoftDeleteViewSet):
 
 class ScheduleViewSet(SoftDeleteViewSet):
     serializer_class = ScheduleSerializer
-    queryset = Schedule.objects.filter(is_deleted=False).select_related('project', 'default_calendar')
+    queryset = Schedule.objects.filter(is_deleted=False)
 
     def get_queryset(self):
+        # Annotate first, then select_related to avoid PostgreSQL GROUP BY issues
         queryset = (
             super().get_queryset().filter(project__in=accessible_projects(self.request.user))
             .annotate(version_count=Count('versions', filter=Q(versions__is_deleted=False), distinct=True))
+            .select_related('project', 'default_calendar', 'created_by')
             .order_by('-created_at')
         )
         project_id = self.request.query_params.get('project')
