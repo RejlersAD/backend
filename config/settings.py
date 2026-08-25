@@ -6,6 +6,7 @@ Aligned with centralized environment configuration (9-3-26 commit).
 
 import os
 from pathlib import Path
+from urllib.parse import quote
 from decouple import config
 import dj_database_url
 
@@ -403,7 +404,27 @@ _ENV_DB_MAP = {
 }
 
 _default_db_url = _ENV_DB_MAP.get(ENVIRONMENT.lower(), '')
-DATABASE_URL = config('DATABASE_URL', default=_default_db_url)
+
+# An explicitly defined but empty DATABASE_URL must not suppress the URL selected
+# for the active environment. This commonly happens when a deployment variable is
+# created before its Railway/Postgres reference is connected.
+DATABASE_URL = config('DATABASE_URL', default='').strip() or _default_db_url.strip()
+
+# Support deployments that expose PostgreSQL as discrete variables instead of a
+# single URL. Railway/Postgres commonly uses PG* names, while Docker and older
+# environments in this project use DB_* names.
+if not DATABASE_URL:
+    _db_host = config('DB_HOST', default='').strip() or config('PGHOST', default='').strip()
+    _db_port = config('DB_PORT', default='').strip() or config('PGPORT', default='5432').strip()
+    _db_name = config('DB_NAME', default='').strip() or config('PGDATABASE', default='').strip()
+    _db_user = config('DB_USER', default='').strip() or config('PGUSER', default='').strip()
+    _db_password = config('DB_PASSWORD', default='') or config('PGPASSWORD', default='')
+
+    if all((_db_host, _db_name, _db_user, _db_password)):
+        DATABASE_URL = (
+            f"postgresql://{quote(_db_user, safe='')}:{quote(_db_password, safe='')}"
+            f"@{_db_host}:{_db_port}/{quote(_db_name, safe='')}"
+        )
 
 # ── Soft-coded list of management commands that don't need a real database ───
 # (collectstatic, makemessages, etc. are run during Docker build before any
