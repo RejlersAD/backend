@@ -13,7 +13,20 @@ class Migration(migrations.Migration):
     operations = [
         migrations.AddField(
             model_name='planningproject', name='enterprise_project',
-            field=models.OneToOneField(blank=True, help_text='Enterprise project that owns this planning workspace.', null=True, on_delete=django.db.models.deletion.CASCADE, related_name='planning_workspace', to='core.project'),
+            field=models.OneToOneField(
+                blank=True,
+                db_constraint=False,
+                help_text=(
+                    'Enterprise project that owns this planning workspace. The legacy '
+                    'production core_project table does not consistently expose a '
+                    'database-level unique constraint on id, so referential integrity '
+                    'is enforced by the API and ORM instead of a PostgreSQL foreign key.'
+                ),
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name='planning_workspace',
+                to='core.project',
+            ),
         ),
         migrations.AddField(model_name='planninggeneration', name='change_summary', field=models.CharField(blank=True, max_length=255)),
         migrations.AddField(
