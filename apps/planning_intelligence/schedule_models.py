@@ -1,6 +1,6 @@
 """Relational scheduling domain for CPM calculation and controlled baselines."""
 from django.conf import settings
-from django.core.validators import MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 from apps.core.models import BaseModel
@@ -271,6 +271,81 @@ class ActivityProgressUpdate(BaseModel):
         ordering = ['-data_date', 'activity__sort_order']
         unique_together = [('activity', 'data_date')]
         indexes = [models.Index(fields=['version', '-data_date'])]
+
+
+class DailyFieldUpdate(BaseModel):
+    """Governed field report that becomes schedule progress only after approval."""
+
+    STATUS_CHOICES = [
+        ('draft', 'Draft'), ('submitted', 'Submitted'), ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ]
+    MEASUREMENT_CHOICES = [
+        ('manual', 'Manual percent'), ('quantity', 'Installed quantity'),
+        ('zero_hundred', '0/100'), ('fifty_fifty', '50/50'),
+        ('weighted_steps', 'Weighted steps'),
+    ]
+
+    version = models.ForeignKey(ScheduleVersion, on_delete=models.CASCADE, related_name='daily_field_updates')
+    activity = models.ForeignKey(ScheduleActivity, on_delete=models.CASCADE, related_name='daily_field_updates')
+    report_date = models.DateField(db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='draft', db_index=True)
+    measurement_method = models.CharField(max_length=24, choices=MEASUREMENT_CHOICES, default='manual')
+    physical_progress_pct = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    installed_quantity = models.DecimalField(
+        max_digits=16, decimal_places=3, null=True, blank=True, validators=[MinValueValidator(0)],
+    )
+    planned_quantity = models.DecimalField(
+        max_digits=16, decimal_places=3, null=True, blank=True, validators=[MinValueValidator(0)],
+    )
+    quantity_unit = models.CharField(max_length=32, blank=True)
+    remaining_duration_days = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, validators=[MinValueValidator(0)],
+    )
+    actual_start = models.DateField(null=True, blank=True)
+    actual_finish = models.DateField(null=True, blank=True)
+    forecast_finish = models.DateField(null=True, blank=True)
+    actual_hours = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0, validators=[MinValueValidator(0)],
+    )
+    actual_cost = models.DecimalField(
+        max_digits=14, decimal_places=2, default=0, validators=[MinValueValidator(0)],
+    )
+    work_location = models.CharField(max_length=255, blank=True)
+    constraints = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+    evidence = models.FileField(upload_to='planning_field_evidence/%Y/%m/%d/', null=True, blank=True)
+    reported_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='daily_field_updates_reported',
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='daily_field_updates_reviewed',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_comment = models.TextField(blank=True)
+    applied_progress_update = models.ForeignKey(
+        ActivityProgressUpdate, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='source_field_updates',
+    )
+
+    class Meta:
+        ordering = ['-report_date', '-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['activity', 'report_date'], condition=models.Q(is_deleted=False),
+                name='unique_active_daily_field_update',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['version', '-report_date']),
+            models.Index(fields=['version', 'status']),
+        ]
 
 
 class ScheduleControlSnapshot(BaseModel):

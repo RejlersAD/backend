@@ -3,7 +3,7 @@ from rest_framework import serializers
 
 from .access import can_write_project
 from .models import (
-    ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException, Schedule,
+    ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException, DailyFieldUpdate, Schedule,
     ScheduleActivity, ScheduleBaseline, ScheduleCalculationRun, ScheduleResource,
     ScheduleControlSnapshot, ScheduleVersion, ScheduleWBSNode, WorkCalendar,
 )
@@ -266,6 +266,104 @@ class ActivityProgressUpdateSerializer(serializers.ModelSerializer):
             'notes', 'reported_by', 'created_at', 'updated_at',
         ]
         read_only_fields = fields
+
+
+class DailyFieldUpdateSerializer(serializers.ModelSerializer):
+    external_id = serializers.CharField(source='activity.external_id', read_only=True)
+    activity_name = serializers.CharField(source='activity.name', read_only=True)
+    discipline = serializers.CharField(source='activity.discipline', read_only=True)
+    reporter_name = serializers.SerializerMethodField()
+    reviewer_name = serializers.SerializerMethodField()
+    evidence_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DailyFieldUpdate
+        fields = [
+            'id', 'version', 'activity', 'external_id', 'activity_name', 'discipline',
+            'report_date', 'status', 'measurement_method', 'physical_progress_pct',
+            'installed_quantity', 'planned_quantity', 'quantity_unit',
+            'remaining_duration_days', 'actual_start', 'actual_finish', 'forecast_finish',
+            'actual_hours', 'actual_cost', 'work_location', 'constraints', 'notes',
+            'evidence', 'evidence_name', 'reported_by', 'reporter_name', 'submitted_at',
+            'reviewed_by', 'reviewer_name', 'reviewed_at', 'review_comment',
+            'applied_progress_update', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'version', 'status', 'reported_by', 'submitted_at', 'reviewed_by',
+            'reviewed_at', 'review_comment', 'applied_progress_update', 'created_at', 'updated_at',
+        ]
+
+    @staticmethod
+    def _user_name(user):
+        if not user:
+            return ''
+        return user.get_full_name() or user.email or user.username
+
+    def get_reporter_name(self, obj):
+        return self._user_name(obj.reported_by)
+
+    def get_reviewer_name(self, obj):
+        return self._user_name(obj.reviewed_by)
+
+    def get_evidence_name(self, obj):
+        return obj.evidence.name.rsplit('/', 1)[-1] if obj.evidence else ''
+
+    def validate_evidence(self, value):
+        if value and value.size > 20 * 1024 * 1024:
+            raise serializers.ValidationError('Evidence files must be 20 MB or smaller.')
+        if value:
+            extension = value.name.rsplit('.', 1)[-1].lower() if '.' in value.name else ''
+            if extension not in {'pdf', 'png', 'jpg', 'jpeg', 'webp', 'xlsx', 'docx'}:
+                raise serializers.ValidationError('Use PDF, image, XLSX, or DOCX evidence files.')
+        return value
+
+    def validate(self, attrs):
+        instance = self.instance
+        activity = attrs.get('activity') or (instance.activity if instance else None)
+        report_date = attrs.get('report_date') or (instance.report_date if instance else None)
+        actual_start = attrs.get('actual_start', instance.actual_start if instance else None)
+        actual_finish = attrs.get('actual_finish', instance.actual_finish if instance else None)
+        method = attrs.get('measurement_method', instance.measurement_method if instance else 'manual')
+
+        if activity and activity.version.status == 'superseded':
+            raise serializers.ValidationError('Field updates cannot be posted to a superseded version.')
+        if activity and report_date:
+            duplicate = DailyFieldUpdate.objects.filter(
+                activity=activity, report_date=report_date, is_deleted=False,
+            )
+            if instance:
+                duplicate = duplicate.exclude(pk=instance.pk)
+            duplicate = duplicate.only('id', 'status').first()
+            if duplicate:
+                raise serializers.ValidationError({
+                    'non_field_errors': [
+                        f'A field update already exists for this activity and date '
+                        f'(record #{duplicate.id}, status: {duplicate.status}). '
+                        'Open the existing record instead of creating another one.'
+                    ],
+                })
+        if actual_start and report_date and actual_start > report_date:
+            raise serializers.ValidationError('Actual start cannot be after the report date.')
+        if actual_finish and report_date and actual_finish > report_date:
+            raise serializers.ValidationError('Actual finish cannot be after the report date.')
+        if actual_start and actual_finish and actual_finish < actual_start:
+            raise serializers.ValidationError('Actual finish cannot be earlier than actual start.')
+
+        if method == 'quantity':
+            installed = attrs.get('installed_quantity', instance.installed_quantity if instance else None)
+            planned = attrs.get('planned_quantity', instance.planned_quantity if instance else None)
+            if installed is None or not planned:
+                raise serializers.ValidationError('Quantity-based progress requires installed and planned quantities.')
+            attrs['physical_progress_pct'] = min(100, (installed / planned) * 100)
+        elif method == 'zero_hundred':
+            attrs['physical_progress_pct'] = 100 if actual_finish else 0
+        elif method == 'fifty_fifty':
+            attrs['physical_progress_pct'] = 100 if actual_finish else (50 if actual_start else 0)
+
+        progress = attrs.get('physical_progress_pct', instance.physical_progress_pct if instance else 0)
+        if actual_finish and progress < 100:
+            raise serializers.ValidationError('An activity with an actual finish must be 100% complete.')
+        return attrs
 
 
 class ActivityProgressRowSerializer(serializers.Serializer):
