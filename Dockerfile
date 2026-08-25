@@ -39,7 +39,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ── Layer 1: Python dependencies (cached unless requirements change)
 COPY requirements.txt .
+# Railway is a CPU service. Preinstall CPU wheels so EasyOCR cannot resolve
+# the default multi-gigabyte CUDA dependency set during requirements install.
+ARG TORCH_VERSION=2.5.1
+ARG TORCHVISION_VERSION=0.20.1
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cpu \
+      "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" && \
     pip install --no-cache-dir -r requirements.txt
 
 # ── Layer 2: Application code
