@@ -65,7 +65,6 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8000
 
-# Apply committed schema changes before accepting application traffic. A failed
-# migration must fail the deployment instead of starting code against an older
-# database schema.
-CMD ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 150 --log-level info"]
+# Railway applies migrations as a native pre-deploy command. Keep container
+# startup focused on serving the health check within Railway's timeout.
+CMD ["sh", "-c", "exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 150 --log-level info"]
