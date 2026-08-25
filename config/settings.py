@@ -1379,4 +1379,28 @@ print("=" * 60)
 print(f"Circuit Breaker Max Failures: {QUEUE_CIRCUIT_BREAKER_MAX_FAILURES}")
 print(f"Circuit Breaker Timeout: {QUEUE_CIRCUIT_BREAKER_TIMEOUT}s")
 print(f"Max Retries: {QUEUE_MAX_RETRIES}")
+
+# ========================================================================
+# LOGGING
+# ========================================================================
+# Django's default logging only mails ADMINS on request-level 500s (which are
+# unconfigured here), so unhandled exceptions were invisible in Railway's
+# console output. This adds a console handler for django.request so
+# tracebacks show up in `railway logs`.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'loggers': {
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+    },
+}
 print("=" * 60 + "\n")
