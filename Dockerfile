@@ -65,7 +65,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8000
 
-# Apply only the planner migration graph and skip runtime URL/system checks.
-# This completes well within Railway's health-check window and prevents the
-# service from accepting traffic against an outdated planning schema.
-CMD ["sh", "-c", "python manage.py migrate planning_intelligence --noinput --skip-checks && exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 150 --log-level info"]
+# Apply the complete Django migration graph before accepting traffic.  Keeping
+# migration failure fatal prevents Railway from promoting a container whose
+# database schema is older than its application code.
+CMD ["sh", "-c", "python manage.py migrate --noinput --skip-checks && exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 150 --log-level info"]
