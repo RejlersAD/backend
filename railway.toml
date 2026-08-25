@@ -13,7 +13,7 @@
   dockerfilePath = "Dockerfile"
 
 [deploy]
-preDeployCommand = ["python manage.py migrate planning_intelligence --noinput"]
+preDeployCommand = ["python manage.py migrate planning_intelligence --noinput --skip-checks"]
 healthcheckPath = "/api/v1/health/"
 healthcheckTimeout = 300
   restartPolicyType = "on_failure"
