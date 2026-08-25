@@ -48,6 +48,7 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'digitization_datasheet', 'name': 'Digitization Datasheet',       'icon': 'Scan',        'order': 20, 'description': 'AI-powered digitization of legacy datasheets'},
     {'code': 'spec_customization',     'name': 'Spec Customization',           'icon': 'Settings',    'order': 21, 'description': 'Engineering specification customization tools'},
     {'code': 'non_teff_metadata',      'name': 'Non-TEFF Metadata Extractor',  'icon': 'Search',      'order': 22, 'description': 'Extract metadata from Non-TEFF documents (PDF, Excel, Word, AutoCAD)'},
+    {'code': 'smart_plant_3d',         'name': 'Smart Plant 3D',               'icon': 'Cube',        'order': 23, 'description': 'Extract and synchronize data from SmartPlant 3D models and databases'},
     # ── Process sub-module codes (granular per sidebar item) ───────────────────
     {'code': 'pid_line_list',          'name': 'Line List',                    'icon': 'TableCells',  'order': 23, 'description': 'Extract base line list columns from P&ID drawings'},
     {'code': 'pid_equipment_list',     'name': 'Equipment List',               'icon': 'TableCells',  'order': 23, 'description': 'Extract equipment tags and type classification from P&ID'},
@@ -478,6 +479,7 @@ MODULE_DISCIPLINE_MAP = {
     'digitization_datasheet': 'Digitization',
     'spec_customization': 'Digitization',
     'non_teff_metadata': 'Digitization',
+    'smart_plant_3d': 'Digitization',
     'qhse':              'QHSE',
     'crs_documents':     'CRS',
     'user_mgmt':         'Admin',
