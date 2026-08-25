@@ -65,7 +65,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8000
 
-# Apply the complete Django migration graph before accepting traffic.  Keeping
-# migration failure fatal prevents Railway from promoting a container whose
-# database schema is older than its application code.
-CMD ["sh", "-c", "python manage.py migrate --noinput --skip-checks && exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 150 --log-level info"]
+# Railway applies the complete migration graph through railway.toml's
+# preDeployCommand. Start the web process immediately afterward so the health
+# check measures application readiness instead of migration duration.
+CMD ["sh", "-c", "exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 150 --log-level info"]
