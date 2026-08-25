@@ -3,8 +3,7 @@
 # ============================================
 # Build Context: backend/ directory (git repository root)
 # Dockerfile: Dockerfile (single-stage production build)
-# Pre-deploy: apply the planning schema before the new container starts
-# Start: Gunicorn begins listening immediately after pre-deploy succeeds
+# Startup: apply the planning schema, then start Gunicorn
 # Health Check: /api/v1/health/ (should pass within 15 seconds)
 # ============================================
 
@@ -13,7 +12,6 @@
   dockerfilePath = "Dockerfile"
 
 [deploy]
-preDeployCommand = ["python manage.py migrate planning_intelligence --noinput --skip-checks"]
 healthcheckPath = "/api/v1/health/"
 healthcheckTimeout = 300
   restartPolicyType = "on_failure"
