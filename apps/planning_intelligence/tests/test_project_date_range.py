@@ -76,5 +76,7 @@ class PlanningProjectListQueryTests(TestCase):
         self.assertEqual(rows[0]['latest_generation_version'], 7)
         self.assertEqual(rows[0]['file_count'], 0)
         executed_sql = '\n'.join(query['sql'].lower() for query in queries.captured_queries)
+        self.assertNotIn('left outer join "planning_intelligence_planningfile"', executed_sql)
+        self.assertNotIn('group by "planning_intelligence_planningproject"."id"', executed_sql)
         self.assertNotIn('planning_intelligence_planninggeneration"."activities', executed_sql)
         self.assertNotIn('planning_intelligence_planninggeneration"."intelligence', executed_sql)

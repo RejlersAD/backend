@@ -19,7 +19,8 @@ from __future__ import annotations
 import logging
 
 from django.db import DatabaseError, connection, transaction
-from django.db.models import Count, Max, OuterRef, Q, Subquery
+from django.db.models import Count, IntegerField, Max, OuterRef, Subquery, Value
+from django.db.models.functions import Coalesce
 from django.http import Http404, HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -50,12 +51,19 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
     queryset = PlanningProject.objects.all().filter(is_deleted=False)
 
     def get_queryset(self):
+        active_files = (
+            PlanningFile.objects.filter(project_id=OuterRef('pk'), is_deleted=False)
+            .order_by()
+            .values('project_id')
+            .annotate(total=Count('id'))
+            .values('total')[:1]
+        )
         latest_generation = PlanningGeneration.objects.filter(
             project_id=OuterRef('pk'), is_deleted=False,
         ).order_by('-version').values('version')[:1]
         return accessible_projects(self.request.user).select_related('enterprise_project').annotate(
-            active_file_count=Count(
-                'files', filter=Q(files__is_deleted=False), distinct=True,
+            active_file_count=Coalesce(
+                Subquery(active_files, output_field=IntegerField()), Value(0),
             ),
             latest_generation_version_value=Subquery(latest_generation),
         ).order_by('-created_at')
