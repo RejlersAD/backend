@@ -65,6 +65,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8000
 
-# Railway applies migrations as a native pre-deploy command. Keep container
-# startup focused on serving the health check within Railway's timeout.
-CMD ["sh", "-c", "exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 150 --log-level info"]
+# Apply only the planner migration graph and skip runtime URL/system checks.
+# This completes well within Railway's health-check window and prevents the
+# service from accepting traffic against an outdated planning schema.
+CMD ["sh", "-c", "python manage.py migrate planning_intelligence --noinput --skip-checks && exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 150 --log-level info"]
