@@ -1,8 +1,14 @@
 import datetime
 from decimal import Decimal
 
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
+from rest_framework.test import APIClient
 
+from apps.users.models import User
+
+from ..models import PlanningGeneration, PlanningProject
 from ..serializers import PlanningProjectSerializer
 
 
@@ -43,3 +49,32 @@ class PlanningProjectDateRangeTests(TestCase):
 
         self.assertFalse(serializer.is_valid())
         self.assertIn('planned_end_date', serializer.errors)
+
+
+class PlanningProjectListQueryTests(TestCase):
+    def test_project_list_does_not_load_large_generation_payloads(self):
+        user = User.objects.create_user(
+            username='planning-list-owner', email='planning-list@example.com', password='test',
+            is_staff=True,
+        )
+        project = PlanningProject.objects.create(name='Lean Project List', created_by=user)
+        PlanningGeneration.objects.create(
+            project=project, version=7,
+            intelligence={'large': 'payload'},
+            activities=[{'id': index, 'name': f'Activity {index}'} for index in range(20)],
+            narrative='Large generated narrative',
+            generated_by=user,
+        )
+        client = APIClient()
+        client.force_authenticate(user)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = client.get('/api/v1/planning-intelligence/projects/')
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.data.get('results', []) if isinstance(response.data, dict) else response.data
+        self.assertEqual(rows[0]['latest_generation_version'], 7)
+        self.assertEqual(rows[0]['file_count'], 0)
+        executed_sql = '\n'.join(query['sql'].lower() for query in queries.captured_queries)
+        self.assertNotIn('planning_intelligence_planninggeneration"."activities', executed_sql)
+        self.assertNotIn('planning_intelligence_planninggeneration"."intelligence', executed_sql)

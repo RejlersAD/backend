@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 
 from django.db import DatabaseError, connection, transaction
-from django.db.models import Max
+from django.db.models import Count, Max, OuterRef, Q, Subquery
 from django.http import Http404, HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -47,10 +47,18 @@ logger = logging.getLogger(__name__)
 class PlanningProjectViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, PlanningObjectPermission]
     serializer_class = PlanningProjectSerializer
-    queryset = PlanningProject.objects.all().filter(is_deleted=False).prefetch_related('files', 'generations')
+    queryset = PlanningProject.objects.all().filter(is_deleted=False)
 
     def get_queryset(self):
-        return accessible_projects(self.request.user).select_related('enterprise_project').prefetch_related('files', 'generations')
+        latest_generation = PlanningGeneration.objects.filter(
+            project_id=OuterRef('pk'), is_deleted=False,
+        ).order_by('-version').values('version')[:1]
+        return accessible_projects(self.request.user).select_related('enterprise_project').annotate(
+            active_file_count=Count(
+                'files', filter=Q(files__is_deleted=False), distinct=True,
+            ),
+            latest_generation_version_value=Subquery(latest_generation),
+        ).order_by('-created_at')
 
     def perform_create(self, serializer):
         project = serializer.save(created_by=self.request.user)

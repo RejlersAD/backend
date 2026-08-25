@@ -111,7 +111,7 @@ class PlanningFileListSerializer(serializers.ModelSerializer):
 
 
 class PlanningProjectSerializer(serializers.ModelSerializer):
-    file_count = serializers.IntegerField(source='files.count', read_only=True)
+    file_count = serializers.SerializerMethodField()
     latest_generation_version = serializers.SerializerMethodField()
     ai_enabled = serializers.SerializerMethodField()
     ai_provider = serializers.SerializerMethodField()
@@ -157,8 +157,16 @@ class PlanningProjectSerializer(serializers.ModelSerializer):
         return None
 
     def get_latest_generation_version(self, obj):
-        latest = obj.generations.first()
-        return latest.version if latest else None
+        annotated = getattr(obj, 'latest_generation_version_value', None)
+        if annotated is not None:
+            return annotated
+        return obj.generations.filter(is_deleted=False).order_by('-version').values_list('version', flat=True).first()
+
+    def get_file_count(self, obj):
+        annotated = getattr(obj, 'active_file_count', None)
+        if annotated is not None:
+            return annotated
+        return obj.files.filter(is_deleted=False).count()
 
     def get_ai_enabled(self, obj):
         return bool((obj.ai_settings or {}).get('enabled'))
