@@ -228,7 +228,7 @@ class PlanningAuditEvent(models.Model):
 
 # Import relational scheduling models so Django registers them under this app.
 from .schedule_models import (  # noqa: E402,F401
-    ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException, Schedule,
+    ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException, DailyFieldUpdate, Schedule,
     ScheduleActivity, ScheduleBaseline, ScheduleCalculationRun, ScheduleResource,
     ScheduleControlSnapshot, ScheduleVersion, ScheduleWBSNode, WorkCalendar,
 )

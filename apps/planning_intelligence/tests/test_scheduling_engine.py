@@ -10,7 +10,8 @@ from apps.core.project_models import Project, ProjectMember
 from apps.users.models import User
 
 from ..models import (
-    ActivityAssignment, ActivityRelationship, CalendarException, PlanningGeneration, PlanningProject,
+    ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException,
+    DailyFieldUpdate, GovernanceItem, PlanningGeneration, PlanningProject,
     IntegrationDelivery, IntegrationEndpoint, PlanningJob, Schedule, ScheduleActivity,
     ScheduleControlSnapshot, ScheduleExportRecord, ScheduleResource, ScheduleVersion, WorkCalendar,
 )
@@ -384,6 +385,105 @@ class MaterializationAndAPITests(ScheduleFixture):
         )
 
         self.assertEqual(response.status_code, 400)
+
+
+class DailyFieldUpdateAPITests(ScheduleFixture):
+    def test_approved_field_update_posts_progress_snapshot_and_constraint(self):
+        activity = self.activity('FIELD-100', 5)
+        calculate_schedule_version(self.version, requested_by=self.owner)
+        client = APIClient()
+        client.force_authenticate(self.owner)
+
+        create_response = client.post(
+            '/api/v1/planning-intelligence/daily-field-updates/',
+            {
+                'activity': activity.id,
+                'report_date': '2026-08-25',
+                'measurement_method': 'quantity',
+                'installed_quantity': '25',
+                'planned_quantity': '100',
+                'quantity_unit': 'm',
+                'remaining_duration_days': '3',
+                'actual_start': '2026-08-24',
+                'actual_hours': '16',
+                'actual_cost': '800',
+                'work_location': 'Area A',
+                'constraints': 'Access permit is delayed.',
+                'notes': 'Installed and inspected.',
+            }, format='json',
+        )
+        self.assertEqual(create_response.status_code, 201)
+        update_id = create_response.data['id']
+        self.assertEqual(Decimal(create_response.data['physical_progress_pct']), Decimal('25.00'))
+
+        submit_response = client.post(
+            f'/api/v1/planning-intelligence/daily-field-updates/{update_id}/submit/', {}, format='json',
+        )
+        approve_response = client.post(
+            f'/api/v1/planning-intelligence/daily-field-updates/{update_id}/approve/',
+            {'comment': 'Field evidence accepted.'}, format='json',
+        )
+
+        self.assertEqual(submit_response.status_code, 200)
+        self.assertEqual(approve_response.status_code, 200)
+        field_update = DailyFieldUpdate.objects.get(pk=update_id)
+        progress = ActivityProgressUpdate.objects.get(activity=activity, data_date=dt.date(2026, 8, 25))
+        self.assertEqual(field_update.status, 'approved')
+        self.assertEqual(progress.physical_progress_pct, Decimal('25.00'))
+        self.assertEqual(progress.actual_hours, Decimal('16.00'))
+        self.assertTrue(ScheduleControlSnapshot.objects.filter(version=self.version, data_date='2026-08-25').exists())
+        self.assertTrue(GovernanceItem.objects.filter(
+            version=self.version, activity=activity, item_type='issue', status='open',
+        ).exists())
+
+    def test_field_update_requires_project_access_and_rejection_comment(self):
+        activity = self.activity('FIELD-200', 2)
+        owner_client = APIClient()
+        owner_client.force_authenticate(self.owner)
+        outsider_client = APIClient()
+        outsider_client.force_authenticate(self.outsider)
+        created = owner_client.post(
+            '/api/v1/planning-intelligence/daily-field-updates/',
+            {'activity': activity.id, 'report_date': '2026-08-25', 'physical_progress_pct': 10},
+            format='json',
+        )
+        owner_client.post(
+            f'/api/v1/planning-intelligence/daily-field-updates/{created.data["id"]}/submit/', {}, format='json',
+        )
+
+        missing_comment = owner_client.post(
+            f'/api/v1/planning-intelligence/daily-field-updates/{created.data["id"]}/reject/', {}, format='json',
+        )
+        outsider_list = outsider_client.get(
+            f'/api/v1/planning-intelligence/daily-field-updates/?version={self.version.id}',
+        )
+
+        self.assertEqual(missing_comment.status_code, 400)
+        self.assertEqual(outsider_list.status_code, 200)
+        outsider_rows = outsider_list.data.get('results', []) if isinstance(outsider_list.data, dict) else outsider_list.data
+        self.assertEqual(outsider_rows, [])
+
+    def test_duplicate_field_update_returns_actionable_validation_message(self):
+        activity = self.activity('FIELD-300', 3)
+        client = APIClient()
+        client.force_authenticate(self.owner)
+        payload = {
+            'activity': activity.id,
+            'report_date': '2026-08-25',
+            'physical_progress_pct': 10,
+        }
+
+        first = client.post(
+            '/api/v1/planning-intelligence/daily-field-updates/', payload, format='json',
+        )
+        duplicate = client.post(
+            '/api/v1/planning-intelligence/daily-field-updates/', payload, format='json',
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertIn('already exists', duplicate.data['non_field_errors'][0])
+        self.assertIn(f'record #{first.data["id"]}', duplicate.data['non_field_errors'][0])
 
 
 class GovernanceAPITests(ScheduleFixture):

@@ -13,7 +13,9 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from apps.users.models import User
 
-from .access import PlanningObjectPermission, accessible_projects, can_write_project
+from .access import (
+    PlanningObjectPermission, accessible_projects, can_final_approve_defaults, can_write_project,
+)
 from .governance_serializers import (
     GovernanceCommentInputSerializer, GovernanceCommentSerializer,
     GovernanceItemInputSerializer, GovernanceItemSerializer, GovernanceItemUpdateSerializer,
@@ -21,7 +23,7 @@ from .governance_serializers import (
     ScheduleReviewSerializer,
 )
 from .models import (
-    ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException,
+    ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException, DailyFieldUpdate,
     GovernanceComment, GovernanceItem, Schedule,
     ScheduleActivity, ScheduleBaseline, ScheduleCalculationRun, ScheduleResource,
     ScheduleExportRecord, ScheduleReview, ScheduleReviewDecision, ScheduleVersion,
@@ -31,6 +33,7 @@ from .serializers import PlanningAuditEventSerializer
 from .schedule_serializers import (
     ActivityAssignmentSerializer, ActivityProgressUpdateSerializer, ActivityRelationshipSerializer,
     BulkActivityEditSerializer, BulkProgressUpdateSerializer, CalendarExceptionSerializer, ControlDateSerializer,
+    DailyFieldUpdateSerializer,
     ScheduleActivitySerializer, ScheduleBaselineSerializer,
     ScheduleCalculationRunSerializer, ScheduleResourceSerializer, ScheduleSerializer,
     ScheduleControlSnapshotSerializer, ScheduleVersionSerializer, ScheduleWBSNodeSerializer,
@@ -303,6 +306,8 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             'can_edit': can_write_project(request.user, project)
             and version.status not in {'approved', 'baselined', 'superseded'},
             'can_control': can_write_project(request.user, project) and version.status != 'superseded',
+            'can_approve_field_updates': can_final_approve_defaults(request.user, project)
+            and version.status != 'superseded',
         })
 
     @action(detail=True, methods=['get'], url_path='export', throttle_classes=[ScopedRateThrottle])
@@ -830,6 +835,160 @@ class ActivityAssignmentViewSet(SoftDeleteViewSet):
         version = instance.activity.version
         super().perform_destroy(instance)
         _mark_version_draft(version)
+
+
+class DailyFieldUpdateViewSet(SoftDeleteViewSet):
+    serializer_class = DailyFieldUpdateSerializer
+    queryset = DailyFieldUpdate.objects.filter(is_deleted=False).select_related(
+        'version__schedule__project', 'activity', 'reported_by', 'reviewed_by',
+        'applied_progress_update',
+    )
+
+    def get_queryset(self):
+        queryset = super().get_queryset().filter(
+            version__schedule__project__in=accessible_projects(self.request.user),
+        )
+        for parameter, field in (
+            ('version', 'version_id'), ('activity', 'activity_id'),
+            ('status', 'status'), ('report_date', 'report_date'),
+        ):
+            value = self.request.query_params.get(parameter)
+            if value:
+                queryset = queryset.filter(**{field: value})
+        return queryset
+
+    def perform_create(self, serializer):
+        activity = serializer.validated_data['activity']
+        project = activity.version.schedule.project
+        if not can_write_project(self.request.user, project):
+            raise ValidationError('You cannot submit field updates for this project.')
+        update = serializer.save(version=activity.version, reported_by=self.request.user)
+        record_event(
+            project=project, actor=self.request.user, action='field_update.created', entity=update,
+            after={'activity_id': activity.id, 'report_date': update.report_date.isoformat()},
+        )
+
+    def perform_update(self, serializer):
+        if serializer.instance.status not in {'draft', 'rejected'}:
+            raise ValidationError('Only draft or rejected field updates can be edited.')
+        update = serializer.save()
+        record_event(
+            project=update.version.schedule.project, actor=self.request.user,
+            action='field_update.updated', entity=update,
+        )
+
+    def perform_destroy(self, instance):
+        if instance.status not in {'draft', 'rejected'}:
+            raise ValidationError('Only draft or rejected field updates can be deleted.')
+        super().perform_destroy(instance)
+
+    @action(detail=True, methods=['post'])
+    def submit(self, request, pk=None):
+        update = self.get_object()
+        if not can_write_project(request.user, update.version.schedule.project):
+            return Response({'error': 'You cannot submit this field update.'}, status=status.HTTP_403_FORBIDDEN)
+        if update.status not in {'draft', 'rejected'}:
+            return Response({'error': 'Only draft or rejected updates can be submitted.'}, status=status.HTTP_409_CONFLICT)
+        update.status = 'submitted'
+        update.submitted_at = timezone.now()
+        update.reviewed_by = None
+        update.reviewed_at = None
+        update.review_comment = ''
+        update.save(update_fields=[
+            'status', 'submitted_at', 'reviewed_by', 'reviewed_at', 'review_comment', 'updated_at',
+        ])
+        record_event(
+            project=update.version.schedule.project, actor=request.user,
+            action='field_update.submitted', entity=update,
+        )
+        return Response(self.get_serializer(update).data)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        update = self.get_object()
+        project = update.version.schedule.project
+        if not can_final_approve_defaults(request.user, project):
+            return Response({'error': 'Only the project manager can approve field progress.'}, status=status.HTTP_403_FORBIDDEN)
+        if update.status != 'submitted':
+            return Response({'error': 'Only submitted field updates can be approved.'}, status=status.HTTP_409_CONFLICT)
+
+        comment = str(request.data.get('comment') or '').strip()[:4000]
+        note_parts = [part for part in (
+            update.notes,
+            f'Field location: {update.work_location}' if update.work_location else '',
+            f'Constraint: {update.constraints}' if update.constraints else '',
+            f'Approved field update #{update.id}',
+        ) if part]
+        with transaction.atomic():
+            progress, _ = ActivityProgressUpdate.objects.update_or_create(
+                activity=update.activity, data_date=update.report_date,
+                defaults={
+                    'version': update.version,
+                    'physical_progress_pct': update.physical_progress_pct,
+                    'remaining_duration_days': update.remaining_duration_days,
+                    'actual_start': update.actual_start,
+                    'actual_finish': update.actual_finish,
+                    'forecast_finish': update.forecast_finish,
+                    'actual_hours': update.actual_hours,
+                    'actual_cost': update.actual_cost,
+                    'notes': '\n'.join(note_parts),
+                    'reported_by': update.reported_by,
+                    'is_deleted': False,
+                    'deleted_at': None,
+                },
+            )
+            schedule = update.version.schedule
+            if schedule.data_date is None or update.report_date > schedule.data_date:
+                schedule.data_date = update.report_date
+                schedule.save(update_fields=['data_date', 'updated_at'])
+            if update.constraints:
+                GovernanceItem.objects.create(
+                    version=update.version, activity=update.activity, item_type='issue',
+                    title=f'Field constraint — {update.activity.external_id}',
+                    description=update.constraints, status='open', priority='high',
+                    raised_by=update.reported_by, metadata={'daily_field_update_id': update.id},
+                )
+            snapshot = capture_control_snapshot(update.version, update.report_date, request.user)
+            update.status = 'approved'
+            update.reviewed_by = request.user
+            update.reviewed_at = timezone.now()
+            update.review_comment = comment
+            update.applied_progress_update = progress
+            update.save(update_fields=[
+                'status', 'reviewed_by', 'reviewed_at', 'review_comment',
+                'applied_progress_update', 'updated_at',
+            ])
+        record_event(
+            project=project, actor=request.user, action='field_update.approved', entity=update,
+            after={'progress_update_id': progress.id, 'snapshot_id': snapshot.id},
+        )
+        return Response({
+            'field_update': self.get_serializer(update).data,
+            'controls': build_control_dashboard(update.version, update.report_date),
+            'snapshot': ScheduleControlSnapshotSerializer(snapshot).data,
+        })
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        update = self.get_object()
+        project = update.version.schedule.project
+        if not can_final_approve_defaults(request.user, project):
+            return Response({'error': 'Only the project manager can reject field progress.'}, status=status.HTTP_403_FORBIDDEN)
+        if update.status != 'submitted':
+            return Response({'error': 'Only submitted field updates can be rejected.'}, status=status.HTTP_409_CONFLICT)
+        comment = str(request.data.get('comment') or '').strip()
+        if not comment:
+            return Response({'error': 'A rejection comment is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        update.status = 'rejected'
+        update.reviewed_by = request.user
+        update.reviewed_at = timezone.now()
+        update.review_comment = comment[:4000]
+        update.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'review_comment', 'updated_at'])
+        record_event(
+            project=project, actor=request.user, action='field_update.rejected', entity=update,
+            after={'comment': update.review_comment},
+        )
+        return Response(self.get_serializer(update).data)
 
 
 class ScheduleBaselineViewSet(viewsets.ReadOnlyModelViewSet):

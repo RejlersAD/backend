@@ -9,6 +9,7 @@ from .views import (
 )
 from .schedule_views import (
     ActivityAssignmentViewSet, ActivityRelationshipViewSet, CalendarExceptionViewSet,
+    DailyFieldUpdateViewSet,
     ScheduleActivityViewSet, ScheduleBaselineViewSet, ScheduleCalculationRunViewSet,
     ScheduleResourceViewSet, ScheduleVersionViewSet, ScheduleViewSet,
     ScheduleWBSNodeViewSet, WorkCalendarViewSet,
@@ -42,6 +43,7 @@ router.register(r'activities', ScheduleActivityViewSet, basename='schedule-activ
 router.register(r'relationships', ActivityRelationshipViewSet, basename='activity-relationship')
 router.register(r'resources', ScheduleResourceViewSet, basename='schedule-resource')
 router.register(r'assignments', ActivityAssignmentViewSet, basename='activity-assignment')
+router.register(r'daily-field-updates', DailyFieldUpdateViewSet, basename='daily-field-update')
 router.register(r'baselines', ScheduleBaselineViewSet, basename='schedule-baseline')
 router.register(r'calculation-runs', ScheduleCalculationRunViewSet, basename='schedule-calculation-run')
 router.register(r'document-profiles', DocumentProfileViewSet, basename='document-profile')
