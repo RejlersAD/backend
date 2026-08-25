@@ -5,7 +5,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('planning_intelligence', '0006_relational_scheduling_engine'),
+        ('planning_intelligence', '0006b_verify_planningfile_constraints'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
