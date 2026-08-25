@@ -8,6 +8,51 @@ LEGACY_ID_INDEXES = (
 )
 
 
+def repair_duplicate_ids(cursor, quote_name, table_name):
+    """Preserve imported rows by re-keying duplicate/null legacy ids."""
+    table = quote_name(table_name)
+    cursor.execute(f'LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE')
+    cursor.execute(
+        f'''
+        WITH ranked AS (
+            SELECT
+                ctid,
+                id,
+                ROW_NUMBER() OVER (PARTITION BY id ORDER BY ctid) AS duplicate_rank,
+                MAX(id) OVER () AS max_id
+            FROM {table}
+        ),
+        rekey AS (
+            SELECT
+                ctid,
+                COALESCE(max_id, 0)
+                    + ROW_NUMBER() OVER (ORDER BY id NULLS FIRST, ctid) AS new_id
+            FROM ranked
+            WHERE id IS NULL OR duplicate_rank > 1
+        )
+        UPDATE {table} AS target
+        SET id = rekey.new_id
+        FROM rekey
+        WHERE target.ctid = rekey.ctid
+        ''',
+    )
+
+    cursor.execute('SELECT pg_get_serial_sequence(%s, %s)', [table_name, 'id'])
+    sequence_name = cursor.fetchone()[0]
+    if sequence_name:
+        cursor.execute(
+            f'''
+            SELECT setval(
+                %s::regclass,
+                COALESCE(MAX(id), 1),
+                EXISTS (SELECT 1 FROM {table})
+            )
+            FROM {table}
+            ''',
+            [sequence_name],
+        )
+
+
 def restore_legacy_id_uniqueness(apps, schema_editor):
     """Recheck imported tables even when the historical 0005 was faked."""
     connection = schema_editor.connection
@@ -20,6 +65,7 @@ def restore_legacy_id_uniqueness(apps, schema_editor):
         for table_name, index_name in LEGACY_ID_INDEXES:
             if table_name not in existing_tables:
                 continue
+            repair_duplicate_ids(cursor, quote_name, table_name)
             constraints = connection.introspection.get_constraints(cursor, table_name)
             id_is_unique = any(
                 constraint['unique'] and constraint['columns'] == ['id']
