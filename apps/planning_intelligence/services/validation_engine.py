@@ -7,9 +7,12 @@ issues for the user to review before export.
 """
 from __future__ import annotations
 
+from django.db.models import Q
+
 from ..config import (
     DISCIPLINE_DEFAULT_DELIVERABLES, LEVEL4_MAX_ACTIVITY_DURATION_DAYS, MAX_TOTAL_FLOAT_DAYS,
 )
+from ..models import WorkflowTemplate
 
 
 def _issue(rule: str, severity: str, message: str, activity_id: str | None = None) -> dict:
@@ -63,9 +66,10 @@ def validate(project, wbs: list, activities: list, eddr: list, intelligence: dic
 
     # 5. Missing predecessors (every activity except the very first milestone
     #    should link to something).
+    first_activity_ids = {activities[0]['id']} if activities else set()
     missing_pred = [
         a for a in activities
-        if not a.get('predecessors') and a['id'] not in {activities[0]['id']}
+        if not a.get('predecessors') and a.get('id') not in first_activity_ids
     ]
     if missing_pred:
         issues.append(_issue(
@@ -99,5 +103,75 @@ def validate(project, wbs: list, activities: list, eddr: list, intelligence: dic
         issues.append(_issue('milestones_present', 'critical', 'No milestones were generated.'))
     else:
         issues.append(_issue('milestones_present', 'pass', f'{milestone_count} milestones generated.'))
+
+    # 8. Every configuration-driven deliverable must contain each selected
+    # workflow stage exactly once. This catches accidental four/six-task chains.
+    configured_groups = {}
+    for activity in activities:
+        if not activity.get('workflow_template_code') or not activity.get('deliverable'):
+            continue
+        key = (activity.get('discipline') or '', activity['deliverable'])
+        configured_groups.setdefault(key, []).append(activity.get('workflow_stage_code'))
+    workflow_defects = []
+    template_keys = {
+        (activity.get('workflow_template_code'), activity.get('workflow_template_version'))
+        for activity in activities if activity.get('workflow_template_code')
+    }
+    templates = WorkflowTemplate.objects.filter(
+        Q(project__isnull=True) | Q(project=project), is_deleted=False,
+        code__in={code for code, _version in template_keys},
+    ).prefetch_related('stages')
+    expected_by_template = {
+        (template.code, template.version): [
+            stage.code for stage in sorted(
+                (stage for stage in template.stages.all() if not stage.is_deleted),
+                key=lambda stage: stage.sequence,
+            )
+        ]
+        for template in templates
+    }
+    for (discipline, deliverable), actual_stages in configured_groups.items():
+        first = next(
+            activity for activity in activities
+            if activity.get('discipline') == discipline
+            and activity.get('deliverable') == deliverable
+            and activity.get('workflow_template_code')
+        )
+        expected_stages = expected_by_template.get((
+            first.get('workflow_template_code'), first.get('workflow_template_version'),
+        ), [])
+        if not expected_stages or actual_stages != expected_stages or len(actual_stages) != len(set(actual_stages)):
+            workflow_defects.append(deliverable)
+    if workflow_defects:
+        issues.append(_issue(
+            'workflow_stage_integrity', 'critical',
+            f'{len(workflow_defects)} deliverables do not match their selected workflow: '
+            + ', '.join(workflow_defects[:10]),
+        ))
+    else:
+        issues.append(_issue(
+            'workflow_stage_integrity', 'pass',
+            f'{len(configured_groups)} deliverables match their selected workflow stages.',
+        ))
+
+    # 9. Engineer-supplied Process gates are applied to CPM immediately but
+    # remain visible as assumptions until a planner confirms their basis.
+    confirmation_rule_ids = {
+        predecessor.get('rule_id')
+        for activity in activities for predecessor in activity.get('predecessors', [])
+        if predecessor.get('source') == 'dependency_template'
+        and predecessor.get('requires_confirmation')
+        and predecessor.get('rule_id')
+    }
+    if confirmation_rule_ids:
+        issues.append(_issue(
+            'dependency_gate_confirmation', 'warning',
+            f'{len(confirmation_rule_ids)} Process release gates are active and require planner confirmation.',
+        ))
+    else:
+        issues.append(_issue(
+            'dependency_gate_confirmation', 'pass',
+            'No unconfirmed configured dependency gates are active.',
+        ))
 
     return issues

@@ -107,7 +107,9 @@ BYOK_ENCRYPTION_KEY = config('BYOK_ENCRYPTION_KEY', default=None)
 if BYOK_ENCRYPTION_KEY:
     BYOK_ENCRYPTION_KEY = BYOK_ENCRYPTION_KEY.encode() if isinstance(BYOK_ENCRYPTION_KEY, str) else BYOK_ENCRYPTION_KEY
 else:
-    print("[WARNING] BYOK_ENCRYPTION_KEY not set — API key encryption will use insecure fallback!")
+    print("[WARNING] BYOK_ENCRYPTION_KEY not set — planning BYOK uses legacy SECRET_KEY compatibility mode.")
+
+PLANNING_INTEGRATION_ENCRYPTION_KEY = config('PLANNING_INTEGRATION_ENCRYPTION_KEY', default=None)
 
 # ================================================================
 # USER MANAGEMENT SECURITY SETTINGS
@@ -516,6 +518,11 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 500,  # Increased from 10 to show more items per page
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
+    'DEFAULT_THROTTLE_RATES': {
+        'planning_exports': '60/hour',
+        'planning_integrations': '120/hour',
+        'planning_enterprise': '240/hour',
+    },
 }
 
 # ==============================================================================
@@ -819,6 +826,9 @@ if REDIS_URL:
             'LOCATION': REDIS_URL,
             'OPTIONS': {
                 'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+                # Cache-backed controls must fail open if Redis is briefly unavailable;
+                # core API requests and export auditing remain authoritative in SQL.
+                'IGNORE_EXCEPTIONS': True,
                 'SOCKET_CONNECT_TIMEOUT': 5,  # seconds
                 'SOCKET_TIMEOUT': 5,  # seconds
                 'RETRY_ON_TIMEOUT': True,
@@ -847,6 +857,7 @@ elif REDIS_HOST and REDIS_HOST != 'None':
             'LOCATION': redis_location,
             'OPTIONS': {
                 'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+                'IGNORE_EXCEPTIONS': True,
                 'SOCKET_CONNECT_TIMEOUT': 5,
                 'SOCKET_TIMEOUT': 5,
                 'RETRY_ON_TIMEOUT': True,

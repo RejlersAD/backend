@@ -17,13 +17,16 @@ from ..config import CLAUDE_NARRATIVE_MAX_TOKENS, DISCIPLINE_NAME_BY_CODE
 from . import claude_client
 
 _CLAUDE_SYSTEM_PROMPT = (
-    'You are an engineering project-controls assistant polishing the Executive Summary '
-    'paragraph of a schedule narrative for a FEED/DEFINE oil & gas project. You will be '
+    'Write as a senior project-controls consultant preparing an Executive Summary for a '
+    'FEED/DEFINE oil and gas project. You will be '
     'given the exact facts already computed by the scheduler. Rewrite ONLY the executive '
-    'summary paragraph in clear, professional engineering-report prose. You MUST use every '
+    'summary in direct, restrained and natural engineering-report prose. Address the project '
+    'and delivery approach specifically. Avoid generic promotional language, exaggerated '
+    'adjectives, repetition, meta-commentary and any reference to AI or generated content. '
+    'You MUST use every '
     'number/date given exactly as provided — do not invent, omit, or alter any figure. '
-    'Respond with the rewritten paragraph text only — no markdown headers, no JSON, no '
-    'preamble.'
+    'Use no more than two short paragraphs. Respond with plain text only: no Markdown, headings, '
+    'labels, bullets, JSON or preamble.'
 )
 
 

@@ -697,6 +697,12 @@ def generation_to_xer_bytes(generation) -> bytes:
         # a stale duration on the activity row can't corrupt the schedule.
         if is_milestone:
             duration_hrs = 0
+        progress_pct = max(0, min(100, float(activity.get('physical_progress_pct') or 0)))
+        remaining_days = activity.get('remaining_duration_days')
+        remaining_hrs = int(float(remaining_days) * hours_per_day) if remaining_days is not None else duration_hrs
+        actual_start = _xer_datetime(activity.get('actual_start'), XER_WORK_START)
+        actual_finish = _xer_datetime(activity.get('actual_finish'), XER_WORK_START if is_milestone else XER_WORK_END)
+        task_status = 'TK_Complete' if actual_finish else ('TK_Active' if actual_start else 'TK_NotStart')
         float_days = activity.get('total_float_days') or 0
         float_hrs = int(float_days * hours_per_day)
 
@@ -714,17 +720,17 @@ def generation_to_xer_bytes(generation) -> bytes:
                 late_start, late_end = shifted_start, shifted_end
 
         lines.append(_xer_row(
-            task_id_map[activity['id']], XER_PROJ_ID, wbs_id, XER_CLNDR_ID, 0, 'N', 1, 'N', 'N',
+            task_id_map[activity['id']], XER_PROJ_ID, wbs_id, XER_CLNDR_ID, progress_pct, 'N', 1, 'N', 'N',
             'CP_Drtn',
             'TT_Mile' if is_milestone else 'TT_Task',
-            'DT_FixedDUR2', 'TK_NotStart',
+            'DT_FixedDUR2', task_status,
             str(activity['id'])[:XER_TASK_CODE_MAX_LEN],
             (activity.get('name') or '')[:XER_TASK_NAME_MAX_LEN],
             '',                                # rsrc_id (none — resources managed downstream)
-            float_hrs, float_hrs, duration_hrs,
+            float_hrs, float_hrs, remaining_hrs,
             0, 0, 0, duration_hrs, 0, 0, 0,    # work / equip quantities (planning-only export)
             '',                                # cstr_date
-            '', '',                            # act_start_date / act_end_date (not started)
+            actual_start, actual_finish,
             late_start, late_end, '',
             early_start, early_end,
             early_start, early_end,            # restart_date / reend_date

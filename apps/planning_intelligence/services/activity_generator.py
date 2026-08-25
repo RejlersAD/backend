@@ -1,10 +1,10 @@
 """
 Activity Generator (MODULE 5 + MODULE 6) — the core scheduling engine.
 
-CRITICAL RULE (per spec): a deliverable is NEVER a single activity. Every
-deliverable/HSE-study/survey step is expanded into its full review-cycle
-workflow (Prepare -> IFR -> Company Review -> IFA -> Company Approval ->
-Issue) using the soft-coded templates in config.py.
+CRITICAL RULE (per spec): a deliverable is NEVER a single activity. Standard
+engineering deliverables use the controlled five-stage workflow (IFR ->
+Company Review -> IFA -> Company Approval -> Final Issue). HSE studies and
+surveys retain their own soft-coded specialist workflows.
 
 This is a simplified-but-coherent CPM-style scheduler: each logical group
 (survey, one HSE study, one discipline's deliverable list) is built as a
@@ -25,9 +25,15 @@ from ..config import (
     DISCIPLINE_PREFIX_BY_CODE, DISCIPLINE_RESPONSIBLE_ROLE, ENGINEERING_DISCIPLINE_ORDER,
     HSE_STUDY_WORKFLOW_STEPS, MAX_ALLOWED_LAG_DAYS, MILESTONE_TEMPLATE, SURVEY_WORKFLOW_STEPS,
 )
+from ..models import ProjectScheduleConfiguration
 from .calendar_utils import add_working_days, working_days_between
+from .workflow_configuration import ensure_project_schedule_configuration
 
 _MODEL_REVIEW_OFFSETS_WEEKS = (8, 16, 24)  # soft-coded 30/60/90% model review spacing
+_STANDARD_FIVE_STAGE_CODE = 'STANDARD_5_STAGE'
+_STANDARD_FIVE_STAGE_SEQUENCE = (
+    'IFR', 'COMPANY_REVIEW', 'IFA', 'COMPANY_APPROVAL', 'FINAL_ISSUE',
+)
 
 # ── Deliverable categorization for smart sequencing ────────────────────────
 DELIVERABLE_CATEGORIES = {
@@ -164,7 +170,7 @@ def _step_duration(step: dict, review_days: dict) -> int:
 
 def _build_chain(*, ids: _IdCounter, prefix: str, wbs_code: str, discipline: str,
                   role: str, steps: list, name: str, start_date, calendar, review_days,
-                  is_milestone_flags=True, predecessors=None) -> list:
+                  is_milestone_flags=True, predecessors=None, workflow_template=None) -> list:
     """Builds one linear working-day chain of activities from a step template.
     
     Args:
@@ -185,7 +191,12 @@ def _build_chain(*, ids: _IdCounter, prefix: str, wbs_code: str, discipline: str
         if prev_id is None:
             activity_predecessors = predecessors
         else:
-            activity_predecessors = [{'id': prev_id, 'type': 'FS', 'lag_days': 0}]
+            activity_predecessors = [{
+                'id': prev_id,
+                'type': step.get('relationship_to_previous') or 'FS',
+                'lag_days': step.get('lag_days', 0),
+                'source': 'workflow_template' if workflow_template else 'legacy_template',
+            }]
         
         chain.append({
             'id': activity_id,
@@ -193,8 +204,13 @@ def _build_chain(*, ids: _IdCounter, prefix: str, wbs_code: str, discipline: str
             'name': step['suffix'].format(name=name),
             'discipline': discipline,
             'deliverable': name,
-            'responsible_role': role,
+            'responsible_role': step.get('responsible_party') or role,
             'workflow_status': step.get('status', ''),  # Workflow stage marker (Start, IFR, IFA, Final Issue)
+            'workflow_stage_code': step.get('code') or step.get('status', ''),
+            'workflow_stage_sequence': step.get('sequence'),
+            'workflow_progress_weight': step.get('progress_weight'),
+            'workflow_template_code': workflow_template.get('code') if workflow_template else None,
+            'workflow_template_version': workflow_template.get('version') if workflow_template else None,
             'original_duration_days': duration,
             'start_date': cursor.isoformat(),
             'finish_date': finish.isoformat(),
@@ -206,6 +222,139 @@ def _build_chain(*, ids: _IdCounter, prefix: str, wbs_code: str, discipline: str
         prev_id = activity_id
         cursor = finish
     return chain
+
+
+def _configured_workflow(project, discipline: str, deliverable: str, *, configuration=None,
+                         overrides=None) -> tuple[list, dict | None]:
+    """Resolve the Phase A workflow into the legacy generator's step shape."""
+    if configuration is None:
+        configuration, _ = ensure_project_schedule_configuration(project)
+    if not configuration:
+        return DELIVERABLE_WORKFLOW_STEPS, None
+    template = configuration.workflow_template
+    if overrides is None:
+        overrides = list(configuration.overrides.filter(is_deleted=False, is_active=True).select_related('workflow_template'))
+    exact = next((row for row in overrides if row.scope_type == 'deliverable' and row.scope_key.lower() == deliverable.lower()), None)
+    discipline_match = next((row for row in overrides if row.scope_type == 'discipline' and row.scope_key.lower() == discipline.lower()), None)
+    if exact or discipline_match:
+        template = (exact or discipline_match).workflow_template
+    stages = sorted((stage for stage in template.stages.all() if not stage.is_deleted), key=lambda stage: stage.sequence)
+    if not stages:
+        return DELIVERABLE_WORKFLOW_STEPS, None
+    if template.code == _STANDARD_FIVE_STAGE_CODE:
+        actual_sequence = tuple(stage.code for stage in stages)
+        if actual_sequence != _STANDARD_FIVE_STAGE_SEQUENCE:
+            raise ValueError(
+                'STANDARD_5_STAGE must contain exactly: '
+                f'{" -> ".join(_STANDARD_FIVE_STAGE_SEQUENCE)}. '
+                f'Configured sequence: {" -> ".join(actual_sequence) or "empty"}.'
+            )
+    steps = [{
+        'sequence': stage.sequence,
+        'code': stage.code,
+        'status': stage.code,
+        'suffix': stage.activity_name_template.format(
+            deliverable='{name}', stage=stage.name, discipline=discipline,
+        ),
+        'duration': float(stage.duration_days),
+        'responsible_party': stage.responsible_party,
+        'activity_type': stage.activity_type,
+        'milestone': stage.activity_type in {'start_milestone', 'finish_milestone'},
+        'relationship_to_previous': stage.relationship_to_previous,
+        'lag_days': float(stage.lag_days),
+        'progress_weight': float(stage.progress_weight),
+    } for stage in stages]
+    return steps, {'code': template.code, 'version': template.version, 'id': template.id}
+
+
+def _normalise_deliverable_code(value: str) -> str:
+    value = (value or '').upper().replace('&', ' AND ')
+    return re.sub(r'[^A-Z0-9]+', '_', value).strip('_')
+
+
+_PROCESS_DELIVERABLE_ALIASES = {
+    'CONTRACT_AWARD_PROJECT_START': 'CONTRACT_AWARD',
+    'PROCESS_DESIGN_BASIS': 'PROCESS_STUDY_INSTRUCTION',
+    'PROCESS_STUDY_PROCESS_DESIGN_INSTRUCTION': 'PROCESS_STUDY_INSTRUCTION',
+    'BLOCK_FLOW_DIAGRAM': 'PROCESS_BLOCK_DIAGRAM',
+    'PROCESS_CALCULATION_AND_SIMULATION': 'PROCESS_CALCULATION_SIMULATION',
+    'HEAT_AND_MATERIAL_BALANCE': 'HEAT_MASS_BALANCE',
+    'HEAT_AND_MASS_BALANCE': 'HEAT_MASS_BALANCE',
+    'PROCESS_FLOW_DIAGRAM_PFD': 'PROCESS_FLOW_DIAGRAM',
+    'UTILITY_BALANCE_AND_UTILITY_FLOW_DIAGRAM': 'UTILITY_BALANCE_DIAGRAM',
+    'PRE_COMMISSIONING_COMMISSIONING_PHILOSOPHY': 'COMMISSIONING_PHILOSOPHY',
+    'RELIEF_AND_FLARE_SYSTEM': 'RELIEF_FLARE_SYSTEM',
+    'P_AND_IDS': 'PIDS',
+    'P_IDS': 'PIDS',
+    'PIPING_AND_INSTRUMENTATION_DIAGRAM_P_AND_ID_PROCESS': 'PIDS',
+    'PROCESS_CAUSE_AND_EFFECT_DIAGRAMS': 'CAUSE_EFFECT_DIAGRAMS',
+    'LINE_LIST_LINE_SCHEDULE': 'LINE_LIST',
+    'TIE_IN_LIST': 'TIE_IN_LIST',
+    'EQUIPMENT_PROCESS_DATA_SHEETS': 'EQUIPMENT_PROCESS_DATA_SHEETS',
+    'INSTRUMENT_PROCESS_DATA_SHEETS': 'INSTRUMENT_PROCESS_DATA_SHEETS',
+    'SPECIAL_PIPING_LIST': 'SPECIAL_PIPING_LIST',
+    'MATERIAL_SELECTION_FLOW_DIAGRAMS': 'MATERIAL_SELECTION_DIAGRAMS',
+}
+
+
+def _deliverable_code(value: str) -> str:
+    normalised = _normalise_deliverable_code(value)
+    return _PROCESS_DELIVERABLE_ALIASES.get(normalised, normalised)
+
+
+def _apply_dependency_template(project, activities: list, chains_by_discipline: dict,
+                               *, award_activity: dict, bod_activity: dict,
+                               configuration=None) -> list[dict]:
+    """Apply configured release gates after every workflow stage has an ID."""
+    if configuration is None:
+        configuration, _ = ensure_project_schedule_configuration(project)
+    template = configuration.dependency_template if configuration else None
+    if not template or template.status != 'active':
+        return []
+
+    discipline = template.discipline
+    chain_entries = chains_by_discipline.get(discipline, [])
+    activity_by_gate = {}
+    for deliverable, chain in chain_entries:
+        code = _deliverable_code(deliverable)
+        for activity in chain:
+            activity_by_gate[(code, activity.get('workflow_stage_code'))] = activity
+    activity_by_gate[('CONTRACT_AWARD', 'MILESTONE')] = award_activity
+
+    confirmed_rule_ids = {
+        int(value) for value in (configuration.settings or {}).get('confirmed_dependency_rule_ids', [])
+        if str(value).isdigit()
+    }
+    applied = []
+    successor_with_rule = set()
+    rules = sorted((rule for rule in template.rules.all() if not rule.is_deleted), key=lambda rule: rule.sequence)
+    for rule in rules:
+        predecessor = activity_by_gate.get((rule.predecessor_code, rule.predecessor_stage_code))
+        successor = activity_by_gate.get((rule.successor_code, rule.successor_stage_code))
+        if not predecessor or not successor:
+            continue
+        gate_key = (successor['id'], predecessor['id'], rule.relationship_type)
+        if gate_key in successor_with_rule:
+            continue
+        successor_with_rule.add(gate_key)
+        # Template logic replaces the generic Basis-of-Design entry gate but
+        # retains workflow-internal and any other explicit predecessors.
+        successor['predecessors'] = [
+            pred for pred in successor.get('predecessors', [])
+            if pred.get('id') != bod_activity['id']
+        ]
+        successor['predecessors'].append({
+            'id': predecessor['id'], 'type': rule.relationship_type,
+            'lag_days': float(rule.lag_days), 'source': 'dependency_template',
+            'rule_id': rule.id,
+            'requires_confirmation': rule.requires_confirmation and rule.id not in confirmed_rule_ids,
+        })
+        applied.append({
+            'rule_id': rule.id, 'predecessor_code': rule.predecessor_code,
+            'successor_code': rule.successor_code,
+            'requires_confirmation': rule.requires_confirmation and rule.id not in confirmed_rule_ids,
+        })
+    return applied
 
 
 def _milestone_activity(ids: _IdCounter, name: str, date_: datetime.date,
@@ -247,6 +396,25 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
     effective_date = project.effective_date or datetime.date.today()
     ids = _IdCounter()
     activities: list[dict] = []
+    configuration = ProjectScheduleConfiguration.objects.filter(
+        project=project, is_deleted=False,
+    ).select_related('workflow_template', 'dependency_template').prefetch_related(
+        'workflow_template__stages', 'overrides__workflow_template__stages',
+        'dependency_template__rules',
+    ).first()
+    if configuration is None:
+        configuration, _ = ensure_project_schedule_configuration(project)
+        if configuration:
+            configuration = ProjectScheduleConfiguration.objects.filter(pk=configuration.pk).select_related(
+                'workflow_template', 'dependency_template',
+            ).prefetch_related(
+                'workflow_template__stages', 'overrides__workflow_template__stages',
+                'dependency_template__rules',
+            ).first()
+    workflow_overrides = sorted(
+        (row for row in configuration.overrides.all() if not row.is_deleted and row.is_active),
+        key=lambda row: row.priority,
+    ) if configuration else []
 
     # Resolve WBS codes from what WBS Builder actually generated so
     # Primavera .xer import lands every task under its discipline folder
@@ -315,10 +483,6 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
     discipline_chain_last_activities: dict[str, list[str]] = {}
     discipline_deliverable_chains: dict[str, list[tuple[str, list[dict]]]] = {}  # discipline -> [(deliverable_name, chain)]
     
-    process_first_deliverable_id = None
-    process_first_deliverable_finish = None
-    process_design_basis_id = None  # Special tracking for Process Design Basis
-
     for disc_code in ENGINEERING_DISCIPLINE_ORDER:
         disc_info = disciplines_intel.get(disc_code, {})
         if disc_info.get('in_scope') is False:
@@ -333,104 +497,34 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
         role = DISCIPLINE_RESPONSIBLE_ROLE.get(disc_code, 'Engineer')
 
         # ── STEP 1: Categorize and sort deliverables by priority ────
-        deliverable_info = []
-        for deliverable in deliverables:
-            category, priority = _categorize_deliverable(deliverable)
-            deliverable_info.append({
-                'name': deliverable,
-                'category': category,
-                'priority': priority,
-            })
-        
-        # Sort by priority (design basis first, lists last)
-        deliverable_info.sort(key=lambda x: (x['priority'], x['name']))
+        # Preserve the document order. Category labels are not engineering
+        # logic and must not manufacture predecessor links.
+        deliverable_info = [{'name': deliverable} for deliverable in deliverables]
 
         # ── STEP 2: Determine start point for this discipline ────
         chain_start = bod_start
         base_predecessor_id = m_bod['id']
-        
-        # Non-Process disciplines wait on Process deliverables
-        if disc_code != 'process' and process_first_deliverable_id:
-            chain_start = process_first_deliverable_finish
-            base_predecessor_id = process_first_deliverable_id
-            
-            # Additional cross-discipline dependencies for realism
-            if disc_code == 'piping' and process_design_basis_id:
-                base_predecessor_id = process_design_basis_id  # Piping waits on Process Design Basis
-            elif disc_code == 'mechanical' and process_first_deliverable_id:
-                base_predecessor_id = process_first_deliverable_id
-            elif disc_code == 'electrical':
-                # Electrical can start with some lag after mechanical (for equipment power requirements)
-                pass  # Will add SS relationship later
-            elif disc_code == 'instrumentation':
-                # Instrumentation needs P&IDs from Process/Piping
-                pass
 
         # ── STEP 3: Build chains with smart predecessor relationships ────
         deliverable_chains_list = []
         finish_dates = []
         last_activity_ids = []
-        prev_deliverable = None
-        prev_chain = None
-        
-        for idx, del_info in enumerate(deliverable_info):
+        for del_info in deliverable_info:
             deliverable = del_info['name']
-            category = del_info['category']
-            
             del_wbs = _resolve_deliverable_wbs(disc_wbs, deliverable_wbs, disc_code, deliverable)
-            
-            # Determine predecessors for this deliverable chain
-            if idx == 0:
-                # First deliverable links to discipline gate or upstream discipline
-                predecessors = [{'id': base_predecessor_id, 'type': 'FS', 'lag_days': 0}]
-                start_date = chain_start
-            else:
-                # Subsequent deliverables use smart relationship logic
-                rel_type, lag_days = _determine_relationship_type(
-                    prev_deliverable['category'],
-                    category,
-                    prev_deliverable['name'],
-                    deliverable
-                )
-                
-                # Calculate start date based on relationship type
-                if rel_type == 'FS':
-                    # Finish-to-Start: Start after previous finishes + lag
-                    start_date = add_working_days(
-                        datetime.date.fromisoformat(prev_chain[-1]['finish_date']),
-                        lag_days,
-                        calendar['working_days_per_week']
-                    )
-                    predecessors = [{'id': prev_chain[-1]['id'], 'type': 'FS', 'lag_days': lag_days}]
-                    
-                elif rel_type == 'SS':
-                    # Start-to-Start: Can start while previous is in progress
-                    start_date = add_working_days(
-                        datetime.date.fromisoformat(prev_chain[0]['start_date']),
-                        lag_days,
-                        calendar['working_days_per_week']
-                    )
-                    predecessors = [{'id': prev_chain[0]['id'], 'type': 'SS', 'lag_days': lag_days}]
-                    
-                elif rel_type == 'FF':
-                    # Finish-to-Finish: Should finish around same time as previous
-                    # Calculate start based on own duration to align finish dates
-                    prev_finish = datetime.date.fromisoformat(prev_chain[-1]['finish_date'])
-                    # Estimate this deliverable's duration (sum of workflow steps)
-                    est_duration = sum(_step_duration(step, review_days) for step in DELIVERABLE_WORKFLOW_STEPS)
-                    start_date = add_working_days(prev_finish, -est_duration + lag_days, calendar['working_days_per_week'])
-                    start_date = max(start_date, chain_start)  # Can't start before discipline starts
-                    predecessors = [{'id': prev_chain[-1]['id'], 'type': 'FF', 'lag_days': lag_days}]
-                    
-                else:  # SF (Start-to-Finish) - rarely used
-                    start_date = datetime.date.fromisoformat(prev_chain[-1]['finish_date'])
-                    predecessors = [{'id': prev_chain[-1]['id'], 'type': 'SF', 'lag_days': lag_days}]
-            
-            # Build the deliverable workflow chain
+            steps, workflow_template = _configured_workflow(
+                project, disc_code, deliverable,
+                configuration=configuration, overrides=workflow_overrides,
+            )
             deliverable_chain = _build_chain(
                 ids=ids, prefix=prefix, wbs_code=del_wbs, discipline=disc_code, role=role,
-                steps=DELIVERABLE_WORKFLOW_STEPS, name=deliverable, start_date=start_date,
-                calendar=calendar, review_days=review_days, predecessors=predecessors,
+                steps=steps, name=deliverable, start_date=chain_start,
+                calendar=calendar, review_days=review_days,
+                predecessors=[{
+                    'id': base_predecessor_id, 'type': 'FS', 'lag_days': 0,
+                    'source': 'discipline_gate',
+                }],
+                workflow_template=workflow_template,
             )
             
             activities += deliverable_chain
@@ -438,19 +532,15 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
             finish_dates.append(datetime.date.fromisoformat(deliverable_chain[-1]['finish_date']))
             last_activity_ids.append(deliverable_chain[-1]['id'])
             
-            # Track Process Design Basis specifically for cross-discipline dependencies
-            if disc_code == 'process' and idx == 0:
-                process_first_deliverable_id = deliverable_chain[-1]['id']
-                process_first_deliverable_finish = finish_dates[-1]
-                if 'design basis' in deliverable.lower():
-                    process_design_basis_id = deliverable_chain[-1]['id']
-            
-            prev_deliverable = del_info
-            prev_chain = deliverable_chain
-        
+
         discipline_chain_finish[disc_code] = max(finish_dates)
         discipline_chain_last_activities[disc_code] = last_activity_ids
         discipline_deliverable_chains[disc_code] = deliverable_chains_list
+
+    applied_dependency_rules = _apply_dependency_template(
+        project, activities, discipline_deliverable_chains,
+        award_activity=m_award, bod_activity=m_bod, configuration=configuration,
+    )
 
     engineering_start = bod_start
     engineering_finish = max(discipline_chain_finish.values()) if discipline_chain_finish else bod_start
@@ -471,12 +561,16 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
         {'id': aid, 'type': 'FS', 'lag_days': 0}
         for last_ids in discipline_chain_last_activities.values() for aid in last_ids
     ]
+    pdr_steps, pdr_template = _configured_workflow(
+        project, 'pdr', 'Project Definition Report (PDR)',
+        configuration=configuration, overrides=workflow_overrides,
+    )
     pdr_chain = _build_chain(
         ids=ids, prefix=DISCIPLINE_PREFIX_BY_CODE['pdr'], wbs_code=pdr_wbs,
         discipline='pdr', role=DISCIPLINE_RESPONSIBLE_ROLE['pdr'],
-        steps=DELIVERABLE_WORKFLOW_STEPS, name='Project Definition Report (PDR)',
+        steps=pdr_steps, name='Project Definition Report (PDR)',
         start_date=engineering_finish, calendar=calendar, review_days=review_days,
-        predecessors=pdr_predecessors
+        predecessors=pdr_predecessors, workflow_template=pdr_template,
     )
     activities += pdr_chain
     pdr_finish = datetime.date.fromisoformat(pdr_chain[-1]['finish_date'])
@@ -486,12 +580,17 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
                                            role=DISCIPLINE_RESPONSIBLE_ROLE.get('pdr', 'Project Manager')))
 
     epc_wbs = disc_wbs.get('epc', '1')
+    epc_steps, epc_template = _configured_workflow(
+        project, 'epc', 'EPC Tender Package',
+        configuration=configuration, overrides=workflow_overrides,
+    )
     epc_chain = _build_chain(
         ids=ids, prefix=DISCIPLINE_PREFIX_BY_CODE['epc'], wbs_code=epc_wbs,
         discipline='epc', role=DISCIPLINE_RESPONSIBLE_ROLE['epc'],
-        steps=DELIVERABLE_WORKFLOW_STEPS, name='EPC Tender Package',
+        steps=epc_steps, name='EPC Tender Package',
         start_date=pdr_finish, calendar=calendar, review_days=review_days,
-        predecessors=[{'id': pdr_chain[-1]['id'], 'type': 'FS', 'lag_days': 0}]
+        predecessors=[{'id': pdr_chain[-1]['id'], 'type': 'FS', 'lag_days': 0}],
+        workflow_template=epc_template,
     )
     activities += epc_chain
     epc_finish = datetime.date.fromisoformat(epc_chain[-1]['finish_date'])
@@ -522,12 +621,21 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
             'activity_id': a['id'], 
             'predecessor_id': p['id'], 
             'type': p.get('type', 'FS'),
-            'lag_days': p.get('lag_days', 0)
+            'lag_days': p.get('lag_days', 0),
+            'source': p.get('source', 'generated'),
+            'rule_id': p.get('rule_id'),
+            'requires_confirmation': bool(p.get('requires_confirmation')),
         }
         for a in activities for p in a.get('predecessors', []) if p.get('id')
     ]
 
-    return {'activities': activities, 'logic_matrix': logic_matrix, 'project_finish_date': project_finish.isoformat()}
+    return {
+        'activities': activities,
+        'logic_matrix': logic_matrix,
+        'project_finish_date': project_finish.isoformat(),
+        'applied_dependency_rules': applied_dependency_rules,
+        'date_authority': 'relational_cpm',
+    }
 
 
 def _assign_float(activities: list, project_finish: datetime.date, calendar: dict) -> None:

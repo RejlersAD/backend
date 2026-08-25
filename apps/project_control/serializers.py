@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from .config import MAX_DOCUMENT_BYTES
 from .models import (
     ChangeEvent,
     CostSnapshot,
@@ -112,6 +113,11 @@ class ProjectDocumentSerializer(serializers.ModelSerializer):
             return None
         u = obj.uploaded_by
         return u.get_full_name() or getattr(u, 'email', None) or getattr(u, 'username', None)
+
+    def validate_file(self, value):
+        if value.size > MAX_DOCUMENT_BYTES:
+            raise serializers.ValidationError(f'File exceeds the {MAX_DOCUMENT_BYTES} byte limit.')
+        return value
 
 
 class CostSnapshotSerializer(serializers.ModelSerializer):

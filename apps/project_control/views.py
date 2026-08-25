@@ -19,10 +19,15 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
 from apps.core.project_models import Project
 
+from .access import (
+    ProjectControlObjectPermission, accessible_enterprise_projects,
+    can_write_enterprise_project,
+)
 from .config import (
     DOCUMENT_KINDS, MAX_DOCUMENT_BYTES, PHASE_FLAGS,
     PLANNING_PACKAGE_ALLOWED_HTTP_METHODS, VARIANCE_THRESHOLDS,
@@ -67,18 +72,27 @@ def phase_flags_view(request):
 # ─────────────────────────────────────────────────────────────────────────────
 class _ProjectFilteredMixin:
     def get_queryset(self):
-        qs = super().get_queryset().filter(is_deleted=False)
+        qs = super().get_queryset().filter(
+            is_deleted=False,
+            project__in=accessible_enterprise_projects(self.request.user),
+        )
         pid = self.request.query_params.get('project')
         if pid:
             qs = qs.filter(project_id=pid)
         return qs
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data.get('project')
+        if project and not can_write_enterprise_project(self.request.user, project):
+            raise PermissionDenied('You cannot modify this project.')
+        serializer.save()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Estimate viewset
 # ─────────────────────────────────────────────────────────────────────────────
 class EstimateViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     queryset = Estimate.objects.all().select_related('project').prefetch_related('line_items')
 
     def get_serializer_class(self):
@@ -87,7 +101,10 @@ class EstimateViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
         return EstimateSerializer
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user if self.request.user.is_authenticated else None)
+        project = serializer.validated_data.get('project')
+        if not can_write_enterprise_project(self.request.user, project):
+            raise PermissionDenied('You cannot modify this project.')
+        serializer.save(created_by=self.request.user)
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
@@ -105,23 +122,29 @@ class EstimateViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
 
 
 class EstimateLineItemViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = EstimateLineItemSerializer
     queryset = EstimateLineItem.objects.all().filter(is_deleted=False)
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = super().get_queryset().filter(estimate__project__in=accessible_enterprise_projects(self.request.user))
         est = self.request.query_params.get('estimate')
         if est:
             qs = qs.filter(estimate_id=est)
         return qs
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data['estimate'].project
+        if not can_write_enterprise_project(self.request.user, project):
+            raise PermissionDenied('You cannot modify this project.')
+        serializer.save()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WBS viewset
 # ─────────────────────────────────────────────────────────────────────────────
 class WBSNodeViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = WBSNodeSerializer
     queryset = WBSNode.objects.all()
 
@@ -130,15 +153,16 @@ class WBSNodeViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
 # Document viewset — file uploads + presign + Excel-import shortcut
 # ─────────────────────────────────────────────────────────────────────────────
 class ProjectDocumentViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = ProjectDocumentSerializer
     parser_classes = [MultiPartParser, FormParser]
     queryset = ProjectDocument.objects.all().select_related('project', 'uploaded_by')
 
     def perform_create(self, serializer):
         file = serializer.validated_data.get('file')
-        if file and file.size and file.size > MAX_DOCUMENT_BYTES:
-            raise ValueError(f'File exceeds maximum allowed size ({MAX_DOCUMENT_BYTES} bytes).')
+        project = serializer.validated_data.get('project')
+        if not can_write_enterprise_project(self.request.user, project):
+            raise PermissionDenied('You cannot modify this project.')
 
         doc = serializer.save(
             uploaded_by=self.request.user if self.request.user.is_authenticated else None,
@@ -172,9 +196,14 @@ class ProjectDocumentViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
         file = request.FILES.get('file')
         if not file:
             return Response({'error': 'file is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if file.size > MAX_DOCUMENT_BYTES:
+            return Response(
+                {'error': f'File exceeds the {MAX_DOCUMENT_BYTES} byte limit.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-            project = Project.objects.get(pk=project_id, is_deleted=False)
+            project = accessible_enterprise_projects(request.user).get(pk=project_id)
         except Project.DoesNotExist:
             return Response({'error': 'project not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -220,13 +249,13 @@ class ProjectDocumentViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
 # Snapshot + Change viewsets (Phase 3/4 read mostly)
 # ─────────────────────────────────────────────────────────────────────────────
 class CostSnapshotViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = CostSnapshotSerializer
     queryset = CostSnapshot.objects.all()
 
 
 class ChangeEventViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = ChangeEventSerializer
     queryset = ChangeEvent.objects.all()
 
@@ -251,7 +280,7 @@ class PlanningPackageViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
         ?status={value} - Filter by status
         ?priority={value} - Filter by priority
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     http_method_names = PLANNING_PACKAGE_ALLOWED_HTTP_METHODS
     queryset = PlanningPackage.objects.all().select_related(
         'project', 'package_manager', 'wbs_node'
@@ -292,10 +321,7 @@ class PlanningPackageViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        packages = PlanningPackage.objects.filter(
-            project_id=project_id,
-            is_deleted=False
-        )
+        packages = self.get_queryset().filter(project_id=project_id)
         
         from django.db.models import Sum, Count, Avg
         
@@ -340,7 +366,10 @@ class ProjectAnalyticsViewSet(viewsets.ViewSet):
             return None, Response({'error': 'project is required'},
                                   status=status.HTTP_400_BAD_REQUEST)
         try:
-            return Project.objects.get(pk=pid, is_deleted=False), None
+            project = accessible_enterprise_projects(request.user).get(pk=pid)
+            if request.method not in ('GET', 'HEAD', 'OPTIONS') and not can_write_enterprise_project(request.user, project):
+                return None, Response({'error': 'You cannot modify this project.'}, status=status.HTTP_403_FORBIDDEN)
+            return project, None
         except Project.DoesNotExist:
             return None, Response({'error': 'project not found'},
                                   status=status.HTTP_404_NOT_FOUND)
