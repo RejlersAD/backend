@@ -52,8 +52,14 @@ class PlanningProject(BaseModel):
         on_delete=models.CASCADE,
         null=True,
         blank=True,
+        db_constraint=False,
         related_name='planning_workspace',
-        help_text='Enterprise project that owns this planning workspace.',
+        help_text=(
+            'Enterprise project that owns this planning workspace. The legacy '
+            'production core_project table does not consistently expose a '
+            'database-level unique constraint on id, so referential integrity '
+            'is enforced by the API and ORM instead of a PostgreSQL foreign key.'
+        ),
     )
     name = models.CharField(max_length=255, default='Untitled Planning Project')
     client = models.CharField(max_length=255, blank=True)
