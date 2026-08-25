@@ -1,7 +1,10 @@
 """RADAI Project Planning Application — DRF serializers."""
 import calendar
+import datetime as dt
+import math
 import os
 from decimal import Decimal, ROUND_HALF_UP
+from uuid import UUID
 
 from rest_framework import serializers
 
@@ -16,6 +19,36 @@ ALLOWED_PLANNING_EXTENSIONS = {
     '.pdf', '.docx', '.xlsx', '.xlsm', '.csv', '.txt', '.md', '.xer',
     '.png', '.jpg', '.jpeg', '.tif', '.tiff',
 }
+
+
+def _json_safe(value):
+    """Normalize legacy generation snapshots for strict JSON rendering.
+
+    DRF deliberately rejects NaN and infinite numbers. Older planning
+    snapshots can contain those values inside deeply nested generated data,
+    which previously made the complete generation detail endpoint return an
+    HTML 500 response. Keep the snapshot readable while representing invalid
+    numeric results as null.
+    """
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Decimal):
+        return float(value) if value.is_finite() else None
+    if isinstance(value, str):
+        return value.encode('utf-8', errors='replace').decode('utf-8')
+    if isinstance(value, bytes):
+        return value.decode('utf-8', errors='replace')
+    if isinstance(value, (dt.date, dt.time)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return str(value)
 
 
 def _add_calendar_months(value, months):
@@ -163,6 +196,9 @@ class PlanningGenerationSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    def to_representation(self, instance):
+        return _json_safe(super().to_representation(instance))
+
 
 class PlanningGenerationEditSerializer(serializers.Serializer):
     wbs = serializers.ListField(required=False)
@@ -201,6 +237,9 @@ class PlanningJobSerializer(serializers.ModelSerializer):
             'requested_by', 'started_at', 'finished_at', 'created_at', 'updated_at',
         ]
         read_only_fields = fields
+
+    def to_representation(self, instance):
+        return _json_safe(super().to_representation(instance))
 
 
 class PlanningAuditEventSerializer(serializers.ModelSerializer):

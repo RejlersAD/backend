@@ -1,9 +1,11 @@
+import json
 from unittest.mock import patch
 import tempfile
 
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
+from rest_framework.renderers import JSONRenderer
 from rest_framework.test import APIClient
 
 from apps.core.project_models import Project, ProjectMember
@@ -11,7 +13,7 @@ from apps.users.models import User
 
 from ..access import accessible_projects
 from ..models import PlanningFile, PlanningGeneration, PlanningJob, PlanningProject
-from ..serializers import PlanningFileSerializer
+from ..serializers import PlanningFileSerializer, PlanningGenerationSerializer
 from ..services import byok_crypto
 from ..services.pipeline import generate_schedule
 from ..tasks import parse_uploaded_planning_file, run_planning_job
@@ -117,6 +119,27 @@ class GenerationRevisionTests(Phase0Fixture):
         self.assertEqual(revision.version, 2)
         self.assertEqual(revision.parent_generation_id, self.generation.id)
         self.assertEqual(revision.narrative, 'Corrected narrative')
+
+    def test_generation_detail_normalizes_non_finite_legacy_numbers(self):
+        legacy_generation = PlanningGeneration(
+            project=self.workspace,
+            version=99,
+            generated_by=self.owner,
+            intelligence={'confidence': float('nan')},
+            activities=[
+                {'id': 'A-1', 'total_float_days': float('inf')},
+                {'id': 'A-2', 'total_float_days': float('-inf')},
+            ],
+        )
+
+        rendered = JSONRenderer().render(
+            PlanningGenerationSerializer(legacy_generation).data,
+        )
+        payload = json.loads(rendered)
+
+        self.assertIsNone(payload['intelligence']['confidence'])
+        self.assertIsNone(payload['activities'][0]['total_float_days'])
+        self.assertIsNone(payload['activities'][1]['total_float_days'])
 
     @patch('apps.planning_intelligence.services.pipeline.build_narrative', return_value='Narrative')
     @patch('apps.planning_intelligence.services.pipeline.validate', return_value=[])
