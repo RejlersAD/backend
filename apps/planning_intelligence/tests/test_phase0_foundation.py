@@ -4,6 +4,7 @@ import tempfile
 
 from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import DatabaseError
 from django.test import TestCase, override_settings
 from rest_framework.renderers import JSONRenderer
 from rest_framework.test import APIClient
@@ -140,6 +141,37 @@ class GenerationRevisionTests(Phase0Fixture):
         self.assertIsNone(payload['intelligence']['confidence'])
         self.assertIsNone(payload['activities'][0]['total_float_days'])
         self.assertIsNone(payload['activities'][1]['total_float_days'])
+
+    @patch(
+        'rest_framework.mixins.RetrieveModelMixin.retrieve',
+        side_effect=DatabaseError('legacy production column is missing'),
+    )
+    def test_generation_detail_falls_back_to_legacy_schema_query(self, _retrieve):
+        client = APIClient()
+        client.force_authenticate(self.owner)
+
+        response = client.get(
+            f'/api/v1/planning-intelligence/generations/{self.generation.id}/'
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['id'], self.generation.id)
+        self.assertEqual(response.data['project'], self.workspace.id)
+        self.assertEqual(response.data['narrative'], 'Original narrative')
+
+    @patch(
+        'rest_framework.mixins.RetrieveModelMixin.retrieve',
+        side_effect=DatabaseError('legacy production column is missing'),
+    )
+    def test_legacy_schema_fallback_preserves_project_access(self, _retrieve):
+        client = APIClient()
+        client.force_authenticate(self.outsider)
+
+        response = client.get(
+            f'/api/v1/planning-intelligence/generations/{self.generation.id}/'
+        )
+
+        self.assertEqual(response.status_code, 404)
 
     @patch('apps.planning_intelligence.services.pipeline.build_narrative', return_value='Narrative')
     @patch('apps.planning_intelligence.services.pipeline.validate', return_value=[])

@@ -11,6 +11,7 @@ from django.views.decorators.http import require_http_methods
 from decouple import config
 import json
 import datetime
+import os
 
 
 class CorsTestView(View):
@@ -73,6 +74,7 @@ def railway_health_check(request):
     return JsonResponse({
         'status': 'healthy',
         'service': 'radai-backend',
+        'release': os.environ.get('RAILWAY_GIT_COMMIT_SHA', 'local')[:12],
         'timestamp': datetime.datetime.now().isoformat(),
     }, status=200)
 
