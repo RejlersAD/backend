@@ -231,11 +231,29 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
     throttle_scope = 'planning_exports'
 
     def get_queryset(self):
+        active_activities = (
+            ScheduleActivity.objects.filter(version_id=OuterRef('pk'), is_deleted=False)
+            .order_by()
+            .values('version_id')
+            .annotate(total=Count('id'))
+            .values('total')[:1]
+        )
+        active_relationships = (
+            ActivityRelationship.objects.filter(version_id=OuterRef('pk'), is_deleted=False)
+            .order_by()
+            .values('version_id')
+            .annotate(total=Count('id'))
+            .values('total')[:1]
+        )
         queryset = (
             super().get_queryset().filter(schedule__project__in=accessible_projects(self.request.user))
             .annotate(
-                activity_count=Count('activities', filter=Q(activities__is_deleted=False), distinct=True),
-                relationship_count=Count('relationships', filter=Q(relationships__is_deleted=False), distinct=True),
+                activity_count=Coalesce(
+                    Subquery(active_activities, output_field=IntegerField()), Value(0),
+                ),
+                relationship_count=Coalesce(
+                    Subquery(active_relationships, output_field=IntegerField()), Value(0),
+                ),
             )
         )
         schedule_id = self.request.query_params.get('schedule')

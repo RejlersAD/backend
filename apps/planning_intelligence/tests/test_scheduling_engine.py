@@ -203,6 +203,26 @@ class MaterializationAndAPITests(ScheduleFixture):
         self.assertNotIn('left outer join "planning_intelligence_scheduleversion"', executed_sql)
         self.assertNotIn('group by "planning_intelligence_schedule"."id"', executed_sql)
 
+    def test_schedule_version_list_avoids_outer_group_by(self):
+        first = self.activity('A', 2)
+        second = self.activity('B', 1)
+        self.link(first, second)
+        owner_client = APIClient()
+        owner_client.force_authenticate(self.owner)
+
+        with CaptureQueriesContext(connection) as queries:
+            response = owner_client.get(
+                '/api/v1/planning-intelligence/schedule-versions/', {'schedule': self.schedule.pk},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['results'][0]['activity_count'], 2)
+        self.assertEqual(response.data['results'][0]['relationship_count'], 1)
+        executed_sql = '\n'.join(query['sql'].lower() for query in queries.captured_queries)
+        self.assertNotIn('left outer join "planning_intelligence_scheduleactivity"', executed_sql)
+        self.assertNotIn('left outer join "planning_intelligence_activityrelationship"', executed_sql)
+        self.assertNotIn('group by "planning_intelligence_scheduleversion"."id"', executed_sql)
+
     def test_baseline_captures_immutable_snapshot(self):
         self.activity('A', 2)
         calculate_schedule_version(self.version)
