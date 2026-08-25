@@ -12,7 +12,10 @@
   dockerfilePath = "Dockerfile"
 
 [deploy]
-healthcheckPath = "/api/v1/health/"
-healthcheckTimeout = 300
+  # Run the complete schema upgrade before Railway starts or health-checks
+  # the web container. A non-zero exit keeps the previous release online.
+  preDeployCommand = ["python manage.py migrate --noinput --skip-checks"]
+  healthcheckPath = "/api/v1/health/"
+  healthcheckTimeout = 300
   restartPolicyType = "on_failure"
   restartPolicyMaxRetries = 10
