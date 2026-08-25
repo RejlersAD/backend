@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import logging
 
-from django.db import transaction
+from django.db import DatabaseError, connection, transaction
 from django.db.models import Max
-from django.http import HttpResponse
+from django.http import Http404, HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -341,6 +341,88 @@ class PlanningGenerationViewSet(viewsets.ReadOnlyModelViewSet):
         if project_id:
             qs = qs.filter(project_id=project_id)
         return qs
+
+    def retrieve(self, request, *args, **kwargs):
+        """Return legacy generations even when production schema drift exists.
+
+        Some imported production databases have migration records for the
+        planning foundation without every column from that migration. A normal
+        ORM retrieval then selects a missing column and PostgreSQL aborts the
+        request before DRF can serialize the otherwise valid legacy snapshot.
+        Keep the standard ORM path for healthy databases and use a narrow,
+        read-only compatibility query only for database schema failures.
+        """
+        try:
+            return super().retrieve(request, *args, **kwargs)
+        except DatabaseError:
+            logger.exception(
+                'Planning generation %s could not be read through the ORM; '
+                'using legacy schema compatibility mode.',
+                kwargs.get(self.lookup_url_kwarg or self.lookup_field),
+            )
+            payload = self._legacy_generation_payload(
+                kwargs.get(self.lookup_url_kwarg or self.lookup_field),
+                request.user,
+            )
+            return Response(payload)
+
+    @staticmethod
+    def _legacy_generation_payload(generation_id, user):
+        table_name = PlanningGeneration._meta.db_table
+        quote_name = connection.ops.quote_name
+        with connection.cursor() as cursor:
+            columns = {
+                column.name
+                for column in connection.introspection.get_table_description(cursor, table_name)
+            }
+            requested_columns = [
+                'id', 'project_id', 'version', 'parent_generation_id', 'change_summary',
+                'intelligence', 'wbs', 'activities', 'logic_matrix', 'eddr', 'milestones',
+                'manhours', 'validation', 'narrative', 'generated_by_id', 'created_at',
+            ]
+            selected_columns = [name for name in requested_columns if name in columns]
+            if not {'id', 'project_id', 'version'}.issubset(selected_columns):
+                raise DatabaseError(
+                    'Legacy planning generation table is missing required identity columns.'
+                )
+            where = f'{quote_name("id")} = %s'
+            if 'is_deleted' in columns:
+                where += f' AND NOT {quote_name("is_deleted")}'
+            cursor.execute(
+                f'SELECT {", ".join(quote_name(name) for name in selected_columns)} '
+                f'FROM {quote_name(table_name)} WHERE {where}',
+                [generation_id],
+            )
+            row = cursor.fetchone()
+
+        if row is None:
+            raise Http404
+        raw = dict(zip(selected_columns, row))
+        if not accessible_projects(user).filter(pk=raw['project_id']).exists():
+            raise Http404
+
+        payload = {
+            'id': raw['id'],
+            'project': raw['project_id'],
+            'version': raw['version'],
+            'parent_generation': raw.get('parent_generation_id'),
+            'change_summary': raw.get('change_summary', ''),
+            'intelligence': raw.get('intelligence') or {},
+            'wbs': raw.get('wbs') or [],
+            'activities': raw.get('activities') or [],
+            'logic_matrix': raw.get('logic_matrix') or [],
+            'eddr': raw.get('eddr') or [],
+            'milestones': raw.get('milestones') or [],
+            'manhours': raw.get('manhours') or {},
+            'validation': raw.get('validation') or [],
+            'narrative': raw.get('narrative') or '',
+            'generated_by': raw.get('generated_by_id'),
+            'created_at': raw.get('created_at'),
+        }
+        # Reuse the serializer's strict JSON normalization for legacy NaN,
+        # byte strings, decimals and dates without issuing another ORM query.
+        from .serializers import _json_safe
+        return _json_safe(payload)
 
     @action(detail=True, methods=['patch'], url_path='edit')
     def edit(self, request, pk=None):
