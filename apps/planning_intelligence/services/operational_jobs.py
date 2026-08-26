@@ -3,11 +3,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+from concurrent.futures import ThreadPoolExecutor
 
+from django.conf import settings
+from django.db import close_old_connections
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from ..models import PlanningJob
+
+
+logger = logging.getLogger(__name__)
+_local_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='planning-job-fallback')
 
 
 def canonical_fingerprint(payload):
@@ -158,14 +166,58 @@ def get_or_create_job(project, job_type, request_data, user, *, idempotency_key=
     return job, True
 
 
+def _run_job_with_local_connection(task, job_id):
+    """Run one emergency fallback job with thread-local database connections."""
+    close_old_connections()
+    try:
+        task.run(job_id)
+    except Exception:  # noqa: BLE001
+        logger.exception('Local planning fallback failed for job %s', job_id)
+    finally:
+        close_old_connections()
+
+
+def _dispatch_local_fallback(task, job, broker_error):
+    """Queue work on one bounded web-process thread when the broker is down."""
+    if not getattr(settings, 'PLANNING_JOB_LOCAL_FALLBACK', True):
+        return False
+    fallback_task_id = f'local-planning-job-{job.id}'
+    job.task_id = fallback_task_id
+    job.status = 'queued'
+    job.message = 'Worker queue unavailable; using local recovery worker'
+    job.error_code = ''
+    job.error_message = ''
+    job.finished_at = None
+    job.progress_log = [*(job.progress_log or []), {
+        'progress': job.progress, 'message': job.message, 'phase': 'local_fallback',
+        'at': timezone.now().isoformat(),
+    }][-100:]
+    job.save(update_fields=[
+        'task_id', 'status', 'message', 'error_code', 'error_message', 'finished_at',
+        'progress_log', 'updated_at',
+    ])
+    try:
+        _local_executor.submit(_run_job_with_local_connection, task, job.id)
+    except Exception:  # noqa: BLE001
+        logger.exception('Could not start local planning fallback for job %s', job.id)
+        return False
+    logger.warning(
+        'Celery dispatch failed for planning job %s (%s); local recovery worker accepted it',
+        job.id, type(broker_error).__name__,
+    )
+    return True
+
+
 def dispatch_job(job):
-    """Dispatch only; never execute expensive planning work in the web process."""
+    """Prefer Celery, with a bounded non-blocking recovery path for broker outages."""
     from ..tasks import run_planning_job
     try:
         result = run_planning_job.apply_async(args=[job.id], task_id=f'planning-job-{job.id}')
         job.task_id = result.id or f'planning-job-{job.id}'
         job.save(update_fields=['task_id', 'updated_at'])
     except Exception as exc:  # noqa: BLE001
+        if _dispatch_local_fallback(run_planning_job, job, exc):
+            return job
         job.status = 'failed'
         job.error_code = 'queue_unavailable'
         job.error_message = 'The background worker queue is unavailable. Retry this operation after worker recovery.'
