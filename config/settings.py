@@ -966,6 +966,15 @@ CELERY_BASE_EXTRACTION_PREFER_CELERY = config(
 )
 print(f"[CELERY] base_extraction prefer_celery: {CELERY_BASE_EXTRACTION_PREFER_CELERY}")
 
+# Planning jobs normally run through Celery. If the broker cannot accept a task,
+# keep the user request non-blocking by handing the durable job to one bounded
+# local recovery thread. Disable only when the deployment guarantees a live
+# external worker and should fail closed instead.
+PLANNING_JOB_LOCAL_FALLBACK = config(
+    'PLANNING_JOB_LOCAL_FALLBACK', default=True, cast=bool,
+)
+print(f"[CELERY] planning local fallback: {PLANNING_JOB_LOCAL_FALLBACK}")
+
 CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
