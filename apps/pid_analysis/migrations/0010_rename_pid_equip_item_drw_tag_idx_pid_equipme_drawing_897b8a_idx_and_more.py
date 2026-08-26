@@ -10,6 +10,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
         migrations.RenameIndex(
             model_name='pidequipmentitem',
             new_name='pid_equipme_drawing_897b8a_idx',
@@ -19,5 +22,7 @@ class Migration(migrations.Migration):
             model_name='pidequipmentitem',
             new_name='pid_equipme_upload__6df543_idx',
             old_name='pid_equip_item_upload_idx',
+        ),
+            ],
         ),
     ]

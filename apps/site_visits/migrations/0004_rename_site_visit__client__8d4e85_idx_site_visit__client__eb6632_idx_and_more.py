@@ -10,6 +10,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
         migrations.RenameIndex(
             model_name='clientsite',
             new_name='site_visit__client__eb6632_idx',
@@ -49,5 +52,7 @@ class Migration(migrations.Migration):
             model_name='sitevisitrequest',
             new_name='site_visit__site_id_c1fcf0_idx',
             old_name='site_visit__site_id_3f8e1d_idx',
+        ),
+            ],
         ),
     ]

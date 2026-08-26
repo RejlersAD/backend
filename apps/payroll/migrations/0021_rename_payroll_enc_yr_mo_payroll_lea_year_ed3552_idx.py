@@ -10,9 +10,14 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
         migrations.RenameIndex(
             model_name='leaveencashmentrun',
             new_name='payroll_lea_year_ed3552_idx',
             old_name='payroll_enc_yr_mo',
+        ),
+            ],
         ),
     ]

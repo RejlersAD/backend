@@ -10,45 +10,52 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameIndex(
-            model_name='budget',
-            new_name='procurement_project_cf65fc_idx',
-            old_name='procurement_budget_idx1',
-        ),
-        migrations.RenameIndex(
-            model_name='budget',
-            new_name='procurement_fiscal__0de50e_idx',
-            old_name='procurement_budget_idx2',
-        ),
-        migrations.RenameIndex(
-            model_name='costcenter',
-            new_name='procurement_code_f170f4_idx',
-            old_name='procurement_costcenter_idx1',
-        ),
-        migrations.RenameIndex(
-            model_name='costcenter',
-            new_name='procurement_departm_ea9b87_idx',
-            old_name='procurement_costcenter_idx2',
-        ),
-        migrations.RenameIndex(
-            model_name='project',
-            new_name='procurement_project_3cb8c1_idx',
-            old_name='procurement_project_idx1',
-        ),
-        migrations.RenameIndex(
-            model_name='project',
-            new_name='procurement_status_5adfc7_idx',
-            old_name='procurement_project_idx2',
-        ),
-        migrations.RenameIndex(
-            model_name='project',
-            new_name='procurement_client__88c69c_idx',
-            old_name='procurement_project_idx3',
-        ),
-        migrations.RenameIndex(
-            model_name='project',
-            new_name='procurement_start_d_19f6a3_idx',
-            old_name='procurement_project_idx4',
+        # Earlier migrations already conditionally renamed these indexes in
+        # the database. Reconcile Django's state without repeating the SQL.
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
+                migrations.RenameIndex(
+                    model_name='budget',
+                    new_name='procurement_project_cf65fc_idx',
+                    old_name='procurement_budget_idx1',
+                ),
+                migrations.RenameIndex(
+                    model_name='budget',
+                    new_name='procurement_fiscal__0de50e_idx',
+                    old_name='procurement_budget_idx2',
+                ),
+                migrations.RenameIndex(
+                    model_name='costcenter',
+                    new_name='procurement_code_f170f4_idx',
+                    old_name='procurement_costcenter_idx1',
+                ),
+                migrations.RenameIndex(
+                    model_name='costcenter',
+                    new_name='procurement_departm_ea9b87_idx',
+                    old_name='procurement_costcenter_idx2',
+                ),
+                migrations.RenameIndex(
+                    model_name='project',
+                    new_name='procurement_project_3cb8c1_idx',
+                    old_name='procurement_project_idx1',
+                ),
+                migrations.RenameIndex(
+                    model_name='project',
+                    new_name='procurement_status_5adfc7_idx',
+                    old_name='procurement_project_idx2',
+                ),
+                migrations.RenameIndex(
+                    model_name='project',
+                    new_name='procurement_client__88c69c_idx',
+                    old_name='procurement_project_idx3',
+                ),
+                migrations.RenameIndex(
+                    model_name='project',
+                    new_name='procurement_start_d_19f6a3_idx',
+                    old_name='procurement_project_idx4',
+                ),
+            ],
         ),
         migrations.AlterField(
             model_name='purchaserequisition',

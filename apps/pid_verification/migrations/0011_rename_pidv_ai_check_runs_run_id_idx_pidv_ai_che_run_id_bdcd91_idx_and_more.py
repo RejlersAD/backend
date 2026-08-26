@@ -10,6 +10,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
         migrations.RenameIndex(
             model_name='pidvaicheckrun',
             new_name='pidv_ai_che_run_id_bdcd91_idx',
@@ -69,5 +72,7 @@ class Migration(migrations.Migration):
             model_name='pidvproject',
             new_name='pidv_projec_project_5ecddd_idx',
             old_name='pidv_project_id_idx',
+        ),
+            ],
         ),
     ]

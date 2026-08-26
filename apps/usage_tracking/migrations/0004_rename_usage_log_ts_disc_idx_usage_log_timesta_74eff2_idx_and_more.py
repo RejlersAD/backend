@@ -10,6 +10,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
         migrations.RenameIndex(
             model_name='usagelog',
             new_name='usage_log_timesta_74eff2_idx',
@@ -19,5 +22,7 @@ class Migration(migrations.Migration):
             model_name='usagelog',
             new_name='usage_log_user_em_75b9a8_idx',
             old_name='usage_log_email_ts_idx',
+        ),
+            ],
         ),
     ]

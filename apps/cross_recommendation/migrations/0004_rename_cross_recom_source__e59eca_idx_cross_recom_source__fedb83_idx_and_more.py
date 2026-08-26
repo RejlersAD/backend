@@ -9,25 +9,33 @@ class Migration(migrations.Migration):
         ('cross_recommendation', '0003_rename_cross_recom_source__e59eca_idx_cross_recom_source__fedb83_idx_and_more'),
     ]
 
+    # Migrations 0002 and 0003 already perform these database renames with
+    # conditional SQL. Keep 0004 as a state-only reconciliation so a fresh
+    # database does not attempt to rename the same indexes a third time.
     operations = [
-        migrations.RenameIndex(
-            model_name='crossrecommendationlink',
-            new_name='cross_recom_source__fedb83_idx',
-            old_name='cross_recom_source__e59eca_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='crossrecommendationlink',
-            new_name='cross_recom_target__4d2a9e_idx',
-            old_name='cross_recom_target__7d77b4_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='crossrecommendationlink',
-            new_name='cross_recom_project_ed1a64_idx',
-            old_name='cross_recom_project_6d8f4f_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='crossrecommendationlink',
-            new_name='cross_recom_decisio_e81fbf_idx',
-            old_name='cross_recom_decisio_2e9d00_idx',
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
+                migrations.RenameIndex(
+                    model_name='crossrecommendationlink',
+                    new_name='cross_recom_source__fedb83_idx',
+                    old_name='cross_recom_source__e59eca_idx',
+                ),
+                migrations.RenameIndex(
+                    model_name='crossrecommendationlink',
+                    new_name='cross_recom_target__4d2a9e_idx',
+                    old_name='cross_recom_target__7d77b4_idx',
+                ),
+                migrations.RenameIndex(
+                    model_name='crossrecommendationlink',
+                    new_name='cross_recom_project_ed1a64_idx',
+                    old_name='cross_recom_project_6d8f4f_idx',
+                ),
+                migrations.RenameIndex(
+                    model_name='crossrecommendationlink',
+                    new_name='cross_recom_decisio_e81fbf_idx',
+                    old_name='cross_recom_decisio_2e9d00_idx',
+                ),
+            ],
         ),
     ]

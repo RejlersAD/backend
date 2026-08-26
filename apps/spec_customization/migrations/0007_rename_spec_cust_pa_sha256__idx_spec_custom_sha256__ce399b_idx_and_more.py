@@ -10,6 +10,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
         migrations.RenameIndex(
             model_name='paperspecdocument',
             new_name='spec_custom_sha256__ce399b_idx',
@@ -39,5 +42,7 @@ class Migration(migrations.Migration):
             model_name='pipingclasscomponent',
             new_name='spec_custom_piping__35b7ee_idx',
             old_name='spec_cust_pcc_pc_type_idx',
+        ),
+            ],
         ),
     ]
