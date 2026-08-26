@@ -200,6 +200,7 @@ INSTALLED_APPS = [
     'apps.instrument_tools',     # Instrument Tools — IO List / Cable Block Diagram / Cable Schedule (Generator + QC)
     'apps.instrument_io_workflow',  # Instrument IO List Workflow — CRS-style multi-revision IO List doc handling
     'apps.spec_customization',   # Spec Customization — Paper Spec PDF extraction (Piping Classes)
+    'apps.valve_standards',      # Valve Standards Reference — ASME B16.34 pressure/wall-thickness/material DB
     'apps.marketing_analytics',  # Marketing Analytics — Google Analytics (GA4) real-time dashboard widget
     'apps.timesheet',            # Time Sheet Analytics — SQL Server attendance integration
     'apps.project_control',      # Project Management — phased cost dashboards, estimates, documents, AI take-off (stubbed)

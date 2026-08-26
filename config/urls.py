@@ -236,6 +236,11 @@ if is_app_installed('apps.spec_customization'):
     urlpatterns.append(path('api/v1/spec-customization/', include('apps.spec_customization.urls')))
     print("[URL] ✅ Spec Customization URLs registered")
 
+# Valve Standards Reference — ASME B16.34 pressure/wall-thickness/material DB
+if is_app_installed('apps.valve_standards'):
+    urlpatterns.append(path('api/v1/valve-standards/', include('apps.valve_standards.urls')))
+    print("[URL] ✅ Valve Standards Reference URLs registered")
+
 # MLflow Model Orchestration API (DISABLED - not in use)
 # urlpatterns.extend([
 #     path('api/v1/mlflow/', include('apps.mlflow_integration.urls')),

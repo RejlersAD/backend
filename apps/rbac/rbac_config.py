@@ -49,6 +49,7 @@ ALL_MODULES_CATALOGUE = [
     {'code': 'spec_customization',     'name': 'Spec Customization',           'icon': 'Settings',    'order': 21, 'description': 'Engineering specification customization tools'},
     {'code': 'non_teff_metadata',      'name': 'Non-TEFF Metadata Extractor',  'icon': 'Search',      'order': 22, 'description': 'Extract metadata from Non-TEFF documents (PDF, Excel, Word, AutoCAD)'},
     {'code': 'smart_plant_3d',         'name': 'Smart Plant 3D',               'icon': 'Cube',        'order': 23, 'description': 'Extract and synchronize data from SmartPlant 3D models and databases'},
+    {'code': 'valve_standards_reference', 'name': 'Valve Standards Reference', 'icon': 'Database',    'order': 24, 'description': 'ASME B16.34 valve pressure-temperature ratings, wall thickness, and material specification database'},
     # ── Process sub-module codes (granular per sidebar item) ───────────────────
     {'code': 'pid_line_list',          'name': 'Line List',                    'icon': 'TableCells',  'order': 23, 'description': 'Extract base line list columns from P&ID drawings'},
     {'code': 'pid_equipment_list',     'name': 'Equipment List',               'icon': 'TableCells',  'order': 23, 'description': 'Extract equipment tags and type classification from P&ID'},
@@ -348,6 +349,7 @@ DEFAULT_ROLE_MODULES = [
     # ── Digital Transformation ────────────────────────────────────────
     'spec_customization',
     'non_teff_metadata',
+    'valve_standards_reference',
     # ── Common & Integration ──────────────────────────────────────────
     'crs_documents',
     'pfd_to_pid',
@@ -389,6 +391,7 @@ ENGINEERING_SECTION_MODULES = [
     'digitization_datasheet',
     'spec_customization',
     'non_teff_metadata',
+    'valve_standards_reference',
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -480,6 +483,7 @@ MODULE_DISCIPLINE_MAP = {
     'spec_customization': 'Digitization',
     'non_teff_metadata': 'Digitization',
     'smart_plant_3d': 'Digitization',
+    'valve_standards_reference': 'Digitization',
     'qhse':              'QHSE',
     'crs_documents':     'CRS',
     'user_mgmt':         'Admin',
