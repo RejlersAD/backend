@@ -14,12 +14,36 @@ class Migration(migrations.Migration):
     operations = [
         migrations.RunSQL(
             sql="""
-                ALTER TABLE procurement_requisitions 
-                RENAME COLUMN current_approval_level TO current_approval_step;
+                DO $$ BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'procurement_requisitions'
+                          AND column_name = 'current_approval_level'
+                    ) AND NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'procurement_requisitions'
+                          AND column_name = 'current_approval_step'
+                    ) THEN
+                        ALTER TABLE procurement_requisitions
+                        RENAME COLUMN current_approval_level TO current_approval_step;
+                    END IF;
+                END $$;
             """,
             reverse_sql="""
-                ALTER TABLE procurement_requisitions 
-                RENAME COLUMN current_approval_step TO current_approval_level;
+                DO $$ BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'procurement_requisitions'
+                          AND column_name = 'current_approval_step'
+                    ) AND NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'procurement_requisitions'
+                          AND column_name = 'current_approval_level'
+                    ) THEN
+                        ALTER TABLE procurement_requisitions
+                        RENAME COLUMN current_approval_step TO current_approval_level;
+                    END IF;
+                END $$;
             """,
         ),
     ]

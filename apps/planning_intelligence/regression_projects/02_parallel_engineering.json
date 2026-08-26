@@ -1,0 +1,6 @@
+{
+  "code": "parallel_engineering_1000",
+  "description": "Large multi-discipline parallel engineering network.",
+  "network": {"activity_count": 1000, "shape": "parallel_branches", "branches": 25},
+  "expected": {"activity_count": 1000, "open_start_count": 1, "open_finish_count": 1, "has_cycle": false}
+}

@@ -6,6 +6,7 @@ operation is intentionally idempotent and leaves existing columns/data intact.
 """
 
 from django.db import migrations
+from django.core.exceptions import FieldDoesNotExist
 
 
 FIELD_NAMES = (
@@ -27,7 +28,12 @@ def add_missing_columns(apps, schema_editor):
     existing_columns = {column.name for column in description}
 
     for field_name in FIELD_NAMES:
-        field = Requisition._meta.get_field(field_name)
+        try:
+            field = Requisition._meta.get_field(field_name)
+        except FieldDoesNotExist:
+            # The clean migration state never contained some legacy branch
+            # fields. They only need repair where that branch is present.
+            continue
         if field.column not in existing_columns:
             schema_editor.add_field(Requisition, field)
             existing_columns.add(field.column)

@@ -94,6 +94,14 @@ def planning_project_for_object(obj):
     project = getattr(file_obj, 'project', None)
     if isinstance(project, PlanningProject):
         return project
+    basis = getattr(obj, 'basis', None)
+    project = getattr(basis, 'project', None)
+    if isinstance(project, PlanningProject):
+        return project
+    plan = getattr(obj, 'plan', None)
+    project = getattr(plan, 'project', None)
+    if isinstance(project, PlanningProject):
+        return project
     run = getattr(obj, 'run', None)
     return getattr(run, 'project', None)
 

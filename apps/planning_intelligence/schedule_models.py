@@ -167,6 +167,7 @@ class ActivityRelationship(BaseModel):
     successor = models.ForeignKey(ScheduleActivity, on_delete=models.CASCADE, related_name='predecessor_links')
     relationship_type = models.CharField(max_length=2, choices=TYPE_CHOICES, default='FS')
     lag_days = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ['successor__sort_order', 'predecessor__sort_order']
@@ -183,6 +184,10 @@ class ScheduleResource(BaseModel):
     role = models.CharField(max_length=120, blank=True)
     unit = models.CharField(max_length=32, default='hour')
     unit_cost = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    capacity_units_per_day = models.DecimalField(
+        max_digits=12, decimal_places=2, default=8,
+        help_text='Maximum available units per working day for concurrency checks.',
+    )
 
     class Meta:
         ordering = ['code']
@@ -236,6 +241,38 @@ class ScheduleCalculationRun(BaseModel):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class ScheduleAssuranceReview(BaseModel):
+    """Durable Phase 3 assessment of one exact calculated schedule state."""
+
+    STATUS_CHOICES = [
+        ('draft', 'Draft'), ('ready', 'Ready'), ('approved', 'Approved'),
+        ('superseded', 'Superseded'),
+    ]
+
+    version = models.ForeignKey(ScheduleVersion, on_delete=models.CASCADE, related_name='assurance_reviews')
+    calculation_run = models.ForeignKey(
+        ScheduleCalculationRun, on_delete=models.PROTECT, related_name='assurance_reviews',
+    )
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='draft', db_index=True)
+    network_validation = models.JSONField(default=dict, blank=True)
+    contract_scenarios = models.JSONField(default=dict, blank=True)
+    resource_validation = models.JSONField(default=dict, blank=True)
+    change_comparison = models.JSONField(default=dict, blank=True)
+    blockers = models.JSONField(default=list, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+    calculated_state_at = models.DateTimeField()
+    input_fingerprint = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='schedule_assurance_reviews_approved',
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['version', 'status'])]
 
 
 class ActivityProgressUpdate(BaseModel):

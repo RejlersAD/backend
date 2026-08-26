@@ -19,6 +19,7 @@ from ..models import (
 )
 from ..services.cpm import SchedulingError, calculate_schedule_version
 from ..services.schedule_materializer import materialize_generation
+from ..services.trustworthy_scheduling import approve_schedule_assurance, run_schedule_assurance
 
 
 class ScheduleFixture(TestCase):
@@ -137,6 +138,21 @@ class CalendarAwareCPMTests(ScheduleFixture):
         self.assertTrue(activity.is_critical)
         self.assertEqual(run.issues[0]['code'], 'constraint_violation')
 
+    def test_contractual_finish_drives_float_and_reports_overrun(self):
+        self.project.planned_end_date = dt.date(2026, 8, 26)
+        self.project.save(update_fields=['planned_end_date', 'updated_at'])
+        activity = self.activity('LATE', 4)
+
+        run = calculate_schedule_version(self.version)
+        activity.refresh_from_db()
+
+        self.assertEqual(activity.planned_finish, dt.date(2026, 8, 27))
+        self.assertEqual(activity.total_float_days, -1)
+        overrun = next(item for item in run.issues if item['code'] == 'contractual_finish_overrun')
+        self.assertEqual(overrun['contractual_finish'], '2026-08-26')
+        self.assertEqual(overrun['forecast_finish'], '2026-08-27')
+        self.assertEqual(overrun['variance_working_days'], 1)
+
 
 class MaterializationAndAPITests(ScheduleFixture):
     def test_generation_materializes_wbs_logic_resources_and_is_idempotent(self):
@@ -228,12 +244,18 @@ class MaterializationAndAPITests(ScheduleFixture):
         calculate_schedule_version(self.version)
         client = APIClient()
         client.force_authenticate(self.owner)
+        run_schedule_assurance(self.version)
+        approve_schedule_assurance(self.version, self.owner)
+        schedule_approval = client.post(
+            f'/api/v1/planning-intelligence/schedule-versions/{self.version.pk}/approve/',
+        )
 
         response = client.post(
             f'/api/v1/planning-intelligence/schedule-versions/{self.version.pk}/baseline/',
             {'name': 'Contract Baseline'}, format='json',
         )
 
+        self.assertEqual(schedule_approval.status_code, 200)
         self.assertEqual(response.status_code, 201)
         self.version.refresh_from_db()
         self.assertEqual(self.version.status, 'baselined')
@@ -307,6 +329,8 @@ class MaterializationAndAPITests(ScheduleFixture):
         calculate_schedule_version(self.version)
         client = APIClient()
         client.force_authenticate(self.owner)
+        run_schedule_assurance(self.version)
+        approve_schedule_assurance(self.version, self.owner)
 
         approve_response = client.post(
             f'/api/v1/planning-intelligence/schedule-versions/{self.version.pk}/approve/',
@@ -334,6 +358,8 @@ class MaterializationAndAPITests(ScheduleFixture):
         self.version.save(update_fields=['source_generation', 'updated_at'])
         self.activity('A', 1)
         calculate_schedule_version(self.version)
+        run_schedule_assurance(self.version)
+        approve_schedule_assurance(self.version, self.owner)
         client = APIClient()
         client.force_authenticate(self.owner)
 
@@ -344,6 +370,19 @@ class MaterializationAndAPITests(ScheduleFixture):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data['code'], 'schedule_assurance_blocked')
         self.assertEqual(response.data['unconfirmed_gate_count'], 1)
+
+    def test_contract_overrun_blocks_phase3_assurance_approval(self):
+        self.project.planned_end_date = dt.date(2026, 8, 24)
+        self.project.save(update_fields=['planned_end_date', 'updated_at'])
+        self.activity('LATE', 3)
+        calculate_schedule_version(self.version)
+
+        review = run_schedule_assurance(self.version)
+
+        self.assertEqual(review.status, 'draft')
+        self.assertTrue(any(row['code'] == 'contract_finish_overrun' for row in review.blockers))
+        with self.assertRaisesMessage(ValueError, 'Resolve all critical'):
+            approve_schedule_assurance(self.version, self.owner)
 
     def test_progress_update_builds_evm_forecast_and_s_curve(self):
         activity = self.activity('A', 2)

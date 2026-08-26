@@ -58,11 +58,15 @@ def parse_uploaded_planning_file(file_id):
     return {'file_id': planning_file.id, 'parse_status': planning_file.parse_status}
 
 
-@shared_task(bind=True, name='apps.planning_intelligence.tasks.run_planning_job')
+@shared_task(
+    bind=True, acks_late=True, reject_on_worker_lost=True,
+    name='apps.planning_intelligence.tasks.run_planning_job',
+)
 def run_planning_job(self, job_id):
     """Run a durable analysis/generation job and persist progress for polling."""
     from .models import PlanningJob
     from .services.audit import record_event
+    from .services.operational_jobs import update_job_progress
     from .services.pipeline import analyze_documents, generate_schedule
 
     try:
@@ -71,18 +75,31 @@ def run_planning_job(self, job_id):
         return {'job_id': job_id, 'error': 'not_found'}
     if job.status == 'cancelled':
         return {'job_id': job_id, 'status': 'cancelled'}
+    if job.status == 'succeeded':
+        return {'job_id': job.id, 'status': job.status, 'idempotent_replay': True}
 
     job.status = 'running'
-    job.progress = 10
-    job.message = 'Reading parsed project documents'
     job.started_at = timezone.now()
+    job.heartbeat_at = job.started_at
+    job.attempt_count += 1
     job.task_id = self.request.id or job.task_id
-    job.save(update_fields=['status', 'progress', 'message', 'started_at', 'task_id', 'updated_at'])
+    job.save(update_fields=['status', 'started_at', 'heartbeat_at', 'attempt_count', 'task_id', 'updated_at'])
+    update_job_progress(job, 5, 'Worker accepted the job', phase='started')
 
     try:
         if job.job_type == 'analyze':
+            update_job_progress(job, 15, 'Reading parsed project documents', phase='documents')
             intelligence = analyze_documents(job.project, user=job.requested_by, force=True)
-            job.result_data = {'intelligence': intelligence}
+            from .models import DocumentIntelligenceRun
+            from .services.schedule_basis import build_schedule_basis
+            run = DocumentIntelligenceRun.objects.get(pk=intelligence['document_intelligence_run_id'])
+            basis = run.schedule_bases.filter(is_deleted=False).first() or build_schedule_basis(run)
+            job.result_data = {
+                'intelligence': intelligence,
+                'schedule_basis_id': basis.id,
+                'schedule_basis_version': basis.version,
+                'schedule_basis_readiness': basis.readiness,
+            }
             job.message = 'Document intelligence completed'
             record_event(
                 project=job.project, actor=job.requested_by, action='intelligence.completed', entity=job,
@@ -91,21 +108,29 @@ def run_planning_job(self, job_id):
                     'evidence_summary': intelligence.get('evidence_summary') or {},
                 },
             )
-        else:
-            job.progress = 35
-            job.message = 'Building WBS, logic, schedule and deliverables'
-            job.save(update_fields=['progress', 'message', 'updated_at'])
-            generation = generate_schedule(
+        elif job.job_type == 'preview':
+            from .services.pipeline import preview_schedule
+            update_job_progress(job, 20, 'Building deterministic schedule preview', phase='preview')
+            preview = preview_schedule(
                 job.project, user=job.requested_by,
                 overrides=(job.request_data or {}).get('intelligence_overrides'),
             )
-            job.progress = 75
-            job.message = 'Materializing and calculating the CPM schedule'
-            job.save(update_fields=['progress', 'message', 'updated_at'])
+            update_job_progress(job, 90, 'Persisting preview validation results', phase='preview_persistence')
+            job.result_data = {'preview': preview}
+            job.message = 'Schedule preview completed'
+        elif job.job_type == 'generate':
+            update_job_progress(job, 20, 'Building evidence-controlled WBS and activities', phase='generation')
+            generation = generate_schedule(
+                job.project, user=job.requested_by,
+                overrides=(job.request_data or {}).get('intelligence_overrides'),
+                input_fingerprint=job.idempotency_key,
+            )
+            update_job_progress(job, 65, 'Materializing the relational schedule', phase='materialization')
             from .services.schedule_materializer import materialize_generation
             schedule_version, calculation_run, materialization_issues = materialize_generation(
                 generation, requested_by=job.requested_by,
             )
+            update_job_progress(job, 90, 'Finalizing CPM dates and persistent results', phase='finalizing')
             job.result_generation = generation
             job.result_data = {
                 'generation_id': generation.id,
@@ -120,10 +145,111 @@ def run_planning_job(self, job_id):
                 project=job.project, actor=job.requested_by, action='generation.created',
                 entity=generation, after={'version': generation.version}, metadata={'job_id': job.id},
             )
+        elif job.job_type == 'build_plan':
+            from django.db import transaction
+            from .models import ScheduleBasis
+            from .services.generation_plan import build_generation_plan
+            basis = ScheduleBasis.objects.get(
+                pk=(job.request_data or {}).get('basis_id'), project=job.project, is_deleted=False,
+            )
+            update_job_progress(job, 20, 'Classifying approved deliverables and source evidence', phase='classification')
+            existing_plan_id = (job.result_data or {}).get('generation_plan_id')
+            if existing_plan_id:
+                plan = job.project.generation_plans.get(pk=existing_plan_id, is_deleted=False)
+            else:
+                # Commit the generated plan and its durable job pointer together. A worker retry
+                # can therefore reuse the output instead of creating another plan version.
+                with transaction.atomic():
+                    plan = build_generation_plan(basis)
+                    job.result_data = {'generation_plan_id': plan.id}
+                    job.save(update_fields=['result_data', 'updated_at'])
+            update_job_progress(job, 90, 'Saving phases, scenarios, and dependency logic', phase='plan_persistence')
+            job.result_data = {
+                'generation_plan_id': plan.id, 'generation_plan_version': plan.version,
+                'generation_plan_status': plan.status, 'readiness': plan.readiness,
+            }
+            job.message = f'Generation Plan v{plan.version} completed'
+            record_event(
+                project=job.project, actor=job.requested_by, action='generation_plan.created', entity=plan,
+                after={'version': plan.version, 'readiness': plan.readiness}, metadata={'job_id': job.id},
+            )
+        elif job.job_type == 'workable_plan':
+            from .services.workable_plan import approve_workable_baseline, build_workable_plan
+            request_data = dict(job.request_data or {})
+            progress_callback = lambda progress, message, phase, details=None: update_job_progress(
+                job, progress, message, phase=phase, details=details,
+            )
+            if request_data.get('approval'):
+                approval = request_data['approval']
+                job.result_data = approve_workable_baseline(
+                    job.project, job.requested_by, approval.get('schedule_version_id'),
+                    approval.get('name'), progress_callback,
+                )
+            else:
+                request_data['output_fingerprint'] = job.idempotency_key
+                job.result_data = build_workable_plan(
+                    job.project, job.requested_by, request_data, progress_callback,
+                )
+            state = job.result_data.get('state')
+            job.message = (
+                'Workable plan baseline approved' if state == 'baselined'
+                else 'Workable plan is ready for baseline approval' if state == 'ready_for_approval'
+                else 'Planner decisions are required'
+            )
+            record_event(
+                project=job.project, actor=job.requested_by, action='workable_plan.completed', entity=job,
+                after={'state': state, 'schedule_version_id': (job.result_data.get('summary') or {}).get('schedule_version_id')},
+            )
+        elif job.job_type == 'calculate':
+            from .models import ScheduleVersion
+            from .services.cpm import calculate_schedule_version
+            version = ScheduleVersion.objects.get(
+                pk=(job.request_data or {}).get('schedule_version_id'),
+                schedule__project=job.project, is_deleted=False,
+            )
+            if version.status in {'approved', 'baselined', 'superseded'}:
+                raise ValueError('This schedule version is immutable.')
+            update_job_progress(job, 20, 'Validating activity network and calendars', phase='network')
+            calculation_run = calculate_schedule_version(version, requested_by=job.requested_by)
+            update_job_progress(job, 90, 'Persisting dates, float, and critical path', phase='persistence')
+            job.result_data = {
+                'schedule_version_id': version.id, 'calculation_run_id': calculation_run.id,
+                'project_finish': calculation_run.project_finish.isoformat() if calculation_run.project_finish else None,
+                'issues': calculation_run.issues,
+            }
+            job.message = 'CPM calculation completed'
+            record_event(project=job.project, actor=job.requested_by, action='schedule.calculated_async', entity=job, after=job.result_data)
+        elif job.job_type == 'assurance':
+            from .models import ScheduleVersion
+            from .services.trustworthy_scheduling import run_schedule_assurance
+            version = ScheduleVersion.objects.get(
+                pk=(job.request_data or {}).get('schedule_version_id'),
+                schedule__project=job.project, is_deleted=False,
+            )
+            update_job_progress(job, 20, 'Running expanded network validation', phase='network_assurance')
+            review = run_schedule_assurance(version, requested_by=job.requested_by)
+            update_job_progress(job, 85, 'Saving contract, resource, and comparison results', phase='assurance_persistence')
+            job.result_data = {
+                'schedule_version_id': version.id, 'assurance_review_id': review.id,
+                'assurance_status': review.status, 'blocker_count': len(review.blockers),
+                'warning_count': len(review.warnings),
+            }
+            job.message = 'Phase 3 schedule assurance completed'
+            record_event(project=job.project, actor=job.requested_by, action='schedule.assurance_run_async', entity=job, after=job.result_data)
+        else:
+            raise ValueError(f'Unsupported planning job type: {job.job_type}')
         job.status = 'succeeded'
         job.progress = 100
         job.finished_at = timezone.now()
-        job.save(update_fields=['status', 'progress', 'message', 'result_data', 'result_generation', 'finished_at', 'updated_at'])
+        job.heartbeat_at = job.finished_at
+        job.progress_log = [*(job.progress_log or []), {
+            'progress': 100, 'message': job.message, 'phase': 'completed',
+            'at': job.finished_at.isoformat(),
+        }][-100:]
+        job.save(update_fields=[
+            'status', 'progress', 'message', 'progress_log', 'result_data', 'result_generation',
+            'finished_at', 'heartbeat_at', 'updated_at',
+        ])
         record_event(
             project=job.project, actor=job.requested_by, action='job.completed', entity=job,
             after={'job_type': job.job_type, 'status': job.status},
@@ -135,7 +261,12 @@ def run_planning_job(self, job_id):
         job.error_message = f'Planning job failed. Contact support with job id {job.id}.'
         job.message = 'Planning job failed'
         job.finished_at = timezone.now()
-        job.save(update_fields=['status', 'error_code', 'error_message', 'message', 'finished_at', 'updated_at'])
+        job.heartbeat_at = job.finished_at
+        job.progress_log = [*(job.progress_log or []), {
+            'progress': job.progress, 'message': job.message, 'phase': 'failed',
+            'at': job.finished_at.isoformat(),
+        }][-100:]
+        job.save(update_fields=['status', 'error_code', 'error_message', 'message', 'finished_at', 'heartbeat_at', 'progress_log', 'updated_at'])
         record_event(
             project=job.project, actor=job.requested_by, action='job.failed', entity=job,
             after={'job_type': job.job_type, 'error_code': job.error_code},

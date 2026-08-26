@@ -10,6 +10,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
         migrations.RenameIndex(
             model_name='nonteffbatchitem',
             new_name='non_teff_me_batch_i_2cd8f0_idx',
@@ -24,5 +27,7 @@ class Migration(migrations.Migration):
             model_name='nonteffproject',
             new_name='non_teff_me_created_06767f_idx',
             old_name='ntm_proj_creator_upd_idx',
+        ),
+            ],
         ),
     ]

@@ -10,6 +10,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
         migrations.RenameIndex(
             model_name='activityevent',
             new_name='activity_ev_user_id_f3fd17_idx',
@@ -69,5 +72,7 @@ class Migration(migrations.Migration):
             model_name='monthlychampion',
             new_name='monthly_cha_user_id_769211_idx',
             old_name='champion_user_period_idx',
+        ),
+            ],
         ),
     ]

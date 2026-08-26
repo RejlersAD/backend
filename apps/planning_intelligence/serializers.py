@@ -237,14 +237,29 @@ class PlanningGenerationEditSerializer(serializers.Serializer):
 
 
 class PlanningJobSerializer(serializers.ModelSerializer):
+    api_contract_version = serializers.SerializerMethodField()
+    poll_url = serializers.SerializerMethodField()
+    terminal = serializers.SerializerMethodField()
+
     class Meta:
         model = PlanningJob
         fields = [
             'id', 'project', 'job_type', 'status', 'progress', 'message',
             'result_data', 'result_generation', 'error_code', 'error_message',
+            'idempotency_key', 'progress_log', 'heartbeat_at', 'attempt_count', 'task_id',
+            'api_contract_version', 'poll_url', 'terminal',
             'requested_by', 'started_at', 'finished_at', 'created_at', 'updated_at',
         ]
         read_only_fields = fields
+
+    def get_api_contract_version(self, obj):
+        return 4
+
+    def get_poll_url(self, obj):
+        return f'/api/v1/planning-intelligence/jobs/{obj.id}/'
+
+    def get_terminal(self, obj):
+        return obj.status in {'succeeded', 'failed', 'cancelled'}
 
     def to_representation(self, instance):
         return _json_safe(super().to_representation(instance))

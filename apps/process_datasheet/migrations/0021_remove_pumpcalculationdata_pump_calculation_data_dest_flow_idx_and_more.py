@@ -9,7 +9,12 @@ class Migration(migrations.Migration):
         ('process_datasheet', '0020_remove_pumpcalculationdata_pump_calculation_data_dest_flow_idx_and_more'),
     ]
 
+    # Migrations 0019 and 0020 already apply these index changes with
+    # idempotent SQL. This final generated migration reconciles state only.
     operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
         migrations.RemoveIndex(
             model_name='pumpcalculationdata',
             name='pump_calculation_data_dest_flow_idx',
@@ -42,5 +47,7 @@ class Migration(migrations.Migration):
             model_name='pumphydraulicsnapshot',
             new_name='process_dat_user_id_4fd13a_idx',
             old_name='ph_snap_user_idx',
+        ),
+            ],
         ),
     ]

@@ -208,7 +208,24 @@ def calculate_schedule_version(version, *, requested_by=None):
                         })
                 early[pk] = start
 
-            project_finish = max(early[pk] + nodes[pk].duration for pk in order)
+            network_finish = max(early[pk] + nodes[pk].duration for pk in order)
+            contractual_finish = schedule.project.planned_end_date
+            contractual_finish_index = None
+            contractual_variance = None
+            if contractual_finish:
+                contractual_finish_index = (
+                    calendar.index_of(calendar.on_or_before(contractual_finish)) + 1
+                )
+                contractual_variance = network_finish - contractual_finish_index
+
+            # Use the contractual finish for the backward pass. A network that
+            # cannot meet it now exposes negative float instead of silently
+            # treating its own late forecast as the target finish.
+            project_finish = (
+                contractual_finish_index
+                if contractual_finish_index is not None
+                else network_finish
+            )
             late = {pk: project_finish - nodes[pk].duration for pk in order}
             for pk, upper in upper_bounds.items():
                 late[pk] = min(late[pk], upper)
@@ -243,6 +260,13 @@ def calculate_schedule_version(version, *, requested_by=None):
 
             finish_index = max(early[pk] + max(nodes[pk].duration - 1, 0) for pk in order)
             finish_date = calendar.date_at(finish_index)
+            if contractual_variance is not None and contractual_variance > 0:
+                issues.append({
+                    'code': 'contractual_finish_overrun',
+                    'contractual_finish': contractual_finish.isoformat(),
+                    'forecast_finish': finish_date.isoformat(),
+                    'variance_working_days': contractual_variance,
+                })
             version.status = 'calculated'
             version.calculated_at = timezone.now()
             version.calculated_finish = finish_date

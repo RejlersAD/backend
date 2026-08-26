@@ -9,15 +9,22 @@ class Migration(migrations.Migration):
         ('invoice_tracker', '0003_rename_invoice_tra_account_dab1bb_idx_invoice_tra_account_55b104_idx_and_more'),
     ]
 
+    # The preceding conditional SQL migrations already rename these indexes.
+    # This migration only needs to bring Django's model state into alignment.
     operations = [
-        migrations.RenameIndex(
-            model_name='customerinvoice',
-            new_name='invoice_tra_account_55b104_idx',
-            old_name='invoice_tra_account_dab1bb_idx',
-        ),
-        migrations.RenameIndex(
-            model_name='customerinvoice',
-            new_name='invoice_tra_rad_pro_21a969_idx',
-            old_name='invoice_tra_rad_pro_71f8b9_idx',
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
+                migrations.RenameIndex(
+                    model_name='customerinvoice',
+                    new_name='invoice_tra_account_55b104_idx',
+                    old_name='invoice_tra_account_dab1bb_idx',
+                ),
+                migrations.RenameIndex(
+                    model_name='customerinvoice',
+                    new_name='invoice_tra_rad_pro_21a969_idx',
+                    old_name='invoice_tra_rad_pro_71f8b9_idx',
+                ),
+            ],
         ),
     ]

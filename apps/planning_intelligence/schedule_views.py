@@ -30,20 +30,24 @@ from .models import (
     ScheduleExportRecord, ScheduleReview, ScheduleReviewDecision, ScheduleVersion,
     ScheduleWBSNode, WorkCalendar,
 )
-from .serializers import PlanningAuditEventSerializer
+from .serializers import PlanningAuditEventSerializer, PlanningJobSerializer
 from .schedule_serializers import (
     ActivityAssignmentSerializer, ActivityProgressUpdateSerializer, ActivityRelationshipSerializer,
     BulkActivityEditSerializer, BulkProgressUpdateSerializer, CalendarExceptionSerializer, ControlDateSerializer,
     DailyFieldUpdateSerializer,
     ScheduleActivitySerializer, ScheduleBaselineSerializer,
-    ScheduleCalculationRunSerializer, ScheduleResourceSerializer, ScheduleSerializer,
+    ScheduleAssuranceReviewSerializer, ScheduleCalculationRunSerializer, ScheduleResourceSerializer, ScheduleSerializer,
     ScheduleControlSnapshotSerializer, ScheduleVersionSerializer, ScheduleWBSNodeSerializer,
     WorkCalendarSerializer,
 )
 from .services.audit import record_event
-from .services.cpm import SchedulingError, calculate_schedule_version
+from .services.activity_generator import build_activities
 from .services.project_controls import build_control_dashboard, capture_control_snapshot
 from .services.schedule_exports import generate_schedule_export
+from .services.operational_jobs import (
+    assurance_state_fingerprint, dispatch_job, get_or_create_job, schedule_state_fingerprint,
+)
+from .services.trustworthy_scheduling import approve_schedule_assurance, current_assurance
 
 
 def _build_deliverable_summaries(activities):
@@ -184,42 +188,64 @@ class ScheduleViewSet(SoftDeleteViewSet):
                 change_summary=summary, created_by=request.user,
             )
             if source:
-                node_map = {}
-                source_nodes = list(source.wbs_nodes.filter(is_deleted=False).order_by('sort_order'))
-                for node in source_nodes:
-                    node_map[node.pk] = ScheduleWBSNode.objects.create(
+                source_nodes = list(
+                    source.wbs_nodes.filter(is_deleted=False).order_by('sort_order')
+                )
+                node_map = {
+                    node.pk: ScheduleWBSNode(
                         version=version, code=node.code, name=node.name, level=node.level,
                         sort_order=node.sort_order, discipline=node.discipline,
                     )
+                    for node in source_nodes
+                }
+                ScheduleWBSNode.objects.bulk_create(list(node_map.values()), batch_size=500)
+                parent_updates = []
                 for node in source_nodes:
                     if node.parent_id in node_map:
                         clone = node_map[node.pk]
                         clone.parent = node_map[node.parent_id]
-                        clone.save(update_fields=['parent', 'updated_at'])
-                activity_map = {}
-                for item in source.activities.filter(is_deleted=False).order_by('sort_order'):
-                    clone = ScheduleActivity.objects.create(
-                        version=version, wbs_node=node_map.get(item.wbs_node_id), calendar=item.calendar,
+                        parent_updates.append(clone)
+                if parent_updates:
+                    ScheduleWBSNode.objects.bulk_update(parent_updates, ['parent'], batch_size=500)
+
+                source_activities = list(
+                    source.activities.filter(is_deleted=False).order_by('sort_order')
+                )
+                activity_map = {
+                    item.pk: ScheduleActivity(
+                        version=version, wbs_node=node_map.get(item.wbs_node_id),
+                        calendar_id=item.calendar_id,
                         external_id=item.external_id, name=item.name, activity_type=item.activity_type,
                         duration_days=item.duration_days, discipline=item.discipline,
                         responsible_role=item.responsible_role, constraint_type=item.constraint_type,
                         constraint_date=item.constraint_date, sort_order=item.sort_order, metadata=item.metadata,
                     )
-                    activity_map[item.pk] = clone
-                for link in source.relationships.filter(is_deleted=False):
+                    for item in source_activities
+                }
+                ScheduleActivity.objects.bulk_create(list(activity_map.values()), batch_size=500)
+
+                relationship_rows = []
+                for link in source.relationships.filter(is_deleted=False).iterator(chunk_size=500):
                     if link.predecessor_id in activity_map and link.successor_id in activity_map:
-                        ActivityRelationship.objects.create(
+                        relationship_rows.append(ActivityRelationship(
                             version=version, predecessor=activity_map[link.predecessor_id],
                             successor=activity_map[link.successor_id],
                             relationship_type=link.relationship_type, lag_days=link.lag_days,
-                        )
-                for assignment in ActivityAssignment.objects.filter(activity__version=source, is_deleted=False):
+                        ))
+                ActivityRelationship.objects.bulk_create(relationship_rows, batch_size=500)
+
+                assignment_rows = []
+                assignments = ActivityAssignment.objects.filter(
+                    activity__version=source, is_deleted=False,
+                ).iterator(chunk_size=500)
+                for assignment in assignments:
                     if assignment.activity_id in activity_map:
-                        ActivityAssignment.objects.create(
-                            activity=activity_map[assignment.activity_id], resource=assignment.resource,
+                        assignment_rows.append(ActivityAssignment(
+                            activity=activity_map[assignment.activity_id], resource_id=assignment.resource_id,
                             planned_units=assignment.planned_units, budgeted_hours=assignment.budgeted_hours,
                             budgeted_cost=assignment.budgeted_cost,
-                        )
+                        ))
+                ActivityAssignment.objects.bulk_create(assignment_rows, batch_size=500)
         record_event(project=schedule.project, actor=request.user, action='schedule.version_created', entity=version, after={'version': version.version})
         return Response(ScheduleVersionSerializer(version).data, status=status.HTTP_201_CREATED)
 
@@ -282,6 +308,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         )) if configuration else []
         dependency_template = configuration.dependency_template if configuration else None
         source_generation = version.source_generation
+        assurance = current_assurance(version)
         dependency_assumptions = [
             item for item in (source_generation.logic_matrix or [])
             if item.get('source') == 'dependency_template'
@@ -290,6 +317,9 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
             'project': {
                 'id': project.id, 'name': project.name, 'client': project.client,
                 'location': project.location, 'phase': project.phase,
+                'effective_date': project.effective_date,
+                'planned_end_date': project.planned_end_date,
+                'duration_months': project.duration_months,
             },
             'schedule': ScheduleSerializer(schedule).data,
             'version': self.get_serializer(version).data,
@@ -329,6 +359,7 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
                 'date_authority': (configuration.settings or {}).get('date_authority', 'relational_cpm'),
             } if configuration else None,
             'generation_validation': source_generation.validation if source_generation else [],
+            'schedule_assurance': ScheduleAssuranceReviewSerializer(assurance).data if assurance else None,
             'dependency_assumptions': dependency_assumptions,
             'can_edit': can_write_project(request.user, project)
             and version.status not in {'approved', 'baselined', 'superseded'},
@@ -413,21 +444,177 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
         version = self.get_object()
         if version.status in {'approved', 'baselined', 'superseded'}:
             return Response({'error': 'This version is immutable.'}, status=status.HTTP_409_CONFLICT)
-        try:
-            run = calculate_schedule_version(version, requested_by=request.user)
-        except SchedulingError as exc:
-            return Response({'error': str(exc), 'code': exc.code, 'issues': exc.issues}, status=status.HTTP_400_BAD_REQUEST)
+        request_data = {
+            'schedule_version_id': version.id,
+            'schedule_state_fingerprint': schedule_state_fingerprint(version),
+        }
+        job, created = get_or_create_job(
+            version.schedule.project, 'calculate', request_data, request.user,
+            idempotency_key=request_data['schedule_state_fingerprint'],
+        )
+        if created or job.status == 'failed':
+            if job.status == 'failed':
+                job.status, job.error_code, job.error_message, job.finished_at = 'queued', '', '', None
+                job.save(update_fields=['status', 'error_code', 'error_message', 'finished_at', 'updated_at'])
+            try:
+                dispatch_job(job)
+            except RuntimeError:
+                pass
         record_event(
             project=version.schedule.project, actor=request.user, action='schedule.calculated', entity=version,
-            after={'run_id': run.id, 'finish': run.project_finish.isoformat() if run.project_finish else None},
+            after={'job_id': job.id, 'async': True},
         )
-        return Response(ScheduleCalculationRunSerializer(run).data)
+        job.refresh_from_db()
+        return Response(PlanningJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=['post'], url_path='run-assurance')
+    def run_assurance(self, request, pk=None):
+        version = self.get_object()
+        if not can_write_project(request.user, version.schedule.project):
+            return Response({'error': 'You cannot run assurance for this project.'}, status=status.HTTP_403_FORBIDDEN)
+        if version.status != 'calculated' or not version.calculated_at:
+            return Response({'error': 'Calculate the schedule before running Phase 3 assurance.'}, status=status.HTTP_409_CONFLICT)
+        request_data = {
+            'schedule_version_id': version.id,
+            'calculated_state_at': version.calculated_at.isoformat(),
+            'assurance_state_fingerprint': assurance_state_fingerprint(version),
+        }
+        job, created = get_or_create_job(
+            version.schedule.project, 'assurance', request_data, request.user,
+            idempotency_key=request_data['assurance_state_fingerprint'],
+        )
+        if created or job.status == 'failed':
+            if job.status == 'failed':
+                job.status, job.error_code, job.error_message, job.finished_at = 'queued', '', '', None
+                job.save(update_fields=['status', 'error_code', 'error_message', 'finished_at', 'updated_at'])
+            try:
+                dispatch_job(job)
+            except RuntimeError:
+                pass
+        record_event(
+            project=version.schedule.project, actor=request.user, action='schedule.assurance_queued', entity=job,
+            after={'version_id': version.id, 'job_id': job.id},
+        )
+        job.refresh_from_db()
+        return Response(PlanningJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=['post'], url_path='approve-assurance')
+    def approve_assurance(self, request, pk=None):
+        version = self.get_object()
+        if not can_final_approve_defaults(request.user, version.schedule.project):
+            return Response({'error': 'Only a project authority can approve schedule assurance.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            review = approve_schedule_assurance(version, request.user)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        record_event(project=version.schedule.project, actor=request.user, action='schedule.assurance_approved', entity=review, after={'version_id': version.id})
+        return Response(ScheduleAssuranceReviewSerializer(review).data)
+
+    @action(detail=True, methods=['post'], url_path='rebuild-generated-logic')
+    def rebuild_generated_logic(self, request, pk=None):
+        """Reconcile a draft revision's relationships with the current generator rules."""
+        version = self.get_object()
+        if version.status in {'approved', 'baselined', 'superseded'}:
+            return Response({'error': 'This version is immutable.'}, status=status.HTTP_409_CONFLICT)
+
+        source_version = version
+        generation = source_version.source_generation
+        while not generation and source_version.parent_version_id:
+            source_version = source_version.parent_version
+            generation = source_version.source_generation
+        if not generation:
+            generation = version.schedule.project.generations.filter(is_deleted=False).first()
+        if not generation:
+            return Response(
+                {'error': 'No generated schedule source is available for rebuilding logic.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        generated = build_activities(
+            version.schedule.project, generation.wbs or [], generation.intelligence or {},
+        )
+        with transaction.atomic():
+            version = ScheduleVersion.objects.select_for_update().get(pk=version.pk)
+            activity_by_external_id = {
+                item.external_id: item
+                for item in version.activities.filter(is_deleted=False)
+            }
+            missing = sorted({
+                external_id
+                for row in generated['logic_matrix']
+                for external_id in (row['activity_id'], row['predecessor_id'])
+                if external_id not in activity_by_external_id
+            })
+            if missing:
+                return Response({
+                    'error': 'The revision activities no longer match the generated schedule.',
+                    'missing_activity_ids': missing[:25],
+                }, status=status.HTTP_409_CONFLICT)
+
+            desired = {}
+            for row in generated['logic_matrix']:
+                predecessor = activity_by_external_id[row['predecessor_id']]
+                successor = activity_by_external_id[row['activity_id']]
+                relationship_type = row.get('type', 'FS')
+                desired[(predecessor.id, successor.id, relationship_type)] = row.get('lag_days', 0)
+
+            existing = {
+                (link.predecessor_id, link.successor_id, link.relationship_type): link
+                for link in version.relationships.all()
+            }
+            now = timezone.now()
+            updates = []
+            for key, link in existing.items():
+                link.updated_at = now
+                if key in desired:
+                    link.lag_days = desired.pop(key)
+                    link.is_deleted = False
+                    link.deleted_at = None
+                else:
+                    link.is_deleted = True
+                    link.deleted_at = now
+                updates.append(link)
+            if updates:
+                ActivityRelationship.objects.bulk_update(
+                    updates, ['lag_days', 'is_deleted', 'deleted_at', 'updated_at'], batch_size=500,
+                )
+            ActivityRelationship.objects.bulk_create([
+                ActivityRelationship(
+                    version=version,
+                    predecessor_id=predecessor_id,
+                    successor_id=successor_id,
+                    relationship_type=relationship_type,
+                    lag_days=lag_days,
+                )
+                for (predecessor_id, successor_id, relationship_type), lag_days in desired.items()
+            ], batch_size=500)
+            _mark_version_draft(version)
+
+        relationship_count = version.relationships.filter(is_deleted=False).count()
+        record_event(
+            project=version.schedule.project, actor=request.user,
+            action='schedule.generated_logic_rebuilt', entity=version,
+            after={'relationship_count': relationship_count, 'generation_id': generation.id},
+        )
+        return Response({
+            'version_id': version.id,
+            'generation_id': generation.id,
+            'relationship_count': relationship_count,
+        })
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         version = self.get_object()
+        if not can_final_approve_defaults(request.user, version.schedule.project):
+            return Response({'error': 'Only a project authority can approve a schedule version.'}, status=status.HTTP_403_FORBIDDEN)
         if version.status != 'calculated':
             return Response({'error': 'Only a calculated version can be approved.'}, status=status.HTTP_409_CONFLICT)
+        assurance = current_assurance(version)
+        if not assurance or assurance.status != 'approved':
+            return Response({
+                'error': 'Run and approve Phase 3 schedule assurance before schedule approval.',
+                'code': 'schedule_assurance_required',
+            }, status=status.HTTP_409_CONFLICT)
         generation = version.source_generation
         critical_findings = [
             item for item in (generation.validation or []) if item.get('severity') == 'critical'
@@ -751,20 +938,28 @@ class ScheduleVersionViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['post'])
     def baseline(self, request, pk=None):
         version = self.get_object()
-        if version.status not in {'calculated', 'approved'}:
-            return Response({'error': 'Calculate the version before creating a baseline.'}, status=status.HTTP_409_CONFLICT)
+        if not can_final_approve_defaults(request.user, version.schedule.project):
+            return Response({'error': 'Only a project authority can create a baseline.'}, status=status.HTTP_403_FORBIDDEN)
+        if version.status != 'approved':
+            return Response({'error': 'Approve the assured schedule version before creating a baseline.'}, status=status.HTTP_409_CONFLICT)
+        assurance = current_assurance(version)
+        if not assurance or assurance.status != 'approved':
+            return Response({'error': 'An approved Phase 3 assurance review is required for this exact calculated state.'}, status=status.HTTP_409_CONFLICT)
+        if version.governance_items.filter(priority='critical', is_deleted=False).exclude(status__in=['closed', 'implemented', 'rejected']).exists():
+            return Response({'error': 'Resolve open critical governance items before baselining.'}, status=status.HTTP_409_CONFLICT)
         name = str(request.data.get('name') or f'Baseline {version.version}')[:255]
         if version.schedule.baselines.filter(name=name, is_deleted=False).exists():
             return Response({'error': 'A baseline with this name already exists.'}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
             version = ScheduleVersion.objects.select_for_update().get(pk=version.pk)
-            if version.status not in {'calculated', 'approved'}:
+            if version.status != 'approved':
                 return Response({'error': 'The version is no longer available for baselining.'}, status=status.HTTP_409_CONFLICT)
             snapshot = {
                 'version': ScheduleVersionSerializer(version).data,
                 'wbs': ScheduleWBSNodeSerializer(version.wbs_nodes.filter(is_deleted=False), many=True).data,
                 'activities': ScheduleActivitySerializer(version.activities.filter(is_deleted=False), many=True).data,
                 'relationships': ActivityRelationshipSerializer(version.relationships.filter(is_deleted=False), many=True).data,
+                'schedule_assurance': ScheduleAssuranceReviewSerializer(assurance).data,
             }
             baseline = ScheduleBaseline.objects.create(
                 schedule=version.schedule, source_version=version, name=name,
