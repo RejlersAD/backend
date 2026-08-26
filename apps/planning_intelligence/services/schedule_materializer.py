@@ -143,6 +143,17 @@ def materialize_generation(generation, *, requested_by=None):
                 'workflow_progress_weight': item.get('workflow_progress_weight'),
                 'workflow_template_code': item.get('workflow_template_code'),
                 'workflow_template_version': item.get('workflow_template_version'),
+                'workflow_family': item.get('workflow_family'),
+                'generation_plan_id': item.get('generation_plan_id'),
+                'plan_deliverable_id': item.get('plan_deliverable_id'),
+                'basis_deliverable_id': item.get('basis_deliverable_id'),
+                'document_number': item.get('document_number'),
+                'document_revision': item.get('document_revision'),
+                'phase_code': item.get('phase_code'),
+                'scenario_code': item.get('scenario_code'),
+                'recurrence': item.get('recurrence'),
+                'recurrence_occurrence': item.get('recurrence_occurrence'),
+                'source_references': item.get('source_references') or [],
                 'source_start': item.get('start_date'),
                 'source_finish': item.get('finish_date'),
                 'date_authority': 'relational_cpm',
@@ -175,6 +186,12 @@ def materialize_generation(generation, *, requested_by=None):
                 version=version, predecessor=predecessor, successor=successor,
                 relationship_type=relationship_type,
                 lag_days=_as_decimal(predecessor_data.get('lag_days'), 0),
+                metadata={
+                    'source': predecessor_data.get('source', 'generated'),
+                    'generation_dependency_id': predecessor_data.get('generation_dependency_id'),
+                    'rationale': predecessor_data.get('rationale', ''),
+                    'source_references': predecessor_data.get('source_references') or [],
+                },
             ))
             seen_relationships.add(key)
     ActivityRelationship.objects.bulk_create(relationship_rows, batch_size=500)

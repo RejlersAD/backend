@@ -391,6 +391,10 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
     flattened predecessor/successor table (Activity ID / Predecessor ID / Type)
     convenient for export and validation.
     """
+    if intelligence.get('generation_plan_id'):
+        from .trustworthy_generator import build_trustworthy_activities
+        return build_trustworthy_activities(project, wbs, intelligence)
+
     calendar = _merged_calendar(project)
     review_days = _merged_review_days(project)
     effective_date = project.effective_date or datetime.date.today()
@@ -427,9 +431,15 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
     # ── Milestones: project start ──────────────────────────────────────────
     m_award = _milestone_activity(ids, MILESTONE_TEMPLATE[0], effective_date, wbs_code=pm_wbs)
     m_kickoff_date = add_working_days(effective_date, 1, calendar['working_days_per_week'])
-    m_kickoff = _milestone_activity(ids, MILESTONE_TEMPLATE[1], m_kickoff_date, m_award['id'], wbs_code=pm_wbs)
+    m_kickoff = _milestone_activity(
+        ids, MILESTONE_TEMPLATE[1], m_kickoff_date, wbs_code=pm_wbs,
+        predecessors=[{'id': m_award['id'], 'type': 'FS', 'lag_days': 1}],
+    )
     m_mobilize_date = add_working_days(m_kickoff_date, 3, calendar['working_days_per_week'])
-    m_mobilize = _milestone_activity(ids, MILESTONE_TEMPLATE[2], m_mobilize_date, m_kickoff['id'], wbs_code=pm_wbs)
+    m_mobilize = _milestone_activity(
+        ids, MILESTONE_TEMPLATE[2], m_mobilize_date, wbs_code=pm_wbs,
+        predecessors=[{'id': m_kickoff['id'], 'type': 'FS', 'lag_days': 3}],
+    )
     activities += [m_award, m_kickoff, m_mobilize]
 
     # ── Survey / Studies chain ──────────────────────────────────────────────
@@ -455,6 +465,7 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
     hse_in_scope = disciplines_intel.get('hse', {}).get('in_scope', True) is not False
     hse_studies = (intelligence.get('hse_studies') or []) if hse_in_scope else []
     hse_finish_dates = []
+    hse_last_activity_ids = []
     for study_name in hse_studies:
         study_wbs = _resolve_deliverable_wbs(disc_wbs, deliverable_wbs, 'hse', study_name)
         hse_chain = _build_chain(
@@ -465,17 +476,30 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
         )
         activities += hse_chain
         hse_finish_dates.append(datetime.date.fromisoformat(hse_chain[-1]['finish_date']))
+        hse_last_activity_ids.append(hse_chain[-1]['id'])
 
     hse_overall_finish = max(hse_finish_dates) if hse_finish_dates else survey_finish
-    m_hse_done = _milestone_activity(ids, MILESTONE_TEMPLATE[7], hse_overall_finish,
-                                      wbs_code=hse_wbs, discipline='hse',
-                                      role=DISCIPLINE_RESPONSIBLE_ROLE.get('hse', 'HSE Engineer'))
+    hse_completion_predecessors = [
+        {'id': activity_id, 'type': 'FS', 'lag_days': 0}
+        for activity_id in hse_last_activity_ids
+    ] or [{'id': survey_chain[-1]['id'], 'type': 'FS', 'lag_days': 0}]
+    m_hse_done = _milestone_activity(
+        ids, MILESTONE_TEMPLATE[7], hse_overall_finish,
+        wbs_code=hse_wbs, discipline='hse',
+        role=DISCIPLINE_RESPONSIBLE_ROLE.get('hse', 'HSE Engineer'),
+        predecessors=hse_completion_predecessors,
+    )
     activities.append(m_hse_done)
 
     # ── Basis of Design milestone — gate for all engineering disciplines ───
     bod_start = survey_finish
-    m_bod = _milestone_activity(ids, MILESTONE_TEMPLATE[5], bod_start, survey_chain[-1]['id'],
-                                 wbs_code=pm_wbs)
+    m_bod = _milestone_activity(
+        ids, MILESTONE_TEMPLATE[5], bod_start, wbs_code=pm_wbs,
+        predecessors=[
+            {'id': m_data_collect['id'], 'type': 'FS', 'lag_days': 0},
+            {'id': m_site_survey['id'], 'type': 'FS', 'lag_days': 0},
+        ],
+    )
     activities.append(m_bod)
 
     # ── Engineering discipline chains with SMART SEQUENCING ────────────────
@@ -506,24 +530,50 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
         base_predecessor_id = m_bod['id']
 
         # ── STEP 3: Build chains with smart predecessor relationships ────
+        # Sequence a discipline's deliverables as a staggered production wave.
+        # Previously they all had only the same BOD predecessor, which forced
+        # identical workflows onto identical CPM dates.
+        stagger_days = max(0, min(20, int(
+            (getattr(project, 'calendar_overrides', None) or {}).get(
+                'engineering_deliverable_stagger_days', 1,
+            )
+        )))
+        parallel_deliverables = max(1, min(50, int(
+            (getattr(project, 'calendar_overrides', None) or {}).get(
+                'engineering_parallel_deliverables', 5,
+            )
+        )))
         deliverable_chains_list = []
         finish_dates = []
         last_activity_ids = []
-        for del_info in deliverable_info:
+        previous_deliverable_start_id = None
+        for deliverable_index, del_info in enumerate(deliverable_info):
             deliverable = del_info['name']
             del_wbs = _resolve_deliverable_wbs(disc_wbs, deliverable_wbs, disc_code, deliverable)
             steps, workflow_template = _configured_workflow(
                 project, disc_code, deliverable,
                 configuration=configuration, overrides=workflow_overrides,
             )
+            entry_predecessors = [{
+                'id': base_predecessor_id, 'type': 'FS', 'lag_days': 0,
+                'source': 'discipline_gate',
+            }]
+            wave_index = deliverable_index // parallel_deliverables
+            if previous_deliverable_start_id:
+                entry_predecessors.append({
+                    'id': previous_deliverable_start_id, 'type': 'SS',
+                    'lag_days': stagger_days if deliverable_index % parallel_deliverables == 0 else 0,
+                    'source': 'discipline_delivery_wave',
+                })
+            deliverable_start = add_working_days(
+                chain_start, wave_index * stagger_days,
+                calendar['working_days_per_week'],
+            )
             deliverable_chain = _build_chain(
                 ids=ids, prefix=prefix, wbs_code=del_wbs, discipline=disc_code, role=role,
-                steps=steps, name=deliverable, start_date=chain_start,
+                steps=steps, name=deliverable, start_date=deliverable_start,
                 calendar=calendar, review_days=review_days,
-                predecessors=[{
-                    'id': base_predecessor_id, 'type': 'FS', 'lag_days': 0,
-                    'source': 'discipline_gate',
-                }],
+                predecessors=entry_predecessors,
                 workflow_template=workflow_template,
             )
             
@@ -531,6 +581,7 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
             deliverable_chains_list.append((deliverable, deliverable_chain))
             finish_dates.append(datetime.date.fromisoformat(deliverable_chain[-1]['finish_date']))
             last_activity_ids.append(deliverable_chain[-1]['id'])
+            previous_deliverable_start_id = deliverable_chain[0]['id']
             
 
         discipline_chain_finish[disc_code] = max(finish_dates)
@@ -547,19 +598,32 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
 
     # ── 3D Model review milestones (soft-coded offsets from engineering start) ──
     model_wbs = disc_wbs.get('3d_model', pm_wbs)
+    model_review_ids = []
     for pct, weeks in zip((30, 60, 90), _MODEL_REVIEW_OFFSETS_WEEKS):
         review_date = add_working_days(engineering_start, weeks * calendar['working_days_per_week'],
                                         calendar['working_days_per_week'])
         review_date = min(review_date, engineering_finish)
-        activities.append(_milestone_activity(ids, f'{pct}% Model Review', review_date,
-                                               wbs_code=model_wbs, discipline='3d_model',
-                                               role='Piping Lead'))
+        review_lag = working_days_between(engineering_start, review_date)
+        model_review = _milestone_activity(
+            ids, f'{pct}% Model Review', review_date,
+            wbs_code=model_wbs, discipline='3d_model', role='Piping Lead',
+            predecessors=[{
+                'id': m_bod['id'], 'type': 'SS', 'lag_days': review_lag,
+                'source': 'model_review_offset',
+            }],
+        )
+        activities.append(model_review)
+        model_review_ids.append(model_review['id'])
 
     # ── PDR / EPC Tender / Final Dossier / Closeout ─────────────────────────
     pdr_wbs = disc_wbs.get('pdr', '1')
     pdr_predecessors = [
         {'id': aid, 'type': 'FS', 'lag_days': 0}
         for last_ids in discipline_chain_last_activities.values() for aid in last_ids
+    ]
+    pdr_predecessors += [
+        {'id': m_hse_done['id'], 'type': 'FS', 'lag_days': 0},
+        *[{'id': activity_id, 'type': 'FS', 'lag_days': 0} for activity_id in model_review_ids],
     ]
     pdr_steps, pdr_template = _configured_workflow(
         project, 'pdr', 'Project Definition Report (PDR)',
@@ -574,10 +638,12 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
     )
     activities += pdr_chain
     pdr_finish = datetime.date.fromisoformat(pdr_chain[-1]['finish_date'])
-    activities.append(_milestone_activity(ids, MILESTONE_TEMPLATE[11], pdr_finish,
-                                           pdr_chain[-1]['id'], wbs_code=pdr_wbs,
-                                           discipline='pdr',
-                                           role=DISCIPLINE_RESPONSIBLE_ROLE.get('pdr', 'Project Manager')))
+    m_pdr_issued = _milestone_activity(
+        ids, MILESTONE_TEMPLATE[11], pdr_finish, pdr_chain[-1]['id'], wbs_code=pdr_wbs,
+        discipline='pdr',
+        role=DISCIPLINE_RESPONSIBLE_ROLE.get('pdr', 'Project Manager'),
+    )
+    activities.append(m_pdr_issued)
 
     epc_wbs = disc_wbs.get('epc', '1')
     epc_steps, epc_template = _configured_workflow(
@@ -589,25 +655,30 @@ def build_activities(project, wbs: list, intelligence: dict) -> dict:
         discipline='epc', role=DISCIPLINE_RESPONSIBLE_ROLE['epc'],
         steps=epc_steps, name='EPC Tender Package',
         start_date=pdr_finish, calendar=calendar, review_days=review_days,
-        predecessors=[{'id': pdr_chain[-1]['id'], 'type': 'FS', 'lag_days': 0}],
+        predecessors=[{'id': m_pdr_issued['id'], 'type': 'FS', 'lag_days': 0}],
         workflow_template=epc_template,
     )
     activities += epc_chain
     epc_finish = datetime.date.fromisoformat(epc_chain[-1]['finish_date'])
-    activities.append(_milestone_activity(ids, MILESTONE_TEMPLATE[12], epc_finish,
-                                           epc_chain[-1]['id'], wbs_code=epc_wbs,
-                                           discipline='epc',
-                                           role=DISCIPLINE_RESPONSIBLE_ROLE.get('epc', 'Project Manager')))
-    activities.append(_milestone_activity(ids, MILESTONE_TEMPLATE[13], epc_finish,
-                                           epc_chain[-1]['id'], wbs_code=epc_wbs,
-                                           discipline='epc',
-                                           role=DISCIPLINE_RESPONSIBLE_ROLE.get('epc', 'Project Manager')))
+    m_epc_issued = _milestone_activity(
+        ids, MILESTONE_TEMPLATE[12], epc_finish, epc_chain[-1]['id'], wbs_code=epc_wbs,
+        discipline='epc',
+        role=DISCIPLINE_RESPONSIBLE_ROLE.get('epc', 'Project Manager'),
+    )
+    m_epc_award = _milestone_activity(
+        ids, MILESTONE_TEMPLATE[13], epc_finish, m_epc_issued['id'], wbs_code=epc_wbs,
+        discipline='epc',
+        role=DISCIPLINE_RESPONSIBLE_ROLE.get('epc', 'Project Manager'),
+    )
+    activities += [m_epc_issued, m_epc_award]
 
     closeout_wbs = disc_wbs.get('closeout', pm_wbs)
     closeout_finish = add_working_days(epc_finish, 5, calendar['working_days_per_week'])
-    activities.append(_milestone_activity(ids, MILESTONE_TEMPLATE[14], closeout_finish,
-                                           epc_chain[-1]['id'], wbs_code=closeout_wbs,
-                                           discipline='closeout', role='Project Manager'))
+    activities.append(_milestone_activity(
+        ids, MILESTONE_TEMPLATE[14], closeout_finish,
+        wbs_code=closeout_wbs, discipline='closeout', role='Project Manager',
+        predecessors=[{'id': m_epc_award['id'], 'type': 'FS', 'lag_days': 5}],
+    ))
 
     # ── Total float pass ────────────────────────────────────────────────────
     project_finish = max(

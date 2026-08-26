@@ -1,0 +1,6 @@
+{
+  "code": "contract_chain_250",
+  "description": "Sequential contractual deliverable network.",
+  "network": {"activity_count": 250, "shape": "chain"},
+  "expected": {"activity_count": 250, "relationship_count": 249, "open_start_count": 1, "open_finish_count": 1, "has_cycle": false}
+}

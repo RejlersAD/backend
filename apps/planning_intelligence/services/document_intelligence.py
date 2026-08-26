@@ -19,7 +19,13 @@ from ..models import (
 )
 from .intelligence import analyze_project
 
-ENGINE_VERSION = '2.0'
+ENGINE_VERSION = '3.0'
+
+_DOCUMENT_NUMBER_RE = re.compile(
+    r'\b(?=[A-Z0-9./_~\-]{6,100}\b)(?=[A-Z0-9./_~\-]*\d)[A-Z0-9]{2,12}(?:[-/_.][A-Z0-9~]{1,25}){2,}\b',
+    re.I,
+)
+_REVISION_RE = re.compile(r'\b(?:rev(?:ision)?[.: -]*)?(?P<revision>[A-Z]|\d{1,3})\b', re.I)
 
 _CATEGORY_TERMS = {
     'sow': ('scope of work', 'scope of services', 'contractor shall'),
@@ -45,6 +51,12 @@ _CALENDAR_PATTERNS = [
 _REVIEW_RE = re.compile(r'(?P<label>[A-Za-z][A-Za-z /&-]{2,80}review[A-Za-z /&-]{0,40})[^\n]{0,30}?(?P<days>\d{1,3})\s*working days?', re.I)
 _MILESTONE_RE = re.compile(r'(?P<label>[A-Za-z][A-Za-z0-9 /&()_-]{2,100}(?:milestone|award|kickoff|completion|handover))\s*[:\-]?\s*(?P<date>\d{4}-\d{2}-\d{2}|\d{1,2}[\-/][A-Za-z]{3,9}[\-/]\d{2,4})', re.I)
 _EXCLUSION_RE = re.compile(r'(?P<text>[^\n.]{0,120}\b(?:out of scope|excluded|not required)\b[^\n.]{0,160})', re.I)
+_REGISTER_ROW_RE = re.compile(
+    r'^\s*(?P<item>\d{1,5})\s+(?P<discipline>[A-Z][A-Z &/()-]{1,60}?)\s+'
+    r'(?P<number>(?=[A-Z0-9./_~\-]*\d)[A-Z0-9]{2,12}(?:[-/_.][A-Z0-9~]{1,25}){2,})\s+(?P<title_area>.+?)\s+'
+    r'(?P<existing>NEW|EXISTING)\s+(?P<class>\d{1,3})\s+(?P<revision>[A-Z0-9]{1,8})(?:\s.*)?$',
+    re.I,
+)
 
 
 def _normalize(value):
@@ -62,8 +74,15 @@ def _locator(text, start, match=None):
     locator = {'line': line, 'character_start': start}
     if sheet_matches:
         locator['sheet'] = sheet_matches[-1].group(1).strip()
-    page = prefix.count('\f') + 1
-    if page > 1 or '\f' in text:
+    ocr_pages = list(re.finditer(r'^--- OCR Page:\s*(\d+)\s*---$', prefix, re.M))
+    printed_pages = list(re.finditer(r'\bPage(?:\s+Page)?\s+(\d+)\s+of\s+\d+\b', prefix, re.I))
+    if ocr_pages:
+        page = int(ocr_pages[-1].group(1))
+    elif printed_pages:
+        page = int(printed_pages[-1].group(1))
+    else:
+        page = prefix.count('\f') + 1
+    if page > 1 or '\f' in text or ocr_pages or printed_pages:
         locator['page'] = page
     if match:
         locator['matched_term'] = match[:160]
@@ -119,9 +138,64 @@ def profile_document(file_obj):
     return profile
 
 
+def _register_discipline(value):
+    normalized = re.sub(r'[^a-z0-9]+', ' ', value.casefold()).strip()
+    mappings = (
+        ('civil', 'civil'), ('structural', 'civil'), ('electrical', 'electrical'),
+        ('hvac', 'mechanical'), ('mechanical', 'mechanical'), ('mep', 'mechanical'),
+        ('instrument', 'instrumentation'), ('process', 'process'), ('general', 'general'),
+        ('hse', 'hse'), ('pipeline', 'pipeline'), ('piping', 'piping'),
+    )
+    return next((code for term, code in mappings if term in normalized), slugify(normalized)[:64] or 'general')
+
+
+def _extract_register_rows(rows, file_obj, text):
+    """Extract collapsed PDF/Excel register rows, preserving number/revision/title."""
+    if file_obj.category not in {'mdr', 'eddr'}:
+        return
+    matches = []
+    for line_match in re.finditer(r'^.*$', text, re.M):
+        match = _REGISTER_ROW_RE.match(line_match.group(0))
+        if match:
+            matches.append((line_match, match))
+    if not matches:
+        return
+
+    # PDF table extraction commonly appends a repeated AREA column to TITLE.
+    # Detect that repeated suffix from the register itself instead of using a
+    # project/location-specific hardcode.
+    suffix_counts = defaultdict(int)
+    for _line, match in matches:
+        tokens = match.group('title_area').split()
+        for size in range(1, min(5, len(tokens))):
+            suffix_counts[' '.join(tokens[-size:]).casefold()] += 1
+    threshold = max(2, int(len(matches) * .5))
+    repeated_suffixes = [
+        suffix for suffix, count in suffix_counts.items()
+        if count >= threshold and len(suffix.split()) >= 2
+    ]
+    area_suffix = max(repeated_suffixes, key=lambda value: len(value.split()), default='')
+
+    for line_match, match in matches:
+        title = re.sub(r'\s+', ' ', match.group('title_area')).strip()
+        if area_suffix and title.casefold().endswith(' ' + area_suffix):
+            title = title[:-(len(area_suffix) + 1)].strip()
+        discipline = _register_discipline(match.group('discipline'))
+        number = match.group('number').strip()
+        _add_fact(
+            rows, file_obj, 'deliverable', f'{discipline}:{slugify(number)}',
+            {
+                'discipline': discipline, 'name': title, 'original_title': title,
+                'document_number': number, 'document_revision': match.group('revision').strip(),
+                'register_item': int(match.group('item')),
+            }, .97, text, line_match.start(), line_match.end(), matched=number,
+        )
+
+
 def _extract_file_facts(rows, file_obj):
     text = file_obj.extracted_text or ''
     lower = text.casefold()
+    _extract_register_rows(rows, file_obj, text)
     for fact_type, key, pattern, group, confidence in _SCALAR_PATTERNS:
         for match in pattern.finditer(text):
             value = match.group(group).strip(' :-|')
@@ -142,9 +216,20 @@ def _extract_file_facts(rows, file_obj):
             hits = [(lower.find(term.casefold()), term) for term in terms if lower.find(term.casefold()) >= 0]
             if hits:
                 start, term = min(hits)
+                line_start = text.rfind('\n', 0, start) + 1
+                line_end = text.find('\n', start)
+                line_end = len(text) if line_end < 0 else line_end
+                source_line = text[line_start:line_end].strip()
+                document_number_match = _DOCUMENT_NUMBER_RE.search(source_line)
+                revision_match = re.search(r'\bRev(?:ision)?[.: -]*(?P<revision>[A-Z0-9]{1,8})\b', source_line, re.I)
                 _add_fact(
                     rows, file_obj, 'deliverable', f'{discipline}:{slugify(deliverable)}',
-                    {'discipline': discipline, 'name': deliverable}, .88, text, start,
+                    {
+                        'discipline': discipline, 'name': deliverable,
+                        'original_title': deliverable,
+                        'document_number': document_number_match.group(0) if document_number_match else '',
+                        'document_revision': revision_match.group('revision') if revision_match else '',
+                    }, .88, text, start,
                     start + len(term), matched=term,
                 )
 
@@ -185,6 +270,23 @@ def _persist_ai_facts(rows, intelligence):
         value = review.get(source_key)
         if value not in (None, ''):
             _add_fact(rows, None, fact_type, fact_type, value, .65, '', 0, 0, method='ai')
+
+
+def _persist_project_record_facts(rows, project):
+    """Treat existing workspace values as evidence so document mismatches are visible."""
+    values = {
+        'project_name': project.name,
+        'effective_date': project.effective_date.isoformat() if project.effective_date else None,
+        'duration_months': float(project.duration_months) if project.duration_months is not None else None,
+        'client': project.client or None,
+        'location': project.location or None,
+    }
+    for fact_type, value in values.items():
+        if value in (None, ''):
+            continue
+        _add_fact(rows, None, fact_type, fact_type, value, .99, '', 0, 0, method='deterministic')
+        rows['facts'][-1].source_locator = {'source': 'project_record', 'project_id': project.id}
+        rows['facts'][-1].source_excerpt = 'Current planning workspace value'
 
 
 def _create_conflicts(run):
@@ -282,6 +384,7 @@ def run_document_intelligence(project, *, user=None, files=None):
             rows = {'run': run, 'facts': [], '_seen': set()}
             for file_obj in files:
                 _extract_file_facts(rows, file_obj)
+            _persist_project_record_facts(rows, project)
             _persist_ai_facts(rows, legacy)
             IntelligenceFact.objects.bulk_create(rows['facts'])
             conflicts = _create_conflicts(run)

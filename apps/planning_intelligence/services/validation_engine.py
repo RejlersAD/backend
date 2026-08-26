@@ -12,7 +12,7 @@ from django.db.models import Q
 from ..config import (
     DISCIPLINE_DEFAULT_DELIVERABLES, LEVEL4_MAX_ACTIVITY_DURATION_DAYS, MAX_TOTAL_FLOAT_DAYS,
 )
-from ..models import WorkflowTemplate
+from ..models import GenerationPlan, WorkflowTemplate
 
 
 def _issue(rule: str, severity: str, message: str, activity_id: str | None = None) -> dict:
@@ -81,13 +81,36 @@ def validate(project, wbs: list, activities: list, eddr: list, intelligence: dic
 
     # 6. MDR / SOW deliverable coverage — every default deliverable for every
     #    discipline present in the source documents must appear in the EDDR.
-    eddr_names = {(row['discipline'], row['deliverable_name']) for row in eddr}
     missing_deliverables = []
-    for disc_code, deliverables in DISCIPLINE_DEFAULT_DELIVERABLES.items():
-        mentioned = set(intelligence.get('disciplines', {}).get(disc_code, {}).get('mentioned_in_source', []))
-        for deliverable in mentioned:
-            if (disc_code, deliverable) not in eddr_names:
-                missing_deliverables.append(f'{disc_code}: {deliverable}')
+    generation_plan_id = intelligence.get('generation_plan_id')
+    plan = GenerationPlan.objects.filter(
+        pk=generation_plan_id, project=project, status__in=['approved', 'superseded'], is_deleted=False,
+    ).first() if generation_plan_id else None
+    if plan:
+        # The approved plan is the scope authority. Raw document mentions may
+        # contain mutually exclusive alternatives, so require common items and
+        # only the branch selected at the approved decision gate.
+        selected_scenario = plan.selected_scenario
+        expected_entries = plan.deliverables.filter(is_deleted=False).select_related('basis_deliverable')
+        expected_entries = [
+            entry for entry in expected_entries
+            if entry.scenario_code in ('', 'common', selected_scenario)
+        ]
+        scheduled_basis_ids = {
+            activity.get('basis_deliverable_id') for activity in activities
+            if activity.get('basis_deliverable_id')
+        }
+        missing_deliverables = [
+            f'{entry.basis_deliverable.discipline}: {entry.basis_deliverable.canonical_name}'
+            for entry in expected_entries if entry.basis_deliverable_id not in scheduled_basis_ids
+        ]
+    else:
+        eddr_names = {(row['discipline'], row['deliverable_name']) for row in eddr}
+        for disc_code, deliverables in DISCIPLINE_DEFAULT_DELIVERABLES.items():
+            mentioned = set(intelligence.get('disciplines', {}).get(disc_code, {}).get('mentioned_in_source', []))
+            for deliverable in mentioned:
+                if (disc_code, deliverable) not in eddr_names:
+                    missing_deliverables.append(f'{disc_code}: {deliverable}')
     if missing_deliverables:
         issues.append(_issue(
             'deliverable_coverage', 'critical',

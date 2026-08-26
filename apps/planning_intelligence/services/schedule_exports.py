@@ -34,6 +34,12 @@ def _safe(value):
     return json.loads(json.dumps(value, cls=DjangoJSONEncoder))
 
 
+def _filename_part(value, fallback):
+    """Return a readable, path-safe ASCII filename component."""
+    cleaned = re.sub(r'[^A-Za-z0-9_-]+', '_', str(value or '')).strip('_-')
+    return cleaned[:80] or fallback
+
+
 def schedule_snapshot(version):
     schedule = version.schedule
     project = schedule.project
@@ -161,6 +167,8 @@ def generate_schedule_export(version, export_format):
         content = _excel(snapshot)
     else:
         content = _xer(version, snapshot)
-    code = re.sub(r'[^A-Za-z0-9_-]+', '-', version.schedule.code).strip('-') or 'schedule'
-    filename = f'{code}-v{version.version}.{export_format}'
+    project_name = _filename_part(version.schedule.project.name, 'Project')
+    schedule_code = _filename_part(version.schedule.code, 'Schedule')
+    export_label = 'Activities' if export_format == 'csv' else 'Schedule'
+    filename = f'{project_name}_{schedule_code}_v{version.version}_{export_label}.{export_format}'
     return content, EXPORT_CONTENT_TYPES[export_format], filename

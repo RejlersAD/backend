@@ -1,4 +1,5 @@
 """Schedule pipeline shared by HTTP orchestration and Celery workers."""
+from collections import Counter
 from django.db import transaction
 from django.db.models import Max
 
@@ -42,6 +43,10 @@ def preview_schedule(project, *, user=None, overrides=None):
     intelligence = analyze_documents(project, user=user)
     if isinstance(overrides, dict) and overrides:
         intelligence = apply_intelligence_overrides(intelligence, overrides)
+    from .schedule_basis import apply_approved_basis
+    intelligence = apply_approved_basis(project, intelligence)
+    from .generation_plan import apply_approved_generation_plan
+    intelligence = apply_approved_generation_plan(project, intelligence)
     wbs = build_wbs(project, intelligence)
     schedule = build_activities(project, wbs, intelligence)
     activities = schedule['activities']
@@ -63,6 +68,12 @@ def preview_schedule(project, *, user=None, overrides=None):
         'project_finish_hint': schedule.get('project_finish_date'),
         'date_authority': schedule.get('date_authority', 'relational_cpm'),
         'applied_dependency_rules': schedule.get('applied_dependency_rules') or [],
+        'generation_plan_id': intelligence.get('generation_plan_id'),
+        'generation_plan_version': intelligence.get('generation_plan_version'),
+        'selected_scenario': intelligence.get('selected_scenario'),
+        'workflow_family_counts': dict(Counter(
+            item.get('workflow_family') for item in activities if item.get('workflow_family')
+        )),
         'validation': validation,
         'sample_activities': [{
             key: item.get(key) for key in (
@@ -73,10 +84,20 @@ def preview_schedule(project, *, user=None, overrides=None):
     }
 
 
-def generate_schedule(project, *, user=None, overrides=None):
+def generate_schedule(project, *, user=None, overrides=None, input_fingerprint=None):
+    if input_fingerprint:
+        existing = project.generations.filter(
+            is_deleted=False, input_fingerprint=input_fingerprint,
+        ).first()
+        if existing:
+            return existing
     intelligence = analyze_documents(project, user=user)
     if isinstance(overrides, dict) and overrides:
         intelligence = apply_intelligence_overrides(intelligence, overrides)
+    from .schedule_basis import apply_approved_basis
+    intelligence = apply_approved_basis(project, intelligence)
+    from .generation_plan import apply_approved_generation_plan
+    intelligence = apply_approved_generation_plan(project, intelligence)
     wbs = build_wbs(project, intelligence)
     schedule = build_activities(project, wbs, intelligence)
     activities = schedule['activities']
@@ -98,7 +119,14 @@ def generate_schedule(project, *, user=None, overrides=None):
     }
     with transaction.atomic():
         locked_project = PlanningProject.objects.select_for_update().get(pk=project.pk)
+        if input_fingerprint:
+            existing = locked_project.generations.filter(
+                is_deleted=False, input_fingerprint=input_fingerprint,
+            ).first()
+            if existing:
+                return existing
         next_version = (locked_project.generations.aggregate(value=Max('version'))['value'] or 0) + 1
         return PlanningGeneration.objects.create(
-            project=locked_project, version=next_version, generated_by=user, **payload,
+            project=locked_project, version=next_version, generated_by=user,
+            input_fingerprint=input_fingerprint, **payload,
         )

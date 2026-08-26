@@ -4,7 +4,7 @@ from rest_framework import serializers
 from .access import can_write_project
 from .models import (
     ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException, DailyFieldUpdate, Schedule,
-    ScheduleActivity, ScheduleBaseline, ScheduleCalculationRun, ScheduleResource,
+    ScheduleActivity, ScheduleAssuranceReview, ScheduleBaseline, ScheduleCalculationRun, ScheduleResource,
     ScheduleControlSnapshot, ScheduleVersion, ScheduleWBSNode, WorkCalendar,
 )
 
@@ -161,7 +161,7 @@ class ActivityRelationshipSerializer(serializers.ModelSerializer):
         model = ActivityRelationship
         fields = [
             'id', 'version', 'predecessor', 'successor', 'relationship_type',
-            'lag_days', 'created_at', 'updated_at',
+            'lag_days', 'metadata', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -227,6 +227,25 @@ class ScheduleCalculationRunSerializer(serializers.ModelSerializer):
         model = ScheduleCalculationRun
         fields = '__all__'
         read_only_fields = [field.name for field in ScheduleCalculationRun._meta.fields]
+
+
+class ScheduleAssuranceReviewSerializer(serializers.ModelSerializer):
+    approved_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ScheduleAssuranceReview
+        fields = [
+            'id', 'version', 'calculation_run', 'status', 'network_validation',
+            'contract_scenarios', 'resource_validation', 'change_comparison',
+            'blockers', 'warnings', 'calculated_state_at', 'input_fingerprint', 'approved_by',
+            'approved_by_name', 'approved_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_approved_by_name(self, obj):
+        if not obj.approved_by:
+            return ''
+        return obj.approved_by.get_full_name() or obj.approved_by.get_username()
 
 
 class BulkActivityEditSerializer(serializers.Serializer):

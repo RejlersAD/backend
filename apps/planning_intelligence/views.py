@@ -29,7 +29,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .access import PlanningObjectPermission, accessible_projects
+from .access import PlanningObjectPermission, accessible_projects, can_final_approve_defaults
 from .config import CLAUDE_API_KEY_PATTERN, CLAUDE_MODEL_CHOICES, DEFAULT_CLAUDE_MODEL
 from .models import PlanningAuditEvent, PlanningFile, PlanningGeneration, PlanningJob, PlanningProject
 from .serializers import (
@@ -39,9 +39,10 @@ from .serializers import (
 )
 from .services import byok_crypto, claude_client, export_utils
 from .services.audit import record_event
+from .services.operational_jobs import dispatch_job, get_or_create_job, workable_plan_fingerprint
 from .services.validation_engine import validate
 from .services.workflow_configuration import ensure_project_schedule_configuration
-from .tasks import parse_uploaded_planning_file, run_planning_job
+from .tasks import parse_uploaded_planning_file
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,64 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         before = PlanningProjectSerializer(serializer.instance).data
         project = serializer.save()
         record_event(project=project, actor=self.request.user, action='project.updated', entity=project, before=before, after=serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='build-workable-plan')
+    def build_workable_plan(self, request, pk=None):
+        project = self.get_object()
+        request_data = {'decisions': dict(request.data or {}).get('decisions') or {}}
+        fingerprint = workable_plan_fingerprint(project, request_data)
+        job, created = get_or_create_job(
+            project, 'workable_plan', request_data, request.user, idempotency_key=fingerprint,
+        )
+        if created or job.status == 'failed':
+            if job.status == 'failed':
+                job.status, job.error_code, job.error_message, job.finished_at = 'queued', '', '', None
+                job.save(update_fields=['status', 'error_code', 'error_message', 'finished_at', 'updated_at'])
+            try:
+                dispatch_job(job)
+            except RuntimeError:
+                pass
+        job.refresh_from_db()
+        return Response(PlanningJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=['get'], url_path='workable-plan-status')
+    def workable_plan_status(self, request, pk=None):
+        project = self.get_object()
+        job = project.jobs.filter(is_deleted=False, job_type='workable_plan').first()
+        from .models import ScheduleBaseline
+        from .schedule_serializers import ScheduleBaselineSerializer
+        baseline = ScheduleBaseline.objects.filter(
+            schedule__project=project, is_deleted=False,
+        ).select_related('source_version').first()
+        if job and (job.result_data or {}).get('state') != 'baselined':
+            target_version_id = ((job.result_data or {}).get('summary') or {}).get('schedule_version_id')
+            if not target_version_id or not baseline or baseline.source_version_id != target_version_id:
+                baseline = None
+        return Response({
+            'job': PlanningJobSerializer(job).data if job else None,
+            'baseline': ScheduleBaselineSerializer(baseline).data if baseline else None,
+        })
+
+    @action(detail=True, methods=['post'], url_path='approve-workable-baseline')
+    def approve_workable_baseline(self, request, pk=None):
+        project = self.get_object()
+        if not can_final_approve_defaults(request.user, project):
+            return Response({'error': 'Only a project authority can approve the plan as baseline.'}, status=status.HTTP_403_FORBIDDEN)
+        request_data = {'approval': {
+            'schedule_version_id': request.data.get('schedule_version_id'),
+            'name': str(request.data.get('name') or ''),
+        }}
+        fingerprint = workable_plan_fingerprint(project, request_data)
+        job, created = get_or_create_job(
+            project, 'workable_plan', request_data, request.user, idempotency_key=fingerprint,
+        )
+        if created:
+            try:
+                dispatch_job(job)
+            except RuntimeError:
+                pass
+        job.refresh_from_db()
+        return Response(PlanningJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
 
     def perform_destroy(self, instance):
         """Soft-delete only — never hard-delete a project (RADAI global rule:
@@ -155,6 +214,19 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
             return byok_error
         if not project.files.filter(is_deleted=False, parse_status='done').exists():
             return Response({'error': 'No successfully parsed files are available.'}, status=status.HTTP_400_BAD_REQUEST)
+        approved_basis = project.schedule_bases.filter(is_deleted=False, status='approved').first()
+        if not approved_basis:
+            return Response({
+                'error': 'Approve a Schedule Basis before generating a schedule.',
+                'code': 'schedule_basis_required',
+            }, status=status.HTTP_409_CONFLICT)
+        if not project.generation_plans.filter(
+            is_deleted=False, status='approved', basis=approved_basis,
+        ).exists():
+            return Response({
+                'error': 'Approve a Trustworthy Generation Plan before generating a schedule.',
+                'code': 'generation_plan_required',
+            }, status=status.HTTP_409_CONFLICT)
         return self._enqueue_job(project, 'generate', dict(request.data or {}))
 
     @action(detail=True, methods=['post'], url_path='generation-preview')
@@ -169,28 +241,38 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
                 {'error': 'No successfully parsed files are available.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        from .services.pipeline import preview_schedule
-        preview = preview_schedule(
-            project, user=request.user,
-            overrides=(request.data or {}).get('intelligence_overrides'),
-        )
-        return Response(preview)
+        approved_basis = project.schedule_bases.filter(is_deleted=False, status='approved').first()
+        if not approved_basis:
+            return Response({
+                'error': 'Approve a Schedule Basis before preparing a generation preview.',
+                'code': 'schedule_basis_required',
+            }, status=status.HTTP_409_CONFLICT)
+        if not project.generation_plans.filter(
+            is_deleted=False, status='approved', basis=approved_basis,
+        ).exists():
+            return Response({
+                'error': 'Approve a Trustworthy Generation Plan before preparing a preview.',
+                'code': 'generation_plan_required',
+            }, status=status.HTTP_409_CONFLICT)
+        return self._enqueue_job(project, 'preview', dict(request.data or {}))
 
     def _enqueue_job(self, project, job_type, request_data):
-        active = project.jobs.filter(is_deleted=False, job_type=job_type, status__in=['queued', 'running']).first()
-        if active:
-            return Response(PlanningJobSerializer(active).data, status=status.HTTP_202_ACCEPTED)
-        job = PlanningJob.objects.create(
-            project=project, job_type=job_type, request_data=request_data, requested_by=self.request.user,
+        supplied_key = str(self.request.headers.get('Idempotency-Key') or '').strip()[:64] or None
+        job, created = get_or_create_job(
+            project, job_type, request_data, self.request.user, idempotency_key=supplied_key,
         )
-        record_event(project=project, actor=self.request.user, action='job.queued', entity=job, after={'job_type': job_type})
-        try:
-            result = run_planning_job.delay(job.id)
-            job.task_id = result.id or ''
-            job.save(update_fields=['task_id', 'updated_at'])
-        except Exception:  # noqa: BLE001
-            logger.exception('Celery dispatch failed for planning job %s; executing eagerly', job.id)
-            run_planning_job.apply(args=[job.id])
+        if created or job.status == 'failed':
+            if job.status == 'failed':
+                job.status = 'queued'
+                job.error_code = ''
+                job.error_message = ''
+                job.finished_at = None
+                job.save(update_fields=['status', 'error_code', 'error_message', 'finished_at', 'updated_at'])
+            record_event(project=project, actor=self.request.user, action='job.queued', entity=job, after={'job_type': job_type, 'idempotency_key': job.idempotency_key})
+            try:
+                dispatch_job(job)
+            except RuntimeError:
+                logger.exception('Celery dispatch failed for planning job %s', job.id)
         job.refresh_from_db()
         return Response(PlanningJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
 

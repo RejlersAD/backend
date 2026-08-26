@@ -1,0 +1,6 @@
+{
+  "code": "enterprise_large_10000",
+  "description": "Ten-thousand-activity operational scale guard.",
+  "network": {"activity_count": 10000, "shape": "chain"},
+  "expected": {"activity_count": 10000, "relationship_count": 9999, "open_start_count": 1, "open_finish_count": 1, "has_cycle": false}
+}

@@ -137,6 +137,7 @@ class PlanningGeneration(BaseModel):
         related_name='revisions',
     )
     change_summary = models.CharField(max_length=255, blank=True)
+    input_fingerprint = models.CharField(max_length=64, null=True, blank=True, db_index=True)
 
     intelligence = models.JSONField(default=dict, blank=True, help_text='Extracted project intelligence')
     wbs = models.JSONField(default=list, blank=True)
@@ -156,6 +157,13 @@ class PlanningGeneration(BaseModel):
     class Meta:
         ordering = ['-created_at']
         unique_together = [('project', 'version')]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['project', 'input_fingerprint'],
+                condition=models.Q(input_fingerprint__isnull=False),
+                name='unique_generation_input_fingerprint',
+            ),
+        ]
 
     def __str__(self):
         return f'{self.project_id} · v{self.version}'
@@ -164,7 +172,12 @@ class PlanningGeneration(BaseModel):
 class PlanningJob(BaseModel):
     """Durable status record for document analysis and schedule generation."""
 
-    JOB_TYPE_CHOICES = [('analyze', 'Analyze Documents'), ('generate', 'Generate Schedule')]
+    JOB_TYPE_CHOICES = [
+        ('analyze', 'Analyze Documents'), ('preview', 'Preview Schedule'), ('generate', 'Generate Schedule'),
+        ('build_plan', 'Build Generation Plan'), ('workable_plan', 'Build Workable Project Plan'),
+        ('calculate', 'Calculate CPM'),
+        ('assurance', 'Run Schedule Assurance'),
+    ]
     STATUS_CHOICES = [
         ('queued', 'Queued'), ('running', 'Running'), ('succeeded', 'Succeeded'),
         ('failed', 'Failed'), ('cancelled', 'Cancelled'),
@@ -182,6 +195,10 @@ class PlanningJob(BaseModel):
         related_name='jobs',
     )
     task_id = models.CharField(max_length=255, blank=True)
+    idempotency_key = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    progress_log = models.JSONField(default=list, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    attempt_count = models.PositiveSmallIntegerField(default=0)
     error_code = models.CharField(max_length=64, blank=True)
     error_message = models.TextField(blank=True)
     requested_by = models.ForeignKey(
@@ -196,6 +213,13 @@ class PlanningJob(BaseModel):
         indexes = [
             models.Index(fields=['project', '-created_at']),
             models.Index(fields=['status', '-created_at']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['project', 'job_type', 'idempotency_key'],
+                condition=models.Q(idempotency_key__isnull=False),
+                name='unique_planning_job_idempotency',
+            ),
         ]
 
     def __str__(self):
@@ -229,13 +253,15 @@ class PlanningAuditEvent(models.Model):
 # Import relational scheduling models so Django registers them under this app.
 from .schedule_models import (  # noqa: E402,F401
     ActivityAssignment, ActivityProgressUpdate, ActivityRelationship, CalendarException, DailyFieldUpdate, Schedule,
-    ScheduleActivity, ScheduleBaseline, ScheduleCalculationRun, ScheduleResource,
+    ScheduleActivity, ScheduleAssuranceReview, ScheduleBaseline, ScheduleCalculationRun, ScheduleResource,
     ScheduleControlSnapshot, ScheduleVersion, ScheduleWBSNode, WorkCalendar,
 )
 
 # Import document-intelligence evidence models for Django app registration.
 from .intelligence_models import (  # noqa: E402,F401
-    DocumentIntelligenceRun, DocumentProfile, IntelligenceConflict, IntelligenceFact,
+    BasisDeliverable, DocumentAuthorityRule, DocumentIntelligenceRun, DocumentProfile,
+    GenerationDecisionGate, GenerationDependency, GenerationPhase, GenerationPlan,
+    IntelligenceConflict, IntelligenceFact, PlanDeliverable, ScheduleBasis,
 )
 
 # Import schedule governance and collaboration models for Django registration.

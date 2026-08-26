@@ -271,6 +271,36 @@ class WorkflowConfigurationTests(TestCase):
         )
         self.assertFalse(template_link['requires_confirmation'])
 
+    def test_deliverables_in_one_discipline_form_a_staggered_wave(self):
+        ensure_project_schedule_configuration(self.project, actor=self.owner)
+        deliverables = [f'Mechanical Deliverable {number}' for number in range(1, 7)]
+        result = build_activities(self.project, [], {
+            'disciplines': {'mechanical': {
+                'in_scope': True,
+                'deliverables': deliverables,
+            }},
+            'hse_studies': [],
+        })
+        first_ifr = next(
+            item for item in result['activities']
+            if item.get('deliverable') == deliverables[4]
+            and item.get('workflow_stage_code') == 'IFR'
+        )
+        second_ifr = next(
+            item for item in result['activities']
+            if item.get('deliverable') == deliverables[5]
+            and item.get('workflow_stage_code') == 'IFR'
+        )
+        wave = next(
+            predecessor for predecessor in second_ifr['predecessors']
+            if predecessor.get('source') == 'discipline_delivery_wave'
+        )
+
+        self.assertEqual(wave['id'], first_ifr['id'])
+        self.assertEqual(wave['type'], 'SS')
+        self.assertEqual(wave['lag_days'], 1)
+        self.assertGreater(second_ifr['start_date'], first_ifr['start_date'])
+
     @patch('apps.planning_intelligence.services.pipeline.analyze_documents')
     def test_generation_wizard_preview_does_not_persist_generation(self, analyze):
         ensure_project_schedule_configuration(self.project, actor=self.owner)
