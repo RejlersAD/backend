@@ -1810,8 +1810,12 @@ def check_naming(request, document_id):
     page_index = int(body.get("page_index", 0))
     run_ai     = bool(body.get("run_ai", True))
 
+    # Same S3-vs-local fix as drawing_image()/reprocess_document() above —
+    # .path always raised under S3Boto3Storage, so this endpoint
+    # unconditionally 400'd in production. _resolve_file_path handles both.
+    from .tasks import _resolve_file_path
     try:
-        file_path = doc.original_file.path
+        file_path = _resolve_file_path(doc)
     except Exception:
         return Response(
             {"error": "File path unavailable — storage may be remote"},
