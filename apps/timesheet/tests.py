@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
@@ -262,6 +262,36 @@ class BiometricMirrorIntegrationTests(TestCase):
         row = next(item for item in report['rows'] if item['employee_code'] == 'E010')
         self.assertEqual(row['total_hours'], 13.0)
         self.assertEqual(report['attendance_source'], 'hybrid')
+
+    def test_hybrid_daily_sorts_biometric_datetimes_with_manual_strings(self):
+        TimesheetEvent.objects.create(
+            source_event_id='hybrid-sort-in', employee_code='E020',
+            employee_name='Biometric Employee',
+            event_time=datetime(2026, 8, 20, 4, 0, tzinfo=timezone.utc),
+            event_type='IN',
+        )
+        TimesheetEvent.objects.create(
+            source_event_id='hybrid-sort-out', employee_code='E020',
+            employee_name='Biometric Employee',
+            event_time=datetime(2026, 8, 20, 13, 0, tzinfo=timezone.utc),
+            event_type='OUT',
+        )
+        DailyAttendanceSummary.objects.create(
+            employee_code='E021', date=date(2026, 8, 20), source='manual',
+            employee_name='Manual Employee', effective_hours=8,
+            time_in=time(9, 0), time_out=time(17, 0),
+        )
+        identity = lambda rows: rows
+        with (
+            patch.object(config, 'INPUT_MODE', 'hybrid'),
+            patch.object(config, 'INGEST_TZ_OFFSET_HOURS', 4),
+            patch.object(mirror_services, '_enrich_from_user_master_mirror', side_effect=identity),
+            patch.object(mirror_services, '_enrich_with_rad_users', side_effect=identity),
+            patch.object(mirror_services, '_backfill_email_from_matrix_name', side_effect=identity),
+        ):
+            report = mirror_services.daily_report('2026-08-20')
+
+        self.assertEqual({row['employee_code'] for row in report['rows']}, {'E020', 'E021'})
 
     def test_hybrid_live_roster_without_punch_is_unknown_not_out(self):
         today = mirror_services._attendance_today()
