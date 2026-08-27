@@ -17,6 +17,7 @@ Task pipeline:
 """
 import logging
 import os
+import shutil
 import tempfile
 
 from celery import shared_task
@@ -203,9 +204,24 @@ def _resolve_file_path(doc) -> str:
 
     Resolution order (soft-coded to handle all storage backends):
       1. Local FileField  →  .path  (e.g. FileSystemStorage / ResilientMediaStorage)
-      2. S3 FileField     →  .name  holds the S3 key → download to tmp file
-      3. Explicit s3_path →  download to tmp file
+      2. Any other FileField backend (S3 or otherwise) → read through the
+         field's OWN storage object (see _download_via_storage below).
+      3. Explicit s3_path →  download to tmp file (legacy path, no Storage
+         object available — see _download_from_s3)
     Raises ValueError when no source is available.
+
+    IMPORTANT — 2026-08-27 postmortem: step 2 used to hand-roll S3 access
+    with a raw boto3 client, keyed on doc.original_file.name alone. That
+    silently ignored the configured storage backend's `location` prefix
+    (e.g. MediaStorage.location = 'media' — see apps/core/storage_backends.py)
+    — Django's FileField.name is relative to that location, NOT a full S3
+    key. So every single download 404'd on HeadObject: it asked S3 for
+    "<upload_to_path>/<file>" when the real object was at
+    "media/<upload_to_path>/<file>". Going through
+    doc.original_file.storage (the exact same Storage instance that
+    performed the original upload) makes this correct automatically, for
+    whichever storage backend is actually configured — no prefix, bucket,
+    region, or credential logic to keep in sync by hand ever again.
     """
     if doc.original_file:
         # Try local path first (works for FileSystemStorage and ResilientMediaStorage)
@@ -216,13 +232,13 @@ def _resolve_file_path(doc) -> str:
         except NotImplementedError:
             pass  # S3Boto3Storage raises NotImplementedError for .path
 
-        # For S3-backed FileField, .name is the S3 object key
-        s3_key = getattr(doc.original_file, 'name', None)
-        if s3_key:
-            logger.info('[PIDVTask] Downloading file from S3 key: %s', s3_key)
-            return _download_from_s3(s3_key)
+        if doc.original_file.name:
+            logger.info('[PIDVTask] Downloading file via storage backend: %s', doc.original_file.name)
+            return _download_via_storage(doc.original_file)
 
-    # Explicit s3_path field (legacy / manually set)
+    # Explicit s3_path field (legacy / manually set) — no Storage object
+    # attached to a plain CharField, so this one genuinely does need a raw
+    # boto3 client; s3_key here is assumed to already be a full bucket key.
     if doc.s3_path:
         logger.info('[PIDVTask] Downloading file from explicit s3_path: %s', doc.s3_path)
         return _download_from_s3(doc.s3_path)
@@ -230,8 +246,26 @@ def _resolve_file_path(doc) -> str:
     raise ValueError(f'No file path available for document {doc.document_id}')
 
 
+def _download_via_storage(file_field) -> str:
+    """Download a FileField's content to a temp file through its OWN
+    storage backend — correctly handles bucket/region/credentials/location
+    prefix for whichever backend is configured (S3Boto3Storage,
+    FileSystemStorage, etc.), instead of reconstructing S3 access by hand."""
+    ext = file_field.name.rsplit('.', 1)[-1] if '.' in file_field.name else 'bin'
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}')
+    with file_field.open('rb') as src:
+        shutil.copyfileobj(src, tmp)
+    tmp.flush()
+    tmp.close()
+    return tmp.name
+
+
 def _download_from_s3(s3_key: str) -> str:
-    """Download an S3 object to a temp file and return its path."""
+    """Download an S3 object to a temp file and return its path. Only used
+    for the legacy explicit doc.s3_path field (a plain CharField with no
+    Storage object attached) — s3_key is assumed to already be a full,
+    correct bucket key, unlike a FileField's .name (see _resolve_file_path's
+    docstring for why that distinction matters)."""
     import boto3
     bucket = os.environ.get('AWS_STORAGE_BUCKET_NAME', '')
     region = os.environ.get('AWS_S3_REGION_NAME', 'us-east-1')
