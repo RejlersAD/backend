@@ -1,12 +1,15 @@
-from datetime import date, datetime
-from unittest.mock import Mock, patch
+from datetime import date, datetime, time
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 
-from . import config, get_service, mirror_services
+from . import config, get_service, mirror_services, services
+from .manual_import import _hours, _parse, _time
 from .models import DailyAttendanceSummary, TimesheetEvent
+from .services import _backfill_email_from_matrix_name
 
 
 class ServiceSelectionTests(SimpleTestCase):
@@ -22,6 +25,16 @@ class ServiceSelectionTests(SimpleTestCase):
         with patch.object(config, 'INPUT_MODE', 'hybrid'), patch.object(config, 'DATA_SOURCE', 'sqlserver'):
             self.assertIs(get_service(), mirror_services)
 
+    def test_hybrid_is_configured_without_direct_sql_credentials(self):
+        empty_sql = {'host': '192.168.99.52', 'user': '', 'password': '', 'database': ''}
+        with (
+            patch.object(config, 'FEATURE_ENABLED', True),
+            patch.object(config, 'INPUT_MODE', 'hybrid'),
+            patch.object(config, 'DATA_SOURCE', 'sqlserver'),
+            patch.object(config, 'SQLSERVER', empty_sql),
+        ):
+            self.assertTrue(config.is_configured())
+
 
 class BiometricHoursTests(SimpleTestCase):
     def test_paired_hours_obey_daily_cap(self):
@@ -32,6 +45,129 @@ class BiometricHoursTests(SimpleTestCase):
         result = mirror_services._compute_paired_hours(punches)
         self.assertEqual(result['effective_hours'], 9.0)
         self.assertEqual(result['paired_hours'], 9.0)
+
+
+class DirectSqlAttendanceQueryTests(SimpleTestCase):
+    schema = {
+        'table': 'dbo.Mx_VEW_UserAttendanceEvents',
+        'columns': {
+            'employee_code': 'UserID', 'employee_email': '',
+            'employee_name': 'FullName', 'department': 'DptName',
+            'punch_time': 'EventDateTime', 'punch_type': 'EntryExitType',
+            'in_value': '0', 'out_value': '1',
+            'login_time': '', 'logout_time': '', 'date': '',
+        },
+    }
+
+    def _connection(self):
+        connection = MagicMock()
+        cursor = connection.__enter__.return_value
+        cursor.fetchall.return_value = []
+        return connection, cursor
+
+    def test_daily_uses_first_entry_and_last_exit(self):
+        connection, cursor = self._connection()
+        with patch.object(config, 'SCHEMA', self.schema), patch.object(services, 'connect', return_value=connection):
+            services.daily_report.__wrapped__('2026-08-27')
+
+        sql, params = cursor.execute.call_args.args
+        self.assertIn('MIN(CASE WHEN [EntryExitType] = %s THEN [EventDateTime] END)', sql)
+        self.assertIn('MAX(CASE WHEN [EntryExitType] = %s THEN [EventDateTime] END)', sql)
+        self.assertEqual(params, ('0', '1', date(2026, 8, 27)))
+
+    def test_monthly_uses_entry_exit_values_before_date_range(self):
+        connection, cursor = self._connection()
+        with patch.object(config, 'SCHEMA', self.schema), patch.object(services, 'connect', return_value=connection):
+            services.monthly_report.__wrapped__(2026, 8)
+
+        _, params = cursor.execute.call_args.args
+        self.assertEqual(params, ('0', '1', date(2026, 8, 1), date(2026, 8, 31)))
+
+
+class ManualAttendanceParsingTests(SimpleTestCase):
+    def test_cosec_duration_is_converted_to_decimal_hours(self):
+        self.assertAlmostEqual(_hours('10:55'), 10 + 55 / 60)
+
+    def test_cosec_missing_clock_out_is_empty(self):
+        self.assertIsNone(_time('-'))
+
+    def test_cosec_export_row_is_accepted(self):
+        rows = [
+            ['Date', 'Emp ID', 'Employee Name', 'Department', 'Time In', 'Time Out', 'Total Hours', 'Status'],
+            ['01/08/2026', '05192601', 'Test Employee', 'Rejlers Abu Dhabi', '20:03:18', '06:58:26', '10:55', 'Present'],
+        ]
+
+        parsed, errors = _parse(rows, year=2026, month=8)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].employee_code, '05192601')
+        self.assertAlmostEqual(parsed[0].hours, 10 + 55 / 60)
+        self.assertEqual(parsed[0].time_in, time(20, 3, 18))
+        self.assertEqual(parsed[0].time_out, time(6, 58, 26))
+
+    def test_native_cosec_organization_report_is_accepted(self):
+        rows = [
+            [None, None, None, 'REJLERS ABU DHABI'],
+            [None, None, None, 'Organization-Wise Attendance From 01/07/2026 To 31/07/2026'],
+            [None, 'User', ' Name', ' Shift', ' IN-', None, ' OUT-', None, ' IN-', ' OUT-', None, None, None, None, None, None, None, None, None, 'Work'],
+            [None, 'ID', None, None, ' SPFID', None, ' SPFID', None, ' SPFID', ' SPFID', None, None, None, None, None, None, None, None, None, 'Hrs'],
+            [None] * 20,
+            [None, datetime(2026, 7, 4), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None],
+            [None, '05192603', 'Test Employee', None, datetime(2026, 7, 4, 8, 47, 16), None,
+             datetime(2026, 7, 4, 19, 32, 5), None, None, None, None, None, None, None, None, None, None, None, None, '10:45'],
+        ]
+
+        parsed, errors = _parse(rows, year=2026, month=7)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].employee_code, '05192603')
+        self.assertEqual(parsed[0].date, date(2026, 7, 4))
+        self.assertEqual(parsed[0].time_in, time(8, 47, 16))
+        self.assertEqual(parsed[0].time_out, time(19, 32, 5))
+        self.assertEqual(parsed[0].hours, 10.75)
+
+
+class AttendanceNameBackfillTests(SimpleTestCase):
+    def test_multiple_employee_names_use_one_bulk_profile_query(self):
+        from apps.rbac.models import UserProfile
+
+        profiles = [
+            SimpleNamespace(
+                user=SimpleNamespace(
+                    id=1, first_name='Alice', last_name='Smith',
+                    email='alice.smith@example.com', username='alice.smith',
+                ),
+                user_id=1, department='Engineering', job_title='Engineer',
+            ),
+            SimpleNamespace(
+                user=SimpleNamespace(
+                    id=2, first_name='Bob', last_name='Jones',
+                    email='bob.jones@example.com', username='bob.jones',
+                ),
+                user_id=2, department='Operations', job_title='Manager',
+            ),
+        ]
+        manager = Mock()
+        manager.select_related.return_value.filter.return_value = profiles
+
+        rows = [
+            {'employee_name': 'Alice Smith', 'radai_email': None},
+            {'employee_name': 'Bob Jones', 'radai_email': None},
+        ]
+        name_backfill = {'enabled': True, 'min_token_hits': 2, 'max_candidates': 8}
+
+        with (
+            patch.object(config, 'NAME_BACKFILL', name_backfill),
+            patch.object(UserProfile, 'objects', manager),
+        ):
+            result = _backfill_email_from_matrix_name(rows)
+
+        manager.select_related.assert_called_once_with('user')
+        manager.select_related.return_value.filter.assert_called_once_with(is_deleted=False)
+        self.assertEqual(result[0]['radai_email'], 'alice.smith@example.com')
+        self.assertEqual(result[1]['radai_email'], 'bob.jones@example.com')
 
 
 class BiometricMirrorIntegrationTests(TestCase):

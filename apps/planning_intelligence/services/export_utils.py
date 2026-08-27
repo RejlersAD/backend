@@ -39,11 +39,10 @@ PRIMAVERA_COLUMNS = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────
-# PowerPoint export — built on Rejlers' own corporate template so exported
-# decks carry the real brand (fonts, colors, logo, master slides) instead of
-# a hand-drawn approximation. Template file is a versioned asset shipped with
-# the backend (COPY'd into every Docker image — local & production alike),
-# so no extra deploy step or file path configuration is required.
+# PowerPoint export — uses Rejlers' corporate template when the optional asset
+# is available. A complete branded widescreen deck is generated from standard
+# Office layouts when it is absent, so local and production exports remain
+# functional without a binary template deployment step.
 # ─────────────────────────────────────────────────────────────────────────
 PPTX_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), '..', 'assets', 'rejlers_template.pptx')
 
@@ -132,13 +131,85 @@ def activities_to_excel_bytes(activities: list) -> bytes:
 
 
 def _pptx_get_layout(prs, name):
-    """Look up a slide layout by its name in the Rejlers template. Falls back
-    to the deck's first layout so export never hard-fails if the template is
-    ever revised/renamed."""
+    """Return a named corporate layout or a compatible standard layout.
+
+    The corporate template is optional in deployments.  Falling back every
+    slide to layout 0 (Title Slide) made content/table exports fail because
+    those slides do not expose the expected placeholders.  Standard
+    ``python-pptx`` layout indexes are stable for a newly-created deck.
+    """
     for layout in prs.slide_layouts:
         if layout.name == name:
             return layout
-    return prs.slide_layouts[0]
+    fallback_indexes = {
+        PPTX_LAYOUT_COVER: 0,    # Title Slide
+        PPTX_LAYOUT_CONTENT: 1,  # Title and Content
+        PPTX_LAYOUT_TABLE: 5,    # Title Only
+        PPTX_LAYOUT_CLOSING: 0,  # Title Slide
+    }
+    index = min(fallback_indexes.get(name, 5), len(prs.slide_layouts) - 1)
+    return prs.slide_layouts[index]
+
+
+def _pptx_placeholder(slide, idx):
+    """Safely resolve a template placeholder by its stable idx."""
+    try:
+        return slide.placeholders[idx]
+    except (KeyError, IndexError):
+        return None
+
+
+def _pptx_set_heading(slide, prs, heading, *, light=False):
+    """Set a heading on either the corporate or default Office layout."""
+    from pptx.dml.color import RGBColor
+    from pptx.util import Inches, Pt
+
+    shape = _pptx_placeholder(slide, PPTX_HEADING_PLACEHOLDER_IDX) or slide.shapes.title
+    if shape is None:
+        shape = slide.shapes.add_textbox(Inches(0.8), Inches(0.45), prs.slide_width - Inches(1.6), Inches(0.8))
+    shape.text = str(heading)
+    for paragraph in shape.text_frame.paragraphs:
+        for run in paragraph.runs:
+            run.font.name = 'Arial'
+            run.font.size = Pt(26)
+            run.font.bold = True
+            run.font.color.rgb = RGBColor(255, 255, 255) if light else RGBColor(15, 23, 42)
+    return shape
+
+
+def _pptx_body_placeholder(slide, prs):
+    """Return a writable body shape, creating one when the layout has none."""
+    from pptx.util import Inches
+
+    body = _pptx_placeholder(slide, PPTX_BODY_PLACEHOLDER_IDX)
+    if body is None:
+        title = slide.shapes.title
+        title_shape_id = getattr(title, 'shape_id', None)
+        body = next(
+            (
+                shape for shape in slide.placeholders
+                if getattr(shape, 'shape_id', None) != title_shape_id
+                and getattr(shape, 'has_text_frame', False)
+            ),
+            None,
+        )
+    if body is None:
+        body = slide.shapes.add_textbox(Inches(0.9), Inches(1.55), prs.slide_width - Inches(1.8), prs.slide_height - Inches(2.15))
+    return body
+
+
+def _pptx_add_footer(slide, prs, text='RADAI Project Planning Application'):
+    from pptx.dml.color import RGBColor
+    from pptx.util import Inches, Pt
+
+    footer = slide.shapes.add_textbox(Inches(0.8), prs.slide_height - Inches(0.42), prs.slide_width - Inches(1.6), Inches(0.22))
+    paragraph = footer.text_frame.paragraphs[0]
+    paragraph.text = text
+    paragraph.alignment = 2
+    for run in paragraph.runs:
+        run.font.name = 'Arial'
+        run.font.size = Pt(8)
+        run.font.color.rgb = RGBColor(100, 116, 139)
 
 
 def _pptx_strip_sample_slides(prs):
@@ -155,36 +226,128 @@ def _pptx_strip_sample_slides(prs):
 
 
 def _pptx_add_cover_slide(prs, project, generation):
+    from pptx.dml.color import RGBColor
+    from pptx.util import Inches, Pt
+
     slide = prs.slides.add_slide(_pptx_get_layout(prs, PPTX_LAYOUT_COVER))
-    tf = slide.placeholders[PPTX_HEADING_PLACEHOLDER_IDX].text_frame
-    tf.word_wrap = True
-    tf.paragraphs[0].text = project.name or 'Untitled Planning Project'
+    corporate_heading = _pptx_placeholder(slide, PPTX_HEADING_PLACEHOLDER_IDX)
+    if corporate_heading is not None:
+        tf = corporate_heading.text_frame
+        tf.word_wrap = True
+        tf.paragraphs[0].text = project.name or 'Untitled Planning Project'
+    else:
+        fill = slide.background.fill
+        fill.solid()
+        fill.fore_color.rgb = RGBColor(15, 23, 42)
+        heading = _pptx_set_heading(slide, prs, project.name or 'Untitled Planning Project', light=True)
+        heading.left = Inches(0.9)
+        heading.top = Inches(1.4)
+        heading.width = prs.slide_width - Inches(1.8)
+        heading.height = Inches(1.25)
+        tf = _pptx_body_placeholder(slide, prs).text_frame
+        tf.clear()
+        tf.word_wrap = True
 
     subtitle_bits = [b for b in [project.phase, project.client, project.location] if b]
-    for line in (
+    lines = (
         ' · '.join(subtitle_bits) if subtitle_bits else 'Project Planning Presentation',
         f'Effective Date: {project.effective_date or "—"}',
         f'RADAI Project Planning Application · Schedule v{generation.version}',
-    ):
-        p = tf.add_paragraph()
+    )
+    for i, line in enumerate(lines):
+        p = tf.paragraphs[0] if i == 0 and corporate_heading is None else tf.add_paragraph()
         p.text = line
+        if corporate_heading is None:
+            for run in p.runs:
+                run.font.name = 'Arial'
+                run.font.size = Pt(18 if i == 0 else 13)
+                run.font.color.rgb = RGBColor(203, 213, 225)
     return slide
 
 
 def _pptx_add_bullet_slide(prs, heading, bullets, max_items=10):
-    slide = prs.slides.add_slide(_pptx_get_layout(prs, PPTX_LAYOUT_CONTENT))
-    slide.placeholders[PPTX_HEADING_PLACEHOLDER_IDX].text = heading
+    from pptx.dml.color import RGBColor
+    from pptx.util import Pt
 
-    tf = slide.placeholders[PPTX_BODY_PLACEHOLDER_IDX].text_frame
+    slide = prs.slides.add_slide(_pptx_get_layout(prs, PPTX_LAYOUT_CONTENT))
+    _pptx_set_heading(slide, prs, heading)
+
+    tf = _pptx_body_placeholder(slide, prs).text_frame
+    tf.clear()
     tf.word_wrap = True
     items = bullets[:max_items] or ['No data available.']
     for i, text in enumerate(items):
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
         p.text = str(text)
+        p.space_after = Pt(8)
+        for run in p.runs:
+            run.font.name = 'Arial'
+            run.font.size = Pt(16)
+            run.font.color.rgb = RGBColor(51, 65, 85)
     if len(bullets) > max_items:
         p = tf.add_paragraph()
         p.text = f'…and {len(bullets) - max_items} more (see full export for details).'
+    _pptx_add_footer(slide, prs)
     return slide
+
+
+def _pptx_paginate_paragraphs(paragraphs, max_chars=750, max_items=5):
+    """Split narrative text into slide-sized pages without dropping content.
+
+    PowerPoint does not reliably auto-create continuation slides when text
+    overflows a placeholder.  Keep a conservative character and paragraph
+    budget, splitting unusually long paragraphs at sentence/word boundaries.
+    """
+    segments = []
+    for paragraph in paragraphs:
+        text = re.sub(r'\s+', ' ', str(paragraph)).strip()
+        if not text:
+            continue
+
+        sentences = [part.strip() for part in re.split(r'(?<=[.!?])\s+', text) if part.strip()]
+        current = ''
+        for sentence in sentences or [text]:
+            if len(sentence) > max_chars:
+                words = sentence.split()
+                word_chunk = ''
+                for word in words:
+                    candidate = f'{word_chunk} {word}'.strip()
+                    if word_chunk and len(candidate) > max_chars:
+                        if current:
+                            segments.append(current)
+                            current = ''
+                        segments.append(word_chunk)
+                        word_chunk = word
+                    else:
+                        word_chunk = candidate
+                sentence_parts = [word_chunk] if word_chunk else []
+            else:
+                sentence_parts = [sentence]
+
+            for part in sentence_parts:
+                candidate = f'{current} {part}'.strip()
+                if current and len(candidate) > max_chars:
+                    segments.append(current)
+                    current = part
+                else:
+                    current = candidate
+        if current:
+            segments.append(current)
+
+    pages = []
+    page = []
+    page_chars = 0
+    for segment in segments:
+        required = len(segment) + (1 if page else 0)
+        if page and (len(page) >= max_items or page_chars + required > max_chars):
+            pages.append(page)
+            page = []
+            page_chars = 0
+        page.append(segment)
+        page_chars += len(segment) + (1 if page_chars else 0)
+    if page:
+        pages.append(page)
+    return pages
 
 
 def _pptx_add_table_slide(prs, heading, headers, rows, max_rows=PPTX_MAX_TABLE_ROWS, footnote=None):
@@ -193,14 +356,19 @@ def _pptx_add_table_slide(prs, heading, headers, rows, max_rows=PPTX_MAX_TABLE_R
     (it is not a native table placeholder in python-pptx), so we read its
     on-brand position/size then swap it for a real table at that exact spot —
     keeping the table perfectly aligned with the template's grid."""
-    from pptx.util import Pt, Emu
+    from pptx.dml.color import RGBColor
+    from pptx.util import Pt, Emu, Inches
 
     slide = prs.slides.add_slide(_pptx_get_layout(prs, PPTX_LAYOUT_TABLE))
-    slide.placeholders[PPTX_HEADING_PLACEHOLDER_IDX].text = heading
+    _pptx_set_heading(slide, prs, heading)
 
-    content_ph = slide.placeholders[PPTX_CONTENT_PLACEHOLDER_IDX]
-    left, top, width, height = content_ph.left, content_ph.top, content_ph.width, content_ph.height
-    content_ph._element.getparent().remove(content_ph._element)
+    content_ph = _pptx_placeholder(slide, PPTX_CONTENT_PLACEHOLDER_IDX)
+    if content_ph is not None:
+        left, top, width, height = content_ph.left, content_ph.top, content_ph.width, content_ph.height
+        content_ph._element.getparent().remove(content_ph._element)
+    else:
+        left, top = Inches(0.75), Inches(1.45)
+        width, height = prs.slide_width - Inches(1.5), prs.slide_height - Inches(2.05)
 
     note_lines = []
     if len(rows) > max_rows:
@@ -214,11 +382,21 @@ def _pptx_add_table_slide(prs, heading, headers, rows, max_rows=PPTX_MAX_TABLE_R
     table = graphic_frame.table
     for c, header in enumerate(headers):
         table.cell(0, c).text = str(header)
+        table.cell(0, c).fill.solid()
+        table.cell(0, c).fill.fore_color.rgb = RGBColor(30, 64, 175)
         for run in table.cell(0, c).text_frame.paragraphs[0].runs:
             run.font.bold = True
+            run.font.color.rgb = RGBColor(255, 255, 255)
+            run.font.size = Pt(11)
     for r, row in enumerate(display_rows, start=1):
         for c, value in enumerate(row):
             table.cell(r, c).text = '' if value is None else str(value)
+            if r % 2 == 0:
+                table.cell(r, c).fill.solid()
+                table.cell(r, c).fill.fore_color.rgb = RGBColor(241, 245, 249)
+            for run in table.cell(r, c).text_frame.paragraphs[0].runs:
+                run.font.size = Pt(10)
+                run.font.color.rgb = RGBColor(51, 65, 85)
 
     if note_lines:
         note_top = Emu(int(top) + int(table_height) + Emu(int(prs.slide_height * 0.015)))
@@ -231,24 +409,33 @@ def _pptx_add_table_slide(prs, heading, headers, rows, max_rows=PPTX_MAX_TABLE_R
             run.text = line
             run.font.size = Pt(11)
             run.font.italic = True
+    _pptx_add_footer(slide, prs)
     return slide
 
 
 def _pptx_add_closing_slide(prs, message='Thank You'):
+    from pptx.dml.color import RGBColor
+
     slide = prs.slides.add_slide(_pptx_get_layout(prs, PPTX_LAYOUT_CLOSING))
-    slide.placeholders[PPTX_HEADING_PLACEHOLDER_IDX].text = message
+    if _pptx_placeholder(slide, PPTX_HEADING_PLACEHOLDER_IDX) is not None:
+        _pptx_set_heading(slide, prs, message)
+    else:
+        fill = slide.background.fill
+        fill.solid()
+        fill.fore_color.rgb = RGBColor(15, 23, 42)
+        _pptx_set_heading(slide, prs, message, light=True)
     return slide
 
 
 def generation_to_pptx_bytes(generation) -> bytes:
     """
     Builds a client/internal-review-ready PowerPoint deck summarizing a
-    PlanningGeneration, using Rejlers' own corporate template
-    (assets/rejlers_template.pptx) for the slide masters/layouts — cover,
-    agenda, content, table and closing slides all inherit that template's
-    fonts, colors and logo placement automatically.
+    PlanningGeneration. Rejlers' corporate template is used when available;
+    otherwise safe standard layouts produce a complete branded widescreen
+    deck with cover, agenda, content, table and closing slides.
     """
     from pptx import Presentation
+    from pptx.util import Inches
 
     project = generation.project
     activities = generation.activities or []
@@ -258,13 +445,23 @@ def generation_to_pptx_bytes(generation) -> bytes:
     validation = generation.validation or []
     intelligence = generation.intelligence or {}
 
-    try:
-        prs = Presentation(PPTX_TEMPLATE_PATH)
-        _pptx_strip_sample_slides(prs)
-    except Exception:
-        # Defensive fallback so export never hard-fails if the template asset
-        # is ever missing/unreadable — falls back to a blank deck.
+    template_loaded = False
+    if os.path.isfile(PPTX_TEMPLATE_PATH):
+        try:
+            prs = Presentation(PPTX_TEMPLATE_PATH)
+            _pptx_strip_sample_slides(prs)
+            template_loaded = True
+        except Exception:
+            prs = Presentation()
+    else:
         prs = Presentation()
+
+    # A generated deck must remain functional even when no corporate template
+    # asset is shipped. The blank-deck path uses a modern 16:9 canvas and the
+    # helper functions above supply safe layouts, text boxes and branding.
+    if not template_loaded:
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
 
     # 1) Cover
     _pptx_add_cover_slide(prs, project, generation)
@@ -367,8 +564,20 @@ def generation_to_pptx_bytes(generation) -> bytes:
     # 10) Narrative / Executive Summary
     narrative_text = (generation.narrative or '').strip()
     paragraphs = [p.strip() for p in narrative_text.split('\n') if p.strip()]
-    summary_bullets = paragraphs[:6] if paragraphs else ['Narrative not yet generated.']
-    _pptx_add_bullet_slide(prs, 'Executive Summary', summary_bullets, max_items=6)
+    summary_pages = _pptx_paginate_paragraphs(
+        paragraphs or ['Narrative not yet generated.'],
+    )
+    total_summary_pages = len(summary_pages)
+    for page_number, summary_bullets in enumerate(summary_pages, start=1):
+        heading = 'Executive Summary'
+        if total_summary_pages > 1:
+            heading = f'Executive Summary ({page_number}/{total_summary_pages})'
+        _pptx_add_bullet_slide(
+            prs,
+            heading,
+            summary_bullets,
+            max_items=len(summary_bullets),
+        )
 
     # 11) Closing
     _pptx_add_closing_slide(prs, 'Thank You')

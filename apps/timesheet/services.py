@@ -503,7 +503,6 @@ def _backfill_email_from_matrix_name(rows: list[dict]) -> list[dict]:
             imports_ok = True
             try:
                 from apps.rbac.models import UserProfile
-                from django.db.models import Q
             except Exception:
                 imports_ok = False
 
@@ -511,8 +510,11 @@ def _backfill_email_from_matrix_name(rows: list[dict]) -> list[dict]:
                 min_hits = max(1, int(cfg.get('min_token_hits', 2)))
                 cap = max(1, int(cfg.get('max_candidates', 8)))
 
-                # Aggregate every distinct token across all needy rows so we issue
-                # ONE candidate query per token instead of N per-row queries.
+                # Aggregate every distinct token across all needy rows. Load the
+                # RAD AI roster once and build the candidate lists in memory.
+                # A monthly import can contain hundreds of distinct names; doing
+                # one remote-Postgres query per token made the report exceed the
+                # frontend's request timeout.
                 token_to_rows: dict[str, list[tuple[dict, set[str]]]] = {}
                 for r, toks in needs:
                     tset = set(toks)
@@ -520,22 +522,32 @@ def _backfill_email_from_matrix_name(rows: list[dict]) -> list[dict]:
                         token_to_rows.setdefault(t, []).append((r, tset))
 
                 candidate_cache: dict[str, list] = {}
-                for token in token_to_rows.keys():
-                    if len(token) < 3:
-                        continue
-                    try:
-                        qs = UserProfile.objects.select_related('user').filter(
-                            is_deleted=False
-                        ).filter(
-                            Q(user__first_name__icontains=token)
-                            | Q(user__last_name__icontains=token)
-                            | Q(user__email__icontains=token)
-                            | Q(user__username__icontains=token)
-                        )[:cap]
-                        candidate_cache[token] = list(qs)
-                    except Exception as exc:
-                        logger.info('[timesheet] name-backfill token=%r skipped: %s', token, exc)
-                        candidate_cache[token] = []
+                try:
+                    profiles = list(
+                        UserProfile.objects.select_related('user').filter(is_deleted=False)
+                    )
+                    searchable_profiles = [
+                        (
+                            profile,
+                            ' '.join(filter(None, (
+                                profile.user.first_name,
+                                profile.user.last_name,
+                                profile.user.email,
+                                profile.user.username,
+                            ))).lower(),
+                        )
+                        for profile in profiles
+                        if profile.user
+                    ]
+                    for token in token_to_rows:
+                        if len(token) < 3:
+                            continue
+                        candidate_cache[token] = [
+                            profile for profile, searchable in searchable_profiles
+                            if token in searchable
+                        ][:cap]
+                except Exception as exc:
+                    logger.info('[timesheet] bulk name-backfill skipped: %s', exc)
 
                 for r, toks in needs:
                     tset = set(toks)
@@ -756,13 +768,18 @@ def daily_report(date: Optional[str] = None) -> dict:
             f"       {_opt_select('employee_email', 'email', agg='MAX')}"
             f"       MAX({_col('employee_name')}) AS name, "
             f"       {('MAX(' + _col('department') + ') AS department,') if _col('department') else ''}"
-            f"       MIN({_col('punch_time')}) AS first_in, "
-            f"       MAX({_col('punch_time')}) AS last_out, "
+            f"       MIN(CASE WHEN {_col('punch_type')} = %s THEN {_col('punch_time')} END) AS first_in, "
+            f"       MAX(CASE WHEN {_col('punch_type')} = %s THEN {_col('punch_time')} END) AS last_out, "
             f"       COUNT(*) AS punch_count "
             f"FROM {_table()} "
             f"WHERE CAST({_col('punch_time')} AS DATE) = %s "
             f"GROUP BY {_col('employee_code')} "
             f"ORDER BY first_in"
+        )
+        params = (
+            ts_config.SCHEMA['columns']['in_value'],
+            ts_config.SCHEMA['columns']['out_value'],
+            day,
         )
     else:
         sql = (
@@ -776,9 +793,10 @@ def daily_report(date: Optional[str] = None) -> dict:
             f"WHERE CAST({_col('date')} AS DATE) = %s "
             f"ORDER BY {_col('login_time')}"
         )
+        params = (day,)
 
     with connect() as cur:
-        cur.execute(sql, (day,))
+        cur.execute(sql, params)
         rows = rows_to_dicts(cur, cur.fetchall())
 
     for r in rows:
@@ -817,12 +835,18 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             f"       MAX({_col('employee_name')}) AS name, "
             f"       {('MAX(' + _col('department') + ') AS department,') if _col('department') else ''}"
             f"       CAST({_col('punch_time')} AS DATE) AS work_date, "
-            f"       MIN({_col('punch_time')}) AS first_in, "
-            f"       MAX({_col('punch_time')}) AS last_out "
+            f"       MIN(CASE WHEN {_col('punch_type')} = %s THEN {_col('punch_time')} END) AS first_in, "
+            f"       MAX(CASE WHEN {_col('punch_type')} = %s THEN {_col('punch_time')} END) AS last_out "
             f"FROM {_table()} "
             f"WHERE {_col('punch_time')} >= %s AND {_col('punch_time')} < DATEADD(DAY, 1, %s) "
             f"GROUP BY {_col('employee_code')}, CAST({_col('punch_time')} AS DATE) "
             f"ORDER BY employee_code, work_date"
+        )
+        params = (
+            ts_config.SCHEMA['columns']['in_value'],
+            ts_config.SCHEMA['columns']['out_value'],
+            start,
+            end,
         )
     else:
         sql = (
@@ -837,9 +861,10 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             f"WHERE {_col('date')} >= %s AND {_col('date')} <= %s "
             f"ORDER BY {_col('employee_code')}, {_col('date')}"
         )
+        params = (start, end)
 
     with connect() as cur:
-        cur.execute(sql, (start, end))
+        cur.execute(sql, params)
         raw = rows_to_dicts(cur, cur.fetchall())
 
     # Roll up per employee

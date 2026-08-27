@@ -14,6 +14,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'apps.users',
     'apps.core',
+    'apps.notifications',
     'apps.planning_intelligence',
     'apps.project_control',
 ]

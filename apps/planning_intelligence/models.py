@@ -275,7 +275,7 @@ from .enterprise_models import (  # noqa: E402,F401
 )
 
 # Import enterprise technical proposal models.
-from .proposal_models import ProposalExportRecord, TechnicalProposal  # noqa: E402,F401
+from .proposal_models import ProposalExportRecord, ProposalWorkflowTask, TechnicalProposal  # noqa: E402,F401
 
 # Import versioned workflow and engineering-dependency configuration models.
 from .workflow_models import (  # noqa: E402,F401
