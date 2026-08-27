@@ -149,6 +149,7 @@ class PidCheckerV2LineTag(models.Model):
     spec = models.CharField(max_length=TAG_FIELD_MAX_LEN, blank=True, default='')
     serial = models.CharField(max_length=TAG_FIELD_MAX_LEN, blank=True, default='')
     service_group = models.CharField(max_length=SERVICE_GROUP_MAX_LEN, blank=True, default='')
+    confidence = models.CharField(max_length=8, blank=True, default='')  # 'high'|'medium'|'low', see vision_extractor._parse_tag_list
 
     class Meta:
         db_table = 'pid_checker_v2_line_tag'
@@ -563,4 +564,73 @@ class PidCheckerV2UsageLog(models.Model):
 
     def __str__(self) -> str:
         return f'{self.feature} · {self.model_name} · {self.total_tokens} tok'
+
+
+# ─── Legend Symbol Images (BYOK Vision-extracted, project-scoped) ─────
+# Cropped picture for one (section, symbol_name) pair, extracted from a
+# project's uploaded Legend PDF (apps.pid_verification.PIDVLegendSheet).
+# Cross-app FKs use string references to avoid import-order issues.
+SYMBOL_IMAGE_SECTION_MAX_LEN = 64
+SYMBOL_IMAGE_NAME_MAX_LEN = 255
+SYMBOL_IMAGE_CONTENT_TYPE_MAX_LEN = 50
+
+
+def legend_symbol_image_upload_path(instance, filename):
+    """Storage key for a project's custom symbol picture — routed through
+    Django's storage abstraction, so this lands on S3 in any environment
+    where ``DEFAULT_FILE_STORAGE`` is the S3 backend (see settings.py) and
+    on local disk otherwise, with zero branching here.
+
+    Global *default* pictures are NOT stored this way — see
+    ``apps/pid_checker_v2/services/default_symbol_images.py``: they're repo
+    -committed static files under ``static/default_symbols/``, so a fresh
+    server with an empty database still has every default picture without
+    needing to seed anything.
+    """
+    ext = filename.rsplit('.', 1)[-1] if '.' in filename else 'png'
+    return f'legend_symbol_images/{instance.project_id}/{instance.section}/{uuid.uuid4().hex}.{ext}'
+
+
+class LegendSymbolImage(models.Model):
+    """One project's custom symbol picture, matched to a legend_defaults.py
+    name. Stored in S3 (or local disk in dev) via ``image_file``.
+
+    Re-uploading for the same (project, section, symbol_name) replaces the
+    row rather than accumulating duplicates — see ``unique_together``.
+
+    This table only ever holds project-specific overrides. The shared
+    library of default pictures lives outside the database entirely, as
+    static files — see ``services/default_symbol_images.py``.
+    """
+
+    image_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, db_index=True)
+    project = models.ForeignKey(
+        'pid_verification.PIDVProject',
+        on_delete=models.CASCADE,
+        related_name='legend_symbol_images',
+    )
+    legend_sheet = models.ForeignKey(
+        'pid_verification.PIDVLegendSheet',
+        on_delete=models.CASCADE,
+        null=True, blank=True,
+        related_name='symbol_images',
+    )
+    section = models.CharField(max_length=SYMBOL_IMAGE_SECTION_MAX_LEN)
+    symbol_name = models.CharField(max_length=SYMBOL_IMAGE_NAME_MAX_LEN)
+    image_file = models.ImageField(upload_to=legend_symbol_image_upload_path, max_length=500, null=True, blank=True)
+    content_type = models.CharField(max_length=SYMBOL_IMAGE_CONTENT_TYPE_MAX_LEN, default='image/png')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'pid_checker_v2_legend_symbol_image'
+        ordering = ['section', 'symbol_name']
+        unique_together = [('project', 'section', 'symbol_name')]
+        indexes = [
+            models.Index(fields=['project', 'section']),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.symbol_name} [{self.section}]'
 

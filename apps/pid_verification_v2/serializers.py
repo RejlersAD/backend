@@ -2,7 +2,7 @@
 P&ID Verification Serializers
 """
 from rest_framework import serializers
-from .models import PIDVProject, PIDVDocument, PIDVDrawing, PIDVFinding
+from .models import PIDVProject, PIDVDocument, PIDVDrawing, PIDVFinding, PIDVComparisonFinding
 
 
 # ---------------------------------------------------------------------------
@@ -73,11 +73,25 @@ class PIDVDrawingSerializer(serializers.ModelSerializer):
         return obj.findings.count()
 
 
+class PIDVComparisonFindingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = PIDVComparisonFinding
+        fields = [
+            'finding_id', 'finding_type', 'severity', 'title', 'description',
+            'evidence', 'ai_suggestion', 'ai_confidence', 'location_info',
+            'status', 'created_at',
+        ]
+
+
 class PIDVDocumentSerializer(serializers.ModelSerializer):
     drawings = PIDVDrawingSerializer(many=True, read_only=True)
     total_issues = serializers.SerializerMethodField()
     project_id   = serializers.UUIDField(source='project.project_id', read_only=True, allow_null=True)
     project_name = serializers.CharField(source='project.project_name', read_only=True, allow_null=True)
+    # Legend Sheets / Symbol Images bridge (apps.pid_checker_v2) — text
+    # matches and visually-identified symbols, cross-referenced. See
+    # services/legend_bridge.py + orchestrator.LegendSymbolBridgeStage.
+    comparison_findings = serializers.SerializerMethodField()
 
     class Meta:
         model  = PIDVDocument
@@ -85,11 +99,21 @@ class PIDVDocumentSerializer(serializers.ModelSerializer):
             'document_id', 'file_name', 's3_path', 'status',
             'error_message', 'excel_s3_url', 'pdf_s3_url',
             'project_id', 'project_name',
-            'total_issues', 'drawings', 'created_at', 'updated_at',
+            'total_issues', 'drawings', 'comparison_findings', 'created_at', 'updated_at',
         ]
 
     def get_total_issues(self, obj):
         return PIDVFinding.objects.filter(drawing__document=obj).count()
+
+    def get_comparison_findings(self, obj):
+        if obj.project_id is None:
+            return []
+        qs = PIDVComparisonFinding.objects.filter(
+            project=obj.project,
+            finding_type=PIDVComparisonFinding.FindingType.SYMBOL_LEGEND_MATCH,
+            evidence__document_id=str(obj.document_id),
+        ).order_by('-ai_confidence')
+        return PIDVComparisonFindingSerializer(qs, many=True).data
 
 
 class PIDVDocumentListSerializer(serializers.ModelSerializer):

@@ -99,6 +99,17 @@ PROCESSING_STAGES: List[ProcessingStage] = [
         log_level='INFO'
     ),
     ProcessingStage(
+        id='legend_symbol_bridge',
+        name='Legend & Symbol Bridge (pid_checker_v2)',
+        description='Text-match tags against pid_checker_v2 legend lookup tables and, '
+                     'when a Claude BYOK key is available, visually identify symbols '
+                     'against its uploaded reference pictures',
+        timeout_seconds=180,
+        retry_count=0,  # Vision calls are already slow; a retry would double the wait
+        critical=False,  # Best-effort enhancement — never blocks the pipeline
+        log_level='INFO'
+    ),
+    ProcessingStage(
         id='report_generation',
         name='Report Generation',
         description='Generate Excel, PDF, and JSON reports',

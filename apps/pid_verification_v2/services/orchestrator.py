@@ -49,7 +49,16 @@ REFERENCE_FIELD_ALIASES = {
     'line_list': {
         'line_tag': ['line no', 'line number', 'line tag', 'line id', 'lineno', 'linenumber'],
         'size':     ['size', 'nominal size', 'nps', 'pipe size', 'linesize'],
-        'service':  ['service', 'fluid service', 'commodity', 'fluid'],
+        # Deliberately does NOT include a bare 'fluid' alias — that matched
+        # 'FLUID PHASE' (a free-text phase description like "Vapor" or
+        # "Multi Phase") as a false substring hit, which then got composited
+        # into every line_tag instead of the real short SERVICE CODE (e.g.
+        # "FL"), so the reconstructed tag could never match the P&ID's
+        # actual composite tags (confirmed live — 0/347 line_list matches
+        # until this fix). 'service code'/'fluid code' explicitly target the
+        # short-code column; see _BLOCKED_COLUMN_SUBSTRINGS below for the
+        # extra guard against 'phase'-named description columns.
+        'service':  ['service code', 'fluid code', 'service', 'commodity'],
         'spec':     ['spec', 'pipe spec', 'material spec', 'pipe class', 'piping class'],
     },
     'equipment_list': {
@@ -76,6 +85,21 @@ REFERENCE_FIELD_ALIASES = {
 # tags extracted from the P&ID drawing itself.
 COMPOSITE_LINE_TAG_MARKER_RE = re.compile(r'["\u201d]|[A-Za-z]')
 
+# Column headers containing any of these substrings are NEVER mapped onto
+# the given canonical field, even if one of its aliases would otherwise
+# substring-match \u2014 these are description/free-text columns that happen to
+# share a word with a short-code column's alias (e.g. 'FLUID PHASE' vs the
+# 'service' field's 'fluid code' alias). "Prefer short-code columns over
+# description columns" (line_list/service) is enforced here explicitly
+# rather than relying on alias specificity alone.
+_BLOCKED_COLUMN_SUBSTRINGS = {
+    ('line_list', 'service'): ('phase', 'description', 'desc'),
+}
+
+# A genuine service/fluid code is 1-4 letters (FL, SG, CD, HC, ...) — used
+# to validate _build_composite_line_tag()'s 'service' value before using it.
+_LOOKS_LIKE_SERVICE_CODE_RE = re.compile(r'^[A-Za-z]{1,4}$')
+
 
 def _build_composite_line_tag(mapped: Dict[str, Any]) -> None:
     """
@@ -95,6 +119,20 @@ def _build_composite_line_tag(mapped: Dict[str, Any]) -> None:
     spec = str(mapped.get('spec') or '').strip()
     if not (size and service):
         return  # not enough info to rebuild a composite tag
+    if not _LOOKS_LIKE_SERVICE_CODE_RE.match(service):
+        # Validation gate: a genuine service/fluid code is short (2-4
+        # letters, e.g. FL, SG, CD) — if whatever landed in 'service' looks
+        # like a sentence/description instead (spaces, lowercase words,
+        # too long), building a composite tag from it would only ever
+        # produce a value that can never match the P&ID's real tags. Log
+        # and skip rather than emit a tag guaranteed to create a false
+        # "missing" finding.
+        logger.warning(
+            "[LineListNormalize] 'service' value %r doesn't look like a short "
+            "code — skipping composite line_tag for this row (raw tag=%r)",
+            service, tag,
+        )
+        return
 
     parts = [f'{size}"', service]
     if spec:
@@ -141,6 +179,9 @@ def _normalize_reference_rows(data_type: str, raw_rows: List[Dict[str, Any]]) ->
     def _match_column(cleaned_col: str) -> Optional[str]:
         for cleaned_alias, canonical in alias_entries:
             if not cleaned_alias:
+                continue
+            blocked = _BLOCKED_COLUMN_SUBSTRINGS.get((data_type, canonical), ())
+            if any(b in cleaned_col for b in blocked):
                 continue
             if len(cleaned_alias) <= 3:
                 if cleaned_col == cleaned_alias:
@@ -189,7 +230,16 @@ class PipelineContext:
     document: Any  # PIDVDocument instance
     project: Any  # PIDVProject instance
     user_context: Dict[str, Any] = field(default_factory=dict)  # BYOK, settings
-    
+
+    # Reference symbol pictures (LegendSymbolImage, via apps.pid_checker_v2),
+    # loaded ONCE per document run by the caller (tasks.py) — before either
+    # the inline orchestrator.execute() call or the per-page fan-out chord —
+    # and reused for every page here, instead of every page/task re-reading
+    # and re-encoding the same images from storage. Always fetched fresh
+    # from the DB by the caller (never a hardcoded count), so this scales
+    # to any library size without a code change; see legend_bridge.py.
+    symbol_images: List[Dict[str, Any]] = field(default_factory=list)
+
     # Accumulated results from stages
     file_path: Optional[str] = None
     segments: List[Any] = field(default_factory=list)
@@ -409,8 +459,16 @@ class ExtractionStage(StageExecutor):
             'line_sizes': 0, 'notes': 0, 'holds': 0, 'line_tags': 0,
         }
 
+        # Hybrid extraction: Tesseract (if installed) + AI Vision (if a BYOK
+        # key is present in this run's context) — see services/extraction.py.
+        extraction_api_key = context.user_context.get('claude_api_key') or context.user_context.get('openai_api_key')
+        extraction_provider = 'claude' if context.user_context.get('claude_api_key') else 'openai'
+
         for seg in context.segments:
-            extraction = extract_drawing(context.file_path, page_index=seg.page_index)
+            extraction = extract_drawing(
+                context.file_path, page_index=seg.page_index,
+                api_key=extraction_api_key, provider=extraction_provider,
+            )
             raw_text = extraction.get('raw_text', '') or ''
             extraction_summary = {
                 'tags': len(extraction.get('tags', [])),
@@ -595,7 +653,14 @@ class ComparisonEngineStage(StageExecutor):
             legend_data=legend_data,
             line_list_data=line_list_data,
             equipment_list_data=equipment_list_data,
-            instrument_index_data=instrument_index_data
+            instrument_index_data=instrument_index_data,
+            # Smart AI value comparison — same Claude key already used for
+            # this run's Vision analysis (context.user_context), reused here
+            # so a mismatch the naive fuzzy-match threshold can't confidently
+            # call (units, formatting, ranges) gets a real judgment instead
+            # of a false positive. Omitted (None) falls back to the exact
+            # original deterministic behavior when no key is available.
+            ai_api_key=context.user_context.get('claude_api_key'),
         )
 
         # Fallback bucket (first page) for document-level findings with no
@@ -715,34 +780,80 @@ class ComparisonEngineStage(StageExecutor):
         return _normalize_reference_rows(data_type, ref.parsed_data)
 
 
+# ── Smart page filter (Vision cost control) ───────────────────────────────
+# Cover sheets, index/contents pages, and legend/symbol-key pages rarely
+# have real P&ID content worth an expensive per-page Vision call. Skipping
+# them is what makes per-page Vision practical at 35-50+ pages instead of
+# paying for every single page regardless of content.
+_LOW_VALUE_TITLE_KEYWORDS = ('legend', 'index', 'cover', 'contents', 'symbol key', 'abbreviation', 'revision history')
+_MIN_EXTRACTED_ITEMS_FOR_VISION = 1  # a page with zero extracted tags/instruments/valves/equipment/line_tags is almost never worth Vision
+
+
+def _page_worth_vision(extraction_summary: Dict[str, Any], drawing_title: str) -> bool:
+    """True if this page looks like real P&ID content worth a Vision call."""
+    title_lower = (drawing_title or '').lower()
+    if any(kw in title_lower for kw in _LOW_VALUE_TITLE_KEYWORDS):
+        return False
+    total_items = sum(
+        extraction_summary.get(k, 0)
+        for k in ('tags', 'instruments', 'valves', 'equipment', 'line_tags')
+    )
+    return total_items >= _MIN_EXTRACTED_ITEMS_FOR_VISION
+
+
 class AIAnalysisStage(StageExecutor):
-    """Stage 7: AI analysis (BYOK - optional)."""
-    
+    """Stage 7: AI analysis (BYOK - optional).
+
+    Claude modes (deep_claude/hybrid) now send the ACTUAL rendered page
+    image (not just OCR'd text) and, when reference symbol pictures are
+    available (context.symbol_images — loaded ONCE per document run by the
+    caller, see tasks.py), the same Vision call also does symbol
+    recognition — see services/ai_analysis.py and services/legend_bridge.py.
+    Runs per page, filtered by _page_worth_vision() so low-value pages
+    (covers/index/legend sheets, near-empty pages) don't cost a Vision call.
+    """
+
     def __init__(self):
         super().__init__('ai_analysis')
-    
+
     def _execute_impl(self, context: PipelineContext) -> Dict[str, Any]:
         if not is_feature_enabled('byok_ai_analysis'):
             return {'skipped': True, 'reason': 'Feature disabled'}
-        
+
         analysis_mode = context.user_context.get('analysis_mode', 'standard')
         if analysis_mode == 'standard':
             return {'skipped': True, 'reason': 'Standard mode selected'}
 
         from apps.pid_verification_v2.services.ai_analysis import (
             run_openai_analysis,
-            run_claude_analysis,
             run_hybrid_analysis,
             to_rule_findings,
+        )
+        from apps.pid_verification_v2.services.legend_bridge import (
+            run_page_vision_analysis, SYMBOL_BATCH_SIZE,
         )
 
         openai_key = context.user_context.get('openai_api_key')
         claude_key = context.user_context.get('claude_api_key')
+        symbol_images = context.symbol_images or []
+        needs_page_image = analysis_mode in ('deep_claude', 'hybrid') and claude_key
+
+        pdf_bytes = None
+        if needs_page_image and context.file_path:
+            try:
+                with open(context.file_path, 'rb') as fh:
+                    pdf_bytes = fh.read()
+            except Exception:
+                self.logger.warning("[ai_analysis] Could not read file_path for Vision", exc_info=True)
 
         all_ai_findings = []
+        pages_analyzed = 0
+        pages_skipped_by_filter = 0
+
         for seg in context.segments:
             seg_bucket = context.segment_data.setdefault(seg.drawing_id, {})
             extraction = seg_bucket.get('extraction', {}) or {}
+            extraction_summary = seg_bucket.get('extraction_summary', {}) or {}
             drawing_data = {
                 'instruments': extraction.get('instruments', []),
                 'valves':      extraction.get('valves', []),
@@ -752,38 +863,217 @@ class AIAnalysisStage(StageExecutor):
                 'line_sizes':  extraction.get('line_sizes', []),
                 'notes':       extraction.get('notes', []),
             }
+            seg_bucket.setdefault('ai_symbols', [])
+
+            if not _page_worth_vision(extraction_summary, seg.title):
+                self.logger.info(
+                    "[ai_analysis] Skipping low-value page drawing_id=%s (filtered — no Vision call)",
+                    seg.drawing_id,
+                )
+                pages_skipped_by_filter += 1
+                seg_bucket['ai_findings'] = []
+                continue
+
+            page_image_b64 = None
+            if needs_page_image and pdf_bytes is not None:
+                try:
+                    from apps.pid_checker_v2.services.vision_extractor import (
+                        _render_single_page, _prepare_image_b64, VISION_OVERVIEW_MAX_DIMENSION_PX,
+                    )
+                    page_img = _render_single_page(pdf_bytes, seg.page_index)
+                    page_image_b64 = _prepare_image_b64(page_img, VISION_OVERVIEW_MAX_DIMENSION_PX)
+                except Exception:
+                    self.logger.warning(
+                        "[ai_analysis] Could not render page image for drawing_id=%s",
+                        seg.drawing_id, exc_info=True,
+                    )
 
             raw_findings: List[Dict[str, Any]] = []
+            symbols: List[Dict[str, Any]] = []
             try:
                 if analysis_mode == 'enhanced_openai' and openai_key:
-                    raw_findings = run_openai_analysis(drawing_data, openai_key)
-                elif analysis_mode == 'deep_claude' and claude_key:
-                    raw_findings = run_claude_analysis(drawing_data, claude_key)
+                    result = run_openai_analysis(drawing_data, openai_key)
+                    raw_findings = result['findings']
+                elif analysis_mode == 'deep_claude' and claude_key and page_image_b64:
+                    result = run_page_vision_analysis(
+                        drawing_data, claude_key, page_image_b64, symbol_images=symbol_images,
+                    )
+                    if result:
+                        raw_findings = result['findings']
+                        symbols = result['symbols']
                 elif analysis_mode == 'hybrid' and openai_key and claude_key:
-                    raw_findings = run_hybrid_analysis(drawing_data, openai_key, claude_key)
+                    result = run_hybrid_analysis(
+                        drawing_data, openai_key, claude_key,
+                        page_image_b64=page_image_b64,
+                        symbol_images=symbol_images[:SYMBOL_BATCH_SIZE],
+                    )
+                    raw_findings = result['findings']
+                    symbols = result['symbols']
                 else:
                     self.logger.warning(
-                        "[ai_analysis] mode=%s requested but required API key(s) missing — skipping",
-                        analysis_mode,
+                        "[ai_analysis] mode=%s requested but required API key/page image "
+                        "missing for drawing_id=%s — skipping this page",
+                        analysis_mode, seg.drawing_id,
                     )
-                    return {'skipped': True, 'reason': 'Missing API key for selected mode'}
+                    seg_bucket['ai_findings'] = []
+                    continue
             except Exception as exc:
                 # Non-critical: log and skip AI findings for THIS page only,
-                # so one bad page doesn't abort AI analysis for the rest of
-                # a multi-page document.
+                # so one bad/slow page can't abort AI analysis for the rest
+                # of a multi-page document.
                 self.logger.error(
                     "[ai_analysis] mode=%s failed for drawing_id=%s: %s",
                     analysis_mode, seg.drawing_id, exc, exc_info=True,
                 )
+                seg_bucket['ai_findings'] = []
                 continue
 
             seg_findings = to_rule_findings(raw_findings)
             seg_bucket['ai_findings'] = seg_findings
+            seg_bucket['ai_symbols'] = symbols
             all_ai_findings.extend(seg_findings)
+            pages_analyzed += 1
 
         context.ai_findings = all_ai_findings  # aggregate — backward-compat
 
-        return {'findings_count': len(all_ai_findings), 'mode': analysis_mode}
+        return {
+            'findings_count': len(all_ai_findings),
+            'mode': analysis_mode,
+            'pages_analyzed': pages_analyzed,
+            'pages_skipped_by_filter': pages_skipped_by_filter,
+        }
+
+
+class LegendSymbolBridgeStage(StageExecutor):
+    """Stage 7b: pid_checker_v2 Legend Sheets + Symbol Images bridge.
+
+    Connects V2's automatic pipeline to apps.pid_checker_v2's legend lookup
+    tables (text matching, e.g. "FL" -> "FLARE GAS") and manually-uploaded
+    reference symbol pictures (visual recognition via the same Vision call
+    pid_checker_v2's own "Identify Symbols" feature uses). Results are
+    persisted as PIDVComparisonFinding rows so they show up alongside the
+    rest of V2's findings. See services/legend_bridge.py for the matching
+    logic. Best-effort and additive — never blocks the pipeline (critical=False).
+    """
+
+    def __init__(self):
+        super().__init__('legend_symbol_bridge')
+
+    def _execute_impl(self, context: PipelineContext) -> Dict[str, Any]:
+        from .legend_bridge import get_legend_lookup_fields, match_text_against_legend, cross_reference
+        from apps.pid_verification_v2.models import PIDVComparisonFinding
+
+        doc = context.document
+        user = getattr(doc, 'uploaded_by', None)
+        fields = get_legend_lookup_fields(user)
+
+        # Symbol vision now runs PER PAGE inside AIAnalysisStage (which
+        # already sends the real page image to Claude for findings — the
+        # SAME call also does symbol recognition, see
+        # legend_bridge.run_page_vision_analysis). This stage no longer
+        # makes its own Vision call; it just reads AIAnalysisStage's
+        # per-page results (seg_bucket['ai_symbols']) and cross-references
+        # them against this page's own text matches — giving real page
+        # attribution "for free" instead of the earlier whole-document,
+        # unattributed symbol list.
+        #
+        # NOTE: reprocess idempotency (clearing this document's previous
+        # bridge findings) is handled ONCE, document-wide, in tasks.py
+        # BEFORE this stage runs for any page — not here. This stage may
+        # run once per page under the large-document parallel fan-out
+        # (process_pid_page, one Celery task per page); deleting here would
+        # wipe out the previous page's freshly-written findings on every
+        # subsequent page's task.
+        total_text_matches = 0
+        total_linked = total_text_only = total_symbol_only = 0
+        symbol_vision_pages = 0
+        findings_to_create: List[Any] = []
+
+        for seg in context.segments:
+            seg_bucket = context.segment_data.setdefault(seg.drawing_id, {})
+            extraction = seg_bucket.get('extraction', {}) or {}
+            page_text_matches = match_text_against_legend(extraction, fields)
+            total_text_matches += len(page_text_matches)
+
+            page_symbols = seg_bucket.get('ai_symbols') or []
+            if page_symbols:
+                symbol_vision_pages += 1
+            symbol_result = {'symbols': page_symbols} if page_symbols else None
+
+            xref = cross_reference(page_text_matches, symbol_result)
+            total_linked += len(xref['linked'])
+            total_text_only += len(xref['text_only'])
+            total_symbol_only += len(xref['symbol_only'])
+
+            if context.project is None:
+                continue
+
+            for item in xref['linked']:
+                findings_to_create.append(PIDVComparisonFinding(
+                    project=context.project,
+                    finding_type=PIDVComparisonFinding.FindingType.SYMBOL_LEGEND_MATCH,
+                    severity=PIDVComparisonFinding.Severity.LOW,
+                    title=f"Confirmed: {item['tag']} → {item['description']}",
+                    description=(
+                        f"Text tag '{item['tag']}' (code '{item['code']}' in "
+                        f"{item['field_label']}, section '{item['section']}') matches legend "
+                        f"entry '{item['description']}', and Vision independently identified a "
+                        f"matching symbol ('{item['symbol']['symbol_type']}') on this drawing."
+                    ),
+                    evidence={
+                        'document_id': str(context.document_id),
+                        'drawing_id': seg.drawing_id,
+                        'text_match': {k: v for k, v in item.items() if k != 'symbol'},
+                        'symbol': item['symbol'],
+                    },
+                    ai_confidence=90.0,
+                    location_info={'drawing_id': seg.drawing_id, 'symbol_location': item['symbol'].get('location')},
+                ))
+
+            for item in xref['text_only']:
+                findings_to_create.append(PIDVComparisonFinding(
+                    project=context.project,
+                    finding_type=PIDVComparisonFinding.FindingType.SYMBOL_LEGEND_MATCH,
+                    severity=PIDVComparisonFinding.Severity.LOW,
+                    title=f"Legend text match: {item['tag']} → {item['description']}",
+                    description=(
+                        f"Text tag '{item['tag']}' (code '{item['code']}' in "
+                        f"{item['field_label']}, section '{item['section']}') matches legend "
+                        f"entry '{item['description']}'. No corresponding symbol was visually "
+                        f"confirmed."
+                    ),
+                    evidence={'document_id': str(context.document_id), 'drawing_id': seg.drawing_id, 'text_match': item},
+                    ai_confidence=55.0,
+                    location_info={'drawing_id': seg.drawing_id},
+                ))
+
+            for sym in xref['symbol_only']:
+                findings_to_create.append(PIDVComparisonFinding(
+                    project=context.project,
+                    finding_type=PIDVComparisonFinding.FindingType.SYMBOL_LEGEND_MATCH,
+                    severity=PIDVComparisonFinding.Severity.LOW,
+                    title=f"Symbol identified: {sym['symbol_type']}",
+                    description=(
+                        f"Vision identified a '{sym['symbol_type']}' symbol on this drawing "
+                        f"({sym.get('confidence', 'low')} confidence). No matching legend text "
+                        f"tag was found."
+                    ),
+                    evidence={'document_id': str(context.document_id), 'drawing_id': seg.drawing_id, 'symbol': sym},
+                    ai_confidence={'high': 85.0, 'medium': 60.0, 'low': 35.0}.get(sym.get('confidence'), 35.0),
+                    location_info={'drawing_id': seg.drawing_id, 'symbol_location': sym.get('location')},
+                ))
+
+        if findings_to_create:
+            PIDVComparisonFinding.objects.bulk_create(findings_to_create, batch_size=200)
+
+        return {
+            'legend_fields_used': len(fields),
+            'text_matches': total_text_matches,
+            'symbol_vision_pages': symbol_vision_pages,
+            'linked_count': total_linked,
+            'text_only_count': total_text_only,
+            'symbol_only_count': total_symbol_only,
+        }
 
 
 class ReportGenerationStage(StageExecutor):
@@ -819,6 +1109,7 @@ class PipelineOrchestrator:
             RuleEngineStage(),
             ComparisonEngineStage(),
             AIAnalysisStage(),
+            LegendSymbolBridgeStage(),
             ReportGenerationStage(),
         ]
     

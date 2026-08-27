@@ -174,7 +174,10 @@ def cross_check(
         tag = _norm(t)
         if not tag:
             continue
-        pid_by_tag.setdefault(tag, tag)
+        # Keep the ORIGINAL, as-extracted text (not the normalized matching
+        # key) — findings display this. The normalized key is still what
+        # everything else in this module matches on.
+        pid_by_tag.setdefault(tag, t)
 
     ii_by_tag: dict[str, dict] = {}
     for r in instrument_index_rows:
@@ -198,14 +201,14 @@ def cross_check(
     # MATCH + MISSING
     for tag, ii_row in ii_by_tag.items():
         if tag in pid_by_tag:
-            findings.append(_finding_match(tag, ii_row))
+            findings.append(_finding_match(tag, ii_row, pid_by_tag[tag]))
         else:
             findings.append(_finding_missing(tag, ii_row))
 
     # EXTRA_ON_PID
     for tag in pid_by_tag:
         if tag not in ii_by_tag:
-            findings.append(_finding_extra(tag))
+            findings.append(_finding_extra(tag, pid_by_tag[tag]))
 
     # Deterministic fuzzy pass: promote near-identical MISSING↔EXTRA pairs
     # to fuzzy matches so obvious OCR / hyphen / suffix drift doesn't
@@ -256,13 +259,15 @@ def cross_check(
 # Finding builders
 # ═════════════════════════════════════════════════════════════════════
 
-def _finding_match(tag: str, ii_row: dict) -> dict:
+def _finding_match(tag: str, ii_row: dict, pid_original: str) -> dict:
+    display = ii_row.get('tag') or tag
     return {
         'kind': FINDING_MATCH,
         'severity': SEVERITY_INFO,
-        'tag': tag,
-        'pid_tag': tag,
-        'instrument_index_tag': tag,
+        'norm_tag': tag,  # internal matching key — lookups use this, not 'tag'
+        'tag': display,
+        'pid_tag': pid_original or tag,
+        'instrument_index_tag': display,
         'instrument_type': ii_row.get('instrument_type') or '',
         'service_description': ii_row.get('service_description') or '',
         'pid_no': ii_row.get('pid_no') or '',
@@ -273,12 +278,14 @@ def _finding_match(tag: str, ii_row: dict) -> dict:
 
 
 def _finding_missing(tag: str, ii_row: dict) -> dict:
+    display = ii_row.get('tag') or tag
     return {
         'kind': FINDING_MISSING_ON_PID,
         'severity': SEVERITY_ERROR,
-        'tag': tag,
+        'norm_tag': tag,
+        'tag': display,
         'pid_tag': None,
-        'instrument_index_tag': tag,
+        'instrument_index_tag': display,
         'instrument_type': ii_row.get('instrument_type') or '',
         'service_description': ii_row.get('service_description') or '',
         'pid_no': ii_row.get('pid_no') or '',
@@ -289,12 +296,14 @@ def _finding_missing(tag: str, ii_row: dict) -> dict:
     }
 
 
-def _finding_extra(tag: str) -> dict:
+def _finding_extra(tag: str, pid_original: str) -> dict:
+    display = pid_original or tag
     return {
         'kind': FINDING_EXTRA_ON_PID,
         'severity': SEVERITY_WARNING,
-        'tag': tag,
-        'pid_tag': tag,
+        'norm_tag': tag,
+        'tag': display,
+        'pid_tag': display,
         'instrument_index_tag': None,
         'message': 'Tag was extracted from the P&ID but is not present in the master Instrument Index',
     }
@@ -329,7 +338,7 @@ def _enrich_with_ai(findings: list[dict], ii_by_tag: dict[str, dict], provider: 
 
     by_kind_tag: dict[tuple, dict] = {}
     for f in findings:
-        by_kind_tag[(f['kind'], _norm(f['tag']))] = f
+        by_kind_tag[(f['kind'], f['norm_tag'])] = f
 
     # Two-pass: annotate first, then promote confident pairs to MATCH.
     promote_pairs: list[tuple[dict, str, str, str]] = []
@@ -378,7 +387,7 @@ def _promote_pair_to_match(
     index_tag = missing_f.get('instrument_index_tag') or missing_f.get('tag')
     pid_tag   = extra_f.get('pid_tag') or extra_f.get('tag')
     ii_row    = ii_by_tag.get(_norm(index_tag), {})
-    promoted = _finding_match(index_tag, ii_row)
+    promoted = _finding_match(_norm(index_tag), ii_row, pid_tag)
     promoted.update({
         'severity': SEVERITY_WARNING,
         'ai_probable_match': True,
@@ -589,7 +598,7 @@ def _compare_attributes_deterministic(
     ii_by_tag: dict[str, dict],
 ) -> None:
     for f in match_findings:
-        tag = f['tag']
+        tag = f['norm_tag']
         pid_attrs = pid_attr_by_tag.get(tag) or {}
         ii_row = ii_by_tag.get(tag) or {}
         rows = []
@@ -597,28 +606,45 @@ def _compare_attributes_deterministic(
             pid_val = pid_attrs.get(key, '') or ''
             ii_field = IX_ATTRIBUTE_FIELD_MAP.get(key, key)
             ii_val = ii_row.get(ii_field, '') or ''
+            status, note = _cell_status(pid_val, ii_val)
             rows.append({
                 'key': key,
                 'label': INSTRUMENT_ATTRIBUTE_LABELS.get(key, key),
                 'pid_value': str(pid_val),
                 'excel_value': str(ii_val),
-                'status': _cell_status(pid_val, ii_val),
-                'note': '',
+                'status': status,
+                'note': note or '',
             })
         f['attributes'] = rows
         f['severity'] = _overall_severity_from_rows(rows)
 
 
-def _cell_status(pid_val, ii_val) -> str:
+def _cell_status(pid_val, ii_val) -> tuple[str, str]:
+    """Returns (status, note) — see equipment_cross_check._cell_status for
+    why `note` exists (explains unit-conversion/range matches inline)."""
     p_empty = _is_empty_attr(pid_val)
     e_empty = _is_empty_attr(ii_val)
     if p_empty and e_empty:
-        return ATTR_STATUS_BOTH_EMPTY
+        return ATTR_STATUS_BOTH_EMPTY, ''
     if p_empty:
-        return ATTR_STATUS_MISSING_PID
+        return ATTR_STATUS_MISSING_PID, ''
     if e_empty:
-        return ATTR_STATUS_MISSING_XLS
-    return ATTR_STATUS_MATCH if _attr_norm(pid_val) == _attr_norm(ii_val) else ATTR_STATUS_MISMATCH
+        return ATTR_STATUS_MISSING_XLS, ''
+    if _attr_norm(pid_val) == _attr_norm(ii_val):
+        return ATTR_STATUS_MATCH, ''
+    # Free, no-AI resolution for unit/format/range differences a plain
+    # normalized-string check can't see (e.g. "150 psig" vs "150", a
+    # single OT value vs a combined "Min: X / Max: Y" range) — same
+    # deterministic matcher used by the equipment cross-check and the V2
+    # comparison engine.
+    try:
+        from apps.pid_verification_v2.services.comparison_engine import _try_deterministic_value_match_ex
+        status, note = _try_deterministic_value_match_ex(pid_val, ii_val)
+        if status == 'MATCH':
+            return ATTR_STATUS_MATCH, note or ''
+    except Exception:
+        logger.warning('[InstrumentCrossCheck] Deterministic value match helper unavailable', exc_info=True)
+    return ATTR_STATUS_MISMATCH, ''
 
 
 def _overall_severity_from_rows(rows: list[dict]) -> str:
@@ -637,10 +663,16 @@ def _refine_attributes_with_ai(match_findings: list[dict], provider: str, api_ke
     payload_tags = []
     for f in match_findings:
         rows = f.get('attributes') or []
+        # Only send attributes the deterministic pass couldn't already
+        # confidently resolve — a row already MATCH is confident by
+        # construction; sending it anyway risks a single misjudged AI call
+        # silently flipping a correct Match back to Mismatch with no way
+        # for the deterministic result to win back (see equipment/line
+        # list cross-check fixes for the same class of bug).
         nonempty = [
             {'key': r['key'], 'pid_value': r['pid_value'], 'excel_value': r['excel_value']}
             for r in rows
-            if r.get('status') != ATTR_STATUS_BOTH_EMPTY
+            if r.get('status') not in (ATTR_STATUS_BOTH_EMPTY, ATTR_STATUS_MATCH)
         ]
         if not nonempty:
             continue
@@ -649,7 +681,10 @@ def _refine_attributes_with_ai(match_findings: list[dict], provider: str, api_ke
     if not payload_tags:
         return
 
-    by_tag = {f['tag']: f for f in match_findings}
+    # Keyed by the normalized tag, not the display text — the AI response
+    # is matched back via _norm(row['tag']) below, so this dict has to use
+    # the same key space.
+    by_tag = {f['norm_tag']: f for f in match_findings}
 
     for i in range(0, len(payload_tags), AI_ATTR_MAX_TAGS_PER_BATCH):
         batch = payload_tags[i:i + AI_ATTR_MAX_TAGS_PER_BATCH]
@@ -681,6 +716,11 @@ def _refine_attributes_with_ai(match_findings: list[dict], provider: str, api_ke
                 key = a.get('key')
                 cell = existing_by_key.get(key)
                 if not cell:
+                    continue
+                if cell.get('status') == ATTR_STATUS_MATCH:
+                    # Belt-and-suspenders: a deterministic MATCH is never
+                    # sent to the AI above, but guard here too in case of a
+                    # stray/duplicate key in the AI's response.
                     continue
                 status = str(a.get('status') or '').strip()
                 if status in (

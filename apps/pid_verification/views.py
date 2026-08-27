@@ -433,7 +433,14 @@ def upload_pid(request):
                     process_pid_document,
                     args=(str(doc.document_id),),
                     kwargs={'context': byok_context},
-                    sync_fallback=lambda: _run_sync_pipeline(str(doc.document_id), byok_context),
+                    # RobustQueueService._execute_with_fallback() calls
+                    # sync_fallback(*args, **kwargs) using the SAME args/kwargs
+                    # given to queue_task() above — i.e. it invokes this as
+                    # sync_fallback(str(doc.document_id), context=byok_context).
+                    # A zero-arg lambda here raised "got an unexpected keyword
+                    # argument 'context'" on every fallback, silently failing
+                    # every upload whose Celery enqueue didn't go through cleanly.
+                    sync_fallback=lambda doc_id, context=None: _run_sync_pipeline(doc_id, context),
                     max_retries=3,
                 )
                 logger.info("[PIDVUpload] Task queued via Celery: doc_id=%s", doc.document_id)
@@ -519,6 +526,38 @@ def reprocess_document(request, document_id):
             status=status.HTTP_409_CONFLICT,
         )
 
+    # ── Result cache check ──────────────────────────────────────────────
+    # Hash the file as it exists RIGHT NOW (not the stored doc.file_hash —
+    # that's a sanity re-check that the underlying file genuinely hasn't
+    # changed) and compare to what the cache was captured against. Same
+    # hash → skip the pipeline entirely and serve the cached snapshot;
+    # different hash (or no cache yet) → fall through to a normal re-run,
+    # which will write a fresh cache on completion (see tasks.py).
+    if doc.original_file:
+        from .services.consistency import compute_file_hash
+        from .services.results_cache import load_results_cache
+
+        try:
+            doc.original_file.open('rb')
+            current_hash = compute_file_hash(doc.original_file)
+        finally:
+            doc.original_file.close()
+
+        cached = load_results_cache(doc)
+        if cached and cached.get('file_hash') == current_hash:
+            logger.info('[PIDVReprocess] Cache hit for document_id=%s — skipping pipeline', document_id)
+            return Response(
+                {
+                    "document_id": str(doc.document_id),
+                    "status": doc.status,
+                    "message": "Loaded from cache — file unchanged since last analysis.",
+                    "file_name": doc.file_name,
+                    "cache_status": "cache",
+                    "analysis_timestamp": cached.get("analysis_timestamp"),
+                },
+                status=status.HTTP_200_OK,
+            )
+
     # Reset state so the task pipeline treats this as a fresh run
     doc.status        = 'uploaded'
     doc.error_message = ''
@@ -527,7 +566,7 @@ def reprocess_document(request, document_id):
     # Enqueue Celery task (with sync-thread fallback if workers unavailable)
     try:
         from .tasks import process_pid_document
-        from apps.config.queue_service import RobustQueueService
+        from apps.core.queue_service import RobustQueueService
 
         def _sync_fallback(doc_id):
             import threading
@@ -538,9 +577,9 @@ def reprocess_document(request, document_id):
             )
             t.start()
 
-        RobustQueueService.enqueue(
-            process_pid_document.delay,
-            str(doc.document_id),
+        RobustQueueService.queue_task(
+            process_pid_document,
+            args=(str(doc.document_id),),
             sync_fallback=_sync_fallback,
         )
     except Exception:
@@ -562,6 +601,7 @@ def reprocess_document(request, document_id):
             "status":      doc.status,
             "message":     "Re-check queued — the original file will be re-analysed without re-uploading.",
             "file_name":   doc.file_name,
+            "cache_status": "fresh",
         },
         status=status.HTTP_202_ACCEPTED,
     )
@@ -578,6 +618,24 @@ def get_status(request, document_id):
     if doc is None:
         return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
 
+    # Cache info — only looked up once a run has settled (completed/failed),
+    # not on every poll during active processing, to avoid extra S3/local
+    # reads on a frequently-polled endpoint. Compared against the stored
+    # doc.file_hash (cheap) rather than re-hashing the live file on every
+    # request — reprocess_document() does the authoritative live re-hash
+    # at the moment it actually matters (right before deciding to skip the
+    # pipeline).
+    cache_available = False
+    cache_timestamp = None
+    cache_matches_current_file = False
+    if doc.status in (PIDVDocument.Status.COMPLETED, PIDVDocument.Status.FAILED):
+        from .services.results_cache import load_results_cache
+        cached = load_results_cache(doc)
+        if cached:
+            cache_available = True
+            cache_timestamp = cached.get('analysis_timestamp')
+            cache_matches_current_file = cached.get('file_hash') == doc.file_hash
+
     return Response({
         "document_id":   str(doc.document_id),
         "status":        doc.status,
@@ -587,6 +645,9 @@ def get_status(request, document_id):
         "pdf_s3_url":    doc.pdf_s3_url   or None,
         "project_id":    str(doc.project.project_id) if doc.project else None,
         "updated_at":    doc.updated_at,
+        "cache_available": cache_available,
+        "cache_timestamp": cache_timestamp,
+        "cache_matches_current_file": cache_matches_current_file,
     })
 
 

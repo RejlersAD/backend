@@ -82,8 +82,12 @@ VISION_SYSTEM_PROMPT = (
 VISION_USER_PROMPT = """Identify EVERY unique piece of process equipment on this P&ID image.
 
 Equipment tags follow the shape:  PREFIX-NUMBER[SUFFIX][-SITE]
-Examples:  V-803-TF, V-804-TF, P-801-A, P-801-B, E-401, HX-1201, T-101, C-301, K-501,
-           F-101, R-201, S-101, D-102, TK-002.
+The illustrative placeholders below show the SHAPE of a tag only — they are
+NOT real values and do not appear on this drawing. Never copy one of these
+placeholders into your output; every tag you report must come from
+characters you actually observe in THIS image.
+Placeholder shapes:  V-###-XX, P-###A, E-###, HX-####, T-###, C-###, K-###,
+                     F-###, R-###, S-###, D-###, TK-###.
 
 Prefix legend (typical):
   V   = vessel / drum / KO drum      P   = pump                     E, HX = heat exchanger
@@ -92,27 +96,38 @@ Prefix legend (typical):
   H   = fired heater / furnace        B   = blower / fan            D     = drum
 
 Rules:
-- NUMBER is 2-4 digits (101, 803, 1201).
+- NUMBER is 2-4 digits — read EVERY digit independently and carefully. Two
+  tags can share the same PREFIX/SUFFIX/SITE and differ only in one NUMBER
+  digit — do not let a tag you already reported bias your reading of a
+  different, similar-looking tag elsewhere on the drawing. If a digit is
+  genuinely ambiguous, give your best independent reading of THAT digit
+  rather than defaulting to a digit you've already used.
 - Optional single-letter SUFFIX indicates parallel duty  (A, B, C).
-- Optional 2-letter SITE symbol follows a dash  (TF = Mubarraz Island, CF, HF …).
+- Optional 2-letter SITE symbol follows a dash (a site/platform code specific
+  to this project — read it exactly as printed).
 - Ignore line tags (they contain a size like  4"-FL-AC6N-8112).
-- Ignore instrument tags (LT-8019, PT-8003ATF, PSV-8006, FCV-8004B, SDV-8003TF).
-- Ignore reference / drawing numbers (PJ6-EXD-MRI-BQDA-0023).
+- Ignore instrument tags (e.g. LT-####, PT-####, PSV-####, FCV-####, SDV-####).
+- Ignore reference / drawing numbers (e.g. PJ6-EXD-MRI-BQDA-####).
 - Ignore NOTE / TYPE / DETAIL callouts.
 
 SCAN THE ENTIRE IMAGE METHODICALLY:
 - Look for tag boxes attached to vessels, pumps, exchangers, tanks.
 - The equipment tag is usually printed inside or immediately next to the equipment symbol.
-- The equipment title block at the top-left / top-right of the drawing often lists
-  the main equipment tag and its description (e.g. "V-803-TF  MRD OIL SLUG CATCHER").
+- The equipment title block at the top-left / top-right of the drawing often
+  lists the main equipment tag alongside its description.
+- Equipment tags are very often UNDERLINED. Treat the underline as pure
+  decoration, not part of the text — do not let it merge visually with
+  letters that have descenders, and do not skip a tag just because a line
+  runs through or under it.
 - Read text rotated 90° / 270°.
 
 Return ONLY a JSON array of objects — no prose, no markdown fences.
-Each object has these fields:
+Each object has these fields, and every value must be a literal transcription
+of what you see in the image, not a copy of the placeholder shape above:
   {
-    "tag": "V-803-TF",
+    "tag": "<prefix>-<number><suffix?>-<site?>",
     "kind": "vessel",
-    "description": "MRD Oil Slug Catcher",
+    "description": "<service/duty text as printed, or empty string>",
     "attributes": {
       "nominal_capacity":    "5 m3",
       "length_tt":           "3500 mm",
@@ -137,7 +152,8 @@ Each object has these fields:
                 next to each tag on the drawing. Use whatever unit is printed
                 on the drawing (do NOT convert). Use an empty string "" for any
                 attribute that is not shown for that equipment. Do not invent
-                values. The keys are FIXED — do not rename or add new keys.
+                values — the sample attribute values above are illustrative
+                only. The keys are FIXED — do not rename or add new keys.
 
 Be exhaustive. A typical process P&ID has 3–15 pieces of equipment.
 """
@@ -185,6 +201,24 @@ EQUIPMENT_ATTRIBUTE_LABELS = {
     'trim':                'Trim',
 }
 
+# Providers whose Vision calls run at NON-zero, non-configurable temperature
+# (see vision_extractor.py's VISION_TEMPERATURE comment — Claude Sonnet 5 /
+# Opus 5 reject an explicit temperature parameter entirely) — meaning the
+# same tile can be read slightly differently from one analysis run to the
+# next. A tag that's genuinely hard to read (small text, poor scan quality,
+# partial occlusion) can therefore come back correctly on one run and be
+# silently absent on the next, with equipment_cross_check.py's fuzzy/AI
+# pairing powerless to help (there's nothing to pair against when Vision
+# simply omits the tag from that pass's output).
+#
+# Fix: for these providers, read every tile/overview TWICE (independent
+# calls) and union the results via _merge_tags — a flaky tag only needs to
+# survive ONE of two independent reads to end up in the final list. This
+# roughly doubles Vision API cost/time for these providers; OpenAI (already
+# deterministic at VISION_TEMPERATURE=0.0) is left single-pass.
+VISION_NONDETERMINISTIC_PROVIDERS = {'claude'}
+VISION_DOUBLE_PASS_READS = 2
+
 
 # ─── Public API ───────────────────────────────────────────────────────
 def extract_equipment_tags_via_vision(
@@ -206,25 +240,33 @@ def extract_equipment_tags_via_vision(
     meter = UsageMeter(feature='equipment_extraction')
     model = VISION_MODELS[provider]
 
+    # See VISION_NONDETERMINISTIC_PROVIDERS above: Claude ignores temperature
+    # control, so each region is read multiple times and unioned to avoid a
+    # legible-but-borderline tag flipping between Match and Missing across
+    # runs with no code change in between.
+    reads_per_region = VISION_DOUBLE_PASS_READS if provider in VISION_NONDETERMINISTIC_PROVIDERS else 1
+
+    def _read_region(image_b64: str, label: str) -> None:
+        nonlocal call_count
+        for read_idx in range(reads_per_region):
+            raw, in_t, out_t = _call_vision(provider, api_key, image_b64)
+            meter.add(provider, model, in_t, out_t)
+            call_count += 1
+            read_tag = f' read {read_idx}' if reads_per_region > 1 else ''
+            all_raw.append(f'[{label}{read_tag}]\n{raw}')
+            _merge_tags(merged, _parse_equipment_list(raw))
+
     for page_idx, page_image in enumerate(_render_pages(pdf_bytes)):
         if VISION_INCLUDE_OVERVIEW:
             overview = _downscale(page_image, VISION_OVERVIEW_MAX_DIMENSION_PX)
-            raw, in_t, out_t = _call_vision(provider, api_key, _image_to_b64_png(overview))
-            meter.add(provider, model, in_t, out_t)
-            call_count += 1
-            all_raw.append(f'[page {page_idx} overview]\n{raw}')
-            _merge_tags(merged, _parse_equipment_list(raw))
+            _read_region(_image_to_b64_png(overview), f'page {page_idx} overview')
 
         for tile_idx, tile in enumerate(_tile_image(page_image,
                                                     VISION_TILE_ROWS,
                                                     VISION_TILE_COLS,
                                                     VISION_TILE_OVERLAP_FRAC)):
             tile = _downscale(tile, VISION_TILE_MAX_DIMENSION_PX)
-            raw, in_t, out_t = _call_vision(provider, api_key, _image_to_b64_png(tile))
-            meter.add(provider, model, in_t, out_t)
-            call_count += 1
-            all_raw.append(f'[page {page_idx} tile {tile_idx}]\n{raw}')
-            _merge_tags(merged, _parse_equipment_list(raw))
+            _read_region(_image_to_b64_png(tile), f'page {page_idx} tile {tile_idx}')
 
     tags_sorted = sorted(merged.values(), key=lambda t: (t.get('kind') or '', t.get('tag') or ''))
     return {

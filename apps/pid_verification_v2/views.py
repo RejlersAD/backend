@@ -433,7 +433,14 @@ def upload_pid(request):
                     process_pid_document,
                     args=(str(doc.document_id),),
                     kwargs={'context': byok_context},
-                    sync_fallback=lambda: _run_sync_pipeline(str(doc.document_id), byok_context),
+                    # RobustQueueService._execute_with_fallback() calls
+                    # sync_fallback(*args, **kwargs) using the SAME args/kwargs
+                    # given to queue_task() above — i.e. it invokes this as
+                    # sync_fallback(str(doc.document_id), context=byok_context).
+                    # A zero-arg lambda here raised "got an unexpected keyword
+                    # argument 'context'" on every fallback, silently failing
+                    # every upload whose Celery enqueue didn't go through cleanly.
+                    sync_fallback=lambda doc_id, context=None: _run_sync_pipeline(doc_id, context),
                     max_retries=3,
                 )
                 logger.info("[PIDVUpload] Task queued via Celery: doc_id=%s", doc.document_id)

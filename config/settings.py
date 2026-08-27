@@ -510,6 +510,12 @@ USE_TZ = True
 # in the S3 section below based on USE_S3 setting
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
+# Project-root static source dir (repo-committed, deploy-time only — e.g.
+# apps/pid_checker_v2's default_symbols/ picture library). Static files are
+# always served locally (WhiteNoise), never from S3, regardless of USE_S3 —
+# see the S3 section below, which only redirects MEDIA to S3.
+STATICFILES_DIRS = [BASE_DIR / 'static']
+
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

@@ -1,8 +1,14 @@
 """
 Extraction Service
 ==================
-AI-assisted OCR/text extraction for a single drawing.
-AI is used ONLY for text recognition and symbol bounding boxes.
+Hybrid text extraction for a single drawing: Tesseract OCR (free, offline —
+when installed) AND AI Vision (BYOK — when an API key is provided) run
+together and their results are merged, so each covers the other's gaps
+(Tesseract is fast/free but misses low-quality scans; Vision reads faint
+or rotated text Tesseract can't, but costs money and needs a key). All
+downstream categorization (tags/instruments/valves/equipment/notes/holds/
+line_sizes) is deterministic regex over the merged raw_text, unchanged
+regardless of which source(s) actually ran.
 All downstream validation is deterministic (rule engine).
 
 Returns a structured ExtractionResult dict:
@@ -15,6 +21,8 @@ Returns a structured ExtractionResult dict:
   "notes":       ["NOTE 1: All valves NPS >= 2\"...", ...],
   "holds":       ["HOLD-1: Client approval pending", ...],
   "line_sizes":  [{"text": "6\"", "x": 50, "y": 200, "direction": "H"}, ...],
+  "extraction_info": {"tesseract_available": bool, "tesseract_used": bool,
+                       "vision_used": bool, "message": str | None},
 }
 """
 import logging
@@ -51,14 +59,80 @@ TESSERACT_CONFIGS = [
 ]
 
 
-def extract_drawing(file_path: str, page_index: int = 0, legend_data: dict | None = None) -> Dict[str, Any]:
+class NoExtractionMethodAvailableError(Exception):
+    """Raised by extract_drawing() when NEITHER Tesseract (not installed)
+    NOR an AI Vision API key (not provided) is available — there is no way
+    to extract any text from this page. Callers must catch this and
+    surface it as a clear, actionable error (see apps.pid_verification.tasks),
+    never as a silently "completed" document with zero findings."""
+    def __init__(self):
+        super().__init__(
+            "Please install Tesseract OR add a Claude API key to analyse this P&ID."
+        )
+
+
+@lru_cache(maxsize=1)
+def _tesseract_available() -> bool:
+    """True if the Tesseract binary is actually reachable (not just the
+    pytesseract Python package) — checked once per process. A missing
+    binary raises pytesseract.TesseractNotFoundError, not ImportError, so
+    this must actually invoke it rather than just trying to import it."""
+    try:
+        import pytesseract
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:
+        return False
+
+
+def extract_drawing(file_path: str, page_index: int = 0, legend_data: dict | None = None, *,
+                     api_key: str | None = None, provider: str = 'claude',
+                     model: str | None = None) -> Dict[str, Any]:
     """
     Extract all P&ID elements from a single page/drawing.
     Returns ExtractionResult dict (see module docstring).
+
     legend_data: optional per-project legend (overrides global if provided).
+    api_key/provider/model: optional BYOK Vision credentials. When present,
+        AI Vision runs ALONGSIDE Tesseract (if installed) and results are
+        merged — see module docstring. When Tesseract is also unavailable
+        AND no api_key is given, raises NoExtractionMethodAvailableError.
     """
-    raw_text = _run_ocr(file_path, page_index)
-    tag_positions = _extract_tag_positions(file_path, page_index)
+    tesseract_ok = _tesseract_available()
+
+    tesseract_text = ''
+    if tesseract_ok:
+        try:
+            tesseract_text = _run_tesseract_ocr(file_path, page_index)
+        except Exception as exc:
+            logger.warning('[PIDExtraction] Tesseract pass failed (non-fatal): %s', exc)
+    else:
+        logger.info('[PIDExtraction] Tesseract not installed — skipping OCR pass')
+    tesseract_used = bool(tesseract_text.strip())
+
+    vision_text, vision_tag_positions = '', {}
+    if api_key:
+        vision_text, vision_tag_positions = _run_vision_ocr(file_path, page_index, api_key, provider, model)
+    vision_used = bool(vision_text.strip())
+
+    if not tesseract_used and not vision_used:
+        # Distinguish "neither method is even configured" from "both ran
+        # but this page genuinely has no readable text" — only the former
+        # is a hard stop; a blank scanned/near-empty page with a working
+        # extraction method is a legitimate (if low-value) result.
+        if not tesseract_ok and not api_key:
+            raise NoExtractionMethodAvailableError()
+
+    raw_text = _merge_ocr_text(tesseract_text, vision_text)
+
+    extraction_info = {
+        'tesseract_available': tesseract_ok,
+        'tesseract_used':      tesseract_used,
+        'vision_used':         vision_used,
+        'message':             _extraction_scenario_message(tesseract_ok, bool(api_key)),
+    }
+    if extraction_info['message']:
+        logger.info('[PIDExtraction] %s', extraction_info['message'])
 
     # Resolve prefix sets: use per-project legend if available, else global.
     if legend_data:
@@ -76,26 +150,63 @@ def extract_drawing(file_path: str, page_index: int = 0, legend_data: dict | Non
         'holds':               _extract_holds(raw_text),
         'line_sizes':          _extract_line_sizes(raw_text),
         'raw_text':            raw_text,
-        'tag_positions':       tag_positions,   # {tag: {x_pct, y_pct}} real diagram coords
-        # Multi-angle pipeline designation extraction (soft-coded, additive).
-        'line_tags':           _extract_pipeline_tags_multi_angle(file_path, page_index),
-        # Revision / scope-change signals (soft-coded, vector PDFs only).
+        'tag_positions':       {**vision_tag_positions, **_extract_tag_positions(file_path, page_index)},
+        # Pipeline line designations — Tesseract's vector-PDF + multi-angle
+        # scan, ADDITIVELY merged with a scan of the same combined raw_text
+        # (catches anything the vector/Tesseract passes missed, e.g. on
+        # scanned pages with no embedded text and no Tesseract installed).
+        'line_tags':           _extract_pipeline_tags_multi_angle(file_path, page_index, raw_text),
+        # Revision / scope-change signals (vector PDFs only — PyMuPDF
+        # colour/geometry analysis, never used Tesseract).
         'red_annotations':     _extract_red_annotations(file_path, page_index),
         # Reducer notations e.g. 6"x2" and valve-type size contexts.
         'reducers':            _extract_reducers(raw_text),
         'valve_size_contexts': _extract_valve_size_contexts(raw_text),
+        'extraction_info':     extraction_info,
     }
+
+
+def _extraction_scenario_message(tesseract_ok: bool, has_api_key: bool) -> str | None:
+    """User/log-facing info message for the 4 availability scenarios.
+    Only scenarios B and C (one source missing) get a message — A (both)
+    and D (neither, which raises before this is reached in the all-failed
+    case) don't need one."""
+    if tesseract_ok and has_api_key:
+        return None
+    if not tesseract_ok and has_api_key:
+        return 'Tesseract not installed. Using AI Vision only.'
+    if tesseract_ok and not has_api_key:
+        return 'Add an API key for better accuracy with AI Vision.'
+    return None  # neither available — handled by NoExtractionMethodAvailableError instead
+
+
+def _merge_ocr_text(tesseract_text: str, vision_text: str) -> str:
+    """Combine both sources' transcriptions, deduplicated line-by-line
+    (Tesseract first, then any additional lines Vision found) — downstream
+    regex extractors already dedupe at the tag level via set(), so a
+    line-level merge here is sufficient; there's no per-line confidence
+    score from either source to rank by."""
+    seen = set()
+    out = []
+    for block in (tesseract_text, vision_text):
+        for line in block.splitlines():
+            norm = line.strip()
+            if norm and norm not in seen:
+                seen.add(norm)
+                out.append(norm)
+    return '\n'.join(out)
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _run_ocr(file_path: str, page_index: int) -> str:
+def _run_tesseract_ocr(file_path: str, page_index: int) -> str:
     """
-    Run OCR on the specified page.
-    Falls back to plain text extraction if pytesseract is unavailable.
-    temperature=0 equivalent: fixed model config, no randomness.
+    Run Tesseract OCR on the specified page (multi-DPI, multi-variant,
+    multi-config pass). Returns '' if Tesseract isn't installed or errors —
+    callers check _tesseract_available() beforehand, this is a second
+    safety net.
     """
     try:
         import pytesseract
@@ -151,8 +262,26 @@ def _run_ocr(file_path: str, page_index: int) -> str:
         logger.warning('[PIDExtraction] pytesseract/fitz not available – using empty extraction')
         return ''
     except Exception as exc:
-        logger.error('[PIDExtraction] OCR error: %s', exc)
+        logger.error('[PIDExtraction] Tesseract OCR error: %s', exc)
         return ''
+
+
+def _run_vision_ocr(file_path: str, page_index: int, api_key: str,
+                     provider: str, model: str | None) -> tuple[str, dict]:
+    """Render the page and transcribe it via AI Vision (Claude by default).
+    Returns (raw_text, tag_positions). Never raises for Vision-call
+    failures (logs and returns empty) — extract_drawing() decides what to
+    do when both this AND Tesseract come back empty."""
+    from apps.pid_checker_v2.services.vision_extractor import extract_raw_text_via_vision
+
+    try:
+        with open(file_path, 'rb') as f:
+            pdf_bytes = f.read()
+        result = extract_raw_text_via_vision(pdf_bytes, page_index, api_key, provider=provider, model=model)
+        return result.get('raw_text', ''), result.get('tag_positions', {})
+    except Exception as exc:
+        logger.error('[PIDExtraction] Vision text extraction failed: %s', exc, exc_info=True)
+        return '', {}
 
 
 # Regex patterns – all deterministic
@@ -160,7 +289,10 @@ _TAG_PATTERN       = re.compile(r'\b([A-Z]{1,4}-[0-9]{3,5}[A-Z]?)\b')
 _NOTE_PATTERN      = re.compile(r'NOTE\s*\d+[:\s].{5,200}', re.IGNORECASE)
 _HOLD_PATTERN      = re.compile(r'HOLD[- ]\d+[:\s].{5,200}', re.IGNORECASE)
 _LINE_SIZE_PATTERN = re.compile(r'\b(\d+(?:\.\d+)?)\s*(?:"|”|\'\'|mm|DN)(?=\s|$|[^A-Za-z0-9_])', re.IGNORECASE)
-_EQUIPMENT_TYPES   = re.compile(r'\b(V|E|T|K|C|P|H|X|F|R)-\d{3,5}\b')
+# Optional trailing group captures a site-symbol suffix (e.g. "-TF", "-CF")
+# or unit letter ("-A") — without it, "V-803-TF" only matched as far as
+# "V-803", which then could never match the Equipment List's full tag.
+_EQUIPMENT_TYPES   = re.compile(r'\b(V|E|T|K|C|P|H|X|F|R)-\d{3,5}(-[A-Z]{1,4})?\b')
 
 # Pipeline line designation pattern.
 # Matches designations like: 2"-D-6152-033842-X-N  or  4"-D-5690-013842-X_N
@@ -471,47 +603,50 @@ def _extract_tag_positions(file_path, page_index):
                 pass
 
         else:
-            # --- Path B: scanned/image PDF -- OCR with per-word bounding boxes ---
-            try:
-                import pytesseract
-                from PIL import Image
-                import io
+            # --- Path B: scanned/image PDF -- Tesseract OCR with per-word bounding boxes ---
+            # Only attempted if Tesseract is actually installed (see
+            # _tesseract_available()) — AI Vision's coarse 9-zone locations
+            # (extract_drawing()'s vision_tag_positions) fill this gap when
+            # Tesseract isn't available, at lower positional precision.
+            if _tesseract_available():
+                try:
+                    import pytesseract
+                    from PIL import Image
+                    import io
 
-                dpi = 300
-                mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
-                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY, alpha=False)
-                img = Image.open(io.BytesIO(pix.tobytes('png')))
-                img_w, img_h = img.size
+                    dpi = 300
+                    mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+                    pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY, alpha=False)
+                    img = Image.open(io.BytesIO(pix.tobytes('png')))
+                    img_w, img_h = img.size
 
-                data = pytesseract.image_to_data(
-                    img,
-                    config='--oem 1 --psm 11',
-                    output_type=pytesseract.Output.DICT,
-                )
-                n = len(data.get('text', []))
-                ocr_words = []
-                for i in range(n):
-                    txt = str(data['text'][i]).strip()
-                    if not txt:
-                        continue
-                    try:
-                        conf = int(data['conf'][i])
-                    except (ValueError, TypeError):
-                        conf = -1
-                    if conf < 20:   # reject very-low-confidence noise
-                        continue
-                    lft = int(data['left'][i])
-                    top = int(data['top'][i])
-                    wid = int(data['width'][i])
-                    hgt = int(data['height'][i])
-                    ocr_words.append((lft, top, lft + wid, top + hgt, txt))
+                    data = pytesseract.image_to_data(
+                        img,
+                        config='--oem 1 --psm 11',
+                        output_type=pytesseract.Output.DICT,
+                    )
+                    n = len(data.get('text', []))
+                    ocr_words = []
+                    for i in range(n):
+                        txt = str(data['text'][i]).strip()
+                        if not txt:
+                            continue
+                        try:
+                            conf = int(data['conf'][i])
+                        except (ValueError, TypeError):
+                            conf = -1
+                        if conf < 20:   # reject very-low-confidence noise
+                            continue
+                        lft = int(data['left'][i])
+                        top = int(data['top'][i])
+                        wid = int(data['width'][i])
+                        hgt = int(data['height'][i])
+                        ocr_words.append((lft, top, lft + wid, top + hgt, txt))
 
-                _process_words(ocr_words, img_w, img_h)
+                    _process_words(ocr_words, img_w, img_h)
 
-            except ImportError:
-                pass
-            except Exception as exc:
-                logger.debug('[PIDExtraction] OCR coord pass skipped: %s', exc)
+                except Exception as exc:
+                    logger.debug('[PIDExtraction] Tesseract OCR coord pass skipped: %s', exc)
 
         doc.close()
 
@@ -564,7 +699,7 @@ def _normalize_pipeline_desig_key(size_num: str, fluid: str, area: str, seq: str
     return parts[0]
 
 
-def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int) -> list:
+def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text: str = '') -> list:
     """
     Detect pipeline line designations like ``2"-D-6152-033842-X-N`` from a single
     drawing page in both **horizontal** and **vertical** orientations.
@@ -573,10 +708,13 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int) -> list:
     --------
     * **Vector PDF** (embedded text): PyMuPDF ``get_text('dict')`` exposes the
       ``dir`` vector for each text line, allowing H vs V classification without
-      any image rotation.
-    * **Scanned / image PDF**: The page is rendered at 200 DPI then OCR'd three
-      times — original (0°), rotated 90° CW, and rotated 90° CCW — so that text
-      written vertically along pipe runs in either direction is captured.
+      any image rotation, with real per-span x_pct/y_pct positions.
+    * **Any page** (additionally): `raw_text` — the AI Vision transcription
+      already produced by extract_drawing() — is scanned too, at a single
+      page-center position (Vision reads rotated/vertical pipe-run text
+      natively in its one pass, so no separate multi-angle render/OCR pass
+      is needed the way the old Tesseract path required one). This is the
+      only source for scanned/image pages with no embedded text layer.
 
     Returns a deduplicated list of pipeline tag dicts, one entry per unique
     canonical designation.  Each entry::
@@ -750,81 +888,84 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int) -> list:
 
         else:
             # ── Path B: scanned / image PDF – multi-angle Tesseract ─────
-            try:
-                import pytesseract
-                from PIL import Image
-                import io
+            # Only attempted if Tesseract is actually installed. When it's
+            # not, the Vision raw_text pass below (always run) is this
+            # page's only source — at a single page-center position rather
+            # than per-orientation coordinates.
+            if _tesseract_available():
+                try:
+                    import pytesseract
+                    from PIL import Image
+                    import io
 
-                dpi = 200   # reduced for rotated passes: speed vs quality trade-off
-                mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
-                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY, alpha=False)
-                orig_img      = Image.open(io.BytesIO(pix.tobytes('png')))
-                orig_w, orig_h = orig_img.size
-                cfg = '--oem 1 --psm 11'
+                    dpi = 200   # reduced for rotated passes: speed vs quality trade-off
+                    mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+                    pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY, alpha=False)
+                    orig_img      = Image.open(io.BytesIO(pix.tobytes('png')))
+                    orig_w, orig_h = orig_img.size
+                    cfg = '--oem 1 --psm 11'
 
-                def _ocr_words(img):
-                    """Return list of (text, x_frac, y_frac) with conf >= 15."""
-                    try:
-                        data = pytesseract.image_to_data(
-                            img, config=cfg, output_type=pytesseract.Output.DICT)
-                    except Exception:
-                        return []
-                    out = []
-                    iw, ih = img.size
-                    for i in range(len(data.get('text', []))):
-                        txt = str(data['text'][i]).strip()
-                        if not txt:
-                            continue
+                    def _ocr_words(img):
+                        """Return list of (text, x_frac, y_frac) with conf >= 15."""
                         try:
-                            conf = int(data['conf'][i])
-                        except (ValueError, TypeError):
-                            conf = -1
-                        if conf < 15:
-                            continue
-                        lft = int(data['left'][i])
-                        top = int(data['top'][i])
-                        wid = int(data['width'][i])
-                        hgt = int(data['height'][i])
-                        out.append((txt,
-                                    (lft + wid / 2.0) / iw,
-                                    (top + hgt / 2.0) / ih))
-                    return out
+                            data = pytesseract.image_to_data(
+                                img, config=cfg, output_type=pytesseract.Output.DICT)
+                        except Exception:
+                            return []
+                        out = []
+                        iw, ih = img.size
+                        for i in range(len(data.get('text', []))):
+                            txt = str(data['text'][i]).strip()
+                            if not txt:
+                                continue
+                            try:
+                                conf = int(data['conf'][i])
+                            except (ValueError, TypeError):
+                                conf = -1
+                            if conf < 15:
+                                continue
+                            lft = int(data['left'][i])
+                            top = int(data['top'][i])
+                            wid = int(data['width'][i])
+                            hgt = int(data['height'][i])
+                            out.append((txt,
+                                        (lft + wid / 2.0) / iw,
+                                        (top + hgt / 2.0) / ih))
+                        return out
 
-                def _full_page_text(img):
+                    def _full_page_text(img):
+                        try:
+                            return pytesseract.image_to_string(img, config='--oem 1 --psm 6')
+                        except Exception:
+                            return ''
+
+                    # --- 0° (horizontal) ----------------------------------------
+                    for txt, rx, ry in _ocr_words(orig_img):
+                        _scan_text(txt, 'H', rx * 100.0, ry * 100.0)
+                    _scan_text(_full_page_text(orig_img), 'H', 50.0, 50.0)  # compound token recovery
+
+                    # --- 90° CW (PIL ROTATE_270) — picks up bottom-to-top text --
                     try:
-                        return pytesseract.image_to_string(img, config='--oem 1 --psm 6')
-                    except Exception:
-                        return ''
+                        img_cw = orig_img.transpose(Image.Transpose.ROTATE_270)
+                    except AttributeError:
+                        img_cw = orig_img.transpose(4)  # ROTATE_270 = 4 (Pillow < 10 compat)
+                    for txt, rx, ry in _ocr_words(img_cw):
+                        # Map back: CW90 inverse → orig_x ≈ ry, orig_y ≈ 1 - rx
+                        _scan_text(txt, 'V', ry * 100.0, (1.0 - rx) * 100.0)
+                    _scan_text(_full_page_text(img_cw), 'V', 50.0, 50.0)
 
-                # --- 0° (horizontal) ----------------------------------------
-                for txt, rx, ry in _ocr_words(orig_img):
-                    _scan_text(txt, 'H', rx * 100.0, ry * 100.0)
-                _scan_text(_full_page_text(orig_img), 'H', 50.0, 50.0)  # compound token recovery
+                    # --- 90° CCW (PIL ROTATE_90) — picks up top-to-bottom text --
+                    try:
+                        img_ccw = orig_img.transpose(Image.Transpose.ROTATE_90)
+                    except AttributeError:
+                        img_ccw = orig_img.transpose(2)  # ROTATE_90 = 2 (Pillow < 10 compat)
+                    for txt, rx, ry in _ocr_words(img_ccw):
+                        # Map back: CCW90 inverse → orig_x ≈ 1 - ry, orig_y ≈ rx
+                        _scan_text(txt, 'V', (1.0 - ry) * 100.0, rx * 100.0)
+                    _scan_text(_full_page_text(img_ccw), 'V', 50.0, 50.0)
 
-                # --- 90° CW (PIL ROTATE_270) — picks up bottom-to-top text --
-                try:
-                    img_cw = orig_img.transpose(Image.Transpose.ROTATE_270)
-                except AttributeError:
-                    img_cw = orig_img.transpose(4)  # ROTATE_270 = 4 (Pillow < 10 compat)
-                for txt, rx, ry in _ocr_words(img_cw):
-                    # Map back: CW90 inverse → orig_x ≈ ry, orig_y ≈ 1 - rx
-                    _scan_text(txt, 'V', ry * 100.0, (1.0 - rx) * 100.0)
-                _scan_text(_full_page_text(img_cw), 'V', 50.0, 50.0)
-
-                # --- 90° CCW (PIL ROTATE_90) — picks up top-to-bottom text --
-                try:
-                    img_ccw = orig_img.transpose(Image.Transpose.ROTATE_90)
-                except AttributeError:
-                    img_ccw = orig_img.transpose(2)  # ROTATE_90 = 2 (Pillow < 10 compat)
-                for txt, rx, ry in _ocr_words(img_ccw):
-                    # Map back: CCW90 inverse → orig_x ≈ 1 - ry, orig_y ≈ rx
-                    _scan_text(txt, 'V', (1.0 - ry) * 100.0, rx * 100.0)
-                _scan_text(_full_page_text(img_ccw), 'V', 50.0, 50.0)
-
-            except ImportError:
-                logger.warning('[PIDLineTags] pytesseract/PIL not available – rotated OCR skipped')
-            except Exception as exc:
-                logger.warning('[PIDLineTags] Scanned path error: %s', exc)
+                except Exception as exc:
+                    logger.warning('[PIDLineTags] Tesseract scanned path error: %s', exc)
 
         doc.close()
 
@@ -832,6 +973,19 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int) -> list:
         pass
     except Exception as exc:
         logger.debug('[PIDLineTags] Extraction skipped: %s', exc)
+
+    # ── Vision raw_text pass — always run, additive to the scans above. No
+    # per-tag coordinates are available from a page-level text
+    # transcription, so every match is recorded at the page center; that's
+    # enough for rule-engine/comparison-engine matching (which only needs
+    # the tag text), even though it can't drive a precise overlay marker.
+    # Direction is unknown from raw_text alone — recorded as 'H' (Vision
+    # reads rotated/vertical text into the same linear transcription, so
+    # there's no separate orientation signal to classify V vs H post-hoc).
+    # _record()'s dedup means this never double-counts a tag Tesseract
+    # already found with a real position — it only ADDS tags Tesseract missed.
+    if raw_text:
+        _scan_text(raw_text, 'H', 50.0, 50.0)
 
     # ── Cloud-truncation resolution pass ─────────────────────────────────
     # When a revision cloud partially covers a line designation, OCR reads a

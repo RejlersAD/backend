@@ -81,14 +81,77 @@ def _ocr_yield_sufficient(seen_lines: set) -> bool:
     return len(_TAG_PATTERN.findall(combined)) >= _OCR_MIN_TAGS_FOR_EARLY_EXIT
 
 
-def extract_drawing(file_path: str, page_index: int = 0, legend_data: dict | None = None) -> Dict[str, Any]:
+class NoExtractionMethodAvailableError(Exception):
+    """Raised by extract_drawing() when NEITHER Tesseract (not installed)
+    NOR an AI Vision API key (not provided) is available — there is no way
+    to extract any text from this page. Callers must catch this and
+    surface it as a clear, actionable error (see apps.pid_verification_v2.tasks),
+    never as a silently "completed" document with zero findings."""
+    def __init__(self):
+        super().__init__(
+            "Please install Tesseract OR add a Claude API key to analyse this P&ID."
+        )
+
+
+@lru_cache(maxsize=1)
+def _tesseract_available() -> bool:
+    """True if the Tesseract binary is actually reachable (not just the
+    pytesseract Python package) — checked once per process. A missing
+    binary raises pytesseract.TesseractNotFoundError, not ImportError, so
+    this must actually invoke it rather than just trying to import it."""
+    try:
+        import pytesseract
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:
+        return False
+
+
+def extract_drawing(file_path: str, page_index: int = 0, legend_data: dict | None = None, *,
+                     api_key: str | None = None, provider: str = 'claude',
+                     model: str | None = None) -> Dict[str, Any]:
     """
-    Extract all P&ID elements from a single page/drawing.
-    Returns ExtractionResult dict (see module docstring).
+    Extract all P&ID elements from a single page/drawing. Hybrid: Tesseract
+    OCR (if installed) AND AI Vision (if api_key given) both run and their
+    text is merged — see module docstring. Returns ExtractionResult dict.
+
     legend_data: optional per-project legend (overrides global if provided).
+    api_key/provider/model: optional BYOK Vision credentials. Raises
+        NoExtractionMethodAvailableError only when BOTH Tesseract is
+        unavailable AND no api_key is given.
     """
-    raw_text = _run_ocr(file_path, page_index)
-    tag_positions = _extract_tag_positions(file_path, page_index)
+    tesseract_ok = _tesseract_available()
+
+    tesseract_text = ''
+    if tesseract_ok:
+        try:
+            tesseract_text = _run_tesseract_ocr(file_path, page_index)
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception as exc:
+            logger.warning('[PIDExtraction] Tesseract pass failed (non-fatal): %s', exc)
+    else:
+        logger.info('[PIDExtraction] Tesseract not installed — skipping OCR pass')
+    tesseract_used = bool(tesseract_text.strip())
+
+    vision_text, vision_tag_positions = '', {}
+    if api_key:
+        vision_text, vision_tag_positions = _run_vision_ocr(file_path, page_index, api_key, provider, model)
+    vision_used = bool(vision_text.strip())
+
+    if not tesseract_used and not vision_used and not tesseract_ok and not api_key:
+        raise NoExtractionMethodAvailableError()
+
+    raw_text = _merge_ocr_text(tesseract_text, vision_text)
+
+    extraction_info = {
+        'tesseract_available': tesseract_ok,
+        'tesseract_used':      tesseract_used,
+        'vision_used':         vision_used,
+        'message':             _extraction_scenario_message(tesseract_ok, bool(api_key)),
+    }
+    if extraction_info['message']:
+        logger.info('[PIDExtraction] %s', extraction_info['message'])
 
     # Resolve prefix sets: use per-project legend if available, else global.
     if legend_data:
@@ -106,25 +169,69 @@ def extract_drawing(file_path: str, page_index: int = 0, legend_data: dict | Non
         'holds':               _extract_holds(raw_text),
         'line_sizes':          _extract_line_sizes(raw_text),
         'raw_text':            raw_text,
-        'tag_positions':       tag_positions,   # {tag: {x_pct, y_pct}} real diagram coords
-        # Multi-angle pipeline designation extraction (soft-coded, additive).
-        'line_tags':           _extract_pipeline_tags_multi_angle(file_path, page_index),
+        'tag_positions':       {**vision_tag_positions, **_extract_tag_positions(file_path, page_index)},
+        # Multi-angle pipeline designation extraction, ADDITIVELY merged
+        # with a scan of the same combined raw_text (catches anything the
+        # vector/Tesseract passes missed — e.g. scanned pages with no
+        # embedded text and no Tesseract installed).
+        'line_tags':           _extract_pipeline_tags_multi_angle(file_path, page_index, raw_text),
         # Revision / scope-change signals (soft-coded, vector PDFs only).
         'red_annotations':     _extract_red_annotations(file_path, page_index),
         # Reducer notations e.g. 6"x2" and valve-type size contexts.
         'reducers':            _extract_reducers(raw_text),
         'valve_size_contexts': _extract_valve_size_contexts(raw_text),
+        'extraction_info':     extraction_info,
     }
+
+
+def _extraction_scenario_message(tesseract_ok: bool, has_api_key: bool) -> str | None:
+    """User/log-facing info message for the 4 availability scenarios."""
+    if tesseract_ok and has_api_key:
+        return None
+    if not tesseract_ok and has_api_key:
+        return 'Tesseract not installed. Using AI Vision only.'
+    if tesseract_ok and not has_api_key:
+        return 'Add an API key for better accuracy with AI Vision.'
+    return None  # neither available — handled by NoExtractionMethodAvailableError instead
+
+
+def _merge_ocr_text(tesseract_text: str, vision_text: str) -> str:
+    """Combine both sources' transcriptions, deduplicated line-by-line."""
+    seen = set()
+    out = []
+    for block in (tesseract_text, vision_text):
+        for line in block.splitlines():
+            norm = line.strip()
+            if norm and norm not in seen:
+                seen.add(norm)
+                out.append(norm)
+    return '\n'.join(out)
+
+
+def _run_vision_ocr(file_path: str, page_index: int, api_key: str,
+                     provider: str, model: str | None) -> tuple[str, dict]:
+    """Render the page and transcribe it via AI Vision (Claude by default).
+    Returns (raw_text, tag_positions). Never raises — logs and returns
+    empty on failure."""
+    from apps.pid_checker_v2.services.vision_extractor import extract_raw_text_via_vision
+
+    try:
+        with open(file_path, 'rb') as f:
+            pdf_bytes = f.read()
+        result = extract_raw_text_via_vision(pdf_bytes, page_index, api_key, provider=provider, model=model)
+        return result.get('raw_text', ''), result.get('tag_positions', {})
+    except Exception as exc:
+        logger.error('[PIDExtraction] Vision text extraction failed: %s', exc, exc_info=True)
+        return '', {}
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _run_ocr(file_path: str, page_index: int) -> str:
+def _run_tesseract_ocr(file_path: str, page_index: int) -> str:
     """
-    Run OCR on the specified page.
-    Falls back to plain text extraction if pytesseract is unavailable.
+    Run Tesseract OCR on the specified page.
     temperature=0 equivalent: fixed model config, no randomness.
     """
     result = ''
@@ -230,7 +337,12 @@ _TAG_PATTERN       = re.compile(r'\b([A-Z]{1,4}-[0-9]{3,5}[A-Z]?)\b')
 _NOTE_PATTERN      = re.compile(r'NOTE\s*\d+[:\s].{5,200}', re.IGNORECASE)
 _HOLD_PATTERN      = re.compile(r'HOLD[- ]\d+[:\s].{5,200}', re.IGNORECASE)
 _LINE_SIZE_PATTERN = re.compile(r'\b(\d+(?:\.\d+)?)\s*(?:"|”|\'\'|mm|DN)(?=\s|$|[^A-Za-z0-9_])', re.IGNORECASE)
-_EQUIPMENT_TYPES   = re.compile(r'\b(V|E|T|K|C|P|H|X|F|R)-\d{3,5}\b')
+# Optional trailing group captures a site-symbol suffix (e.g. "-TF", "-CF")
+# or unit letter ("-A") — without it, "V-803-TF" only matched as far as
+# "V-803", which then could never match the Equipment List's full tag
+# (confirmed live: same physical equipment reported as both an "extra"
+# P&ID-only tag "V-803" AND a "missing" register tag "V-803-TF").
+_EQUIPMENT_TYPES   = re.compile(r'\b(V|E|T|K|C|P|H|X|F|R)-\d{3,5}(-[A-Z]{1,4})?\b')
 
 # Pipeline line designation pattern.
 # Matches designations like: 2"-D-6152-033842-X-N  or  4"-D-5690-013842-X_N
@@ -540,8 +652,8 @@ def _extract_tag_positions(file_path, page_index):
             except Exception:
                 pass
 
-        else:
-            # --- Path B: scanned/image PDF -- OCR with per-word bounding boxes ---
+        elif _tesseract_available():
+            # --- Path B: scanned/image PDF -- Tesseract OCR with per-word bounding boxes ---
             try:
                 import pytesseract
                 from PIL import Image
@@ -636,10 +748,15 @@ def _normalize_pipeline_desig_key(size_num: str, fluid: str, area: str, seq: str
     return parts[0]
 
 
-def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int) -> list:
+def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int, raw_text: str = '') -> list:
     """
     Detect pipeline line designations like ``2"-D-6152-033842-X-N`` from a single
     drawing page in both **horizontal** and **vertical** orientations.
+
+    `raw_text` (the merged Tesseract+Vision transcription from extract_drawing())
+    is ALSO scanned, additively, at a single page-center position — catches
+    anything the vector-PDF/Tesseract passes below missed (the only source
+    for scanned pages when Tesseract isn't installed).
 
     Strategy
     --------
@@ -820,7 +937,7 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int) -> list:
             except Exception as _e:
                 logger.debug('[PIDLineTags] Word-window pass error: %s', _e)
 
-        else:
+        elif _tesseract_available():
             # ── Path B: scanned / image PDF – multi-angle Tesseract ─────
             try:
                 import pytesseract
@@ -906,6 +1023,14 @@ def _extract_pipeline_tags_multi_angle(file_path: str, page_index: int) -> list:
         raise
     except Exception as exc:
         logger.debug('[PIDLineTags] Extraction skipped: %s', exc)
+
+    # ── Vision raw_text pass — always run, additive to the scans above.
+    # No per-tag coordinates from a page-level transcription, so matches
+    # are recorded at page-center; _record()'s dedup means this never
+    # double-counts a tag already found with a real position above, it
+    # only adds tags the vector/Tesseract passes missed.
+    if raw_text:
+        _scan_text(raw_text, 'H', 50.0, 50.0)
 
     # ── Cloud-truncation resolution pass ─────────────────────────────────
     # When a revision cloud partially covers a line designation, OCR reads a
