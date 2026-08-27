@@ -17,6 +17,7 @@ Documents:
   DELETE /api/v1/pid-verification/delete/<document_id>/  → remove document
 """
 import logging
+import os
 import threading
 import json
 import tempfile
@@ -1906,55 +1907,84 @@ def drawing_image(request, document_id, page_index):
     if not doc.original_file:
         return Response({"error": "Original file not stored"}, status=status.HTTP_404_NOT_FOUND)
 
+    # Same S3-vs-local abstraction already fixed in tasks.py's
+    # _resolve_file_path/_download_via_storage (2026-08-27 HeadObject 404
+    # postmortem) — this view used to call doc.original_file.path directly,
+    # which ALWAYS raises NotImplementedError under S3Boto3Storage, so this
+    # endpoint unconditionally 404'd for every document in production
+    # ("Drawing preview unavailable" in the UI). _resolve_file_path handles
+    # both local disk (returns the real path) and S3 (downloads to a temp
+    # file) correctly.
+    from .tasks import _resolve_file_path
     try:
-        file_path = doc.original_file.path
-    except Exception:
+        file_path = _resolve_file_path(doc)
+    except Exception as exc:
+        logger.warning("[PIDVDrawingImage] Could not resolve file for doc_id=%s: %s", document_id, exc)
         return Response({"error": "File path unavailable"}, status=status.HTTP_404_NOT_FOUND)
+
+    # _resolve_file_path downloads S3-backed files to a temp copy for us to
+    # read — clean it up afterward so these don't accumulate on disk across
+    # repeated page views. Only ever deletes OUR OWN temp download, never
+    # doc.original_file's real path when storage is local (that's a
+    # permanent file, not ours to remove) — detected by directory, not by
+    # storage type, so this stays correct regardless of which backend ran.
+    is_temp_download = os.path.dirname(os.path.abspath(file_path)) == os.path.abspath(tempfile.gettempdir())
 
     ext = Path(file_path).suffix.lower().lstrip(".")
     png_data = None
 
-    if ext == "pdf":
-        try:
-            import fitz  # PyMuPDF
-            pdf_doc = fitz.open(file_path)
-            if page_index >= len(pdf_doc):
+    try:
+        if ext == "pdf":
+            try:
+                import fitz  # PyMuPDF
+                pdf_doc = fitz.open(file_path)
+                if page_index >= len(pdf_doc):
+                    pdf_doc.close()
+                    return Response({"error": "Page index out of range"}, status=status.HTTP_400_BAD_REQUEST)
+                page = pdf_doc[page_index]
+                # 2× zoom → ~150 dpi for typical A1 drawings
+                mat = fitz.Matrix(2.0, 2.0)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                png_data = pix.tobytes("png")
                 pdf_doc.close()
-                return Response({"error": "Page index out of range"}, status=status.HTTP_400_BAD_REQUEST)
-            page = pdf_doc[page_index]
-            # 2× zoom → ~150 dpi for typical A1 drawings
-            mat = fitz.Matrix(2.0, 2.0)
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            png_data = pix.tobytes("png")
-            pdf_doc.close()
-        except ImportError:
-            return Response({"error": "PyMuPDF not available"}, status=status.HTTP_501_NOT_IMPLEMENTED)
-        except Exception as exc:
-            logger.warning("[PIDVDrawingImage] PDF render failed: %s", exc)
-            return Response({"error": "Failed to render PDF page"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    elif ext in {"png", "jpg", "jpeg", "tiff", "tif"}:
-        try:
-            with open(file_path, "rb") as f:
-                raw = f.read()
-            if ext == "png":
-                png_data = raw
-            else:
-                from PIL import Image
-                import io
-                img = Image.open(io.BytesIO(raw)).convert("RGB")
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                png_data = buf.getvalue()
-        except Exception as exc:
-            logger.warning("[PIDVDrawingImage] Image read failed: %s", exc)
-            return Response({"error": "Failed to read image file"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    else:
-        return Response({"error": f"Unsupported file type: {ext}"}, status=status.HTTP_400_BAD_REQUEST)
+            except ImportError:
+                return Response({"error": "PyMuPDF not available"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+            except Exception as exc:
+                logger.warning("[PIDVDrawingImage] PDF render failed: %s", exc)
+                return Response({"error": "Failed to render PDF page"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        elif ext in {"png", "jpg", "jpeg", "tiff", "tif"}:
+            try:
+                with open(file_path, "rb") as f:
+                    raw = f.read()
+                if ext == "png":
+                    png_data = raw
+                else:
+                    from PIL import Image
+                    import io
+                    img = Image.open(io.BytesIO(raw)).convert("RGB")
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    png_data = buf.getvalue()
+            except Exception as exc:
+                logger.warning("[PIDVDrawingImage] Image read failed: %s", exc)
+                return Response({"error": "Failed to read image file"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        else:
+            return Response({"error": f"Unsupported file type: {ext}"}, status=status.HTTP_400_BAD_REQUEST)
 
-    response = HttpResponse(png_data, content_type="image/png")
-    response["Cache-Control"] = "private, max-age=3600"
-    response["Content-Length"] = len(png_data)
-    return response
+        response = HttpResponse(png_data, content_type="image/png")
+        response["Cache-Control"] = "private, max-age=3600"
+        response["Content-Length"] = len(png_data)
+        return response
+    finally:
+        # Clean up our own S3 temp download (never a real local-storage
+        # file — see is_temp_download above) regardless of which return
+        # path was taken, so these don't accumulate across repeated page
+        # views (this endpoint is called once per drawing page viewed).
+        if is_temp_download:
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
 
 
 # ===========================================================================
