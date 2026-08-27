@@ -291,6 +291,65 @@ def _pptx_add_bullet_slide(prs, heading, bullets, max_items=10):
     return slide
 
 
+def _pptx_paginate_paragraphs(paragraphs, max_chars=750, max_items=5):
+    """Split narrative text into slide-sized pages without dropping content.
+
+    PowerPoint does not reliably auto-create continuation slides when text
+    overflows a placeholder.  Keep a conservative character and paragraph
+    budget, splitting unusually long paragraphs at sentence/word boundaries.
+    """
+    segments = []
+    for paragraph in paragraphs:
+        text = re.sub(r'\s+', ' ', str(paragraph)).strip()
+        if not text:
+            continue
+
+        sentences = [part.strip() for part in re.split(r'(?<=[.!?])\s+', text) if part.strip()]
+        current = ''
+        for sentence in sentences or [text]:
+            if len(sentence) > max_chars:
+                words = sentence.split()
+                word_chunk = ''
+                for word in words:
+                    candidate = f'{word_chunk} {word}'.strip()
+                    if word_chunk and len(candidate) > max_chars:
+                        if current:
+                            segments.append(current)
+                            current = ''
+                        segments.append(word_chunk)
+                        word_chunk = word
+                    else:
+                        word_chunk = candidate
+                sentence_parts = [word_chunk] if word_chunk else []
+            else:
+                sentence_parts = [sentence]
+
+            for part in sentence_parts:
+                candidate = f'{current} {part}'.strip()
+                if current and len(candidate) > max_chars:
+                    segments.append(current)
+                    current = part
+                else:
+                    current = candidate
+        if current:
+            segments.append(current)
+
+    pages = []
+    page = []
+    page_chars = 0
+    for segment in segments:
+        required = len(segment) + (1 if page else 0)
+        if page and (len(page) >= max_items or page_chars + required > max_chars):
+            pages.append(page)
+            page = []
+            page_chars = 0
+        page.append(segment)
+        page_chars += len(segment) + (1 if page_chars else 0)
+    if page:
+        pages.append(page)
+    return pages
+
+
 def _pptx_add_table_slide(prs, heading, headers, rows, max_rows=PPTX_MAX_TABLE_ROWS, footnote=None):
     """Adds a table-content slide using the template's 'Graph/table slide'
     layout. The layout's empty content placeholder only supports simple text
@@ -505,8 +564,20 @@ def generation_to_pptx_bytes(generation) -> bytes:
     # 10) Narrative / Executive Summary
     narrative_text = (generation.narrative or '').strip()
     paragraphs = [p.strip() for p in narrative_text.split('\n') if p.strip()]
-    summary_bullets = paragraphs[:6] if paragraphs else ['Narrative not yet generated.']
-    _pptx_add_bullet_slide(prs, 'Executive Summary', summary_bullets, max_items=6)
+    summary_pages = _pptx_paginate_paragraphs(
+        paragraphs or ['Narrative not yet generated.'],
+    )
+    total_summary_pages = len(summary_pages)
+    for page_number, summary_bullets in enumerate(summary_pages, start=1):
+        heading = 'Executive Summary'
+        if total_summary_pages > 1:
+            heading = f'Executive Summary ({page_number}/{total_summary_pages})'
+        _pptx_add_bullet_slide(
+            prs,
+            heading,
+            summary_bullets,
+            max_items=len(summary_bullets),
+        )
 
     # 11) Closing
     _pptx_add_closing_slide(prs, 'Thank You')

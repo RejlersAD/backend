@@ -76,3 +76,38 @@ class PowerPointExportTests(TestCase):
         self.assertEqual(len(presentation.slides), 10)
         self.assertNotIn('Key Milestones', titles)
         self.assertIn('Executive Summary', titles)
+
+    @patch(
+        'apps.planning_intelligence.services.export_utils.PPTX_TEMPLATE_PATH',
+        'missing-corporate-template.pptx',
+    )
+    def test_paginates_long_executive_summary_without_losing_text(self):
+        generation = self._generation()
+        generation.narrative = '\n'.join(
+            f'Paragraph {number}: ' + ('Detailed planning information ' * 18)
+            for number in range(1, 9)
+        ) + '\nFINAL-NARRATIVE-MARKER'
+
+        content = generation_to_pptx_bytes(generation)
+        presentation = Presentation(BytesIO(content))
+        summary_slides = [
+            slide for slide in presentation.slides
+            if slide.shapes.title and slide.shapes.title.text.startswith('Executive Summary')
+        ]
+        summary_text = '\n'.join(
+            shape.text
+            for slide in summary_slides
+            for shape in slide.shapes
+            if getattr(shape, 'has_text_frame', False)
+        )
+
+        self.assertGreater(len(summary_slides), 1)
+        self.assertEqual(summary_slides[0].shapes.title.text, f'Executive Summary (1/{len(summary_slides)})')
+        self.assertIn('FINAL-NARRATIVE-MARKER', summary_text)
+        for slide in summary_slides:
+            body_text = '\n'.join(
+                shape.text
+                for shape in slide.shapes
+                if getattr(shape, 'has_text_frame', False) and shape != slide.shapes.title
+            )
+            self.assertLessEqual(len(body_text), 800)
