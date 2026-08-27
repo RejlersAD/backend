@@ -768,13 +768,18 @@ def daily_report(date: Optional[str] = None) -> dict:
             f"       {_opt_select('employee_email', 'email', agg='MAX')}"
             f"       MAX({_col('employee_name')}) AS name, "
             f"       {('MAX(' + _col('department') + ') AS department,') if _col('department') else ''}"
-            f"       MIN({_col('punch_time')}) AS first_in, "
-            f"       MAX({_col('punch_time')}) AS last_out, "
+            f"       MIN(CASE WHEN {_col('punch_type')} = %s THEN {_col('punch_time')} END) AS first_in, "
+            f"       MAX(CASE WHEN {_col('punch_type')} = %s THEN {_col('punch_time')} END) AS last_out, "
             f"       COUNT(*) AS punch_count "
             f"FROM {_table()} "
             f"WHERE CAST({_col('punch_time')} AS DATE) = %s "
             f"GROUP BY {_col('employee_code')} "
             f"ORDER BY first_in"
+        )
+        params = (
+            ts_config.SCHEMA['columns']['in_value'],
+            ts_config.SCHEMA['columns']['out_value'],
+            day,
         )
     else:
         sql = (
@@ -788,9 +793,10 @@ def daily_report(date: Optional[str] = None) -> dict:
             f"WHERE CAST({_col('date')} AS DATE) = %s "
             f"ORDER BY {_col('login_time')}"
         )
+        params = (day,)
 
     with connect() as cur:
-        cur.execute(sql, (day,))
+        cur.execute(sql, params)
         rows = rows_to_dicts(cur, cur.fetchall())
 
     for r in rows:
@@ -829,12 +835,18 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             f"       MAX({_col('employee_name')}) AS name, "
             f"       {('MAX(' + _col('department') + ') AS department,') if _col('department') else ''}"
             f"       CAST({_col('punch_time')} AS DATE) AS work_date, "
-            f"       MIN({_col('punch_time')}) AS first_in, "
-            f"       MAX({_col('punch_time')}) AS last_out "
+            f"       MIN(CASE WHEN {_col('punch_type')} = %s THEN {_col('punch_time')} END) AS first_in, "
+            f"       MAX(CASE WHEN {_col('punch_type')} = %s THEN {_col('punch_time')} END) AS last_out "
             f"FROM {_table()} "
             f"WHERE {_col('punch_time')} >= %s AND {_col('punch_time')} < DATEADD(DAY, 1, %s) "
             f"GROUP BY {_col('employee_code')}, CAST({_col('punch_time')} AS DATE) "
             f"ORDER BY employee_code, work_date"
+        )
+        params = (
+            ts_config.SCHEMA['columns']['in_value'],
+            ts_config.SCHEMA['columns']['out_value'],
+            start,
+            end,
         )
     else:
         sql = (
@@ -849,9 +861,10 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             f"WHERE {_col('date')} >= %s AND {_col('date')} <= %s "
             f"ORDER BY {_col('employee_code')}, {_col('date')}"
         )
+        params = (start, end)
 
     with connect() as cur:
-        cur.execute(sql, (start, end))
+        cur.execute(sql, params)
         raw = rows_to_dicts(cur, cur.fetchall())
 
     # Roll up per employee

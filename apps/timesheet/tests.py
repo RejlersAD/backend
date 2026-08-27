@@ -1,12 +1,12 @@
 from datetime import date, datetime, time
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 
-from . import config, get_service, mirror_services
+from . import config, get_service, mirror_services, services
 from .manual_import import _hours, _parse, _time
 from .models import DailyAttendanceSummary, TimesheetEvent
 from .services import _backfill_email_from_matrix_name
@@ -45,6 +45,43 @@ class BiometricHoursTests(SimpleTestCase):
         result = mirror_services._compute_paired_hours(punches)
         self.assertEqual(result['effective_hours'], 9.0)
         self.assertEqual(result['paired_hours'], 9.0)
+
+
+class DirectSqlAttendanceQueryTests(SimpleTestCase):
+    schema = {
+        'table': 'dbo.Mx_VEW_UserAttendanceEvents',
+        'columns': {
+            'employee_code': 'UserID', 'employee_email': '',
+            'employee_name': 'FullName', 'department': 'DptName',
+            'punch_time': 'EventDateTime', 'punch_type': 'EntryExitType',
+            'in_value': '0', 'out_value': '1',
+            'login_time': '', 'logout_time': '', 'date': '',
+        },
+    }
+
+    def _connection(self):
+        connection = MagicMock()
+        cursor = connection.__enter__.return_value
+        cursor.fetchall.return_value = []
+        return connection, cursor
+
+    def test_daily_uses_first_entry_and_last_exit(self):
+        connection, cursor = self._connection()
+        with patch.object(config, 'SCHEMA', self.schema), patch.object(services, 'connect', return_value=connection):
+            services.daily_report.__wrapped__('2026-08-27')
+
+        sql, params = cursor.execute.call_args.args
+        self.assertIn('MIN(CASE WHEN [EntryExitType] = %s THEN [EventDateTime] END)', sql)
+        self.assertIn('MAX(CASE WHEN [EntryExitType] = %s THEN [EventDateTime] END)', sql)
+        self.assertEqual(params, ('0', '1', date(2026, 8, 27)))
+
+    def test_monthly_uses_entry_exit_values_before_date_range(self):
+        connection, cursor = self._connection()
+        with patch.object(config, 'SCHEMA', self.schema), patch.object(services, 'connect', return_value=connection):
+            services.monthly_report.__wrapped__(2026, 8)
+
+        _, params = cursor.execute.call_args.args
+        self.assertEqual(params, ('0', '1', date(2026, 8, 1), date(2026, 8, 31)))
 
 
 class ManualAttendanceParsingTests(SimpleTestCase):
