@@ -1549,33 +1549,37 @@ def run_ai_checks_task(self, run_id: str, context: dict = None):
         sheets_processed = 0
         api_calls_made = 0
         
-        s3_client = boto3.client('s3')
-        
         for drawing in drawings[:10]:  # Limit to 10 sheets for initial implementation
             try:
-                # Download image from S3
+                # Download image from S3 — via the field's own storage
+                # backend (_download_field_file), NOT a raw boto3 client
+                # keyed on doc.original_file.name alone. That was the exact
+                # 2026-08-27 HeadObject 404 bug (see _download_field_file's
+                # docstring): .name is relative to the storage's `location`
+                # prefix (e.g. MediaStorage.location = 'media'), so a raw
+                # S3 key built from .name alone 404s on the real object.
                 doc = drawing.document
-                bucket = settings.AWS_STORAGE_BUCKET_NAME
-                key = doc.original_file.name if hasattr(doc.original_file, 'name') else doc.s3_path
-                
-                # Download to temp file
-                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-                s3_client.download_file(bucket, key, tmp_file.name)
-                
+                if doc.original_file:
+                    tmp_file_path = _download_field_file(doc.original_file)
+                elif doc.s3_path:
+                    tmp_file_path = _download_from_s3(doc.s3_path)
+                else:
+                    raise ValueError(f'No file source available for document {doc.document_id}')
+
                 # Extract using vision API
                 logger.info('[AICheckTask] Extracting sheet: %s (page %d)', drawing.title, drawing.page_index)
-                
-                extraction_result = extractor.extract_all(tmp_file.name, sheet_number=drawing.title)
-                
+
+                extraction_result = extractor.extract_all(tmp_file_path, sheet_number=drawing.title)
+
                 all_equipment.extend(extraction_result.get('equipment', []))
                 all_lines.extend(extraction_result.get('lines', []))
                 all_instruments.extend(extraction_result.get('instruments', []))
-                
+
                 sheets_processed += 1
                 api_calls_made += 3  # equipment + lines + instruments
-                
+
                 # Cleanup
-                os.unlink(tmp_file.name)
+                os.unlink(tmp_file_path)
                 
                 logger.info('[AICheckTask] Extracted %d equipment, %d lines, %d instruments from sheet %s',
                            len(extraction_result.get('equipment', [])),

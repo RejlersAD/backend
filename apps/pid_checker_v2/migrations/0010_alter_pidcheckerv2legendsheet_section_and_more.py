@@ -9,7 +9,11 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('pid_checker_v2', '0009_pidcheckerv2usagelog'),
-        ('pid_verification', '0011_rename_pidv_ai_check_runs_run_id_idx_pidv_ai_che_run_id_bdcd91_idx_and_more'),
+        # 0013 (not just 0011/0012) — this migration adds REAL foreign keys
+        # to both pidv_legend_sheets (repaired by 0012) AND pidv_projects
+        # (repaired by 0013) — both needed before these FKs can be created.
+        # See those migrations' docstrings for the full story.
+        ('pid_verification', '0013_repair_remaining_primary_keys'),
     ]
 
     operations = [
