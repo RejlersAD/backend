@@ -67,9 +67,9 @@ def _time(value) -> dt.time | None:
     if value in (None, ''):
         return None
     if isinstance(value, dt.datetime):
-        return value.time().replace(second=0, microsecond=0)
+        return value.time().replace(microsecond=0)
     if isinstance(value, dt.time):
-        return value.replace(second=0, microsecond=0)
+        return value.replace(microsecond=0)
     raw = str(value).strip()
     if raw.lower() in {'-', '--', 'n/a', 'na'}:
         return None
@@ -124,9 +124,94 @@ def _sheet_rows(upload) -> list[list]:
     raise ValueError('Upload a .xlsx or .csv file.')
 
 
+def _cosec_report_columns(rows: list[list]) -> tuple[int, dict] | None:
+    """Detect Matrix COSEC's native Organization-Wise Attendance report.
+
+    COSEC exports a two-row header (for example ``User`` + ``ID`` and
+    ``Work`` + ``Hrs``), followed by date-marker rows and employee rows.
+    Return the second header row index and the resolved column map.
+    """
+    title_found = any(
+        'organizationwiseattendance' in _key(value)
+        for row in rows[:10]
+        for value in row
+    )
+    if not title_found:
+        return None
+
+    for top_idx in range(min(12, max(0, len(rows) - 1))):
+        top, bottom = rows[top_idx], rows[top_idx + 1]
+        width = max(len(top), len(bottom))
+        combined = [
+            _key(f'{(top[idx] if idx < len(top) else "") or ""} '
+                 f'{(bottom[idx] if idx < len(bottom) else "") or ""}')
+            for idx in range(width)
+        ]
+        code_idx = next((idx for idx, key in enumerate(combined) if key == 'userid'), None)
+        hours_idx = next((idx for idx, key in enumerate(combined) if key == 'workhrs'), None)
+        name_idx = next((idx for idx, key in enumerate(combined) if key == 'name'), None)
+        if code_idx is None or hours_idx is None or name_idx is None:
+            continue
+        return top_idx + 1, {
+            'code': code_idx,
+            'name': name_idx,
+            'hours': hours_idx,
+            'time_in': [idx for idx, key in enumerate(combined) if key.startswith('in')],
+            'time_out': [idx for idx, key in enumerate(combined) if key.startswith('out')],
+        }
+    raise ValueError('COSEC attendance report header could not be recognized.')
+
+
+def _parse_cosec_report(rows: list[list], header_idx: int, columns: dict,
+                        *, year=None, month=None) -> tuple[list[ImportRow], list[dict]]:
+    parsed, errors = [], []
+    current_date = None
+
+    def value_at(values, idx, default=None):
+        return values[idx] if idx is not None and idx < len(values) else default
+
+    def clock(values, indices, *, last=False):
+        candidates = []
+        for idx in indices:
+            raw = value_at(values, idx)
+            if raw not in (None, ''):
+                candidates.append(raw)
+        return _time(candidates[-1 if last else 0]) if candidates else None
+
+    for number, values in enumerate(rows[header_idx + 1:], start=header_idx + 2):
+        code_value = value_at(values, columns['code'])
+        if isinstance(code_value, (dt.datetime, dt.date)):
+            current_date = _date(code_value)
+            continue
+        if current_date is None or code_value in (None, ''):
+            continue
+        try:
+            code = norm_code(code_value)
+            if not code:
+                raise ValueError('Employee ID is required')
+            hours_value = value_at(values, columns['hours'])
+            hours = 0.0 if hours_value in (None, '') else _hours(hours_value)
+            time_in = clock(values, columns['time_in'])
+            time_out = clock(values, columns['time_out'], last=True)
+            status = 'present' if hours > 0 else ('incomplete' if time_in and not time_out else 'absent')
+            parsed.append(ImportRow(
+                number, code, current_date, hours,
+                employee_name=str(value_at(values, columns['name'], '') or '').strip(),
+                status=status,
+                time_in=time_in,
+                time_out=time_out,
+            ))
+        except (TypeError, ValueError) as exc:
+            errors.append({'row': number, 'error': str(exc)})
+    return parsed, errors
+
+
 def _parse(rows: list[list], *, year=None, month=None) -> tuple[list[ImportRow], list[dict]]:
     if not rows:
         raise ValueError('The uploaded file is empty.')
+    cosec_layout = _cosec_report_columns(rows)
+    if cosec_layout:
+        return _parse_cosec_report(rows, *cosec_layout, year=year, month=month)
     headers = [_key(v) for v in rows[0]]
     code_idx = next((i for i, h in enumerate(headers) if h in CODE_ALIASES), None)
     if code_idx is None:
@@ -202,8 +287,12 @@ def import_daily_attendance(upload, *, year=None, month=None) -> dict:
     for item in parsed:
         if item.hours < 0 or item.hours > max_total_hours:
             errors.append({'row': item.row_number, 'error': f'Hours must be between 0 and {max_total_hours:g}'})
-        elif item.date.weekday() >= 5:
-            errors.append({'row': item.row_number, 'error': f'{item.date.isoformat()} is a weekend'})
+        elif ((year and item.date.year != int(year))
+              or (month and item.date.month != int(month))):
+            errors.append({
+                'row': item.row_number,
+                'error': f'{item.date.isoformat()} is outside the selected month',
+            })
         else:
             valid.append(item)
 

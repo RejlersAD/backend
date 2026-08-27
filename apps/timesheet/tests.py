@@ -69,6 +69,28 @@ class ManualAttendanceParsingTests(SimpleTestCase):
         self.assertEqual(parsed[0].time_in, time(20, 3, 18))
         self.assertEqual(parsed[0].time_out, time(6, 58, 26))
 
+    def test_native_cosec_organization_report_is_accepted(self):
+        rows = [
+            [None, None, None, 'REJLERS ABU DHABI'],
+            [None, None, None, 'Organization-Wise Attendance From 01/07/2026 To 31/07/2026'],
+            [None, 'User', ' Name', ' Shift', ' IN-', None, ' OUT-', None, ' IN-', ' OUT-', None, None, None, None, None, None, None, None, None, 'Work'],
+            [None, 'ID', None, None, ' SPFID', None, ' SPFID', None, ' SPFID', ' SPFID', None, None, None, None, None, None, None, None, None, 'Hrs'],
+            [None] * 20,
+            [None, datetime(2026, 7, 4), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None],
+            [None, '05192603', 'Test Employee', None, datetime(2026, 7, 4, 8, 47, 16), None,
+             datetime(2026, 7, 4, 19, 32, 5), None, None, None, None, None, None, None, None, None, None, None, None, '10:45'],
+        ]
+
+        parsed, errors = _parse(rows, year=2026, month=7)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].employee_code, '05192603')
+        self.assertEqual(parsed[0].date, date(2026, 7, 4))
+        self.assertEqual(parsed[0].time_in, time(8, 47, 16))
+        self.assertEqual(parsed[0].time_out, time(19, 32, 5))
+        self.assertEqual(parsed[0].hours, 10.75)
+
 
 class AttendanceNameBackfillTests(SimpleTestCase):
     def test_multiple_employee_names_use_one_bulk_profile_query(self):
