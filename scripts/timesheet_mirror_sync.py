@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 
 try:
     import requests
-    from decouple import AutoConfig
+    from decouple import AutoConfig, Config, RepositoryEnv
 except ImportError as exc:  # pragma: no cover - operator setup failure
     raise SystemExit(
         "Missing sync-agent dependency. Run: "
@@ -38,6 +38,15 @@ LOG = logging.getLogger("timesheet-mirror-sync")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENV = AutoConfig(search_path=str(PROJECT_ROOT))
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#@]*$")
+
+
+def configure_env_file(path: str) -> None:
+    """Use a dedicated agent env file instead of the backend's main .env."""
+    global ENV
+    env_path = Path(path).expanduser().resolve()
+    if not env_path.is_file():
+        raise RuntimeError(f"Sync-agent env file not found: {env_path}")
+    ENV = Config(RepositoryEnv(str(env_path)))
 
 
 def env_first(*names: str, default: str = "") -> str:
@@ -305,6 +314,26 @@ def post_batches(path: str, payload_key: str, rows: list[dict], batch_size: int,
     return totals
 
 
+def check_connections(hours: int) -> None:
+    """Verify SQL access, source mapping, production URL and shared key."""
+    events = fetch_events(hours, full=False)
+    LOG.info("SQL Server check passed; read %s recent event(s)", len(events))
+
+    api_key = env_first("TIMESHEET_MIRROR_API_KEY")
+    if not api_key:
+        raise RuntimeError("TIMESHEET_MIRROR_API_KEY must be configured")
+    url = f"{mirror_base_url()}/mirror/ingest/"
+    timeout = int(env_first("TIMESHEET_MIRROR_HTTP_TIMEOUT", default="60"))
+    response = requests.post(
+        url,
+        json={"events": []},
+        headers={"X-Timesheet-Mirror-Key": api_key},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    LOG.info("Production mirror authentication passed: %s", url)
+
+
 def sync_once(args: argparse.Namespace) -> None:
     if args.users:
         users = fetch_users()
@@ -327,18 +356,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--watch", action="store_true", help="continue syncing at the configured interval")
     parser.add_argument("--interval", type=int, default=300, help="watch interval in seconds (default: 300)")
     parser.add_argument("--dry-run", action="store_true", help="read and validate SQL rows without sending")
+    parser.add_argument("--check", action="store_true", help="verify SQL, production endpoint and API key, then exit")
+    parser.add_argument(
+        "--env-file",
+        help="dedicated agent env file (recommended: scripts/timesheet_mirror.env)",
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.env_file:
+        configure_env_file(args.env_file)
     if args.hours <= 0 or args.batch_size <= 0 or args.interval <= 0:
         raise SystemExit("--hours, --batch-size and --interval must be positive")
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    if args.check:
+        try:
+            check_connections(args.hours)
+            return 0
+        except Exception:
+            LOG.exception("Biometric synchronization preflight failed")
+            return 1
+
     while True:
         try:
             sync_once(args)

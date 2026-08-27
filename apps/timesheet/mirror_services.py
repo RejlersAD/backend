@@ -73,6 +73,14 @@ def _event_bounds(start: dt.date, end_exclusive: dt.date) -> tuple[dt.datetime, 
     return start_local.astimezone(dt.timezone.utc), end_local.astimezone(dt.timezone.utc)
 
 
+def _daily_first_in_sort_key(row: dict) -> tuple[bool, str]:
+    """Sort mixed biometric/manual rows without comparing datetime to str."""
+    value = row.get('first_in')
+    if isinstance(value, dt.datetime):
+        value = _to_naive(value).isoformat()
+    return value is None or value == '', str(value or '')
+
+
 def _as_aware_attendance(value: dt.datetime | None) -> dt.datetime | None:
     """Attach the office timezone before persisting a local calculation."""
     if value is None or timezone.is_aware(value):
@@ -1112,7 +1120,7 @@ def daily_report(date: Optional[str] = None) -> dict:
     rows = _enrich_from_user_master_mirror(rows)
     rows = _enrich_with_rad_users(rows)
     rows = _backfill_email_from_matrix_name(rows)
-    rows.sort(key=lambda r: r.get('first_in') or dt.datetime.min)
+    rows.sort(key=_daily_first_in_sort_key)
     return {
         'date': day.isoformat(),
         'rows': rows,
