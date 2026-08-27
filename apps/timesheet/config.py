@@ -344,7 +344,10 @@ def is_configured() -> bool:
     """Quick check: do we have the bare minimum to attempt a query?"""
     if not FEATURE_ENABLED:
         return False
-    if INPUT_MODE == 'manual':
+    # Manual and hybrid modes are backed by the local Postgres summary
+    # service. Hybrid may enrich those summaries with biometric mirror data,
+    # but it must remain usable when the direct SQL Server is unavailable.
+    if INPUT_MODE in ('manual', 'hybrid'):
         return True
     # Mirror mode needs no SQL Server creds — the Postgres table is always
     # there. Just check the feature is on; reads return empty list naturally.

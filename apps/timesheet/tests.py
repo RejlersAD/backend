@@ -23,6 +23,16 @@ class ServiceSelectionTests(SimpleTestCase):
         with patch.object(config, 'INPUT_MODE', 'hybrid'), patch.object(config, 'DATA_SOURCE', 'sqlserver'):
             self.assertIs(get_service(), mirror_services)
 
+    def test_hybrid_is_configured_without_direct_sql_credentials(self):
+        empty_sql = {'host': '192.168.99.52', 'user': '', 'password': '', 'database': ''}
+        with (
+            patch.object(config, 'FEATURE_ENABLED', True),
+            patch.object(config, 'INPUT_MODE', 'hybrid'),
+            patch.object(config, 'DATA_SOURCE', 'sqlserver'),
+            patch.object(config, 'SQLSERVER', empty_sql),
+        ):
+            self.assertTrue(config.is_configured())
+
 
 class BiometricHoursTests(SimpleTestCase):
     def test_paired_hours_obey_daily_cap(self):
