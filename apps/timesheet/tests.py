@@ -1,4 +1,5 @@
 from datetime import date, datetime, time
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, TestCase
@@ -8,6 +9,7 @@ from rest_framework.test import APIClient
 from . import config, get_service, mirror_services
 from .manual_import import _hours, _parse, _time
 from .models import DailyAttendanceSummary, TimesheetEvent
+from .services import _backfill_email_from_matrix_name
 
 
 class ServiceSelectionTests(SimpleTestCase):
@@ -66,6 +68,47 @@ class ManualAttendanceParsingTests(SimpleTestCase):
         self.assertAlmostEqual(parsed[0].hours, 10 + 55 / 60)
         self.assertEqual(parsed[0].time_in, time(20, 3, 18))
         self.assertEqual(parsed[0].time_out, time(6, 58, 26))
+
+
+class AttendanceNameBackfillTests(SimpleTestCase):
+    def test_multiple_employee_names_use_one_bulk_profile_query(self):
+        from apps.rbac.models import UserProfile
+
+        profiles = [
+            SimpleNamespace(
+                user=SimpleNamespace(
+                    id=1, first_name='Alice', last_name='Smith',
+                    email='alice.smith@example.com', username='alice.smith',
+                ),
+                user_id=1, department='Engineering', job_title='Engineer',
+            ),
+            SimpleNamespace(
+                user=SimpleNamespace(
+                    id=2, first_name='Bob', last_name='Jones',
+                    email='bob.jones@example.com', username='bob.jones',
+                ),
+                user_id=2, department='Operations', job_title='Manager',
+            ),
+        ]
+        manager = Mock()
+        manager.select_related.return_value.filter.return_value = profiles
+
+        rows = [
+            {'employee_name': 'Alice Smith', 'radai_email': None},
+            {'employee_name': 'Bob Jones', 'radai_email': None},
+        ]
+        name_backfill = {'enabled': True, 'min_token_hits': 2, 'max_candidates': 8}
+
+        with (
+            patch.object(config, 'NAME_BACKFILL', name_backfill),
+            patch.object(UserProfile, 'objects', manager),
+        ):
+            result = _backfill_email_from_matrix_name(rows)
+
+        manager.select_related.assert_called_once_with('user')
+        manager.select_related.return_value.filter.assert_called_once_with(is_deleted=False)
+        self.assertEqual(result[0]['radai_email'], 'alice.smith@example.com')
+        self.assertEqual(result[1]['radai_email'], 'bob.jones@example.com')
 
 
 class BiometricMirrorIntegrationTests(TestCase):
