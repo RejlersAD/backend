@@ -56,7 +56,7 @@ COPY . .
 RUN mkdir -p /app/media /app/staticfiles /app/media/invoices
 
 # Make startup scripts executable
-RUN chmod +x railway_start.sh railway_start_fast.sh production_start.sh 2>/dev/null || true
+RUN chmod +x railway_start.sh railway_start_fast.sh 2>/dev/null || true
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -68,4 +68,4 @@ EXPOSE 8000
 # Railway applies the complete migration graph through railway.toml's
 # preDeployCommand. Start the web process immediately afterward so the health
 # check measures application readiness instead of migration duration.
-CMD ["./production_start.sh"]
+CMD ["sh", "-c", "exec gunicorn config.wsgi_bulletproof:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --timeout 150 --log-level info"]
