@@ -1,11 +1,13 @@
 """Object-level access policy for planning workspaces and child records."""
 from django.db.models import Q
+from django.contrib.auth import get_user_model
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 from .models import PlanningProject
 
 
 WRITE_ROLES = {'project_manager', 'lead_engineer', 'engineer', 'designer'}
+APPROVAL_ROLES = {'project_manager'}
 
 
 def accessible_projects(user):
@@ -18,6 +20,7 @@ def accessible_projects(user):
         Q(enterprise_project__isnull=True, created_by=user)
         | Q(enterprise_project__owner=user)
         | Q(enterprise_project__memberships__user=user, enterprise_project__memberships__is_active=True)
+        | Q(technical_proposals__workflow_tasks__assigned_to=user)
     ).distinct()
 
 
@@ -50,6 +53,35 @@ def can_final_approve_defaults(user, project):
             user=user, is_active=True, role='project_manager',
         ).exists()
     return project.created_by_id == user.id
+
+
+def proposal_reviewer_users(project):
+    """Active organization users who may receive a technical review task.
+
+    Review is deliberately organization-wide: the workflow task grants the
+    selected reviewer read access to the proposal's planning workspace. Final
+    approval remains restricted to accountable project authorities.
+    """
+    User = get_user_model()
+    return User.objects.filter(is_active=True).order_by('first_name', 'last_name', 'email')
+
+
+def proposal_approver_users(project):
+    """Accountable authorities permitted to approve a technical proposal."""
+    User = get_user_model()
+    ids = set(User.objects.filter(Q(is_staff=True) | Q(is_superuser=True), is_active=True).values_list('id', flat=True))
+    if project.enterprise_project_id:
+        enterprise_project = project.enterprise_project
+        if enterprise_project.owner_id:
+            ids.add(enterprise_project.owner_id)
+        ids.update(enterprise_project.memberships.filter(
+            is_active=True, role__in=APPROVAL_ROLES,
+        ).values_list('user_id', flat=True))
+    return User.objects.filter(id__in=ids, is_active=True).order_by('first_name', 'last_name', 'email')
+
+
+def can_approve_proposal(user, project):
+    return bool(user and user.is_authenticated and proposal_approver_users(project).filter(pk=user.pk).exists())
 
 
 def planning_project_for_object(obj):

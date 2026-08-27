@@ -71,12 +71,43 @@ def _time(value) -> dt.time | None:
     if isinstance(value, dt.time):
         return value.replace(second=0, microsecond=0)
     raw = str(value).strip()
+    if raw.lower() in {'-', '--', 'n/a', 'na'}:
+        return None
     for fmt in ('%I:%M %p', '%H:%M', '%H:%M:%S'):
         try:
             return dt.datetime.strptime(raw, fmt).time()
         except ValueError:
             continue
     raise ValueError(f'Invalid time "{raw}"')
+
+
+def _hours(value) -> float:
+    """Parse decimal hours or COSEC duration values such as ``10:55``.
+
+    COSEC's attendance export writes Total Hours as an HH:MM string rather
+    than a decimal number.  Excel may also expose a duration-formatted cell as
+    a ``time`` or ``timedelta`` value, so accept those representations too.
+    """
+    if isinstance(value, dt.timedelta):
+        return value.total_seconds() / 3600
+    if isinstance(value, dt.datetime):
+        value = value.time()
+    if isinstance(value, dt.time):
+        return value.hour + (value.minute / 60) + (value.second / 3600)
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    raw = str(value or '').strip()
+    if raw.lower() in {'-', '--', 'n/a', 'na'}:
+        return 0.0
+    match = re.fullmatch(r'(\d{1,3}):([0-5]\d)(?::([0-5]\d))?', raw)
+    if match:
+        hours, minutes, seconds = match.groups()
+        return int(hours) + (int(minutes) / 60) + (int(seconds or 0) / 3600)
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f'Invalid hours "{raw}"') from exc
 
 
 def _sheet_rows(upload) -> list[list]:
@@ -119,7 +150,7 @@ def _parse(rows: list[list], *, year=None, month=None) -> tuple[list[ImportRow],
                 if not code:
                     raise ValueError('Employee ID is required')
                 day = _date(values[date_idx] if date_idx < len(values) else '', year=year, month=month)
-                hours = float(values[hours_idx] if hours_idx < len(values) else '')
+                hours = _hours(values[hours_idx] if hours_idx < len(values) else '')
                 value_at = lambda idx, default='': values[idx] if idx is not None and idx < len(values) else default
                 parsed.append(ImportRow(
                     number, code, day, hours,
@@ -157,7 +188,7 @@ def _parse(rows: list[list], *, year=None, month=None) -> tuple[list[ImportRow],
             if value in (None, '', '-'):
                 continue
             try:
-                parsed.append(ImportRow(number, code, day, float(value)))
+                parsed.append(ImportRow(number, code, day, _hours(value)))
             except (TypeError, ValueError):
                 errors.append({'row': number, 'error': f'Invalid hours for {day.isoformat()}'})
     return parsed, errors

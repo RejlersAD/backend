@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, time
 from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, TestCase
@@ -6,6 +6,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from . import config, get_service, mirror_services
+from .manual_import import _hours, _parse, _time
 from .models import DailyAttendanceSummary, TimesheetEvent
 
 
@@ -32,6 +33,29 @@ class BiometricHoursTests(SimpleTestCase):
         result = mirror_services._compute_paired_hours(punches)
         self.assertEqual(result['effective_hours'], 9.0)
         self.assertEqual(result['paired_hours'], 9.0)
+
+
+class ManualAttendanceParsingTests(SimpleTestCase):
+    def test_cosec_duration_is_converted_to_decimal_hours(self):
+        self.assertAlmostEqual(_hours('10:55'), 10 + 55 / 60)
+
+    def test_cosec_missing_clock_out_is_empty(self):
+        self.assertIsNone(_time('-'))
+
+    def test_cosec_export_row_is_accepted(self):
+        rows = [
+            ['Date', 'Emp ID', 'Employee Name', 'Department', 'Time In', 'Time Out', 'Total Hours', 'Status'],
+            ['01/08/2026', '05192601', 'Test Employee', 'Rejlers Abu Dhabi', '20:03:18', '06:58:26', '10:55', 'Present'],
+        ]
+
+        parsed, errors = _parse(rows, year=2026, month=8)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].employee_code, '05192601')
+        self.assertAlmostEqual(parsed[0].hours, 10 + 55 / 60)
+        self.assertEqual(parsed[0].time_in, time(20, 3, 18))
+        self.assertEqual(parsed[0].time_out, time(6, 58, 26))
 
 
 class BiometricMirrorIntegrationTests(TestCase):
