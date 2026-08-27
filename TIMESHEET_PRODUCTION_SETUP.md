@@ -77,9 +77,19 @@ openssl rand -hex 32
 # Example: a7f9c3d8e2b1a6f4d9c8e7b3a2f1d6c9e8b7a6f5d4c3e2b1a9f8d7c6e5b4a3
 ```
 
-**2. Create the Sync Agent Script:**
+**2. Configure the supplied Sync Agent:**
 
-Since `timesheet_mirror_sync.py` doesn't exist yet, here's what it should do:
+The maintained agent and current step-by-step instructions are available at:
+
+- `scripts/timesheet_mirror_sync.py`
+- `scripts/TIMESHEET_MIRROR_SETUP.md`
+
+Do not copy the obsolete sample implementation below for a new installation.
+Use the supplied agent because it supports the confirmed Matrix schema,
+idempotent batching, retries, user-master synchronization and preflight checks.
+
+<details>
+<summary>Legacy example (reference only)</summary>
 
 ```python
 #!/usr/bin/env python3
@@ -165,6 +175,8 @@ if __name__ == "__main__":
     
     sync_events(args.hours)
 ```
+
+</details>
 
 **3. Schedule the Sync Agent:**
 
