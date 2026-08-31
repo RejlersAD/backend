@@ -1014,6 +1014,10 @@ else:
 # and the calendar day matches the configured day_of_month / days_after_month_end.
 from celery.schedules import crontab  # noqa: E402
 CELERY_BEAT_SCHEDULE = {
+    'enquiry-sla-escalation-every-15-minutes': {
+        'task': 'core.process_enquiry_sla_escalations',
+        'schedule': crontab(minute='*/15'),
+    },
     'auto-generate-monthly-payroll': {
         # Must match the @shared_task(name=...) registered name, not the
         # dotted module path — Celery Beat dispatches by registry name.
