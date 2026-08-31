@@ -4,6 +4,8 @@ Smart reusable model patterns.
 """
 from django.db import models
 from django.utils import timezone
+from django.conf import settings
+import uuid
 
 
 class TimeStampedModel(models.Model):
@@ -65,10 +67,31 @@ class Enquiry(TimeStampedModel):
 
     STATUS_CHOICES = [
         ('new',        'New'),
-        ('in_review',  'In Review'),
-        ('contacted',  'Contacted'),
+        ('assigned',   'Assigned'),
+        ('in_progress','In Progress'),
+        ('waiting_user', 'Waiting for User'),
+        ('responded',  'Responded'),
+        ('escalated', 'Escalated'),
+        ('pending_confirmation', 'Awaiting Resolution Confirmation'),
+        ('reopened', 'Reopened'),
         ('resolved',   'Resolved'),
+        ('closed',     'Closed'),
         ('spam',       'Spam'),
+    ]
+
+    TYPE_CHOICES = [
+        ('general', 'General Inquiry'),
+        ('technical_support', 'Technical Support'),
+        ('complaint', 'Complaint'),
+        ('suggestion', 'Suggestion'),
+        ('partnership', 'Partnership'),
+        ('legal', 'Legal'),
+        ('hr', 'HR'),
+        ('it_request', 'IT Request'),
+        ('finance_request', 'Finance Request'),
+        ('procurement', 'Procurement'),
+        ('facility_request', 'Facility Request'),
+        ('other', 'Other'),
     ]
 
     name        = models.CharField(max_length=120)
@@ -78,10 +101,45 @@ class Enquiry(TimeStampedModel):
     subject     = models.CharField(max_length=200)
     message     = models.TextField()
     service     = models.CharField(max_length=60, blank=True, default='')
+    inquiry_type = models.CharField(max_length=30, choices=TYPE_CHOICES, default='general', db_index=True)
+    department = models.CharField(max_length=100, blank=True, default='', db_index=True)
     urgency     = models.CharField(max_length=10, choices=URGENCY_CHOICES, default='normal')
 
-    status      = models.CharField(max_length=12, choices=STATUS_CHOICES, default='new', db_index=True)
+    status      = models.CharField(max_length=20, choices=STATUS_CHOICES, default='new', db_index=True)
     admin_notes = models.TextField(blank=True, default='')
+    channel = models.CharField(max_length=20, default='web', db_index=True)
+    escalation_level = models.PositiveSmallIntegerField(default=0)
+    escalated_at = models.DateTimeField(null=True, blank=True)
+    escalation_reason = models.TextField(blank=True, default='')
+    resolution_summary = models.TextField(blank=True, default='')
+    resolution_proposed_at = models.DateTimeField(null=True, blank=True)
+    resolution_confirmed_at = models.DateTimeField(null=True, blank=True)
+    approval_required = models.BooleanField(default=False)
+    approval_status = models.CharField(max_length=20, default='not_required', db_index=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    feedback_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+
+    requester = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='submitted_enquiries',
+    )
+    assigned_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='assigned_enquiries',
+    )
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='enquiry_assignments_made',
+    )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='approved_enquiry_actions',
+    )
+    assigned_at = models.DateTimeField(null=True, blank=True)
+    first_response_at = models.DateTimeField(null=True, blank=True)
+    due_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
 
     source_ip   = models.GenericIPAddressField(null=True, blank=True)
     user_agent  = models.CharField(max_length=400, blank=True, default='')
@@ -95,8 +153,84 @@ class Enquiry(TimeStampedModel):
         verbose_name = 'Enquiry'
         verbose_name_plural = 'Enquiries'
 
+    @property
+    def reference(self):
+        return f'ENQ-{self.pk:06d}' if self.pk else 'ENQ-PENDING'
+
     def __str__(self):
         return f'{self.name} <{self.email}> — {self.subject[:60]}'
+
+
+class EnquiryRoutingRule(TimeStampedModel):
+    """Configurable type-to-department and representative routing rule."""
+
+    inquiry_type = models.CharField(max_length=30, choices=Enquiry.TYPE_CHOICES, unique=True)
+    department = models.CharField(max_length=100, db_index=True)
+    representative = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='enquiry_routing_rules',
+    )
+    sla_hours = models.PositiveIntegerField(default=24)
+    is_active = models.BooleanField(default=True, db_index=True)
+
+    class Meta:
+        ordering = ['inquiry_type']
+
+    def __str__(self):
+        return f'{self.get_inquiry_type_display()} -> {self.department}'
+
+
+class EnquiryMessage(TimeStampedModel):
+    SENDER_CHOICES = [
+        ('requester', 'Requester'),
+        ('representative', 'Representative'),
+        ('system', 'System'),
+    ]
+
+    enquiry = models.ForeignKey(Enquiry, on_delete=models.CASCADE, related_name='messages')
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='enquiry_messages',
+    )
+    sender_type = models.CharField(max_length=20, choices=SENDER_CHOICES)
+    body = models.TextField()
+    is_internal = models.BooleanField(default=False, db_index=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+
+
+class EnquiryActivity(models.Model):
+    """Append-only audit event for routing and lifecycle changes."""
+
+    enquiry = models.ForeignKey(Enquiry, on_delete=models.CASCADE, related_name='activities')
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='enquiry_activities',
+    )
+    action = models.CharField(max_length=50, db_index=True)
+    details = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+
+
+class EnquiryFeedback(TimeStampedModel):
+    """Post-service requester feedback captured once resolution is confirmed."""
+
+    enquiry = models.OneToOneField(Enquiry, on_delete=models.CASCADE, related_name='feedback')
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='enquiry_feedback_submissions',
+    )
+    rating = models.PositiveSmallIntegerField()
+    resolution_confirmed = models.BooleanField(default=True)
+    comment = models.TextField(blank=True, default='')
+    would_recommend = models.BooleanField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
 
 
 # Smart Project Collection Models for Multi-Disciplinary Document Organization

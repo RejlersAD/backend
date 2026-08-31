@@ -91,6 +91,17 @@ class Project(TimeStampedModel):
     Links to Purchase Orders, Budgets, Invoices, Timesheets, etc.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # Canonical company project.  This relationship is intentionally nullable
+    # while legacy procurement projects are reconciled by project number.
+    enterprise_project = models.OneToOneField(
+        'core.Project',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='procurement_project',
+        help_text='Authoritative enterprise Project used by Project Control, Finance, and Procurement.',
+    )
     
     # Identification (soft-coded format: PRJ-YYYY-XXX)
     project_number = models.CharField(max_length=100, unique=True, db_index=True, help_text='Unique project identifier')
@@ -168,13 +179,19 @@ class Project(TimeStampedModel):
         return f"{self.project_number} - {self.project_name}"
     
     def get_total_budget(self):
-        """Calculate total allocated budget from all budget lines"""
+        """Return posted canonical ledger budget when this project is reconciled."""
+        if self.enterprise_project_id:
+            from apps.project_control.services.cost_ledger import ledger_summary
+            return ledger_summary(self.enterprise_project)['budget']
         return self.budgets.aggregate(
             total=models.Sum('allocated_amount')
         )['total'] or Decimal('0.00')
     
     def get_total_spent(self):
-        """Calculate total spent from purchase orders"""
+        """Return verified actual ledger cost, never raw PO value, when reconciled."""
+        if self.enterprise_project_id:
+            from apps.project_control.services.cost_ledger import ledger_summary
+            return ledger_summary(self.enterprise_project)['spent']
         return self.purchase_orders.aggregate(
             total=models.Sum('total_amount')
         )['total'] or Decimal('0.00')
@@ -256,7 +273,14 @@ class Budget(TimeStampedModel):
         return f"{self.project.project_number} - {self.get_category_display()} - {self.allocated_amount} {self.currency}"
     
     def get_spent_amount(self):
-        """Calculate amount spent against this budget line"""
+        """Calculate verified actual cost from linked control-budget ledger entries."""
+        if self.project.enterprise_project_id:
+            from apps.project_control.models import CostLedgerEntry
+            return CostLedgerEntry.objects.filter(
+                project=self.project.enterprise_project,
+                budget_allocation__source_budget=self,
+                entry_type='actual', status='posted', is_deleted=False,
+            ).aggregate(total=models.Sum('amount'))['total'] or Decimal('0.00')
         # Sum from linked purchase orders
         from apps.procurement.models import PurchaseOrder
         total = PurchaseOrder.objects.filter(

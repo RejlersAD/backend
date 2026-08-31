@@ -16,7 +16,7 @@ from .models_master import (
 
 __all__ = [
     'Vendor', 'PurchaseRequisition', 'PurchaseOrder', 'Receipt', 'PODocument',
-    'Project', 'Budget', 'CostCenter',  # Master tables
+    'Project', 'Budget', 'CostCenter', 'ProjectRelationshipResolution',  # Master tables
 ]
 
 User = get_user_model()
@@ -198,6 +198,14 @@ class PurchaseRequisition(TimeStampedModel):
     
     # === HEADER SECTION (Fields 1-3) ===
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    enterprise_project = models.ForeignKey(
+        'core.Project',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='purchase_requisitions',
+        help_text='Canonical project when this requisition resolves to exactly one enterprise project.',
+    )
     pr_number = models.CharField(max_length=50, unique=True, db_index=True, help_text='Manually assigned PR number (system validates for duplicates). Feedback: PR Number to be Manual enter with duplicate alert')
     issued_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='prs_issued', help_text='Person who issued the PR')
     issued_date = models.DateField(null=True, blank=True, help_text='Date when PR was issued')
@@ -430,6 +438,14 @@ class PurchaseOrder(TimeStampedModel):
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    enterprise_project = models.ForeignKey(
+        'core.Project',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='purchase_orders',
+        help_text='Authoritative enterprise Project for cross-department cost reporting.',
+    )
     po_number = models.CharField(max_length=50, unique=True, db_index=True)
     pr_reference = models.ForeignKey(PurchaseRequisition, on_delete=models.SET_NULL, null=True, blank=True, related_name='purchase_orders')
     
@@ -803,3 +819,44 @@ class PODocument(TimeStampedModel):
 
     def __str__(self):
         return f"PODoc:{self.original_filename} [{self.extraction_status}]"
+
+
+class ProjectRelationshipResolution(models.Model):
+    """Immutable audit record for canonical Procurement project assignments."""
+
+    RECORD_TYPE_CHOICES = [
+        ('procurement_project', 'Procurement Project'),
+        ('purchase_requisition', 'Purchase Requisition'),
+        ('purchase_order', 'Purchase Order'),
+    ]
+    RESOLUTION_CHOICES = [
+        ('manual', 'Manual'),
+        ('propagated', 'Propagated'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    record_type = models.CharField(max_length=30, choices=RECORD_TYPE_CHOICES, db_index=True)
+    record_id = models.UUIDField(db_index=True)
+    previous_enterprise_project = models.ForeignKey(
+        'core.Project', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='+',
+    )
+    enterprise_project = models.ForeignKey(
+        'core.Project', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='procurement_relationship_resolutions',
+    )
+    resolution = models.CharField(max_length=20, choices=RESOLUTION_CHOICES, default='manual')
+    reason = models.CharField(max_length=500, blank=True)
+    resolved_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='procurement_project_resolutions',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'procurement_project_relationship_resolutions'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['record_type', 'record_id'], name='proc_rel_record_idx'),
+            models.Index(fields=['-created_at'], name='proc_rel_created_idx'),
+        ]

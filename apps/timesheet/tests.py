@@ -1,4 +1,6 @@
 from datetime import date, datetime, time, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
@@ -155,6 +157,46 @@ class SyncAgentEventTypeTests(SimpleTestCase):
 
         self.assertEqual([event['event_type'] for event in events], ['IN', 'OUT'])
 
+    def test_watch_checkpoint_only_selects_unseen_events(self):
+        events = [
+            {'source_event_id': 'known'},
+            {'source_event_id': 'new'},
+        ]
+        self.assertEqual(
+            timesheet_mirror_sync.unseen_events(events, {'known'}),
+            [{'source_event_id': 'new'}],
+        )
+
+    def test_watch_checkpoint_round_trip(self):
+        with TemporaryDirectory() as directory:
+            state_path = Path(directory) / 'state.json'
+            events = [
+                {'source_event_id': 'event-2'},
+                {'source_event_id': 'event-1'},
+                {'source_event_id': 'event-1'},
+            ]
+            timesheet_mirror_sync.save_seen_event_ids(state_path, events)
+
+            self.assertEqual(
+                timesheet_mirror_sync.load_seen_event_ids(state_path),
+                {'event-1', 'event-2'},
+            )
+
+    def test_sync_refuses_oversized_replay_without_explicit_override(self):
+        args = SimpleNamespace(
+            users=False, hours=2, full=False, batch_size=100, dry_run=False,
+            max_events_per_run=1, allow_large_replay=False,
+        )
+        events = [{'source_event_id': 'one'}, {'source_event_id': 'two'}]
+        with (
+            patch.object(timesheet_mirror_sync, 'fetch_events', return_value=events),
+            patch.object(timesheet_mirror_sync, 'post_batches') as post_batches,
+            self.assertRaises(RuntimeError),
+        ):
+            timesheet_mirror_sync.sync_once(args)
+
+        post_batches.assert_not_called()
+
 
 class ManualAttendanceParsingTests(SimpleTestCase):
     def test_cosec_duration_is_converted_to_decimal_hours(self):
@@ -273,7 +315,8 @@ class BiometricMirrorIntegrationTests(TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.data['inserted'], 2)
         self.assertEqual(second.status_code, 200)
-        self.assertEqual(second.data['updated'], 2)
+        self.assertEqual(second.data['updated'], 0)
+        self.assertEqual(second.data['unchanged'], 2)
         self.assertEqual(TimesheetEvent.objects.count(), 2)
         summary = DailyAttendanceSummary.objects.get(
             employee_code='E001', date=date(2026, 8, 20), source='biometric'

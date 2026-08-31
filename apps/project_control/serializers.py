@@ -1,8 +1,12 @@
 from rest_framework import serializers
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from .config import MAX_DOCUMENT_BYTES
 from .models import (
+    BudgetAllocation,
     ChangeEvent,
+    CostAllocation,
+    CostLedgerEntry,
     CostSnapshot,
     Estimate,
     EstimateLineItem,
@@ -10,6 +14,7 @@ from .models import (
     ProjectDocument,
     WBSNode,
 )
+from .services.cost_ledger import allocation_totals, source_record, source_value
 
 
 class EstimateLineItemSerializer(serializers.ModelSerializer):
@@ -70,6 +75,113 @@ class WBSNodeSerializer(serializers.ModelSerializer):
         fields = ['id', 'project', 'parent', 'code', 'name', 'level', 'sort_order',
                   'created_at', 'updated_at']
         read_only_fields = ('created_at', 'updated_at')
+
+
+class BudgetAllocationSerializer(serializers.ModelSerializer):
+    wbs_code = serializers.CharField(source='wbs_node.code', read_only=True)
+    wbs_name = serializers.CharField(source='wbs_node.name', read_only=True)
+    approved_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BudgetAllocation
+        fields = [
+            'id', 'project', 'wbs_node', 'wbs_code', 'wbs_name', 'code', 'name',
+            'category', 'amount', 'currency', 'status', 'source_budget', 'notes',
+            'approved_by', 'approved_by_name', 'approved_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ('status', 'approved_by', 'approved_by_name', 'approved_at', 'created_at', 'updated_at')
+
+    def get_approved_by_name(self, obj):
+        return obj.approved_by.get_full_name() if obj.approved_by else None
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        project = attrs.get('project', getattr(self.instance, 'project', None))
+        wbs = attrs.get('wbs_node', getattr(self.instance, 'wbs_node', None))
+        if project and wbs and wbs.project_id != project.pk:
+            raise serializers.ValidationError({'wbs_node': 'WBS node must belong to the selected project.'})
+        currency = attrs.get('currency', getattr(self.instance, 'currency', project.currency if project else 'AED'))
+        if project and currency != (project.currency or 'AED'):
+            raise serializers.ValidationError({'currency': 'Budget currency must match the project control currency.'})
+        attrs['currency'] = currency
+        source_budget = attrs.get('source_budget', getattr(self.instance, 'source_budget', None))
+        if source_budget and source_budget.project.enterprise_project_id != project.pk:
+            raise serializers.ValidationError({'source_budget': 'Procurement budget is not linked to this enterprise project.'})
+        return attrs
+
+
+class CostAllocationSerializer(serializers.ModelSerializer):
+    project_code = serializers.CharField(source='project.code', read_only=True)
+    wbs_code = serializers.CharField(source='wbs_node.code', read_only=True)
+    wbs_name = serializers.CharField(source='wbs_node.name', read_only=True)
+    budget_code = serializers.CharField(source='budget_allocation.code', read_only=True, allow_null=True)
+
+    class Meta:
+        model = CostAllocation
+        fields = [
+            'id', 'project', 'project_code', 'wbs_node', 'wbs_code', 'wbs_name',
+            'budget_allocation', 'budget_code', 'source_type', 'source_id',
+            'source_reference', 'amount', 'currency', 'status', 'notes',
+            'allocated_by', 'approved_by', 'approved_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = (
+            'source_reference', 'currency', 'status', 'allocated_by', 'approved_by',
+            'approved_at', 'created_at', 'updated_at',
+        )
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        project = attrs.get('project', getattr(self.instance, 'project', None))
+        wbs = attrs.get('wbs_node', getattr(self.instance, 'wbs_node', None))
+        budget = attrs.get('budget_allocation', getattr(self.instance, 'budget_allocation', None))
+        if project and wbs and wbs.project_id != project.pk:
+            raise serializers.ValidationError({'wbs_node': 'WBS node must belong to the selected project.'})
+        if budget and (budget.project_id != project.pk or budget.wbs_node_id != wbs.pk):
+            raise serializers.ValidationError({'budget_allocation': 'Budget must belong to the selected project and WBS node.'})
+
+        source_type = attrs.get('source_type', getattr(self.instance, 'source_type', None))
+        source_id = attrs.get('source_id', getattr(self.instance, 'source_id', None))
+        if source_type == 'manual':
+            attrs.setdefault('source_reference', 'Manual adjustment')
+            return attrs
+        try:
+            row = source_record(source_type, source_id)
+        except (DjangoValidationError, ValueError, TypeError):
+            row = None
+        if row is None:
+            raise serializers.ValidationError({'source_id': 'The source record was not found.'})
+        source_amount, currency, reference = source_value(source_type, row)
+        if project and currency and currency != (project.currency or 'AED'):
+            raise serializers.ValidationError({
+                'currency': 'Source currency differs from the project currency. Convert it before allocation.'
+            })
+        amount = attrs.get('amount', getattr(self.instance, 'amount', 0))
+        allocated = allocation_totals(
+            source_type, source_id, exclude_id=getattr(self.instance, 'pk', None),
+        )
+        if allocated + amount > source_amount:
+            raise serializers.ValidationError({
+                'amount': f'Allocations would exceed source value {source_amount} {currency}.'
+            })
+        attrs['source_reference'] = reference
+        attrs['currency'] = currency or attrs.get('currency', 'AED')
+        return attrs
+
+
+class CostLedgerEntrySerializer(serializers.ModelSerializer):
+    project_code = serializers.CharField(source='project.code', read_only=True)
+    wbs_code = serializers.CharField(source='wbs_node.code', read_only=True, allow_null=True)
+    wbs_name = serializers.CharField(source='wbs_node.name', read_only=True, allow_null=True)
+
+    class Meta:
+        model = CostLedgerEntry
+        fields = [
+            'id', 'project', 'project_code', 'wbs_node', 'wbs_code', 'wbs_name',
+            'budget_allocation', 'cost_allocation', 'entry_key', 'entry_type',
+            'amount', 'currency', 'source_type', 'source_id', 'source_reference',
+            'entry_date', 'status', 'metadata', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
 
 
 class ProjectDocumentSerializer(serializers.ModelSerializer):

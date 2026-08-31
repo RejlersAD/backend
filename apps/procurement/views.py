@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 # RBAC - Module-level access control (soft-coded)
 from apps.rbac.permissions import HasModuleAccess
@@ -88,6 +89,12 @@ from .services.requisition_conversion import RequisitionConversionService
 from .services.purchase_order_numbering import PurchaseOrderNumberService
 from .services.purchase_order_approvals import pending_entries_for, record_decision
 from .services.requisition_status import canonicalize_pr_status, stored_values_for
+from .services.project_relationships import (
+    build_project_reconciliation_payload,
+    resolve_invoice_purchase_order,
+    resolve_project_relationship,
+)
+from apps.project_control.access import CommercialModulePermission
 
 # Soft-coded pagination for vendor list - supports large page_size
 class VendorPagination(PageNumberPagination):
@@ -185,6 +192,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     queryset = PurchaseRequisition.objects.select_related(
         'issued_by',
         'vendor',
+        'enterprise_project',
         'requested_by',
         'approved_by',
         'pm_name',
@@ -1700,7 +1708,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all().select_related(
-        'vendor', 'pr_reference'
+        'vendor', 'pr_reference', 'project', 'enterprise_project'
     ).prefetch_related('receipts').order_by('-created_at', '-id')
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
@@ -1900,7 +1908,11 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        project_data = {'project_number': project_number, 'project_name': project_name}
+        project_data = {
+            'project_number': project_number,
+            'project_name': project_name,
+            'enterprise_project': source_project.pk if source_project else None,
+        }
         if source_project:
             project_data.update({
                 'client_name': source_project.client_name,
@@ -2445,8 +2457,68 @@ class ProjectViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(health_status=health)
         
         return queryset.select_related(
-            'cost_center', 'project_manager', 'lead_engineer'
+            'cost_center', 'project_manager', 'lead_engineer', 'enterprise_project'
         ).prefetch_related('team_members', 'budgets')
+
+    @action(
+        detail=False, methods=['get'], url_path='relationship-report',
+        permission_classes=[IsAuthenticated, CommercialModulePermission],
+    )
+    def relationship_report(self, request):
+        """Preview unresolved canonical links without mutating project data."""
+        return Response(build_project_reconciliation_payload())
+
+    @action(
+        detail=False, methods=['post'], url_path='resolve-relationship',
+        permission_classes=[IsAuthenticated, CommercialModulePermission],
+    )
+    def resolve_relationship(self, request):
+        """Manually assign a canonical project with an immutable audit trail."""
+        record_type = request.data.get('record_type')
+        record_id = request.data.get('record_id')
+        enterprise_project_id = request.data.get('enterprise_project_id')
+        if not record_type or not record_id or not enterprise_project_id:
+            raise ValidationError({
+                'detail': 'record_type, record_id, and enterprise_project_id are required.'
+            })
+        try:
+            result = resolve_project_relationship(
+                record_type=record_type,
+                record_id=record_id,
+                enterprise_project_id=enterprise_project_id,
+                user=request.user,
+                reason=str(request.data.get('reason') or ''),
+            )
+        except DjangoValidationError as exc:
+            detail = getattr(exc, 'message_dict', None) or getattr(exc, 'messages', None)
+            raise ValidationError(detail) from exc
+        return Response(result)
+
+    @action(
+        detail=False, methods=['post'], url_path='resolve-invoice-po',
+        permission_classes=[IsAuthenticated, CommercialModulePermission],
+    )
+    def resolve_invoice_po(self, request):
+        """Record an operator-selected PO and evaluate the invoice evidence."""
+        invoice_id = request.data.get('invoice_id')
+        purchase_order_id = request.data.get('purchase_order_id')
+        allocated_amount = request.data.get('allocated_amount')
+        if not invoice_id or not purchase_order_id or allocated_amount in (None, ''):
+            raise ValidationError({
+                'detail': 'invoice_id, purchase_order_id, and allocated_amount are required.'
+            })
+        try:
+            result = resolve_invoice_purchase_order(
+                invoice_id=invoice_id,
+                purchase_order_id=purchase_order_id,
+                allocated_amount=allocated_amount,
+                user=request.user,
+                reason=str(request.data.get('reason') or ''),
+            )
+        except DjangoValidationError as exc:
+            detail = getattr(exc, 'message_dict', None) or getattr(exc, 'messages', None)
+            raise ValidationError(detail) from exc
+        return Response(result, status=status.HTTP_201_CREATED)
     
     @action(detail=True, methods=['get'])
     def purchase_orders(self, request, pk=None):
@@ -2476,7 +2548,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             'contract_value': float(project.contract_value or 0),
             'contract_currency': project.contract_currency,
             'budgets': {
-                'total_allocated': float(budget_stats['total_allocated'] or 0),
+                'total_allocated': float(project.get_total_budget()),
                 'approved_budget_lines': budget_stats['approved_count'],
                 'total_spent': float(project.get_total_spent()),
                 'remaining': float(project.get_total_budget() - project.get_total_spent()),

@@ -14,6 +14,11 @@ from .services.purchase_order_approvals import normalize_assignments, notify_ass
 from .services.receipt_numbering import ReceiptNumberService
 from .services.requisition_numbering import RequisitionNumberService
 from .services.requisition_status import canonicalize_pr_status
+from .services.project_relationships import (
+    resolve_enterprise_project_by_code,
+    resolve_order_enterprise_project,
+    resolve_requisition_enterprise_project,
+)
 from .services.requisition_validation import (
     line_items_total,
     normalize_line_items,
@@ -122,6 +127,12 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     requested_by_name = serializers.CharField(source='requested_by.get_full_name', read_only=True, allow_null=True)
     approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True)
     category_display = serializers.SerializerMethodField()
+    enterprise_project_code = serializers.CharField(
+        source='enterprise_project.code', read_only=True, allow_null=True,
+    )
+    enterprise_project_name = serializers.CharField(
+        source='enterprise_project.name', read_only=True, allow_null=True,
+    )
     
     # File upload fields
     attachments_files = serializers.ListField(
@@ -155,7 +166,8 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'product_service', 'project_department',
             
             # Enhanced Project Selection (Feedback: Multiple projects)
-            'project_details',
+            'project_details', 'enterprise_project', 'enterprise_project_code',
+            'enterprise_project_name',
             
             # Description Section (Field 8)
             'description_reason',
@@ -352,6 +364,20 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                     'total_price': 'Total price must equal the sum of the line items.'
                 })
 
+        project_fields_changed = self.instance is None or bool(
+            {'project', 'project_details'}.intersection(attrs)
+        )
+        if 'enterprise_project' not in attrs and project_fields_changed:
+            candidate, _reason = resolve_requisition_enterprise_project(
+                project=attrs.get('project', getattr(self.instance, 'project', '')),
+                project_details=attrs.get(
+                    'project_details', getattr(self.instance, 'project_details', []),
+                ),
+            )
+            # A null value is deliberate for no-match, conflicting, or
+            # multi-project requisitions; the migration report surfaces them.
+            attrs['enterprise_project'] = candidate
+
         return attrs
     
     def get_category_display(self, obj):
@@ -527,6 +553,12 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     project_name = serializers.CharField(source='project.project_name', read_only=True, allow_null=True)
     project_display = serializers.SerializerMethodField()
     budget_allocation_display = serializers.CharField(source='budget_allocation.description', read_only=True, allow_null=True)
+    enterprise_project_code = serializers.CharField(
+        source='enterprise_project.code', read_only=True, allow_null=True,
+    )
+    enterprise_project_name = serializers.CharField(
+        source='enterprise_project.name', read_only=True, allow_null=True,
+    )
     
     class Meta:
         model = PurchaseOrder
@@ -560,7 +592,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'po_date', 'start_date', 'end_date', 'expected_delivery', 'actual_delivery',
             
             # Project linkage
-            'project', 'project_name', 'project_display', 'project_number', 'project_manager', 
+            'project', 'project_name', 'project_display', 'project_number', 'project_manager',
+            'enterprise_project', 'enterprise_project_code', 'enterprise_project_name',
             'budget_allocation', 'budget_allocation_display', 'budget',
             
             # Detailed project information
@@ -648,6 +681,19 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             attrs['technical_approver'] = ''
             attrs['financial_approver'] = ''
             attrs['management_approver'] = by_stage.get('Final Management Sign-off', {}).get('approver', '')
+
+        project_fields_changed = self.instance is None or bool(
+            {'project', 'project_number', 'pr_reference'}.intersection(attrs)
+        )
+        if 'enterprise_project' not in attrs and project_fields_changed:
+            candidate, _reason = resolve_order_enterprise_project(
+                project=attrs.get('project', getattr(self.instance, 'project', None)),
+                project_number=attrs.get(
+                    'project_number', getattr(self.instance, 'project_number', ''),
+                ),
+                requisition=pr or getattr(self.instance, 'pr_reference', None),
+            )
+            attrs['enterprise_project'] = candidate
 
         return attrs
     
@@ -805,12 +851,19 @@ class ProjectListSerializer(serializers.ModelSerializer):
     total_budget = serializers.SerializerMethodField()
     total_spent = serializers.SerializerMethodField()
     budget_utilization = serializers.SerializerMethodField()
+    enterprise_project_code = serializers.CharField(
+        source='enterprise_project.code', read_only=True, allow_null=True,
+    )
+    enterprise_project_name = serializers.CharField(
+        source='enterprise_project.name', read_only=True, allow_null=True,
+    )
     
     class Meta:
         from .models import Project
         model = Project
         fields = [
             'id', 'project_number', 'project_name', 'client_name',
+            'enterprise_project', 'enterprise_project_code', 'enterprise_project_name',
             'project_type', 'project_type_display', 'status', 'status_display',
             'cost_center', 'cost_center_name', 'project_manager', 'project_manager_display',
             'start_date', 'planned_end_date', 'contract_value', 'contract_currency',
@@ -819,6 +872,17 @@ class ProjectListSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        if 'enterprise_project' not in attrs and (
+            self.instance is None or 'project_number' in attrs
+        ):
+            candidate, _reason = resolve_enterprise_project_by_code(
+                attrs.get('project_number', getattr(self.instance, 'project_number', ''))
+            )
+            attrs['enterprise_project'] = candidate
+        return attrs
     
     def get_project_manager_display(self, obj):
         if obj.project_manager:

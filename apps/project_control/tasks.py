@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 @shared_task(name='apps.project_control.tasks.finance_sync_all_projects', ignore_result=True)
 def finance_sync_all_projects():
-    """Nightly task: recompute project.spent for every project from finance invoices."""
+    """Nightly task: rebuild structured project cost ledgers."""
     from .services.finance_sync import sync_all_projects
     try:
         result = sync_all_projects()

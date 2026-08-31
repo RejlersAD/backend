@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
+import os
 import re
 import sys
 import time
@@ -38,6 +40,7 @@ LOG = logging.getLogger("timesheet-mirror-sync")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENV = AutoConfig(search_path=str(PROJECT_ROOT))
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#@]*$")
+DEFAULT_STATE_FILE = PROJECT_ROOT / "scripts" / "timesheet_mirror.state.json"
 
 
 def configure_env_file(path: str) -> None:
@@ -271,6 +274,42 @@ def chunks(items: list[dict], size: int) -> Iterable[list[dict]]:
         yield items[start:start + size]
 
 
+def load_seen_event_ids(path: str | Path) -> set[str]:
+    state_path = Path(path)
+    if not state_path.is_file():
+        return set()
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        return {
+            str(value).strip()
+            for value in payload.get("seen_event_ids", [])
+            if str(value).strip()
+        }
+    except (OSError, ValueError, TypeError) as exc:
+        LOG.warning("Ignoring unreadable sync state %s: %s", state_path, exc)
+        return set()
+
+
+def save_seen_event_ids(path: str | Path, events: list[dict]) -> None:
+    """Atomically retain IDs in the current rolling SQL window."""
+    state_path = Path(path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    event_ids = sorted({str(event.get("source_event_id") or "").strip() for event in events} - {""})
+    temporary = state_path.with_suffix(state_path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps({"seen_event_ids": event_ids, "saved_at": datetime.now().isoformat()}, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(temporary, state_path)
+
+
+def unseen_events(events: list[dict], seen_event_ids: set[str]) -> list[dict]:
+    return [
+        event for event in events
+        if str(event.get("source_event_id") or "").strip() not in seen_event_ids
+    ]
+
+
 def mirror_base_url() -> str:
     configured = env_first("TIMESHEET_MIRROR_URL", "BACKEND_URL")
     if not configured:
@@ -291,7 +330,10 @@ def post_batches(path: str, payload_key: str, rows: list[dict], batch_size: int,
     if not api_key:
         raise RuntimeError("TIMESHEET_MIRROR_API_KEY must be configured")
     url = f"{mirror_base_url()}/{path.strip('/')}/"
-    totals = {"received": 0, "inserted": 0, "updated": 0, "skipped": 0, "errors": 0}
+    totals = {
+        "received": 0, "inserted": 0, "updated": 0,
+        "unchanged": 0, "skipped": 0, "errors": 0,
+    }
     timeout = int(env_first("TIMESHEET_MIRROR_HTTP_TIMEOUT", default="60"))
     with requests.Session() as session:
         # POST retries are safe because source_event_id makes event ingestion
@@ -300,6 +342,9 @@ def post_batches(path: str, payload_key: str, rows: list[dict], batch_size: int,
         from urllib3.util.retry import Retry
         retry = Retry(
             total=3,
+            connect=3,
+            read=0,
+            status=3,
             backoff_factor=1,
             status_forcelist=(429, 500, 502, 503, 504),
             allowed_methods=frozenset({'POST'}),
@@ -311,7 +356,7 @@ def post_batches(path: str, payload_key: str, rows: list[dict], batch_size: int,
             response = session.post(url, json={payload_key: batch}, timeout=timeout)
             response.raise_for_status()
             result = response.json()
-            for key in ("received", "inserted", "updated", "skipped"):
+            for key in ("received", "inserted", "updated", "unchanged", "skipped"):
                 totals[key] += int(result.get(key) or 0)
             totals["errors"] += len(result.get("errors") or [])
             LOG.info("Sent %s batch %s (%s records)", payload_key, number, len(batch))
@@ -338,8 +383,13 @@ def check_connections(hours: int) -> None:
     LOG.info("Production mirror authentication passed: %s", url)
 
 
-def sync_once(args: argparse.Namespace) -> None:
-    if args.users:
+def sync_once(
+    args: argparse.Namespace,
+    *,
+    seen_event_ids: set[str] | None = None,
+    sync_users: bool = True,
+) -> list[dict]:
+    if args.users and sync_users:
         users = fetch_users()
         LOG.info("Read %s biometric user-master records", len(users))
         totals = post_batches("mirror/ingest-users", "users", users, args.batch_size, args.dry_run)
@@ -347,8 +397,17 @@ def sync_once(args: argparse.Namespace) -> None:
 
     events = fetch_events(args.hours, args.full)
     LOG.info("Read %s biometric punch events", len(events))
-    totals = post_batches("mirror/ingest", "events", events, args.batch_size, args.dry_run)
+    pending = unseen_events(events, seen_event_ids) if seen_event_ids is not None else events
+    LOG.info("Selected %s new biometric punch event(s)", len(pending))
+    if len(pending) > args.max_events_per_run and not args.allow_large_replay:
+        raise RuntimeError(
+            f"Refusing to send {len(pending)} events in one run; safety limit is "
+            f"{args.max_events_per_run}. Prime watch state first or use "
+            "--allow-large-replay only during a controlled maintenance window."
+        )
+    totals = post_batches("mirror/ingest", "events", pending, args.batch_size, args.dry_run)
     LOG.info("Attendance sync complete: %s", totals)
+    return events
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -356,11 +415,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hours", type=int, default=48, help="rolling SQL window (default: 48)")
     parser.add_argument("--full", action="store_true", help="sync all source rows; API remains idempotent")
     parser.add_argument("--users", action="store_true", help="also sync biometric user-master records")
-    parser.add_argument("--batch-size", type=int, default=500, help="records per API request (default: 500)")
+    parser.add_argument("--batch-size", type=int, default=100, help="records per API request (default: 100)")
+    parser.add_argument(
+        "--max-events-per-run", type=int, default=1000,
+        help="safety limit before posting (default: 1000)",
+    )
+    parser.add_argument(
+        "--allow-large-replay", action="store_true",
+        help="override the per-run safety limit for controlled maintenance only",
+    )
     parser.add_argument("--watch", action="store_true", help="continue syncing at the configured interval")
     parser.add_argument("--interval", type=int, default=300, help="watch interval in seconds (default: 300)")
     parser.add_argument("--dry-run", action="store_true", help="read and validate SQL rows without sending")
     parser.add_argument("--check", action="store_true", help="verify SQL, production endpoint and API key, then exit")
+    parser.add_argument("--state-file", help="watch checkpoint file (default: scripts/timesheet_mirror.state.json)")
+    parser.add_argument(
+        "--prime-state", action="store_true",
+        help="record the current rolling window as already sent, then exit without posting",
+    )
     parser.add_argument(
         "--env-file",
         help="dedicated agent env file (recommended: scripts/timesheet_mirror.env)",
@@ -373,8 +445,15 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.env_file:
         configure_env_file(args.env_file)
-    if args.hours <= 0 or args.batch_size <= 0 or args.interval <= 0:
-        raise SystemExit("--hours, --batch-size and --interval must be positive")
+    args.state_file = args.state_file or env_first(
+        "TIMESHEET_MIRROR_STATE_FILE", default=str(DEFAULT_STATE_FILE),
+    )
+    if any(value <= 0 for value in (
+        args.hours, args.batch_size, args.interval, args.max_events_per_run,
+    )):
+        raise SystemExit(
+            "--hours, --batch-size, --interval and --max-events-per-run must be positive"
+        )
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -387,15 +466,38 @@ def main() -> int:
             LOG.exception("Biometric synchronization preflight failed")
             return 1
 
+    if args.prime_state:
+        try:
+            events = fetch_events(args.hours, args.full)
+            save_seen_event_ids(args.state_file, events)
+            LOG.info("Primed sync state with %s event(s): %s", len(events), args.state_file)
+            return 0
+        except Exception:
+            LOG.exception("Biometric synchronization state priming failed")
+            return 1
+
+    seen_event_ids = load_seen_event_ids(args.state_file) if args.watch else None
+    first_cycle = True
     while True:
         try:
-            sync_once(args)
+            events = sync_once(
+                args,
+                seen_event_ids=seen_event_ids,
+                sync_users=first_cycle,
+            )
+            if args.watch and not args.dry_run:
+                save_seen_event_ids(args.state_file, events)
+                seen_event_ids = {
+                    str(event.get("source_event_id") or "").strip()
+                    for event in events
+                } - {""}
         except Exception:
             LOG.exception("Biometric synchronization failed")
             if not args.watch:
                 return 1
         if not args.watch:
             return 0
+        first_cycle = False
         time.sleep(args.interval)
 
 

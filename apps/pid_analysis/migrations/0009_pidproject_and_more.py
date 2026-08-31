@@ -5,6 +5,26 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+def align_equipment_indexes(apps, schema_editor):
+    """Apply the only physical changes not already made by migrations 0005-0008.
+
+    Migrations 0005 and 0006 created the drawing columns and PIDProject table
+    with idempotent SQL, but did not add those objects to Django's migration
+    state.  This migration repairs that state without trying to create the same
+    database objects a second time.
+    """
+    schema_editor.execute("""
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'pid_equip_item_drw_tag_idx') THEN
+            ALTER INDEX pid_equip_item_drw_tag_idx RENAME TO pid_equipme_drawing_897b8a_idx;
+          END IF;
+          IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'pid_equip_item_upload_idx') THEN
+            ALTER INDEX pid_equip_item_upload_idx RENAME TO pid_equipme_upload__6df543_idx;
+          END IF;
+        END $$;
+    """)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -13,6 +33,9 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=[migrations.RunPython(align_equipment_indexes, migrations.RunPython.noop)],
+            state_operations=[
         migrations.CreateModel(
             name='PIDProject',
             fields=[
@@ -121,5 +144,7 @@ class Migration(migrations.Migration):
         migrations.AddIndex(
             model_name='pidproject',
             index=models.Index(fields=['organization'], name='pid_project_organiz_a8e179_idx'),
+        ),
+            ],
         ),
     ]

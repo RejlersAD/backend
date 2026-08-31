@@ -15,18 +15,19 @@ from __future__ import annotations
 
 import logging
 
+from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
 from apps.core.project_models import Project
 
 from .access import (
     ProjectControlObjectPermission, accessible_enterprise_projects,
-    can_write_enterprise_project,
+    can_approve_commercial, can_write_enterprise_project,
 )
 from .config import (
     DOCUMENT_KINDS, MAX_DOCUMENT_BYTES, PHASE_FLAGS,
@@ -34,11 +35,13 @@ from .config import (
     is_phase_enabled,
 )
 from .models import (
-    ChangeEvent, CostSnapshot, Estimate, EstimateLineItem,
+    BudgetAllocation, ChangeEvent, CostAllocation, CostLedgerEntry,
+    CostSnapshot, Estimate, EstimateLineItem,
     PlanningPackage, ProjectDocument, WBSNode,
 )
 from .serializers import (
-    ChangeEventSerializer, CostSnapshotSerializer,
+    BudgetAllocationSerializer, ChangeEventSerializer, CostAllocationSerializer,
+    CostLedgerEntrySerializer, CostSnapshotSerializer,
     EstimateLineItemSerializer, EstimateListSerializer, EstimateSerializer,
     PlanningPackageListSerializer, PlanningPackageSerializer,
     ProjectDocumentSerializer, WBSNodeSerializer,
@@ -46,6 +49,8 @@ from .serializers import (
 from .services.excel_import import import_boq_excel
 from .services.finance_sync import sync_project_spend
 from .services.kpis import compute_project_kpis
+from .services.cost_ledger import source_record
+from .services.commercial_dashboard import project_commercial_dashboard
 from .services.s3 import presign_document_download
 from .services.variance import compute_variance
 from .tasks import parse_uploaded_document
@@ -147,6 +152,118 @@ class WBSNodeViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = WBSNodeSerializer
     queryset = WBSNode.objects.all()
+
+
+class BudgetAllocationViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
+    serializer_class = BudgetAllocationSerializer
+    queryset = BudgetAllocation.objects.select_related(
+        'project', 'wbs_node', 'source_budget', 'approved_by',
+    )
+
+    def perform_update(self, serializer):
+        if serializer.instance.status == 'approved':
+            raise ValidationError('Approved budgets are immutable; create a correcting allocation.')
+        super().perform_update(serializer)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        allocation = self.get_object()
+        if not can_approve_commercial(request.user):
+            raise PermissionDenied('Finance or Project Control approval access is required.')
+        allocation.status = 'approved'
+        allocation.approved_by = request.user
+        allocation.approved_at = timezone.now()
+        allocation.save(update_fields=['status', 'approved_by', 'approved_at', 'updated_at'])
+        sync_project_spend(allocation.project, user=request.user)
+        return Response(self.get_serializer(allocation).data)
+
+
+class CostAllocationViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
+    serializer_class = CostAllocationSerializer
+    queryset = CostAllocation.objects.select_related(
+        'project', 'wbs_node', 'budget_allocation', 'allocated_by', 'approved_by',
+    )
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        for field in ('source_type', 'source_id', 'status'):
+            value = self.request.query_params.get(field)
+            if value:
+                queryset = queryset.filter(**{field: value})
+        return queryset
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data['project']
+        if not can_write_enterprise_project(self.request.user, project):
+            raise PermissionDenied('You cannot modify this project.')
+        serializer.save(allocated_by=self.request.user, status='draft')
+
+    def perform_update(self, serializer):
+        if serializer.instance.status == 'approved':
+            raise ValidationError('Approved cost allocations are immutable; reject and replace them.')
+        super().perform_update(serializer)
+
+    def _sync_affected_projects(self, allocation, user):
+        projects = {str(allocation.project_id): allocation.project}
+        source = source_record(allocation.source_type, allocation.source_id)
+        source_project = None
+        if allocation.source_type == 'purchase_order' and source:
+            source_project = source.enterprise_project
+        elif allocation.source_type == 'invoice_allocation' and source:
+            source_project = source.purchase_order.enterprise_project
+        if source_project:
+            projects[str(source_project.pk)] = source_project
+        for related in CostAllocation.objects.filter(
+            source_type=allocation.source_type, source_id=allocation.source_id,
+            is_deleted=False,
+        ).select_related('project'):
+            projects[str(related.project_id)] = related.project
+        for project in projects.values():
+            sync_project_spend(project, user=user)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        allocation = self.get_object()
+        if allocation.allocated_by_id == request.user.id and not request.user.is_superuser:
+            raise PermissionDenied('The allocator cannot approve their own cost allocation.')
+        if not can_approve_commercial(request.user):
+            raise PermissionDenied('Finance or Project Control approval access is required.')
+        allocation.status = 'approved'
+        allocation.approved_by = request.user
+        allocation.approved_at = timezone.now()
+        allocation.save(update_fields=['status', 'approved_by', 'approved_at', 'updated_at'])
+        self._sync_affected_projects(allocation, request.user)
+        return Response(self.get_serializer(allocation).data)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        allocation = self.get_object()
+        allocation.status = 'rejected'
+        allocation.approved_by = request.user
+        allocation.approved_at = timezone.now()
+        allocation.save(update_fields=['status', 'approved_by', 'approved_at', 'updated_at'])
+        self._sync_affected_projects(allocation, request.user)
+        return Response(self.get_serializer(allocation).data)
+
+
+class CostLedgerEntryViewSet(_ProjectFilteredMixin, viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
+    serializer_class = CostLedgerEntrySerializer
+    queryset = CostLedgerEntry.objects.select_related(
+        'project', 'wbs_node', 'budget_allocation', 'cost_allocation',
+    )
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        for field in ('entry_type', 'status', 'source_type'):
+            value = self.request.query_params.get(field)
+            if value:
+                queryset = queryset.filter(**{field: value})
+        return queryset
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -384,6 +501,13 @@ class ProjectAnalyticsViewSet(viewsets.ViewSet):
             return err
         return Response(compute_project_kpis(project))
 
+    @action(detail=False, methods=['get'], url_path='commercial-dashboard')
+    def commercial_dashboard(self, request):
+        project, err = self._get_project(request)
+        if err:
+            return err
+        return Response(project_commercial_dashboard(project))
+
     @action(detail=False, methods=['get'], url_path='estimate-variance')
     def estimate_variance(self, request):
         if not is_phase_enabled('phase_1_estimate_variance'):
@@ -409,7 +533,7 @@ class ProjectAnalyticsViewSet(viewsets.ViewSet):
         project, err = self._get_project(request)
         if err:
             return err
-        return Response(sync_project_spend(project))
+        return Response(sync_project_spend(project, user=request.user))
 
     # Phase 2/3/4 stubs — all return 501 with a uniform shape so the frontend
     # can render a "Coming in Phase X" card without bespoke handling.

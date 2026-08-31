@@ -78,6 +78,45 @@ CHANGE_STATUS_CHOICES = [
     ('rejected', 'Rejected'),
 ]
 
+ALLOCATION_STATUS_CHOICES = [
+    ('draft', 'Draft'),
+    ('approved', 'Approved'),
+    ('rejected', 'Rejected'),
+    ('closed', 'Closed'),
+]
+
+COST_SOURCE_TYPE_CHOICES = [
+    ('purchase_requisition', 'Purchase Requisition'),
+    ('purchase_order', 'Purchase Order'),
+    ('invoice_allocation', 'Verified Invoice Allocation'),
+    ('manual', 'Manual'),
+]
+
+LEDGER_ENTRY_TYPE_CHOICES = [
+    ('budget', 'Budget'),
+    ('commitment', 'Commitment'),
+    ('actual', 'Actual Cost'),
+    ('adjustment', 'Adjustment'),
+]
+
+LEDGER_STATUS_CHOICES = [
+    ('posted', 'Posted'),
+    ('reversed', 'Reversed'),
+]
+
+COMMERCIAL_EVENT_TYPE_CHOICES = [
+    ('po_approved', 'Purchase Order Approved'),
+    ('receipt_accepted', 'Receipt Accepted'),
+    ('invoice_approved', 'Invoice Approved'),
+    ('invoice_verified', 'Invoice Three-Way Match Verified'),
+    ('payment_scheduled', 'Payment Scheduled'),
+    ('payment_recorded', 'Payment Recorded'),
+    ('payment_held', 'Payment Held'),
+    ('payment_released', 'Payment Released'),
+    ('payment_cancelled', 'Payment Cancelled'),
+    ('historical_reconciliation', 'Historical Reconciliation'),
+]
+
 
 def _document_upload_path(instance, filename):
     """Storage path resolver — keeps S3 layout soft-coded via config."""
@@ -105,6 +144,158 @@ class WBSNode(BaseModel):
 
     def __str__(self):
         return f'{self.project.code} · {self.code} {self.name}'
+
+
+class BudgetAllocation(BaseModel):
+    """Approved control budget assigned to one enterprise Project/WBS node."""
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='control_budget_allocations')
+    wbs_node = models.ForeignKey(WBSNode, on_delete=models.PROTECT, related_name='budget_allocations')
+    code = models.CharField(max_length=64)
+    name = models.CharField(max_length=255)
+    category = models.CharField(max_length=64, blank=True)
+    amount = models.DecimalField(max_digits=18, decimal_places=2)
+    currency = models.CharField(max_length=8, default='AED')
+    status = models.CharField(max_length=12, choices=ALLOCATION_STATUS_CHOICES, default='draft', db_index=True)
+    source_budget = models.ForeignKey(
+        'procurement.Budget', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='control_allocations',
+    )
+    notes = models.TextField(blank=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_control_budgets_approved',
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['project', 'wbs_node__sort_order', 'code']
+        constraints = [
+            models.UniqueConstraint(fields=['project', 'code'], name='pc_budget_project_code_uniq'),
+            models.CheckConstraint(check=models.Q(amount__gt=0), name='pc_budget_amount_positive'),
+        ]
+        indexes = [models.Index(fields=['project', 'status'], name='pc_budget_proj_status_idx')]
+
+
+class CostAllocation(BaseModel):
+    """Manual project/WBS split for ambiguous Procurement or Finance records."""
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='cost_allocations')
+    wbs_node = models.ForeignKey(WBSNode, on_delete=models.PROTECT, related_name='cost_allocations')
+    budget_allocation = models.ForeignKey(
+        BudgetAllocation, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='cost_allocations',
+    )
+    source_type = models.CharField(max_length=30, choices=COST_SOURCE_TYPE_CHOICES, db_index=True)
+    source_id = models.CharField(max_length=64, db_index=True)
+    source_reference = models.CharField(max_length=120, blank=True)
+    amount = models.DecimalField(max_digits=18, decimal_places=2)
+    currency = models.CharField(max_length=8, default='AED')
+    status = models.CharField(max_length=12, choices=ALLOCATION_STATUS_CHOICES, default='draft', db_index=True)
+    notes = models.TextField(blank=True)
+    allocated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_cost_allocations_created',
+    )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_cost_allocations_approved',
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source_type', 'source_id', 'project', 'wbs_node'],
+                condition=models.Q(is_deleted=False), name='pc_cost_source_wbs_uniq',
+            ),
+            models.CheckConstraint(check=models.Q(amount__gt=0), name='pc_cost_amount_positive'),
+        ]
+        indexes = [
+            models.Index(fields=['project', 'status'], name='pc_cost_proj_status_idx'),
+            models.Index(fields=['source_type', 'source_id', 'status'], name='pc_cost_source_status_idx'),
+        ]
+
+
+class CostLedgerEntry(BaseModel):
+    """Auditable, idempotently generated project cost ledger entry."""
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='cost_ledger_entries')
+    wbs_node = models.ForeignKey(WBSNode, null=True, blank=True, on_delete=models.PROTECT, related_name='ledger_entries')
+    budget_allocation = models.ForeignKey(
+        BudgetAllocation, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='ledger_entries',
+    )
+    cost_allocation = models.ForeignKey(
+        CostAllocation, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='ledger_entries',
+    )
+    entry_key = models.CharField(max_length=255, unique=True)
+    entry_type = models.CharField(max_length=20, choices=LEDGER_ENTRY_TYPE_CHOICES, db_index=True)
+    amount = models.DecimalField(max_digits=18, decimal_places=2)
+    currency = models.CharField(max_length=8, default='AED')
+    source_type = models.CharField(max_length=30, blank=True, db_index=True)
+    source_id = models.CharField(max_length=64, blank=True, db_index=True)
+    source_reference = models.CharField(max_length=120, blank=True)
+    entry_date = models.DateField()
+    status = models.CharField(max_length=12, choices=LEDGER_STATUS_CHOICES, default='posted', db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_cost_ledger_entries_created',
+    )
+
+    class Meta:
+        ordering = ['-entry_date', '-created_at']
+        constraints = [models.CheckConstraint(check=models.Q(amount__gte=0), name='pc_ledger_amount_nonnegative')]
+        indexes = [
+            models.Index(fields=['project', 'entry_type', 'status'], name='pc_ledger_proj_type_idx'),
+            models.Index(fields=['project', 'wbs_node', 'status'], name='pc_ledger_proj_wbs_idx'),
+        ]
+
+
+class CommercialEvent(models.Model):
+    """Immutable cross-department event and audit record.
+
+    ``event_key`` makes signal delivery and historical reconciliation safe to
+    retry. Source applications remain authoritative; this table records the
+    commercial consequence and whether the project ledger was rebuilt.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        Project, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='commercial_events',
+    )
+    event_key = models.CharField(max_length=255, unique=True)
+    event_type = models.CharField(max_length=40, choices=COMMERCIAL_EVENT_TYPE_CHOICES, db_index=True)
+    source_type = models.CharField(max_length=40, db_index=True)
+    source_id = models.CharField(max_length=64, db_index=True)
+    source_reference = models.CharField(max_length=160, blank=True)
+    amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=8, blank=True)
+    event_at = models.DateTimeField(db_index=True)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_commercial_events',
+    )
+    payload = models.JSONField(default=dict, blank=True)
+    ledger_rebuilt = models.BooleanField(default=False)
+    processing_error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-event_at', '-created_at']
+        indexes = [
+            models.Index(fields=['project', 'event_type', '-event_at'], name='pc_com_event_project_idx'),
+            models.Index(fields=['source_type', 'source_id'], name='pc_com_event_source_idx'),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk and CommercialEvent.objects.filter(pk=self.pk).exists():
+            raise ValueError('Commercial events are immutable.')
+        return super().save(*args, **kwargs)
 
 
 class Estimate(BaseModel):

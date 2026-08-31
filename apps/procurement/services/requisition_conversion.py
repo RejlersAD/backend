@@ -132,6 +132,7 @@ class RequisitionConversionService:
         po = PurchaseOrder.objects.create(
             po_number=po_number,
             pr_reference=pr,
+            enterprise_project=pr.enterprise_project,
             pr_requester_name=requester_name,
             vendor=vendor,
             seller_reference=vendor.contact_person or '',
@@ -158,6 +159,28 @@ class RequisitionConversionService:
             notes=pr.notes or '',
             attachments=list(pr.attachments or []),
         )
+
+        # Preserve approved/draft multi-project WBS splits as draft PO
+        # allocations. Procurement approval does not silently post a financial
+        # commitment; Project Control must approve the carried allocations.
+        from apps.project_control.models import CostAllocation
+        for allocation in CostAllocation.objects.filter(
+            source_type='purchase_requisition', source_id=str(pr.pk),
+            is_deleted=False,
+        ):
+            CostAllocation.objects.create(
+                project=allocation.project,
+                wbs_node=allocation.wbs_node,
+                budget_allocation=allocation.budget_allocation,
+                source_type='purchase_order',
+                source_id=str(po.pk),
+                source_reference=po.po_number,
+                amount=allocation.amount,
+                currency=po.currency,
+                status='draft',
+                notes=f'Carried from {pr.pr_number}; requires Project Control approval.',
+                allocated_by=actor,
+            )
 
         # The surrounding transaction rolls back both operations on failure.
         pr.status = 'converted'

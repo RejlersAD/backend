@@ -75,7 +75,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
             )
 
         # Show only user's projects if not admin
-        if not user.is_staff:
+        from apps.project_control.access import has_commercial_module_access
+        commercial_read = self.request.method in ('GET', 'HEAD', 'OPTIONS') and has_commercial_module_access(user)
+        if not user.is_staff and not commercial_read:
             queryset = queryset.filter(
                 Q(owner=user) | Q(team_members=user)
             ).distinct()

@@ -740,17 +740,96 @@ def recompute_summaries_for_events(events: list[dict]) -> int:
                 affected.add((code, d))
             except (ValueError, AttributeError):
                 pass
-    count = 0
-    for code, day in affected:
-        try:
-            if _compute_and_save_day(code, day):
-                count += 1
-        except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning(
-                '[timesheet] summary recompute failed for %s %s: %s', code, day, exc
-            )
-    return count
+    if not affected:
+        return 0
+
+    # One read for every touched employee/date combination. The previous
+    # implementation issued a punch query and an update_or_create per
+    # employee/day, which could occupy Railway's only web worker for minutes.
+    codes = {code for code, _ in affected}
+    first_day = min(day for _, day in affected)
+    last_day = max(day for _, day in affected)
+    range_start, range_end = _event_bounds(first_day, last_day + dt.timedelta(days=1))
+    punches_by_key: dict[tuple[str, dt.date], list[dict]] = defaultdict(list)
+    punch_rows = (
+        TimesheetEvent.objects
+        .filter(
+            employee_code__in=codes,
+            event_time__gte=range_start,
+            event_time__lt=range_end,
+        )
+        .values('employee_code', 'event_time', 'event_type')
+        .order_by('event_time')
+    )
+    for row in punch_rows:
+        key = (_norm_emp_code(row['employee_code']), _attendance_date(row['event_time']))
+        if key in affected:
+            punches_by_key[key].append({
+                'event_time': _to_naive(row['event_time']),
+                'event_type': row['event_type'],
+            })
+
+    existing_rows = DailyAttendanceSummary.objects.filter(
+        employee_code__in=codes,
+        date__gte=first_day,
+        date__lte=last_day,
+        source=DailyAttendanceSummary.SOURCE_BIOMETRIC,
+    )
+    existing = {(row.employee_code, row.date): row for row in existing_rows}
+    to_create: list[DailyAttendanceSummary] = []
+    to_update: list[DailyAttendanceSummary] = []
+    computed_at = timezone.now()
+    update_fields = [
+        'paired_hours', 'elapsed_hours', 'effective_hours', 'overtime_hours',
+        'first_in', 'last_out', 'punch_count_in', 'punch_count_out',
+        'paired_segments', 'open_shift', 'open_shift_since',
+        'open_shift_credited', 'is_late', 'is_full_day', 'computed_at',
+    ]
+
+    for key in affected:
+        punches = punches_by_key.get(key)
+        if not punches:
+            continue
+        code, day = key
+        result = _compute_paired_hours(punches)
+        first_in = result['first_in']
+        values = {
+            'paired_hours': result['paired_hours'],
+            'elapsed_hours': result['elapsed_hours'],
+            'effective_hours': result['effective_hours'],
+            'overtime_hours': result['recorded_overtime'],
+            'first_in': _as_aware_attendance(first_in),
+            'last_out': _as_aware_attendance(result['last_out']),
+            'punch_count_in': result['punch_count_in'],
+            'punch_count_out': result['punch_count_out'],
+            'paired_segments': result['paired_segments'],
+            'open_shift': result['open_shift'],
+            'open_shift_since': _as_aware_attendance(result['open_shift_since']),
+            'open_shift_credited': result['open_shift_credited'],
+            'is_late': _is_late({'punch_time': first_in}) if first_in else False,
+            'is_full_day': result['effective_hours'] >= _FULL_DAY_H,
+            'computed_at': computed_at,
+        }
+        summary = existing.get(key)
+        if summary is None:
+            to_create.append(DailyAttendanceSummary(
+                employee_code=code,
+                date=day,
+                source=DailyAttendanceSummary.SOURCE_BIOMETRIC,
+                **values,
+            ))
+        else:
+            for field, value in values.items():
+                setattr(summary, field, value)
+            to_update.append(summary)
+
+    if to_create:
+        DailyAttendanceSummary.objects.bulk_create(to_create, batch_size=500)
+    if to_update:
+        DailyAttendanceSummary.objects.bulk_update(
+            to_update, update_fields, batch_size=500,
+        )
+    return len(to_create) + len(to_update)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
