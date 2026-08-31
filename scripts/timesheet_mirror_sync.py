@@ -208,7 +208,11 @@ def fetch_events(hours: int, full: bool = False) -> list[dict]:
     out_value = cfg["out_value"].strip().upper()
     events = []
     for row in rows:
-        raw_type = str(row.get("punch_type") or "").strip().upper()
+        # EntryExitType is numeric in Matrix (0=IN, 1=OUT).  Do not use
+        # ``value or ''`` here: integer 0 is falsy and was therefore dropped,
+        # causing production to receive only OUT punches.
+        raw_value = row.get("punch_type")
+        raw_type = "" if raw_value is None else str(raw_value).strip().upper()
         event_type = "IN" if raw_type == in_value else "OUT" if raw_type == out_value else ""
         timestamp = scalar_iso(row.get("punch_time"))
         if timestamp and event_type:
