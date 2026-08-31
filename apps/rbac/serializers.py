@@ -33,7 +33,10 @@ class OrganizationSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
     
     def get_user_count(self, obj):
-        return obj.users.filter(is_deleted=False, status='active').count()
+        # Reads the prefetched cache (obj.users.all()) instead of
+        # .filter().count(), which would bypass prefetch_related and hit the
+        # DB again for every organization.
+        return sum(1 for u in obj.users.all() if not u.is_deleted and u.status == 'active')
 
 
 class ModuleSerializer(serializers.ModelSerializer):
