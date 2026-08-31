@@ -534,6 +534,23 @@ def _cap_daily_hours(value: float) -> float:
     return round(min(value, _MAX_DAILY_H), 2) if _MAX_DAILY_H > 0 else round(value, 2)
 
 
+def _attendance_hour_split(actual_hours: float) -> dict:
+    """Split observed presence into payable regular and recorded excess.
+
+    ``regular_hours`` remains capped by company policy and is the only value
+    exposed through ``effective_hours`` to payroll. ``recorded_overtime`` is
+    informational until an independent HR-approved overtime request is
+    applied by payroll.
+    """
+    actual = round(max(0.0, float(actual_hours or 0.0)), 2)
+    regular = _cap_daily_hours(actual)
+    return {
+        'actual_hours': actual,
+        'regular_hours': regular,
+        'recorded_overtime': round(max(0.0, actual - regular), 2),
+    }
+
+
 def _compute_paired_hours(punches: list[dict], *, now: dt.datetime | None = None) -> dict:
     """Compute accurate worked hours from a list of punch dicts.
 
@@ -545,8 +562,8 @@ def _compute_paired_hours(punches: list[dict], *, now: dt.datetime | None = None
         paired_hours        — only counted IN→OUT segments
         elapsed_hours       — first_in to last_out
         effective_hours     — paired or elapsed per TIMESHEET_HOURS_MODE
-        first_in            — earliest punch time (any type)
-        last_out            — latest punch time (any type)
+        first_in            — earliest IN punch time
+        last_out            — latest OUT punch time
         punch_count_in
         punch_count_out
         paired_segments     — number of completed IN→OUT pairs
@@ -558,6 +575,7 @@ def _compute_paired_hours(punches: list[dict], *, now: dt.datetime | None = None
     if not punches:
         return {
             'paired_hours': 0.0, 'elapsed_hours': 0.0, 'effective_hours': 0.0,
+            'actual_hours': 0.0, 'regular_hours': 0.0, 'recorded_overtime': 0.0,
             'first_in': None, 'last_out': None,
             'punch_count_in': 0, 'punch_count_out': 0,
             'paired_segments': 0, 'open_shift': False,
@@ -572,15 +590,33 @@ def _compute_paired_hours(punches: list[dict], *, now: dt.datetime | None = None
 
     count_in  = sum(1 for p in sorted_punches if str(p.get('event_type', '')).upper() == 'IN')
     count_out = sum(1 for p in sorted_punches if str(p.get('event_type', '')).upper() == 'OUT')
-    first_time = _to_naive(sorted_punches[0]['event_time'])
-    last_time  = _to_naive(sorted_punches[-1]['event_time'])
-    elapsed    = _hours_between(first_time, last_time)
+    in_times = [
+        _to_naive(p['event_time']) for p in sorted_punches
+        if str(p.get('event_type', '')).upper() == 'IN'
+    ]
+    out_times = [
+        _to_naive(p['event_time']) for p in sorted_punches
+        if str(p.get('event_type', '')).upper() == 'OUT'
+    ]
+    first_time = min(in_times) if in_times else None
+    last_time = max(out_times) if out_times else None
+    # COSEC's Daily report is defined by the first Entry and last Exit.  Keep
+    # that same definition in the mirror so the analytics and employee-profile
+    # views can never disagree because of orphan/duplicate punches.
+    elapsed = (
+        _hours_between(first_time, last_time)
+        if first_time and last_time and last_time >= first_time
+        else 0.0
+    )
 
     if _HOURS_MODE != 'paired':
-        # Legacy elapsed mode: first punch → last punch
-        capped_elapsed = _cap_daily_hours(elapsed)
+        # Elapsed mode: first IN → last OUT, matching COSEC Daily.
+        split = _attendance_hour_split(elapsed)
         return {
-            'paired_hours': capped_elapsed, 'elapsed_hours': capped_elapsed, 'effective_hours': capped_elapsed,
+            'paired_hours': split['actual_hours'],
+            'elapsed_hours': split['actual_hours'],
+            'effective_hours': split['regular_hours'],
+            **split,
             'first_in': first_time, 'last_out': last_time,
             'punch_count_in': count_in, 'punch_count_out': count_out,
             'paired_segments': 0, 'open_shift': False,
@@ -614,13 +650,14 @@ def _compute_paired_hours(punches: list[dict], *, now: dt.datetime | None = None
         since_in  = _hours_between(pending_in, _now)
         open_credited = round(min(since_in, _OPEN_SHIFT_MAX_H), 2)
 
-    paired_total  = _cap_daily_hours(paired_total + open_credited)
-    effective     = paired_total
+    paired_total += open_credited
+    split = _attendance_hour_split(paired_total)
 
     return {
-        'paired_hours':        paired_total,
-        'elapsed_hours':       _cap_daily_hours(elapsed),
-        'effective_hours':     effective,
+        'paired_hours':        split['actual_hours'],
+        'elapsed_hours':       round(max(0.0, elapsed), 2),
+        'effective_hours':     split['regular_hours'],
+        **split,
         'first_in':            first_time,
         'last_out':            last_time,
         'punch_count_in':      count_in,
@@ -667,6 +704,7 @@ def _compute_and_save_day(employee_code: str, day: dt.date,
             'paired_hours':        result['paired_hours'],
             'elapsed_hours':       result['elapsed_hours'],
             'effective_hours':     result['effective_hours'],
+            'overtime_hours':      result['recorded_overtime'],
             'first_in':            _as_aware_attendance(first_in),
             'last_out':            _as_aware_attendance(result['last_out']),
             'punch_count_in':      result['punch_count_in'],
@@ -1006,7 +1044,13 @@ def _manual_daily_rows(day: dt.date) -> list[dict]:
         effective_hours__gt=0,
     )
     for summary in summaries:
-        hours = float(summary.effective_hours or 0)
+        stored_hours = max(0.0, float(summary.effective_hours or 0))
+        regular_hours = _cap_daily_hours(stored_hours)
+        overtime_hours = round(max(
+            float(summary.overtime_hours or 0),
+            stored_hours - regular_hours,
+        ), 2)
+        total_presence_hours = round(regular_hours + overtime_hours, 2)
         first_in = dt.datetime.combine(day, summary.time_in).isoformat() if summary.time_in else None
         last_out = dt.datetime.combine(day, summary.time_out).isoformat() if summary.time_out else None
         rows.append({
@@ -1017,16 +1061,18 @@ def _manual_daily_rows(day: dt.date) -> list[dict]:
             'department': summary.department or '',
             'first_in': first_in,
             'last_out': last_out,
-            'hours_worked': hours,
-            'overtime_hours': float(summary.overtime_hours or 0),
-            'paired_hours': hours,
-            'elapsed_hours': hours,
+            'hours_worked': regular_hours,
+            'regular_hours': regular_hours,
+            'overtime_hours': overtime_hours,
+            'total_presence_hours': total_presence_hours,
+            'paired_hours': total_presence_hours,
+            'elapsed_hours': total_presence_hours,
             'paired_segments': 0,
             'open_shift': False,
             'punch_count_in': 0,
             'punch_count_out': 0,
             'is_late': False,
-            'is_full_day': hours >= _FULL_DAY_H,
+            'is_full_day': regular_hours >= _FULL_DAY_H,
             'attendance_status': summary.attendance_status,
             'hours_mode': 'manual',
             'attendance_source': 'manual_upload',
@@ -1096,6 +1142,9 @@ def daily_report(date: Optional[str] = None) -> dict:
             'first_in':            result['first_in'],
             'last_out':            result['last_out'],
             'hours_worked':        result['effective_hours'],
+            'regular_hours':       result['regular_hours'],
+            'overtime_hours':      result['recorded_overtime'],
+            'total_presence_hours': result['actual_hours'],
             'paired_hours':        result['paired_hours'],
             'elapsed_hours':       result['elapsed_hours'],
             'paired_segments':     result['paired_segments'],
@@ -1207,10 +1256,15 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             'days_detail':   [],
             'attendance_source': s.source,
         })
-        h = s.effective_hours or 0.0
+        stored_hours = max(0.0, float(s.effective_hours or 0.0))
+        h = _cap_daily_hours(stored_hours)
+        recorded_overtime = round(max(
+            float(s.overtime_hours or 0.0),
+            stored_hours - h,
+        ), 2)
         slot['days_present'] += 1
         slot['total_hours']  += h
-        slot['overtime_hours'] += float(s.overtime_hours or 0)
+        slot['overtime_hours'] += recorded_overtime
         if s.is_full_day:
             slot['full_days'] += 1
         else:
@@ -1224,7 +1278,9 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             'first_in':        dt.datetime.combine(day_date, s.time_in).isoformat() if s.time_in else (s.first_in.isoformat() if s.first_in else None),
             'last_out':        dt.datetime.combine(day_date, s.time_out).isoformat() if s.time_out else (s.last_out.isoformat() if s.last_out else None),
             'hours':           round(h, 2),
-            'overtime_hours':  round(float(s.overtime_hours or 0), 2),
+            'regular_hours':   round(h, 2),
+            'overtime_hours':  recorded_overtime,
+            'total_presence_hours': round(h + recorded_overtime, 2),
             'status':          s.attendance_status,
             'paired_segments': s.paired_segments,
             'open_shift':      s.open_shift,
@@ -1260,6 +1316,9 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
     for slot in rows:
         slot['total_hours'] = round(slot['total_hours'], 2)
         slot['overtime_hours'] = round(slot.get('overtime_hours', 0), 2)
+        slot['total_presence_hours'] = round(
+            slot['total_hours'] + slot['overtime_hours'], 2,
+        )
         slot['avg_hours_per_day'] = (
             round(slot['total_hours'] / slot['days_present'], 2) if slot['days_present'] else 0
         )
@@ -1330,6 +1389,8 @@ def user_history(employee_code: Optional[str] = None,
     log = logging.getLogger(__name__)
     range_start, range_end = _event_bounds(start, end_exclusive)
     qs = TimesheetEvent.objects.filter(event_time__gte=range_start, event_time__lt=range_end)
+    if ts_config.INPUT_MODE == 'manual':
+        qs = qs.none()
     # OR-match: either identifier may resolve the record. Aliases include
     # alternate emails from the RAD AI UserProfile AND biometric employee_codes
     # discovered by fuzzy [employee_name] match — same multi-strategy logic
@@ -1370,19 +1431,18 @@ def user_history(employee_code: Optional[str] = None,
     except Exception:
         pass
 
-    per_day = defaultdict(lambda: {'first_in': None, 'last_out': None, 'punches': 0})
+    per_day = defaultdict(list)
     raw_punches: list[dict] = []  # optional, per-event detail
     employee_meta = {'employee_code': '', 'employee_name': '', 'employee_email': '', 'department': ''}
 
     for ev in qs.order_by('event_time'):
-        d = ev.event_time.date().isoformat()
-        slot = per_day[d]
+        # Group by the office attendance date, not PostgreSQL's UTC date.
+        # A UAE punch between 00:00 and 04:00 is otherwise shown on the
+        # previous day in Employee Profile while Time Sheet Daily shows it on
+        # the correct day.
+        d = _attendance_date(ev.event_time).isoformat()
         ts = _to_naive(ev.event_time)
-        if slot['first_in'] is None or ts < slot['first_in']:
-            slot['first_in'] = ts
-        if slot['last_out'] is None or ts > slot['last_out']:
-            slot['last_out'] = ts
-        slot['punches'] += 1
+        per_day[d].append({'event_time': ts, 'event_type': ev.event_type})
         # First seen wins for the employee header metadata
         if not employee_meta['employee_code']:
             employee_meta = {
@@ -1400,22 +1460,93 @@ def user_history(employee_code: Optional[str] = None,
 
     # Per-day rows (same shape as before)
     rows = []
-    max_daily_hours = float(ts_config.RULES.get('max_daily_hours', 9.0))
-    for d, slot in sorted(per_day.items()):
-        raw_hours = _hours_between(slot['first_in'], slot['last_out']) or 0
-        # Cap hours at configured maximum (default: 9 hours)
-        hours = min(raw_hours, max_daily_hours)
+    for d, punches in sorted(per_day.items()):
+        result = _compute_paired_hours(punches)
         rows.append({
             'date':         d,
-            'first_in':     str(slot['first_in']) if slot['first_in'] else None,
-            'last_out':     str(slot['last_out']) if slot['last_out'] else None,
-            'hours_worked': round(hours, 2),
-            'punch_count':  slot['punches'],
+            'first_in':     result['first_in'].isoformat() if result['first_in'] else None,
+            'last_out':     result['last_out'].isoformat() if result['last_out'] else None,
+            'hours_worked': result['effective_hours'],
+            'regular_hours': result['regular_hours'],
+            'overtime_hours': result['recorded_overtime'],
+            'total_presence_hours': result['actual_hours'],
+            'punch_count':  result['punch_count_in'] + result['punch_count_out'],
+            'punch_count_in': result['punch_count_in'],
+            'punch_count_out': result['punch_count_out'],
+            'paired_hours': result['paired_hours'],
+            'elapsed_hours': result['elapsed_hours'],
+            'paired_segments': result['paired_segments'],
+            'open_shift': result['open_shift'],
+            'hours_mode': _HOURS_MODE,
+            'attendance_source': 'biometric',
         })
+
+    # Mirror the main Daily report's source precedence.  Manual rows are the
+    # source in manual mode and a per-day fallback in hybrid mode; a biometric
+    # day always wins when both exist.
+    if ts_config.INPUT_MODE in ('manual', 'hybrid') and alias_codes:
+        biometric_days = {row['date'] for row in rows}
+        manual_summaries = (
+            DailyAttendanceSummary.objects
+            .filter(
+                employee_code__in=list(alias_codes),
+                date__gte=start,
+                date__lte=end,
+                source=DailyAttendanceSummary.SOURCE_MANUAL,
+                effective_hours__gt=0,
+            )
+            .order_by('date', 'computed_at')
+        )
+        manual_by_day = {summary.date.isoformat(): summary for summary in manual_summaries}
+        for d, summary_row in sorted(manual_by_day.items()):
+            if d in biometric_days:
+                continue
+            first_in = (
+                dt.datetime.combine(summary_row.date, summary_row.time_in)
+                if summary_row.time_in else _to_naive(summary_row.first_in)
+            )
+            last_out = (
+                dt.datetime.combine(summary_row.date, summary_row.time_out)
+                if summary_row.time_out else _to_naive(summary_row.last_out)
+            )
+            stored_hours = max(0.0, float(summary_row.effective_hours or 0))
+            hours = _cap_daily_hours(stored_hours)
+            overtime_hours = round(max(
+                float(summary_row.overtime_hours or 0),
+                stored_hours - hours,
+            ), 2)
+            rows.append({
+                'date': d,
+                'first_in': first_in.isoformat() if first_in else None,
+                'last_out': last_out.isoformat() if last_out else None,
+                'hours_worked': hours,
+                'regular_hours': hours,
+                'overtime_hours': overtime_hours,
+                'total_presence_hours': round(hours + overtime_hours, 2),
+                'punch_count': 0,
+                'punch_count_in': 0,
+                'punch_count_out': 0,
+                'paired_hours': hours,
+                'elapsed_hours': hours,
+                'paired_segments': 0,
+                'open_shift': False,
+                'hours_mode': 'manual',
+                'attendance_source': 'manual_upload',
+            })
+            if not employee_meta['employee_code']:
+                employee_meta = {
+                    'employee_code': summary_row.employee_code,
+                    'employee_name': summary_row.employee_name,
+                    'employee_email': '',
+                    'department': summary_row.department,
+                }
+        rows.sort(key=lambda row: row['date'])
 
     # ── Consolidated summary across the whole range
     full_day_hours = float(ts_config.RULES.get('full_day_hours', 9.0))
     total_hours    = sum(r['hours_worked'] for r in rows)
+    total_overtime = sum(r.get('overtime_hours') or 0 for r in rows)
+    total_presence = sum(r.get('total_presence_hours', r['hours_worked']) or 0 for r in rows)
     total_punches  = sum(r['punch_count'] or 0 for r in rows)
     days_present   = len(rows)
     days_full      = sum(1 for r in rows if (r['hours_worked'] or 0) >= full_day_hours)
@@ -1430,16 +1561,23 @@ def user_history(employee_code: Optional[str] = None,
         avg = sum(secs) // len(secs)
         return f'{avg // 3600:02d}:{(avg % 3600) // 60:02d}'
 
-    first_ins = []
-    last_outs = []
-    for d, slot in per_day.items():
-        if slot['first_in']:
-            first_ins.append(slot['first_in'])
-        if slot['last_out'] and slot['last_out'] != slot['first_in']:
-            last_outs.append(slot['last_out'])
+    def _row_datetime(value):
+        if not value:
+            return None
+        if isinstance(value, dt.datetime):
+            return value
+        try:
+            return dt.datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+
+    first_ins = [value for value in (_row_datetime(row.get('first_in')) for row in rows) if value]
+    last_outs = [value for value in (_row_datetime(row.get('last_out')) for row in rows) if value]
 
     summary = {
         'total_hours':         round(total_hours, 2),
+        'recorded_overtime_hours': round(total_overtime, 2),
+        'total_presence_hours': round(total_presence, 2),
         'total_punches':       total_punches,
         'days_present':        days_present,
         'days_full':           days_full,
@@ -1452,18 +1590,23 @@ def user_history(employee_code: Optional[str] = None,
 
     # ── Monthly breakdown (one entry per YYYY-MM in range)
     monthly_buckets: dict[str, dict] = defaultdict(lambda: {
-        'hours': 0.0, 'days': 0, 'punches': 0,
+        'hours': 0.0, 'overtime_hours': 0.0,
+        'total_presence_hours': 0.0, 'days': 0, 'punches': 0,
     })
     for r in rows:
         ym = r['date'][:7]  # 'YYYY-MM'
         b = monthly_buckets[ym]
         b['hours']   += r['hours_worked'] or 0
+        b['overtime_hours'] += r.get('overtime_hours') or 0
+        b['total_presence_hours'] += r.get('total_presence_hours', r['hours_worked']) or 0
         b['days']    += 1
         b['punches'] += r['punch_count'] or 0
     monthly_breakdown = [
         {
             'month':        ym,
             'hours':        round(b['hours'], 2),
+            'overtime_hours': round(b['overtime_hours'], 2),
+            'total_presence_hours': round(b['total_presence_hours'], 2),
             'days_present': b['days'],
             'punches':      b['punches'],
             'avg_per_day':  round(b['hours'] / b['days'], 2) if b['days'] else 0,

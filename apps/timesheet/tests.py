@@ -10,6 +10,7 @@ from . import config, get_service, mirror_services, services
 from .manual_import import _hours, _parse, _time
 from .models import DailyAttendanceSummary, TimesheetEvent
 from .services import _backfill_email_from_matrix_name
+from scripts import timesheet_mirror_sync
 
 
 class ServiceSelectionTests(SimpleTestCase):
@@ -44,7 +45,24 @@ class BiometricHoursTests(SimpleTestCase):
         ]
         result = mirror_services._compute_paired_hours(punches)
         self.assertEqual(result['effective_hours'], 9.0)
-        self.assertEqual(result['paired_hours'], 9.0)
+        self.assertEqual(result['regular_hours'], 9.0)
+        self.assertEqual(result['paired_hours'], 13.0)
+        self.assertEqual(result['actual_hours'], 13.0)
+        self.assertEqual(result['recorded_overtime'], 4.0)
+
+    def test_first_in_and_last_out_use_event_types(self):
+        punches = [
+            {'event_time': datetime(2026, 8, 1, 7, 30), 'event_type': 'OUT'},
+            {'event_time': datetime(2026, 8, 1, 8, 0), 'event_type': 'IN'},
+            {'event_time': datetime(2026, 8, 1, 17, 0), 'event_type': 'OUT'},
+            {'event_time': datetime(2026, 8, 1, 18, 0), 'event_type': 'IN'},
+        ]
+
+        result = mirror_services._compute_paired_hours(punches)
+
+        self.assertEqual(result['first_in'], datetime(2026, 8, 1, 8, 0))
+        self.assertEqual(result['last_out'], datetime(2026, 8, 1, 17, 0))
+        self.assertEqual(result['elapsed_hours'], 9.0)
 
 
 class DirectSqlAttendanceQueryTests(SimpleTestCase):
@@ -82,6 +100,60 @@ class DirectSqlAttendanceQueryTests(SimpleTestCase):
 
         _, params = cursor.execute.call_args.args
         self.assertEqual(params, ('0', '1', date(2026, 8, 1), date(2026, 8, 31)))
+
+    def test_user_history_uses_first_entry_and_last_exit(self):
+        connection, cursor = self._connection()
+        raw = [
+            {'punch_time': datetime(2026, 8, 27, 7, 30), 'punch_type': '1', 'employee_code': 'E001'},
+            {'punch_time': datetime(2026, 8, 27, 8, 0), 'punch_type': '0', 'employee_code': 'E001'},
+            {'punch_time': datetime(2026, 8, 27, 17, 0), 'punch_type': '1', 'employee_code': 'E001'},
+            {'punch_time': datetime(2026, 8, 27, 18, 0), 'punch_type': '0', 'employee_code': 'E001'},
+        ]
+        with (
+            patch.object(config, 'SCHEMA', self.schema),
+            patch.object(services, 'connect', return_value=connection),
+            patch.object(services, 'rows_to_dicts', return_value=raw),
+        ):
+            report = services.user_history(
+                employee_code='E001',
+                from_date='2026-08-27',
+                to_date='2026-08-27',
+            )
+
+        row = report['rows'][0]
+        self.assertEqual(row['first_in'], '2026-08-27T08:00:00')
+        self.assertEqual(row['last_out'], '2026-08-27T17:00:00')
+        self.assertEqual(row['hours'], 9.0)
+
+
+class SyncAgentEventTypeTests(SimpleTestCase):
+    def test_numeric_zero_entry_value_is_not_discarded(self):
+        schema = {
+            'table': 'dbo.Mx_VEW_UserAttendanceEvents',
+            'employee_code': 'UserID', 'employee_name': 'FullName',
+            'employee_email': '', 'department': 'DptName',
+            'punch_time': 'EventDateTime', 'punch_type': 'EntryExitType',
+            'in_value': '0', 'out_value': '1',
+            'login_time': '', 'logout_time': '', 'work_date': '',
+        }
+        source_rows = [
+            {
+                'employee_code': 'E001', 'employee_name': 'Test Employee',
+                'punch_time': datetime(2026, 8, 27, 8, 0), 'punch_type': 0,
+            },
+            {
+                'employee_code': 'E001', 'employee_name': 'Test Employee',
+                'punch_time': datetime(2026, 8, 27, 17, 0), 'punch_type': 1,
+            },
+        ]
+
+        with (
+            patch.object(timesheet_mirror_sync, 'attendance_schema', return_value=schema),
+            patch.object(timesheet_mirror_sync, '_query_rows', return_value=source_rows),
+        ):
+            events = timesheet_mirror_sync.fetch_events(hours=24)
+
+        self.assertEqual([event['event_type'] for event in events], ['IN', 'OUT'])
 
 
 class ManualAttendanceParsingTests(SimpleTestCase):
@@ -244,6 +316,61 @@ class BiometricMirrorIntegrationTests(TestCase):
         self.assertEqual(summary.date, date(2026, 8, 20))
         self.assertEqual(summary.effective_hours, 2.0)
 
+    def test_daily_and_employee_profile_share_uae_day_and_hours(self):
+        TimesheetEvent.objects.create(
+            source_event_id='profile-midnight-in', employee_code='E004',
+            employee_name='Profile Employee',
+            event_time=datetime(2026, 8, 19, 20, 30, tzinfo=timezone.utc),
+            event_type='IN',
+        )
+        TimesheetEvent.objects.create(
+            source_event_id='profile-midnight-out', employee_code='E004',
+            employee_name='Profile Employee',
+            event_time=datetime(2026, 8, 19, 22, 30, tzinfo=timezone.utc),
+            event_type='OUT',
+        )
+        identity = lambda rows: rows
+        with (
+            patch.object(config, 'INGEST_TZ_OFFSET_HOURS', 4),
+            patch.object(mirror_services, '_enrich_from_user_master_mirror', side_effect=identity),
+            patch.object(mirror_services, '_enrich_with_rad_users', side_effect=identity),
+            patch.object(mirror_services, '_backfill_email_from_matrix_name', side_effect=identity),
+        ):
+            daily = mirror_services.daily_report('2026-08-20')
+            profile = mirror_services.user_history(
+                employee_code='E004',
+                from_date='2026-08-20',
+                to_date='2026-08-20',
+            )
+
+        daily_row = daily['rows'][0]
+        profile_row = profile['rows'][0]
+        self.assertEqual(profile_row['date'], '2026-08-20')
+        self.assertEqual(profile_row['first_in'], daily_row['first_in'].isoformat())
+        self.assertEqual(profile_row['last_out'], daily_row['last_out'].isoformat())
+        self.assertEqual(profile_row['hours_worked'], daily_row['hours_worked'])
+
+    def test_employee_profile_uses_manual_daily_fallback(self):
+        DailyAttendanceSummary.objects.create(
+            employee_code='E005', date=date(2026, 8, 20), source='manual',
+            employee_name='Manual Profile Employee', department='Engineering',
+            effective_hours=8.0, time_in=time(8, 30), time_out=time(16, 30),
+        )
+
+        with patch.object(config, 'INPUT_MODE', 'manual'):
+            profile = mirror_services.user_history(
+                employee_code='E005',
+                from_date='2026-08-20',
+                to_date='2026-08-20',
+            )
+
+        self.assertEqual(len(profile['rows']), 1)
+        row = profile['rows'][0]
+        self.assertEqual(row['first_in'], '2026-08-20T08:30:00')
+        self.assertEqual(row['last_out'], '2026-08-20T16:30:00')
+        self.assertEqual(row['hours_worked'], 8.0)
+        self.assertEqual(row['attendance_source'], 'manual_upload')
+
     def test_hybrid_prefers_biometric_and_uses_manual_as_fallback(self):
         DailyAttendanceSummary.objects.create(
             employee_code='E010', date=date(2026, 8, 1), source='manual',
@@ -317,3 +444,26 @@ class PayrollDispatcherTests(SimpleTestCase):
 
         self.assertEqual(_safe_monthly_report(2026, 8), {'rows': []})
         service.monthly_report.assert_called_once_with(2026, 8)
+
+    def test_recorded_overtime_is_not_added_to_payroll_hours(self):
+        from apps.payroll_engine.services import attendance
+
+        report = {
+            'rows': [{
+                'employee_code': 'E001',
+                'days_detail': [{
+                    'date': '2026-08-20',
+                    'hours': 9.0,
+                    'overtime_hours': 4.0,
+                    'total_presence_hours': 13.0,
+                }],
+            }],
+        }
+        with (
+            patch.object(attendance, 'HOURS_FROM_TIMESHEET', True),
+            patch.object(attendance, '_safe_monthly_report', return_value=report),
+            patch.object(attendance, '_overrides_for_month', return_value={}),
+        ):
+            result = attendance.compute_monthly_hours(2026, 8)
+
+        self.assertEqual(result['E001'], 9)

@@ -800,7 +800,11 @@ def daily_report(date: Optional[str] = None) -> dict:
         rows = rows_to_dicts(cur, cur.fetchall())
 
     for r in rows:
-        r['hours_worked'] = _hours_between(r.get('first_in'), r.get('last_out'))
+        split = _split_recorded_hours(_hours_between(r.get('first_in'), r.get('last_out')))
+        r['hours_worked'] = split['regular_hours']
+        r['regular_hours'] = split['regular_hours']
+        r['overtime_hours'] = split['recorded_overtime']
+        r['total_presence_hours'] = split['actual_hours']
         r['is_late'] = _is_late({'punch_time': r.get('first_in')})
         r['is_full_day'] = (r['hours_worked'] or 0) >= ts_config.RULES['full_day_hours']
 
@@ -883,15 +887,16 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             'half_days': 0,
             'late_arrivals': 0,
             'total_hours': 0.0,
+            'overtime_hours': 0.0,
             'days_detail': [],
         })
         # Apply max_daily_hours cap (soft-coded, default 9.0h)
-        raw_hours = _hours_between(r.get('first_in'), r.get('last_out')) or 0
-        max_daily_hrs = float(ts_config.RULES.get('max_daily_hours', 9.0))
-        hours = min(raw_hours, max_daily_hrs)
+        split = _split_recorded_hours(_hours_between(r.get('first_in'), r.get('last_out')))
+        hours = split['regular_hours']
         
         slot['days_present'] += 1
         slot['total_hours'] += hours
+        slot['overtime_hours'] += split['recorded_overtime']
         if hours >= ts_config.RULES['full_day_hours']:
             slot['full_days'] += 1
         else:
@@ -903,11 +908,16 @@ def monthly_report(year: Optional[int] = None, month: Optional[int] = None) -> d
             'first_in': str(r.get('first_in')) if r.get('first_in') else None,
             'last_out': str(r.get('last_out')) if r.get('last_out') else None,
             'hours': round(hours, 2),
+            'regular_hours': split['regular_hours'],
+            'overtime_hours': split['recorded_overtime'],
+            'total_presence_hours': split['actual_hours'],
         })
 
     rows = list(by_emp.values())
     for slot in rows:
         slot['total_hours'] = round(slot['total_hours'], 2)
+        slot['overtime_hours'] = round(slot['overtime_hours'], 2)
+        slot['total_presence_hours'] = round(slot['total_hours'] + slot['overtime_hours'], 2)
         slot['avg_hours_per_day'] = (
             round(slot['total_hours'] / slot['days_present'], 2) if slot['days_present'] else 0
         )
@@ -1113,8 +1123,16 @@ def user_history(employee_code: Optional[str] = None,
             rows = _fallback_user_scan(variant, alias_emails, alias_codes, start, end)
 
     if variant == 'event_stream':
-        # collapse to per-day in/out pairs
-        per_day = defaultdict(lambda: {'first_in': None, 'last_out': None, 'punches': 0})
+        # Collapse to the same First Entry / Last Exit definition used by the
+        # main Daily report.  Previously this treated an orphan OUT as First In
+        # and a duplicate IN as Last Out, so Employee Profile disagreed with
+        # Time Sheet Daily for the exact same source events.
+        per_day = defaultdict(lambda: {
+            'first_in': None, 'last_out': None,
+            'punches': 0, 'punch_count_in': 0, 'punch_count_out': 0,
+        })
+        in_value = str(cols['in_value']).strip().lower()
+        out_value = str(cols['out_value']).strip().lower()
         for r in rows:
             t = r.get('punch_time')
             if isinstance(t, str):
@@ -1124,39 +1142,50 @@ def user_history(employee_code: Optional[str] = None,
                     continue
             d = t.date().isoformat()
             slot = per_day[d]
-            if slot['first_in'] is None or t < slot['first_in']:
-                slot['first_in'] = t
-            if slot['last_out'] is None or t > slot['last_out']:
-                slot['last_out'] = t
+            raw_punch_type = r.get('punch_type')
+            punch_type = '' if raw_punch_type is None else str(raw_punch_type).strip().lower()
+            if punch_type == in_value:
+                if slot['first_in'] is None or t < slot['first_in']:
+                    slot['first_in'] = t
+                slot['punch_count_in'] += 1
+            elif punch_type == out_value:
+                if slot['last_out'] is None or t > slot['last_out']:
+                    slot['last_out'] = t
+                slot['punch_count_out'] += 1
             slot['punches'] += 1
-        daily_rows = [
-            {
+        daily_rows = []
+        for d, v in sorted(per_day.items()):
+            split = _split_recorded_hours(_hours_between(v['first_in'], v['last_out']))
+            daily_rows.append({
                 'date': d,
                 'first_in': v['first_in'].isoformat() if v['first_in'] else None,
                 'last_out': v['last_out'].isoformat() if v['last_out'] else None,
-                # Cap hours at configured maximum (default: 9 hours)
-                'hours': min(_hours_between(v['first_in'], v['last_out']) or 0, 
-                            float(ts_config.RULES.get('max_daily_hours', 9.0))),
+                'hours': split['regular_hours'],
+                'regular_hours': split['regular_hours'],
+                'overtime_hours': split['recorded_overtime'],
+                'total_presence_hours': split['actual_hours'],
                 'punches': v['punches'],
-            }
-            for d, v in sorted(per_day.items())
-        ]
+                'punch_count_in': v['punch_count_in'],
+                'punch_count_out': v['punch_count_out'],
+            })
     else:
-        daily_rows = [
-            {
+        daily_rows = []
+        for r in rows:
+            split = _split_recorded_hours(_hours_between(r.get('first_in'), r.get('last_out')))
+            daily_rows.append({
                 'date': str(r.get('work_date')),
                 'first_in': str(r.get('first_in')) if r.get('first_in') else None,
                 'last_out': str(r.get('last_out')) if r.get('last_out') else None,
-                # Cap hours at configured maximum (default: 9 hours)
-                'hours': min(_hours_between(r.get('first_in'), r.get('last_out')) or 0,
-                            float(ts_config.RULES.get('max_daily_hours', 9.0))),
+                'hours': split['regular_hours'],
+                'regular_hours': split['regular_hours'],
+                'overtime_hours': split['recorded_overtime'],
+                'total_presence_hours': split['actual_hours'],
                 'punches': None,
-            }
-            for r in rows
-        ]
+            })
     # ── Consolidated summary + monthly breakdown + optional raw punches
     full_day_hours = float(ts_config.RULES.get('full_day_hours', 9.0))
     total_hours    = sum((r['hours'] or 0) for r in daily_rows)
+    total_overtime = sum((r.get('overtime_hours') or 0) for r in daily_rows)
     total_punches  = sum((r['punches'] or 0) for r in daily_rows)
     days_present   = len(daily_rows)
     days_full      = sum(1 for r in daily_rows if (r['hours'] or 0) >= full_day_hours)
@@ -1180,6 +1209,8 @@ def user_history(employee_code: Optional[str] = None,
 
     summary = {
         'total_hours':       round(total_hours, 2),
+        'recorded_overtime_hours': round(total_overtime, 2),
+        'total_presence_hours': round(total_hours + total_overtime, 2),
         'total_punches':     total_punches,
         'days_present':      days_present,
         'days_full':         days_full,
@@ -1257,6 +1288,18 @@ def _hours_between(start, end) -> float:
             return 0.0
     delta = end - start
     return max(0.0, round(delta.total_seconds() / 3600, 2))
+
+
+def _split_recorded_hours(actual_hours: float) -> dict:
+    """Keep payroll regular hours capped while retaining observed excess."""
+    actual = round(max(0.0, float(actual_hours or 0.0)), 2)
+    cap = float(ts_config.RULES.get('max_daily_hours', 9.0))
+    regular = round(min(actual, cap), 2) if cap > 0 else actual
+    return {
+        'actual_hours': actual,
+        'regular_hours': regular,
+        'recorded_overtime': round(max(0.0, actual - regular), 2),
+    }
 
 
 def _calculate_live_metrics(employee_code: str) -> dict:
