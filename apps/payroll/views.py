@@ -407,26 +407,70 @@ class ChatbotMessageViewSet(viewsets.ModelViewSet):
 # 7. Employee Leave Record ViewSet
 # ─────────────────────────────────────────────────────────────────────────────
 
-class EmployeeLeaveRecordViewSet(viewsets.ReadOnlyModelViewSet):
+class EmployeeLeaveRecordViewSet(viewsets.ModelViewSet):
     """
-    Read-only API for employee leave records imported from the HR Excel.
+    API for employee leave records imported from the HR Excel.
     Supports filtering by year, department, employee_code, and name search.
     Detail view includes the full monthly breakdown.
+
+    Every field except `carryforward` is HR-Excel-imported data and stays
+    read-only (see EmployeeLeaveRecordSerializer.Meta.read_only_fields) —
+    only GET and PATCH are exposed (no create/replace/delete: these records
+    come from the Excel import, not manual entry), and only HR Managers/
+    admins may PATCH (see perform_update below).
     """
     permission_classes = [IsAuthenticated]
+    http_method_names   = ['get', 'patch', 'head', 'options']
 
     def get_queryset(self):
         qs = EmployeeLeaveRecord.objects.prefetch_related('monthly_breakdown').all()
+        user = self.request.user
+
+        # 2026-08-31: this had NO owner-scoping at all — a non-HR user
+        # could see ANY employee's leave record, either implicitly (the
+        # Employee Self-Service "Annual Balance" KPI card deliberately
+        # calls this with no employee_code, trusting "the backend
+        # auto-scopes to the current user" per its own comment — it
+        # didn't, so the card showed whichever employee's name sorted
+        # first) or explicitly via ?employee_code=<anyone>. HR Managers/
+        # admins keep full, filterable visibility (needed for the
+        # carryforward-edit feature above, which lets them edit OTHER
+        # employees' records) — mirrors LeaveRequestViewSet's
+        # _is_hr_or_admin/_user_employee_code pattern just above.
+        #
+        # 2026-08-31 (same day, follow-up): that first pass still let an
+        # HR Manager/admin's OWN Employee Self-Service "Annual Balance"
+        # card show a DIFFERENT employee's balance — is_hr_manager()==True
+        # for them, and the ESS page's fetch (unlike its sibling
+        # getLeaveRequests({ mine: true, ... }) call) sent no
+        # employee_code, so the "if code:" filter never applied and they
+        # got the full unfiltered list, alphabetically-first record and
+        # all. Confirmed live: tanzeem.agra (super_admin, employee_id
+        # '22972', real balance 7.67d) was seeing 30.7d — someone else's
+        # record — on their own profile card for exactly this reason.
+        # `?mine=true` (added to that same fetch call in
+        # EmployeeSelfService.jsx) now forces self-scoping regardless of
+        # role — same flag, same reasoning, same fix LeaveRequestViewSet
+        # already uses for the identical problem.
+        mine_only = self.request.query_params.get('mine', '').lower() in ('true', '1', 'yes')
+        if _is_hr_manager(user) and not mine_only:
+            code = self.request.query_params.get('employee_code')
+            if code:
+                qs = qs.filter(employee_code=code)
+        else:
+            try:
+                emp_code = user.rbac_profile.employee_id or None
+            except Exception:
+                emp_code = None
+            qs = qs.filter(employee_code=emp_code) if emp_code else qs.none()
+
         year   = self.request.query_params.get('year')
         dept   = self.request.query_params.get('department')
-        code   = self.request.query_params.get('employee_code')
         search = self.request.query_params.get('search')
         if year:
             qs = qs.filter(year=year)
         if dept:
             qs = qs.filter(department__iexact=dept)
-        if code:
-            qs = qs.filter(employee_code=code)
         if search:
             qs = qs.filter(employee_name__icontains=search)
         branch = self.request.query_params.get('branch')
@@ -435,10 +479,34 @@ class EmployeeLeaveRecordViewSet(viewsets.ReadOnlyModelViewSet):
         return qs.order_by('employee_name')
 
     def get_serializer_class(self):
-        # Detail view returns monthly breakdown; list view is lightweight
-        if self.action == 'retrieve':
+        # Detail view returns monthly breakdown; list view is lightweight.
+        # PATCH must ALSO use the full serializer — its read_only_fields
+        # correctly locks every field except carryforward. The list
+        # serializer only locks id/imported_at, so routing a PATCH through
+        # it (the old behaviour here — only 'retrieve' got the full one)
+        # would let a request write total_earned/total_taken/leave_balance/
+        # etc directly, bypassing the "carryforward only" contract the
+        # serializer's own read_only_fields comment already documents.
+        if self.action in ('retrieve', 'update', 'partial_update'):
             return EmployeeLeaveRecordSerializer
         return EmployeeLeaveRecordListSerializer
+
+    def perform_update(self, serializer):
+        if not _is_hr_manager(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Only HR Managers can update leave records.')
+        instance = serializer.save()
+        # Recalculate leave_balance from its components — same formula as
+        # apps.payroll.signals._recalculate_total_taken, which keeps
+        # leave_balance in sync whenever total_taken changes via a
+        # LeaveRequest approval/deletion. That signal watches LeaveRequest,
+        # not EmployeeLeaveRecord, so it never fires for a direct PATCH to
+        # carryforward here — this call is what keeps leave_balance correct
+        # for THIS write path instead.
+        instance.leave_balance = (
+            instance.total_earned - instance.total_taken - instance.total_encashed + instance.carryforward
+        )
+        instance.save(update_fields=['leave_balance'])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -786,15 +854,27 @@ def _is_hr_manager(user) -> bool:
 
     Falls back to user.is_staff / user.is_superuser so Django admin accounts
     always retain access even if RBAC is not fully configured.
+
+    2026-08-31: was reading `profile.role` (singular) — UserProfile has no
+    such field at all (only `roles`, a ManyToManyField through UserRole; see
+    apps.rbac.models.UserProfile). That AttributeError was silently
+    swallowed by the bare except below, so this function has always
+    returned False for every real role-holder — only is_staff/is_superuser
+    accounts ever passed, for every "Only HR Managers can..." check in this
+    file (PublicHoliday, AttendanceOverride, component types, and leave
+    record carryforward edits). Fixed to check the real `roles` M2M.
     """
     if user.is_superuser or user.is_staff:
         return True
     try:
         from apps.rbac.models import UserProfile
         profile = UserProfile.objects.filter(user=user, is_deleted=False).first()
-        if profile and profile.role:
-            code = (profile.role.code or '').lower()
-            return code.startswith('hr') or code in ('admin', 'superadmin', 'manager')
+        if profile:
+            codes = profile.roles.filter(is_active=True).values_list('code', flat=True)
+            return any(
+                (code or '').lower().startswith('hr') or (code or '').lower() in ('admin', 'superadmin', 'manager')
+                for code in codes
+            )
     except Exception:
         pass
     return False

@@ -7,15 +7,22 @@ Current tasks:
   upload_master_payroll_to_s3 — generates the Excel from a saved MasterPayrollImport
                                   and uploads it to the payroll/exports/ S3 prefix.
                                   Called after generate_master_payroll saves to DB.
+  run_monthly_leave_accrual    — credits one month's leave (annual_entitlement / 12)
+                                  onto every current-year EmployeeLeaveRecord. Scheduled
+                                  via apps.payroll.config.BEAT_SCHEDULE.
 """
 from __future__ import annotations
 
 import io
 import logging
 import uuid as uuid_lib
+from datetime import timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from celery import shared_task
+from django.db import IntegrityError, transaction
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -167,3 +174,114 @@ def upload_master_payroll_to_s3(self, import_id: str) -> dict:
         session.status = MasterPayrollImportStatus.FAILED
         session.save(update_fields=['status'])
         raise self.retry(exc=exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Monthly leave accrual
+# ─────────────────────────────────────────────────────────────────────────────
+
+@shared_task(
+    name='payroll.run_monthly_leave_accrual',
+    bind=True,
+    max_retries=_MAX_RETRIES,
+    default_retry_delay=_RETRY_BACKOFF_S,
+    time_limit=_TASK_TIMEOUT_S,
+)
+def run_monthly_leave_accrual(self, triggered_by: str = 'celery_beat') -> dict:
+    """
+    Credit one month's leave accrual (annual_entitlement / 12) onto every
+    EmployeeLeaveRecord for the current year, recompute leave_balance, and
+    log the run to MonthlyLeaveAccrualLog.
+
+    The beat schedule (apps.payroll.config.BEAT_SCHEDULE) fires this daily
+    from the 28th-31st at 20:05 UTC — since crontab can't express "last day
+    of the month" directly, this task re-checks the real Abu Dhabi date
+    itself and only does real work when tomorrow (Asia/Dubai) is the 1st.
+    That makes execution correct regardless of whatever CELERY_TIMEZONE is
+    configured, and safe to invoke manually/via API on any day (it's simply
+    a no-op if it isn't month-end yet, and idempotent per (year, month,
+    triggered_by) if run more than once for the same period).
+    """
+    from apps.payroll.models import EmployeeLeaveRecord, MonthlyLeaveAccrualLog
+
+    now_dubai = timezone.now().astimezone(ZoneInfo('Asia/Dubai'))
+    tomorrow_dubai = now_dubai + timedelta(days=1)
+    if tomorrow_dubai.day != 1:
+        logger.debug(
+            'run_monthly_leave_accrual: not month-end yet in Asia/Dubai (%s), skipping',
+            now_dubai.date(),
+        )
+        return {'status': 'skipped', 'reason': 'not_month_end', 'checked_date': str(now_dubai.date())}
+
+    target_year, target_month = tomorrow_dubai.year, tomorrow_dubai.month
+
+    if MonthlyLeaveAccrualLog.objects.filter(
+        year=target_year, month=target_month, triggered_by=triggered_by,
+    ).exists():
+        logger.info(
+            'run_monthly_leave_accrual: already run for %s-%02d (triggered_by=%s), skipping',
+            target_year, target_month, triggered_by,
+        )
+        return {'status': 'skipped', 'reason': 'already_run', 'year': target_year, 'month': target_month}
+
+    records_processed    = 0
+    monthly_accrual_used = Decimal('0')
+
+    try:
+        with transaction.atomic():
+            records = EmployeeLeaveRecord.objects.filter(year=target_year).select_for_update()
+            for record in records:
+                entitlement = record.annual_entitlement or Decimal('22')
+                accrual     = (entitlement / Decimal('12')).quantize(Decimal('0.0001'))
+                monthly_accrual_used = accrual
+
+                record.total_earned  = (record.total_earned or Decimal('0')) + accrual
+                record.leave_balance = (
+                    record.total_earned - record.total_taken - record.total_encashed + record.carryforward
+                )
+                record.save(update_fields=['total_earned', 'leave_balance'])
+                records_processed += 1
+
+            MonthlyLeaveAccrualLog.objects.create(
+                year                  = target_year,
+                month                 = target_month,
+                triggered_by          = triggered_by,
+                records_processed     = records_processed,
+                records_updated       = records_processed,
+                monthly_accrual_used  = monthly_accrual_used,
+                status                = 'success',
+            )
+
+    except IntegrityError:
+        # Another worker logged this period between our existence check and create()
+        logger.warning(
+            'run_monthly_leave_accrual: race on log create for %s-%02d — already recorded elsewhere',
+            target_year, target_month,
+        )
+        return {'status': 'skipped', 'reason': 'race_already_logged', 'year': target_year, 'month': target_month}
+
+    except Exception as exc:
+        logger.exception('run_monthly_leave_accrual: failed for %s-%02d', target_year, target_month)
+        try:
+            MonthlyLeaveAccrualLog.objects.create(
+                year          = target_year,
+                month         = target_month,
+                triggered_by  = triggered_by,
+                records_processed = 0,
+                status        = 'failed',
+                error_message = str(exc)[:2000],
+            )
+        except IntegrityError:
+            pass
+        raise self.retry(exc=exc)
+
+    logger.info(
+        'run_monthly_leave_accrual: completed %s-%02d — %d record(s) updated',
+        target_year, target_month, records_processed,
+    )
+    return {
+        'status':             'success',
+        'year':               target_year,
+        'month':              target_month,
+        'records_processed':  records_processed,
+    }
