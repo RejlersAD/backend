@@ -330,7 +330,10 @@ def import_daily_attendance(upload, *, year=None, month=None) -> dict:
                 source=DailyAttendanceSummary.SOURCE_MANUAL,
                 paired_hours=item.hours,
                 elapsed_hours=item.hours,
-                effective_hours=item.hours,
+                # Payroll consumes effective_hours, so keep it capped at the
+                # nine-hour regular day. Excess remains an informational
+                # attendance record until HR approves a separate OT request.
+                effective_hours=min(item.hours, max_regular_hours),
                 punch_count_in=0,
                 punch_count_out=0,
                 paired_segments=0,

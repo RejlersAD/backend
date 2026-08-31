@@ -113,7 +113,9 @@ def export_daily_excel(date: str | None = None) -> HttpResponse:
     ws.title = f"Daily {payload['date']}"
 
     headers = ['Employee Code', 'Name', 'Email', 'Department',
-               'First In', 'Last Out', 'Hours', 'Late?', 'Full Day?', 'Matched']
+               'First In', 'Last Out', 'Regular Hours',
+               'Recorded OT (Unapproved)', 'Total Presence',
+               'Late?', 'Full Day?', 'Matched']
     _write_header(ws, headers)
     for r in rows:
         ws.append([
@@ -124,6 +126,8 @@ def export_daily_excel(date: str | None = None) -> HttpResponse:
             _fmt(r.get('first_in')),
             _fmt(r.get('last_out')),
             r.get('hours_worked'),
+            r.get('overtime_hours', 0),
+            r.get('total_presence_hours', r.get('hours_worked')),
             'Yes' if r.get('is_late') else 'No',
             'Yes' if r.get('is_full_day') else 'No',
             r.get('matched_by') or 'unmatched',
@@ -141,7 +145,8 @@ def export_monthly_excel(year: int | None = None, month: int | None = None) -> H
 
     headers = ['Employee Code', 'Name', 'Email', 'Department',
                'Days Present', 'Full Days', 'Half Days', 'Late Arrivals',
-               'Total Hours', 'Avg Hours/Day', 'Matched']
+               'Regular Hours', 'Recorded OT (Unapproved)', 'Total Presence',
+               'Avg Regular Hours/Day', 'Matched']
     _write_header(ws, headers)
     for r in rows:
         ws.append([
@@ -154,6 +159,8 @@ def export_monthly_excel(year: int | None = None, month: int | None = None) -> H
             r.get('half_days'),
             r.get('late_arrivals'),
             r.get('total_hours'),
+            r.get('overtime_hours', 0),
+            r.get('total_presence_hours', r.get('total_hours')),
             r.get('avg_hours_per_day'),
             r.get('matched_by') or 'unmatched',
         ])
@@ -161,7 +168,10 @@ def export_monthly_excel(year: int | None = None, month: int | None = None) -> H
 
     # Per-day drilldown on a second sheet
     ws2 = wb.create_sheet('Per-Day Detail')
-    _write_header(ws2, ['Employee Code', 'Name', 'Date', 'First In', 'Last Out', 'Hours'])
+    _write_header(ws2, [
+        'Employee Code', 'Name', 'Date', 'First In', 'Last Out',
+        'Regular Hours', 'Recorded OT (Unapproved)', 'Total Presence',
+    ])
     for r in rows:
         for d in r.get('days_detail') or []:
             ws2.append([
@@ -171,6 +181,8 @@ def export_monthly_excel(year: int | None = None, month: int | None = None) -> H
                 _fmt(d.get('first_in')),
                 _fmt(d.get('last_out')),
                 d.get('hours'),
+                d.get('overtime_hours', 0),
+                d.get('total_presence_hours', d.get('hours')),
             ])
     _autosize(ws2)
     return _xlsx_response(wb, f'timesheet_monthly_{payload["year"]}_{payload["month"]:02d}.xlsx')
