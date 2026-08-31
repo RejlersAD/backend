@@ -1446,6 +1446,11 @@ print(f"Max Retries: {QUEUE_MAX_RETRIES}")
 # unconfigured here), so unhandled exceptions were invisible in Railway's
 # console output. This adds a console handler for django.request so
 # tracebacks show up in `railway logs`.
+# RotatingFileHandler opens its target file immediately at logging-config
+# time and does not create missing parent directories itself — a fresh
+# container/deploy with no logs/ dir yet would crash django.setup() before
+# a single request is served. Guarantee the directory exists first.
+os.makedirs(BASE_DIR / 'logs', exist_ok=True)
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
