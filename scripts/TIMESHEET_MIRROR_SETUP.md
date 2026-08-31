@@ -59,44 +59,54 @@ Common failures:
 - SQL connection error: run on the office LAN/VPN and confirm port 1433.
 - SQL identifier/column error: confirm the configured Matrix view and columns.
 
-## 3. Send the initial history
+## 3. Prime live synchronization
 
-The first run sends user details and the last 30 days of events:
+After any controlled history import, prime the local checkpoint so the watcher
+does not re-upload the rolling window on its first cycle:
 
 ```powershell
 python scripts\timesheet_mirror_sync.py `
   --env-file scripts\timesheet_mirror.env `
-  --users --hours 720
+  --hours 2 --prime-state
 ```
 
-Refresh Time Sheet Analytics after it completes. The warning should disappear
-and the latest event/count should be visible.
+Large history replays are intentionally blocked by default. Only run one during
+an approved maintenance window, after the bulk-ingest backend is deployed:
+
+```powershell
+python scripts\timesheet_mirror_sync.py `
+  --env-file scripts\timesheet_mirror.env `
+  --hours 720 --batch-size 100 --allow-large-replay
+```
 
 ## 4. Schedule continuous synchronization
 
 Open Windows Task Scheduler and create a task with:
 
-- Trigger: every 5 minutes, indefinitely.
+- Trigger: at system startup.
 - Program: the full path to `python.exe` (find it with `Get-Command python`).
 - Start in: the backend repository directory.
 - Arguments:
 
 ```text
-scripts\timesheet_mirror_sync.py --env-file scripts\timesheet_mirror.env --users --hours 48
+scripts\timesheet_mirror_sync.py --env-file scripts\timesheet_mirror.env --hours 2 --batch-size 100 --watch --interval 300
 ```
 
 Enable `Run whether user is logged on or not` and `Restart the task if it
 fails`. Use a Windows service account that can read the repository and reach
-SQL Server. The 48-hour overlap makes temporary internet/production outages
-self-healing.
+SQL Server. The persistent checkpoint keeps the two-hour recovery overlap
+without re-uploading already synchronized events.
 
 For an interactive always-running process instead, use:
 
 ```powershell
 python scripts\timesheet_mirror_sync.py `
   --env-file scripts\timesheet_mirror.env `
-  --users --hours 48 --watch --interval 300
+  --hours 2 --batch-size 100 --watch --interval 300
 ```
+
+Run `--users` separately when employee-master details need refreshing; do not
+include it in the continuous watcher command.
 
 ## Production settings
 

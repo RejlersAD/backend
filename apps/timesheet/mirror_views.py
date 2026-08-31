@@ -26,6 +26,7 @@ import secrets
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
 
+from django.db import transaction
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from rest_framework import status
@@ -86,14 +87,9 @@ _EVENT_TO_MASTER_FIELDS = {
 }
 
 
-def _maybe_upsert_user_master_from_event(ev: dict, emp_code: str) -> None:
-    """Populate or refresh `BiometricUserMaster` from any user-master keys
-    the event payload carries. No-op if none are present. Failures are
-    swallowed so the event ingest itself can never fail because of master
-    enrichment."""
-    if not emp_code:
-        return
-    defaults = {}
+def _master_defaults_from_event(ev: dict) -> dict[str, str]:
+    """Return non-empty user-master values carried by one punch event."""
+    defaults: dict[str, str] = {}
     for src, model_field in _EVENT_TO_MASTER_FIELDS.items():
         val = ev.get(src)
         if val is None:
@@ -101,18 +97,45 @@ def _maybe_upsert_user_master_from_event(ev: dict, emp_code: str) -> None:
         s = str(val).strip()
         if not s:
             continue
+        if model_field in ('office_email', 'personal_email'):
+            s = norm_email(s)
+        elif model_field in ('full_name', 'department'):
+            s = norm_name(s)
         # Never overwrite a stronger key with a weaker legacy one (the dict
         # iteration order means legacy keys come last, so we only set the
         # field if it isn't already set in this defaults dict).
         defaults.setdefault(model_field, s[:255])
-    if not defaults:
+    return defaults
+
+
+def _bulk_upsert_user_masters(master_values: dict[str, dict[str, str]]) -> None:
+    """Refresh event-carried user details with bulk queries."""
+    if not master_values:
         return
-    try:
-        BiometricUserMaster.objects.update_or_create(
-            employee_code=emp_code, defaults=defaults,
+    existing = BiometricUserMaster.objects.in_bulk(master_values, field_name='employee_code')
+    to_create: list[BiometricUserMaster] = []
+    to_update: list[BiometricUserMaster] = []
+    updated_fields: set[str] = set()
+    for code, defaults in master_values.items():
+        obj = existing.get(code)
+        if obj is None:
+            to_create.append(BiometricUserMaster(employee_code=code, **defaults))
+            continue
+        changed = False
+        for field, value in defaults.items():
+            if getattr(obj, field) != value:
+                setattr(obj, field, value)
+                updated_fields.add(field)
+                changed = True
+        if changed:
+            obj.synced_at = timezone.now()
+            to_update.append(obj)
+    if to_create:
+        BiometricUserMaster.objects.bulk_create(to_create, batch_size=500)
+    if to_update and updated_fields:
+        BiometricUserMaster.objects.bulk_update(
+            to_update, sorted(updated_fields | {'synced_at'}), batch_size=500,
         )
-    except Exception as exc:  # pragma: no cover
-        logger.debug('[timesheet.ingest] user-master upsert skipped for %s: %s', emp_code, exc)
 
 
 @api_view(['POST'])
@@ -133,7 +156,9 @@ def ingest_events(request):
     if not isinstance(events, list):
         return Response({'error': 'events must be a list'}, status=status.HTTP_400_BAD_REQUEST)
 
-    max_batch = ts_config.MIRROR_INGEST_MAX_BATCH
+    # Hard ceiling protects the web worker even if an old Railway variable is
+    # still configured with the legacy 5,000-row limit.
+    max_batch = min(ts_config.MIRROR_INGEST_MAX_BATCH, 500)
     if len(events) > max_batch:
         return Response(
             {'error': f'batch too large ({len(events)} > {max_batch})'},
@@ -142,8 +167,12 @@ def ingest_events(request):
 
     inserted = 0
     updated = 0
+    unchanged = 0
     skipped = 0
     errors: list[dict] = []
+    prepared: dict[str, TimesheetEvent] = {}
+    summary_events: dict[str, dict] = {}
+    master_values: dict[str, dict[str, str]] = {}
 
     for idx, ev in enumerate(events):
         try:
@@ -154,34 +183,69 @@ def ingest_events(request):
             if not (sid and emp_code and event_time and event_type in ('IN', 'OUT')):
                 skipped += 1
                 continue
-            defaults = {
-                'employee_code':   emp_code,
-                'employee_name':   norm_name(ev.get('employee_name')),
-                'employee_email':  norm_email(ev.get('employee_email')),
-                'department':      norm_name(ev.get('department')),
-                'event_time':      event_time,
-                'event_type':      event_type,
-            }
-            _, created = TimesheetEvent.objects.update_or_create(
-                source_event_id=sid, defaults=defaults,
+            prepared[sid] = TimesheetEvent(
+                source_event_id=sid,
+                employee_code=emp_code,
+                employee_name=norm_name(ev.get('employee_name')),
+                employee_email=norm_email(ev.get('employee_email')),
+                department=norm_name(ev.get('department')),
+                event_time=event_time,
+                event_type=event_type,
             )
-            if created:
-                inserted += 1
-            else:
-                updated += 1
+            summary_events[sid] = {'employee_code': emp_code, 'event_time': event_time}
+            master_defaults = _master_defaults_from_event(ev)
+            if master_defaults:
+                master_values.setdefault(emp_code, {}).update(master_defaults)
 
-            # Opportunistically seed BiometricUserMaster from any extra
-            # user-master fields the agent included on this event. This makes
-            # the routine event sync also populate Card1 / OfficeEmail without
-            # requiring a separate `--users` run. Keys ignored unless present.
-            _maybe_upsert_user_master_from_event(ev, emp_code)
         except Exception as exc:  # pragma: no cover — never let one bad row kill the batch
             logger.warning('[timesheet.ingest] row %s failed: %s', idx, exc)
             errors.append({'index': idx, 'error': str(exc)})
 
+    # De-duplicate inside the payload because PostgreSQL cannot update the same
+    # conflict target twice in one INSERT. The final occurrence wins.
+    skipped += max(0, len(events) - skipped - len(errors) - len(prepared))
+    if prepared:
+        existing = TimesheetEvent.objects.in_bulk(prepared, field_name='source_event_id')
+        changed_ids: set[str] = set()
+        write_objects: list[TimesheetEvent] = []
+        compare_fields = (
+            'employee_code', 'employee_name', 'employee_email', 'department',
+            'event_time', 'event_type',
+        )
+        for sid, obj in prepared.items():
+            current = existing.get(sid)
+            if current is None:
+                inserted += 1
+                changed_ids.add(sid)
+                write_objects.append(obj)
+            elif any(getattr(current, field) != getattr(obj, field) for field in compare_fields):
+                updated += 1
+                changed_ids.add(sid)
+                write_objects.append(obj)
+            else:
+                unchanged += 1
+        now = timezone.now()
+        for obj in write_objects:
+            obj.created_at = now
+            obj.updated_at = now
+        with transaction.atomic():
+            if write_objects:
+                TimesheetEvent.objects.bulk_create(
+                    write_objects,
+                    batch_size=500,
+                    update_conflicts=True,
+                    update_fields=[
+                        'employee_code', 'employee_name', 'employee_email',
+                        'department', 'event_time', 'event_type', 'updated_at',
+                    ],
+                    unique_fields=['source_event_id'],
+                )
+            _bulk_upsert_user_masters(master_values)
+        summary_events = {sid: summary_events[sid] for sid in changed_ids}
+
     logger.info(
-        '[timesheet.ingest] %s in, %s updated, %s skipped, %s errors',
-        inserted, updated, skipped, len(errors),
+        '[timesheet.ingest] %s in, %s updated, %s unchanged, %s skipped, %s errors',
+        inserted, updated, unchanged, skipped, len(errors),
     )
 
     # ── Recompute DailyAttendanceSummary for all touched employee+date combos ──
@@ -192,15 +256,7 @@ def ingest_events(request):
     if inserted + updated > 0:
         try:
             from . import mirror_services as _ms
-            saved_events = [
-                {
-                    'employee_code': str(ev.get('employee_code') or '').strip(),
-                    'event_time':    _parse_event_time(ev.get('event_time')),
-                }
-                for ev in events
-                if ev.get('employee_code') and ev.get('event_time')
-            ]
-            n_summaries = _ms.recompute_summaries_for_events(saved_events)
+            n_summaries = _ms.recompute_summaries_for_events(list(summary_events.values()))
             logger.info('[timesheet.ingest] recomputed %s daily summaries', n_summaries)
         except Exception as exc:
             logger.warning('[timesheet.ingest] summary recompute failed: %s', exc)
@@ -209,6 +265,7 @@ def ingest_events(request):
         'received': len(events),
         'inserted': inserted,
         'updated':  updated,
+        'unchanged': unchanged,
         'skipped':  skipped,
         'errors':   errors,
     })
