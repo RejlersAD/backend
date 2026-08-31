@@ -366,7 +366,12 @@ class PayrollEmployeeViewSet(viewsets.ModelViewSet):
 
 # ── PayrollRun CRUD + workflow + Excel ──────────────────────────────
 class PayrollRunViewSet(viewsets.ModelViewSet):
-    queryset = PayrollRun.objects.all()
+    # PayrollRunSerializer exposes hr_approved_by/finance_approved_by/
+    # released_by/created_by as plain FK fields — without select_related each
+    # one fires its own query per row (N+1) whenever non-null.
+    queryset = PayrollRun.objects.select_related(
+        'hr_approved_by', 'finance_approved_by', 'released_by', 'created_by',
+    )
     serializer_class = PayrollRunSerializer
     permission_classes = [IsAuthenticated]
     ordering = ['-year', '-month']
@@ -657,7 +662,12 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
         from .models import PayrollRunUpload
         from .serializers import PayrollRunUploadSerializer
         run = self.get_object()
-        qs  = PayrollRunUpload.objects.filter(run=run).order_by('-uploaded_at')
+        # PayrollRunUploadSerializer.get_uploaded_by_name reads 'uploaded_by'
+        # per row — select_related avoids a query per upload row.
+        qs  = (PayrollRunUpload.objects
+               .filter(run=run)
+               .select_related('uploaded_by')
+               .order_by('-uploaded_at'))
         return Response({'results': PayrollRunUploadSerializer(qs, many=True).data})
 
     # Workflow transitions
@@ -972,7 +982,9 @@ def _log_line_item_change(payslip, action, actor, old_values=None, new_values=No
 
 # ── PayslipLineItem CRUD ────────────────────────────────────────────
 class PayslipLineItemViewSet(viewsets.ModelViewSet):
-    queryset = PayslipLineItem.objects.all()
+    # PayslipLineItemSerializer exposes 'payslip' as a plain FK field —
+    # without select_related it fires one query per row.
+    queryset = PayslipLineItem.objects.select_related('payslip')
     serializer_class = PayslipLineItemSerializer
     permission_classes = [IsAuthenticated]
 
@@ -1085,7 +1097,10 @@ class PayslipLineItemViewSet(viewsets.ModelViewSet):
 
 # ── Adjustments CRUD ────────────────────────────────────────────────
 class PayrollAdjustmentViewSet(viewsets.ModelViewSet):
-    queryset = PayrollAdjustment.objects.select_related('employee')
+    # PayrollAdjustmentSerializer also exposes 'created_by' as a plain FK
+    # field, in addition to the employee_no/employee_name sourced from
+    # 'employee' — both need select_related to avoid a query per row.
+    queryset = PayrollAdjustment.objects.select_related('employee', 'created_by')
     serializer_class = PayrollAdjustmentSerializer
     permission_classes = [PayrollAdjustmentWritePermission]
 
