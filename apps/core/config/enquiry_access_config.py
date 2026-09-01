@@ -9,7 +9,7 @@ functionality without hardcoding permissions in the core logic.
 RBAC Integration:
 - Primary access control: RBAC module 'enquiry_management' (defined in rbac_config.py)
 - Users with 'enquiry_management' module access can view/manage enquiries
-- ICT Admin role includes this module by default
+- Default and administrator roles include this module by default
 
 Special Access:
 - Listed users are granted enquiry_management access regardless of role
@@ -34,6 +34,7 @@ ENQUIRY_ADMIN_ROLES = [
     'super_admin',               # Level 1: Full system access
     'admin',                     # Level 2: General admin access  
     'ict_admin',                 # Level 2: ICT-specific admin access
+    'default',                   # Standard users: shared enquiry operations
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────

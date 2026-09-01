@@ -12,7 +12,6 @@ from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocum
 from .services.purchase_order_numbering import PurchaseOrderNumberService
 from .services.purchase_order_approvals import normalize_assignments, notify_assigned_approvers
 from .services.receipt_numbering import ReceiptNumberService
-from .services.requisition_numbering import RequisitionNumberService
 from .services.requisition_status import canonicalize_pr_status
 from .services.project_relationships import (
     resolve_enterprise_project_by_code,
@@ -149,6 +148,10 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = PurchaseRequisition
+        extra_kwargs = {
+            # Validation below is case-insensitive and excludes the edited draft.
+            'pr_number': {'validators': []},
+        }
         fields = [
             # Header Section (Fields 1-3)
             'id', 'pr_number', 'issued_by', 'issued_by_name', 'issued_date',
@@ -216,7 +219,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'id', 'pr_number', 'created_at', 'updated_at', 'attachments',
+            'id', 'created_at', 'updated_at', 'attachments',
             *PR_SERVER_CONTROLLED_FIELDS,
         ]
 
@@ -319,6 +322,20 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     def validate_items(self, value):
         return normalize_line_items(value)
 
+    def validate_pr_number(self, value):
+        """Persist procurement's manual PR number and reject duplicates."""
+        normalized = str(value or '').strip().upper()
+        if not normalized:
+            raise serializers.ValidationError('Enter the PR number manually.')
+
+        duplicates = PurchaseRequisition.objects.filter(pr_number__iexact=normalized)
+        if self.instance:
+            duplicates = duplicates.exclude(pk=self.instance.pk)
+        if duplicates.exists():
+            raise serializers.ValidationError('This PR number already exists.')
+
+        return normalized
+
     def validate_attachments_files(self, value):
         existing = self.instance.attachments if self.instance else []
         return validate_attachments(value, existing)
@@ -410,12 +427,6 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         if not validated_data.get('issued_date'):
             from datetime import date
             validated_data['issued_date'] = date.today()
-        
-        # Auto-generate PR number if not provided
-        if not validated_data.get('pr_number'):
-            validated_data['pr_number'] = RequisitionNumberService.next_number(
-                validated_data.get('requisition_type', 'project')
-            )
         
         # Auto-generate title from product_service if not provided
         if not validated_data.get('title') and validated_data.get('product_service'):

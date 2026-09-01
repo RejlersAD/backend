@@ -438,7 +438,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        query = PurchaseRequisition.objects.filter(pr_number=pr_number)
+        query = PurchaseRequisition.objects.filter(pr_number__iexact=pr_number)
         if pr_id:
             query = query.exclude(pk=pr_id)
         
