@@ -7,6 +7,7 @@ from apps.core.enquiry_workflow import (
 )
 from apps.core.models import Enquiry, EnquiryActivity, EnquiryFeedback, EnquiryMessage, EnquiryRoutingRule
 from apps.notifications.models import Notification
+from apps.rbac.models import Organization, UserProfile
 
 
 class EnquiryWorkflowTests(TestCase):
@@ -17,6 +18,11 @@ class EnquiryWorkflowTests(TestCase):
         )
         self.representative = User.objects.create_user(
             username='representative', email='representative@example.com', password='test-password',
+        )
+        organization = Organization.objects.create(name='Test Organization', code='TEST-ORG')
+        UserProfile.objects.create(
+            user=self.representative, organization=organization, status='active',
+            department='Finance', job_title='Head of Finance', employee_id='TEST-001',
         )
         EnquiryRoutingRule.objects.update_or_create(
             inquiry_type='finance_request',
@@ -96,6 +102,9 @@ class EnquiryWorkflowTests(TestCase):
         enquiry.save(update_fields=['approval_required', 'approval_status'])
         propose_resolution(enquiry, actor=self.representative, summary='Payment access restored.')
         confirm_resolution(enquiry, actor=self.requester, accepted=True)
+        enquiry.refresh_from_db()
+        self.assertEqual(enquiry.status, 'closed')
+        self.assertIsNotNone(enquiry.closed_at)
         submit_feedback(enquiry, actor=self.requester, rating=5, comment='Excellent support.')
 
         enquiry.refresh_from_db()

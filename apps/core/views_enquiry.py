@@ -14,16 +14,19 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from django.core.mail import EmailMultiAlternatives
+from django.http import FileResponse
 from django.template.loader import render_to_string
 from django.conf import settings
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
+from django.db import transaction
 from django.db.models import Case, Count, F, IntegerField, Q, When
 from django.db.models.functions import TruncMonth
 from django.contrib.auth import get_user_model
 import logging
+from pathlib import Path
 
-from apps.core.models import Enquiry, EnquiryActivity, EnquiryFeedback, EnquiryMessage, EnquiryRoutingRule
+from apps.core.models import Enquiry, EnquiryActivity, EnquiryAttachment, EnquiryFeedback, EnquiryMessage, EnquiryRoutingRule
 from apps.core.enquiry_workflow import (
     DEFAULT_ROUTING, add_initial_message, add_response, confirm_resolution, escalate_enquiry,
     normalize_inquiry_type, propose_resolution, route_enquiry, submit_feedback,
@@ -50,6 +53,12 @@ ENQUIRY_CONFIG = {
 # requests originate from /forgot-password where the user typically only
 # knows their email.
 ENQUIRY_SERVICES_WITHOUT_PHONE = {'password-reset', 'it_request'}
+ENQUIRY_MAX_ATTACHMENTS = 5
+ENQUIRY_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+ENQUIRY_ATTACHMENT_EXTENSIONS = {
+    '.png', '.jpg', '.jpeg', '.gif', '.webp',
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv', '.txt', '.ppt', '.pptx',
+}
 
 # Notification config — which services generate an admin notification, and
 # which notification template to use. Extend when new critical services
@@ -126,6 +135,7 @@ def submit_enquiry(request):
         service = data.get('service', '').strip()
         inquiry_type = normalize_inquiry_type(data.get('inquiry_type') or service)
         urgency = data.get('urgency', 'normal').strip()
+        attachments = request.FILES.getlist('attachments')
         
         # Validation
         errors = {}
@@ -143,6 +153,15 @@ def submit_enquiry(request):
             errors['message'] = 'Message is required'
         elif len(message) < 10:
             errors['message'] = 'Message must be at least 10 characters'
+        if len(attachments) > ENQUIRY_MAX_ATTACHMENTS:
+            errors['attachments'] = f'Maximum {ENQUIRY_MAX_ATTACHMENTS} attachments are allowed.'
+        for attachment in attachments:
+            if attachment.size > ENQUIRY_MAX_ATTACHMENT_BYTES:
+                errors['attachments'] = f'{attachment.name} exceeds the 10 MB file limit.'
+                break
+            if Path(attachment.name).suffix.lower() not in ENQUIRY_ATTACHMENT_EXTENSIONS:
+                errors['attachments'] = f'{attachment.name} is not a supported image or document.'
+                break
         
         if errors:
             return Response({
@@ -155,24 +174,36 @@ def submit_enquiry(request):
         enquiry_obj = None
         if ENQUIRY_CONFIG.get('save_to_database', True):
             try:
-                enquiry_obj = Enquiry.objects.create(
-                    name=name,
-                    email=email,
-                    phone=phone,
-                    company=company,
-                    subject=subject,
-                    message=message,
-                    service=service,
-                    inquiry_type=inquiry_type,
-                    urgency=urgency if urgency in dict(Enquiry.URGENCY_CHOICES) else 'normal',
-                    requester=request.user if request.user.is_authenticated else None,
-                    source_ip=(request.META.get('HTTP_X_FORWARDED_FOR') or request.META.get('REMOTE_ADDR') or '').split(',')[0].strip() or None,
-                    user_agent=(request.META.get('HTTP_USER_AGENT') or '')[:400],
-                )
-                add_initial_message(enquiry_obj)
-                route_enquiry(enquiry_obj)
+                with transaction.atomic():
+                    enquiry_obj = Enquiry.objects.create(
+                        name=name,
+                        email=email,
+                        phone=phone,
+                        company=company,
+                        subject=subject,
+                        message=message,
+                        service=service,
+                        inquiry_type=inquiry_type,
+                        urgency=urgency if urgency in dict(Enquiry.URGENCY_CHOICES) else 'normal',
+                        requester=request.user if request.user.is_authenticated else None,
+                        source_ip=(request.META.get('HTTP_X_FORWARDED_FOR') or request.META.get('REMOTE_ADDR') or '').split(',')[0].strip() or None,
+                        user_agent=(request.META.get('HTTP_USER_AGENT') or '')[:400],
+                    )
+                    add_initial_message(enquiry_obj)
+                    route_enquiry(enquiry_obj)
+                    for attachment in attachments:
+                        EnquiryAttachment.objects.create(
+                            enquiry=enquiry_obj, file=attachment,
+                            original_name=Path(attachment.name).name[:255],
+                            content_type=(attachment.content_type or '')[:120], size=attachment.size,
+                            uploaded_by=request.user if request.user.is_authenticated else None,
+                        )
             except Exception as db_err:
-                logger.error(f'Enquiry DB persist failed (continuing with email): {db_err}')
+                logger.exception('Enquiry DB persistence failed')
+                return Response({
+                    'success': False,
+                    'message': 'Could not save the request. Please retry in a moment.',
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Notify administrators via in-app notification (soft-coded per service)
         # For password-reset requests this is critical since SMTP may be down;
@@ -520,6 +551,7 @@ def _serialize_enquiry(e: Enquiry, *, detail=False, include_internal=False) -> d
         'user_agent':  e.user_agent,
         'created_at':  e.created_at.isoformat() if e.created_at else None,
         'updated_at':  e.updated_at.isoformat() if e.updated_at else None,
+        'attachment_count': e.attachments.count(),
     }
     if detail:
         try:
@@ -543,6 +575,17 @@ def _serialize_enquiry(e: Enquiry, *, detail=False, include_internal=False) -> d
                 'created_at': message.created_at.isoformat(),
             }
             for message in messages
+        ]
+        payload['attachments'] = [
+            {
+                'id': attachment.pk,
+                'name': attachment.original_name,
+                'content_type': attachment.content_type,
+                'size': attachment.size,
+                'url': f'/api/v1/enquiry/{e.pk}/attachments/{attachment.pk}/',
+                'created_at': attachment.created_at.isoformat(),
+            }
+            for attachment in e.attachments.all()
         ]
         if include_internal:
             payload['activities'] = [
@@ -890,6 +933,23 @@ def my_enquiry_feedback(request, pk: int):
     return Response({'success': True, 'enquiry': _serialize_enquiry(enquiry, detail=True)})
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def enquiry_attachment_download(request, pk: int, attachment_id: int):
+    if _can_manage_enquiries(request.user):
+        enquiry = get_object_or_404(_managed_queryset(request.user), pk=pk)
+    else:
+        enquiry = get_object_or_404(
+            Enquiry.objects.filter(Q(assigned_to=request.user) | Q(requester=request.user) | Q(requester__isnull=True, email__iexact=request.user.email)).distinct(),
+            pk=pk,
+        )
+    attachment = get_object_or_404(enquiry.attachments.all(), pk=attachment_id)
+    return FileResponse(
+        attachment.file.open('rb'), as_attachment=True,
+        filename=attachment.original_name, content_type=attachment.content_type or 'application/octet-stream',
+    )
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
 def public_enquiry_feedback(request, token):
@@ -906,6 +966,11 @@ def public_enquiry_feedback(request, token):
     if not accepted:
         enquiry.refresh_from_db()
         return Response({'success': True, 'status': enquiry.status})
+    enquiry.refresh_from_db()
+    # Resolution confirmation closes the ticket first. External requesters can
+    # then submit feedback as a separate step on the same tokenized page.
+    if request.data.get('rating') in (None, ''):
+        return Response({'success': True, 'status': enquiry.status, 'feedback_required': True})
     try:
         submit_feedback(
             enquiry, rating=request.data.get('rating'), comment=request.data.get('comment'),
@@ -937,28 +1002,20 @@ def enquiry_options(request):
 def enquiry_representatives(request):
     if not _can_manage_enquiries(request.user):
         return Response({'detail': 'Enquiry management access is required.'}, status=status.HTTP_403_FORBIDDEN)
-    from apps.core.config.enquiry_access_config import (
-        ENQUIRY_ADMIN_ROLES, ENQUIRY_MODULE_CODE, ENQUIRY_SPECIAL_ACCESS_USERS,
-    )
-    users = get_user_model().objects.filter(is_active=True).filter(
-        Q(is_superuser=True) |
-        Q(email__in=ENQUIRY_SPECIAL_ACCESS_USERS) |
-        Q(
-            rbac_profile__is_deleted=False,
-            rbac_profile__status='active',
-            rbac_profile__userrole__role__is_active=True,
-            rbac_profile__userrole__role__code__in=ENQUIRY_ADMIN_ROLES,
-        ) |
-        Q(
-            rbac_profile__is_deleted=False,
-            rbac_profile__status='active',
-            rbac_profile__userrole__role__is_active=True,
-            rbac_profile__userrole__role__modules__is_active=True,
-            rbac_profile__userrole__role__modules__code=ENQUIRY_MODULE_CODE,
-        )
+    # Manual assignment is intentionally broader than automatic routing: an
+    # authorised enquiry admin can select any active RADAI employee.
+    users = get_user_model().objects.filter(
+        is_active=True,
+        rbac_profile__is_deleted=False,
+        rbac_profile__status='active',
     ).select_related('rbac_profile').distinct().order_by('first_name', 'last_name', 'username')
     return Response({'results': [
-        {**_user_summary(user), 'department': getattr(getattr(user, 'rbac_profile', None), 'department', '')}
+        {
+            **_user_summary(user),
+            'department': user.rbac_profile.department,
+            'job_title': user.rbac_profile.job_title,
+            'employee_id': user.rbac_profile.employee_id,
+        }
         for user in users
     ]})
 
