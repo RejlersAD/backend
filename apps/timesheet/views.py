@@ -403,6 +403,37 @@ def user_drill(request):
 # ─────────────────────────────────────────────────────────────────────────────
 # Self-Service: My Attendance (auto-scoped to current user)
 # ─────────────────────────────────────────────────────────────────────────────
+def _find_self_service_row(rows, profile, user):
+    """Match an attendance row using every identity added by enrichment.
+
+    Biometric employee codes can differ from the RBAC employee ID. Report rows
+    are enriched with ``radai_user_id``/``radai_email`` specifically to bridge
+    that gap, so self-service must consider those fields too.
+    """
+    user_id = str(getattr(user, 'id', '') or '').strip().lower()
+    employee_code = str(getattr(profile, 'employee_id', '') or '').strip().lower()
+    email = str(getattr(user, 'email', '') or '').strip().lower()
+
+    for row in rows or []:
+        row_user_id = str(row.get('radai_user_id') or '').strip().lower()
+        row_codes = {
+            str(row.get('employee_code') or '').strip().lower(),
+            str(row.get('code') or '').strip().lower(),
+        } - {''}
+        row_emails = {
+            str(row.get('email') or '').strip().lower(),
+            str(row.get('employee_email') or '').strip().lower(),
+            str(row.get('radai_email') or '').strip().lower(),
+        } - {''}
+        if (
+            (user_id and row_user_id == user_id) or
+            (employee_code and employee_code in row_codes) or
+            (email and email in row_emails)
+        ):
+            return row
+    return None
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def my_live_attendance(request):
@@ -522,25 +553,7 @@ def my_monthly_attendance(request):
         rows = monthly_data.get('rows', [])
         working_days = monthly_data.get('working_days_in_month')
         
-        # Find current user's row
-        user_data = None
-        if employee_code:
-            code_lower = employee_code.lower()
-            user_data = next(
-                (r for r in rows 
-                 if str(r.get('employee_code', '')).lower() == code_lower or
-                    str(r.get('code', '')).lower() == code_lower),
-                None
-            )
-        
-        # Fallback to email match if code didn't work
-        if not user_data and email:
-            email_lower = email.lower()
-            user_data = next(
-                (r for r in rows 
-                 if str(r.get('email', '')).lower() == email_lower),
-                None
-            )
+        user_data = _find_self_service_row(rows, p, request.user)
         
         # Enrich with working_days if found
         if user_data and working_days:
@@ -609,25 +622,7 @@ def my_daily_attendance(request):
         daily_data = _svc().daily_report(date_str)
         rows = daily_data.get('rows', [])
         
-        # Find current user's row
-        user_data = None
-        if employee_code:
-            code_lower = employee_code.lower()
-            user_data = next(
-                (r for r in rows 
-                 if str(r.get('employee_code', '')).lower() == code_lower or
-                    str(r.get('code', '')).lower() == code_lower),
-                None
-            )
-        
-        # Fallback to email match
-        if not user_data and email:
-            email_lower = email.lower()
-            user_data = next(
-                (r for r in rows 
-                 if str(r.get('email', '')).lower() == email_lower),
-                None
-            )
+        user_data = _find_self_service_row(rows, p, request.user)
         
         return Response({
             'configured': True,

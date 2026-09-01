@@ -323,7 +323,8 @@ SUCCESS_MESSAGES = {
 #   ❌ 6. Procurement  
 #   ❌ 7. QHSE
 #   ❌ 8. AI/ML (Sales)
-#   ❌ 9. Admin
+#   ✅ 9.6 Enquiry Management (shared operational access)
+#   ❌ Other Admin modules
 # 
 # To add/remove modules: edit this list, then run: python manage.py sync_default_role
 # ─────────────────────────────────────────────────────────────────────────────
@@ -356,6 +357,7 @@ DEFAULT_ROLE_MODULES = [
     'designiq',
     'data_mining',
     'hr_self_service',  # SOFT-CODED: My Profile (moved to COMMON section 2.5) — always accessible
+    'enquiry_management',  # Shared enquiry register for every authenticated Default user
 ]
 
 ENGINEERING_SECTION_MODULES = [

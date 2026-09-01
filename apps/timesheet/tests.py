@@ -12,6 +12,7 @@ from . import config, get_service, mirror_services, services
 from .manual_import import _hours, _parse, _time
 from .models import DailyAttendanceSummary, TimesheetEvent, TimesheetMirrorHeartbeat
 from .services import _backfill_email_from_matrix_name
+from .views import _find_self_service_row
 from scripts import timesheet_mirror_sync
 
 
@@ -37,6 +38,26 @@ class ServiceSelectionTests(SimpleTestCase):
             patch.object(config, 'SQLSERVER', empty_sql),
         ):
             self.assertTrue(config.is_configured())
+
+
+class SelfServiceIdentityTests(SimpleTestCase):
+    def test_matches_enriched_biometric_row_by_radai_user_id(self):
+        user = SimpleNamespace(id='user-123', email='employee@example.com')
+        profile = SimpleNamespace(employee_id='23022')
+        rows = [{
+            'employee_code': 'BIO-991',
+            'radai_user_id': 'user-123',
+            'radai_email': 'employee@example.com',
+        }]
+
+        self.assertIs(_find_self_service_row(rows, profile, user), rows[0])
+
+    def test_matching_normalizes_code_and_email_whitespace(self):
+        user = SimpleNamespace(id='user-456', email=' Employee@Example.com ')
+        profile = SimpleNamespace(employee_id=' 23022 ')
+        rows = [{'employee_code': '23022', 'email': 'employee@example.com'}]
+
+        self.assertIs(_find_self_service_row(rows, profile, user), rows[0])
 
 
 class BiometricHoursTests(SimpleTestCase):
