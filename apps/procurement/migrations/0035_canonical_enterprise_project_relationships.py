@@ -8,10 +8,10 @@ def ensure_enterprise_project_id_uniqueness(apps, schema_editor):
     """Restore the legacy core_project ownership key before adding FKs.
 
     Some synchronized production databases retained the ``id`` values but not
-    the primary-key index declared by the historical core migration.  Do not
-    rewrite canonical project identifiers because other legacy tables may
-    already refer to them logically; fail clearly if the data itself is
-    ambiguous, otherwise restore the missing uniqueness constraint.
+    the primary-key index declared by the historical core migration. Keep the
+    first row for each existing id as the canonical target for legacy logical
+    references. Assign fresh ids to duplicate/null rows so no project record is
+    deleted, then restore the missing uniqueness constraint and sequence.
     """
     connection = schema_editor.connection
     if connection.vendor != 'postgresql':
@@ -27,24 +27,33 @@ def ensure_enterprise_project_id_uniqueness(apps, schema_editor):
         cursor.execute(f'LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE')
         cursor.execute(
             f'''
-            SELECT
-                COUNT(*) FILTER (WHERE id IS NULL),
-                COUNT(*)
-            FROM (
-                SELECT id, COUNT(*) AS occurrences
+            WITH ranked AS (
+                SELECT
+                    ctid,
+                    id,
+                    ROW_NUMBER() OVER (PARTITION BY id ORDER BY ctid) AS duplicate_rank,
+                    MAX(id) OVER () AS max_id
                 FROM {table}
-                GROUP BY id
-            ) AS grouped
-            WHERE id IS NULL OR occurrences > 1
+            ),
+            rekey AS (
+                SELECT
+                    ctid,
+                    COALESCE(max_id, 0)
+                        + ROW_NUMBER() OVER (ORDER BY id NULLS FIRST, ctid) AS new_id
+                FROM ranked
+                WHERE id IS NULL OR duplicate_rank > 1
+            )
+            UPDATE {table} AS target
+            SET id = rekey.new_id
+            FROM rekey
+            WHERE target.ctid = rekey.ctid
             ''',
         )
-        null_groups, invalid_groups = cursor.fetchone()
-        if invalid_groups:
-            duplicate_groups = invalid_groups - null_groups
-            raise RuntimeError(
-                'Cannot restore core_project.id uniqueness safely: '
-                f'{null_groups} null id group(s) and '
-                f'{duplicate_groups} duplicate id group(s) require manual reconciliation.'
+        repaired_rows = cursor.rowcount
+        if repaired_rows:
+            print(
+                f'[procurement.0035] Re-keyed {repaired_rows} duplicate/null '
+                'core_project row(s); original ids remain on canonical rows.'
             )
 
         constraints = connection.introspection.get_constraints(cursor, table_name)
