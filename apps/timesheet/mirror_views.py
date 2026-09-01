@@ -35,10 +35,31 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from . import config as ts_config
-from .models import TimesheetEvent, BiometricUserMaster
+from .models import TimesheetEvent, TimesheetMirrorHeartbeat, BiometricUserMaster
 from .identity import norm_code, norm_email, norm_name
 
 logger = logging.getLogger(__name__)
+
+
+def _authenticate_mirror(request):
+    key_header = request.META.get('HTTP_X_TIMESHEET_MIRROR_KEY', '')
+    expected = ts_config.MIRROR_API_KEY or ''
+    if not expected:
+        return Response({'error': 'mirror ingest disabled (no key configured)'},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    if not secrets.compare_digest(key_header, expected):
+        return Response({'error': 'invalid mirror key'}, status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
+def _record_heartbeat(last_event_time=None):
+    defaults = {'last_seen_at': timezone.now()}
+    if last_event_time is not None:
+        defaults['last_event_time'] = last_event_time
+    TimesheetMirrorHeartbeat.objects.update_or_create(
+        key='default',
+        defaults=defaults,
+    )
 
 
 def _apply_ingest_tz(dt_naive: datetime) -> datetime:
@@ -143,13 +164,9 @@ def _bulk_upsert_user_masters(master_values: dict[str, dict[str, str]]) -> None:
 @permission_classes([AllowAny])
 def ingest_events(request):
     """Accept a batch of biometric events and upsert by `source_event_id`."""
-    key_header = request.META.get('HTTP_X_TIMESHEET_MIRROR_KEY', '')
-    expected = ts_config.MIRROR_API_KEY or ''
-    if not expected:
-        return Response({'error': 'mirror ingest disabled (no key configured)'},
-                        status=status.HTTP_503_SERVICE_UNAVAILABLE)
-    if not secrets.compare_digest(key_header, expected):
-        return Response({'error': 'invalid mirror key'}, status=status.HTTP_403_FORBIDDEN)
+    auth_error = _authenticate_mirror(request)
+    if auth_error is not None:
+        return auth_error
 
     payload = request.data if isinstance(request.data, dict) else {}
     events = payload.get('events') or []
@@ -261,6 +278,12 @@ def ingest_events(request):
         except Exception as exc:
             logger.warning('[timesheet.ingest] summary recompute failed: %s', exc)
 
+    latest_received = max(
+        (item['event_time'] for item in summary_events.values()),
+        default=None,
+    )
+    _record_heartbeat(latest_received)
+
     return Response({
         'received': len(events),
         'inserted': inserted,
@@ -269,6 +292,21 @@ def ingest_events(request):
         'skipped':  skipped,
         'errors':   errors,
     })
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def heartbeat(request):
+    """Record agent liveness independently of employee punch activity."""
+    auth_error = _authenticate_mirror(request)
+    if auth_error is not None:
+        return auth_error
+    latest_event_time = _parse_event_time(
+        (request.data if isinstance(request.data, dict) else {}).get('latest_event_time')
+    )
+    _record_heartbeat(latest_event_time)
+    return Response({'ok': True, 'received_at': timezone.now().isoformat()})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
