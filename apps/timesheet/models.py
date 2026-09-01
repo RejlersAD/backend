@@ -49,6 +49,22 @@ class TimesheetEvent(models.Model):
         super().save(*args, **kwargs)
 
 
+class TimesheetMirrorHeartbeat(models.Model):
+    """Persisted liveness signal from the office-side mirror agent.
+
+    Punch timestamps describe employee activity, not whether the agent is
+    running.  This singleton row is refreshed after every successful agent
+    cycle, including cycles where SQL Server has no new punch events.
+    """
+
+    key = models.CharField(max_length=32, primary_key=True, default='default')
+    last_seen_at = models.DateTimeField()
+    last_event_time = models.DateTimeField(blank=True, null=True)
+
+    def __str__(self):
+        return f'{self.key} @ {self.last_seen_at:%Y-%m-%d %H:%M}'
+
+
 class BiometricUserMaster(models.Model):
     """Postgres mirror of the Matrix `Mx_VEW_UserDetails` user-master view.
 

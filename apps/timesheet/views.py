@@ -33,7 +33,7 @@ from . import config as ts_config
 from . import discovery as ts_discovery
 from . import exports as ts_exports
 from . import sqlserver as ts_sql
-from .mirror_views import ingest_events, ingest_users  # re-exported via urls.py
+from .mirror_views import heartbeat, ingest_events, ingest_users  # re-exported via urls.py
 from .manual_import import import_daily_attendance
 from .sqlserver import TimesheetConnectionError, TimesheetDriverError
 
@@ -875,7 +875,7 @@ def sync_health_status(request):
             'enabled': bool,             // Is monitoring enabled?
             'data_source': str,          // 'mirror' or 'sqlserver'
             'healthy': bool,             // Is sync data fresh?
-            'last_sync': str|null,       // ISO timestamp of last synced event
+            'last_sync': str|null,       // ISO timestamp of last agent heartbeat
             'data_age_hours': float|null,// Hours since last sync
             'threshold_hours': float,    // Configured stale threshold
             'message': str,              // Human-readable status

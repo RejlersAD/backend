@@ -18,7 +18,10 @@ from django.db.models import Max, Min, Q
 from django.utils import timezone
 
 from . import config as ts_config
-from .models import TimesheetEvent, BiometricUserMaster, DailyAttendanceSummary
+from .models import (
+    TimesheetEvent, TimesheetMirrorHeartbeat, BiometricUserMaster,
+    DailyAttendanceSummary,
+)
 from .identity import norm_code as _norm_emp_code, norm_email as _norm_emp_email, norm_name as _norm_emp_name
 from .services import (
     _enrich_with_rad_users, _backfill_email_from_matrix_name,
@@ -892,18 +895,25 @@ def live_status() -> dict:
     qs = TimesheetEvent.objects.filter(event_time__gte=cutoff)
     windowed_count = qs.count()
     
-    # Soft-coded stale data detection: if DB has events but rolling window is
-    # empty, calculate sync age to help diagnose sync agent failures
-    sync_age_hours = None
+    # Employee activity and agent liveness are separate signals. A quiet night
+    # can make the newest punch old while a healthy agent continues polling.
+    event_age_hours = None
     if total_events > 0 and windowed_count == 0 and latest_event_time:
-        sync_age_hours = (timezone.now() - latest_event_time).total_seconds() / 3600
+        event_age_hours = (timezone.now() - latest_event_time).total_seconds() / 3600
+    heartbeat = TimesheetMirrorHeartbeat.objects.filter(key='default').first()
+    heartbeat_age_hours = None
+    if heartbeat:
+        heartbeat_age_hours = (
+            timezone.now() - heartbeat.last_seen_at
+        ).total_seconds() / 3600
     
     logger.info(
         '[mirror_services.live_status] Events in time window: %d (total in DB: %d), '
-        'sync_age_hours: %s',
+        'event_age_hours: %s, heartbeat_age_hours: %s',
         windowed_count,
         total_events,
-        f'{sync_age_hours:.1f}' if sync_age_hours else 'N/A'
+        f'{event_age_hours:.1f}' if event_age_hours is not None else 'N/A',
+        f'{heartbeat_age_hours:.1f}' if heartbeat_age_hours is not None else 'N/A',
     )
 
     # Latest punch per employee_code
@@ -998,15 +1008,22 @@ def live_status() -> dict:
         'window_from': cutoff.isoformat(),
     }
     
-    # Add stale data diagnostics when needed
+    # Add attendance recency and independent agent-liveness diagnostics.
     if total_events > 0:
         result['mirror_total_events'] = total_events
         if latest_event_time:
             result['mirror_latest_event'] = latest_event_time.isoformat()
-            if sync_age_hours and sync_age_hours > lookback_hours:
-                result['sync_stale'] = True
-                result['sync_age_hours'] = round(sync_age_hours, 1)
-                result['sync_age_days'] = round(sync_age_hours / 24, 1)
+            if event_age_hours is not None:
+                result['event_age_hours'] = round(event_age_hours, 1)
+                result['event_age_days'] = round(event_age_hours / 24, 1)
+    if heartbeat:
+        from .monitor import STALE_THRESHOLD_HOURS
+        result['mirror_last_heartbeat'] = heartbeat.last_seen_at.isoformat()
+        result['sync_age_hours'] = round(heartbeat_age_hours, 1)
+        result['sync_age_days'] = round(heartbeat_age_hours / 24, 1)
+        result['sync_stale'] = heartbeat_age_hours > STALE_THRESHOLD_HOURS
+    else:
+        result['sync_status_unknown'] = True
     
     return result
 

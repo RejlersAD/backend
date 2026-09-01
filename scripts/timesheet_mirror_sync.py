@@ -383,6 +383,26 @@ def check_connections(hours: int) -> None:
     LOG.info("Production mirror authentication passed: %s", url)
 
 
+def post_heartbeat(events: list[dict], dry_run: bool = False) -> None:
+    """Tell production the agent completed a cycle, even with no new punches."""
+    if dry_run:
+        return
+    latest_event_time = max(
+        (event.get('event_time') for event in events if event.get('event_time')),
+        default=None,
+    )
+    api_key = env_first("TIMESHEET_MIRROR_API_KEY")
+    if not api_key:
+        raise RuntimeError("TIMESHEET_MIRROR_API_KEY must be configured")
+    response = requests.post(
+        f"{mirror_base_url()}/mirror/heartbeat/",
+        json={"latest_event_time": latest_event_time},
+        headers={"X-Timesheet-Mirror-Key": api_key},
+        timeout=int(env_first("TIMESHEET_MIRROR_HTTP_TIMEOUT", default="60")),
+    )
+    response.raise_for_status()
+
+
 def sync_once(
     args: argparse.Namespace,
     *,
@@ -407,6 +427,7 @@ def sync_once(
         )
     totals = post_batches("mirror/ingest", "events", pending, args.batch_size, args.dry_run)
     LOG.info("Attendance sync complete: %s", totals)
+    post_heartbeat(events, args.dry_run)
     return events
 
 

@@ -10,7 +10,7 @@ from rest_framework.test import APIClient
 
 from . import config, get_service, mirror_services, services
 from .manual_import import _hours, _parse, _time
-from .models import DailyAttendanceSummary, TimesheetEvent
+from .models import DailyAttendanceSummary, TimesheetEvent, TimesheetMirrorHeartbeat
 from .services import _backfill_email_from_matrix_name
 from scripts import timesheet_mirror_sync
 
@@ -197,6 +197,20 @@ class SyncAgentEventTypeTests(SimpleTestCase):
 
         post_batches.assert_not_called()
 
+    def test_successful_empty_cycle_still_posts_heartbeat(self):
+        args = SimpleNamespace(
+            users=False, hours=48, full=False, batch_size=100, dry_run=False,
+            max_events_per_run=1000, allow_large_replay=False,
+        )
+        with (
+            patch.object(timesheet_mirror_sync, 'fetch_events', return_value=[]),
+            patch.object(timesheet_mirror_sync, 'post_batches', return_value={}),
+            patch.object(timesheet_mirror_sync, 'post_heartbeat') as heartbeat,
+        ):
+            timesheet_mirror_sync.sync_once(args, seen_event_ids=set())
+
+        heartbeat.assert_called_once_with([], False)
+
 
 class ManualAttendanceParsingTests(SimpleTestCase):
     def test_cosec_duration_is_converted_to_decimal_hours(self):
@@ -322,6 +336,37 @@ class BiometricMirrorIntegrationTests(TestCase):
             employee_code='E001', date=date(2026, 8, 20), source='biometric'
         )
         self.assertEqual(summary.effective_hours, 9.0)
+
+    def test_heartbeat_records_agent_liveness_without_events(self):
+        with patch.object(config, 'MIRROR_API_KEY', 'test-key'):
+            response = self.client.post(
+                reverse('timesheet:mirror-heartbeat'), {}, format='json',
+                HTTP_X_TIMESHEET_MIRROR_KEY='test-key',
+            )
+
+        self.assertEqual(response.status_code, 200)
+        heartbeat = TimesheetMirrorHeartbeat.objects.get(key='default')
+        self.assertIsNotNone(heartbeat.last_seen_at)
+
+    def test_old_punch_does_not_mark_a_recent_heartbeat_stale(self):
+        TimesheetEvent.objects.create(
+            source_event_id='old-event', employee_code='E099',
+            event_time=datetime(2026, 8, 1, 8, 0, tzinfo=timezone.utc),
+            event_type='IN',
+        )
+        TimesheetMirrorHeartbeat.objects.create(
+            key='default', last_seen_at=datetime.now(tz=timezone.utc),
+        )
+        identity = lambda rows: rows
+        with (
+            patch.object(mirror_services, '_enrich_from_user_master_mirror', side_effect=identity),
+            patch.object(mirror_services, '_enrich_with_rad_users', side_effect=identity),
+            patch.object(mirror_services, '_backfill_email_from_matrix_name', side_effect=identity),
+        ):
+            report = mirror_services.live_status()
+
+        self.assertFalse(report['sync_stale'])
+        self.assertGreater(report['event_age_hours'], report['lookback_hours'])
 
     def test_biometric_monthly_report_excludes_manual_row(self):
         DailyAttendanceSummary.objects.create(

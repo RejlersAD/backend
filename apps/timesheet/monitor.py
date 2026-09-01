@@ -5,7 +5,7 @@ Monitors the office-side sync agent health and sends alerts when data becomes st
 
 Design:
 - Celery Beat task runs every 15 minutes
-- Checks TimesheetEvent table for last sync timestamp
+- Checks the persisted agent heartbeat timestamp
 - If data age exceeds threshold (soft-coded, default 2 hours), sends alert
 - Integrates with apps.notifications for email/in-app notifications
 - Logs all health checks for troubleshooting
@@ -98,14 +98,12 @@ def _get_alert_recipients() -> list[str]:
 
 
 def _get_last_sync_time() -> datetime | None:
-    """Query TimesheetEvent table for the most recent event timestamp."""
+    """Return the agent heartbeat, not the newest employee punch time."""
     try:
-        from .models import TimesheetEvent
+        from .models import TimesheetMirrorHeartbeat
         
-        latest_event = TimesheetEvent.objects.order_by('-event_time').first()
-        if latest_event:
-            return latest_event.event_time
-        return None
+        heartbeat = TimesheetMirrorHeartbeat.objects.filter(key='default').first()
+        return heartbeat.last_seen_at if heartbeat else None
     except Exception as e:
         logger.error(f'Failed to query last sync time: {e}')
         return None
@@ -297,7 +295,7 @@ def check_sync_health() -> Dict[str, Any]:
     Returns:
         dict: Status dictionary containing:
             - healthy (bool): True if sync is recent, False if stale
-            - last_sync (datetime|None): Timestamp of last synced event
+            - last_sync (datetime|None): Timestamp of last agent heartbeat
             - data_age_hours (float|None): Hours since last sync
             - threshold_hours (float): Configured stale threshold
             - alert_sent (bool): True if alert was triggered this check
@@ -321,7 +319,7 @@ def check_sync_health() -> Dict[str, Any]:
     
     # No events ever synced
     if not last_sync:
-        status['message'] = 'No events have been synced yet. Sync agent needs initial run.'
+        status['message'] = 'No agent heartbeat has been received yet. Update and start the sync agent.'
         status['healthy'] = False
         
         # Send alert if we should
