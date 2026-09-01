@@ -1,5 +1,6 @@
 """Routing, notifications, and lifecycle operations for enquiries."""
 from datetime import timedelta
+import re
 
 from django.db import transaction
 from django.db.models import Count
@@ -37,23 +38,42 @@ def normalize_inquiry_type(value):
     return value if value in dict(Enquiry.TYPE_CHOICES) else 'other'
 
 
+def _normalise_words(value):
+    return set(re.findall(r'[a-z0-9]+', str(value or '').lower()))
+
+
+def _is_department_head(profile):
+    """Return True only for an explicitly identifiable department/discipline head."""
+    metadata = profile.metadata or {}
+    explicit_flags = (
+        metadata.get('is_department_head'), metadata.get('is_discipline_head'),
+        metadata.get('department_head'), metadata.get('discipline_head'),
+    )
+    if any(value is True or str(value).strip().lower() in {'1', 'true', 'yes'} for value in explicit_flags):
+        return True
+    return bool(re.search(r'\bhead\b', profile.job_title or '', flags=re.IGNORECASE))
+
+
+def _profile_matches_department(profile, department):
+    target = _normalise_words(department)
+    # These generic words cannot identify an organisational owner on their own.
+    target -= {'and', 'the', 'of', 'service', 'services', 'management', 'department'}
+    if not target:
+        target = _normalise_words(department)
+    searchable = _normalise_words(f'{profile.department} {profile.job_title}')
+    return bool(target & searchable)
+
+
 def _manager_candidates(department):
-    from apps.core.config.enquiry_access_config import user_has_enquiry_access
     from apps.rbac.models import UserProfile
 
     profiles = list(UserProfile.objects.select_related('user').filter(
         is_deleted=False, status='active', user__is_active=True,
     ))
-    department_words = [word.lower() for word in department.replace('/', ' ').split() if len(word) > 2]
-    department_profiles = [
+    eligible = [
         profile for profile in profiles
-        if any(word in (profile.department or '').lower() for word in department_words)
+        if _is_department_head(profile) and _profile_matches_department(profile, department)
     ]
-    eligible = [profile for profile in department_profiles if user_has_enquiry_access(profile.user)]
-    # A central 9.6 representative is the safe fallback when a department has
-    # not yet configured its own representative. This keeps every request owned.
-    if not eligible:
-        eligible = [profile for profile in profiles if user_has_enquiry_access(profile.user)]
     users = [profile.user for profile in eligible]
     workload = dict(
         Enquiry.objects.filter(assigned_to_id__in=[user.pk for user in users]).exclude(
@@ -91,7 +111,7 @@ def _notify(user, *, title, message, action_url, priority='NORMAL', metadata=Non
 
 @transaction.atomic
 def route_enquiry(enquiry, *, actor=None):
-    rule = EnquiryRoutingRule.objects.select_related('representative').filter(
+    rule = EnquiryRoutingRule.objects.select_related('representative', 'representative__rbac_profile').filter(
         inquiry_type=enquiry.inquiry_type, is_active=True,
     ).first()
     department, sla_hours = DEFAULT_ROUTING.get(enquiry.inquiry_type, DEFAULT_ROUTING['other'])
@@ -99,7 +119,9 @@ def route_enquiry(enquiry, *, actor=None):
     if rule:
         department, sla_hours = rule.department, rule.sla_hours
         if rule.representative and rule.representative.is_active:
-            representative = rule.representative
+            profile = getattr(rule.representative, 'rbac_profile', None)
+            if profile and _is_department_head(profile) and _profile_matches_department(profile, department):
+                representative = rule.representative
     if representative is None:
         candidates = _manager_candidates(department)
         representative = candidates[0] if candidates else None
@@ -119,7 +141,8 @@ def route_enquiry(enquiry, *, actor=None):
     EnquiryActivity.objects.create(
         enquiry=enquiry, actor=enquiry.assigned_by, action='auto_routed',
         details={'department': department, 'representative_id': representative.pk if representative else None,
-                 'sla_hours': sla_hours},
+                 'sla_hours': sla_hours,
+                 'assignment_strategy': 'department_head' if representative else 'unassigned_no_department_head'},
     )
     if representative:
         _notify(
@@ -240,10 +263,14 @@ def propose_resolution(enquiry, *, actor, summary):
 def confirm_resolution(enquiry, *, actor=None, accepted=True, comment=''):
     now = timezone.now()
     if accepted:
-        enquiry.status = 'resolved'
+        # User confirmation completes the service lifecycle and closes the
+        # ticket. Feedback is collected after closure as a separate reporting
+        # step and must never be required in order to close the request.
+        enquiry.status = 'closed'
         enquiry.resolved_at = now
         enquiry.resolution_confirmed_at = now
-        action = 'resolution_confirmed'
+        enquiry.closed_at = now
+        action = 'resolution_confirmed_and_closed'
     else:
         enquiry.status = 'reopened'
         enquiry.resolved_at = None
@@ -254,7 +281,7 @@ def confirm_resolution(enquiry, *, actor=None, accepted=True, comment=''):
         action = 'resolution_rejected'
     enquiry.save(update_fields=[
         'status', 'resolved_at', 'resolution_confirmed_at', 'escalation_level',
-        'escalated_at', 'escalation_reason', 'updated_at',
+        'escalated_at', 'escalation_reason', 'closed_at', 'updated_at',
     ])
     EnquiryActivity.objects.create(
         enquiry=enquiry, actor=actor, action=action, details={'comment': str(comment or '')},

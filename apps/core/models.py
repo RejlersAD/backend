@@ -5,6 +5,8 @@ Smart reusable model patterns.
 from django.db import models
 from django.utils import timezone
 from django.conf import settings
+from django.utils.text import get_valid_filename
+from pathlib import Path
 import uuid
 
 
@@ -195,6 +197,29 @@ class EnquiryMessage(TimeStampedModel):
     sender_type = models.CharField(max_length=20, choices=SENDER_CHOICES)
     body = models.TextField()
     is_internal = models.BooleanField(default=False, db_index=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+
+
+def enquiry_attachment_upload_to(instance, filename):
+    """Store ticket files under an isolated, non-colliding path."""
+    safe_name = get_valid_filename(Path(filename).name) or 'attachment'
+    return f'enquiry_attachments/{instance.enquiry_id}/{uuid.uuid4().hex}_{safe_name}'
+
+
+class EnquiryAttachment(TimeStampedModel):
+    """Optional image or document supplied with an enquiry."""
+
+    enquiry = models.ForeignKey(Enquiry, on_delete=models.CASCADE, related_name='attachments')
+    file = models.FileField(upload_to=enquiry_attachment_upload_to, max_length=500)
+    original_name = models.CharField(max_length=255)
+    content_type = models.CharField(max_length=120, blank=True, default='')
+    size = models.PositiveBigIntegerField(default=0)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='enquiry_attachments',
+    )
 
     class Meta:
         ordering = ['created_at', 'id']

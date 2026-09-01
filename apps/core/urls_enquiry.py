@@ -19,6 +19,7 @@ from .views_enquiry import (
     public_enquiry_feedback,
     enquiry_escalate,
     enquiry_propose_resolution,
+    enquiry_attachment_download,
 )
 
 urlpatterns = [
@@ -30,6 +31,7 @@ urlpatterns = [
     path('mine/<int:pk>/respond/', my_enquiry_response, name='my-enquiry-response'),
     path('mine/<int:pk>/resolution/', my_enquiry_resolution, name='my-enquiry-resolution'),
     path('mine/<int:pk>/feedback/', my_enquiry_feedback, name='my-enquiry-feedback'),
+    path('<int:pk>/attachments/<int:attachment_id>/', enquiry_attachment_download, name='enquiry-attachment-download'),
     path('feedback/<uuid:token>/', public_enquiry_feedback, name='public-enquiry-feedback'),
 
     # Admin (HasModuleAccess: enquiry_management)
