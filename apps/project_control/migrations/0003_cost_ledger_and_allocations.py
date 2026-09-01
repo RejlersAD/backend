@@ -1,3 +1,5 @@
+import uuid
+
 import django.db.models.deletion
 from django.conf import settings
 from django.db import migrations, models
@@ -7,6 +9,82 @@ LEGACY_PARENT_ID_INDEXES = (
     ('procurement_budget', 'pc_source_budget_id_repair_uniq'),
     ('project_control_wbsnode', 'pc_wbsnode_id_repair_uniq'),
 )
+
+
+def _postgres_id_type(cursor, table_name):
+    cursor.execute(
+        '''
+        SELECT data_type, udt_name
+        FROM information_schema.columns
+        WHERE table_schema = ANY (current_schemas(FALSE))
+          AND table_name = %s
+          AND column_name = 'id'
+        ORDER BY array_position(current_schemas(FALSE), table_schema)
+        LIMIT 1
+        ''',
+        [table_name],
+    )
+    return cursor.fetchone()
+
+
+def _repair_uuid_ids(cursor, table):
+    """Re-key only ambiguous physical rows while preserving the canonical UUID."""
+    cursor.execute(f'SELECT id FROM {table} WHERE id IS NOT NULL')
+    used_ids = {str(row[0]) for row in cursor.fetchall()}
+    cursor.execute(
+        f'''
+        WITH ranked AS (
+            SELECT
+                ctid::text AS row_tid,
+                id,
+                ROW_NUMBER() OVER (PARTITION BY id ORDER BY ctid) AS duplicate_rank
+            FROM {table}
+        )
+        SELECT row_tid
+        FROM ranked
+        WHERE id IS NULL OR duplicate_rank > 1
+        ORDER BY id NULLS FIRST, row_tid
+        ''',
+    )
+    row_tids = [row[0] for row in cursor.fetchall()]
+    for row_tid in row_tids:
+        new_id = str(uuid.uuid4())
+        while new_id in used_ids:
+            new_id = str(uuid.uuid4())
+        cursor.execute(
+            f'UPDATE {table} SET id = %s WHERE ctid = %s::tid',
+            [new_id, row_tid],
+        )
+        used_ids.add(new_id)
+    return len(row_tids)
+
+
+def _repair_integer_ids(cursor, table):
+    cursor.execute(
+        f'''
+        WITH ranked AS (
+            SELECT
+                ctid,
+                id,
+                ROW_NUMBER() OVER (PARTITION BY id ORDER BY ctid) AS duplicate_rank,
+                MAX(id) OVER () AS max_id
+            FROM {table}
+        ),
+        rekey AS (
+            SELECT
+                ctid,
+                COALESCE(max_id, 0)
+                    + ROW_NUMBER() OVER (ORDER BY id NULLS FIRST, ctid) AS new_id
+            FROM ranked
+            WHERE id IS NULL OR duplicate_rank > 1
+        )
+        UPDATE {table} AS target
+        SET id = rekey.new_id
+        FROM rekey
+        WHERE target.ctid = rekey.ctid
+        ''',
+    )
+    return cursor.rowcount
 
 
 def repair_legacy_parent_ids(apps, schema_editor):
@@ -24,31 +102,22 @@ def repair_legacy_parent_ids(apps, schema_editor):
 
             table = quote_name(table_name)
             cursor.execute(f'LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE')
-            cursor.execute(
-                f'''
-                WITH ranked AS (
-                    SELECT
-                        ctid,
-                        id,
-                        ROW_NUMBER() OVER (PARTITION BY id ORDER BY ctid) AS duplicate_rank,
-                        MAX(id) OVER () AS max_id
-                    FROM {table}
-                ),
-                rekey AS (
-                    SELECT
-                        ctid,
-                        COALESCE(max_id, 0)
-                            + ROW_NUMBER() OVER (ORDER BY id NULLS FIRST, ctid) AS new_id
-                    FROM ranked
-                    WHERE id IS NULL OR duplicate_rank > 1
+            id_type = _postgres_id_type(cursor, table_name)
+            if not id_type:
+                raise RuntimeError(
+                    f'Cannot repair {table_name}: its id column was not found.'
                 )
-                UPDATE {table} AS target
-                SET id = rekey.new_id
-                FROM rekey
-                WHERE target.ctid = rekey.ctid
-                ''',
-            )
-            repaired_rows = cursor.rowcount
+
+            _data_type, udt_name = id_type
+            if udt_name == 'uuid':
+                repaired_rows = _repair_uuid_ids(cursor, table)
+            elif udt_name in {'int2', 'int4', 'int8'}:
+                repaired_rows = _repair_integer_ids(cursor, table)
+            else:
+                raise RuntimeError(
+                    f'Cannot repair {table_name}.id: unsupported PostgreSQL '
+                    f'type {udt_name!r}.'
+                )
             if repaired_rows:
                 print(
                     f'[project_control.0003] Re-keyed {repaired_rows} '
