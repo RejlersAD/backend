@@ -3,6 +3,85 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+LEGACY_PARENT_ID_INDEXES = (
+    ('procurement_budget', 'pc_source_budget_id_repair_uniq'),
+    ('project_control_wbsnode', 'pc_wbsnode_id_repair_uniq'),
+)
+
+
+def repair_legacy_parent_ids(apps, schema_editor):
+    """Restore ownership keys required by the cost-ledger foreign keys."""
+    connection = schema_editor.connection
+    if connection.vendor != 'postgresql':
+        return
+
+    existing_tables = set(connection.introspection.table_names())
+    quote_name = connection.ops.quote_name
+    with connection.cursor() as cursor:
+        for table_name, index_name in LEGACY_PARENT_ID_INDEXES:
+            if table_name not in existing_tables:
+                continue
+
+            table = quote_name(table_name)
+            cursor.execute(f'LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE')
+            cursor.execute(
+                f'''
+                WITH ranked AS (
+                    SELECT
+                        ctid,
+                        id,
+                        ROW_NUMBER() OVER (PARTITION BY id ORDER BY ctid) AS duplicate_rank,
+                        MAX(id) OVER () AS max_id
+                    FROM {table}
+                ),
+                rekey AS (
+                    SELECT
+                        ctid,
+                        COALESCE(max_id, 0)
+                            + ROW_NUMBER() OVER (ORDER BY id NULLS FIRST, ctid) AS new_id
+                    FROM ranked
+                    WHERE id IS NULL OR duplicate_rank > 1
+                )
+                UPDATE {table} AS target
+                SET id = rekey.new_id
+                FROM rekey
+                WHERE target.ctid = rekey.ctid
+                ''',
+            )
+            repaired_rows = cursor.rowcount
+            if repaired_rows:
+                print(
+                    f'[project_control.0003] Re-keyed {repaired_rows} '
+                    f'duplicate/null {table_name} row(s).'
+                )
+
+            constraints = connection.introspection.get_constraints(cursor, table_name)
+            id_is_unique = any(
+                constraint.get('unique') and constraint.get('columns') == ['id']
+                for constraint in constraints.values()
+            )
+            if not id_is_unique:
+                schema_editor.execute(
+                    f'CREATE UNIQUE INDEX {quote_name(index_name)} '
+                    f'ON {table} ({quote_name("id")})'
+                )
+
+            cursor.execute('SELECT pg_get_serial_sequence(%s, %s)', [table_name, 'id'])
+            sequence_name = cursor.fetchone()[0]
+            if sequence_name:
+                cursor.execute(
+                    f'''
+                    SELECT setval(
+                        %s::regclass,
+                        COALESCE(MAX(id), 1),
+                        EXISTS (SELECT 1 FROM {table})
+                    )
+                    FROM {table}
+                    ''',
+                    [sequence_name],
+                )
+
+
 class Migration(migrations.Migration):
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
@@ -11,6 +90,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(
+            repair_legacy_parent_ids,
+            migrations.RunPython.noop,
+        ),
         migrations.CreateModel(
             name='BudgetAllocation',
             fields=[
