@@ -22,6 +22,80 @@ LEGACY = {
 }
 
 
+def ensure_enquiry_id_uniqueness(apps, schema_editor):
+    """Repair legacy/imported enquiry tables before adding child FKs.
+
+    Some production databases contain ``core_enquiry.id`` as a populated
+    integer column without its original primary-key/unique constraint.  A
+    PostgreSQL foreign key may only reference a unique key, so the message and
+    activity tables created later in this migration would otherwise fail.
+    Preserve every row by assigning fresh ids to null/duplicate occurrences,
+    then restore a unique index on ``id``.
+    """
+    connection = schema_editor.connection
+    if connection.vendor != 'postgresql':
+        return
+
+    table_name = 'core_enquiry'
+    if table_name not in set(connection.introspection.table_names()):
+        return
+
+    quote_name = connection.ops.quote_name
+    table = quote_name(table_name)
+    with connection.cursor() as cursor:
+        cursor.execute(f'LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE')
+        cursor.execute(
+            f'''
+            WITH ranked AS (
+                SELECT
+                    ctid,
+                    id,
+                    ROW_NUMBER() OVER (PARTITION BY id ORDER BY ctid) AS duplicate_rank,
+                    MAX(id) OVER () AS max_id
+                FROM {table}
+            ),
+            rekey AS (
+                SELECT
+                    ctid,
+                    COALESCE(max_id, 0)
+                        + ROW_NUMBER() OVER (ORDER BY id NULLS FIRST, ctid) AS new_id
+                FROM ranked
+                WHERE id IS NULL OR duplicate_rank > 1
+            )
+            UPDATE {table} AS target
+            SET id = rekey.new_id
+            FROM rekey
+            WHERE target.ctid = rekey.ctid
+            ''',
+        )
+
+        constraints = connection.introspection.get_constraints(cursor, table_name)
+        id_is_unique = any(
+            constraint.get('unique') and constraint.get('columns') == ['id']
+            for constraint in constraints.values()
+        )
+        if not id_is_unique:
+            schema_editor.execute(
+                f'CREATE UNIQUE INDEX {quote_name("core_enquiry_id_repair_uniq")} '
+                f'ON {table} ({quote_name("id")})'
+            )
+
+        cursor.execute('SELECT pg_get_serial_sequence(%s, %s)', [table_name, 'id'])
+        sequence_name = cursor.fetchone()[0]
+        if sequence_name:
+            cursor.execute(
+                f'''
+                SELECT setval(
+                    %s::regclass,
+                    COALESCE(MAX(id), 1),
+                    EXISTS (SELECT 1 FROM {table})
+                )
+                FROM {table}
+                ''',
+                [sequence_name],
+            )
+
+
 def seed_and_backfill_enquiries(apps, schema_editor):
     Enquiry = apps.get_model('core', 'Enquiry')
     Message = apps.get_model('core', 'EnquiryMessage')
@@ -56,6 +130,11 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(
+            ensure_enquiry_id_uniqueness,
+            # Never remove a repaired ownership constraint during rollback.
+            migrations.RunPython.noop,
+        ),
         migrations.AddField(
             model_name='enquiry',
             name='assigned_at',
