@@ -284,11 +284,13 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         ):
             raise PermissionDenied('Only the requisition issuer may modify this requisition.')
 
-        allowed_statuses = {'draft', 'rejected', 'cancelled'} if deletable else {'draft'}
+        if deletable:
+            return
+
+        allowed_statuses = {'draft'}
         if canonicalize_pr_status(pr.status) not in allowed_statuses:
-            action = 'deleted' if deletable else 'edited'
             raise ValidationError({
-                'error': f'Only {", ".join(sorted(allowed_statuses))} requisitions can be {action}.'
+                'error': f'Only {", ".join(sorted(allowed_statuses))} requisitions can be edited.'
             })
 
     def update(self, request, *args, **kwargs):
