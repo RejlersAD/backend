@@ -28,7 +28,7 @@ echo [%date% %time%] Starting Time Sheet mirror agent.>>"%AGENT_LOG%"
 
 "%PYTHON_EXE%" scripts\timesheet_mirror_sync.py ^
   --env-file "%AGENT_ENV%" ^
-  --hours 2 ^
+  --hours 48 ^
   --batch-size 100 ^
   --watch ^
   --interval 300 >>"%AGENT_LOG%" 2>&1
