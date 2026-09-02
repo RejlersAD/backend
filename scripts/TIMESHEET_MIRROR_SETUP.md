@@ -105,6 +105,10 @@ python scripts\timesheet_mirror_sync.py `
   --hours 2 --batch-size 100 --watch --interval 300
 ```
 
+On Windows, `scripts\run_timesheet_mirror_agent.cmd` provides the same
+two-hour/five-minute watcher with a rotating local log. It is suitable as the
+Task Scheduler action and can also be double-clicked for a manual start.
+
 Run `--users` separately when employee-master details need refreshing; do not
 include it in the continuous watcher command.
 
