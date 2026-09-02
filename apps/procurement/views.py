@@ -1714,6 +1714,26 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_orders'
     pagination_class = VendorPagination
+    parser_classes = [FormParser, MultiPartParser, JSONParser]
+
+    def create(self, request, *args, **kwargs):
+        """Create a PO and pass repeated multipart attachment fields intact."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        files = request.FILES.getlist('attachments_files', [])
+        serializer.save(**({'attachments_files': files} if files else {}))
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def update(self, request, *args, **kwargs):
+        """Update a PO with optional files from its dedicated Attachments tab."""
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        files = request.FILES.getlist('attachments_files', [])
+        serializer.save(**({'attachments_files': files} if files else {}))
+        return Response(serializer.data)
 
     def get_permissions(self):
         # Any active employee may be selected as a PO approver. Assignment is

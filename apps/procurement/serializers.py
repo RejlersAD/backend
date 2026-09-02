@@ -544,6 +544,12 @@ class OptionalDateField(serializers.DateField):
 class PurchaseOrderSerializer(serializers.ModelSerializer):
     """Serializer for Purchase Order"""
 
+    attachments_files = serializers.ListField(
+        child=serializers.FileField(),
+        write_only=True,
+        required=False,
+        help_text='Upload the files configured in the PO Attachments tab.',
+    )
     po_number = serializers.CharField(required=False, allow_blank=True)
     start_date = OptionalDateField(required=False, allow_null=True)
     end_date = OptionalDateField(required=False, allow_null=True)
@@ -625,12 +631,65 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'time_schedule', 'reporting_meetings', 'performance_requirements', 'contact_persons',
             
             # People & metadata
-            'created_by', 'created_by_name', 'terms_and_conditions', 'notes', 'attachments', 
+            'created_by', 'created_by_name', 'terms_and_conditions', 'notes', 'attachments',
+            'attachments_files',
             
             # Timestamps
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'po_date', 'approved_at', 'created_at', 'updated_at']
+
+    def validate_attachments_files(self, value):
+        existing = self.instance.attachments if self.instance else []
+        return validate_attachments(value, existing)
+
+    def _upload_attachments(self, instance, files):
+        """Store PO attachments in S3 and preserve their editable labels."""
+        from apps.core.s3_utils import S3Client
+        from django.utils import timezone
+        import uuid
+
+        s3_client = S3Client()
+        attachments = list(instance.attachments or [])
+        validated_files = validate_attachments(files, attachments)
+        attachment_details = (instance.contact_persons or {}).get('attachment_details', [])
+
+        for index, file in enumerate(validated_files):
+            detail = attachment_details[index] if index < len(attachment_details) else {}
+            safe_name = file.safe_name
+            s3_key = f"procurement/orders/{instance.po_number}/{uuid.uuid4().hex}_{safe_name}"
+            success = s3_client.upload_file(
+                file_obj=file,
+                s3_key=s3_key,
+                content_type=file.verified_content_type,
+                metadata={
+                    'po_number': instance.po_number,
+                    'uploaded_by': self.context['request'].user.email,
+                    'original_filename': safe_name,
+                },
+            )
+            if not success:
+                raise serializers.ValidationError(
+                    {'attachments_files': f'Failed to store {safe_name}.'}
+                )
+            s3_url = (
+                f"https://{s3_client.bucket_name}.s3."
+                f"{s3_client.s3_client.meta.region_name}.amazonaws.com/{s3_key}"
+            )
+            attachments.append({
+                'title': str(detail.get('title') or f'Attachment {index + 1}').strip(),
+                'description': str(detail.get('description') or '').strip(),
+                'filename': safe_name,
+                's3_key': s3_key,
+                's3_url': s3_url,
+                'uploaded_at': timezone.now().isoformat(),
+                'uploaded_by': self.context['request'].user.email,
+                'file_size': file.size,
+                'content_type': file.verified_content_type,
+            })
+
+        instance.attachments = attachments
+        instance.save(update_fields=['attachments'])
     
     def get_project_display(self, obj):
         """Get formatted project display string"""
@@ -710,6 +769,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     
     @transaction.atomic
     def create(self, validated_data):
+        files = validated_data.pop('attachments_files', [])
         # Lock the selected PR while the PO relationship is recorded.
         selected_pr = validated_data['pr_reference']
         locked_pr = PurchaseRequisition.objects.select_for_update().get(pk=selected_pr.pk)
@@ -718,6 +778,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             validated_data['po_number'] = PurchaseOrderNumberService.next_for_requisition(locked_pr.pr_number)
         validated_data['created_by'] = self.context['request'].user
         order = super().create(validated_data)
+        if files:
+            self._upload_attachments(order, files)
 
         locked_pr.status = 'converted'
         locked_pr.po_number_reference = order.po_number
@@ -727,7 +789,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def update(self, instance, validated_data):
+        files = validated_data.pop('attachments_files', [])
         order = super().update(instance, validated_data)
+        if files:
+            self._upload_attachments(order, files)
         transaction.on_commit(lambda: notify_assigned_approvers(order))
         return order
 
