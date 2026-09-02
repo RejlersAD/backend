@@ -17,6 +17,7 @@ from django.db import transaction
 from datetime import date
 import uuid
 import mimetypes
+import re
 
 from .models import (
     OnboardingRecord, OffboardingRecord, Equipment,
@@ -50,6 +51,24 @@ from .rbac import (
 from .project_assignments import get_active_project_assignments, get_profile_project_manager
 
 User = get_user_model()
+
+EMPLOYEE_ID_PREFIX = '2302'
+
+
+def _next_onboarding_employee_identifier():
+    """Return the next shared Finance/HRM identifier (23021, 23022, ...)."""
+    values = EmployeeMaster.objects.select_for_update().filter(
+        Q(employee_code__startswith=EMPLOYEE_ID_PREFIX)
+        | Q(employment_id__startswith=EMPLOYEE_ID_PREFIX)
+    ).values_list('employee_code', 'employment_id')
+    suffixes = []
+    pattern = re.compile(rf'^{EMPLOYEE_ID_PREFIX}(\d+)$')
+    for employee_code, employment_id in values:
+        for value in (employee_code, employment_id):
+            match = pattern.fullmatch(value or '')
+            if match:
+                suffixes.append(int(match.group(1)))
+    return f'{EMPLOYEE_ID_PREFIX}{max(suffixes, default=0) + 1}'
 
 
 def _resolve_exit_reporting_manager(user, employee=None):
@@ -605,6 +624,19 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                         {'error': 'First name, surname, and email are required'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
+
+                if not re.fullmatch(r'[^@\s]+@rejlers\.ae', email):
+                    return Response(
+                        {'error': 'Email address must use the @rejlers.ae domain'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                mobile_phone = data.get('mobile_phone', '').strip()
+                if not re.fullmatch(r'\+9715\d{8}', mobile_phone):
+                    return Response(
+                        {'error': 'Mobile Phone (Work) must use UAE format +9715XXXXXXXX'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
                 
                 # Check if user already exists
                 if User.objects.filter(email=email).exists():
@@ -627,7 +659,7 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                     email=email,
                     first_name=first_name,
                     last_name=last_name,
-                    phone_number=data.get('mobile_phone', ''),
+                    phone_number=mobile_phone,
                     is_active=True,
                     is_first_login=True,
                     must_reset_password=True  # Will need to set password
@@ -649,7 +681,7 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                     status='active',
                     department=data.get('division', ''),
                     job_title=data.get('job_title_uae') or data.get('job_title_finland', ''),
-                    phone=data.get('mobile_phone', '')
+                    phone=mobile_phone
                 )
                 print(f"[Onboarding] ✅ Created RBAC UserProfile for {email} — Default role will be auto-assigned")
                 
@@ -664,6 +696,8 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                         # Fallback: manager might not have EmployeeMaster yet
                         pass
                 
+                generated_employee_id = _next_onboarding_employee_identifier()
+
                 # Use EmployeeService to create employee record
                 employee = EmployeeService.create_employee(
                     user=user,
@@ -672,13 +706,13 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                     last_name=last_name,
                     preferred_given_name=data.get('preferred_given_name', ''),
                     manager=manager_employee,
-                    phone_number=data.get('mobile_phone', ''),
+                    phone_number=mobile_phone,
+                    country=data.get('country', ''),
                     initials=data.get('initials', ''),
                     employee_number=data.get('employee_number') or None,  # Auto-generate if empty
-                    employee_code=data.get('employee_code') or None,  # Auto-generate if empty
-                    account_name=data.get('account_name', username),
-                    employment_id=data.get('employment_id', ''),
-                    candidate_id=data.get('candidate_id', ''),
+                    employee_code=generated_employee_id,
+                    account_name=username,
+                    employment_id=generated_employee_id,
                     department=data.get('division', ''),  # Note: using division as department
                     division=data.get('division', ''),
                     business_unit=data.get('business_unit', ''),
@@ -793,6 +827,7 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                     'onboarding_id': onboarding_record.id,
                     'employee_number': employee.employee_number,  # Auto-generated employee number
                     'employee_code': employee.employee_code,  # Auto-generated employee code
+                    'employment_id': employee.employment_id,
                     'emp_code': employee.emp_code,  # Biometric system code
                     'email': email,
                     'reporting_manager': employee.manager.get_full_name() if employee.manager else None,
