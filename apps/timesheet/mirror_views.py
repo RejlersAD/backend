@@ -241,21 +241,24 @@ def ingest_events(request):
                 write_objects.append(obj)
             else:
                 unchanged += 1
-        now = timezone.now()
-        for obj in write_objects:
-            obj.created_at = now
-            obj.updated_at = now
+        # Use Django's ordinary upsert path here instead of bulk_create with
+        # update_conflicts.  The mirror runs continuously with a checkpoint,
+        # so batches are small, while update_or_create remains compatible with
+        # production databases that do not support Django's generated bulk
+        # ON CONFLICT statement.  It also runs model field pre_save hooks for
+        # created_at/updated_at consistently.
         with transaction.atomic():
-            if write_objects:
-                TimesheetEvent.objects.bulk_create(
-                    write_objects,
-                    batch_size=500,
-                    update_conflicts=True,
-                    update_fields=[
-                        'employee_code', 'employee_name', 'employee_email',
-                        'department', 'event_time', 'event_type', 'updated_at',
-                    ],
-                    unique_fields=['source_event_id'],
+            for obj in write_objects:
+                TimesheetEvent.objects.update_or_create(
+                    source_event_id=obj.source_event_id,
+                    defaults={
+                        'employee_code': obj.employee_code,
+                        'employee_name': obj.employee_name,
+                        'employee_email': obj.employee_email,
+                        'department': obj.department,
+                        'event_time': obj.event_time,
+                        'event_type': obj.event_type,
+                    },
                 )
             _bulk_upsert_user_masters(master_values)
         summary_events = {sid: summary_events[sid] for sid in changed_ids}
