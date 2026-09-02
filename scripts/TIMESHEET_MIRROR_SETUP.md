@@ -81,6 +81,25 @@ python scripts\timesheet_mirror_sync.py `
 
 ## 4. Schedule continuous synchronization
 
+### Automated Windows installation (recommended)
+
+On the office PC, open PowerShell as Administrator and run:
+
+```powershell
+Set-Location C:\path\to\backend
+powershell -ExecutionPolicy Bypass -File .\scripts\install_timesheet_mirror_task.ps1 `
+  -Replay30Days -SyncUsers
+```
+
+The installer validates dependencies, Matrix SQL connectivity and Production
+authentication before it creates `RADAI Attendance Sync`. The task runs as
+`SYSTEM` at Windows startup, watches a checkpointed 48-hour recovery window,
+and sends only unseen events every five minutes. The two optional switches are
+intended for the first installation; omit them when repairing/re-registering
+an existing agent.
+
+### Manual installation
+
 Open Windows Task Scheduler and create a task with:
 
 - Trigger: at system startup.
@@ -105,8 +124,8 @@ python scripts\timesheet_mirror_sync.py `
   --hours 2 --batch-size 100 --watch --interval 300
 ```
 
-On Windows, `scripts\run_timesheet_mirror_agent.cmd` provides the same
-two-hour/five-minute watcher with a rotating local log. It is suitable as the
+On Windows, `scripts\run_timesheet_mirror_agent.cmd` provides a checkpointed
+48-hour/five-minute watcher with a rotating local log. It is suitable as the
 Task Scheduler action and can also be double-clicked for a manual start.
 
 Run `--users` separately when employee-master details need refreshing; do not
