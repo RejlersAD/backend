@@ -87,7 +87,10 @@ class PurchaseOrderExportTests(TestCase):
         self.assertEqual(len(exported.pages), 9)
         narrative_text = exported.pages[1].extract_text()
         self.assertIn('PURCHASE ORDER', narrative_text)
-        self.assertIn('REJLERS', narrative_text)
+        # Header and footer use the official Rejlers image asset rather than a
+        # substitute text/vector wordmark.
+        xobjects = exported.pages[1]['/Resources'].get('/XObject', {})
+        self.assertGreaterEqual(len(xobjects), 2)
         self.assertIn('Rejlers International Engineering Solutions', narrative_text)
         self.assertIn('Page 2', narrative_text)
         self.assertIn('First scope paragraph', narrative_text)
