@@ -134,7 +134,18 @@ def send_teams_approval_assignment(self, notification_id, context=None):
     if not webhook_url:
         return {'status': 'disabled'}
 
-    notification = Notification.objects.select_related('recipient', 'sender').get(pk=notification_id)
+    # Some legacy production databases contain duplicated notification IDs
+    # from an earlier schema drift. Prefer the newest row so one duplicate
+    # cannot crash delivery with MultipleObjectsReturned.
+    notification = (
+        Notification.objects.select_related('recipient', 'sender')
+        .filter(pk=notification_id)
+        .order_by('-created_at')
+        .first()
+    )
+    if notification is None:
+        logger.warning('Teams approval notification %s no longer exists', notification_id)
+        return {'status': 'missing'}
     payload = build_approval_assignment_payload(notification, context)
     try:
         response = requests.post(
