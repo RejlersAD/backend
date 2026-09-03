@@ -13,7 +13,11 @@ from django.db.models import Q
 
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
 from .services.purchase_order_numbering import PurchaseOrderNumberService
-from .services.purchase_order_approvals import normalize_assignments, notify_assigned_approvers
+from .services.purchase_order_approvals import (
+    normalize_assignments,
+    notify_assigned_approvers,
+    notify_purchase_order_created,
+)
 from .services.employee_display import (
     employee_display_name,
     employee_display_names,
@@ -940,7 +944,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         locked_pr.status = 'converted'
         locked_pr.po_number_reference = order.po_number
         locked_pr.save(update_fields=['status', 'po_number_reference', 'updated_at'])
-        transaction.on_commit(lambda: notify_assigned_approvers(order))
+        # Notification delivery is a side effect and must never turn a
+        # successfully committed PO into an HTTP 500 response.
+        transaction.on_commit(lambda: notify_assigned_approvers(order), robust=True)
+        transaction.on_commit(lambda: notify_purchase_order_created(order), robust=True)
         return order
 
     @transaction.atomic

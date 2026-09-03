@@ -52,6 +52,22 @@ class TeamsApprovalNotificationTests(SimpleTestCase):
             payload['action_url'],
         )
 
+    @override_settings(FRONTEND_URL='https://radai.ae')
+    def test_payload_supports_purchase_order_created_event(self):
+        payload = build_approval_assignment_payload(self._notification(), {
+            'event_type': 'purchase_order_created',
+            'title': 'New purchase order created',
+            'request_name': 'Purchase Order RAD-PRJ-PUR-0117_2026',
+        })
+
+        self.assertEqual(payload['event_type'], 'purchase_order_created')
+        self.assertEqual(payload['title'], 'New purchase order created')
+        self.assertIn('New purchase order created', payload['message'])
+        self.assertEqual(
+            payload['attachments'][0]['content']['body'][0]['text'],
+            'New purchase order created',
+        )
+
     @override_settings(TEAMS_APPROVAL_WEBHOOK_URL='https://flow.example.test/trigger')
     @patch('apps.notifications.teams.send_teams_approval_assignment.delay')
     def test_enabled_delivery_is_queued(self, delay):
