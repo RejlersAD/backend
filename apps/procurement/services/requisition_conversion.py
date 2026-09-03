@@ -119,6 +119,24 @@ class RequisitionConversionService:
             raise ValidationError({'error': 'This requisition has already been converted.'})
         if current_status != 'approved':
             raise ValidationError({'error': 'Only approved requisitions can be converted to a purchase order.'})
+        workflow = normalize_ceo_workflow(
+            pr.approval_workflow_config,
+            pr.po_number_reference,
+        )
+        unresolved_stages = [
+            stage.get('role') or stage.get('stage') or f'Stage {index + 1}'
+            for index, stage in enumerate(workflow)
+            if isinstance(stage, dict)
+            and str(stage.get('status', 'pending')).strip().lower()
+            not in {'approved', 'complete', 'completed'}
+        ]
+        if unresolved_stages:
+            raise ValidationError({
+                'error': (
+                    'All configured approval stages must be approved before conversion. '
+                    f"Unresolved: {', '.join(unresolved_stages)}."
+                ),
+            })
         vendor, vendor_was_linked = cls._resolve_vendor(pr)
         if vendor.status != 'active':
             raise ValidationError({'error': 'The linked vendor must be active before conversion.'})

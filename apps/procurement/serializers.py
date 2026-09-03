@@ -519,6 +519,13 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 ) or name_only(
                     stage.get('user_name') or stage.get('approver')
                 ) or 'Assigned Employee'
+                if (
+                    canonicalize_pr_status(instance.status) == 'converted'
+                    and str(stage.get('status', 'pending')).strip().lower() in {'pending', 'in_review'}
+                ):
+                    # A converted historical/imported PR cannot still be awaiting
+                    # an actionable decision. Its internal evidence was not captured.
+                    stage['status'] = 'not_recorded'
                 normalized.append(stage)
             normalized = normalize_ceo_workflow(normalized, instance.po_number_reference)
             data['approval_workflow_config'] = normalized
