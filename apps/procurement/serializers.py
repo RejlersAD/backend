@@ -796,12 +796,11 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         return validate_attachments(value, existing)
 
     def _upload_attachments(self, instance, files):
-        """Store PO attachments in S3 and preserve their editable labels."""
-        from apps.core.s3_utils import S3Client
+        """Store PO attachments using the active local/S3 storage backend."""
+        from django.core.files.storage import default_storage
         from django.utils import timezone
         import uuid
 
-        s3_client = S3Client()
         attachments = list(instance.attachments or [])
         validated_files = validate_attachments(files, attachments)
         attachment_details = (instance.contact_persons or {}).get('attachment_details', [])
@@ -810,30 +809,20 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             detail = attachment_details[index] if index < len(attachment_details) else {}
             safe_name = file.safe_name
             s3_key = f"procurement/orders/{instance.po_number}/{uuid.uuid4().hex}_{safe_name}"
-            success = s3_client.upload_file(
-                file_obj=file,
-                s3_key=s3_key,
-                content_type=file.verified_content_type,
-                metadata={
-                    'po_number': instance.po_number,
-                    'uploaded_by': self.context['request'].user.email,
-                    'original_filename': safe_name,
-                },
-            )
-            if not success:
+            try:
+                file.seek(0)
+                stored_key = default_storage.save(s3_key, file)
+                storage_url = default_storage.url(stored_key)
+            except Exception:
                 raise serializers.ValidationError(
                     {'attachments_files': f'Failed to store {safe_name}.'}
                 )
-            s3_url = (
-                f"https://{s3_client.bucket_name}.s3."
-                f"{s3_client.s3_client.meta.region_name}.amazonaws.com/{s3_key}"
-            )
             attachments.append({
                 'title': str(detail.get('title') or f'Attachment {index + 1}').strip(),
                 'description': str(detail.get('description') or '').strip(),
                 'filename': safe_name,
-                's3_key': s3_key,
-                's3_url': s3_url,
+                's3_key': stored_key,
+                's3_url': storage_url,
                 'uploaded_at': timezone.now().isoformat(),
                 'uploaded_by': self.context['request'].user.email,
                 'file_size': file.size,
