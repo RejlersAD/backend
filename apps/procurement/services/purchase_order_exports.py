@@ -243,16 +243,29 @@ def _cover_pdf(order, attachment, index):
 
 
 def _download_attachment(attachment):
-    from apps.core.s3_utils import S3Client
+    from django.conf import settings
+    from django.core.files.storage import default_storage
 
     key = str(attachment.get('s3_key') or '').strip()
     if not key:
         return None
-    output = BytesIO()
-    if not S3Client().download_file(key, output):
-        return None
-    output.seek(0)
-    return output.getvalue()
+    try:
+        with default_storage.open(key, 'rb') as stored_file:
+            return stored_file.read()
+    except Exception:
+        # Older PO uploads used a raw bucket key without the MediaStorage
+        # prefix. Keep those files exportable after adopting default_storage.
+        if not getattr(settings, 'USE_S3', False):
+            return None
+        try:
+            from apps.core.s3_utils import S3Client
+
+            output = BytesIO()
+            if S3Client().download_file(key, output):
+                return output.getvalue()
+        except Exception:
+            return None
+    return None
 
 
 def _flowables_pdf(flowables):
