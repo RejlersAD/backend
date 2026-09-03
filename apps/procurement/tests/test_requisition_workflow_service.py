@@ -378,3 +378,50 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
 
         with self.assertRaisesMessage(ValidationError, 'not awaiting approval'):
             RequisitionWorkflowService._approve_locked(pr, self.pm)
+
+    def test_converted_requisition_cannot_be_approved_before_recovery(self):
+        pr = self._pr(status='converted')
+
+        with self.assertRaisesMessage(ValidationError, 'not awaiting approval'):
+            RequisitionWorkflowService._approve_locked(pr, self.pm)
+
+    @patch.object(RequisitionWorkflowService, '_resolve_stage_user')
+    @patch.object(RequisitionWorkflowService, '_notify_level')
+    def test_resend_reactivates_missing_evidence_and_notifies_first_level(
+        self,
+        notify_level,
+        resolve_stage_user,
+    ):
+        pr = self._pr(status='converted')
+        pr.pk = 'pr-id'
+        resolve_stage_user.side_effect = [self.pm, self.engineering_manager]
+
+        result, count = RequisitionWorkflowService._resend_missing_approvals_locked(
+            pr,
+            self.issuer,
+        )
+
+        self.assertIs(result, pr)
+        self.assertEqual(count, 2)
+        self.assertEqual(pr.status, 'converted')
+        self.assertTrue(all(stage.get('evidence_requested_at') for stage in pr.approval_workflow_config))
+        notify_level.assert_called_once_with(pr, pr.approval_workflow_config, 1, force=True)
+
+    @patch.object(RequisitionWorkflowService, '_notify_level')
+    def test_recovered_approval_preserves_converted_status_and_advances(self, notify_level):
+        pr = self._pr(status='converted')
+        for stage in pr.approval_workflow_config:
+            stage['evidence_requested_at'] = '2026-09-03T12:00:00+04:00'
+
+        RequisitionWorkflowService._approve_locked(pr, self.pm, 'pm-signature', 'pm')
+
+        self.assertEqual(pr.status, 'converted')
+        self.assertEqual(pr.approval_workflow_config[0]['status'], 'approved')
+        notify_level.assert_called_once_with(pr, pr.approval_workflow_config, 2, force=True)
+
+    def test_recovery_does_not_bypass_a_rejected_decision(self):
+        pr = self._pr(status='converted')
+        pr.approval_workflow_config[0]['status'] = 'rejected'
+
+        with self.assertRaisesMessage(ValidationError, 'contains a rejected decision'):
+            RequisitionWorkflowService._resend_missing_approvals_locked(pr, self.issuer)

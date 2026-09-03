@@ -483,7 +483,10 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         for workflow_status in RequisitionWorkflowService.ACTIVE_REVIEW_STATUSES:
             active_statuses.update(stored_values_for(workflow_status))
 
-        queryset = self.get_queryset().filter(status__in=active_statuses)
+        converted_statuses = set(stored_values_for('converted'))
+        queryset = self.get_queryset().filter(
+            Q(status__in=active_statuses) | Q(status__in=converted_statuses)
+        )
         is_super_admin = RequisitionWorkflowService._is_super_admin(request.user)
         assigned = []
 
@@ -498,6 +501,10 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 (index, stage) for index, stage in enumerate(workflow)
                 if isinstance(stage, dict)
                 and str(stage.get('status', 'pending')).lower() in ('pending', 'in_review')
+                and (
+                    canonicalize_pr_status(pr.status) != 'converted'
+                    or bool(stage.get('evidence_requested_at'))
+                )
             ]
             if not pending:
                 continue
@@ -620,6 +627,15 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             request.data.get('reason', ''),
         )
         return Response(self._build_requisition_response(pr))
+
+    @action(detail=True, methods=['post'], url_path='resend-missing-approvals')
+    def resend_missing_approvals(self, request, pk=None):
+        """Request genuine decisions for missing history on a converted PR."""
+        pr, count = RequisitionWorkflowService.resend_missing_approvals(pk, request.user)
+        payload = self._build_requisition_response(pr)
+        payload['message'] = f'{count} missing approval stage(s) reactivated. The current approvers were notified.'
+        payload['reactivated_count'] = count
+        return Response(payload)
     
     @action(detail=True, methods=['post'])
     def recommend_vendors(self, request, pk=None):

@@ -522,6 +522,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 if (
                     canonicalize_pr_status(instance.status) == 'converted'
                     and str(stage.get('status', 'pending')).strip().lower() in {'pending', 'in_review'}
+                    and not stage.get('evidence_requested_at')
                 ):
                     # A converted historical/imported PR cannot still be awaiting
                     # an actionable decision. Its internal evidence was not captured.

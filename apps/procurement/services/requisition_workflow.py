@@ -245,12 +245,14 @@ class RequisitionWorkflowService:
         return None
 
     @classmethod
-    def _notify_level(cls, pr, workflow, level):
+    def _notify_level(cls, pr, workflow, level, force=False):
         if not getattr(pr, 'pk', None):
             return
         recipients = {}
         for index, stage in enumerate(workflow):
             if cls._stage_level(stage, index) != level:
+                continue
+            if str(stage.get('status', 'pending')).strip().lower() not in ('pending', 'in_review'):
                 continue
             recipient = cls._resolve_stage_user(stage)
             if recipient:
@@ -264,20 +266,30 @@ class RequisitionWorkflowService:
         def send_notifications():
             from apps.notifications.models import Notification
             from apps.notifications.services import NotificationService
-            already_notified_ids = set(
-                Notification.objects.filter(
-                    recipient_id__in=recipient_ids,
-                    metadata__pr_id=str(pr_id),
-                    metadata__approval_level=level,
-                ).values_list('recipient_id', flat=True)
-            )
+            already_notified_ids = set()
+            if not force:
+                already_notified_ids = set(
+                    Notification.objects.filter(
+                        recipient_id__in=recipient_ids,
+                        metadata__pr_id=str(pr_id),
+                        metadata__approval_level=level,
+                    ).values_list('recipient_id', flat=True)
+                )
             for recipient_id, recipient in recipients.items():
                 if recipient_id in already_notified_ids:
                     continue
                 NotificationService.create_notification(
                     recipient=recipient,
-                    title=f'PR {pr_number} requires your approval',
-                    message=f'You have been assigned as a Level {level} approver for Purchase Requisition {pr_number}.',
+                    title=(
+                        f'PR {pr_number} approval evidence requested again'
+                        if force else f'PR {pr_number} requires your approval'
+                    ),
+                    message=(
+                        f'Please review and record your Level {level} decision for converted '
+                        f'Purchase Requisition {pr_number}.'
+                        if force else
+                        f'You have been assigned as a Level {level} approver for Purchase Requisition {pr_number}.'
+                    ),
                     category='APPROVAL',
                     priority='HIGH',
                     action_url='/approvals?tab=procurement',
@@ -288,7 +300,12 @@ class RequisitionWorkflowService:
                         'submitted_by': submitted_by,
                         'due_date': due_date,
                     },
-                    metadata={'pr_id': str(pr_id), 'pr_number': pr_number, 'approval_level': level},
+                    metadata={
+                        'pr_id': str(pr_id),
+                        'pr_number': pr_number,
+                        'approval_level': level,
+                        'approval_evidence_resend': force,
+                    },
                 )
 
         transaction.on_commit(send_notifications)
@@ -413,12 +430,18 @@ class RequisitionWorkflowService:
 
     @classmethod
     def _approve_locked(cls, pr, actor, signature='', expected_stage_key=None):
-        if canonicalize_pr_status(pr.status) not in cls.ACTIVE_REVIEW_STATUSES:
+        workflow = cls._workflow(pr)
+        current_status = canonicalize_pr_status(pr.status)
+        evidence_recovery = current_status == 'converted' and any(
+            str(stage.get('status', 'pending')).lower() in ('pending', 'in_review')
+            and bool(stage.get('evidence_requested_at'))
+            for stage in workflow
+        )
+        if current_status not in cls.ACTIVE_REVIEW_STATUSES and not evidence_recovery:
             raise ValidationError({'error': 'This requisition is not awaiting approval.'})
         if len(signature or '') > 500:
             raise ValidationError({'error': 'Signature cannot exceed 500 characters.'})
 
-        workflow = cls._workflow(pr)
         active_level, active_stages = cls._active_level_stages(pr, workflow)
         current_index, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
 
@@ -442,17 +465,20 @@ class RequisitionWorkflowService:
 
         if not next_pending:
             pr.current_approval_step = len(workflow)
-            pr.status = 'approved'
+            pr.status = 'converted' if evidence_recovery else 'approved'
             pr.approved_by = actor
             pr.approved_at = approved_at
         else:
             next_index, next_stage = (remaining_current_level or next_pending)[0]
             pr.current_approval_step = next_index
-            pr.status = 'in_review'
+            pr.status = 'converted' if evidence_recovery else 'in_review'
             workflow[next_index]['status'] = 'pending'
             next_level = cls._stage_level(next_stage, next_index)
             if not remaining_current_level and next_level != active_level:
-                cls._notify_level(pr, workflow, next_level)
+                if evidence_recovery:
+                    cls._notify_level(pr, workflow, next_level, force=True)
+                else:
+                    cls._notify_level(pr, workflow, next_level)
 
         pr.approval_workflow_config = workflow
         pr.save()
@@ -466,7 +492,14 @@ class RequisitionWorkflowService:
 
     @classmethod
     def _reject_locked(cls, pr, actor, reason, expected_stage_key=None):
-        if canonicalize_pr_status(pr.status) not in cls.ACTIVE_REVIEW_STATUSES:
+        workflow = cls._workflow(pr)
+        current_status = canonicalize_pr_status(pr.status)
+        evidence_recovery = current_status == 'converted' and any(
+            str(stage.get('status', 'pending')).lower() in ('pending', 'in_review')
+            and bool(stage.get('evidence_requested_at'))
+            for stage in workflow
+        )
+        if current_status not in cls.ACTIVE_REVIEW_STATUSES and not evidence_recovery:
             raise ValidationError({'error': 'This requisition is not awaiting approval.'})
 
         trimmed_reason = str(reason or '').strip()
@@ -475,7 +508,6 @@ class RequisitionWorkflowService:
         if len(trimmed_reason) > 1000:
             raise ValidationError({'error': 'Rejection reason cannot exceed 1000 characters.'})
 
-        workflow = cls._workflow(pr)
         _, active_stages = cls._active_level_stages(pr, workflow)
         _, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
 
@@ -489,7 +521,72 @@ class RequisitionWorkflowService:
         cls._mirror_fixed_rejection(pr, stage)
 
         pr.approval_workflow_config = workflow
-        pr.status = 'rejected'
+        pr.status = 'converted' if evidence_recovery else 'rejected'
         pr.rejection_reason = trimmed_reason
+        if evidence_recovery:
+            # A retrospective rejection must not invalidate or silently delete
+            # the linked PO. Stop the recovery queue and preserve the decision.
+            for candidate in workflow:
+                if str(candidate.get('status', 'pending')).lower() in ('pending', 'in_review'):
+                    candidate.pop('evidence_requested_at', None)
+                    candidate.pop('evidence_requested_by_id', None)
+                    candidate.pop('evidence_requested_by_name', None)
         pr.save()
         return pr
+
+    @classmethod
+    @transaction.atomic
+    def resend_missing_approvals(cls, pr_id, actor):
+        """Reactivate missing audit decisions without changing a converted PR."""
+        pr = get_object_or_404(PurchaseRequisition.objects.select_for_update(), pk=pr_id)
+        return cls._resend_missing_approvals_locked(pr, actor)
+
+    @classmethod
+    def _resend_missing_approvals_locked(cls, pr, actor):
+        if canonicalize_pr_status(pr.status) != 'converted':
+            raise ValidationError({'error': 'Approval recovery is only available for converted requisitions.'})
+
+        workflow = cls._workflow(pr)
+        if any(
+            str(stage.get('status', '')).strip().lower() in ('rejected', 'not_approved', 'declined')
+            for stage in workflow
+        ):
+            raise ValidationError({
+                'error': 'Approval recovery cannot continue while the workflow contains a rejected decision.'
+            })
+        unresolved = [
+            (index, stage)
+            for index, stage in enumerate(workflow)
+            if str(stage.get('status', 'pending')).strip().lower()
+            in ('pending', 'in_review', 'not_recorded')
+        ]
+        if not unresolved:
+            raise ValidationError({'error': 'This requisition has no missing approval decisions.'})
+
+        missing_assignees = [
+            stage.get('role') or stage.get('stage') or f'Stage {index + 1}'
+            for index, stage in unresolved
+            if cls._resolve_stage_user(stage) is None
+        ]
+        if missing_assignees:
+            raise ValidationError({
+                'error': f"Assign an active employee before resending: {', '.join(missing_assignees)}."
+            })
+
+        requested_at = timezone.now().isoformat()
+        requested_by_name = employee_display_name(actor)
+        for _, stage in unresolved:
+            stage['status'] = 'pending'
+            stage['evidence_requested_at'] = requested_at
+            stage['evidence_requested_by_id'] = str(actor.id)
+            stage['evidence_requested_by_name'] = requested_by_name
+
+        first_level = min(cls._stage_level(stage, index) for index, stage in unresolved)
+        pr.approval_workflow_config = workflow
+        pr.current_approval_step = next(
+            index for index, stage in unresolved
+            if cls._stage_level(stage, index) == first_level
+        )
+        pr.save(update_fields=['approval_workflow_config', 'current_approval_step', 'updated_at'])
+        cls._notify_level(pr, workflow, first_level, force=True)
+        return pr, len(unresolved)
