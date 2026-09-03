@@ -33,6 +33,16 @@ from reportlab.platypus import (
 JARMO_NAME = 'Jarmo Suominen'
 JARMO_TITLE = 'Sr. Vice President, Middle East\nCEO, Rejlers Abu Dhabi'
 JARMO_COMPANY = 'Rejlers International Engineering Solutions AB'
+COMPANY_NAME = 'Rejlers International Engineering Solutions'
+COMPANY_ADDRESS = (
+    'Rejlers Tower, 13th floor, AI Hamdan Street, P.O. Box 39317, '
+    'Abu Dhabi, United Arab Emirates'
+)
+COMPANY_PHONE = '+971 50 560 6987'
+COMPANY_WEBSITE = 'www.rejlers.ae'
+BRAND_BLUE = colors.HexColor('#0870aa')
+BRAND_TEXT_BLUE = colors.HexColor('#3275b6')
+BRAND_NAVY = colors.HexColor('#1f2d55')
 
 
 def _value(value, fallback='—'):
@@ -95,6 +105,19 @@ def _docx_rich_text(document, value):
 
 def _money(value, currency):
     return f'{currency or "AED"} {float(value or 0):,.2f}'
+
+
+def _date_text(value):
+    if not value:
+        return '—'
+    if hasattr(value, 'strftime'):
+        return value.strftime('%d %b %Y')
+    try:
+        from datetime import date
+
+        return date.fromisoformat(str(value)[:10]).strftime('%d %b %Y')
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _items(order):
@@ -165,18 +188,81 @@ def _pdf_styles():
     }
 
 
-def _pdf_page(canvas, document, order):
+def _draw_rejlers_wordmark(canvas, x, y, width, color):
+    """Draw a compact vector wordmark without relying on frontend assets."""
+    scale = width / 42.0
+    canvas.saveState()
+    canvas.setStrokeColor(color)
+    canvas.setLineWidth(max(0.65, 1.15 * scale))
+    canvas.setLineCap(1)
+    canvas.setLineJoin(1)
+    canvas.line(x, y + 1.0 * scale, x + 4.2 * scale, y + 5.2 * scale)
+    canvas.line(x + 4.2 * scale, y + 5.2 * scale, x + 4.2 * scale, y + 1.0 * scale)
+    canvas.setFillColor(color)
+    canvas.setFont('Helvetica', max(4.5, 5.8 * scale))
+    canvas.drawString(x + 6.2 * scale, y, 'REJLERS')
+    canvas.restoreState()
+
+
+def _pdf_page(canvas, document, order, page_number=None):
+    """Draw the same branded header/footer used by Print Preview."""
     canvas.saveState()
     width, height = A4
-    canvas.setFillColor(colors.HexColor('#16689b'))
-    canvas.setFont('Helvetica-Bold', 7)
-    canvas.drawString(16 * mm, height - 10 * mm, _value(order.po_number, 'PO NUMBER PENDING'))
-    canvas.setStrokeColor(colors.HexColor('#9ca3af'))
-    canvas.line(16 * mm, 11 * mm, width - 16 * mm, 11 * mm)
+
+    # Header: document identity on the left, Rejlers wordmark on the right.
+    left = 16 * mm
+    top = height - 11 * mm
+    canvas.setFillColor(BRAND_TEXT_BLUE)
+    canvas.setFont('Helvetica-Bold', 8.5)
+    canvas.drawString(left, top, 'PURCHASE ORDER')
+    canvas.setFont('Helvetica-Bold', 7.5)
+    canvas.drawString(left, top - 4 * mm, _value(order.po_number, 'PO NUMBER PENDING'))
     canvas.setFillColor(colors.HexColor('#64748b'))
-    canvas.setFont('Helvetica', 6.5)
-    canvas.drawString(16 * mm, 7 * mm, 'Rejlers International Engineering Solutions AB')
-    canvas.drawRightString(width - 16 * mm, 7 * mm, f'Page {document.page}')
+    canvas.setFont('Helvetica', 5.5)
+    canvas.drawString(left, top - 7 * mm, _value(getattr(order, 'form_note', None), '(PO no. to be used in all documents)'))
+    canvas.setFillColor(BRAND_TEXT_BLUE)
+    canvas.setFont('Helvetica-Bold', 7)
+    canvas.drawString(left, top - 12 * mm, _date_text(getattr(order, 'po_date', None)))
+
+    logo_width = 37 * mm
+    logo_x = width - left - logo_width
+    _draw_rejlers_wordmark(canvas, logo_x, top - 4 * mm, logo_width, BRAND_NAVY)
+    canvas.setFillColor(BRAND_TEXT_BLUE)
+    canvas.setFont('Helvetica-Bold', 5.7)
+    canvas.drawRightString(width - left, top - 9 * mm, 'HOME OF THE')
+    canvas.drawRightString(width - left, top - 12 * mm, 'LEARNING MINDS')
+
+    # Footer: repeated white brand marks in the blue band, then the same
+    # company/contact block and page number shown by the browser preview.
+    band_x = left
+    band_y = 12 * mm
+    band_width = width - (2 * left)
+    band_height = 7 * mm
+    canvas.setFillColor(BRAND_BLUE)
+    canvas.rect(band_x, band_y, band_width, band_height, fill=1, stroke=0)
+    group_width = band_width / 5
+    for index in (0, 2, 4):
+        _draw_rejlers_wordmark(
+            canvas,
+            band_x + (index * group_width) + 2.5 * mm,
+            band_y + 2.1 * mm,
+            group_width - 5 * mm,
+            colors.white,
+        )
+    canvas.setFillColor(colors.white)
+    canvas.setFont('Helvetica-Bold', 4.2)
+    for index in (1, 3):
+        center = band_x + ((index + 0.5) * group_width)
+        canvas.drawCentredString(center, band_y + 4.2 * mm, 'HOME OF THE')
+        canvas.drawCentredString(center, band_y + 2.2 * mm, 'LEARNING MINDS')
+
+    canvas.setFillColor(BRAND_TEXT_BLUE)
+    canvas.setFont('Helvetica', 4.6)
+    canvas.drawString(left + 8 * mm, 9.2 * mm, COMPANY_NAME)
+    canvas.drawString(left + 8 * mm, 7.0 * mm, COMPANY_ADDRESS)
+    canvas.drawString(left + 8 * mm, 4.8 * mm, f'Tel: {COMPANY_PHONE} | {COMPANY_WEBSITE}')
+    canvas.setFont('Helvetica', 5.2)
+    canvas.drawRightString(width - left, 5.5 * mm, f'Page {page_number or document.page}')
     canvas.restoreState()
 
 
@@ -188,8 +274,8 @@ def _main_pdf(order):
         pagesize=A4,
         leftMargin=16 * mm,
         rightMargin=16 * mm,
-        topMargin=16 * mm,
-        bottomMargin=16 * mm,
+        topMargin=34 * mm,
+        bottomMargin=25 * mm,
         title=_value(order.po_number),
     )
     currency = order.currency or 'AED'
@@ -283,7 +369,7 @@ def _main_pdf(order):
     return output.getvalue()
 
 
-def _cover_pdf(order, attachment, index):
+def _cover_pdf(order, attachment, index, page_number):
     output = BytesIO()
     styles = _pdf_styles()
     document = SimpleDocTemplate(output, pagesize=A4, leftMargin=25 * mm, rightMargin=25 * mm, topMargin=35 * mm, bottomMargin=25 * mm)
@@ -292,7 +378,7 @@ def _cover_pdf(order, attachment, index):
         Paragraph(f'ATTACHMENT - {index + 1}', styles['cover']),
         Spacer(1, 12 * mm),
         Paragraph(escape(_value(attachment['description'])), styles['cover_body']),
-    ], onFirstPage=lambda canvas, doc: _pdf_page(canvas, doc, order))
+    ], onFirstPage=lambda canvas, doc: _pdf_page(canvas, doc, order, page_number))
     return output.getvalue()
 
 
@@ -410,7 +496,7 @@ def build_purchase_order_pdf(order):
     append(_main_pdf(order))
     for index, raw_attachment in enumerate(order.attachments or []):
         attachment = _attachment(raw_attachment, index)
-        append(_cover_pdf(order, attachment, index))
+        append(_cover_pdf(order, attachment, index, len(writer.pages) + 1))
         content = _download_attachment(attachment)
         if content is None:
             warnings.append(f'{attachment["filename"]}: file could not be downloaded')
