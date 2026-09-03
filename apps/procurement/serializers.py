@@ -7,10 +7,12 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
+from django.db.models import Q
 
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
 from .services.purchase_order_numbering import PurchaseOrderNumberService
 from .services.purchase_order_approvals import normalize_assignments, notify_assigned_approvers
+from .services.employee_display import employee_display_name, employee_display_names, name_only
 from .services.receipt_numbering import ReceiptNumberService
 from .services.requisition_status import canonicalize_pr_status
 from .services.project_relationships import (
@@ -315,7 +317,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 'level': level,
                 'role': role,
                 'user_id': str(approver.pk),
-                'user_name': approver.get_full_name() or approver.get_username(),
+                'user_name': employee_display_name(approver),
                 'username': (
                     approver.get_username()
                     if callable(getattr(approver, 'get_username', None))
@@ -431,6 +433,44 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data['status'] = canonicalize_pr_status(instance.status)
+        workflow = data.get('approval_workflow_config')
+        if isinstance(workflow, list):
+            User = get_user_model()
+            user_ids = {
+                stage.get('user_id') or stage.get('approver_id')
+                for stage in workflow if isinstance(stage, dict)
+            }
+            user_emails = {
+                str(stage.get('user_email') or stage.get('approver_email') or '').strip().lower()
+                for stage in workflow if isinstance(stage, dict)
+            }
+            valid_user_ids = [value for value in user_ids if str(value or '').isdigit()]
+            valid_emails = [value for value in user_emails if value]
+            users = list(User.objects.filter(
+                Q(pk__in=valid_user_ids) | Q(email__in=valid_emails)
+            ))
+            users_by_id = {str(user.pk): user for user in users}
+            users_by_email = {str(user.email or '').strip().lower(): user for user in users}
+            names = employee_display_names(users)
+            normalized = []
+            for raw_stage in workflow:
+                if not isinstance(raw_stage, dict):
+                    normalized.append(raw_stage)
+                    continue
+                stage = dict(raw_stage)
+                user_id = str(stage.get('user_id') or stage.get('approver_id') or '')
+                user_email = str(
+                    stage.get('user_email') or stage.get('approver_email') or ''
+                ).strip().lower()
+                resolved_user = users_by_id.get(user_id) or users_by_email.get(user_email)
+                stage['user_name'] = (
+                    names.get(str(resolved_user.pk)) if resolved_user else None
+                ) or name_only(
+                    stage.get('user_name') or stage.get('approver')
+                ) or 'Assigned Employee'
+                normalized.append(stage)
+            data['approval_workflow_config'] = normalized
+            data['approval_hierarchy'] = normalized
         return data
     
     @transaction.atomic

@@ -747,6 +747,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     def get_approvers(self, request):
         from apps.rbac.models import UserProfile
         from django.contrib.auth import get_user_model
+        from .services.employee_display import employee_display_names
         User = get_user_model()
         
         role = request.query_params.get('role', '').lower()
@@ -848,13 +849,14 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             )
         )
 
+        display_names = employee_display_names(profile.user for profile in profiles)
         users_list = []
         for profile in profiles:
             users_list.append({
                 'id': str(profile.user.id),
                 'username': profile.user.get_username(),
                 'email': profile.user.email,
-                'full_name': profile.user.get_full_name(),
+                'full_name': display_names[str(profile.user_id)],
                 'first_name': profile.user.first_name,
                 'last_name': profile.user.last_name,
                 'job_title': profile.job_title,

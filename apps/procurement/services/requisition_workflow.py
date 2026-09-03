@@ -12,6 +12,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from ..models import PurchaseRequisition
 from .requisition_status import canonicalize_pr_status
 from .requisition_validation import line_items_total, normalize_line_items
+from .employee_display import employee_display_name
 
 
 class RequisitionWorkflowService:
@@ -349,7 +350,7 @@ class RequisitionWorkflowService:
         current_index, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
 
         approved_at = timezone.now()
-        actor_name = actor.get_full_name() or getattr(actor, 'username', '') or 'Assigned employee'
+        actor_name = employee_display_name(actor)
         stage['status'] = 'approved'
         stage['approved_at'] = approved_at.isoformat()
         stage['approved_by_id'] = str(actor.id)
@@ -406,7 +407,7 @@ class RequisitionWorkflowService:
         _, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
 
         rejected_at = timezone.now()
-        actor_name = actor.get_full_name() or getattr(actor, 'username', '') or 'Assigned employee'
+        actor_name = employee_display_name(actor)
         stage['status'] = 'rejected'
         stage['rejected_at'] = rejected_at.isoformat()
         stage['rejected_by_id'] = str(actor.id)
