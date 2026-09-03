@@ -1008,15 +1008,15 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
 }
 print(f"[CELERY] Broker connect timeout: {CELERY_BROKER_CONNECTION_TIMEOUT}s")
 
-# Safe printing of broker URLs (handle None case)
+# Never print broker URLs: Railway Redis URLs contain credentials.
 if CELERY_BROKER_URL:
-    print(f"[CELERY] Broker: {CELERY_BROKER_URL.split('@')[0] if '@' in CELERY_BROKER_URL else CELERY_BROKER_URL}")
+    print("[CELERY] Broker: configured")
 else:
-    print(f"[CELERY] Broker: None (EAGER mode)")
+    print("[CELERY] Broker: None (EAGER mode)")
 if CELERY_RESULT_BACKEND:
-    print(f"[CELERY] Result Backend: {CELERY_RESULT_BACKEND.split('@')[0] if '@' in CELERY_RESULT_BACKEND else CELERY_RESULT_BACKEND}")
+    print("[CELERY] Result Backend: configured")
 else:
-    print(f"[CELERY] Result Backend: None")
+    print("[CELERY] Result Backend: None")
 
 # Celery Beat — scheduled tasks
 # Run daily at 02:00 server time; the task self-skips unless PayrollSchedule.enabled
