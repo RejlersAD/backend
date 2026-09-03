@@ -150,6 +150,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     vendor_name = serializers.CharField(source='vendor.name', read_only=True, allow_null=True)
     
     # Legacy fields
+    requester_name = serializers.SerializerMethodField()
     requested_by_name = serializers.SerializerMethodField()
     approved_by_name = serializers.SerializerMethodField()
     category_display = serializers.SerializerMethodField()
@@ -231,7 +232,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             
             # Legacy fields (backward compatibility)
             'requisition_type', 'requisition_type_display', 'title', 'category', 'category_display',
-            'requested_by', 'requested_by_name', 'department', 'project', 'status',
+            'requested_by', 'requester_name', 'requested_by_name', 'department', 'project', 'status',
             'status_display', 'priority', 'priority_display', 'required_date',
             'estimated_budget', 'items', 'approved_by', 'approved_by_name',
             'approved_at', 'rejection_reason', 'notes',
@@ -456,6 +457,9 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     def get_requested_by_name(self, obj):
         requester = obj.requested_by or obj.issued_by
         return employee_display_name(requester) if requester else ''
+
+    def get_requester_name(self, obj):
+        return self.get_requested_by_name(obj)
 
     def get_approved_by_name(self, obj):
         return employee_display_name(obj.approved_by) if obj.approved_by_id else ''
