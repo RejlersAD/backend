@@ -661,3 +661,390 @@ class HRWorkflowEvent(models.Model):
 
     def __str__(self):
         return f'{self.instance_id}: {self.event_type}'
+
+
+# =============================================================================
+# Performance, goals, and talent management
+# =============================================================================
+
+class PerformanceCycle(TimeStampedModel):
+    STATUS_CHOICES = [('draft', 'Draft'), ('active', 'Active'), ('calibration', 'Calibration'), ('closed', 'Closed')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=160)
+    start_date = models.DateField()
+    end_date = models.DateField()
+    self_review_due = models.DateField(null=True, blank=True)
+    manager_review_due = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft', db_index=True)
+    goal_weight = models.DecimalField(max_digits=5, decimal_places=2, default=60)
+    competency_weight = models.DecimalField(max_digits=5, decimal_places=2, default=40)
+    configuration = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        db_table = 'hr_performance_cycle'
+        ordering = ['-start_date']
+        constraints = [models.UniqueConstraint(fields=['name', 'start_date'], name='hr_perf_cycle_name_start_unique')]
+
+    def __str__(self):
+        return self.name
+
+
+class PerformanceGoal(TimeStampedModel):
+    TYPE_CHOICES = [('individual', 'Individual'), ('team', 'Team'), ('kpi', 'KPI'), ('development', 'Development')]
+    STATUS_CHOICES = [('draft', 'Draft'), ('pending', 'Pending Approval'), ('active', 'Active'), ('completed', 'Completed'), ('cancelled', 'Cancelled')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cycle = models.ForeignKey(PerformanceCycle, on_delete=models.CASCADE, related_name='goals')
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='performance_goals')
+    parent_goal = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name='aligned_goals')
+    goal_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='individual')
+    title = models.CharField(max_length=220)
+    description = models.TextField(blank=True)
+    metric_name = models.CharField(max_length=160, blank=True)
+    target_value = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    current_value = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    unit = models.CharField(max_length=40, blank=True)
+    weight = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    progress = models.PositiveSmallIntegerField(default=0)
+    due_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft', db_index=True)
+    success_criteria = models.TextField(blank=True)
+    created_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='performance_goals_created')
+    approved_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='performance_goals_approved')
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'hr_performance_goal'
+        ordering = ['cycle', 'employee', 'due_date']
+        indexes = [models.Index(fields=['employee', 'cycle', 'status'], name='hr_goal_employee_cycle_idx')]
+
+    def __str__(self):
+        return f'{self.employee}: {self.title}'
+
+
+class GoalCheckIn(TimeStampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    goal = models.ForeignKey(PerformanceGoal, on_delete=models.CASCADE, related_name='check_ins')
+    progress = models.PositiveSmallIntegerField()
+    current_value = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    note = models.TextField(blank=True)
+    evidence = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        db_table = 'hr_goal_check_in'
+        ordering = ['-created_at']
+
+
+class PerformanceReview(TimeStampedModel):
+    TYPE_CHOICES = [('self', 'Self Assessment'), ('manager', 'Manager Review'), ('peer', 'Peer Review'), ('direct_report', 'Direct Report'), ('calibration', 'Calibration')]
+    STATUS_CHOICES = [('draft', 'Draft'), ('submitted', 'Submitted'), ('acknowledged', 'Acknowledged'), ('reopened', 'Reopened')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cycle = models.ForeignKey(PerformanceCycle, on_delete=models.CASCADE, related_name='reviews')
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='performance_reviews')
+    reviewer = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='performance_reviews_given')
+    review_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft', db_index=True)
+    goal_score = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
+    competency_score = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
+    overall_score = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
+    ratings = models.JSONField(default=dict, blank=True)
+    key_achievements = models.TextField(blank=True)
+    strengths = models.TextField(blank=True)
+    areas_for_improvement = models.TextField(blank=True)
+    goals_next_period = models.TextField(blank=True)
+    overall_comments = models.TextField(blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'hr_performance_review'
+        ordering = ['-created_at']
+        constraints = [models.UniqueConstraint(fields=['cycle', 'employee', 'reviewer', 'review_type'], name='hr_review_rater_unique')]
+        indexes = [models.Index(fields=['employee', 'cycle', 'review_type'], name='hr_review_employee_cycle_idx')]
+
+
+class ContinuousFeedback(TimeStampedModel):
+    TYPE_CHOICES = [('recognition', 'Recognition'), ('coaching', 'Coaching'), ('general', 'General Feedback')]
+    VISIBILITY_CHOICES = [('employee', 'Employee and Management'), ('management', 'Management Only'), ('private', 'Author Only')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='continuous_feedback')
+    author = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='hr_feedback_given')
+    feedback_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='general')
+    visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default='employee')
+    content = models.TextField()
+    related_goal = models.ForeignKey(PerformanceGoal, null=True, blank=True, on_delete=models.SET_NULL, related_name='feedback')
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'hr_continuous_feedback'
+        ordering = ['-created_at']
+
+
+class DevelopmentPlan(TimeStampedModel):
+    STATUS_CHOICES = [('draft', 'Draft'), ('active', 'Active'), ('completed', 'Completed'), ('cancelled', 'Cancelled')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='development_plans')
+    cycle = models.ForeignKey(PerformanceCycle, null=True, blank=True, on_delete=models.SET_NULL, related_name='development_plans')
+    title = models.CharField(max_length=220)
+    career_aspiration = models.TextField(blank=True)
+    target_role = models.CharField(max_length=160, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft', db_index=True)
+    start_date = models.DateField()
+    target_date = models.DateField(null=True, blank=True)
+    owner = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        db_table = 'hr_development_plan'
+        ordering = ['-start_date']
+
+
+class DevelopmentAction(TimeStampedModel):
+    TYPE_CHOICES = [('training', 'Training'), ('mentoring', 'Mentoring'), ('assignment', 'Stretch Assignment'), ('certification', 'Certification'), ('coaching', 'Coaching')]
+    STATUS_CHOICES = [('planned', 'Planned'), ('in_progress', 'In Progress'), ('completed', 'Completed'), ('cancelled', 'Cancelled')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan = models.ForeignKey(DevelopmentPlan, on_delete=models.CASCADE, related_name='actions')
+    action_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    title = models.CharField(max_length=220)
+    description = models.TextField(blank=True)
+    provider = models.CharField(max_length=160, blank=True)
+    due_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='planned')
+    completion_evidence = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        db_table = 'hr_development_action'
+        ordering = ['due_date', 'created_at']
+
+
+class TalentAssessment(TimeStampedModel):
+    PERFORMANCE_CHOICES = [(1, 'Low'), (2, 'Moderate'), (3, 'High')]
+    POTENTIAL_CHOICES = [(1, 'Low'), (2, 'Moderate'), (3, 'High')]
+    RISK_CHOICES = [('low', 'Low'), ('medium', 'Medium'), ('high', 'High')]
+    READINESS_CHOICES = [('ready_now', 'Ready Now'), ('one_year', 'Ready in 1 Year'), ('two_plus_years', 'Ready in 2+ Years'), ('not_applicable', 'Not Applicable')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cycle = models.ForeignKey(PerformanceCycle, on_delete=models.CASCADE, related_name='talent_assessments')
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='talent_assessments')
+    performance = models.PositiveSmallIntegerField(choices=PERFORMANCE_CHOICES)
+    potential = models.PositiveSmallIntegerField(choices=POTENTIAL_CHOICES)
+    retention_risk = models.CharField(max_length=20, choices=RISK_CHOICES, default='low')
+    readiness = models.CharField(max_length=30, choices=READINESS_CHOICES, default='not_applicable')
+    critical_role = models.BooleanField(default=False)
+    notes = models.TextField(blank=True)
+    assessed_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        db_table = 'hr_talent_assessment'
+        ordering = ['cycle', 'employee']
+        constraints = [models.UniqueConstraint(fields=['cycle', 'employee'], name='hr_talent_cycle_employee_unique')]
+
+
+class SuccessionPlan(TimeStampedModel):
+    STATUS_CHOICES = [('draft', 'Draft'), ('active', 'Active'), ('closed', 'Closed')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    role_title = models.CharField(max_length=180)
+    department = models.CharField(max_length=120, blank=True)
+    incumbent = models.ForeignKey(EmployeeMaster, null=True, blank=True, on_delete=models.SET_NULL, related_name='succession_plans_as_incumbent')
+    criticality = models.CharField(max_length=20, choices=[('standard', 'Standard'), ('critical', 'Critical')], default='standard')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
+    risk_notes = models.TextField(blank=True)
+    owner = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        db_table = 'hr_succession_plan'
+        ordering = ['department', 'role_title']
+
+
+class SuccessionCandidate(TimeStampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan = models.ForeignKey(SuccessionPlan, on_delete=models.CASCADE, related_name='candidates')
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='succession_candidates')
+    readiness = models.CharField(max_length=30, choices=TalentAssessment.READINESS_CHOICES)
+    rank = models.PositiveSmallIntegerField(default=1)
+    development_gaps = models.TextField(blank=True)
+
+    class Meta:
+        db_table = 'hr_succession_candidate'
+        ordering = ['rank']
+        constraints = [models.UniqueConstraint(fields=['plan', 'employee'], name='hr_successor_plan_employee_unique')]
+
+
+class PromotionCase(TimeStampedModel):
+    STATUS_CHOICES = [('draft', 'Draft'), ('pending', 'Pending'), ('approved', 'Approved'), ('rejected', 'Rejected'), ('cancelled', 'Cancelled')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='promotion_cases')
+    current_title = models.CharField(max_length=160)
+    proposed_title = models.CharField(max_length=160)
+    proposed_grade = models.CharField(max_length=50, blank=True)
+    effective_date = models.DateField(null=True, blank=True)
+    justification = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft', db_index=True)
+    requested_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL)
+    workflow_instance = models.OneToOneField(HRWorkflowInstance, null=True, blank=True, on_delete=models.SET_NULL, related_name='promotion_case')
+
+    class Meta:
+        db_table = 'hr_promotion_case'
+        ordering = ['-created_at']
+
+
+# =============================================================================
+# Shift, roster, and approved overtime management
+# =============================================================================
+
+class WorkShift(TimeStampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code = models.SlugField(max_length=40, unique=True)
+    name = models.CharField(max_length=120)
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    break_minutes = models.PositiveSmallIntegerField(default=60)
+    crosses_midnight = models.BooleanField(default=False)
+    color = models.CharField(max_length=20, default='#2563EB')
+    is_active = models.BooleanField(default=True, db_index=True)
+    configuration = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = 'hr_work_shift'
+        ordering = ['start_time', 'code']
+
+    def __str__(self):
+        return f'{self.code} — {self.name}'
+
+
+class ShiftRoster(TimeStampedModel):
+    STATUS_CHOICES = [('draft', 'Draft'), ('published', 'Published'), ('locked', 'Locked'), ('cancelled', 'Cancelled')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=180)
+    department = models.CharField(max_length=120, blank=True)
+    location = models.CharField(max_length=120, blank=True)
+    start_date = models.DateField()
+    end_date = models.DateField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft', db_index=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        db_table = 'hr_shift_roster'
+        ordering = ['-start_date']
+
+
+class ShiftAssignment(TimeStampedModel):
+    STATUS_CHOICES = [('scheduled', 'Scheduled'), ('worked', 'Worked'), ('absent', 'Absent'), ('leave', 'Leave'), ('cancelled', 'Cancelled')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    roster = models.ForeignKey(ShiftRoster, on_delete=models.CASCADE, related_name='assignments')
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='shift_assignments')
+    shift = models.ForeignKey(WorkShift, on_delete=models.PROTECT, related_name='assignments')
+    date = models.DateField(db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
+    location = models.CharField(max_length=120, blank=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        db_table = 'hr_shift_assignment'
+        ordering = ['date', 'shift__start_time']
+        constraints = [models.UniqueConstraint(fields=['employee', 'date'], name='hr_shift_employee_date_unique')]
+        indexes = [models.Index(fields=['employee', 'date', 'status'], name='hr_shift_employee_date_idx')]
+
+
+class OvertimeRequest(TimeStampedModel):
+    STATUS_CHOICES = [('draft', 'Draft'), ('pending', 'Pending'), ('approved', 'Approved'), ('rejected', 'Rejected'), ('cancelled', 'Cancelled')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='overtime_requests')
+    assignment = models.ForeignKey(ShiftAssignment, null=True, blank=True, on_delete=models.SET_NULL, related_name='overtime_requests')
+    work_date = models.DateField(db_index=True)
+    requested_hours = models.DecimalField(max_digits=5, decimal_places=2)
+    approved_hours = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    reason = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', db_index=True)
+    requested_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='overtime_requests_created')
+    workflow_instance = models.OneToOneField(HRWorkflowInstance, null=True, blank=True, on_delete=models.SET_NULL, related_name='overtime_request')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'hr_overtime_request'
+        ordering = ['-work_date', '-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['employee', 'work_date'], condition=models.Q(status__in=['pending', 'approved']), name='hr_overtime_active_day_unique'),
+        ]
+        indexes = [models.Index(fields=['status', 'work_date'], name='hr_overtime_queue_idx')]
+
+
+# =============================================================================
+# Unified employee service requests
+# =============================================================================
+
+class EmployeeServiceRequest(TimeStampedModel):
+    TYPE_CHOICES = [
+        ('expense', 'Expense Reimbursement'), ('travel', 'Business Travel'),
+        ('asset', 'Asset Request'), ('hr_helpdesk', 'HR Helpdesk'),
+    ]
+    STATUS_CHOICES = [
+        ('draft', 'Draft'), ('pending', 'Pending Approval'),
+        ('approved', 'Approved'), ('rejected', 'Rejected'),
+        ('in_progress', 'In Progress'), ('fulfilled', 'Fulfilled'),
+        ('cancelled', 'Cancelled'),
+    ]
+    PRIORITY_CHOICES = [('low', 'Low'), ('normal', 'Normal'), ('high', 'High'), ('urgent', 'Urgent')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request_number = models.CharField(max_length=32, unique=True, db_index=True, blank=True)
+    request_type = models.CharField(max_length=24, choices=TYPE_CHOICES, db_index=True)
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='service_requests')
+    title = models.CharField(max_length=220)
+    description = models.TextField()
+    category = models.CharField(max_length=100, blank=True)
+    priority = models.CharField(max_length=16, choices=PRIORITY_CHOICES, default='normal')
+    amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=3, default='AED')
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    destination = models.CharField(max_length=180, blank=True)
+    cost_center = models.CharField(max_length=80, blank=True)
+    details = models.JSONField(default=dict, blank=True)
+    attachments = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default='pending', db_index=True)
+    requested_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='employee_service_requests')
+    assigned_to = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='employee_service_requests_assigned')
+    workflow_instance = models.OneToOneField(HRWorkflowInstance, null=True, blank=True, on_delete=models.SET_NULL, related_name='service_request')
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    resolution = models.TextField(blank=True)
+
+    class Meta:
+        db_table = 'hr_employee_service_request'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['employee', 'request_type', 'status'], name='hr_service_employee_idx'),
+            models.Index(fields=['status', 'priority'], name='hr_service_queue_idx'),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.request_number:
+            prefix = {'expense': 'EXP', 'travel': 'TRV', 'asset': 'AST', 'hr_helpdesk': 'HRD'}.get(self.request_type, 'REQ')
+            self.request_number = f'{prefix}-{timezone.now():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}'
+        super().save(*args, **kwargs)
+
+
+class EmployeeServiceRequestComment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request = models.ForeignKey(EmployeeServiceRequest, on_delete=models.CASCADE, related_name='comments')
+    author = models.ForeignKey('users.User', null=True, on_delete=models.SET_NULL)
+    body = models.TextField()
+    is_internal = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'hr_employee_service_request_comment'
+        ordering = ['created_at']

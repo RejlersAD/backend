@@ -1909,9 +1909,15 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     def available_requisitions(self, request):
         """Existing PRs available for Purchase Order linkage and search."""
         queryset = PurchaseRequisition.objects.select_related(
-            'issued_by', 'vendor', 'requested_by', 'approved_by', 'pm_name',
-            'eng_manager_name', 'manager_projects_name', 'vp_op_name',
-        ).all().order_by('-created_at')
+            'issued_by', 'requested_by', 'vendor'
+        ).only(
+            'id', 'pr_number', 'status', 'supplier_name', 'vendor_id', 'vendor__name',
+            'project_department', 'product_service', 'title', 'total_price', 'net_total_excl_vat',
+            'estimated_budget', 'currency', 'description_reason', 'category', 'required_date',
+            'items', 'purchase_recommendation', 'project_details', 'project', 'created_at',
+            'issued_by__first_name', 'issued_by__last_name', 'issued_by__email',
+            'requested_by__first_name', 'requested_by__last_name', 'requested_by__email',
+        ).order_by('-created_at')
 
         search = str(request.query_params.get('search') or '').strip()
         if search:
@@ -1923,12 +1929,50 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
                 | Q(project_department__icontains=search)
             )
 
-        serializer = PurchaseRequisitionSerializer(
-            queryset,
-            many=True,
-            context=self.get_serializer_context(),
-        )
-        return Response(serializer.data)
+        try:
+            requested_limit = int(request.query_params.get('limit') or 500)
+        except (TypeError, ValueError):
+            requested_limit = 500
+        limit = max(50, min(requested_limit, 2000))
+
+        rows = []
+        for requisition in queryset[:limit]:
+            issued_by = requisition.issued_by
+            requested_by = requisition.requested_by
+            rows.append({
+                'id': requisition.id,
+                'pr_number': requisition.pr_number,
+                'status': requisition.status,
+                'status_display': requisition.get_status_display(),
+                'vendor': requisition.vendor_id,
+                'vendor_name': requisition.vendor.name if requisition.vendor else '',
+                'supplier_name': requisition.supplier_name,
+                'project_department': requisition.project_department,
+                'product_service': requisition.product_service,
+                'title': requisition.title,
+                'total_price': requisition.total_price,
+                'net_total_excl_vat': requisition.net_total_excl_vat,
+                'estimated_budget': requisition.estimated_budget,
+                'currency': requisition.currency,
+                'issued_by_name': (
+                    issued_by.get_full_name().strip() if issued_by and issued_by.get_full_name().strip()
+                    else (issued_by.email if issued_by else '')
+                ),
+                'requested_by_name': (
+                    requested_by.get_full_name().strip() if requested_by and requested_by.get_full_name().strip()
+                    else (requested_by.email if requested_by else '')
+                ),
+                'description_reason': requisition.description_reason,
+                'category': requisition.category,
+                'required_date': requisition.required_date,
+                'items': requisition.items,
+                'purchase_recommendation': requisition.purchase_recommendation,
+                'project_details': requisition.project_details,
+                'project': requisition.project,
+                'created_at': requisition.created_at,
+            })
+
+        return Response(rows)
 
     @action(detail=False, methods=['get'], url_path='available-projects')
     def available_projects(self, request):

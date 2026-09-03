@@ -629,3 +629,65 @@ class PayrollComparisonRow(models.Model):
     def __str__(self) -> str:
         who = self.external_name or self.external_employee_no or 'unknown'
         return f'{who} [{self.status}]'
+
+
+class PayrollComplianceCheck(models.Model):
+    STATUS_CHOICES = [('passed', 'Passed'), ('warning', 'Passed with Warnings'), ('failed', 'Failed')]
+    run = models.ForeignKey(PayrollRun, on_delete=models.CASCADE, related_name='compliance_checks')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, db_index=True)
+    jurisdiction = models.CharField(max_length=8, default='AE')
+    ruleset_version = models.CharField(max_length=32, default='AE-2026.1')
+    findings = models.JSONField(default=list)
+    error_count = models.PositiveIntegerField(default=0)
+    warning_count = models.PositiveIntegerField(default=0)
+    checked_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    checked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'payroll_engine_compliance_check'
+        ordering = ['-checked_at']
+
+
+class PayrollPaymentBatch(models.Model):
+    TYPE_CHOICES = [('wps', 'UAE WPS SIF'), ('bank', 'Bank Transfer')]
+    STATUS_CHOICES = [('draft', 'Draft'), ('validated', 'Validated'), ('exported', 'Exported'), ('submitted', 'Submitted'), ('accepted', 'Accepted'), ('rejected', 'Rejected')]
+    run = models.ForeignKey(PayrollRun, on_delete=models.PROTECT, related_name='payment_batches')
+    batch_type = models.CharField(max_length=12, choices=TYPE_CHOICES)
+    reference = models.CharField(max_length=50, unique=True, db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='draft', db_index=True)
+    record_count = models.PositiveIntegerField(default=0)
+    total_amount = models.DecimalField(max_digits=16, decimal_places=2, default=ZERO)
+    currency = models.CharField(max_length=3, default='AED')
+    records = models.JSONField(default=list)
+    validation_errors = models.JSONField(default=list)
+    file_hash = models.CharField(max_length=64, blank=True)
+    bank_response = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'payroll_engine_payment_batch'
+        ordering = ['-created_at']
+        constraints = [models.UniqueConstraint(fields=['run', 'batch_type'], name='uq_payroll_payment_run_type')]
+
+
+class PayrollAccountingExport(models.Model):
+    SYSTEM_CHOICES = [('generic', 'Generic CSV'), ('dynamics', 'Microsoft Dynamics'), ('sap', 'SAP'), ('oracle', 'Oracle')]
+    STATUS_CHOICES = [('generated', 'Generated'), ('exported', 'Exported'), ('posted', 'Posted'), ('failed', 'Failed')]
+    run = models.ForeignKey(PayrollRun, on_delete=models.PROTECT, related_name='accounting_exports')
+    target_system = models.CharField(max_length=16, choices=SYSTEM_CHOICES, default='generic')
+    reference = models.CharField(max_length=50, unique=True, db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='generated')
+    journal_date = models.DateField(default=timezone.localdate)
+    entries = models.JSONField(default=list)
+    total_debit = models.DecimalField(max_digits=16, decimal_places=2, default=ZERO)
+    total_credit = models.DecimalField(max_digits=16, decimal_places=2, default=ZERO)
+    external_reference = models.CharField(max_length=120, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+    posted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'payroll_engine_accounting_export'
+        ordering = ['-created_at']

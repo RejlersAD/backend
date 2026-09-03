@@ -3,6 +3,11 @@ HR Core Admin - Django Admin Interface
 """
 from django.contrib import admin
 from apps.hr_core.models import (
+    ContinuousFeedback,
+    DevelopmentAction,
+    DevelopmentPlan,
+    EmployeeServiceRequest,
+    EmployeeServiceRequestComment,
     EmployeeIdentityAlias,
     EmployeeMaster,
     HRWorkflowDefinition,
@@ -10,6 +15,18 @@ from apps.hr_core.models import (
     HRWorkflowInstance,
     HRWorkflowStage,
     HRWorkflowTask,
+    GoalCheckIn,
+    OvertimeRequest,
+    PerformanceCycle,
+    PerformanceGoal,
+    PerformanceReview,
+    PromotionCase,
+    ShiftAssignment,
+    ShiftRoster,
+    SuccessionCandidate,
+    SuccessionPlan,
+    TalentAssessment,
+    WorkShift,
 )
 
 
@@ -215,3 +232,101 @@ class HRWorkflowEventAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+
+@admin.register(PerformanceCycle)
+class PerformanceCycleAdmin(admin.ModelAdmin):
+    list_display = ('name', 'start_date', 'end_date', 'status', 'goal_weight', 'competency_weight')
+    list_filter = ('status',)
+
+
+@admin.register(PerformanceGoal)
+class PerformanceGoalAdmin(admin.ModelAdmin):
+    list_display = ('title', 'employee', 'cycle', 'goal_type', 'weight', 'progress', 'status')
+    list_filter = ('cycle', 'goal_type', 'status')
+    search_fields = ('title', 'employee__email', 'employee__employee_number')
+
+
+admin.site.register(GoalCheckIn)
+
+
+@admin.register(PerformanceReview)
+class PerformanceReviewAdmin(admin.ModelAdmin):
+    list_display = ('employee', 'cycle', 'review_type', 'reviewer', 'overall_score', 'status')
+    list_filter = ('cycle', 'review_type', 'status')
+
+
+admin.site.register(ContinuousFeedback)
+
+
+class DevelopmentActionInline(admin.TabularInline):
+    model = DevelopmentAction
+    extra = 0
+
+
+@admin.register(DevelopmentPlan)
+class DevelopmentPlanAdmin(admin.ModelAdmin):
+    list_display = ('title', 'employee', 'target_role', 'status', 'target_date')
+    list_filter = ('status',)
+    inlines = (DevelopmentActionInline,)
+
+
+@admin.register(TalentAssessment)
+class TalentAssessmentAdmin(admin.ModelAdmin):
+    list_display = ('employee', 'cycle', 'performance', 'potential', 'retention_risk', 'readiness', 'critical_role')
+    list_filter = ('cycle', 'performance', 'potential', 'retention_risk', 'critical_role')
+
+
+class SuccessionCandidateInline(admin.TabularInline):
+    model = SuccessionCandidate
+    extra = 0
+
+
+@admin.register(SuccessionPlan)
+class SuccessionPlanAdmin(admin.ModelAdmin):
+    list_display = ('role_title', 'department', 'incumbent', 'criticality', 'status')
+    list_filter = ('criticality', 'status', 'department')
+    inlines = (SuccessionCandidateInline,)
+
+
+@admin.register(PromotionCase)
+class PromotionCaseAdmin(admin.ModelAdmin):
+    list_display = ('employee', 'current_title', 'proposed_title', 'effective_date', 'status')
+    list_filter = ('status', 'effective_date')
+
+
+@admin.register(WorkShift)
+class WorkShiftAdmin(admin.ModelAdmin):
+    list_display = ('code', 'name', 'start_time', 'end_time', 'crosses_midnight', 'is_active')
+    list_filter = ('is_active', 'crosses_midnight')
+
+
+class ShiftAssignmentInline(admin.TabularInline):
+    model = ShiftAssignment
+    extra = 0
+
+
+@admin.register(ShiftRoster)
+class ShiftRosterAdmin(admin.ModelAdmin):
+    list_display = ('name', 'department', 'location', 'start_date', 'end_date', 'status')
+    list_filter = ('status', 'department', 'location')
+    inlines = (ShiftAssignmentInline,)
+
+
+@admin.register(OvertimeRequest)
+class OvertimeRequestAdmin(admin.ModelAdmin):
+    list_display = ('employee', 'work_date', 'requested_hours', 'approved_hours', 'status')
+    list_filter = ('status', 'work_date')
+
+
+class EmployeeServiceRequestCommentInline(admin.TabularInline):
+    model = EmployeeServiceRequestComment
+    extra = 0
+
+
+@admin.register(EmployeeServiceRequest)
+class EmployeeServiceRequestAdmin(admin.ModelAdmin):
+    list_display = ('request_number', 'request_type', 'employee', 'priority', 'status', 'created_at')
+    list_filter = ('request_type', 'status', 'priority')
+    search_fields = ('request_number', 'title', 'employee__email')
+    inlines = (EmployeeServiceRequestCommentInline,)
