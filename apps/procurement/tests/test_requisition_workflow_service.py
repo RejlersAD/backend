@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.test import SimpleTestCase
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -113,6 +114,30 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
 
         self.assertEqual(level, 0)
         self.assertEqual(stages[0][1]['role'], 'Procurement Department')
+
+    @patch.object(RequisitionWorkflowService, '_notify_level')
+    def test_submission_notifies_level_zero_first(self, notify_level):
+        pr = self._pr()
+        pr.approval_workflow_config = [
+            {'level': 0, 'role': 'Procurement Department', 'user_id': self.pm.id},
+            {'level': 1, 'role': 'Level 1 Approver', 'user_id': self.engineering_manager.id},
+        ]
+
+        RequisitionWorkflowService._submit_locked(pr, self.issuer)
+
+        notify_level.assert_called_once_with(pr, pr.approval_workflow_config, 0)
+
+    @patch.object(RequisitionWorkflowService, '_notify_level')
+    def test_approval_notifies_every_new_active_level(self, notify_level):
+        pr = self._pr(status='submitted')
+        pr.approval_workflow_config = [
+            {'level': 0, 'role': 'Procurement Department', 'user_id': self.pm.id, 'status': 'pending'},
+            {'level': 1, 'role': 'Level 1 Approver', 'user_id': self.engineering_manager.id, 'status': 'pending'},
+        ]
+
+        RequisitionWorkflowService._approve_locked(pr, self.pm)
+
+        notify_level.assert_called_once_with(pr, pr.approval_workflow_config, 1)
 
     def test_migrated_assignment_uses_email_when_user_id_changed(self):
         stage = {
