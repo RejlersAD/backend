@@ -12,6 +12,7 @@ to ensure data consistency across legacy and new tables.
 """
 import logging
 import uuid
+import calendar
 import random
 from typing import Optional, Dict, Any, List
 from django.db import transaction, models
@@ -23,6 +24,15 @@ from apps.hr_core.models import EmployeeMaster
 logger = logging.getLogger(__name__)
 
 User = get_user_model()
+
+
+def calculate_probation_end_date(join_date, months=6):
+    """Add calendar months while safely handling month-end joining dates."""
+    target_month = join_date.month + months
+    target_year = join_date.year + (target_month - 1) // 12
+    target_month = (target_month - 1) % 12 + 1
+    target_day = min(join_date.day, calendar.monthrange(target_year, target_month)[1])
+    return join_date.replace(year=target_year, month=target_month, day=target_day)
 
 
 class EmployeeService:
@@ -345,6 +355,8 @@ class EmployeeService:
         first_name = first_name or user.first_name or ''
         last_name = last_name or user.last_name or ''
         join_date = join_date or timezone.now().date()
+        if not additional_fields.get('probation_end_date'):
+            additional_fields['probation_end_date'] = calculate_probation_end_date(join_date)
         
         # Generate unique identifiers if not provided
         if not employee_number:

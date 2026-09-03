@@ -215,11 +215,13 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
     reviewed_by_name     = serializers.SerializerMethodField()
     rm_reviewed_by_name  = serializers.SerializerMethodField()
     substitute_employee_name = serializers.SerializerMethodField()
+    workflow_status = serializers.SerializerMethodField()
+    workflow_stage = serializers.SerializerMethodField()
 
     class Meta:
         model  = LeaveRequest
         fields = [
-            'id', 'employee', 'employee_code', 'employee_name', 'department',
+            'id', 'employee', 'canonical_employee', 'employee_code', 'employee_name', 'department',
             'leave_type', 'leave_type_detail',
             'start_date', 'end_date', 'days_requested', 'reason',
             # SOFT-CODED: Additional fields for enhanced leave tracking
@@ -229,12 +231,14 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
             'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'reviewer_note',
             # Stage-1 Reporting Manager fields
             'rm_reviewed_by', 'rm_reviewed_by_name', 'rm_reviewed_at', 'rm_note',
+            'workflow_instance', 'workflow_status', 'workflow_stage',
             'created_at', 'updated_at',
         ]
         read_only_fields = [
             'id', 'days_requested', 'status', 'status_display',
             'reviewed_by', 'reviewed_by_name', 'reviewed_at',
             'rm_reviewed_by', 'rm_reviewed_by_name', 'rm_reviewed_at',
+            'canonical_employee', 'workflow_instance', 'workflow_status', 'workflow_stage',
             'created_at', 'updated_at', 'leave_type_detail', 'substitute_employee_name',
         ]
 
@@ -262,6 +266,13 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
                 or obj.substitute_employee.email
             )
         return obj.substitute_name or None
+
+    def get_workflow_status(self, obj):
+        return obj.workflow_instance.status if obj.workflow_instance_id else None
+
+    def get_workflow_stage(self, obj):
+        instance = obj.workflow_instance if obj.workflow_instance_id else None
+        return instance.current_stage.code if instance and instance.current_stage_id else None
 
 
 # ---------------------------------------------------------------------------

@@ -79,6 +79,22 @@ def get_active_role_codes(user):
     ).values_list('role__code', flat=True))
 
 
+def can_manage_probation_report(user, employee_user=None):
+    """Allow HR/admin roles globally and direct line managers for their reports."""
+    if not user or not getattr(user, 'is_authenticated', False):
+        return False
+    if getattr(user, 'is_superuser', False):
+        return True
+    if get_active_role_codes(user).intersection(LIFECYCLE_ADMIN_ROLES | LIFECYCLE_HR_ROLES):
+        return True
+    if employee_user is None:
+        return False
+    return EmployeeMaster.objects.filter(
+        user=employee_user,
+        manager__user=user,
+    ).exists()
+
+
 def can_manage_onboarding_stage(user, stage, record=None):
     policy = ONBOARDING_STAGE_RBAC.get(stage)
     if not policy or not user or not getattr(user, 'is_authenticated', False):

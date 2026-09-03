@@ -1,4 +1,7 @@
+from unittest.mock import patch
+
 from django.test import SimpleTestCase
+from rest_framework import serializers as drf_serializers
 
 from apps.procurement.models import PurchaseOrder
 from apps.procurement.serializers import PurchaseOrderSerializer
@@ -48,3 +51,25 @@ class PurchaseOrderOptionalDateTests(SimpleTestCase):
         value = serializer.fields['start_date'].run_validation('2026-08-20')
 
         self.assertEqual(value.isoformat(), '2026-08-20')
+
+
+class PurchaseOrderUnifiedProjectTests(SimpleTestCase):
+    def test_core_picker_identity_populates_enterprise_project(self):
+        serializer = PurchaseOrderSerializer()
+        picker_data = {
+            'project': 'core:44',
+            'project_number': '5900913',
+        }
+
+        # Isolate the boundary normalization from relational validation; DRF's
+        # normal field validation then resolves enterprise_project=44.
+        with patch.object(
+            drf_serializers.ModelSerializer,
+            'to_internal_value',
+            side_effect=lambda value: value,
+        ):
+            normalized = serializer.to_internal_value(picker_data)
+
+        self.assertNotIn('project', normalized)
+        self.assertEqual(normalized['enterprise_project'], '44')
+        self.assertEqual(normalized['project_number'], '5900913')

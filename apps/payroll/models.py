@@ -623,6 +623,16 @@ class LeaveRequest(models.Model):
         User, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='leave_requests',
     )
+    canonical_employee = models.ForeignKey(
+        'hr_core.EmployeeMaster', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='leave_requests',
+        help_text='Authoritative employee identity for this request.',
+    )
+    workflow_instance = models.OneToOneField(
+        'hr_core.HRWorkflowInstance', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='leave_request',
+        help_text='Shared approval workflow runtime for this request.',
+    )
     # Denormalised fields — auto-populated from the User FK on save; also
     # allow HR to create requests for employees without RAD AI accounts.
     employee_code    = models.CharField(max_length=30, null=True, blank=True, db_index=True)
@@ -711,6 +721,12 @@ class LeaveRequest(models.Model):
         # Auto-populate identity fields from the User FK
         if self.employee:
             u = self.employee
+            if not self.canonical_employee_id:
+                try:
+                    from apps.hr_core.models import EmployeeMaster
+                    self.canonical_employee = EmployeeMaster.objects.filter(user=u).first()
+                except Exception:
+                    pass
             if not self.employee_name:
                 self.employee_name = (
                     f'{u.first_name} {u.last_name}'.strip() or u.email

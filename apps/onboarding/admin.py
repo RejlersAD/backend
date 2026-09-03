@@ -4,7 +4,8 @@ Onboarding & Offboarding Admin Configuration
 from django.contrib import admin
 from .models import (
     OnboardingRecord, OffboardingRecord, Equipment,
-    Document, AccessProvisioning, Checklist, ExitApproval
+    Document, AccessProvisioning, Checklist, ExitApproval,
+    ProbationPerformanceReport,
 )
 
 
@@ -15,6 +16,14 @@ class OnboardingRecordAdmin(admin.ModelAdmin):
     search_fields = ['employee_name', 'employee_email', 'employee_id', 'position']
     date_hierarchy = 'joining_date'
     ordering = ['-joining_date']
+
+
+@admin.register(ProbationPerformanceReport)
+class ProbationPerformanceReportAdmin(admin.ModelAdmin):
+    list_display = ['employee', 'checkpoint_days', 'due_date', 'status', 'created_by', 'submitted_at']
+    list_filter = ['status', 'checkpoint_days', 'due_date']
+    search_fields = ['employee__first_name', 'employee__last_name', 'employee__email']
+    date_hierarchy = 'due_date'
 
 
 @admin.register(OffboardingRecord)

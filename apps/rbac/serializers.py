@@ -257,6 +257,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
     profile_photo = serializers.SerializerMethodField()
     # Engineering competency profile — stored in metadata['engineer_profile'], no migration needed
     engineer_profile = serializers.SerializerMethodField()
+    join_date = serializers.SerializerMethodField()
+    probation_end_date = serializers.SerializerMethodField()
 
     # User creation fields (used on POST). phone is intentionally NOT redeclared
     # here so the auto-generated model field stays read+write — otherwise the
@@ -410,6 +412,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'last_login_ip', 'last_login_at', 'failed_login_attempts',
             'must_change_password',
             'profile_photo', 'phone', 'bio', 'location', 'engineer_profile',
+            'join_date', 'probation_end_date',
             'is_deleted', 'deleted_at', 'deleted_by',
             'created_at', 'updated_at',
             'username', 'email', 'password', 'first_name', 'last_name', 'is_active', 'phone'
@@ -424,6 +427,18 @@ class UserProfileSerializer(serializers.ModelSerializer):
         """Get all permissions for user"""
         permissions = obj.get_all_permissions()
         return PermissionListSerializer(permissions, many=True).data
+
+    def get_join_date(self, obj):
+        try:
+            return obj.user.employee_master.join_date
+        except (AttributeError, ObjectDoesNotExist):
+            return None
+
+    def get_probation_end_date(self, obj):
+        try:
+            return obj.user.employee_master.probation_end_date
+        except (AttributeError, ObjectDoesNotExist):
+            return None
     
     def get_modules(self, obj):
         """Get all accessible modules for user"""
@@ -875,6 +890,7 @@ class UserProfileListSerializer(serializers.ModelSerializer):
     manager_name = serializers.SerializerMethodField()
     manager_detail = serializers.SerializerMethodField()
     join_date = serializers.SerializerMethodField()
+    probation_end_date = serializers.SerializerMethodField()
     exit_date = serializers.SerializerMethodField()
     employment_status = serializers.SerializerMethodField()
     resignation_date = serializers.SerializerMethodField()
@@ -889,7 +905,7 @@ class UserProfileListSerializer(serializers.ModelSerializer):
             'organization_name', 'primary_role', 'roles',
             # Employment
             'employee_id', 'department', 'job_title', 'manager_name', 'manager_detail',
-            'join_date', 'exit_date', 'employment_status', 'resignation_date', 'contract_end_date',
+            'join_date', 'probation_end_date', 'exit_date', 'employment_status', 'resignation_date', 'contract_end_date',
             # Contact / location
             'phone', 'location', 'bio',
             # Status & security
@@ -994,6 +1010,10 @@ class UserProfileListSerializer(serializers.ModelSerializer):
     def get_join_date(self, obj):
         master = self._employee_master(obj)
         return master.join_date if master else None
+
+    def get_probation_end_date(self, obj):
+        master = self._employee_master(obj)
+        return master.probation_end_date if master else None
 
     def get_exit_date(self, obj):
         master = self._employee_master(obj)

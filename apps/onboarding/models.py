@@ -5,6 +5,7 @@ All soft-coded: status choices, equipment types, document types via config
 """
 from django.db import models
 from django.contrib.auth import get_user_model
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.utils import timezone
 
 User = get_user_model()
@@ -219,6 +220,71 @@ class OnboardingRecord(models.Model):
     
     def __str__(self):
         return f"{self.employee_name} - {self.position} ({self.status})"
+
+
+class ProbationPerformanceReport(models.Model):
+    """Structured performance review at the employee's 100-day checkpoint."""
+    STATUS_DRAFT = 'draft'
+    STATUS_SUBMITTED = 'submitted'
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, 'Draft'),
+        (STATUS_SUBMITTED, 'Submitted'),
+    ]
+
+    employee = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='probation_performance_reports'
+    )
+    checkpoint_days = models.PositiveSmallIntegerField(default=100)
+    due_date = models.DateField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+
+    job_knowledge_rating = models.PositiveSmallIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(5)]
+    )
+    work_quality_rating = models.PositiveSmallIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(5)]
+    )
+    reliability_rating = models.PositiveSmallIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(5)]
+    )
+    teamwork_rating = models.PositiveSmallIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(1), MaxValueValidator(5)]
+    )
+    achievements = models.TextField(blank=True)
+    strengths = models.TextField(blank=True)
+    improvement_areas = models.TextField(blank=True)
+    next_period_goals = models.TextField(blank=True)
+    overall_comments = models.TextField(blank=True)
+    system_snapshot = models.JSONField(default=dict, blank=True)
+    insights_generated_at = models.DateTimeField(null=True, blank=True)
+
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, related_name='probation_reports_created'
+    )
+    updated_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='probation_reports_updated'
+    )
+    submitted_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='probation_reports_submitted'
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'onboarding_probation_performance_report'
+        ordering = ['-due_date', '-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['employee', 'checkpoint_days'],
+                name='unique_employee_probation_checkpoint',
+            )
+        ]
+
+    def __str__(self):
+        return f'{self.employee} - {self.checkpoint_days}-day review ({self.status})'
 
 
 class OffboardingRecord(models.Model):
