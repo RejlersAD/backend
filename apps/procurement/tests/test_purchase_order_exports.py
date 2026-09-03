@@ -71,11 +71,17 @@ class PurchaseOrderExportTests(TestCase):
         # source page for each of the three attachments.
         self.assertEqual(len(exported.pages), 9)
         narrative_text = exported.pages[1].extract_text()
+        self.assertIn('PURCHASE ORDER', narrative_text)
+        self.assertIn('REJLERS', narrative_text)
+        self.assertIn('Rejlers International Engineering Solutions', narrative_text)
+        self.assertIn('Page 2', narrative_text)
         self.assertIn('First scope paragraph', narrative_text)
         self.assertIn('Second scope paragraph', narrative_text)
         self.assertNotIn('&nbsp;', narrative_text)
         self.assertIn('SUMMARY OF PRICES', exported.pages[2].extract_text())
         first_cover_text = exported.pages[3].extract_text()
+        self.assertIn('PURCHASE ORDER', first_cover_text)
+        self.assertIn('Page 4', first_cover_text)
         self.assertIn('Description 1', first_cover_text)
         self.assertNotIn('attachment-1.pdf', first_cover_text)
 

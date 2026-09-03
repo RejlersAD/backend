@@ -1,7 +1,10 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from django.core.files.uploadedfile import TemporaryUploadedFile
+from django.http import QueryDict
 from django.test import SimpleTestCase
+from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 
 from apps.procurement.services.purchase_order_approvals import (
@@ -94,6 +97,35 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
 
         self.assertEqual(attrs['approval_log'], [])
         self.assertEqual(attrs['management_approver'], '')
+
+    def test_core_project_multipart_normalization_keeps_open_attachments(self):
+        upload = TemporaryUploadedFile(
+            'support.pdf', 'application/pdf', 4, charset=None,
+        )
+        try:
+            upload.write(b'%PDF')
+            upload.seek(0)
+            payload = QueryDict('', mutable=True)
+            payload['project'] = 'core:3d2c3f86-2503-477d-892c-cae6d8920140'
+            payload.setlist('attachments_files', [upload])
+
+            with patch.object(
+                serializers.ModelSerializer,
+                'to_internal_value',
+                return_value={'normalized': True},
+            ) as parent:
+                result = PurchaseOrderSerializer().to_internal_value(payload)
+
+            normalized = parent.call_args.args[0]
+            self.assertEqual(result, {'normalized': True})
+            self.assertNotIn('project', normalized)
+            self.assertEqual(
+                normalized['enterprise_project'],
+                '3d2c3f86-2503-477d-892c-cae6d8920140',
+            )
+            self.assertIs(normalized.getlist('attachments_files')[0], upload)
+        finally:
+            upload.close()
 
     def test_manual_vendor_icv_requires_valid_percentage_and_sets_certified(self):
         serializer = VendorICVSerializer(data={'icv_percentage': '64.25'})

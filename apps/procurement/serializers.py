@@ -3,6 +3,8 @@ Procurement Management Serializers
 API data serialization for procurement workflows
 """
 
+import copy
+
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
@@ -785,7 +787,11 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         """
         project_id = data.get('project') if hasattr(data, 'get') else None
         if isinstance(project_id, str) and project_id.startswith('core:'):
-            normalized_data = data.copy()
+            # QueryDict.copy() performs a deep copy. Multipart values include
+            # TemporaryUploadedFile objects backed by BufferedRandom, which
+            # cannot be pickled. A shallow copy retains repeated file values
+            # without trying to copy their open handles.
+            normalized_data = copy.copy(data)
             normalized_data.pop('project', None)
             normalized_data['enterprise_project'] = project_id.removeprefix('core:')
             data = normalized_data
