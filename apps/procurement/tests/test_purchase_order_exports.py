@@ -31,13 +31,28 @@ class PurchaseOrderExportTests(TestCase):
             description='<p>First scope&nbsp;paragraph</p><p>Second scope paragraph</p><ul><li>Required document</li></ul>',
             seller_reference='',
             quote_ref='',
+            seller_license_no='',
+            seller_address='Vendor City',
+            seller_phone='+971 1 234 5678',
+            seller_email='vendor@example.com',
+            invoicing_attn='Accounts Payable',
+            invoicing_emails=['finance@example.com'],
+            company_fax='+971 2 639 7448',
+            buyer_reference_pm='Test Buyer',
+            buyer_reference_email='buyer@example.com',
+            contact_persons={},
             project_number='590001',
             rad_project_no='',
             payment_terms='30 days',
+            payment_mode='Bank Transfer',
             delivery_terms='DAP',
+            expected_delivery='2026-09-30',
+            marking='RAD-PRJ-PUR-0001_2026',
+            form_note='(PO no. to be used in all documents)',
             approved_by_name='',
             approved_by_title='',
             approved_date=None,
+            confirmation_date=None,
             attachments=attachments or [],
         )
 
@@ -93,12 +108,29 @@ class PurchaseOrderExportTests(TestCase):
         }]))
         document = Document(BytesIO(content))
         rendered_text = '\n'.join(paragraph.text for paragraph in document.paragraphs)
+        header_text = '\n'.join(
+            cell.text
+            for table in document.sections[0].header.tables
+            for row in table.rows
+            for cell in row.cells
+        )
+        footer_text = '\n'.join(
+            cell.text
+            for table in document.sections[0].footer.tables
+            for row in table.rows
+            for cell in row.cells
+        )
 
         self.assertIn('Summary of Prices', rendered_text)
         self.assertIn('First scope paragraph', rendered_text)
         self.assertIn('Second scope paragraph', rendered_text)
         self.assertNotIn('&nbsp;', rendered_text)
         self.assertNotIn('Should not be exported to Word', rendered_text)
+        self.assertIn('PURCHASE ORDER', header_text)
+        self.assertIn('RAD-PRJ-PUR-0001_2026', header_text)
+        self.assertIn('HOME OF THE', header_text)
+        self.assertIn('Rejlers International Engineering Solutions', footer_text)
+        self.assertIn('Page ', footer_text)
 
     def test_rich_text_normalization_decodes_entities_and_keeps_blocks(self):
         self.assertEqual(

@@ -10,8 +10,11 @@ from xml.sax.saxutils import escape
 
 from django.utils.html import strip_tags
 from docx import Document
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches, Pt
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Mm, Pt, RGBColor
 from openpyxl import load_workbook
 from PIL import Image as PILImage
 from PyPDF2 import PdfReader, PdfWriter
@@ -29,6 +32,7 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from reportlab.lib.utils import ImageReader
 
 JARMO_NAME = 'Jarmo Suominen'
 JARMO_TITLE = 'Sr. Vice President, Middle East\nCEO, Rejlers Abu Dhabi'
@@ -43,6 +47,20 @@ COMPANY_WEBSITE = 'www.rejlers.ae'
 BRAND_BLUE = colors.HexColor('#0870aa')
 BRAND_TEXT_BLUE = colors.HexColor('#3275b6')
 BRAND_NAVY = colors.HexColor('#1f2d55')
+LOGO_PATH = Path(__file__).resolve().parent.parent / 'assets' / 'rejlers-pr-po-logo.png'
+DEFAULT_INVOICE_ADDRESS = (
+    'Attn. Mr. Aneef Thadikkarantavida\n'
+    'aneef.thadikkarantavida@rejlers.ae\n'
+    'cc. uae.finance@rejlers.ae\n'
+    'uae.procurement@rejlers.ae\n'
+    'Rejlers International Engineering\n'
+    'Solutions AB\n'
+    'PO Box 39317\n'
+    'Abu Dhabi, UAE.\n'
+    'Tel: +971 2 639 7449\n'
+    'Fax: +971 2 639 7448'
+)
+USD_TO_AED_RATE = 3.6725
 
 
 def _value(value, fallback='—'):
@@ -111,13 +129,35 @@ def _date_text(value):
     if not value:
         return '—'
     if hasattr(value, 'strftime'):
-        return value.strftime('%d %b %Y')
+        rendered = value.strftime('%d %b %Y')
     try:
         from datetime import date
 
-        return date.fromisoformat(str(value)[:10]).strftime('%d %b %Y')
+        rendered = date.fromisoformat(str(value)[:10]).strftime('%d %b %Y')
     except (TypeError, ValueError):
         return str(value)
+    return rendered.replace(' Sep ', ' Sept ')
+
+
+def _paragraph(value, style, bold=False):
+    content = escape(_value(value)).replace('\n', '<br/>')
+    return Paragraph(f'<b>{content}</b>' if bold else content, style)
+
+
+def _buyer_reference(order):
+    contacts = getattr(order, 'contact_persons', None) or {}
+    references = contacts.get('buyer_references') or []
+    rendered = []
+    for reference in references:
+        if not reference or not reference.get('name'):
+            continue
+        rendered.append(' · '.join(str(reference.get(key)).strip() for key in ('name', 'designation', 'email') if reference.get(key)))
+    if not rendered:
+        rendered.append(' · '.join(filter(None, (
+            _value(getattr(order, 'buyer_reference_pm', None), 'Richa Hannah Thomas'),
+            str(getattr(order, 'buyer_reference_email', '') or '').strip(),
+        ))))
+    return '\n'.join(rendered)
 
 
 def _items(order):
@@ -146,9 +186,12 @@ def _items(order):
         normalized.append({
             'line': item.get('line_code') or item.get('item_code') or index + 1,
             'description': item.get('description') or item.get('item') or item.get('name') or order.title,
+            'specification': item.get('specification') or '',
+            'comment': item.get('comment') or item.get('comments') or item.get('remarks') or item.get('notes') or '',
             'quantity': quantity,
             'uom': item.get('uom') or item.get('unit') or 'EA',
             'unit_price': unit_price,
+            'discount': discount,
             'total': total,
         })
     return normalized
@@ -185,11 +228,20 @@ def _pdf_styles():
         'right': ParagraphStyle('PORight', parent=styles['BodyText'], fontSize=8.5, leading=11, alignment=TA_RIGHT),
         'cover': ParagraphStyle('POCover', parent=styles['Title'], fontSize=22, leading=28, alignment=TA_CENTER, textColor=colors.HexColor('#16689b')),
         'cover_body': ParagraphStyle('POCoverBody', parent=styles['BodyText'], fontSize=12, leading=18, alignment=TA_CENTER),
+        'preview': ParagraphStyle('POPreview', parent=styles['BodyText'], fontSize=6.8, leading=8.3, textColor=colors.HexColor('#334155')),
+        'preview_bold': ParagraphStyle('POPreviewBold', parent=styles['BodyText'], fontSize=6.8, leading=8.3, fontName='Helvetica-Bold', textColor=colors.HexColor('#334155')),
+        'preview_heading': ParagraphStyle('POPreviewHeading', parent=styles['Heading2'], fontSize=7.8, leading=10, fontName='Helvetica-Bold', textColor=colors.HexColor('#1f2937')),
     }
 
 
 def _draw_rejlers_wordmark(canvas, x, y, width, color):
-    """Draw a compact vector wordmark without relying on frontend assets."""
+    """Draw the official wordmark, with a vector fallback for damaged installs."""
+    if LOGO_PATH.exists() and color == BRAND_NAVY:
+        canvas.drawImage(
+            ImageReader(str(LOGO_PATH)), x, y, width=width, height=width / 6.64,
+            preserveAspectRatio=True, mask='auto', anchor='sw',
+        )
+        return
     scale = width / 42.0
     canvas.saveState()
     canvas.setStrokeColor(color)
@@ -224,9 +276,9 @@ def _pdf_page(canvas, document, order, page_number=None):
     canvas.setFont('Helvetica-Bold', 7)
     canvas.drawString(left, top - 12 * mm, _date_text(getattr(order, 'po_date', None)))
 
-    logo_width = 37 * mm
+    logo_width = 27 * mm
     logo_x = width - left - logo_width
-    _draw_rejlers_wordmark(canvas, logo_x, top - 4 * mm, logo_width, BRAND_NAVY)
+    _draw_rejlers_wordmark(canvas, logo_x, top - 1.5 * mm, logo_width, BRAND_NAVY)
     canvas.setFillColor(BRAND_TEXT_BLUE)
     canvas.setFont('Helvetica-Bold', 5.7)
     canvas.drawRightString(width - left, top - 9 * mm, 'HOME OF THE')
@@ -284,36 +336,112 @@ def _main_pdf(order):
     tax = float(order.tax_amount or 0)
     total = float(order.total_amount or subtotal + tax)
     vendor = getattr(order, 'vendor', None)
-    story = [
-        Paragraph('PURCHASE ORDER', styles['title']),
-        Paragraph(escape(_value(order.po_number, 'PO NUMBER PENDING')), styles['heading']),
-        Spacer(1, 5 * mm),
+    preview = styles['preview']
+    preview_bold = styles['preview_bold']
+
+    def pair_rows(rows):
+        return Table(
+            [[Paragraph(f'<b>{escape(label)}:</b>', preview), _paragraph(value, preview, strong)] for label, value, strong in rows],
+            colWidths=[24 * mm, 58 * mm],
+            style=TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 1.5 * mm),
+                ('TOPPADDING', (0, 0), (-1, -1), 1.2),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 1.8),
+            ]),
+        )
+
+    invoice_address = DEFAULT_INVOICE_ADDRESS
+    if getattr(order, 'invoicing_attn', None) or getattr(order, 'invoicing_emails', None):
+        invoice_emails = getattr(order, 'invoicing_emails', None) or []
+        if not isinstance(invoice_emails, (list, tuple)):
+            invoice_emails = [invoice_emails]
+        invoice_address = '\n'.join(filter(None, (
+            str(getattr(order, 'invoicing_attn', '') or '').strip(),
+            *[str(email).strip() for email in invoice_emails if email],
+            'Rejlers International Engineering Solutions AB',
+            'PO Box 39317', 'Abu Dhabi, UAE.', 'Tel: +971 2 639 7449',
+            f'Fax: {_value(getattr(order, "company_fax", None), "+971 2 639 7448")}',
+        )))
+
+    details = Table([[pair_rows([
+        ('Seller information', '\n'.join(filter(None, (
+            _value(getattr(vendor, 'name', None)),
+            str(getattr(order, 'seller_address', '') or '').strip(),
+        ))), False),
+        ('Invoicing Address', invoice_address, False),
+    ]), pair_rows([
+        ('Seller Reference', getattr(order, 'seller_reference', None), False),
+        ('Quote Ref.', getattr(order, 'quote_ref', None), False),
+        ('License No.', getattr(order, 'seller_license_no', None), False),
+        ('Buyer Reference', _buyer_reference(order), False),
+    ])]], colWidths=[88 * mm, 88 * mm], style=TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+    ]))
+    commercial = Table([[pair_rows([
+        ('Payment Terms', getattr(order, 'payment_terms', None), False),
+        ('Payment Mode', getattr(order, 'payment_mode', None), False),
+        ('Project', getattr(order, 'project_number', None) or getattr(order, 'rad_project_no', None) or 'Multiple Projects', True),
+    ]), pair_rows([
+        ('Delivery terms', getattr(order, 'delivery_terms', None), False),
+        ('Delivery date', _date_text(getattr(order, 'expected_delivery', None)), False),
+        ('Marking', getattr(order, 'marking', None) or order.po_number, True),
+    ])]], colWidths=[88 * mm, 88 * mm], style=TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+    ]))
+    summary_table = Table([[
+        Paragraph(f'<b>Purchase Summary:</b><br/><br/><b>{escape(_value(getattr(order, "summary", None) or order.title))}</b>', preview),
         Table([
-            [Paragraph('<b>Seller information</b>', styles['body']), Paragraph(escape(_value(getattr(vendor, 'name', None))), styles['body'])],
-            [Paragraph('<b>Seller Reference</b>', styles['body']), Paragraph(escape(_value(order.seller_reference)), styles['body'])],
-            [Paragraph('<b>Quote Ref.</b>', styles['body']), Paragraph(escape(_value(order.quote_ref)), styles['body'])],
-            [Paragraph('<b>Project</b>', styles['body']), Paragraph(escape(_value(order.project_number or order.rad_project_no)), styles['body'])],
-            [Paragraph('<b>Payment Terms</b>', styles['body']), Paragraph(escape(_value(order.payment_terms)), styles['body'])],
-            [Paragraph('<b>Delivery Terms</b>', styles['body']), Paragraph(escape(_value(order.delivery_terms)), styles['body'])],
-        ], colWidths=[45 * mm, 125 * mm], style=TableStyle([
-            ('GRID', (0, 0), (-1, -1), 0.35, colors.HexColor('#64748b')),
-            ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#f1f5f9')),
+            [Paragraph('<b>Total Purchase Price:</b>', preview), Paragraph(escape(f'{subtotal:,.2f} {currency}'), styles['right'])],
+            [Paragraph(f'<b>VAT ({float(getattr(order, "vat_percentage", 0) or 0):g}%):</b>', preview), Paragraph(escape(f'{tax:,.2f} {currency}'), styles['right'])],
+            [Paragraph('<b>Total Sum:</b>', preview_bold), Paragraph(escape(f'{total:,.2f} {currency}'), styles['right'])],
+        ], colWidths=[48 * mm, 34 * mm], style=TableStyle([
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 5),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 5),
-            ('TOPPADDING', (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+            ('TOPPADDING', (0, 0), (-1, -1), 1), ('BOTTOMPADDING', (0, 0), (-1, -1), 1),
         ])),
-        Spacer(1, 5 * mm),
-        Paragraph('<b>Purchase Summary</b>', styles['heading']),
-        Paragraph(escape(_value(getattr(order, 'summary', None) or order.title)), styles['body']),
-        Spacer(1, 8 * mm),
-        Paragraph('<b>Approved by:</b>', styles['heading']),
-        Paragraph(escape(_value(order.approved_by_name, JARMO_NAME)), styles['body']),
-        Paragraph(escape(_value(order.approved_by_title, JARMO_TITLE)).replace('\n', '<br/>'), styles['body']),
-        Paragraph(JARMO_COMPANY, styles['body']),
-        Paragraph(f'<b>Date:</b> {escape(_value(order.approved_date, ""))}', styles['body']),
-        PageBreak(),
+    ]], colWidths=[94 * mm, 82 * mm], style=TableStyle([
+        ('LINEABOVE', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
+        ('LINEBELOW', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+        ('TOPPADDING', (0, 0), (-1, -1), 2.2 * mm), ('BOTTOMPADDING', (0, 0), (-1, -1), 2.2 * mm),
+    ]))
+    approval_name = _value(getattr(order, 'approved_by_name', None), JARMO_NAME)
+    approval_title = _value(getattr(order, 'approved_by_title', None), JARMO_TITLE)
+    approved = Paragraph(
+        '<b>Approved by:</b><br/><br/><br/><br/><br/><br/>'
+        f'<b>{escape(approval_name)}</b><br/>{escape(approval_title).replace(chr(10), "<br/>")}<br/>'
+        f'{JARMO_COMPANY}<br/><b>Date:</b> {escape(_value(getattr(order, "approved_date", None), ""))}', preview,
+    )
+    confirmation = Paragraph(
+        '<b>Order Confirmation:</b><br/>We acknowledge receipt of your documents and will perform according to this PO.'
+        '<br/><br/><b>Seller Signature:</b> ______________________________'
+        f'<br/><br/><b>Date:</b> {_date_text(getattr(order, "confirmation_date", None))}'
+        f'<br/><br/><b>Seller information:</b> {escape(_value(getattr(vendor, "name", None)))}'
+        f'<br/><br/><b>Phone / Email:</b> {escape(" / ".join(filter(None, (str(getattr(order, "seller_phone", "") or ""), str(getattr(order, "seller_email", "") or "")))) or "â€”")}',
+        preview,
+    )
+    approval_table = Table([[approved, confirmation]], colWidths=[90 * mm, 86 * mm], style=TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LINEBEFORE', (1, 0), (1, 0), 0.5, colors.HexColor('#64748b')),
+        ('LEFTPADDING', (0, 0), (0, 0), 0), ('RIGHTPADDING', (0, 0), (0, 0), 7 * mm),
+        ('LEFTPADDING', (1, 0), (1, 0), 3 * mm), ('RIGHTPADDING', (1, 0), (1, 0), 0),
+    ]))
+    story = [
+        Spacer(1, 2 * mm), details, Spacer(1, 5 * mm), commercial, Spacer(1, 4 * mm),
+        summary_table, Spacer(1, 8 * mm), approval_table, PageBreak(),
+        Paragraph(f'<u>PURCHASE ORDER:</u> &nbsp;{escape(_value(order.title))}', styles['heading']),
+        Paragraph(
+            f'We, {COMPANY_NAME} (Buyer), issue this purchase order to '
+            f'<b>{escape(_value(getattr(vendor, "name", None)))}</b> (Seller).', preview,
+        ),
         Paragraph('PO DESCRIPTION &amp; SCOPE', styles['heading']),
     ]
     narrative = _pdf_rich_text(order.description, styles)
@@ -322,26 +450,30 @@ def _main_pdf(order):
     # This also prevents an orphaned heading or split table after long scope text.
     story.extend((PageBreak(), Paragraph('SUMMARY OF PRICES', styles['heading'])))
     price_rows = [[
-        Paragraph('<b>Line</b>', styles['small']),
-        Paragraph('<b>Description</b>', styles['small']),
+        Paragraph('<b>Line Code</b>', styles['small']),
+        Paragraph('<b>Item Description</b>', styles['small']),
+        Paragraph('<b>Comment</b>', styles['small']),
         Paragraph('<b>Qty.</b>', styles['small']),
         Paragraph('<b>UOM</b>', styles['small']),
-        Paragraph('<b>Rate</b>', styles['small']),
+        Paragraph('<b>Unit Price</b>', styles['small']),
+        Paragraph('<b>Discount</b>', styles['small']),
         Paragraph('<b>Total Price</b>', styles['small']),
     ]]
     for item in items:
         price_rows.append([
             Paragraph(escape(str(item['line'])), styles['small']),
             Paragraph(escape(_value(item['description'])), styles['small']),
+            Paragraph(escape(_value(item['comment'], '')), styles['small']),
             Paragraph(f'{item["quantity"]:g}', styles['right']),
             Paragraph(escape(_value(item['uom'], '')), styles['small']),
             Paragraph(escape(_money(item['unit_price'], currency)), styles['right']),
+            Paragraph(escape(_money(item['discount'], currency)), styles['right']),
             Paragraph(escape(_money(item['total'], currency)), styles['right']),
         ])
     story.extend([
-        Table(price_rows, repeatRows=1, colWidths=[12 * mm, 76 * mm, 14 * mm, 15 * mm, 26 * mm, 31 * mm], style=TableStyle([
-            ('GRID', (0, 0), (-1, -1), 0.35, colors.HexColor('#64748b')),
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#e2e8f0')),
+        Table(price_rows, repeatRows=1, colWidths=[11 * mm, 55 * mm, 32 * mm, 9 * mm, 10 * mm, 20 * mm, 16 * mm, 23 * mm], style=TableStyle([
+            ('LINEABOVE', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
+            ('LINEBELOW', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('LEFTPADDING', (0, 0), (-1, -1), 3),
             ('RIGHTPADDING', (0, 0), (-1, -1), 3),
@@ -353,6 +485,7 @@ def _main_pdf(order):
             ['Total Price:', _money(subtotal, currency)],
             [f'VAT ({float(order.vat_percentage or 0):g}%):', _money(tax, currency)],
             ['Total Sum:', _money(total, currency)],
+            *([['Grand Total USD in AED:', _money(total * USD_TO_AED_RATE, 'AED')]] if str(currency).upper() == 'USD' else []),
         ], colWidths=[55 * mm, 42 * mm], hAlign='RIGHT', style=TableStyle([
             ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#475569')),
             ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
@@ -515,41 +648,183 @@ def build_purchase_order_pdf(order):
     return output.getvalue(), warnings
 
 
+def _docx_cell_shading(cell, fill):
+    properties = cell._tc.get_or_add_tcPr()
+    shading = properties.find(qn('w:shd'))
+    if shading is None:
+        shading = OxmlElement('w:shd')
+        properties.append(shading)
+    shading.set(qn('w:fill'), fill)
+
+
+def _docx_set_cell_text(cell, value, *, size=7, bold=False, color='334155', align=None):
+    cell.text = ''
+    paragraph = cell.paragraphs[0]
+    if align is not None:
+        paragraph.alignment = align
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.space_before = Pt(0)
+    run = paragraph.add_run(str(value or ''))
+    run.bold = bold
+    run.font.name = 'Arial'
+    run.font.size = Pt(size)
+    run.font.color.rgb = RGBColor.from_string(color)
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+    return paragraph
+
+
+def _docx_add_page_field(paragraph):
+    run = paragraph.add_run()
+    begin = OxmlElement('w:fldChar')
+    begin.set(qn('w:fldCharType'), 'begin')
+    instruction = OxmlElement('w:instrText')
+    instruction.set(qn('xml:space'), 'preserve')
+    instruction.text = ' PAGE '
+    end = OxmlElement('w:fldChar')
+    end.set(qn('w:fldCharType'), 'end')
+    run._r.extend((begin, instruction, end))
+
+
+def _docx_no_borders(table):
+    properties = table._tbl.tblPr
+    borders = properties.first_child_found_in('w:tblBorders')
+    if borders is None:
+        borders = OxmlElement('w:tblBorders')
+        properties.append(borders)
+    for edge in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
+        element = OxmlElement(f'w:{edge}')
+        element.set(qn('w:val'), 'nil')
+        borders.append(element)
+
+
+def _configure_docx_header_footer(document, order):
+    section = document.sections[0]
+    section.header_distance = Mm(7)
+    section.footer_distance = Mm(5)
+
+    header = section.header
+    table = header.add_table(rows=1, cols=2, width=Mm(178))
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.columns[0].width = Mm(135)
+    table.columns[1].width = Mm(43)
+    left, right = table.rows[0].cells
+    paragraph = _docx_set_cell_text(left, 'PURCHASE ORDER', size=8, bold=True, color='3275B6')
+    for value, size, bold, color in (
+        (_value(order.po_number, 'PO NUMBER PENDING'), 7, True, '3275B6'),
+        (_value(getattr(order, 'form_note', None), '(PO no. to be used in all documents)'), 5.5, False, '64748B'),
+        (_date_text(getattr(order, 'po_date', None)), 7, True, '3275B6'),
+    ):
+        run = paragraph.add_run(f'\n{value}')
+        run.bold = bold
+        run.font.name = 'Arial'
+        run.font.size = Pt(size)
+        run.font.color.rgb = RGBColor.from_string(color)
+    right.text = ''
+    logo_paragraph = right.paragraphs[0]
+    logo_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    logo_paragraph.paragraph_format.space_after = Pt(0)
+    if LOGO_PATH.exists():
+        logo_paragraph.add_run().add_picture(str(LOGO_PATH), width=Mm(27))
+    tagline = logo_paragraph.add_run('\nHOME OF THE\nLEARNING MINDS')
+    tagline.bold = True
+    tagline.font.name = 'Arial'
+    tagline.font.size = Pt(6.5)
+    tagline.font.color.rgb = RGBColor.from_string('3275B6')
+
+    footer = section.footer
+    band = footer.add_table(rows=1, cols=5, width=Mm(178))
+    band.alignment = WD_TABLE_ALIGNMENT.CENTER
+    values = ('REJLERS', 'HOME of the\nLEARNING MINDS', 'REJLERS', 'HOME of the\nLEARNING MINDS', 'REJLERS')
+    for cell, value in zip(band.rows[0].cells, values):
+        _docx_cell_shading(cell, '0870AA')
+        _docx_set_cell_text(cell, value, size=5.5, bold=True, color='FFFFFF', align=WD_ALIGN_PARAGRAPH.CENTER)
+    details = footer.add_table(rows=1, cols=2, width=Mm(160))
+    details.alignment = WD_TABLE_ALIGNMENT.CENTER
+    _docx_set_cell_text(
+        details.cell(0, 0),
+        f'{COMPANY_NAME}\n{COMPANY_ADDRESS}\nTel: {COMPANY_PHONE} | {COMPANY_WEBSITE}',
+        size=4.5, color='4E83AD',
+    )
+    page_paragraph = _docx_set_cell_text(details.cell(0, 1), 'Page ', size=5, color='4E83AD', align=WD_ALIGN_PARAGRAPH.RIGHT)
+    _docx_add_page_field(page_paragraph)
+
+
 def build_purchase_order_docx(order):
     """Return the editable PO through Summary of Prices; attachments are excluded."""
     document = Document()
     section = document.sections[0]
-    section.page_width = Inches(8.27)
-    section.page_height = Inches(11.69)
-    section.top_margin = Inches(0.6)
-    section.bottom_margin = Inches(0.6)
-    title = document.add_heading('PURCHASE ORDER', level=0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    document.add_paragraph(_value(order.po_number, 'PO NUMBER PENDING')).alignment = WD_ALIGN_PARAGRAPH.CENTER
+    section.page_width = Mm(210)
+    section.page_height = Mm(297)
+    section.top_margin = Mm(29)
+    section.bottom_margin = Mm(25)
+    section.left_margin = Mm(16)
+    section.right_margin = Mm(16)
+    _configure_docx_header_footer(document, order)
 
     vendor = getattr(order, 'vendor', None)
-    details = document.add_table(rows=0, cols=2)
-    details.style = 'Table Grid'
-    for label, value in (
-        ('Seller information', getattr(vendor, 'name', None)),
-        ('Seller Reference', order.seller_reference),
-        ('Quote Ref.', order.quote_ref),
-        ('Project', order.project_number or order.rad_project_no),
-        ('Payment Terms', order.payment_terms),
-        ('Delivery Terms', order.delivery_terms),
-    ):
-        cells = details.add_row().cells
-        cells[0].text = label
-        cells[1].text = _value(value)
+    invoice_emails = getattr(order, 'invoicing_emails', None) or []
+    if not isinstance(invoice_emails, (list, tuple)):
+        invoice_emails = [invoice_emails]
+    invoice_address = '\n'.join(filter(None, (
+        str(getattr(order, 'invoicing_attn', '') or '').strip(),
+        *[str(email).strip() for email in invoice_emails if email],
+    ))) or DEFAULT_INVOICE_ADDRESS
+    details = document.add_table(rows=4, cols=4)
+    _docx_no_borders(details)
+    detail_rows = (
+        ('Seller information', '\n'.join(filter(None, (_value(getattr(vendor, 'name', None)), str(getattr(order, 'seller_address', '') or '').strip()))), 'Seller Reference', getattr(order, 'seller_reference', None)),
+        ('Invoicing Address', invoice_address, 'Quote Ref.', getattr(order, 'quote_ref', None)),
+        ('', '', 'License No.', getattr(order, 'seller_license_no', None)),
+        ('', '', 'Buyer Reference', _buyer_reference(order)),
+    )
+    for row, values in zip(details.rows, detail_rows):
+        for index, value in enumerate(values):
+            _docx_set_cell_text(row.cells[index], _value(value, '') if index % 2 else value, bold=index % 2 == 0)
 
-    document.add_heading('Purchase Summary', level=1)
-    document.add_paragraph(_value(getattr(order, 'summary', None) or order.title))
-    document.add_heading('Approved by', level=1)
-    document.add_paragraph(_value(order.approved_by_name, JARMO_NAME))
-    document.add_paragraph(_value(order.approved_by_title, JARMO_TITLE))
-    document.add_paragraph(JARMO_COMPANY)
+    document.add_paragraph().paragraph_format.space_after = Pt(0)
+    commercial = document.add_table(rows=3, cols=4)
+    _docx_no_borders(commercial)
+    commercial_rows = (
+        ('Payment Terms', getattr(order, 'payment_terms', None), 'Delivery terms', getattr(order, 'delivery_terms', None)),
+        ('Payment Mode', getattr(order, 'payment_mode', None), 'Delivery date', _date_text(getattr(order, 'expected_delivery', None))),
+        ('Project', getattr(order, 'project_number', None) or getattr(order, 'rad_project_no', None) or 'Multiple Projects', 'Marking', getattr(order, 'marking', None) or order.po_number),
+    )
+    for row, values in zip(commercial.rows, commercial_rows):
+        for index, value in enumerate(values):
+            _docx_set_cell_text(row.cells[index], _value(value), bold=index % 2 == 0 or (index == 1 and row is commercial.rows[-1]))
+
+    summary = document.add_table(rows=1, cols=2)
+    summary.style = 'Table Grid'
+    _docx_set_cell_text(summary.cell(0, 0), f'Purchase Summary:\n{_value(getattr(order, "summary", None) or order.title)}', size=7, bold=True)
+    subtotal_for_summary = sum(item['total'] for item in _items(order))
+    _docx_set_cell_text(
+        summary.cell(0, 1),
+        f'Total Purchase Price: {subtotal_for_summary:,.2f} {order.currency or "AED"}\n'
+        f'VAT ({float(order.vat_percentage or 0):g}%): {float(order.tax_amount or 0):,.2f} {order.currency or "AED"}\n'
+        f'Total Sum: {float(order.total_amount or 0):,.2f} {order.currency or "AED"}',
+        size=7, bold=True,
+    )
+
+    document.add_paragraph().paragraph_format.space_after = Pt(0)
+    approval = document.add_table(rows=1, cols=2)
+    _docx_no_borders(approval)
+    _docx_set_cell_text(
+        approval.cell(0, 0),
+        f'Approved by:\n\n\n\n\n{_value(getattr(order, "approved_by_name", None), JARMO_NAME)}\n'
+        f'{_value(getattr(order, "approved_by_title", None), JARMO_TITLE)}\n{JARMO_COMPANY}\n'
+        f'Date: {_value(getattr(order, "approved_date", None), "")}', size=7,
+    )
+    _docx_set_cell_text(
+        approval.cell(0, 1),
+        f'Order Confirmation:\nWe acknowledge receipt of your documents and will perform according to this PO.\n\n'
+        f'Seller Signature: ____________________\n\nDate: {_date_text(getattr(order, "confirmation_date", None))}\n\n'
+        f'Seller information: {_value(getattr(vendor, "name", None))}\n\n'
+        f'Phone / Email: {" / ".join(filter(None, (str(getattr(order, "seller_phone", "") or ""), str(getattr(order, "seller_email", "") or "")))) or "â€”"}', size=7,
+    )
     document.add_page_break()
-    document.add_heading('PO Description & Scope', level=1)
+    document.add_heading(f'PURCHASE ORDER:  {_value(order.title)}', level=1)
+    document.add_paragraph(f'We, {COMPANY_NAME} (Buyer), issue this purchase order to {_value(getattr(vendor, "name", None))} (Seller).')
+    document.add_heading('PO DESCRIPTION & SCOPE', level=1)
     if _html_blocks(order.description):
         _docx_rich_text(document, order.description)
     else:
@@ -557,16 +832,16 @@ def build_purchase_order_docx(order):
     document.add_page_break()
     document.add_heading('Summary of Prices', level=1)
     items = _items(order)
-    table = document.add_table(rows=1, cols=6)
+    table = document.add_table(rows=1, cols=8)
     table.style = 'Table Grid'
-    for cell, heading in zip(table.rows[0].cells, ('Line', 'Description', 'Qty.', 'UOM', 'Rate', 'Total Price')):
+    for cell, heading in zip(table.rows[0].cells, ('Line Code', 'Item Description', 'Comment', 'Qty.', 'UOM', 'Unit Price', 'Discount', 'Total Price')):
         cell.text = heading
     currency = order.currency or 'AED'
     for item in items:
         cells = table.add_row().cells
         values = (
-            item['line'], item['description'], f'{item["quantity"]:g}', item['uom'],
-            _money(item['unit_price'], currency), _money(item['total'], currency),
+            item['line'], item['description'], item['comment'], f'{item["quantity"]:g}', item['uom'],
+            _money(item['unit_price'], currency), _money(item['discount'], currency), _money(item['total'], currency),
         )
         for cell, value in zip(cells, values):
             cell.text = str(value)
@@ -575,11 +850,14 @@ def build_purchase_order_docx(order):
     total = float(order.total_amount or subtotal + tax)
     totals = document.add_paragraph()
     totals.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    totals.add_run(
+    totals_text = (
         f'Total Price: {_money(subtotal, currency)}\n'
         f'VAT ({float(order.vat_percentage or 0):g}%): {_money(tax, currency)}\n'
         f'Total Sum: {_money(total, currency)}'
-    ).bold = True
+    )
+    if str(currency).upper() == 'USD':
+        totals_text += f'\nGrand Total USD in AED: {_money(total * USD_TO_AED_RATE, "AED")}'
+    totals.add_run(totals_text).bold = True
     normal_style = document.styles['Normal']
     normal_style.font.name = 'Arial'
     normal_style.font.size = Pt(9)
