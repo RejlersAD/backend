@@ -2,7 +2,15 @@
 HR Core Serializers - Employee Master API Serialization
 """
 from rest_framework import serializers
-from apps.hr_core.models import EmployeeMaster
+from apps.hr_core.models import (
+    EmployeeIdentityAlias,
+    EmployeeMaster,
+    HRWorkflowDefinition,
+    HRWorkflowEvent,
+    HRWorkflowInstance,
+    HRWorkflowStage,
+    HRWorkflowTask,
+)
 from apps.users.serializers import UserSerializer
 
 
@@ -164,3 +172,125 @@ class EmployeeMasterDetailSerializer(serializers.ModelSerializer):
             EmployeeService.upload_employee_photo(instance, photo, uploaded_by=request_user)
         
         return instance
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        can_view_sensitive = bool(user and (user.is_staff or user.is_superuser or user.id == instance.user_id))
+        if user and not can_view_sensitive:
+            try:
+                roles = set(user.rbac_profile.roles.filter(is_active=True).values_list('code', flat=True))
+                can_view_sensitive = bool(roles & {'hr_manager', 'hr_admin', 'payroll_admin', 'finance_manager'})
+            except Exception:
+                pass
+        if not can_view_sensitive:
+            for field in (
+                'current_base_salary', 'currency', 'bank_account_number', 'bank_name',
+                'iban', 'swift_code', 'pan_number', 'uan_number', 'tax_id',
+            ):
+                data.pop(field, None)
+        return data
+
+
+class EmployeeIdentityAliasSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EmployeeIdentityAlias
+        fields = [
+            'id', 'employee', 'source', 'identifier_type', 'value',
+            'is_primary', 'verified_at', 'metadata', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class HRWorkflowStageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HRWorkflowStage
+        fields = [
+            'id', 'definition', 'code', 'name', 'sequence', 'approver_type',
+            'approver_value', 'due_after_hours', 'escalate_after_hours',
+            'escalation_role_code', 'require_comment_on_reject', 'configuration',
+        ]
+
+
+class HRWorkflowDefinitionSerializer(serializers.ModelSerializer):
+    stages = HRWorkflowStageSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = HRWorkflowDefinition
+        fields = [
+            'id', 'code', 'name', 'version', 'description', 'subject_type',
+            'is_active', 'configuration', 'stages', 'created_by',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
+
+
+class HRWorkflowTaskSerializer(serializers.ModelSerializer):
+    stage_name = serializers.CharField(source='stage.name', read_only=True)
+    stage_code = serializers.CharField(source='stage.code', read_only=True)
+    assigned_to_name = serializers.SerializerMethodField()
+    decided_by_name = serializers.SerializerMethodField()
+    can_act = serializers.SerializerMethodField()
+
+    class Meta:
+        model = HRWorkflowTask
+        fields = [
+            'id', 'stage', 'stage_name', 'stage_code', 'assigned_to',
+            'assigned_to_name', 'assigned_role_code', 'status', 'due_at',
+            'reminder_sent_at', 'escalated_at', 'decided_by', 'decided_by_name',
+            'decided_at', 'decision_note', 'can_act', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    @staticmethod
+    def _name(user):
+        return (user.get_full_name().strip() or user.email) if user else None
+
+    def get_assigned_to_name(self, obj):
+        return self._name(obj.assigned_to)
+
+    def get_decided_by_name(self, obj):
+        return self._name(obj.decided_by)
+
+    def get_can_act(self, obj):
+        request = self.context.get('request')
+        if not request:
+            return False
+        from .workflows import HRWorkflowService
+
+        return obj.status == 'pending' and HRWorkflowService.can_act(obj, request.user)
+
+
+class HRWorkflowEventSerializer(serializers.ModelSerializer):
+    actor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = HRWorkflowEvent
+        fields = [
+            'id', 'event_type', 'actor', 'actor_name', 'stage_code',
+            'note', 'metadata', 'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_actor_name(self, obj):
+        return (obj.actor.get_full_name().strip() or obj.actor.email) if obj.actor else None
+
+
+class HRWorkflowInstanceSerializer(serializers.ModelSerializer):
+    definition_code = serializers.CharField(source='definition.code', read_only=True)
+    definition_name = serializers.CharField(source='definition.name', read_only=True)
+    employee_name = serializers.CharField(source='employee.get_display_name', read_only=True)
+    current_stage_name = serializers.CharField(source='current_stage.name', read_only=True)
+    tasks = HRWorkflowTaskSerializer(many=True, read_only=True)
+    events = HRWorkflowEventSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = HRWorkflowInstance
+        fields = [
+            'id', 'definition', 'definition_code', 'definition_name', 'employee',
+            'employee_name', 'subject_type', 'subject_id', 'status', 'current_stage',
+            'current_stage_name', 'requested_by', 'completed_at', 'context',
+            'tasks', 'events', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields

@@ -14,13 +14,13 @@ from django.db.models import Q, Count, Prefetch
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from datetime import date
+from datetime import date, timedelta
 import uuid
 import mimetypes
 import re
 
 from .models import (
-    OnboardingRecord, OffboardingRecord, Equipment,
+    OnboardingRecord, OffboardingRecord, Equipment, ProbationPerformanceReport,
     Document, AccessProvisioning, Checklist,
     ONBOARDING_ACTIVE_STATUSES, OFFBOARDING_ACTIVE_STATUSES,
     CHECKLIST_STAGE_PRE_HIRE, CHECKLIST_STAGE_IT_PROVISIONING,
@@ -33,7 +33,8 @@ from .serializers import (
     OnboardingRecordSerializer, OnboardingRecordListSerializer,
     OffboardingRecordSerializer, OffboardingRecordListSerializer,
     EquipmentSerializer, DocumentSerializer,
-    AccessProvisioningSerializer, ChecklistSerializer
+    AccessProvisioningSerializer, ChecklistSerializer,
+    ProbationPerformanceReportSerializer,
 )
 from apps.core.s3_service import S3Service
 from apps.notifications.services import NotificationService
@@ -46,13 +47,77 @@ from apps.rbac.models import UserProfile as RBACUserProfile, Organization
 from .rbac import (
     can_manage_offboarding, can_manage_onboarding_stage,
     can_start_onboarding_stage, can_manage_offboarding_stage,
-    can_start_offboarding_stage,
+    can_start_offboarding_stage, can_manage_probation_report,
 )
 from .project_assignments import get_active_project_assignments, get_profile_project_manager
+from .performance_insights import build_probation_report_insights
 
 User = get_user_model()
 
 EMPLOYEE_ID_PREFIX = '2302'
+
+
+class ProbationPerformanceReportViewSet(viewsets.ModelViewSet):
+    """100-day probation reviews, managed by HR or the direct line manager."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProbationPerformanceReportSerializer
+    queryset = ProbationPerformanceReport.objects.all()
+
+    def get_queryset(self):
+        queryset = self.queryset.select_related('employee', 'created_by', 'submitted_by')
+        employee_id = self.request.query_params.get('employee_id')
+        if employee_id:
+            try:
+                queryset = queryset.filter(employee_id=int(employee_id))
+            except (TypeError, ValueError):
+                raise ValidationError({'employee_id': 'A valid employee user ID is required.'})
+
+        if can_manage_probation_report(self.request.user):
+            return queryset
+        return queryset.filter(employee__employee_master__manager__user=self.request.user)
+
+    def perform_create(self, serializer):
+        employee = serializer.validated_data['employee']
+        if not can_manage_probation_report(self.request.user, employee):
+            raise PermissionDenied(
+                'Only HR or the employee\'s direct line manager may generate this report.'
+            )
+        employee_master = EmployeeMaster.objects.filter(user=employee).first()
+        if not employee_master:
+            raise ValidationError({'employee': 'Employee master record not found.'})
+        serializer.save(
+            created_by=self.request.user,
+            due_date=employee_master.join_date + timedelta(days=100),
+            **build_probation_report_insights(employee, checkpoint_days=100),
+        )
+
+    @action(detail=True, methods=['post'], url_path='refresh-insights')
+    def refresh_insights(self, request, pk=None):
+        report = self.get_object()
+        if not can_manage_probation_report(request.user, report.employee):
+            raise PermissionDenied('You cannot refresh this probation report.')
+        if report.status == ProbationPerformanceReport.STATUS_SUBMITTED:
+            raise ValidationError({'detail': 'A submitted report cannot be changed.'})
+        values = build_probation_report_insights(
+            report.employee, checkpoint_days=report.checkpoint_days
+        )
+        for field, value in values.items():
+            setattr(report, field, value)
+        report.updated_by = request.user
+        report.save(update_fields=[*values.keys(), 'updated_by', 'updated_at'])
+        return Response(self.get_serializer(report).data)
+
+    def perform_update(self, serializer):
+        report = self.get_object()
+        if not can_manage_probation_report(self.request.user, report.employee):
+            raise PermissionDenied('You cannot update this probation report.')
+        if report.status == ProbationPerformanceReport.STATUS_SUBMITTED:
+            raise ValidationError({'detail': 'A submitted report cannot be changed.'})
+        status_value = serializer.validated_data.get('status', report.status)
+        extra = {'updated_by': self.request.user}
+        if status_value == ProbationPerformanceReport.STATUS_SUBMITTED:
+            extra.update(submitted_by=self.request.user, submitted_at=timezone.now())
+        serializer.save(**extra)
 
 
 def _next_onboarding_employee_identifier():
@@ -698,6 +763,14 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                 
                 generated_employee_id = _next_onboarding_employee_identifier()
 
+                joining_date = data.get('joining_date')
+                if joining_date:
+                    from datetime import datetime
+                    if isinstance(joining_date, str):
+                        joining_date = datetime.strptime(joining_date, '%Y-%m-%d').date()
+                else:
+                    joining_date = date.today()
+
                 # Use EmployeeService to create employee record
                 employee = EmployeeService.create_employee(
                     user=user,
@@ -713,6 +786,7 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                     employee_code=generated_employee_id,
                     account_name=username,
                     employment_id=generated_employee_id,
+                    join_date=joining_date,
                     department=data.get('division', ''),  # Note: using division as department
                     division=data.get('division', ''),
                     business_unit=data.get('business_unit', ''),
@@ -726,14 +800,6 @@ class OnboardingRecordViewSet(viewsets.ModelViewSet):
                 )
                 
                 # Create OnboardingRecord
-                joining_date = data.get('joining_date')
-                if joining_date:
-                    from datetime import datetime
-                    if isinstance(joining_date, str):
-                        joining_date = datetime.strptime(joining_date, '%Y-%m-%d').date()
-                else:
-                    joining_date = date.today()
-                
                 onboarding_record = OnboardingRecord.objects.create(
                     employee_name=f"{first_name} {last_name}",
                     employee_email=email,

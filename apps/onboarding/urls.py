@@ -12,6 +12,7 @@ router.register(r'equipment', views.EquipmentViewSet, basename='equipment')
 router.register(r'documents', views.DocumentViewSet, basename='documents')
 router.register(r'access', views.AccessProvisioningViewSet, basename='access')
 router.register(r'checklist', views.ChecklistViewSet, basename='checklist')
+router.register(r'performance-reports', views.ProbationPerformanceReportViewSet, basename='performance-report')
 
 urlpatterns = [
     path('', include(router.urls)),

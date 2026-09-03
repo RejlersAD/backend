@@ -639,6 +639,24 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'po_date', 'approved_at', 'created_at', 'updated_at']
 
+    def to_internal_value(self, data):
+        """Accept project identities returned by the unified project picker.
+
+        ``available-projects`` includes company-core projects that do not yet
+        have a procurement-master row.  Those entries use ``core:<pk>`` as
+        their UI identity, so they cannot be passed to the procurement
+        ``project`` UUID foreign key.  Store that selection on the canonical
+        enterprise-project relationship instead and leave the optional legacy
+        procurement-project relationship unset.
+        """
+        project_id = data.get('project') if hasattr(data, 'get') else None
+        if isinstance(project_id, str) and project_id.startswith('core:'):
+            normalized_data = data.copy()
+            normalized_data.pop('project', None)
+            normalized_data['enterprise_project'] = project_id.removeprefix('core:')
+            data = normalized_data
+        return super().to_internal_value(data)
+
     def validate_attachments_files(self, value):
         existing = self.instance.attachments if self.instance else []
         return validate_attachments(value, existing)

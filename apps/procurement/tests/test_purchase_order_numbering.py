@@ -16,7 +16,7 @@ class PurchaseOrderNumberServiceTests(SimpleTestCase):
         locked.get_or_create.return_value = (sequence, False)
         orders.filter.return_value.values_list.return_value = [
             'RAD-PRJ-PUR-0003_2026',
-            'RAD-PRJ-PUR-0007_2026',
+            'RAD-PRJ-PUR-0007_SEP2026',
         ]
 
         number = PurchaseOrderNumberService.next_number.__wrapped__(
@@ -61,6 +61,23 @@ class PurchaseOrderNumberServiceTests(SimpleTestCase):
 
         self.assertFalse(verified)
         self.assertIn('RAD-{GEN|PRJ}-PUR-####_YYYY', message)
+
+    def test_verification_accepts_month_and_year_suffix(self):
+        verified, _ = PurchaseOrderNumberService.verify(
+            'RAD-PRJ-PUR-0461_SEP2026',
+            'RAD-PRJ-PR-0042_2026',
+        )
+
+        self.assertTrue(verified)
+
+    def test_verification_rejects_invalid_month_suffix(self):
+        verified, message = PurchaseOrderNumberService.verify(
+            'RAD-PRJ-PUR-0461_ABC2026',
+            'RAD-PRJ-PR-0042_2026',
+        )
+
+        self.assertFalse(verified)
+        self.assertIn('MMMYYYY', message)
 
     def test_verification_checks_pr_scope_and_year_but_allows_independent_sequence(self):
         verified, _ = PurchaseOrderNumberService.verify(

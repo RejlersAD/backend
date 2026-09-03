@@ -412,3 +412,252 @@ class EmployeeMaster(TimeStampedModel):
                 expiration=604800  # 7 days
             )
             self.save(update_fields=['photo_url'])
+
+
+class EmployeeIdentityAlias(TimeStampedModel):
+    """Cross-system identifier mapped to one canonical EmployeeMaster UUID."""
+
+    SOURCE_CHOICES = [
+        ('radai', 'RADAI'),
+        ('rbac', 'RBAC Profile'),
+        ('payroll', 'Payroll'),
+        ('timesheet', 'Timesheet / Biometric'),
+        ('onboarding', 'Onboarding'),
+        ('external', 'External System'),
+    ]
+    TYPE_CHOICES = [
+        ('uuid', 'Canonical UUID'),
+        ('user_id', 'User ID'),
+        ('email', 'Email'),
+        ('employee_number', 'Employee Number'),
+        ('employee_code', 'Employee Code'),
+        ('account_name', 'Account Name'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(
+        EmployeeMaster, on_delete=models.CASCADE, related_name='identity_aliases'
+    )
+    source = models.CharField(max_length=30, choices=SOURCE_CHOICES, db_index=True)
+    identifier_type = models.CharField(max_length=30, choices=TYPE_CHOICES, db_index=True)
+    value = models.CharField(max_length=255)
+    normalized_value = models.CharField(max_length=255, db_index=True)
+    is_primary = models.BooleanField(default=False)
+    verified_at = models.DateTimeField(default=timezone.now)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = 'hr_employee_identity_alias'
+        ordering = ['source', 'identifier_type']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source', 'identifier_type', 'normalized_value'],
+                name='hr_identity_alias_unique',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=['identifier_type', 'normalized_value'],
+                name='hr_identity_lookup_idx',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.value = str(self.value or '').strip()
+        self.normalized_value = self.normalize(self.identifier_type, self.value)
+        super().save(*args, **kwargs)
+
+    @staticmethod
+    def normalize(identifier_type, value):
+        value = str(value or '').strip()
+        if identifier_type in {'email', 'account_name'}:
+            return value.casefold()
+        if identifier_type in {'employee_number', 'employee_code'}:
+            return ''.join(value.upper().split())
+        return value
+
+    def __str__(self):
+        return f'{self.employee_id}: {self.source}/{self.identifier_type}={self.value}'
+
+
+class HRWorkflowDefinition(TimeStampedModel):
+    """Versioned, reusable approval workflow configured by HR administrators."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code = models.SlugField(max_length=80, db_index=True)
+    name = models.CharField(max_length=160)
+    version = models.PositiveIntegerField(default=1)
+    description = models.TextField(blank=True)
+    subject_type = models.CharField(max_length=80, help_text='For example: payroll.leave_request')
+    is_active = models.BooleanField(default=True, db_index=True)
+    configuration = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        'users.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='hr_workflow_definitions_created',
+    )
+
+    class Meta:
+        db_table = 'hr_workflow_definition'
+        ordering = ['code', '-version']
+        constraints = [
+            models.UniqueConstraint(fields=['code', 'version'], name='hr_workflow_code_version_unique'),
+        ]
+
+    def __str__(self):
+        return f'{self.name} v{self.version}'
+
+
+class HRWorkflowStage(TimeStampedModel):
+    """Ordered stage within a reusable workflow definition."""
+
+    APPROVER_CHOICES = [
+        ('employee_manager', 'Employee Manager'),
+        ('role', 'RBAC Role'),
+        ('user', 'Named User'),
+        ('requester', 'Requester'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    definition = models.ForeignKey(
+        HRWorkflowDefinition, on_delete=models.CASCADE, related_name='stages'
+    )
+    code = models.SlugField(max_length=80)
+    name = models.CharField(max_length=160)
+    sequence = models.PositiveIntegerField()
+    approver_type = models.CharField(max_length=30, choices=APPROVER_CHOICES)
+    approver_value = models.CharField(
+        max_length=160, blank=True,
+        help_text='Role code or user ID when required by approver_type.',
+    )
+    due_after_hours = models.PositiveIntegerField(default=48)
+    escalate_after_hours = models.PositiveIntegerField(default=72)
+    escalation_role_code = models.CharField(max_length=80, blank=True)
+    require_comment_on_reject = models.BooleanField(default=True)
+    configuration = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = 'hr_workflow_stage'
+        ordering = ['definition', 'sequence']
+        constraints = [
+            models.UniqueConstraint(fields=['definition', 'code'], name='hr_workflow_stage_code_unique'),
+            models.UniqueConstraint(fields=['definition', 'sequence'], name='hr_workflow_stage_seq_unique'),
+        ]
+
+    def __str__(self):
+        return f'{self.definition.code}: {self.sequence}. {self.name}'
+
+
+class HRWorkflowInstance(TimeStampedModel):
+    """Runtime workflow attached to an HR business record."""
+
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('cancelled', 'Cancelled'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    definition = models.ForeignKey(
+        HRWorkflowDefinition, on_delete=models.PROTECT, related_name='instances'
+    )
+    employee = models.ForeignKey(
+        EmployeeMaster, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='workflow_instances',
+    )
+    subject_type = models.CharField(max_length=80, db_index=True)
+    subject_id = models.CharField(max_length=80, db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', db_index=True)
+    current_stage = models.ForeignKey(
+        HRWorkflowStage, null=True, blank=True, on_delete=models.PROTECT,
+        related_name='active_instances',
+    )
+    requested_by = models.ForeignKey(
+        'users.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='hr_workflows_requested',
+    )
+    completed_at = models.DateTimeField(null=True, blank=True)
+    context = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = 'hr_workflow_instance'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['definition', 'subject_type', 'subject_id'],
+                name='hr_workflow_subject_unique',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['status', 'current_stage'], name='hr_workflow_queue_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.definition.code}/{self.subject_id}: {self.status}'
+
+
+class HRWorkflowTask(TimeStampedModel):
+    """Actionable approval task for the current workflow stage."""
+
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('cancelled', 'Cancelled'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    instance = models.ForeignKey(
+        HRWorkflowInstance, on_delete=models.CASCADE, related_name='tasks'
+    )
+    stage = models.ForeignKey(HRWorkflowStage, on_delete=models.PROTECT, related_name='tasks')
+    assigned_to = models.ForeignKey(
+        'users.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='hr_workflow_tasks',
+    )
+    assigned_role_code = models.CharField(max_length=80, blank=True, db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', db_index=True)
+    due_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    reminder_sent_at = models.DateTimeField(null=True, blank=True)
+    escalated_at = models.DateTimeField(null=True, blank=True)
+    decided_by = models.ForeignKey(
+        'users.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='hr_workflow_tasks_decided',
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decision_note = models.TextField(blank=True)
+
+    class Meta:
+        db_table = 'hr_workflow_task'
+        ordering = ['status', 'due_at']
+        constraints = [
+            models.UniqueConstraint(fields=['instance', 'stage'], name='hr_workflow_task_stage_unique'),
+        ]
+
+    def __str__(self):
+        return f'{self.instance_id}/{self.stage.code}: {self.status}'
+
+
+class HRWorkflowEvent(models.Model):
+    """Immutable event stream for workflow audit and compliance reporting."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    instance = models.ForeignKey(
+        HRWorkflowInstance, on_delete=models.CASCADE, related_name='events'
+    )
+    event_type = models.CharField(max_length=50, db_index=True)
+    actor = models.ForeignKey(
+        'users.User', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='hr_workflow_events',
+    )
+    stage_code = models.CharField(max_length=80, blank=True)
+    note = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'hr_workflow_event'
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f'{self.instance_id}: {self.event_type}'

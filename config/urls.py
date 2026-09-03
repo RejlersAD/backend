@@ -140,6 +140,7 @@ urlpatterns = [
     # path('api/v1/core/', include('apps.core.urls')),  # REMOVED: Duplicate - already included via apps.api.urls
     path('api/v1/rbac/', include('apps.rbac.urls')),
     path('api/v1/users/', include('apps.users.urls')),  # User management endpoints
+    path('api/v1/hr/', include('apps.hr_core.urls')),  # Canonical employee master + shared HR workflows
     path('api/v1/timesheet/', include('apps.timesheet.urls')),  # Time Sheet Analytics (SQL Server)
     path('api/v1/enquiry/', include('apps.core.urls_enquiry')),  # Public enquiry endpoint
     

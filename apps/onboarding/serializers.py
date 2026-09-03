@@ -6,9 +6,76 @@ from rest_framework import serializers
 from django.db.models import Q
 from .models import (
     OnboardingRecord, OffboardingRecord, Equipment,
-    Document, AccessProvisioning, Checklist, OFFBOARDING_ACTIVE_STATUSES
+    Document, AccessProvisioning, Checklist, OFFBOARDING_ACTIVE_STATUSES,
+    ProbationPerformanceReport,
 )
 from .project_assignments import get_active_project_assignments
+
+
+class ProbationPerformanceReportSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_full_name', read_only=True)
+    employee_email = serializers.EmailField(source='employee.email', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    submitted_by_name = serializers.CharField(source='submitted_by.get_full_name', read_only=True)
+    joining_date = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProbationPerformanceReport
+        fields = [
+            'id', 'employee', 'employee_name', 'employee_email', 'checkpoint_days',
+            'joining_date', 'due_date', 'status', 'job_knowledge_rating',
+            'work_quality_rating', 'reliability_rating', 'teamwork_rating',
+            'achievements', 'strengths', 'improvement_areas', 'next_period_goals',
+            'overall_comments', 'created_by', 'created_by_name', 'updated_by',
+            'submitted_by', 'submitted_by_name', 'submitted_at', 'created_at',
+            'updated_at', 'can_edit', 'system_snapshot', 'insights_generated_at',
+        ]
+        read_only_fields = [
+            'checkpoint_days', 'joining_date', 'due_date', 'created_by', 'updated_by',
+            'submitted_by', 'submitted_at', 'created_at', 'updated_at', 'can_edit',
+            'system_snapshot', 'insights_generated_at',
+            'achievements', 'strengths', 'improvement_areas', 'next_period_goals',
+            'overall_comments',
+        ]
+
+    def get_joining_date(self, obj):
+        employee_master = getattr(obj.employee, 'employee_master', None)
+        return employee_master.join_date if employee_master else None
+
+    def get_can_edit(self, obj):
+        from .rbac import can_manage_probation_report
+        request = self.context.get('request')
+        return bool(
+            obj.status == ProbationPerformanceReport.STATUS_DRAFT
+            and can_manage_probation_report(getattr(request, 'user', None), obj.employee)
+        )
+
+    def validate(self, attrs):
+        status_value = attrs.get('status', getattr(self.instance, 'status', 'draft'))
+        if self.instance is None and status_value == ProbationPerformanceReport.STATUS_SUBMITTED:
+            raise serializers.ValidationError({
+                'status': 'Generate and save the draft before submitting the report.'
+            })
+        if self.instance is not None and 'employee' in attrs:
+            if attrs['employee'].pk != self.instance.employee_id:
+                raise serializers.ValidationError({
+                    'employee': 'The employee on a generated report cannot be changed.'
+                })
+        if status_value == ProbationPerformanceReport.STATUS_SUBMITTED:
+            required = (
+                'job_knowledge_rating', 'work_quality_rating',
+                'reliability_rating', 'teamwork_rating', 'overall_comments',
+            )
+            missing = [
+                field for field in required
+                if not attrs.get(field, getattr(self.instance, field, None))
+            ]
+            if missing:
+                raise serializers.ValidationError({
+                    field: 'Required before submitting the report.' for field in missing
+                })
+        return attrs
 
 
 def _ongoing_project_summaries(record):

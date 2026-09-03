@@ -19,6 +19,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.exceptions import PermissionDenied
 
 from apps.finance.salary_models import (
     EmployeeSalaryInfo,
@@ -561,6 +562,18 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         except Exception:
             return False
 
+    @staticmethod
+    def _is_reporting_manager(user, leave_request):
+        if not leave_request.employee_id:
+            return False
+        try:
+            from apps.hr_core.models import EmployeeMaster
+            return EmployeeMaster.objects.filter(
+                user_id=leave_request.employee_id, manager__user=user
+            ).exists()
+        except Exception:
+            return False
+
     def get_queryset(self):
         qs = (
             LeaveRequest.objects
@@ -670,7 +683,33 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         # Only fill denormalised fields if the caller didn’t supply them
         if not serializer.validated_data.get('employee_name'):
             extra['employee_name'] = emp_name
-        serializer.save(**extra)
+        leave_request = serializer.save(**extra)
+        try:
+            from apps.hr_core.identity import EmployeeIdentityService
+            from apps.hr_core.workflows import HRWorkflowService
+
+            canonical_employee = EmployeeIdentityService.resolve(
+                leave_request.employee_id or leave_request.employee_code
+            )
+            if canonical_employee:
+                workflow = HRWorkflowService.start(
+                    'leave_request_v1',
+                    'payroll.leave_request',
+                    leave_request.pk,
+                    employee=canonical_employee,
+                    requested_by=user,
+                    context={
+                        'leave_type': leave_request.leave_type.code,
+                        'start_date': str(leave_request.start_date),
+                        'end_date': str(leave_request.end_date),
+                        'days_requested': str(leave_request.days_requested),
+                    },
+                )
+                leave_request.canonical_employee = canonical_employee
+                leave_request.workflow_instance = workflow
+                leave_request.save(update_fields=['canonical_employee', 'workflow_instance', 'updated_at'])
+        except Exception:
+            logger.exception('Unable to attach shared workflow to leave request %s', leave_request.pk)
 
     # Soft-coded: statuses from which the final (HR) approve/reject action is
     # allowed. A request can be finalised either directly from PENDING
@@ -682,10 +721,22 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     def approve(self, request, pk=None):
         """Stage 2 (or single-stage): final approval — HR Manager / Admin."""
         req = self.get_object()
+        if not self._is_hr_or_admin(request.user):
+            raise PermissionDenied('Only HR can give final leave approval.')
         if req.status not in self.FINAL_APPROVABLE_STATUSES:
             return Response(
                 {'error': f'Cannot approve a {req.status} request'},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+        if req.workflow_instance_id:
+            from apps.hr_core.workflows import HRWorkflowService
+            if req.workflow_instance.current_stage_id and req.workflow_instance.current_stage.code == 'manager_review':
+                return Response(
+                    {'error': 'Reporting-manager approval is required before HR final approval.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            HRWorkflowService.decide(
+                req.workflow_instance, request.user, 'approve', request.data.get('note', '')
             )
         req.status       = LeaveRequestStatus.APPROVED
         req.reviewed_by  = request.user
@@ -698,10 +749,22 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     def reject(self, request, pk=None):
         """Stage 2 (or single-stage): final rejection — HR Manager / Admin."""
         req = self.get_object()
+        if not self._is_hr_or_admin(request.user):
+            raise PermissionDenied('Only HR can give final leave rejection.')
         if req.status not in self.FINAL_APPROVABLE_STATUSES:
             return Response(
                 {'error': f'Cannot reject a {req.status} request'},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+        if req.workflow_instance_id:
+            from apps.hr_core.workflows import HRWorkflowService
+            if req.workflow_instance.current_stage_id and req.workflow_instance.current_stage.code == 'manager_review':
+                return Response(
+                    {'error': 'Use reporting-manager rejection for the current workflow stage.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            HRWorkflowService.decide(
+                req.workflow_instance, request.user, 'reject', request.data.get('note', '')
             )
         req.status       = LeaveRequestStatus.REJECTED
         req.reviewed_by  = request.user
@@ -719,6 +782,13 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
                 {'error': f'Cannot approve a {req.status} request at the reporting-manager stage'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if req.workflow_instance_id:
+            from apps.hr_core.workflows import HRWorkflowService
+            HRWorkflowService.decide(
+                req.workflow_instance, request.user, 'approve', request.data.get('note', '')
+            )
+        elif not self._is_reporting_manager(request.user, req):
+            raise PermissionDenied('Only the employee\'s reporting manager can review this request.')
         req.status         = LeaveRequestStatus.RM_APPROVED
         req.rm_reviewed_by = request.user
         req.rm_reviewed_at = timezone.now()
@@ -735,6 +805,13 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
                 {'error': f'Cannot reject a {req.status} request at the reporting-manager stage'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if req.workflow_instance_id:
+            from apps.hr_core.workflows import HRWorkflowService
+            HRWorkflowService.decide(
+                req.workflow_instance, request.user, 'reject', request.data.get('note', '')
+            )
+        elif not self._is_reporting_manager(request.user, req):
+            raise PermissionDenied('Only the employee\'s reporting manager can review this request.')
         req.status         = LeaveRequestStatus.RM_REJECTED
         req.rm_reviewed_by = request.user
         req.rm_reviewed_at = timezone.now()
@@ -745,6 +822,13 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='cancel')
     def cancel(self, request, pk=None):
         req = self.get_object()
+        if req.employee_id != request.user.id and not self._is_hr_or_admin(request.user):
+            raise PermissionDenied('Only the employee or HR can cancel this request.')
+        if req.workflow_instance_id:
+            from apps.hr_core.workflows import HRWorkflowService
+            HRWorkflowService.cancel(
+                req.workflow_instance, request.user, request.data.get('note', '')
+            )
         req.status = LeaveRequestStatus.CANCELLED
         req.save()
         return Response(LeaveRequestSerializer(req).data)

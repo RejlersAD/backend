@@ -8,7 +8,11 @@ from django.utils import timezone
 from ..models import ProcurementNumberSequence, PurchaseOrder
 
 
-PO_NUMBER_PATTERN = re.compile(r'^RAD-(GEN|PRJ)-PUR-(\d{4,})_(\d{4})$')
+PO_NUMBER_PATTERN = re.compile(
+    r'^RAD-(?P<scope>GEN|PRJ)-PUR-(?P<sequence>\d{4,})_'
+    r'(?P<month>JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)?'
+    r'(?P<year>\d{4})$'
+)
 PR_NUMBER_PATTERN = re.compile(r'^RAD-(GEN|PRJ)-PR-(\d{4,})_(\d{4})$')
 
 
@@ -19,13 +23,16 @@ class PurchaseOrderNumberService:
     def _largest_existing_value(cls, prefix, year):
         numbers = PurchaseOrder.objects.filter(
             po_number__startswith=f'RAD-{prefix}-PUR-',
-            po_number__endswith=f'_{year}',
         ).values_list('po_number', flat=True)
         largest = 0
         for number in numbers:
             match = PO_NUMBER_PATTERN.match(str(number))
-            if match and match.group(1) == prefix and int(match.group(3)) == year:
-                largest = max(largest, int(match.group(2)))
+            if (
+                match
+                and match.group('scope') == prefix
+                and int(match.group('year')) == year
+            ):
+                largest = max(largest, int(match.group('sequence')))
         return largest
 
     @classmethod
@@ -71,12 +78,18 @@ class PurchaseOrderNumberService:
         """Verify format and, when applicable, exact correspondence to the source PR."""
         value = str(po_number or '').strip()
         if not PO_NUMBER_PATTERN.fullmatch(value):
-            return False, 'PO number does not follow RAD-{GEN|PRJ}-PUR-####_YYYY.'
+            return False, (
+                'PO number must use RAD-{GEN|PRJ}-PUR-####_YYYY or '
+                'RAD-{GEN|PRJ}-PUR-####_MMMYYYY.'
+            )
         if pr_number:
             pr_match = PR_NUMBER_PATTERN.fullmatch(str(pr_number or '').strip())
             if not pr_match:
                 return False, 'Source PR number does not follow the company numbering standard.'
             po_match = PO_NUMBER_PATTERN.fullmatch(value)
-            if po_match.group(1) != pr_match.group(1) or po_match.group(3) != pr_match.group(3):
+            if (
+                po_match.group('scope') != pr_match.group(1)
+                or po_match.group('year') != pr_match.group(3)
+            ):
                 return False, 'PO and source PR must use the same GEN/PRJ scope and year.'
         return True, 'Verified against the company PO numbering standard.'

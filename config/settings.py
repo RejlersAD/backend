@@ -1035,6 +1035,11 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'finance.auto_generate_monthly_payroll',
         'schedule': crontab(hour=2, minute=0),
     },
+    'hr-process-overdue-workflows': {
+        'task': 'hr_core.process_overdue_workflows',
+        'schedule': crontab(minute='*/15'),
+        'options': {'expires': 15 * 60},
+    },
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
