@@ -4,7 +4,11 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase, override_settings
 
-from apps.notifications.teams import build_approval_assignment_payload, queue_approval_assignment
+from apps.notifications.teams import (
+    build_approval_assignment_payload,
+    queue_approval_assignment,
+    send_teams_approval_assignment,
+)
 
 
 class TeamsApprovalNotificationTests(SimpleTestCase):
@@ -64,3 +68,25 @@ class TeamsApprovalNotificationTests(SimpleTestCase):
     def test_disabled_delivery_does_not_queue(self, delay):
         self.assertFalse(queue_approval_assignment(self._notification()))
         delay.assert_not_called()
+
+    @override_settings(TEAMS_APPROVAL_WEBHOOK_URL='https://flow.example.test/trigger')
+    @patch('apps.notifications.teams.NotificationLog.objects.create')
+    @patch('apps.notifications.teams.requests.post')
+    @patch('apps.notifications.teams.Notification.objects.select_related')
+    def test_delivery_uses_newest_row_when_legacy_ids_are_duplicated(
+        self,
+        select_related,
+        post,
+        _create_log,
+    ):
+        queryset = select_related.return_value.filter.return_value.order_by.return_value
+        queryset.first.return_value = self._notification()
+        post.return_value.raise_for_status.return_value = None
+
+        result = send_teams_approval_assignment.run('notification-id', {})
+
+        self.assertEqual(result, {'status': 'sent'})
+        select_related.return_value.filter.assert_called_once_with(pk='notification-id')
+        select_related.return_value.filter.return_value.order_by.assert_called_once_with(
+            '-created_at'
+        )
