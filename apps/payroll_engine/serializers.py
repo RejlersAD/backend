@@ -7,7 +7,29 @@ from .models import (
     PayrollAdjustment, PayrollEmployee, PayrollRun, Payslip, PayslipLineItem,
     PayrollWorkflowLog, PayrollComparison, PayrollComparisonRow, PayrollRunUpload,
     PayslipLineItemChangeLog,
+    PayrollAccountingExport, PayrollComplianceCheck, PayrollPaymentBatch,
 )
+
+
+class PayrollComplianceCheckSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PayrollComplianceCheck
+        fields = '__all__'
+        read_only_fields = fields
+
+
+class PayrollPaymentBatchSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PayrollPaymentBatch
+        fields = '__all__'
+        read_only_fields = fields
+
+
+class PayrollAccountingExportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PayrollAccountingExport
+        fields = '__all__'
+        read_only_fields = fields
 
 
 class PayrollEmployeeSerializer(serializers.ModelSerializer):

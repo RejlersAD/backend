@@ -4,6 +4,7 @@ from django.contrib import admin
 from .models import (
     PayrollAdjustment, PayrollEmployee, PayrollRun, Payslip, PayslipLineItem,
     PayrollWorkflowLog, PayslipLineItemChangeLog,
+    PayrollAccountingExport, PayrollComplianceCheck, PayrollPaymentBatch,
 )
 
 
@@ -82,3 +83,8 @@ class PayslipLineItemChangeLogAdmin(admin.ModelAdmin):
         kind = obj.new_values.get('kind') or obj.old_values.get('kind') or ''
         return f"{kind}: {label}"
     get_item_label.short_description = 'Item'
+
+
+admin.site.register(PayrollComplianceCheck)
+admin.site.register(PayrollPaymentBatch)
+admin.site.register(PayrollAccountingExport)

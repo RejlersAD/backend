@@ -1,10 +1,13 @@
 """DRF views for the Payroll Engine."""
 from __future__ import annotations
+import csv
+import hashlib
+import io
 from datetime import datetime
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Sum, Q
+from django.db.models import Count, Sum, Q
 from django.contrib.auth import get_user_model
 from django.http import HttpResponse
 from django.utils import timezone
@@ -23,6 +26,7 @@ from .models import (
     PayrollAdjustment, PayrollEmployee, PayrollRun, Payslip, PayslipLineItem,
     PayrollWorkflowLog, PayrollComparison, PayrollComparisonRow,
     PayslipLineItemChangeLog,
+    PayrollAccountingExport, PayrollComplianceCheck, PayrollPaymentBatch,
 )
 from .serializers import (
     CatalogSerializer, PayrollAdjustmentSerializer, PayrollEmployeeSerializer,
@@ -30,6 +34,8 @@ from .serializers import (
     PayrollWorkflowLogSerializer, PayslipLineItemChangeLogSerializer,
     PayrollComparisonSerializer, PayrollComparisonDetailSerializer,
     PayrollComparisonRowSerializer,
+    PayrollAccountingExportSerializer, PayrollComplianceCheckSerializer,
+    PayrollPaymentBatchSerializer,
 )
 from .services import excel_export, excel_import, run_generator, workflow
 from .services import bulk_deduction, comparison as comparison_service
@@ -807,6 +813,163 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             'run': self.get_serializer(run).data,
             'removed_line_items': removed,
         })
+
+    def _require_payroll_admin(self, request):
+        if not _user_has_payroll_admin_role(request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Payroll administration permission is required.')
+
+    @action(detail=True, methods=['post'], url_path='compliance-check')
+    def compliance_check(self, request, pk=None):
+        self._require_payroll_admin(request)
+        run = self.get_object()
+        findings = []
+        payslips = run.payslips.select_related('employee').all()
+        for slip in payslips:
+            employee = slip.employee
+            for field, label in [('iban', 'IBAN'), ('emirates_id', 'Emirates ID'), ('mol_no', 'MOL number')]:
+                if not getattr(employee, field, ''):
+                    findings.append({'severity': 'error', 'code': f'missing_{field}', 'employee_no': employee.employee_no, 'message': f'{label} is required for UAE payroll processing.'})
+            if slip.net_payable < 0:
+                findings.append({'severity': 'error', 'code': 'negative_net_pay', 'employee_no': employee.employee_no, 'message': 'Net pay cannot be negative.'})
+            if slip.net_payable == 0:
+                findings.append({'severity': 'warning', 'code': 'zero_net_pay', 'employee_no': employee.employee_no, 'message': 'Net pay is zero; confirm exclusion or unpaid status.'})
+        duplicate_ibans = PayrollEmployee.objects.exclude(iban='').values('iban').annotate(count=Count('id')).filter(count__gt=1)
+        for item in duplicate_ibans:
+            findings.append({'severity': 'warning', 'code': 'duplicate_iban', 'message': f"IBAN is shared by {item['count']} payroll employees."})
+        slip_total = payslips.aggregate(total=Sum('net_payable'))['total'] or Decimal('0')
+        if slip_total != run.total_net:
+            findings.append({'severity': 'error', 'code': 'run_total_mismatch', 'message': f'Run net total {run.total_net} does not reconcile to payslips {slip_total}.'})
+        errors = sum(1 for f in findings if f['severity'] == 'error')
+        warnings = sum(1 for f in findings if f['severity'] == 'warning')
+        check = PayrollComplianceCheck.objects.create(
+            run=run, status='failed' if errors else ('warning' if warnings else 'passed'),
+            findings=findings, error_count=errors, warning_count=warnings, checked_by=request.user,
+        )
+        return Response(PayrollComplianceCheckSerializer(check).data, status=201)
+
+    def _payment_records(self, run):
+        return [{
+            'employee_no': slip.employee.employee_no,
+            'employee_name': slip.snapshot_full_name,
+            'emirates_id': slip.employee.emirates_id,
+            'mol_no': slip.employee.mol_no,
+            'iban': slip.snapshot_iban or slip.employee.iban,
+            'routing_code': slip.employee.routing_code,
+            'amount': str(slip.net_payable),
+            'currency': CURRENCY,
+            'period': run.cycle_code,
+        } for slip in run.payslips.select_related('employee').all() if slip.net_payable > 0]
+
+    @action(detail=True, methods=['post'], url_path='payment-batch')
+    def payment_batch(self, request, pk=None):
+        self._require_payroll_admin(request)
+        run = self.get_object()
+        batch_type = request.data.get('batch_type', 'wps')
+        if batch_type not in {'wps', 'bank'}:
+            return Response({'error': 'batch_type must be wps or bank.'}, status=400)
+        if run.status not in {catalog.Status.FINANCE_APPROVED, catalog.Status.RELEASED}:
+            return Response({'error': 'Finance approval is required before payment file generation.'}, status=409)
+        latest_check = run.compliance_checks.first()
+        if not latest_check or latest_check.status == 'failed':
+            return Response({'error': 'A passing payroll compliance check is required.'}, status=409)
+        records = self._payment_records(run)
+        errors = []
+        for row in records:
+            if not row['iban']:
+                errors.append({'employee_no': row['employee_no'], 'field': 'iban'})
+            if batch_type == 'wps' and (not row['emirates_id'] or not row['mol_no']):
+                errors.append({'employee_no': row['employee_no'], 'field': 'wps_identity'})
+        reference = f'{batch_type.upper()}-{run.cycle_code}-{run.id}'[:50]
+        batch, _ = PayrollPaymentBatch.objects.update_or_create(
+            run=run, batch_type=batch_type,
+            defaults={'reference': reference, 'records': records, 'record_count': len(records),
+                      'total_amount': sum((Decimal(r['amount']) for r in records), Decimal('0')),
+                      'validation_errors': errors, 'status': 'draft' if errors else 'validated', 'created_by': request.user},
+        )
+        return Response(PayrollPaymentBatchSerializer(batch).data, status=201)
+
+    @action(detail=True, methods=['get'], url_path='payment-file')
+    def payment_file(self, request, pk=None):
+        self._require_payroll_admin(request)
+        run = self.get_object()
+        batch = run.payment_batches.filter(batch_type=request.query_params.get('batch_type', 'wps')).first()
+        if not batch or batch.status == 'draft':
+            return Response({'error': 'A validated payment batch is required.'}, status=409)
+        stream = io.StringIO()
+        writer = csv.DictWriter(stream, fieldnames=['employee_no', 'employee_name', 'emirates_id', 'mol_no', 'iban', 'routing_code', 'amount', 'currency', 'period'])
+        writer.writeheader(); writer.writerows(batch.records)
+        content = stream.getvalue().encode('utf-8-sig')
+        batch.file_hash = hashlib.sha256(content).hexdigest(); batch.status = 'exported'
+        batch.save(update_fields=['file_hash', 'status'])
+        response = HttpResponse(content, content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="{batch.reference}.csv"'
+        return response
+
+    @action(detail=True, methods=['post'], url_path='accounting-export')
+    def accounting_export(self, request, pk=None):
+        self._require_payroll_admin(request)
+        run = self.get_object()
+        if run.status not in {catalog.Status.FINANCE_APPROVED, catalog.Status.RELEASED}:
+            return Response({'error': 'Finance approval is required before journal generation.'}, status=409)
+        entries = [
+            {'account': 'PAYROLL_EXPENSE', 'description': f'Gross payroll {run.cycle_code}', 'debit': str(run.total_gross), 'credit': '0.00'},
+            {'account': 'PAYROLL_DEDUCTIONS_PAYABLE', 'description': f'Deductions {run.cycle_code}', 'debit': '0.00', 'credit': str(run.total_deductions)},
+            {'account': 'SALARIES_PAYABLE', 'description': f'Net salaries {run.cycle_code}', 'debit': '0.00', 'credit': str(run.total_net)},
+        ]
+        target_system = request.data.get('target_system', 'generic')
+        if target_system not in {'generic', 'dynamics', 'sap', 'oracle'}:
+            return Response({'error': 'Unsupported target_system.'}, status=400)
+        reference = f'PAY-{target_system[:3].upper()}-{run.cycle_code}-{run.id}'[:50]
+        export, _ = PayrollAccountingExport.objects.update_or_create(
+            reference=reference,
+            defaults={'run': run, 'target_system': target_system, 'entries': entries,
+                      'total_debit': run.total_gross,
+                      'total_credit': run.total_deductions + run.total_net,
+                      'status': 'generated', 'created_by': request.user},
+        )
+        return Response(PayrollAccountingExportSerializer(export).data, status=201)
+
+    @action(detail=True, methods=['get'], url_path='accounting-file')
+    def accounting_file(self, request, pk=None):
+        self._require_payroll_admin(request)
+        run = self.get_object()
+        target = request.query_params.get('target_system', 'generic')
+        export = run.accounting_exports.filter(target_system=target).first()
+        if not export:
+            return Response({'error': 'Generate the accounting export first.'}, status=404)
+        stream = io.StringIO()
+        writer = csv.DictWriter(stream, fieldnames=['account', 'description', 'debit', 'credit'])
+        writer.writeheader(); writer.writerows(export.entries)
+        export.status = 'exported'; export.save(update_fields=['status'])
+        response = HttpResponse(stream.getvalue().encode('utf-8-sig'), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="{export.reference}.csv"'
+        return response
+
+    @action(detail=True, methods=['post'], url_path='payment-batch-status')
+    def payment_batch_status(self, request, pk=None):
+        self._require_payroll_admin(request)
+        batch = self.get_object().payment_batches.filter(reference=request.data.get('reference')).first()
+        new_status = request.data.get('status')
+        transitions = {'validated': {'exported', 'submitted'}, 'exported': {'submitted'}, 'submitted': {'accepted', 'rejected'}}
+        if not batch or new_status not in transitions.get(batch.status, set()):
+            return Response({'error': 'Invalid payment batch transition.'}, status=409)
+        batch.status = new_status
+        batch.bank_response = request.data.get('bank_response') or {}
+        if new_status == 'submitted': batch.submitted_at = timezone.now()
+        batch.save(update_fields=['status', 'bank_response', 'submitted_at'])
+        return Response(PayrollPaymentBatchSerializer(batch).data)
+
+    @action(detail=True, methods=['post'], url_path='accounting-posted')
+    def accounting_posted(self, request, pk=None):
+        self._require_payroll_admin(request)
+        export = self.get_object().accounting_exports.filter(reference=request.data.get('reference')).first()
+        if not export or export.status not in {'generated', 'exported'}:
+            return Response({'error': 'Accounting export is not postable.'}, status=409)
+        export.status = 'posted'; export.external_reference = request.data.get('external_reference', '')
+        export.posted_at = timezone.now()
+        export.save(update_fields=['status', 'external_reference', 'posted_at'])
+        return Response(PayrollAccountingExportSerializer(export).data)
 
 
 # ── Payslip CRUD ────────────────────────────────────────────────────
