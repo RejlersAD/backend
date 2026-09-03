@@ -19,6 +19,10 @@ from datetime import timedelta
 from apps.core.project_models import Project as CoreProject
 from .services.document_filenames import build_procurement_pdf_filename
 from .services.employee_display import normalize_ceo_workflow
+from .services.purchase_order_exports import (
+    build_purchase_order_docx,
+    build_purchase_order_pdf,
+)
 
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db import models as django_models
@@ -1874,6 +1878,32 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         return self._record_approval_decision(request, 'reject')
+
+    @action(detail=True, methods=['get'], url_path='export-pdf')
+    def export_pdf(self, request, pk=None):
+        """Export the PO and merge supporting documents in attachment order."""
+        order = self.get_object()
+        content, warnings = build_purchase_order_pdf(order)
+        filename = build_procurement_pdf_filename(order.po_number, 'po', order.po_date)
+        response = HttpResponse(content, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        if warnings:
+            response['X-PO-Attachment-Warnings'] = str(len(warnings))
+        return response
+
+    @action(detail=True, methods=['get'], url_path='export-word')
+    def export_word(self, request, pk=None):
+        """Export the editable PO through Summary of Prices, without attachments."""
+        order = self.get_object()
+        content = build_purchase_order_docx(order)
+        pdf_name = build_procurement_pdf_filename(order.po_number, 'po', order.po_date)
+        filename = pdf_name[:-4] + '.docx'
+        response = HttpResponse(
+            content,
+            content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
     @action(detail=False, methods=['get'], url_path='available-requisitions')
     def available_requisitions(self, request):
