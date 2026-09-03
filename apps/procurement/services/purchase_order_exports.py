@@ -48,6 +48,7 @@ BRAND_BLUE = colors.HexColor('#0870aa')
 BRAND_TEXT_BLUE = colors.HexColor('#3275b6')
 BRAND_NAVY = colors.HexColor('#1f2d55')
 LOGO_PATH = Path(__file__).resolve().parent.parent / 'assets' / 'rejlers-pr-po-logo.png'
+WHITE_LOGO_PATH = Path(__file__).resolve().parent.parent / 'assets' / 'rejlers-pr-po-logo-white.png'
 DEFAULT_INVOICE_ADDRESS = (
     'Attn. Mr. Aneef Thadikkarantavida\n'
     'aneef.thadikkarantavida@rejlers.ae\n'
@@ -236,9 +237,10 @@ def _pdf_styles():
 
 def _draw_rejlers_wordmark(canvas, x, y, width, color):
     """Draw the official wordmark, with a vector fallback for damaged installs."""
-    if LOGO_PATH.exists() and color == BRAND_NAVY:
+    logo_path = WHITE_LOGO_PATH if color == colors.white else LOGO_PATH
+    if logo_path.exists():
         canvas.drawImage(
-            ImageReader(str(LOGO_PATH)), x, y, width=width, height=width / 6.64,
+            ImageReader(str(logo_path)), x, y, width=width, height=width / 6.64,
             preserveAspectRatio=True, mask='auto', anchor='sw',
         )
         return
@@ -294,18 +296,19 @@ def _pdf_page(canvas, document, order, page_number=None):
     canvas.rect(band_x, band_y, band_width, band_height, fill=1, stroke=0)
     group_width = band_width / 5
     for index in (0, 2, 4):
+        footer_logo_width = 21 * mm
         _draw_rejlers_wordmark(
             canvas,
-            band_x + (index * group_width) + 2.5 * mm,
-            band_y + 2.1 * mm,
-            group_width - 5 * mm,
+            band_x + ((index + 0.5) * group_width) - (footer_logo_width / 2),
+            band_y + 1.9 * mm,
+            footer_logo_width,
             colors.white,
         )
     canvas.setFillColor(colors.white)
-    canvas.setFont('Helvetica-Bold', 4.2)
+    canvas.setFont('Helvetica-Bold', 4.5)
     for index in (1, 3):
         center = band_x + ((index + 0.5) * group_width)
-        canvas.drawCentredString(center, band_y + 4.2 * mm, 'HOME OF THE')
+        canvas.drawCentredString(center, band_y + 4.2 * mm, 'HOME of the')
         canvas.drawCentredString(center, band_y + 2.2 * mm, 'LEARNING MINDS')
 
     canvas.setFillColor(BRAND_TEXT_BLUE)
@@ -371,12 +374,12 @@ def _main_pdf(order):
             str(getattr(order, 'seller_address', '') or '').strip(),
         ))), False),
         ('Invoicing Address', invoice_address, False),
-    ]), pair_rows([
+    ]), '', pair_rows([
         ('Seller Reference', getattr(order, 'seller_reference', None), False),
         ('Quote Ref.', getattr(order, 'quote_ref', None), False),
         ('License No.', getattr(order, 'seller_license_no', None), False),
         ('Buyer Reference', _buyer_reference(order), False),
-    ])]], colWidths=[88 * mm, 88 * mm], style=TableStyle([
+    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LEFTPADDING', (0, 0), (-1, -1), 0),
         ('RIGHTPADDING', (0, 0), (-1, -1), 0),
@@ -387,26 +390,27 @@ def _main_pdf(order):
         ('Payment Terms', getattr(order, 'payment_terms', None), False),
         ('Payment Mode', getattr(order, 'payment_mode', None), False),
         ('Project', getattr(order, 'project_number', None) or getattr(order, 'rad_project_no', None) or 'Multiple Projects', True),
-    ]), pair_rows([
+    ]), '', pair_rows([
         ('Delivery terms', getattr(order, 'delivery_terms', None), False),
         ('Delivery date', _date_text(getattr(order, 'expected_delivery', None)), False),
         ('Marking', getattr(order, 'marking', None) or order.po_number, True),
-    ])]], colWidths=[88 * mm, 88 * mm], style=TableStyle([
+    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
     ]))
     summary_table = Table([[
         Paragraph(f'<b>Purchase Summary:</b><br/><br/><b>{escape(_value(getattr(order, "summary", None) or order.title))}</b>', preview),
+        '',
         Table([
             [Paragraph('<b>Total Purchase Price:</b>', preview), Paragraph(escape(f'{subtotal:,.2f} {currency}'), styles['right'])],
             [Paragraph(f'<b>VAT ({float(getattr(order, "vat_percentage", 0) or 0):g}%):</b>', preview), Paragraph(escape(f'{tax:,.2f} {currency}'), styles['right'])],
             [Paragraph('<b>Total Sum:</b>', preview_bold), Paragraph(escape(f'{total:,.2f} {currency}'), styles['right'])],
-        ], colWidths=[48 * mm, 34 * mm], style=TableStyle([
+        ], colWidths=[45 * mm, 34 * mm], style=TableStyle([
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
             ('TOPPADDING', (0, 0), (-1, -1), 1), ('BOTTOMPADDING', (0, 0), (-1, -1), 1),
         ])),
-    ]], colWidths=[94 * mm, 82 * mm], style=TableStyle([
+    ]], colWidths=[91 * mm, 6 * mm, 79 * mm], style=TableStyle([
         ('LINEABOVE', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
         ('LINEBELOW', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -428,11 +432,11 @@ def _main_pdf(order):
         f'<br/><br/><b>Phone / Email:</b> {escape(" / ".join(filter(None, (str(getattr(order, "seller_phone", "") or ""), str(getattr(order, "seller_email", "") or "")))) or "â€”")}',
         preview,
     )
-    approval_table = Table([[approved, confirmation]], colWidths=[90 * mm, 86 * mm], style=TableStyle([
+    approval_table = Table([[approved, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm], style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LINEBEFORE', (1, 0), (1, 0), 0.5, colors.HexColor('#64748b')),
+        ('LINEBEFORE', (2, 0), (2, 0), 0.5, colors.HexColor('#64748b')),
         ('LEFTPADDING', (0, 0), (0, 0), 0), ('RIGHTPADDING', (0, 0), (0, 0), 7 * mm),
-        ('LEFTPADDING', (1, 0), (1, 0), 3 * mm), ('RIGHTPADDING', (1, 0), (1, 0), 0),
+        ('LEFTPADDING', (2, 0), (2, 0), 3 * mm), ('RIGHTPADDING', (2, 0), (2, 0), 0),
     ]))
     story = [
         Spacer(1, 2 * mm), details, Spacer(1, 5 * mm), commercial, Spacer(1, 4 * mm),
@@ -735,9 +739,12 @@ def _configure_docx_header_footer(document, order):
     band = footer.add_table(rows=1, cols=5, width=Mm(178))
     band.alignment = WD_TABLE_ALIGNMENT.CENTER
     values = ('REJLERS', 'HOME of the\nLEARNING MINDS', 'REJLERS', 'HOME of the\nLEARNING MINDS', 'REJLERS')
-    for cell, value in zip(band.rows[0].cells, values):
+    for index, (cell, value) in enumerate(zip(band.rows[0].cells, values)):
         _docx_cell_shading(cell, '0870AA')
-        _docx_set_cell_text(cell, value, size=5.5, bold=True, color='FFFFFF', align=WD_ALIGN_PARAGRAPH.CENTER)
+        paragraph = _docx_set_cell_text(cell, value, size=5.5, bold=True, color='FFFFFF', align=WD_ALIGN_PARAGRAPH.CENTER)
+        if index in (0, 2, 4) and WHITE_LOGO_PATH.exists():
+            paragraph.clear()
+            paragraph.add_run().add_picture(str(WHITE_LOGO_PATH), height=Mm(3.2))
     details = footer.add_table(rows=1, cols=2, width=Mm(160))
     details.alignment = WD_TABLE_ALIGNMENT.CENTER
     _docx_set_cell_text(
