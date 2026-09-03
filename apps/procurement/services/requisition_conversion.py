@@ -10,6 +10,7 @@ from rest_framework.exceptions import ValidationError
 from ..models import PurchaseOrder, PurchaseRequisition, Vendor
 from .purchase_order_numbering import PurchaseOrderNumberService
 from .requisition_status import canonicalize_pr_status
+from .employee_display import normalize_ceo_workflow
 
 
 class RequisitionConversionService:
@@ -48,7 +49,10 @@ class RequisitionConversionService:
 
     @classmethod
     def _approval_log(cls, pr):
-        workflow = pr.approval_workflow_config if isinstance(pr.approval_workflow_config, list) else []
+        workflow = normalize_ceo_workflow(
+            pr.approval_workflow_config,
+            pr.po_number_reference,
+        )
         return [
             {
                 'stage': stage.get('stage') or stage.get('role') or f"Stage {index + 1}",

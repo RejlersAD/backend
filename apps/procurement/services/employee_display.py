@@ -76,3 +76,43 @@ def name_only(value):
     """Make legacy email-valued name fields suitable for display."""
     cleaned = _clean(value)
     return _humanize_identifier(cleaned) if '@' in cleaned else cleaned
+
+
+def is_jarmo_ceo_stage(stage):
+    """Identify the conditional CEO approval, including legacy GM labels."""
+    if not isinstance(stage, dict):
+        return False
+    identity = ' '.join(_clean(stage.get(field)).casefold() for field in (
+        'user_name', 'approver', 'user_email', 'approver_email',
+    ))
+    role = f"{stage.get('role', '')} {stage.get('stage', '')}".casefold()
+    try:
+        is_level_five = int(stage.get('level')) == 5
+    except (TypeError, ValueError):
+        is_level_five = False
+    return (
+        'jarmo suominen' in identity
+        or 'jarmo.suominen@' in identity
+        or is_level_five and any(label in role for label in ('general manager', ' ceo', 'ceo '))
+    )
+
+
+def normalize_ceo_workflow(workflow, po_reference=''):
+    """Remove conditional CEO approval when a PO Reference already exists."""
+    normalized = []
+    has_po_reference = bool(_clean(po_reference))
+    for raw_stage in workflow if isinstance(workflow, list) else []:
+        if not isinstance(raw_stage, dict):
+            normalized.append(raw_stage)
+            continue
+        stage = dict(raw_stage)
+        if is_jarmo_ceo_stage(stage):
+            if has_po_reference:
+                continue
+            stage['role'] = 'CEO'
+            stage_name = _clean(stage.get('stage'))
+            stage['stage'] = re.sub(
+                r'general manager', 'CEO', stage_name, flags=re.IGNORECASE,
+            ) or 'Level 5 - CEO Approval'
+        normalized.append(stage)
+    return normalized

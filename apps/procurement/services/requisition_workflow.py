@@ -12,7 +12,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from ..models import PurchaseRequisition
 from .requisition_status import canonicalize_pr_status
 from .requisition_validation import line_items_total, normalize_line_items
-from .employee_display import employee_display_name
+from .employee_display import employee_display_name, normalize_ceo_workflow
 
 
 class RequisitionWorkflowService:
@@ -66,7 +66,10 @@ class RequisitionWorkflowService:
 
     @classmethod
     def _workflow(cls, pr):
-        workflow = pr.approval_workflow_config
+        workflow = normalize_ceo_workflow(
+            pr.approval_workflow_config,
+            pr.po_number_reference,
+        )
         if not isinstance(workflow, list) or not workflow:
             raise ValidationError({'error': 'A configured approval workflow is required.'})
         if any(not isinstance(stage, dict) for stage in workflow):
@@ -293,13 +296,13 @@ class RequisitionWorkflowService:
             has_level_zero = any(cls._stage_level(stage, index) == 0 for index, stage in enumerate(workflow))
             has_jarmo_level_five = any(
                 cls._stage_level(stage, index) == 5
-                and 'general manager' in f"{stage.get('role', '')} {stage.get('stage', '')}".lower()
+                and any(label in f"{stage.get('role', '')} {stage.get('stage', '')}".lower() for label in ('general manager', 'ceo'))
                 and str(stage.get('user_name') or '').strip().lower() == 'jarmo suominen'
                 for index, stage in enumerate(workflow)
             )
             if not has_level_zero or not has_jarmo_level_five:
                 raise ValidationError({
-                    'error': 'When no PO Reference is provided, the workflow requires Level 0 Procurement and Level 5 Jarmo Suominen (General Manager).'
+                    'error': 'When no PO Reference is provided, the workflow requires Level 0 Procurement and Level 5 Jarmo Suominen (CEO).'
                 })
 
         # Pass 1: Validate all stages before mutating memory

@@ -161,7 +161,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
             {'level': 0, 'role': 'Procurement Department', 'user_id': 'procurement'},
             {
                 'level': 5,
-                'role': 'General Manager',
+                'role': 'CEO',
                 'user_id': 'jarmo',
                 'user_name': 'Jarmo Suominen',
             },
@@ -176,11 +176,19 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
         pr.po_number_reference = 'RAD-PRJ-PUR-0461_SEP2026'
         pr.approval_workflow_config = [
             {'level': 0, 'role': 'Procurement Department', 'user_id': 'procurement'},
+            {
+                'level': 5,
+                'role': 'General Manager',
+                'user_id': 'jarmo',
+                'user_name': 'Jarmo Suominen',
+            },
         ]
 
         result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
 
         self.assertEqual(result.status, 'submitted')
+        self.assertEqual(len(result.approval_workflow_config), 1)
+        self.assertEqual(result.approval_workflow_config[0]['role'], 'Procurement Department')
 
     def test_only_issuer_can_submit(self):
         pr = self._pr()

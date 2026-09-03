@@ -18,6 +18,7 @@ from django.utils import timezone
 from datetime import timedelta
 from apps.core.project_models import Project as CoreProject
 from .services.document_filenames import build_procurement_pdf_filename
+from .services.employee_display import normalize_ceo_workflow
 
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db import models as django_models
@@ -470,7 +471,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(pr)
         payload = dict(serializer.data)
         payload['status'] = canonicalize_pr_status(pr.status)
-        payload['approval_hierarchy'] = pr.approval_workflow_config if isinstance(pr.approval_workflow_config, list) else []
+        payload['approval_hierarchy'] = payload.get('approval_workflow_config', [])
         payload['convert_to_po_enabled'] = canonicalize_pr_status(pr.status) == 'approved'
         return payload
 
@@ -486,7 +487,10 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         assigned = []
 
         for pr in queryset:
-            workflow = pr.approval_workflow_config
+            workflow = normalize_ceo_workflow(
+                pr.approval_workflow_config,
+                pr.po_number_reference,
+            )
             if not isinstance(workflow, list):
                 continue
             pending = [

@@ -12,7 +12,12 @@ from django.db.models import Q
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
 from .services.purchase_order_numbering import PurchaseOrderNumberService
 from .services.purchase_order_approvals import normalize_assignments, notify_assigned_approvers
-from .services.employee_display import employee_display_name, employee_display_names, name_only
+from .services.employee_display import (
+    employee_display_name,
+    employee_display_names,
+    name_only,
+    normalize_ceo_workflow,
+)
 from .services.receipt_numbering import ReceiptNumberService
 from .services.requisition_status import canonicalize_pr_status
 from .services.project_relationships import (
@@ -394,6 +399,16 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                     'approval_workflow_config': 'Only the requisition issuer may change draft approval assignments.'
                 })
 
+        if 'approval_workflow_config' in attrs:
+            po_reference = attrs.get(
+                'po_number_reference',
+                getattr(self.instance, 'po_number_reference', '') if self.instance else '',
+            )
+            attrs['approval_workflow_config'] = normalize_ceo_workflow(
+                attrs['approval_workflow_config'],
+                po_reference,
+            )
+
         if 'items' in attrs and attrs['items']:
             calculated_total = line_items_total(attrs['items'])
             requested_total = attrs.get(
@@ -471,6 +486,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                     stage.get('user_name') or stage.get('approver')
                 ) or 'Assigned Employee'
                 normalized.append(stage)
+            normalized = normalize_ceo_workflow(normalized, instance.po_number_reference)
             data['approval_workflow_config'] = normalized
             data['approval_hierarchy'] = normalized
         return data
