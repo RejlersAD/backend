@@ -12,6 +12,7 @@ from apps.procurement.services.purchase_order_approvals import (
     TECHNICAL_STAGE,
     _entry_matches_user,
     normalize_assignments,
+    notify_purchase_order_created,
     record_decision,
 )
 from apps.procurement.serializers import PurchaseOrderSerializer, VendorICVSerializer
@@ -126,6 +127,54 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
             self.assertIs(normalized.getlist('attachments_files')[0], upload)
         finally:
             upload.close()
+
+    @patch('apps.notifications.services.NotificationService.create_notification')
+    @patch('apps.notifications.models.Notification.objects.filter')
+    @patch('apps.procurement.services.purchase_order_approvals._jarmo_user')
+    @patch('apps.procurement.services.purchase_order_approvals._resolve_entry_user')
+    @patch('apps.procurement.services.purchase_order_approvals.employee_display_name')
+    def test_po_created_notifies_buyer_references_and_ceo_once(
+        self,
+        display_name,
+        resolve_entry_user,
+        jarmo_user,
+        notification_filter,
+        create_notification,
+    ):
+        buyer = SimpleNamespace(pk='buyer-id', email='buyer@rejlers.ae')
+        jarmo = SimpleNamespace(pk='ceo-id', email='jarmo@rejlers.ae')
+        creator = SimpleNamespace(pk='creator-id', email='creator@rejlers.ae')
+        resolve_entry_user.return_value = buyer
+        jarmo_user.return_value = jarmo
+        notification_filter.return_value.exists.return_value = False
+        display_name.return_value = 'PO Creator'
+        order = SimpleNamespace(
+            id='po-id',
+            po_number='RAD-PRJ-PUR-0117_2026',
+            buyer_reference_email='buyer@rejlers.ae',
+            buyer_reference_pm='Buyer Reference',
+            contact_persons={'buyer_references': [{
+                'user_id': 'buyer-id',
+                'email': 'buyer@rejlers.ae',
+                'name': 'Buyer Reference',
+            }]},
+            created_by=creator,
+            expected_delivery=None,
+            end_date=None,
+        )
+
+        notify_purchase_order_created(order)
+
+        self.assertEqual(create_notification.call_count, 2)
+        recipients = {
+            call.kwargs['recipient'].email: call.kwargs
+            for call in create_notification.call_args_list
+        }
+        self.assertSetEqual(set(recipients), {'buyer@rejlers.ae', 'jarmo@rejlers.ae'})
+        for kwargs in recipients.values():
+            self.assertTrue(kwargs['send_teams'])
+            self.assertEqual(kwargs['teams_context']['event_type'], 'purchase_order_created')
+            self.assertEqual(kwargs['action_url'], '/procurement/orders/po-id')
 
     def test_manual_vendor_icv_requires_valid_percentage_and_sets_certified(self):
         serializer = VendorICVSerializer(data={'icv_percentage': '64.25'})

@@ -47,6 +47,8 @@ def _absolute_action_url(action_url):
 def build_approval_assignment_payload(notification, context=None):
     """Build the stable JSON contract consumed by the RADAI Power Automate flow."""
     context = context or {}
+    message_title = str(context.get('title') or 'New approval request assigned')
+    event_type = str(context.get('event_type') or 'approval_assignment')
     request_name = str(context.get('request_name') or notification.title or 'Approval request')
     submitted_by = str(context.get('submitted_by') or _display_name(notification.sender))
     due_date = _format_due_date(context.get('due_date'))
@@ -54,7 +56,7 @@ def build_approval_assignment_payload(notification, context=None):
     recipient_name = _display_name(notification.recipient)
     recipient_email = str(getattr(notification.recipient, 'email', '') or '').strip()
     plain_message = (
-        'New approval request assigned\n'
+        f'{message_title}\n'
         f'Request: {request_name}\n'
         f'Submitted By: {submitted_by}\n'
         f'Due Date: {due_date}\n'
@@ -65,10 +67,10 @@ def build_approval_assignment_payload(notification, context=None):
         # Adaptive Card message envelope. The top-level RADAI fields remain so
         # the following Flow-bot action can address recipient_email directly.
         'type': 'message',
-        'event_type': 'approval_assignment',
+        'event_type': event_type,
         'recipient_email': recipient_email,
         'recipient_name': recipient_name,
-        'title': 'New approval request assigned',
+        'title': message_title,
         'request': request_name,
         'submitted_by': submitted_by,
         'due_date': due_date,

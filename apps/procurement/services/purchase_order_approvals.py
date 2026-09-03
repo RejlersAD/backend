@@ -179,6 +179,70 @@ def notify_assigned_approvers(order):
         order.save(update_fields=['approval_log', 'updated_at'])
 
 
+def notify_purchase_order_created(order):
+    """Notify selected Buyer References and the CEO when a PO is created."""
+    from apps.notifications.models import Notification
+    from apps.notifications.services import NotificationService
+
+    buyer_entries = []
+    contact_people = order.contact_persons if isinstance(order.contact_persons, dict) else {}
+    for entry in contact_people.get('buyer_references') or []:
+        if isinstance(entry, dict):
+            buyer_entries.append(dict(entry))
+    if order.buyer_reference_email:
+        buyer_entries.append({
+            'email': order.buyer_reference_email,
+            'name': order.buyer_reference_pm,
+        })
+
+    recipients = []
+    for entry in buyer_entries:
+        recipient = _resolve_entry_user(entry)
+        if recipient:
+            recipients.append(('buyer_reference', recipient))
+    jarmo = _jarmo_user()
+    if jarmo:
+        recipients.append(('ceo', jarmo))
+
+    seen = set()
+    for role, recipient in recipients:
+        identity = str(getattr(recipient, 'pk', None) or getattr(recipient, 'email', '')).lower()
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        metadata = {
+            'event_type': 'po_created',
+            'po_id': str(order.id),
+            'po_number': order.po_number,
+            'recipient_role': role,
+        }
+        if Notification.objects.filter(
+            recipient=recipient,
+            metadata__event_type='po_created',
+            metadata__po_id=str(order.id),
+        ).exists():
+            continue
+        NotificationService.create_notification(
+            recipient=recipient,
+            sender=order.created_by,
+            title=f'Purchase Order {order.po_number} created',
+            message=f'Purchase Order {order.po_number} has been created and is available for review.',
+            category='PROCUREMENT',
+            priority='HIGH',
+            action_url=f'/procurement/orders/{order.id}',
+            action_label='Open Purchase Order',
+            send_teams=True,
+            teams_context={
+                'event_type': 'purchase_order_created',
+                'title': 'New purchase order created',
+                'request_name': f'Purchase Order {order.po_number}',
+                'submitted_by': employee_display_name(order.created_by) if order.created_by else 'Not specified',
+                'due_date': order.expected_delivery or order.end_date,
+            },
+            metadata=metadata,
+        )
+
+
 def pending_entries_for(user, queryset):
     results = []
     for order in queryset:
