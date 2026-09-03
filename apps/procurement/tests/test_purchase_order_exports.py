@@ -79,4 +79,3 @@ class PurchaseOrderExportTests(TestCase):
 
         self.assertIn('Summary of Prices', rendered_text)
         self.assertNotIn('Should not be exported to Word', rendered_text)
-
