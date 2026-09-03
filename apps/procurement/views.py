@@ -504,7 +504,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             active_level = min(RequisitionWorkflowService._stage_level(stage, index) for index, stage in pending)
             active_stages = [stage for index, stage in pending if RequisitionWorkflowService._stage_level(stage, index) == active_level]
             if is_super_admin or any(
-                str(stage.get('user_id') or stage.get('approver_id')) == str(request.user.id)
+                RequisitionWorkflowService._stage_matches_user(stage, request.user)
                 for stage in active_stages
             ):
                 assigned.append(pr)
