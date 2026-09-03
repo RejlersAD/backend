@@ -463,6 +463,8 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                     stage.get('user_email') or stage.get('approver_email') or ''
                 ).strip().lower()
                 resolved_user = users_by_id.get(user_id) or users_by_email.get(user_email)
+                if resolved_user:
+                    stage['user_id'] = str(resolved_user.pk)
                 stage['user_name'] = (
                     names.get(str(resolved_user.pk)) if resolved_user else None
                 ) or name_only(
