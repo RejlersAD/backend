@@ -139,6 +139,43 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
 
         notify_level.assert_called_once_with(pr, pr.approval_workflow_config, 1)
 
+    @patch('apps.notifications.services.NotificationService.create_notification')
+    @patch('apps.notifications.models.Notification.objects.filter')
+    @patch.object(RequisitionWorkflowService, '_resolve_stage_user')
+    @patch(
+        'apps.procurement.services.requisition_workflow.transaction.on_commit',
+        side_effect=lambda callback: callback(),
+    )
+    def test_every_approver_at_active_level_receives_notification(
+        self,
+        _on_commit,
+        resolve_stage_user,
+        notification_filter,
+        create_notification,
+    ):
+        first = FakeUser(pk='level-one-a', id='level-one-a')
+        second = FakeUser(pk='level-one-b', id='level-one-b')
+        resolve_stage_user.side_effect = [first, second]
+        notification_filter.return_value.values_list.return_value = []
+        pr = self._pr(status='submitted')
+        pr.pk = 'pr-id'
+        pr.pr_number = 'RAD-PRJ-PR-TEST_2026'
+        workflow = [
+            {'level': 1, 'user_id': first.id, 'status': 'pending'},
+            {'level': 1, 'user_id': second.id, 'status': 'pending'},
+            {'level': 2, 'user_id': 'later-user', 'status': 'pending'},
+        ]
+
+        RequisitionWorkflowService._notify_level(pr, workflow, 1)
+
+        self.assertEqual(create_notification.call_count, 2)
+        self.assertEqual(
+            {call.kwargs['recipient'].id for call in create_notification.call_args_list},
+            {'level-one-a', 'level-one-b'},
+        )
+        for call in create_notification.call_args_list:
+            self.assertEqual(call.kwargs['action_url'], '/approvals?tab=procurement')
+
     def test_migrated_assignment_uses_email_when_user_id_changed(self):
         stage = {
             'user_id': 'preproduction-user-id',
