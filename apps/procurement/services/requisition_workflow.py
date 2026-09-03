@@ -15,6 +15,62 @@ from .requisition_validation import line_items_total, normalize_line_items
 from .employee_display import employee_display_name, normalize_ceo_workflow
 
 
+def notify_requisition_approver_changes(pr, previous_workflow):
+    """Notify employees newly assigned while an existing PR is edited."""
+    if not getattr(pr, 'pk', None):
+        return
+
+    previous_user_ids = {
+        (str(stage.get('level', '')), str(stage.get('user_id') or stage.get('approver_id') or ''))
+        for stage in (previous_workflow or [])
+        if isinstance(stage, dict) and (stage.get('user_id') or stage.get('approver_id'))
+    }
+    previous_emails = {
+        (
+            str(stage.get('level', '')),
+            str(stage.get('user_email') or stage.get('approver_email') or '').strip().casefold(),
+        )
+        for stage in (previous_workflow or [])
+        if isinstance(stage, dict) and (stage.get('user_email') or stage.get('approver_email'))
+    }
+    notified_user_ids = set()
+    for stage in pr.approval_workflow_config or []:
+        if not isinstance(stage, dict):
+            continue
+        level = str(stage.get('level', ''))
+        user_id = str(stage.get('user_id') or stage.get('approver_id') or '')
+        email = str(
+            stage.get('user_email') or stage.get('approver_email') or ''
+        ).strip().casefold()
+        if (user_id and (level, user_id) in previous_user_ids) or (
+            email and (level, email) in previous_emails
+        ):
+            continue
+        recipient = RequisitionWorkflowService._resolve_stage_user(stage)
+        if recipient is None or recipient.pk in notified_user_ids:
+            continue
+        notified_user_ids.add(recipient.pk)
+        from apps.notifications.services import NotificationService
+
+        level = RequisitionWorkflowService._stage_level(stage, 0)
+        NotificationService.create_notification(
+            recipient=recipient,
+            sender=pr.issued_by,
+            title=f'PR {pr.pr_number} approval assignment updated',
+            message=f'You have been assigned as a Level {level} approver for Purchase Requisition {pr.pr_number}.',
+            category='APPROVAL',
+            priority='HIGH',
+            action_url='/approvals?tab=procurement',
+            action_label='Open Approval tab',
+            metadata={
+                'pr_id': str(pr.pk),
+                'pr_number': pr.pr_number,
+                'approval_level': level,
+                'assignment_updated': True,
+            },
+        )
+
+
 class RequisitionWorkflowService:
     """Single source of truth for PR submission, approval, and rejection."""
 

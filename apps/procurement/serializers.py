@@ -30,6 +30,7 @@ from .services.requisition_validation import (
     normalize_line_items,
     validate_attachments,
 )
+from .services.requisition_workflow import notify_requisition_approver_changes
 
 
 PR_SERVER_CONTROLLED_FIELDS = {
@@ -261,17 +262,6 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         except (AttributeError, ObjectDoesNotExist):
             return False
 
-    def to_internal_value(self, data):
-        if (
-            self.instance
-            and canonicalize_pr_status(self.instance.status) != 'draft'
-            and hasattr(data, 'get')
-            and data.get('approval_workflow_config') is not None
-        ):
-            data = data.copy()
-            data.pop('approval_workflow_config', None)
-        return super().to_internal_value(data)
-
     def validate_approval_workflow_config(self, value):
         """Validate approver assignments and discard client-supplied approval state."""
         if not isinstance(value, list):
@@ -332,6 +322,24 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 'status': 'pending',
                 'approved_at': None,
             }
+
+            if self.instance:
+                previous_stage = next((
+                    existing for existing in (
+                        getattr(self.instance, 'approval_workflow_config', None) or []
+                    )
+                    if isinstance(existing, dict)
+                    and str(existing.get('user_id') or existing.get('approver_id') or '') == approver_id
+                    and str(existing.get('level', '')) == str(level)
+                ), None)
+                if previous_stage:
+                    for state_field in (
+                        'status', 'approved_at', 'approved_by_id', 'approved_by_name',
+                        'rejected_at', 'rejected_by_id', 'rejected_by_name',
+                        'rejection_reason', 'signature',
+                    ):
+                        if state_field in previous_stage:
+                            normalized_stage[state_field] = previous_stage[state_field]
 
             stage_name = str(stage.get('stage') or '').strip()
             if stage_name:
@@ -396,7 +404,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 )
             ):
                 raise serializers.ValidationError({
-                    'approval_workflow_config': 'Only the requisition issuer may change draft approval assignments.'
+                    'approval_workflow_config': 'Only the requisition issuer may change approval assignments.'
                 })
 
         if 'approval_workflow_config' in attrs:
@@ -554,6 +562,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         # Extract files if present
         files = validated_data.pop('attachments_files', [])
         management_evidence = validated_data.pop('management_approval_evidence_file', None)
+        previous_workflow = [
+            dict(stage) for stage in (instance.approval_workflow_config or [])
+            if isinstance(stage, dict)
+        ]
+        workflow_changed = 'approval_workflow_config' in validated_data
         if 'management_approval_evidence' in validated_data:
             validated_data['management_approval_evidence'] = (
                 validated_data.get('management_approval_evidence') or []
@@ -568,6 +581,10 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         if management_evidence:
             instance.management_approval_evidence = self._upload_attachments(instance, [management_evidence])
             instance.save(update_fields=['management_approval_evidence'])
+        if workflow_changed:
+            transaction.on_commit(
+                lambda: notify_requisition_approver_changes(instance, previous_workflow)
+            )
         
         return instance
     
