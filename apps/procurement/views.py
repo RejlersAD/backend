@@ -18,6 +18,7 @@ from django.utils import timezone
 from datetime import timedelta
 from apps.core.project_models import Project as CoreProject
 from .services.document_filenames import build_procurement_pdf_filename
+from .services.employee_display import normalize_ceo_workflow
 
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.db import models as django_models
@@ -73,6 +74,7 @@ from .models import (
 )
 from .serializers import (
     VendorSerializer,
+    VendorICVSerializer,
     PurchaseRequisitionSerializer,
     PurchaseOrderSerializer,
     ReceiptSerializer,
@@ -191,6 +193,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     queryset = PurchaseRequisition.objects.select_related(
         'issued_by',
+        'issued_by__employee_master',
         'vendor',
         'enterprise_project',
         'requested_by',
@@ -199,7 +202,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         'eng_manager_name',
         'manager_projects_name',
         'vp_op_name',
-    ).all().order_by('-created_at')
+    ).prefetch_related('issued_by__onboarding_records').all().order_by('-created_at')
     serializer_class = PurchaseRequisitionSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_requisitions'
@@ -287,11 +290,8 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         if deletable:
             return
 
-        allowed_statuses = {'draft'}
-        if canonicalize_pr_status(pr.status) not in allowed_statuses:
-            raise ValidationError({
-                'error': f'Only {", ".join(sorted(allowed_statuses))} requisitions can be edited.'
-            })
+        # Procurement may correct a requisition at any lifecycle status. The
+        # serializer still protects workflow decisions and other audit fields.
 
     def update(self, request, *args, **kwargs):
         self._enforce_owner_mutation(self.get_object())
@@ -472,7 +472,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(pr)
         payload = dict(serializer.data)
         payload['status'] = canonicalize_pr_status(pr.status)
-        payload['approval_hierarchy'] = pr.approval_workflow_config if isinstance(pr.approval_workflow_config, list) else []
+        payload['approval_hierarchy'] = payload.get('approval_workflow_config', [])
         payload['convert_to_po_enabled'] = canonicalize_pr_status(pr.status) == 'approved'
         return payload
 
@@ -488,7 +488,10 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         assigned = []
 
         for pr in queryset:
-            workflow = pr.approval_workflow_config
+            workflow = normalize_ceo_workflow(
+                pr.approval_workflow_config,
+                pr.po_number_reference,
+            )
             if not isinstance(workflow, list):
                 continue
             pending = [
@@ -727,11 +730,30 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'suggestions': suggestions,
             'count': len(suggestions)
         })
+
+    @action(detail=False, methods=['patch'], url_path='vendor-icv')
+    def vendor_icv(self, request):
+        """Record missing ICV data without granting full vendor-master access."""
+        vendor_id = request.data.get('vendor_id')
+        if not vendor_id:
+            return Response({'vendor_id': 'Select a vendor.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            vendor = Vendor.objects.get(pk=vendor_id, status='active')
+        except (Vendor.DoesNotExist, ValueError, TypeError):
+            return Response({'vendor_id': 'The selected active vendor was not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = VendorICVSerializer(vendor, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(VendorSerializer(vendor, context=self.get_serializer_context()).data)
     
     @action(detail=False, methods=['get'])
     def get_approvers(self, request):
         from apps.rbac.models import UserProfile
+        from apps.hr_core.models import EmployeeMaster
         from django.contrib.auth import get_user_model
+        from .services.employee_display import employee_display_names
         User = get_user_model()
         
         role = request.query_params.get('role', '').lower()
@@ -824,6 +846,19 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 )
             ).distinct()
 
+        employee_records = {
+            record.user_id: record
+            for record in EmployeeMaster.objects.filter(
+                user_id__in=profiles.values_list('user_id', flat=True),
+            )
+        }
+        eligible_employment_statuses = {'active', 'probation', 'notice_period'}
+        profiles = [
+            profile for profile in profiles
+            if profile.user_id not in employee_records
+            or employee_records[profile.user_id].employment_status in eligible_employment_statuses
+        ]
+
         profiles = sorted(
             profiles,
             key=lambda p: (
@@ -833,18 +868,27 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             )
         )
 
+        display_names = employee_display_names(profile.user for profile in profiles)
         users_list = []
         for profile in profiles:
+            employee = employee_records.get(profile.user_id)
             users_list.append({
                 'id': str(profile.user.id),
                 'username': profile.user.get_username(),
                 'email': profile.user.email,
-                'full_name': profile.user.get_full_name(),
+                'full_name': display_names[str(profile.user_id)],
                 'first_name': profile.user.first_name,
                 'last_name': profile.user.last_name,
-                'job_title': profile.job_title,
-                'department': profile.department,
-                'employee_id': profile.employee_id,
+                'job_title': (
+                    employee.designation
+                    or employee.job_title_uae
+                    or employee.job_title_finland
+                    or profile.job_title
+                ) if employee else profile.job_title,
+                'department': employee.department or profile.department if employee else profile.department,
+                'employee_id': employee.employee_number if employee else profile.employee_id,
+                'employee_record_id': str(employee.pk) if employee else None,
+                'employee_source': 'radai_employee_master' if employee else 'legacy_employee_profile',
                 'job_title_match': profile.user_id in matched_user_ids,
                 'is_current_user': profile.user_id == request.user.id,
             })

@@ -7,10 +7,17 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
+from django.db.models import Q
 
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
 from .services.purchase_order_numbering import PurchaseOrderNumberService
 from .services.purchase_order_approvals import normalize_assignments, notify_assigned_approvers
+from .services.employee_display import (
+    employee_display_name,
+    employee_display_names,
+    name_only,
+    normalize_ceo_workflow,
+)
 from .services.receipt_numbering import ReceiptNumberService
 from .services.requisition_status import canonicalize_pr_status
 from .services.project_relationships import (
@@ -23,6 +30,7 @@ from .services.requisition_validation import (
     normalize_line_items,
     validate_attachments,
 )
+from .services.requisition_workflow import notify_requisition_approver_changes
 
 
 PR_SERVER_CONTROLLED_FIELDS = {
@@ -98,6 +106,25 @@ class VendorSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+class VendorICVSerializer(serializers.ModelSerializer):
+    """Restricted serializer used when procurement records a missing ICV value."""
+
+    icv_percentage = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        min_value=0,
+        max_value=100,
+    )
+
+    class Meta:
+        model = Vendor
+        fields = ['icv_percentage', 'icv_expiry_date', 'is_icv_certified']
+
+    def validate(self, attrs):
+        attrs['is_icv_certified'] = True
+        return attrs
+
+
 class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     """
     Serializer for Purchase Requisition
@@ -112,19 +139,20 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     vp_op_approval_status_display = serializers.CharField(source='get_vp_op_approval_status_display', read_only=True)
     
     # User relationship fields
-    issued_by_name = serializers.CharField(source='issued_by.get_full_name', read_only=True, allow_null=True)
-    pm_name_display = serializers.CharField(source='pm_name.get_full_name', read_only=True, allow_null=True)
-    eng_manager_name_display = serializers.CharField(source='eng_manager_name.get_full_name', read_only=True, allow_null=True)
-    manager_projects_name_display = serializers.CharField(source='manager_projects_name.get_full_name', read_only=True, allow_null=True)
-    vp_op_name_display = serializers.CharField(source='vp_op_name.get_full_name', read_only=True, allow_null=True)
+    issued_by_name = serializers.SerializerMethodField()
+    pm_name_display = serializers.SerializerMethodField()
+    eng_manager_name_display = serializers.SerializerMethodField()
+    manager_projects_name_display = serializers.SerializerMethodField()
+    vp_op_name_display = serializers.SerializerMethodField()
     
     # Vendor relationship fields
     vendor_details = VendorSerializer(source='vendor', read_only=True)
     vendor_name = serializers.CharField(source='vendor.name', read_only=True, allow_null=True)
     
     # Legacy fields
-    requested_by_name = serializers.CharField(source='requested_by.get_full_name', read_only=True, allow_null=True)
-    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True)
+    requester_name = serializers.SerializerMethodField()
+    requested_by_name = serializers.SerializerMethodField()
+    approved_by_name = serializers.SerializerMethodField()
     category_display = serializers.SerializerMethodField()
     enterprise_project_code = serializers.CharField(
         source='enterprise_project.code', read_only=True, allow_null=True,
@@ -204,7 +232,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             
             # Legacy fields (backward compatibility)
             'requisition_type', 'requisition_type_display', 'title', 'category', 'category_display',
-            'requested_by', 'requested_by_name', 'department', 'project', 'status',
+            'requested_by', 'requester_name', 'requested_by_name', 'department', 'project', 'status',
             'status_display', 'priority', 'priority_display', 'required_date',
             'estimated_budget', 'items', 'approved_by', 'approved_by_name',
             'approved_at', 'rejection_reason', 'notes',
@@ -285,7 +313,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 'level': level,
                 'role': role,
                 'user_id': str(approver.pk),
-                'user_name': approver.get_full_name() or approver.email,
+                'user_name': employee_display_name(approver),
                 'username': (
                     approver.get_username()
                     if callable(getattr(approver, 'get_username', None))
@@ -295,6 +323,24 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 'status': 'pending',
                 'approved_at': None,
             }
+
+            if self.instance:
+                previous_stage = next((
+                    existing for existing in (
+                        getattr(self.instance, 'approval_workflow_config', None) or []
+                    )
+                    if isinstance(existing, dict)
+                    and str(existing.get('user_id') or existing.get('approver_id') or '') == approver_id
+                    and str(existing.get('level', '')) == str(level)
+                ), None)
+                if previous_stage:
+                    for state_field in (
+                        'status', 'approved_at', 'approved_by_id', 'approved_by_name',
+                        'rejected_at', 'rejected_by_id', 'rejected_by_name',
+                        'rejection_reason', 'signature',
+                    ):
+                        if state_field in previous_stage:
+                            normalized_stage[state_field] = previous_stage[state_field]
 
             stage_name = str(stage.get('stage') or '').strip()
             if stage_name:
@@ -349,11 +395,6 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             })
 
         if self.instance and 'approval_workflow_config' in attrs:
-            if self.instance.status != 'draft':
-                raise serializers.ValidationError({
-                    'approval_workflow_config': 'Approval assignments can only be changed while the requisition is a draft.'
-                })
-
             request = self.context.get('request')
             user = getattr(request, 'user', None)
             if (
@@ -364,8 +405,18 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 )
             ):
                 raise serializers.ValidationError({
-                    'approval_workflow_config': 'Only the requisition issuer may change draft approval assignments.'
+                    'approval_workflow_config': 'Only the requisition issuer may change approval assignments.'
                 })
+
+        if 'approval_workflow_config' in attrs:
+            po_reference = attrs.get(
+                'po_number_reference',
+                getattr(self.instance, 'po_number_reference', '') if self.instance else '',
+            )
+            attrs['approval_workflow_config'] = normalize_ceo_workflow(
+                attrs['approval_workflow_config'],
+                po_reference,
+            )
 
         if 'items' in attrs and attrs['items']:
             calculated_total = line_items_total(attrs['items'])
@@ -400,12 +451,78 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
 
+    def get_issued_by_name(self, obj):
+        return employee_display_name(obj.issued_by) if obj.issued_by_id else ''
+
+    def get_requested_by_name(self, obj):
+        requester = obj.requested_by or obj.issued_by
+        return employee_display_name(requester) if requester else ''
+
+    def get_requester_name(self, obj):
+        return self.get_requested_by_name(obj)
+
+    def get_approved_by_name(self, obj):
+        return employee_display_name(obj.approved_by) if obj.approved_by_id else ''
+
+    def get_pm_name_display(self, obj):
+        return employee_display_name(obj.pm_name) if obj.pm_name_id else ''
+
+    def get_eng_manager_name_display(self, obj):
+        return employee_display_name(obj.eng_manager_name) if obj.eng_manager_name_id else ''
+
+    def get_manager_projects_name_display(self, obj):
+        return employee_display_name(obj.manager_projects_name) if obj.manager_projects_name_id else ''
+
+    def get_vp_op_name_display(self, obj):
+        return employee_display_name(obj.vp_op_name) if obj.vp_op_name_id else ''
+
     def get_status_display(self, obj):
         return canonicalize_pr_status(obj.status).replace('_', ' ').title()
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data['status'] = canonicalize_pr_status(instance.status)
+        workflow = data.get('approval_workflow_config')
+        if isinstance(workflow, list):
+            User = get_user_model()
+            user_ids = {
+                stage.get('user_id') or stage.get('approver_id')
+                for stage in workflow if isinstance(stage, dict)
+            }
+            user_emails = {
+                str(stage.get('user_email') or stage.get('approver_email') or '').strip().lower()
+                for stage in workflow if isinstance(stage, dict)
+            }
+            valid_user_ids = [value for value in user_ids if str(value or '').isdigit()]
+            valid_emails = [value for value in user_emails if value]
+            users = list(User.objects.filter(
+                Q(pk__in=valid_user_ids) | Q(email__in=valid_emails)
+            ))
+            users_by_id = {str(user.pk): user for user in users}
+            users_by_email = {str(user.email or '').strip().lower(): user for user in users}
+            names = employee_display_names(users)
+            normalized = []
+            for raw_stage in workflow:
+                if not isinstance(raw_stage, dict):
+                    normalized.append(raw_stage)
+                    continue
+                stage = dict(raw_stage)
+                user_id = str(stage.get('user_id') or stage.get('approver_id') or '')
+                user_email = str(
+                    stage.get('user_email') or stage.get('approver_email') or ''
+                ).strip().lower()
+                resolved_user = users_by_id.get(user_id) or users_by_email.get(user_email)
+                if resolved_user:
+                    stage['user_id'] = str(resolved_user.pk)
+                stage['user_name'] = (
+                    names.get(str(resolved_user.pk)) if resolved_user else None
+                ) or name_only(
+                    stage.get('user_name') or stage.get('approver')
+                ) or 'Assigned Employee'
+                normalized.append(stage)
+            normalized = normalize_ceo_workflow(normalized, instance.po_number_reference)
+            data['approval_workflow_config'] = normalized
+            data['approval_hierarchy'] = normalized
         return data
     
     @transaction.atomic
@@ -449,6 +566,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         # Extract files if present
         files = validated_data.pop('attachments_files', [])
         management_evidence = validated_data.pop('management_approval_evidence_file', None)
+        previous_workflow = [
+            dict(stage) for stage in (instance.approval_workflow_config or [])
+            if isinstance(stage, dict)
+        ]
+        workflow_changed = 'approval_workflow_config' in validated_data
         if 'management_approval_evidence' in validated_data:
             validated_data['management_approval_evidence'] = (
                 validated_data.get('management_approval_evidence') or []
@@ -463,6 +585,10 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         if management_evidence:
             instance.management_approval_evidence = self._upload_attachments(instance, [management_evidence])
             instance.save(update_fields=['management_approval_evidence'])
+        if workflow_changed:
+            transaction.on_commit(
+                lambda: notify_requisition_approver_changes(instance, previous_workflow)
+            )
         
         return instance
     
@@ -759,12 +885,21 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         if 'approval_log' in attrs:
             existing_log = self.instance.approval_log if self.instance is not None else []
             requisition = pr or (self.instance.pr_reference if self.instance is not None else None)
+            has_po_reference = requisition is not None
             attrs['approval_log'] = normalize_assignments(
                 attrs.get('approval_log'),
                 existing_log=existing_log,
                 require_core=False,
-                require_management=attrs.get('status', getattr(self.instance, 'status', 'draft')) != 'draft',
+                require_management=(
+                    attrs.get('status', getattr(self.instance, 'status', 'draft')) != 'draft'
+                    and not has_po_reference
+                ),
             )
+            if has_po_reference:
+                attrs['approval_log'] = [
+                    entry for entry in attrs['approval_log']
+                    if entry.get('stage') != 'Final Management Sign-off'
+                ]
             by_stage = {entry['stage']: entry for entry in attrs['approval_log']}
             attrs['technical_approver'] = ''
             attrs['financial_approver'] = ''

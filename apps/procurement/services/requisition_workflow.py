@@ -12,6 +12,63 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from ..models import PurchaseRequisition
 from .requisition_status import canonicalize_pr_status
 from .requisition_validation import line_items_total, normalize_line_items
+from .employee_display import employee_display_name, normalize_ceo_workflow
+
+
+def notify_requisition_approver_changes(pr, previous_workflow):
+    """Notify employees newly assigned while an existing PR is edited."""
+    if not getattr(pr, 'pk', None):
+        return
+
+    previous_user_ids = {
+        (str(stage.get('level', '')), str(stage.get('user_id') or stage.get('approver_id') or ''))
+        for stage in (previous_workflow or [])
+        if isinstance(stage, dict) and (stage.get('user_id') or stage.get('approver_id'))
+    }
+    previous_emails = {
+        (
+            str(stage.get('level', '')),
+            str(stage.get('user_email') or stage.get('approver_email') or '').strip().casefold(),
+        )
+        for stage in (previous_workflow or [])
+        if isinstance(stage, dict) and (stage.get('user_email') or stage.get('approver_email'))
+    }
+    notified_user_ids = set()
+    for stage in pr.approval_workflow_config or []:
+        if not isinstance(stage, dict):
+            continue
+        level = str(stage.get('level', ''))
+        user_id = str(stage.get('user_id') or stage.get('approver_id') or '')
+        email = str(
+            stage.get('user_email') or stage.get('approver_email') or ''
+        ).strip().casefold()
+        if (user_id and (level, user_id) in previous_user_ids) or (
+            email and (level, email) in previous_emails
+        ):
+            continue
+        recipient = RequisitionWorkflowService._resolve_stage_user(stage)
+        if recipient is None or recipient.pk in notified_user_ids:
+            continue
+        notified_user_ids.add(recipient.pk)
+        from apps.notifications.services import NotificationService
+
+        level = RequisitionWorkflowService._stage_level(stage, 0)
+        NotificationService.create_notification(
+            recipient=recipient,
+            sender=pr.issued_by,
+            title=f'PR {pr.pr_number} approval assignment updated',
+            message=f'You have been assigned as a Level {level} approver for Purchase Requisition {pr.pr_number}.',
+            category='APPROVAL',
+            priority='HIGH',
+            action_url='/approvals?tab=procurement',
+            action_label='Open Approval tab',
+            metadata={
+                'pr_id': str(pr.pk),
+                'pr_number': pr.pr_number,
+                'approval_level': level,
+                'assignment_updated': True,
+            },
+        )
 
 
 class RequisitionWorkflowService:
@@ -65,7 +122,10 @@ class RequisitionWorkflowService:
 
     @classmethod
     def _workflow(cls, pr):
-        workflow = pr.approval_workflow_config
+        workflow = normalize_ceo_workflow(
+            pr.approval_workflow_config,
+            pr.po_number_reference,
+        )
         if not isinstance(workflow, list) or not workflow:
             raise ValidationError({'error': 'A configured approval workflow is required.'})
         if any(not isinstance(stage, dict) for stage in workflow):
@@ -212,8 +272,8 @@ class RequisitionWorkflowService:
                     message=f'You have been assigned as a Level {level} approver for Purchase Requisition {pr_number}.',
                     category='APPROVAL',
                     priority='HIGH',
-                    action_url=f'/procurement/requisitions/{pr_id}',
-                    action_label='Review requisition',
+                    action_url='/approvals?tab=procurement',
+                    action_label='Open Approval tab',
                     metadata={'pr_id': str(pr_id), 'pr_number': pr_number, 'approval_level': level},
                 )
 
@@ -285,17 +345,20 @@ class RequisitionWorkflowService:
 
         workflow = cls._workflow(pr)
 
-        if getattr(pr, 'po_applicable', True) is False:
+        if (
+            getattr(pr, 'po_applicable', True) is False
+            and not str(getattr(pr, 'po_number_reference', '') or '').strip()
+        ):
             has_level_zero = any(cls._stage_level(stage, index) == 0 for index, stage in enumerate(workflow))
             has_jarmo_level_five = any(
                 cls._stage_level(stage, index) == 5
-                and 'general manager' in f"{stage.get('role', '')} {stage.get('stage', '')}".lower()
+                and any(label in f"{stage.get('role', '')} {stage.get('stage', '')}".lower() for label in ('general manager', 'ceo'))
                 and str(stage.get('user_name') or '').strip().lower() == 'jarmo suominen'
                 for index, stage in enumerate(workflow)
             )
             if not has_level_zero or not has_jarmo_level_five:
                 raise ValidationError({
-                    'error': 'When PO Applicable is No, the workflow requires Level 0 Procurement and Level 5 Jarmo Suominen (General Manager).'
+                    'error': 'When no PO Reference is provided, the workflow requires Level 0 Procurement and Level 5 Jarmo Suominen (CEO).'
                 })
 
         # Pass 1: Validate all stages before mutating memory
@@ -346,7 +409,7 @@ class RequisitionWorkflowService:
         current_index, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
 
         approved_at = timezone.now()
-        actor_name = actor.get_full_name() or getattr(actor, 'username', '') or getattr(actor, 'email', '')
+        actor_name = employee_display_name(actor)
         stage['status'] = 'approved'
         stage['approved_at'] = approved_at.isoformat()
         stage['approved_by_id'] = str(actor.id)
@@ -403,7 +466,7 @@ class RequisitionWorkflowService:
         _, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
 
         rejected_at = timezone.now()
-        actor_name = actor.get_full_name() or getattr(actor, 'username', '') or getattr(actor, 'email', '')
+        actor_name = employee_display_name(actor)
         stage['status'] = 'rejected'
         stage['rejected_at'] = rejected_at.isoformat()
         stage['rejected_by_id'] = str(actor.id)

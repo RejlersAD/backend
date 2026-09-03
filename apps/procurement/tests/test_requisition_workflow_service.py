@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.test import SimpleTestCase
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -63,6 +64,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
             status=status,
             issued_by_id=self.issuer.id,
             approval_workflow_config=self._workflow(),
+            po_number_reference='',
             current_approval_step=0,
             items=[],
             total_price=None,
@@ -113,6 +115,30 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
         self.assertEqual(level, 0)
         self.assertEqual(stages[0][1]['role'], 'Procurement Department')
 
+    @patch.object(RequisitionWorkflowService, '_notify_level')
+    def test_submission_notifies_level_zero_first(self, notify_level):
+        pr = self._pr()
+        pr.approval_workflow_config = [
+            {'level': 0, 'role': 'Procurement Department', 'user_id': self.pm.id},
+            {'level': 1, 'role': 'Level 1 Approver', 'user_id': self.engineering_manager.id},
+        ]
+
+        RequisitionWorkflowService._submit_locked(pr, self.issuer)
+
+        notify_level.assert_called_once_with(pr, pr.approval_workflow_config, 0)
+
+    @patch.object(RequisitionWorkflowService, '_notify_level')
+    def test_approval_notifies_every_new_active_level(self, notify_level):
+        pr = self._pr(status='submitted')
+        pr.approval_workflow_config = [
+            {'level': 0, 'role': 'Procurement Department', 'user_id': self.pm.id, 'status': 'pending'},
+            {'level': 1, 'role': 'Level 1 Approver', 'user_id': self.engineering_manager.id, 'status': 'pending'},
+        ]
+
+        RequisitionWorkflowService._approve_locked(pr, self.pm)
+
+        notify_level.assert_called_once_with(pr, pr.approval_workflow_config, 1)
+
     def test_migrated_assignment_uses_email_when_user_id_changed(self):
         stage = {
             'user_id': 'preproduction-user-id',
@@ -135,7 +161,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
             {'level': 0, 'role': 'Procurement Department', 'user_id': 'procurement'},
             {
                 'level': 5,
-                'role': 'General Manager',
+                'role': 'CEO',
                 'user_id': 'jarmo',
                 'user_name': 'Jarmo Suominen',
             },
@@ -143,6 +169,26 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
         result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
 
         self.assertEqual(result.status, 'submitted')
+
+    def test_po_reference_skips_jarmo_level_five_requirement(self):
+        pr = self._pr()
+        pr.po_applicable = False
+        pr.po_number_reference = 'RAD-PRJ-PUR-0461_SEP2026'
+        pr.approval_workflow_config = [
+            {'level': 0, 'role': 'Procurement Department', 'user_id': 'procurement'},
+            {
+                'level': 5,
+                'role': 'General Manager',
+                'user_id': 'jarmo',
+                'user_name': 'Jarmo Suominen',
+            },
+        ]
+
+        result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
+
+        self.assertEqual(result.status, 'submitted')
+        self.assertEqual(len(result.approval_workflow_config), 1)
+        self.assertEqual(result.approval_workflow_config[0]['role'], 'Procurement Department')
 
     def test_only_issuer_can_submit(self):
         pr = self._pr()
