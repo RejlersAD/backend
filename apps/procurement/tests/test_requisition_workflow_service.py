@@ -175,6 +175,8 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
         )
         for call in create_notification.call_args_list:
             self.assertEqual(call.kwargs['action_url'], '/approvals?tab=procurement')
+            self.assertEqual(call.kwargs['action_label'], 'Open Request')
+            self.assertTrue(call.kwargs['send_teams'])
 
     def test_migrated_assignment_uses_email_when_user_id_changed(self):
         stage = {

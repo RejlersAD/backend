@@ -165,7 +165,13 @@ def notify_assigned_approvers(order):
             category='APPROVAL',
             priority='HIGH',
             action_url='/approvals?tab=purchase_order',
-            action_label='Open Approval tab',
+            action_label='Open Request',
+            send_teams=True,
+            teams_context={
+                'request_name': f'Purchase Order {order.po_number}',
+                'submitted_by': employee_display_name(order.created_by) if getattr(order, 'created_by', None) else 'Not specified',
+                'due_date': getattr(order, 'expected_delivery', None) or getattr(order, 'end_date', None),
+            },
             metadata=metadata,
         )
     if repaired:
