@@ -623,6 +623,15 @@ FRONTEND_URL = sanitize_cors_origin(
     config('FRONTEND_URL', default='http://localhost:5173')
 ) or 'http://localhost:5173'  # For email links
 
+# Power Automate HTTP trigger used to deliver approval assignments privately in
+# Microsoft Teams. Leave blank to keep Teams delivery disabled.
+TEAMS_APPROVAL_WEBHOOK_URL = config('TEAMS_APPROVAL_WEBHOOK_URL', default='').strip()
+TEAMS_APPROVAL_WEBHOOK_TIMEOUT = config(
+    'TEAMS_APPROVAL_WEBHOOK_TIMEOUT',
+    default=10,
+    cast=int,
+)
+
 # ==============================================================================
 # RAILWAY PRODUCTION SAFETY CHECK
 # ==============================================================================

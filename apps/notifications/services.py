@@ -210,6 +210,13 @@ class NotificationService:
             # Send email asynchronously if enabled
             if notification.send_email:
                 send_notification_email.delay(notification.id)
+
+            if notification_data.get('send_teams', False):
+                from .teams import queue_approval_assignment
+                queue_approval_assignment(
+                    notification,
+                    notification_data.get('teams_context') or {},
+                )
             
             return notification
             

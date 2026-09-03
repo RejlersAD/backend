@@ -61,7 +61,13 @@ def notify_requisition_approver_changes(pr, previous_workflow):
             category='APPROVAL',
             priority='HIGH',
             action_url='/approvals?tab=procurement',
-            action_label='Open Approval tab',
+            action_label='Open Request',
+            send_teams=True,
+            teams_context={
+                'request_name': f'Purchase Requisition {pr.pr_number}',
+                'submitted_by': employee_display_name(pr.issued_by) if getattr(pr, 'issued_by', None) else 'Not specified',
+                'due_date': getattr(pr, 'review_due_at', None) or getattr(pr, 'required_date', None),
+            },
             metadata={
                 'pr_id': str(pr.pk),
                 'pr_number': pr.pr_number,
@@ -252,6 +258,8 @@ class RequisitionWorkflowService:
         recipient_ids = set(recipients)
         pr_id = pr.pk
         pr_number = pr.pr_number
+        submitted_by = employee_display_name(pr.issued_by) if getattr(pr, 'issued_by', None) else 'Not specified'
+        due_date = getattr(pr, 'review_due_at', None) or getattr(pr, 'required_date', None)
 
         def send_notifications():
             from apps.notifications.models import Notification
@@ -273,7 +281,13 @@ class RequisitionWorkflowService:
                     category='APPROVAL',
                     priority='HIGH',
                     action_url='/approvals?tab=procurement',
-                    action_label='Open Approval tab',
+                    action_label='Open Request',
+                    send_teams=True,
+                    teams_context={
+                        'request_name': f'Purchase Requisition {pr_number}',
+                        'submitted_by': submitted_by,
+                        'due_date': due_date,
+                    },
                     metadata={'pr_id': str(pr_id), 'pr_number': pr_number, 'approval_level': level},
                 )
 
