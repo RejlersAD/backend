@@ -38,6 +38,15 @@ class TeamsApprovalNotificationTests(SimpleTestCase):
         self.assertEqual(payload['due_date'], '05-Sep-2026')
         self.assertEqual(payload['action_url'], 'https://radai.ae/approvals?tab=procurement')
         self.assertIn('New approval request assigned', payload['message'])
+        self.assertEqual(payload['type'], 'message')
+        self.assertEqual(
+            payload['attachments'][0]['contentType'],
+            'application/vnd.microsoft.card.adaptive',
+        )
+        self.assertEqual(
+            payload['attachments'][0]['content']['actions'][0]['url'],
+            payload['action_url'],
+        )
 
     @override_settings(TEAMS_APPROVAL_WEBHOOK_URL='https://flow.example.test/trigger')
     @patch('apps.notifications.teams.send_teams_approval_assignment.delay')

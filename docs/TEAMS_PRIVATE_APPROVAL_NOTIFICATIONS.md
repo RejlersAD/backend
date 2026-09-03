@@ -1,7 +1,8 @@
 # Private Teams approval notifications
 
-RADAI sends approval assignments to a Power Automate HTTP-triggered flow. The
-flow must use the Microsoft Teams **Post a message in a chat or channel** action
+RADAI sends approval assignments to the standard Microsoft Teams **When a Teams
+webhook request is received** trigger. Configure it for `Anyone`; the callback
+URL is a secret. The flow must use the Microsoft Teams **Post a message in a chat or channel** action
 with these values:
 
 - Post as: `Flow bot`
@@ -22,6 +23,7 @@ Example request body sent by RADAI:
 
 ```json
 {
+  "type": "message",
   "event_type": "approval_assignment",
   "recipient_email": "approver@rejlers.ae",
   "recipient_name": "Approver Name",
@@ -32,7 +34,19 @@ Example request body sent by RADAI:
   "action_label": "Open Request",
   "action_url": "https://radai.ae/approvals?tab=procurement",
   "message": "New approval request assigned\nRequest: Purchase Requisition RAD-PRJ-PR-0001_2026\nSubmitted By: Requester Name\nDue Date: 05-Sep-2026\nOpen Request: https://radai.ae/approvals?tab=procurement",
-  "notification_id": "..."
+  "notification_id": "...",
+  "attachments": [
+    {
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "contentUrl": null,
+      "content": {
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "body": [],
+        "actions": []
+      }
+    }
+  ]
 }
 ```
 
