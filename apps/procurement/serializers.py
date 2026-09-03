@@ -138,19 +138,19 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     vp_op_approval_status_display = serializers.CharField(source='get_vp_op_approval_status_display', read_only=True)
     
     # User relationship fields
-    issued_by_name = serializers.CharField(source='issued_by.get_full_name', read_only=True, allow_null=True)
-    pm_name_display = serializers.CharField(source='pm_name.get_full_name', read_only=True, allow_null=True)
-    eng_manager_name_display = serializers.CharField(source='eng_manager_name.get_full_name', read_only=True, allow_null=True)
-    manager_projects_name_display = serializers.CharField(source='manager_projects_name.get_full_name', read_only=True, allow_null=True)
-    vp_op_name_display = serializers.CharField(source='vp_op_name.get_full_name', read_only=True, allow_null=True)
+    issued_by_name = serializers.SerializerMethodField()
+    pm_name_display = serializers.SerializerMethodField()
+    eng_manager_name_display = serializers.SerializerMethodField()
+    manager_projects_name_display = serializers.SerializerMethodField()
+    vp_op_name_display = serializers.SerializerMethodField()
     
     # Vendor relationship fields
     vendor_details = VendorSerializer(source='vendor', read_only=True)
     vendor_name = serializers.CharField(source='vendor.name', read_only=True, allow_null=True)
     
     # Legacy fields
-    requested_by_name = serializers.CharField(source='requested_by.get_full_name', read_only=True, allow_null=True)
-    approved_by_name = serializers.CharField(source='approved_by.get_full_name', read_only=True, allow_null=True)
+    requested_by_name = serializers.SerializerMethodField()
+    approved_by_name = serializers.SerializerMethodField()
     category_display = serializers.SerializerMethodField()
     enterprise_project_code = serializers.CharField(
         source='enterprise_project.code', read_only=True, allow_null=True,
@@ -441,6 +441,28 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)
+
+    def get_issued_by_name(self, obj):
+        return employee_display_name(obj.issued_by) if obj.issued_by_id else ''
+
+    def get_requested_by_name(self, obj):
+        requester = obj.requested_by or obj.issued_by
+        return employee_display_name(requester) if requester else ''
+
+    def get_approved_by_name(self, obj):
+        return employee_display_name(obj.approved_by) if obj.approved_by_id else ''
+
+    def get_pm_name_display(self, obj):
+        return employee_display_name(obj.pm_name) if obj.pm_name_id else ''
+
+    def get_eng_manager_name_display(self, obj):
+        return employee_display_name(obj.eng_manager_name) if obj.eng_manager_name_id else ''
+
+    def get_manager_projects_name_display(self, obj):
+        return employee_display_name(obj.manager_projects_name) if obj.manager_projects_name_id else ''
+
+    def get_vp_op_name_display(self, obj):
+        return employee_display_name(obj.vp_op_name) if obj.vp_op_name_id else ''
 
     def get_status_display(self, obj):
         return canonicalize_pr_status(obj.status).replace('_', ' ').title()

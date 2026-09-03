@@ -193,6 +193,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     
     queryset = PurchaseRequisition.objects.select_related(
         'issued_by',
+        'issued_by__employee_master',
         'vendor',
         'enterprise_project',
         'requested_by',
@@ -201,7 +202,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         'eng_manager_name',
         'manager_projects_name',
         'vp_op_name',
-    ).all().order_by('-created_at')
+    ).prefetch_related('issued_by__onboarding_records').all().order_by('-created_at')
     serializer_class = PurchaseRequisitionSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_requisitions'
@@ -750,6 +751,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def get_approvers(self, request):
         from apps.rbac.models import UserProfile
+        from apps.hr_core.models import EmployeeMaster
         from django.contrib.auth import get_user_model
         from .services.employee_display import employee_display_names
         User = get_user_model()
@@ -844,6 +846,19 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 )
             ).distinct()
 
+        employee_records = {
+            record.user_id: record
+            for record in EmployeeMaster.objects.filter(
+                user_id__in=profiles.values_list('user_id', flat=True),
+            )
+        }
+        eligible_employment_statuses = {'active', 'probation', 'notice_period'}
+        profiles = [
+            profile for profile in profiles
+            if profile.user_id not in employee_records
+            or employee_records[profile.user_id].employment_status in eligible_employment_statuses
+        ]
+
         profiles = sorted(
             profiles,
             key=lambda p: (
@@ -856,6 +871,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         display_names = employee_display_names(profile.user for profile in profiles)
         users_list = []
         for profile in profiles:
+            employee = employee_records.get(profile.user_id)
             users_list.append({
                 'id': str(profile.user.id),
                 'username': profile.user.get_username(),
@@ -863,9 +879,16 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
                 'full_name': display_names[str(profile.user_id)],
                 'first_name': profile.user.first_name,
                 'last_name': profile.user.last_name,
-                'job_title': profile.job_title,
-                'department': profile.department,
-                'employee_id': profile.employee_id,
+                'job_title': (
+                    employee.designation
+                    or employee.job_title_uae
+                    or employee.job_title_finland
+                    or profile.job_title
+                ) if employee else profile.job_title,
+                'department': employee.department or profile.department if employee else profile.department,
+                'employee_id': employee.employee_number if employee else profile.employee_id,
+                'employee_record_id': str(employee.pk) if employee else None,
+                'employee_source': 'radai_employee_master' if employee else 'legacy_employee_profile',
                 'job_title_match': profile.user_id in matched_user_ids,
                 'is_current_user': profile.user_id == request.user.id,
             })

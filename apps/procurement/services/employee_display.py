@@ -69,6 +69,21 @@ def employee_display_names(users):
 def employee_display_name(user):
     if user is None:
         return 'Assigned Employee'
+    try:
+        employee = user.employee_master
+    except Exception:
+        employee = None
+    if employee:
+        canonical_name = _clean(employee.get_display_name())
+        if canonical_name:
+            return canonical_name
+
+    prefetched = getattr(user, '_prefetched_objects_cache', {}).get('onboarding_records')
+    if prefetched is not None:
+        records = sorted(prefetched, key=lambda record: record.updated_at, reverse=True)
+        onboarding_name = next((_clean(record.employee_name) for record in records if _clean(record.employee_name)), '')
+        if onboarding_name:
+            return onboarding_name
     return employee_display_names([user]).get(str(getattr(user, 'pk', '')), 'Assigned Employee')
 
 
