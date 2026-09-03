@@ -73,6 +73,7 @@ from .models import (
 )
 from .serializers import (
     VendorSerializer,
+    VendorICVSerializer,
     PurchaseRequisitionSerializer,
     PurchaseOrderSerializer,
     ReceiptSerializer,
@@ -287,11 +288,8 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         if deletable:
             return
 
-        allowed_statuses = {'draft'}
-        if canonicalize_pr_status(pr.status) not in allowed_statuses:
-            raise ValidationError({
-                'error': f'Only {", ".join(sorted(allowed_statuses))} requisitions can be edited.'
-            })
+        # Procurement may correct a requisition at any lifecycle status. The
+        # serializer still protects workflow decisions and other audit fields.
 
     def update(self, request, *args, **kwargs):
         self._enforce_owner_mutation(self.get_object())
@@ -727,6 +725,23 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'suggestions': suggestions,
             'count': len(suggestions)
         })
+
+    @action(detail=False, methods=['patch'], url_path='vendor-icv')
+    def vendor_icv(self, request):
+        """Record missing ICV data without granting full vendor-master access."""
+        vendor_id = request.data.get('vendor_id')
+        if not vendor_id:
+            return Response({'vendor_id': 'Select a vendor.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            vendor = Vendor.objects.get(pk=vendor_id, status='active')
+        except (Vendor.DoesNotExist, ValueError, TypeError):
+            return Response({'vendor_id': 'The selected active vendor was not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = VendorICVSerializer(vendor, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(VendorSerializer(vendor, context=self.get_serializer_context()).data)
     
     @action(detail=False, methods=['get'])
     def get_approvers(self, request):

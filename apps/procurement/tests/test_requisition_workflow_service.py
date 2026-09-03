@@ -63,6 +63,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
             status=status,
             issued_by_id=self.issuer.id,
             approval_workflow_config=self._workflow(),
+            po_number_reference='',
             current_approval_step=0,
             items=[],
             total_price=None,
@@ -140,6 +141,18 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
                 'user_name': 'Jarmo Suominen',
             },
         ]
+        result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
+
+        self.assertEqual(result.status, 'submitted')
+
+    def test_po_reference_skips_jarmo_level_five_requirement(self):
+        pr = self._pr()
+        pr.po_applicable = False
+        pr.po_number_reference = 'RAD-PRJ-PUR-0461_SEP2026'
+        pr.approval_workflow_config = [
+            {'level': 0, 'role': 'Procurement Department', 'user_id': 'procurement'},
+        ]
+
         result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
 
         self.assertEqual(result.status, 'submitted')

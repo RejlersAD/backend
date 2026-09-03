@@ -11,6 +11,7 @@ from apps.procurement.services.purchase_order_approvals import (
     normalize_assignments,
     record_decision,
 )
+from apps.procurement.serializers import PurchaseOrderSerializer, VendorICVSerializer
 
 
 class EmptyRelations:
@@ -75,6 +76,35 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
         }
 
         self.assertTrue(_entry_matches_user(entry, actor))
+
+    @patch('apps.procurement.services.purchase_order_approvals._active_profiles')
+    def test_linked_po_removes_jarmo_management_approval(self, active_profiles):
+        jarmo = self._profile('jarmo-id', 'Jarmo Suominen', 'jarmo@example.com', 'Management')
+        active_profiles.return_value = {'jarmo-id': jarmo}
+        serializer = PurchaseOrderSerializer(instance=SimpleNamespace(
+            status='sent',
+            approval_log=[],
+            pr_reference=SimpleNamespace(id='pr-id'),
+        ))
+
+        attrs = serializer.validate({'approval_log': [{
+            'stage': 'Final Management Sign-off',
+            'user_id': 'jarmo-id',
+        }]})
+
+        self.assertEqual(attrs['approval_log'], [])
+        self.assertEqual(attrs['management_approver'], '')
+
+    def test_manual_vendor_icv_requires_valid_percentage_and_sets_certified(self):
+        serializer = VendorICVSerializer(data={'icv_percentage': '64.25'})
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(str(serializer.validated_data['icv_percentage']), '64.25')
+        self.assertTrue(serializer.validated_data['is_icv_certified'])
+
+        invalid = VendorICVSerializer(data={'icv_percentage': '101'})
+        self.assertFalse(invalid.is_valid())
+        self.assertIn('icv_percentage', invalid.errors)
 
     @patch('apps.procurement.models.PurchaseOrder.objects.select_for_update')
     def test_approval_records_full_timestamp(self, select_for_update):

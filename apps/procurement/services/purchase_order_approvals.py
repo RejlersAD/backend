@@ -122,7 +122,7 @@ def normalize_assignments(approval_log, existing_log=None, require_core=True, re
         normalized.append({
             'stage': stage,
             'user_id': user_id,
-            'approver': user.get_full_name() or user.email,
+            'approver': user.get_full_name() or user.get_username(),
             'approver_email': user.email,
             'status': previous.get('status', 'Pending') if same_assignee else 'Pending',
             'date': previous.get('date', '') if same_assignee else '',
@@ -216,7 +216,7 @@ def record_decision(order, actor, decision, stage='', comment=''):
     assigned_entries = [item for item in workflow if item.get('user_id')]
     if assigned_entries and all(str(item.get('status')).lower() == 'approved' for item in assigned_entries):
         locked.approved_by = actor
-        locked.approved_by_name = actor.get_full_name() or actor.email
+        locked.approved_by_name = actor.get_full_name() or actor.get_username()
         locked.approved_date = timezone.localtime(decision_at).date()
         locked.approved_at = decision_at
         update_fields.extend(['approved_by', 'approved_by_name', 'approved_date', 'approved_at'])

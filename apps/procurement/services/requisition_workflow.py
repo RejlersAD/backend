@@ -212,8 +212,8 @@ class RequisitionWorkflowService:
                     message=f'You have been assigned as a Level {level} approver for Purchase Requisition {pr_number}.',
                     category='APPROVAL',
                     priority='HIGH',
-                    action_url=f'/procurement/requisitions/{pr_id}',
-                    action_label='Review requisition',
+                    action_url='/approvals?tab=procurement',
+                    action_label='Open Approval tab',
                     metadata={'pr_id': str(pr_id), 'pr_number': pr_number, 'approval_level': level},
                 )
 
@@ -285,7 +285,10 @@ class RequisitionWorkflowService:
 
         workflow = cls._workflow(pr)
 
-        if getattr(pr, 'po_applicable', True) is False:
+        if (
+            getattr(pr, 'po_applicable', True) is False
+            and not str(getattr(pr, 'po_number_reference', '') or '').strip()
+        ):
             has_level_zero = any(cls._stage_level(stage, index) == 0 for index, stage in enumerate(workflow))
             has_jarmo_level_five = any(
                 cls._stage_level(stage, index) == 5
@@ -295,7 +298,7 @@ class RequisitionWorkflowService:
             )
             if not has_level_zero or not has_jarmo_level_five:
                 raise ValidationError({
-                    'error': 'When PO Applicable is No, the workflow requires Level 0 Procurement and Level 5 Jarmo Suominen (General Manager).'
+                    'error': 'When no PO Reference is provided, the workflow requires Level 0 Procurement and Level 5 Jarmo Suominen (General Manager).'
                 })
 
         # Pass 1: Validate all stages before mutating memory
@@ -346,7 +349,7 @@ class RequisitionWorkflowService:
         current_index, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
 
         approved_at = timezone.now()
-        actor_name = actor.get_full_name() or getattr(actor, 'username', '') or getattr(actor, 'email', '')
+        actor_name = actor.get_full_name() or getattr(actor, 'username', '') or 'Assigned employee'
         stage['status'] = 'approved'
         stage['approved_at'] = approved_at.isoformat()
         stage['approved_by_id'] = str(actor.id)
@@ -403,7 +406,7 @@ class RequisitionWorkflowService:
         _, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
 
         rejected_at = timezone.now()
-        actor_name = actor.get_full_name() or getattr(actor, 'username', '') or getattr(actor, 'email', '')
+        actor_name = actor.get_full_name() or getattr(actor, 'username', '') or 'Assigned employee'
         stage['status'] = 'rejected'
         stage['rejected_at'] = rejected_at.isoformat()
         stage['rejected_by_id'] = str(actor.id)

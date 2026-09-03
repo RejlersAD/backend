@@ -98,6 +98,25 @@ class VendorSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+class VendorICVSerializer(serializers.ModelSerializer):
+    """Restricted serializer used when procurement records a missing ICV value."""
+
+    icv_percentage = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        min_value=0,
+        max_value=100,
+    )
+
+    class Meta:
+        model = Vendor
+        fields = ['icv_percentage', 'icv_expiry_date', 'is_icv_certified']
+
+    def validate(self, attrs):
+        attrs['is_icv_certified'] = True
+        return attrs
+
+
 class PurchaseRequisitionSerializer(serializers.ModelSerializer):
     """
     Serializer for Purchase Requisition
@@ -235,6 +254,17 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
         except (AttributeError, ObjectDoesNotExist):
             return False
 
+    def to_internal_value(self, data):
+        if (
+            self.instance
+            and canonicalize_pr_status(self.instance.status) != 'draft'
+            and hasattr(data, 'get')
+            and data.get('approval_workflow_config') is not None
+        ):
+            data = data.copy()
+            data.pop('approval_workflow_config', None)
+        return super().to_internal_value(data)
+
     def validate_approval_workflow_config(self, value):
         """Validate approver assignments and discard client-supplied approval state."""
         if not isinstance(value, list):
@@ -285,7 +315,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 'level': level,
                 'role': role,
                 'user_id': str(approver.pk),
-                'user_name': approver.get_full_name() or approver.email,
+                'user_name': approver.get_full_name() or approver.get_username(),
                 'username': (
                     approver.get_username()
                     if callable(getattr(approver, 'get_username', None))
@@ -349,11 +379,6 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             })
 
         if self.instance and 'approval_workflow_config' in attrs:
-            if self.instance.status != 'draft':
-                raise serializers.ValidationError({
-                    'approval_workflow_config': 'Approval assignments can only be changed while the requisition is a draft.'
-                })
-
             request = self.context.get('request')
             user = getattr(request, 'user', None)
             if (
@@ -759,12 +784,21 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         if 'approval_log' in attrs:
             existing_log = self.instance.approval_log if self.instance is not None else []
             requisition = pr or (self.instance.pr_reference if self.instance is not None else None)
+            has_po_reference = requisition is not None
             attrs['approval_log'] = normalize_assignments(
                 attrs.get('approval_log'),
                 existing_log=existing_log,
                 require_core=False,
-                require_management=attrs.get('status', getattr(self.instance, 'status', 'draft')) != 'draft',
+                require_management=(
+                    attrs.get('status', getattr(self.instance, 'status', 'draft')) != 'draft'
+                    and not has_po_reference
+                ),
             )
+            if has_po_reference:
+                attrs['approval_log'] = [
+                    entry for entry in attrs['approval_log']
+                    if entry.get('stage') != 'Final Management Sign-off'
+                ]
             by_stage = {entry['stage']: entry for entry in attrs['approval_log']}
             attrs['technical_approver'] = ''
             attrs['financial_approver'] = ''
