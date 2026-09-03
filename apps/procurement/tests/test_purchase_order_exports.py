@@ -64,9 +64,13 @@ class PurchaseOrderExportTests(TestCase):
         ):
             content, warnings = build_purchase_order_pdf(self._order(attachments))
 
+        exported = PdfReader(BytesIO(content))
         self.assertEqual(warnings, [])
         # Two PO pages + three attachment covers + three one-page source PDFs.
-        self.assertEqual(len(PdfReader(BytesIO(content)).pages), 8)
+        self.assertEqual(len(exported.pages), 8)
+        first_cover_text = exported.pages[2].extract_text()
+        self.assertIn('Description 1', first_cover_text)
+        self.assertNotIn('attachment-1.pdf', first_cover_text)
 
     def test_word_stops_at_price_summary_and_excludes_attachments(self):
         content = build_purchase_order_docx(self._order([{

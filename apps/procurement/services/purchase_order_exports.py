@@ -238,8 +238,6 @@ def _cover_pdf(order, attachment, index):
         Paragraph(f'ATTACHMENT - {index + 1}', styles['cover']),
         Spacer(1, 12 * mm),
         Paragraph(escape(_value(attachment['description'])), styles['cover_body']),
-        Spacer(1, 8 * mm),
-        Paragraph(escape(_value(attachment['filename'])), styles['small']),
     ], onFirstPage=lambda canvas, doc: _pdf_page(canvas, doc, order))
     return output.getvalue()
 
