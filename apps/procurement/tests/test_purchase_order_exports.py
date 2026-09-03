@@ -9,6 +9,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
 from apps.procurement.services.purchase_order_exports import (
+    _html_blocks,
     build_purchase_order_docx,
     build_purchase_order_pdf,
 )
@@ -27,7 +28,7 @@ class PurchaseOrderExportTests(TestCase):
             vat_percentage=5,
             currency='USD',
             title='Test Purchase Order',
-            description='<p>Test scope</p>',
+            description='<p>First scope&nbsp;paragraph</p><p>Second scope paragraph</p><ul><li>Required document</li></ul>',
             seller_reference='',
             quote_ref='',
             project_number='590001',
@@ -66,9 +67,15 @@ class PurchaseOrderExportTests(TestCase):
 
         exported = PdfReader(BytesIO(content))
         self.assertEqual(warnings, [])
-        # Two PO pages + three attachment covers + three one-page source PDFs.
-        self.assertEqual(len(exported.pages), 8)
-        first_cover_text = exported.pages[2].extract_text()
+        # Cover/details, narrative, and price summary, then one cover and one
+        # source page for each of the three attachments.
+        self.assertEqual(len(exported.pages), 9)
+        narrative_text = exported.pages[1].extract_text()
+        self.assertIn('First scope paragraph', narrative_text)
+        self.assertIn('Second scope paragraph', narrative_text)
+        self.assertNotIn('&nbsp;', narrative_text)
+        self.assertIn('SUMMARY OF PRICES', exported.pages[2].extract_text())
+        first_cover_text = exported.pages[3].extract_text()
         self.assertIn('Description 1', first_cover_text)
         self.assertNotIn('attachment-1.pdf', first_cover_text)
 
@@ -82,4 +89,13 @@ class PurchaseOrderExportTests(TestCase):
         rendered_text = '\n'.join(paragraph.text for paragraph in document.paragraphs)
 
         self.assertIn('Summary of Prices', rendered_text)
+        self.assertIn('First scope paragraph', rendered_text)
+        self.assertIn('Second scope paragraph', rendered_text)
+        self.assertNotIn('&nbsp;', rendered_text)
         self.assertNotIn('Should not be exported to Word', rendered_text)
+
+    def test_rich_text_normalization_decodes_entities_and_keeps_blocks(self):
+        self.assertEqual(
+            _html_blocks('&lt;p&gt;Alpha&amp;nbsp;Beta&lt;/p&gt;<div>Gamma<br>Delta</div>'),
+            ['Alpha Beta', 'Gamma', 'Delta'],
+        )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 from io import BytesIO
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -38,8 +40,57 @@ def _value(value, fallback='—'):
     return rendered or fallback
 
 
-def _plain_html(value):
-    return ' '.join(strip_tags(str(value or '')).split())
+def _decode_html(value):
+    """Decode editor content, including values that were escaped more than once."""
+    decoded = str(value or '')
+    for _ in range(3):
+        next_value = html.unescape(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return decoded.replace('\xa0', ' ')
+
+
+def _html_blocks(value):
+    """Return readable text blocks from the browser rich-text editor markup."""
+    source = _decode_html(value)
+    if not source.strip():
+        return []
+
+    # Preserve editor paragraphs, lists, line breaks, and table rows before
+    # removing unsupported markup. Django strip_tags does not decode entities.
+    source = re.sub(r'(?is)<br\s*/?>', '\n', source)
+    source = re.sub(r'(?is)<li\b[^>]*>', '\n• ', source)
+    source = re.sub(r'(?is)</(?:p|div|h[1-6]|li|blockquote|pre|tr)>', '\n', source)
+    source = re.sub(r'(?is)</(?:td|th)>', '\t', source)
+    plain = _decode_html(strip_tags(source)).replace('\r\n', '\n').replace('\r', '\n')
+
+    blocks = []
+    for raw_line in plain.split('\n'):
+        line = re.sub(r'[\t \f\v]+', ' ', raw_line).strip()
+        if line:
+            blocks.append(line)
+    return blocks
+
+
+def _pdf_rich_text(value, styles):
+    flowables = []
+    for block in _html_blocks(value):
+        is_bullet = block.startswith('• ')
+        content = block[2:].strip() if is_bullet else block
+        style = styles['bullet'] if is_bullet else styles['body']
+        flowables.extend((
+            Paragraph(escape(content), style, bulletText='•' if is_bullet else None),
+            Spacer(1, 1.5 * mm),
+        ))
+    return flowables
+
+
+def _docx_rich_text(document, value):
+    for block in _html_blocks(value):
+        is_bullet = block.startswith('• ')
+        content = block[2:].strip() if is_bullet else block
+        document.add_paragraph(content, style='List Bullet' if is_bullet else None)
 
 
 def _money(value, currency):
@@ -106,6 +157,7 @@ def _pdf_styles():
         'title': ParagraphStyle('POTitle', parent=styles['Title'], fontSize=17, leading=21, textColor=colors.HexColor('#16689b')),
         'heading': ParagraphStyle('POHeading', parent=styles['Heading2'], fontSize=10, leading=13, spaceBefore=8, spaceAfter=5, textColor=colors.HexColor('#1f2937')),
         'body': ParagraphStyle('POBody', parent=styles['BodyText'], fontSize=8.5, leading=11),
+        'bullet': ParagraphStyle('POBullet', parent=styles['BodyText'], fontSize=8.5, leading=11, leftIndent=5 * mm, firstLineIndent=-3 * mm),
         'small': ParagraphStyle('POSmall', parent=styles['BodyText'], fontSize=7, leading=9),
         'right': ParagraphStyle('PORight', parent=styles['BodyText'], fontSize=8.5, leading=11, alignment=TA_RIGHT),
         'cover': ParagraphStyle('POCover', parent=styles['Title'], fontSize=22, leading=28, alignment=TA_CENTER, textColor=colors.HexColor('#16689b')),
@@ -177,10 +229,12 @@ def _main_pdf(order):
         Paragraph(f'<b>Date:</b> {escape(_value(order.approved_date, ""))}', styles['body']),
         PageBreak(),
         Paragraph('PO DESCRIPTION &amp; SCOPE', styles['heading']),
-        Paragraph(escape(_plain_html(order.description) or _value(order.title)), styles['body']),
-        Spacer(1, 5 * mm),
-        Paragraph('SUMMARY OF PRICES', styles['heading']),
     ]
+    narrative = _pdf_rich_text(order.description, styles)
+    story.extend(narrative or [Paragraph(escape(_value(order.title)), styles['body'])])
+    # Match the live A4 document: the price summary starts on a clean page.
+    # This also prevents an orphaned heading or split table after long scope text.
+    story.extend((PageBreak(), Paragraph('SUMMARY OF PRICES', styles['heading'])))
     price_rows = [[
         Paragraph('<b>Line</b>', styles['small']),
         Paragraph('<b>Description</b>', styles['small']),
@@ -410,7 +464,11 @@ def build_purchase_order_docx(order):
     document.add_paragraph(JARMO_COMPANY)
     document.add_page_break()
     document.add_heading('PO Description & Scope', level=1)
-    document.add_paragraph(_plain_html(order.description) or _value(order.title))
+    if _html_blocks(order.description):
+        _docx_rich_text(document, order.description)
+    else:
+        document.add_paragraph(_value(order.title))
+    document.add_page_break()
     document.add_heading('Summary of Prices', level=1)
     items = _items(order)
     table = document.add_table(rows=1, cols=6)
