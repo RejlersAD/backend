@@ -60,7 +60,11 @@ def build_approval_assignment_payload(notification, context=None):
         f'Due Date: {due_date}\n'
         f'Open Request: {action_url}'
     )
-    return {
+    payload = {
+        # The native, non-Premium Microsoft Teams webhook trigger requires an
+        # Adaptive Card message envelope. The top-level RADAI fields remain so
+        # the following Flow-bot action can address recipient_email directly.
+        'type': 'message',
         'event_type': 'approval_assignment',
         'recipient_email': recipient_email,
         'recipient_name': recipient_name,
@@ -73,6 +77,37 @@ def build_approval_assignment_payload(notification, context=None):
         'message': plain_message,
         'notification_id': str(notification.pk),
     }
+    payload['attachments'] = [{
+        'contentType': 'application/vnd.microsoft.card.adaptive',
+        'contentUrl': None,
+        'content': {
+            '$schema': 'http://adaptivecards.io/schemas/adaptive-card.json',
+            'type': 'AdaptiveCard',
+            'version': '1.4',
+            'body': [
+                {
+                    'type': 'TextBlock',
+                    'text': payload['title'],
+                    'weight': 'Bolder',
+                    'size': 'Medium',
+                },
+                {
+                    'type': 'FactSet',
+                    'facts': [
+                        {'title': 'Request', 'value': request_name},
+                        {'title': 'Submitted By', 'value': submitted_by},
+                        {'title': 'Due Date', 'value': due_date},
+                    ],
+                },
+            ],
+            'actions': [{
+                'type': 'Action.OpenUrl',
+                'title': payload['action_label'],
+                'url': action_url,
+            }],
+        },
+    }]
+    return payload
 
 
 def queue_approval_assignment(notification, context=None):
