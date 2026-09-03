@@ -7,6 +7,55 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+def ensure_employee_master_id_is_unique(apps, schema_editor):
+    """Repair legacy tables whose UUID id column lost its PK/unique constraint.
+
+    Some long-lived environments have ``hr_employee_master`` recorded as
+    migrated even though its ``id`` column was created without the primary-key
+    constraint declared by 0001.  PostgreSQL cannot create the workflow foreign
+    keys until that target column is unique.
+    """
+    EmployeeMaster = apps.get_model('hr_core', 'EmployeeMaster')
+    table_name = EmployeeMaster._meta.db_table
+    quoted_table = schema_editor.quote_name(table_name)
+    quoted_id = schema_editor.quote_name('id')
+
+    with schema_editor.connection.cursor() as cursor:
+        constraints = schema_editor.connection.introspection.get_constraints(
+            cursor, table_name
+        )
+        if any(
+            details.get('unique') and details.get('columns') == ['id']
+            for details in constraints.values()
+        ):
+            return
+
+        cursor.execute(
+            f'SELECT {quoted_id} FROM {quoted_table} '
+            f'GROUP BY {quoted_id} HAVING COUNT(*) > 1 LIMIT 1'
+        )
+        duplicate = cursor.fetchone()
+        cursor.execute(
+            f'SELECT COUNT(*) FROM {quoted_table} WHERE {quoted_id} IS NULL'
+        )
+        null_count = cursor.fetchone()[0]
+
+    if duplicate or null_count:
+        raise RuntimeError(
+            'Cannot repair hr_employee_master.id automatically: '
+            f'duplicate id={duplicate[0] if duplicate else None!s}, '
+            f'null rows={null_count}. Resolve these rows before migrating.'
+        )
+
+    constraint_name = schema_editor.quote_name(
+        'hr_employee_master_id_unique_repair'
+    )
+    schema_editor.execute(
+        f'ALTER TABLE {quoted_table} ADD CONSTRAINT {constraint_name} '
+        f'UNIQUE ({quoted_id})'
+    )
+
+
 def seed_hr_foundation(apps, schema_editor):
     EmployeeMaster = apps.get_model('hr_core', 'EmployeeMaster')
     EmployeeIdentityAlias = apps.get_model('hr_core', 'EmployeeIdentityAlias')
@@ -93,6 +142,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(
+            ensure_employee_master_id_is_unique,
+            migrations.RunPython.noop,
+        ),
         migrations.CreateModel(
             name='HRWorkflowDefinition',
             fields=[
