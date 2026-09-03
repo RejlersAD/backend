@@ -108,6 +108,7 @@ verify_railway_cors.py
 
 # CRITICAL: Explicitly include Railway startup scripts
 !railway_start.sh
+!railway_runtime.sh
 !start.sh
 
 # Backup files

@@ -99,6 +99,7 @@ push_to_github.bat
 *.sh
 !railway_start.sh
 !railway_start_fast.sh
+!railway_runtime.sh
 !start.sh
 !docker-entrypoint.sh
 *.bat
