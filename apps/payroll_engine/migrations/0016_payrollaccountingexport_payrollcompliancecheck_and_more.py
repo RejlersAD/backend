@@ -15,6 +15,39 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunSQL(
+            sql='''
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name = 'payroll_engine_run'
+    )
+    AND NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        JOIN pg_namespace n ON t.relnamespace = n.oid
+        WHERE n.nspname = 'public'
+          AND t.relname = 'payroll_engine_run'
+          AND c.contype = 'p'
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'payroll_engine_run'
+          AND column_name = 'id'
+    ) THEN
+        ALTER TABLE public.payroll_engine_run
+            ADD CONSTRAINT payroll_engine_run_pkey PRIMARY KEY (id);
+    END IF;
+END $$;
+''',
+            reverse_sql=migrations.RunSQL.noop,
+        ),
         migrations.CreateModel(
             name='PayrollAccountingExport',
             fields=[
