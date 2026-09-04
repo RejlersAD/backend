@@ -1811,6 +1811,185 @@ class DailyWorkLogViewSet(viewsets.ModelViewSet):
         except Exception:
             return False
 
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        """Return daily task and hour totals for the current filtered scope."""
+        from django.db.models import Count, Sum  # noqa: F811
+
+        rows = (
+            self.get_queryset()
+            .values('log_date')
+            .annotate(total_hours=Sum('hours_spent'), task_count=Count('id'))
+            .order_by('log_date')
+        )
+        return Response([
+            {
+                'date': str(row['log_date']),
+                'total_hours': float(row['total_hours'] or 0),
+                'task_count': row['task_count'],
+            }
+            for row in rows
+        ])
+
+    @staticmethod
+    def _notify_review_result(log, reviewer, approved, note):
+        try:
+            from django.conf import settings as email_settings
+            from django.core.mail import send_mail
+
+            role_label = {
+                'project_manager': 'Project Manager',
+                'reporting_manager': 'Reporting Manager',
+            }.get(log.submitted_to_role, 'Manager')
+            outcome = 'approved' if approved else 'requires revision'
+            detail = (
+                f'Your activity "{log.task_title}" on {log.log_date} '
+                f'({log.hours_spent} hrs) {"has been approved" if approved else "was not approved"} '
+                f'by your {role_label}.'
+            )
+            if note:
+                detail += f'\n\nNote: {note}'
+            send_mail(
+                subject=f'[RAD AI] Your activity {outcome}',
+                message=(
+                    f'Hi {log.user.first_name or log.user.email},\n\n{detail}\n\n'
+                    f'Reviewed by: {reviewer.get_full_name() or reviewer.email}\n'
+                ),
+                from_email=getattr(email_settings, 'DEFAULT_FROM_EMAIL', None),
+                recipient_list=[log.user.email],
+                fail_silently=True,
+            )
+        except Exception:
+            logger.exception('Daily work log review notification failed for log %s', log.pk)
+
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve(self, request, pk=None):
+        log = self.get_object()
+        if not self._can_approve(request.user, log):
+            return Response(
+                {'error': 'You do not have permission to approve this activity.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if log.approval_status == DailyWorkLogApprovalStatus.APPROVED:
+            return Response(
+                {'error': 'Activity is already approved.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        note = request.data.get('note', '')
+        log.approval_status = DailyWorkLogApprovalStatus.APPROVED
+        log.approved_by = request.user
+        log.approved_at = timezone.now()
+        log.approval_note = note
+        log.save(update_fields=['approval_status', 'approved_by', 'approved_at', 'approval_note'])
+
+        try:
+            from apps.finance.salary_models import SalarySlip
+
+            slip = SalarySlip.objects.filter(
+                month=log.log_date.month,
+                year=log.log_date.year,
+                employee_salary_info__user=log.user,
+            ).first()
+            if slip:
+                ProjectCostAllocation.objects.create(
+                    salary_slip=slip,
+                    project_code=log.project_category or 'DAILY-ACTIVITY',
+                    project_name=log.project_category or 'Daily Activity',
+                    allocated_hours=log.hours_spent,
+                    allocation_percent=Decimal('0'),
+                    allocated_cost=Decimal('0'),
+                    month=log.log_date.month,
+                    year=log.log_date.year,
+                )
+        except Exception:
+            logger.exception('Project cost allocation failed for approved daily log %s', log.pk)
+
+        self._notify_review_result(log, request.user, True, note)
+        return Response(DailyWorkLogSerializer(log).data)
+
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject(self, request, pk=None):
+        log = self.get_object()
+        if not self._can_approve(request.user, log):
+            return Response(
+                {'error': 'You do not have permission to reject this activity.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if log.approval_status == DailyWorkLogApprovalStatus.REJECTED:
+            return Response(
+                {'error': 'Activity is already rejected.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        note = request.data.get('note', '')
+        log.approval_status = DailyWorkLogApprovalStatus.REJECTED
+        log.approved_by = request.user
+        log.approved_at = timezone.now()
+        log.approval_note = note
+        log.save(update_fields=['approval_status', 'approved_by', 'approved_at', 'approval_note'])
+        self._notify_review_result(log, request.user, False, note)
+        return Response(DailyWorkLogSerializer(log).data)
+
+    @action(detail=False, methods=['get'], url_path='export-to-s3')
+    def export_to_s3(self, request):
+        from django.conf import settings as storage_settings
+
+        bucket = getattr(storage_settings, 'AWS_STORAGE_BUCKET_NAME', '')
+        if not bucket:
+            return Response({'error': 'S3 storage is not configured on this environment.'}, status=503)
+
+        import boto3
+        import json
+
+        logs = self.get_queryset()
+        data = DailyWorkLogSerializer(logs, many=True).data
+        now = datetime.datetime.utcnow()
+        key = (
+            f'daily-tracker/{request.user.id}/{now.year:04d}/{now.month:02d}/'
+            f'export_{now.strftime("%Y%m%d_%H%M%S")}.json'
+        )
+        s3 = boto3.client(
+            's3',
+            region_name=getattr(storage_settings, 'AWS_S3_REGION_NAME', 'us-east-1'),
+            endpoint_url=getattr(storage_settings, 'AWS_S3_ENDPOINT_URL', None),
+        )
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=json.dumps(list(data), default=str, ensure_ascii=False).encode('utf-8'),
+            ContentType='application/json',
+        )
+        logs.update(s3_export_key=key)
+        url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket, 'Key': key},
+            ExpiresIn=3600,
+        )
+        return Response({'s3_key': key, 'url': url, 'count': len(data)})
+
+    @action(detail=False, methods=['get'], url_path='team')
+    def team(self, request):
+        if not request.user.is_staff:
+            return Response({'error': 'Staff access required.'}, status=403)
+
+        from django.db.models import Max  # noqa: F811
+
+        selected_date = request.query_params.get('date', str(datetime.date.today()))
+        latest = (
+            DailyWorkLog.objects.filter(log_date=selected_date)
+            .values('user')
+            .annotate(latest=Max('created_at'))
+            .values_list('latest', flat=True)
+        )
+        logs = (
+            DailyWorkLog.objects
+            .filter(log_date=selected_date, created_at__in=latest)
+            .select_related('user')
+            .order_by('user__first_name', 'user__last_name')
+        )
+        return Response(DailyWorkLogSerializer(logs, many=True).data)
+
 
 # =============================================================================
 # Master Payroll Generator — Sympa + ValueFrame + RADAI attendance merge
