@@ -699,6 +699,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         user = self.request.user
         queryset = UserProfile.objects.select_related(
             'user', 'organization', 'manager__user',
+            'canonical_employee',
             'user__employee_master', 'user__employee_master__manager',
             'user__employee_master__manager__user__rbac_profile',
         ).filter(is_deleted=False)
@@ -723,7 +724,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 'manager__id', 'manager__job_title', 'manager__department',
                 'manager__user__id', 'manager__user__email',
                 'manager__user__first_name', 'manager__user__last_name',
+                'canonical_employee__id', 'canonical_employee__photo_file_path',
+                'canonical_employee__photo_url',
                 'user__employee_master__id', 'user__employee_master__user_id',
+                'user__employee_master__photo_file_path',
+                'user__employee_master__photo_url',
                 'user__employee_master__join_date', 'user__employee_master__exit_date',
                 'user__employee_master__probation_end_date',
                 'user__employee_master__employment_status',
