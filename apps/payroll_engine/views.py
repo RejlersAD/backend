@@ -229,7 +229,7 @@ _EMPLOYEE_TO_SNAPSHOT_SYNC: dict = {
 
 
 class PayrollEmployeeViewSet(viewsets.ModelViewSet):
-    queryset = PayrollEmployee.objects.select_related('user__rbac_profile').all()
+    queryset = PayrollEmployee.objects.select_related('employee', 'user__rbac_profile').all()
     serializer_class = PayrollEmployeeSerializer
     permission_classes = [PayrollEmployeeWritePermission]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
