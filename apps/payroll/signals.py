@@ -1,14 +1,23 @@
 from django.db.models import Sum
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
-from .models import LeaveRequest, EmployeeLeaveRecord
+from .models import LeaveRequest, EmployeeLeaveRecord, LeaveCategory
 from django.utils import timezone
 
 
 def _recalculate_total_taken(employee_code, year):
     """Recompute total_taken from scratch — sum of every currently-APPROVED
-    LeaveRequest for this employee/year — instead of incrementing/decrementing
-    a running total. Idempotent regardless of how many times a signal fires.
+    Annual Leave LeaveRequest for this employee/year — instead of
+    incrementing/decrementing a running total. Idempotent regardless of how
+    many times a signal fires.
+
+    Only LeaveType.category == 'annual' counts here: EmployeeLeaveRecord's
+    total_taken/leave_balance track the Annual Leave entitlement specifically,
+    so Sick/Unpaid/Emergency/Compensatory/etc. requests must not reduce it —
+    they're tracked on the LeaveRequest itself but have no paid-annual-leave
+    balance to draw down. Filtering by category (LeaveType's own canonical
+    key, editable via Django admin without code changes) instead of name is
+    deliberate — leave_type.name is free text HR can rename, category isn't.
 
     Must run post_save/post_delete, not pre_save: this queries the DB for the
     current APPROVED set, so it needs the triggering row's own change already
@@ -23,6 +32,7 @@ def _recalculate_total_taken(employee_code, year):
         employee_code=employee_code,
         status='APPROVED',
         start_date__year=year,
+        leave_type__category=LeaveCategory.ANNUAL,
     ).aggregate(t=Sum('days_requested'))['t'] or 0
 
     if record.total_taken == total:

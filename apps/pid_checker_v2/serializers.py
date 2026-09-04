@@ -18,7 +18,7 @@ from .services.legend_engine import compile_legend
 
 # Soft-coded field lists — mirror model fields so we never over-expose.
 LINE_TAG_FIELDS = (
-    'tag', 'size', 'service', 'spec', 'serial', 'service_group',
+    'tag', 'size', 'service', 'spec', 'serial', 'service_group', 'confidence',
 )
 
 EXTRACTION_LIST_FIELDS = (

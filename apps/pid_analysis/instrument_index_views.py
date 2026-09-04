@@ -4,13 +4,16 @@ Instrument Index Views
 REST API endpoints for extracting the full instrument index from P&ID drawings.
 
 Endpoints (all registered in urls.py):
-  POST  instrument-index/analyze/          → extract_instrument_index
+  POST  instrument-index/analyze/          → extract_instrument_index (kicks off async task)
+  GET   instrument-index/status/<upload_id>/ → get_instrument_index_status
   GET   instrument-index/download-excel/<upload_id>/  → download_instrument_index_excel
   GET   instrument-index/categories/       → get_instrument_categories
 """
 
+import base64
 import io
 import os
+import threading
 import uuid
 import logging
 
@@ -26,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 # How long to keep the generated Excel bytes in Django cache (seconds)
 EXCEL_CACHE_TTL = 600  # 10 minutes
+
+# Soft-coded flag — set to False to force the legacy synchronous path
+# (used by unit tests and by clients that cannot poll).
+II_ASYNC_ENABLED = True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +120,72 @@ def extract_instrument_index(request):
         )
         drawing_info["legend_sheet_name"] = legend_file.name
 
+    upload_id = str(uuid.uuid4())
+
+    # ── Async dispatch (Celery, with graceful thread fallback) ──────────────
+    if II_ASYNC_ENABLED:
+        try:
+            from apps.pid_analysis.tasks import (
+                run_instrument_index_task,
+                II_RESULT_CACHE_KEY_FMT,
+                II_RESULT_CACHE_TTL_S,
+            )
+            cache_key = II_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id)
+            cache.set(
+                cache_key,
+                {'status': 'processing', 'progress': 1, 'message': 'Uploaded — waiting for worker…'},
+                II_RESULT_CACHE_TTL_S,
+            )
+            pid_b64 = base64.b64encode(pid_bytes).decode('ascii')
+            legend_b64 = ''
+            if legend_file:
+                # `legend_bytes` is already loaded above — reuse it.
+                legend_b64 = base64.b64encode(legend_bytes).decode('ascii')
+
+            task_args = (
+                upload_id, pid_b64, pid_file.name, drawing_info,
+                legend_b64, (legend_file.name if legend_file else ''),
+            )
+            try:
+                run_instrument_index_task.delay(*task_args)
+                logger.info('[InstrumentIndex] Celery task dispatched  upload_id=%s', upload_id)
+            except Exception as broker_exc:
+                logger.warning(
+                    '[InstrumentIndex] Celery broker unavailable (%s) — falling back to thread',
+                    broker_exc,
+                )
+                def _run_in_thread():
+                    try:
+                        run_instrument_index_task.apply(args=task_args)
+                    except Exception as thread_exc:
+                        cache.set(
+                            cache_key,
+                            {'status': 'failed', 'error': str(thread_exc)},
+                            II_RESULT_CACHE_TTL_S,
+                        )
+                threading.Thread(target=_run_in_thread, daemon=True).start()
+
+            return Response(
+                {
+                    'success':   True,
+                    'async':     True,
+                    'upload_id': upload_id,
+                    'status':    'processing',
+                    'poll_url':  f'/api/v1/pid_analysis/instrument-index/status/{upload_id}/',
+                    'drawing_info': drawing_info,
+                },
+                status=202,
+            )
+        except Exception as exc:
+            # If anything in the async path fails (import error, cache misconfig)
+            # we still fall through to the synchronous path so the request never
+            # dies silently.
+            logger.error(
+                '[InstrumentIndex] Async dispatch failed — running synchronously: %s',
+                exc, exc_info=True,
+            )
+
+    # ── Legacy synchronous fallback ─────────────────────────────────────────
     instruments = service.extract_instruments(
         pid_bytes,
         drawing_info,
@@ -129,7 +202,6 @@ def extract_instrument_index(request):
         category_summary[cat] = category_summary.get(cat, 0) + 1
 
     # Generate Excel and cache it
-    upload_id = str(uuid.uuid4())
     try:
         excel_bytes = service.generate_excel(instruments, drawing_info)
         cache.set(f"instrument_index_excel_{upload_id}", excel_bytes, timeout=EXCEL_CACHE_TTL)
@@ -155,6 +227,32 @@ def extract_instrument_index(request):
             "excel_url": excel_url,
         }
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1b. Poll status of an async extraction (GET)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def get_instrument_index_status(request, upload_id):
+    """
+    GET /api/v1/pid_analysis/instrument-index/status/<upload_id>/
+
+    Returns the current state of an async instrument-index extraction:
+      • processing → {status, progress, message}
+      • completed  → the full result payload (identical to the legacy sync response)
+      • failed     → {status, error}
+      • 404        → unknown upload_id or cache expired
+    """
+    from apps.pid_analysis.tasks import II_RESULT_CACHE_KEY_FMT
+    entry = cache.get(II_RESULT_CACHE_KEY_FMT.format(upload_id=upload_id))
+    if entry is None:
+        return Response(
+            {"status": "not_found", "error": "Unknown upload_id or result expired."},
+            status=404,
+        )
+    return Response(entry)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

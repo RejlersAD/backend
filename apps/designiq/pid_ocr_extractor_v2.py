@@ -189,6 +189,18 @@ SMART_RECOVERY_CONFIG = {
     'dup_guard_threshold': 0.88,
 }
 
+# ---------------------------------------------------------------------------
+# LLM determinism config — same values are reused across every OpenAI call
+# in this file so that repeated runs on the same P&ID return the same tag
+# counts. Historically each call used temperature=0.1 with no seed which
+# caused the extraction count to drift by 5–15 % between runs.
+# ---------------------------------------------------------------------------
+LLM_DETERMINISM = {
+    'temperature': 0.0,   # zero = maximally deterministic sampling
+    'seed': 42,           # gpt-4o / gpt-4-turbo honour this for reproducibility
+    'top_p': 1.0,
+}
+
 # Conditional import for pytesseract (graceful fallback if not installed)
 try:
     import pytesseract
@@ -1343,7 +1355,9 @@ Extract ALL line numbers now! 🚀"""
                         "content": prompt
                     }
                 ],
-                temperature=0.1,  # Very low creativity but not zero - allows pattern recognition
+                temperature=LLM_DETERMINISM['temperature'],
+                seed=LLM_DETERMINISM['seed'],
+                top_p=LLM_DETERMINISM['top_p'],
                 max_tokens=4096  # Increased for more extractions
             )
             
@@ -1617,7 +1631,9 @@ Example 4: "10\"-PG-0003-033842-X-H"
                     {"role": "system", "content": "You are a P&ID analysis expert. Return only valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1,
+                temperature=LLM_DETERMINISM['temperature'],
+                seed=LLM_DETERMINISM['seed'],
+                top_p=LLM_DETERMINISM['top_p'],
                 max_tokens=2000
             )
             
@@ -2969,7 +2985,9 @@ Analyze and return JSON:"""
                         ]
                     }
                 ],
-                temperature=0.1,
+                temperature=LLM_DETERMINISM['temperature'],
+                seed=LLM_DETERMINISM['seed'],
+                top_p=LLM_DETERMINISM['top_p'],
                 max_tokens=3000
             )
             

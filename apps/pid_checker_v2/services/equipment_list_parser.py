@@ -184,16 +184,27 @@ def _detect_header_row(all_rows: list[tuple]) -> Optional[int]:
 def _map_columns(header_row: tuple, sub_header_row: tuple) -> dict[str, int]:
     """Map canonical keys to column indices, using the composite (header + sub-header) label."""
     columns: dict[str, int] = {}
+    # A grouped header like "DESIGN / SET PRESS. (PSIG)" spanning a MIN/MAX
+    # pair of columns is usually a MERGED cell in the source Excel — Excel
+    # (via openpyxl) only stores the text in the merge's top-left cell, so
+    # every other column under that merge reads back as None. Without
+    # forward-filling that group label onto the MAX column, its combined
+    # text collapses to just "max" and never matches any alias (e.g.
+    # "design press") — silently dropping design_p_max/design_t_max even
+    # though the value is right there in the sheet. Track and reuse the
+    # last seen non-blank header cell across the row.
+    last_group_header = ''
     for idx, cell in enumerate(header_row):
-        if cell is None and idx < len(sub_header_row):
-            # inherit sub-header only
-            cell = sub_header_row[idx] if idx < len(sub_header_row) else None
-        if cell is None:
-            continue
-        header_txt = str(cell).strip().lower()
+        if cell is not None and str(cell).strip():
+            last_group_header = str(cell).strip().lower()
+            header_txt = last_group_header
+        else:
+            header_txt = last_group_header
         sub_txt = ''
         if idx < len(sub_header_row) and sub_header_row[idx] is not None:
             sub_txt = str(sub_header_row[idx]).strip().lower()
+        if not header_txt and not sub_txt:
+            continue
         combined = f'{header_txt} {sub_txt}'.strip()
         for key, aliases in COL_ALIASES.items():
             if key in columns:
@@ -213,6 +224,28 @@ def _map_columns(header_row: tuple, sub_header_row: tuple) -> dict[str, int]:
                             continue
                     columns[key] = idx
                     break
+
+    # Deep-attribute keys (nominal_capacity, length_tt, diameter_id,
+    # material_shell, material_internal) are compared against the P&ID
+    # Vision extraction by equipment_cross_check.py, but many real-world
+    # Equipment List exports don't use those exact header words — they
+    # reuse the same column as a more general field (e.g. "Design
+    # Flowrate / Design Duty / Volume" for capacity, a single combined
+    # "MOC" column for both shell and internal material). Rather than
+    # requiring every Excel to spell out the deep-attribute header exactly,
+    # fall back to the general-purpose column that already carries the
+    # same data when the deep-attribute alias never matched anything.
+    _FALLBACK_FROM = {
+        'nominal_capacity': 'design_flow',
+        'length_tt': 'dim_length',
+        'diameter_id': 'dim_diameter',
+        'material_shell': 'moc',
+        'material_internal': 'moc',
+    }
+    for deep_key, general_key in _FALLBACK_FROM.items():
+        if deep_key not in columns and general_key in columns:
+            columns[deep_key] = columns[general_key]
+
     return columns
 
 

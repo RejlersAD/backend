@@ -116,7 +116,7 @@ def process_pid_document(self, document_id: str, context: dict = None):
 
     # ── V2 ORCHESTRATOR: Configuration-driven processing pipeline ────────
     USE_V2_ORCHESTRATOR = True  # Feature flag - set to False to use legacy pipeline
-    
+
     if USE_V2_ORCHESTRATOR:
         try:
             from apps.pid_verification_v2.services.orchestrator import (
@@ -124,8 +124,43 @@ def process_pid_document(self, document_id: str, context: dict = None):
                 PipelineContext,
                 update_processing_progress,
             )
-            
+            from apps.pid_verification_v2.services.processing_config import get_stage_config
+
             logger.info('[PIDVTask] Using V2 Orchestrator for document_id=%s', document_id)
+
+            # ── Load reference symbol pictures ONCE for this whole document
+            # run — not once per page. Reused by every page (inline or
+            # fanned-out) instead of every page re-reading/re-encoding the
+            # same images from storage. Always fetched fresh from
+            # LegendSymbolImage (never a hardcoded count), so this scales to
+            # any library size automatically. Only bothers fetching when a
+            # Claude key is actually present — Vision won't run without one.
+            _symbol_images = []
+            if context.get('claude_api_key') and doc.project_id:
+                from apps.pid_verification_v2.services.legend_bridge import get_symbol_images_for_project
+                try:
+                    _symbol_images = get_symbol_images_for_project(doc.project)
+                    logger.info(
+                        '[PIDVTask] Loaded %d reference symbol image(s) for document_id=%s',
+                        len(_symbol_images), document_id,
+                    )
+                except Exception:
+                    logger.warning('[PIDVTask] Could not load symbol images (non-fatal)', exc_info=True)
+
+            # Reprocess idempotency for the legend/symbol bridge — clear this
+            # document's previous PIDVComparisonFinding rows ONCE, up front,
+            # before any page (inline or fanned-out) writes fresh ones. Must
+            # happen here rather than inside LegendSymbolBridgeStage itself:
+            # under the parallel per-page fan-out, that stage runs once per
+            # page in a SEPARATE task each — deleting there would wipe out
+            # whichever other page's findings were already written.
+            if doc.project_id:
+                from apps.pid_verification_v2.models import PIDVComparisonFinding
+                PIDVComparisonFinding.objects.filter(
+                    project=doc.project,
+                    finding_type=PIDVComparisonFinding.FindingType.SYMBOL_LEGEND_MATCH,
+                    evidence__document_id=str(doc.document_id),
+                ).delete()
 
             # ── Peek at page count first ──────────────────────────────────
             # Large multi-page documents are fanned out to parallel per-page
@@ -143,7 +178,7 @@ def process_pid_document(self, document_id: str, context: dict = None):
                 from celery import chord
 
                 header = [
-                    process_pid_page.s(str(doc.document_id), _asdict(seg), context)
+                    process_pid_page.s(str(doc.document_id), _asdict(seg), context, _symbol_images)
                     for seg in _peek_segments
                 ]
                 chord(header)(finalize_pid_document.s(str(doc.document_id)))
@@ -160,6 +195,7 @@ def process_pid_document(self, document_id: str, context: dict = None):
                 document=doc,
                 project=doc.project if doc.project_id else None,
                 user_context=context,
+                symbol_images=_symbol_images,
             )
             
             # Execute orchestrated pipeline
@@ -169,9 +205,22 @@ def process_pid_document(self, document_id: str, context: dict = None):
             # Check for critical failure
             if result_context.has_critical_failure():
                 doc.status = PIDVDocument.Status.FAILED
-                doc.error_message = 'Critical processing stage failed. Check logs for details.'
+                # Surface the actual failed stage's error (e.g. extraction's
+                # NoExtractionMethodAvailableError: "Please install
+                # Tesseract OR add a Claude API key...") instead of a
+                # generic message — this is exactly the "don't show
+                # completed with 0 results, show a clear error" requirement.
+                _failed_result = next(
+                    (r for r in result_context.stage_results
+                     if not r.success and get_stage_config(r.stage_id).critical),
+                    None,
+                )
+                doc.error_message = (
+                    _failed_result.error if _failed_result and _failed_result.error
+                    else 'Critical processing stage failed. Check logs for details.'
+                )
                 doc.save(update_fields=['status', 'error_message', 'updated_at'])
-                logger.error('[PIDVTask] Pipeline failed for document_id=%s', document_id)
+                logger.error('[PIDVTask] Pipeline failed for document_id=%s: %s', document_id, doc.error_message)
                 return
             
             # Create/update ONE PIDVDrawing per page/segment (soft-coded —
@@ -224,6 +273,23 @@ def process_pid_document(self, document_id: str, context: dict = None):
             project_legend = doc.project.legend_knowledge_data
             logger.info('[PIDVTask] Using per-project legend for project=%s', doc.project.project_id)
 
+        # Reference symbol pictures — loaded ONCE for the whole document
+        # (same reasoning as the V2 orchestrator path above), reused for
+        # every page in the loop below instead of re-fetched per page.
+        _legacy_symbol_images = []
+        _legacy_pdf_bytes = None
+        if context.get('claude_api_key') and doc.project_id:
+            from apps.pid_verification_v2.services.legend_bridge import get_symbol_images_for_project
+            try:
+                _legacy_symbol_images = get_symbol_images_for_project(doc.project)
+            except Exception:
+                logger.warning('[PIDVTask] Could not load symbol images (non-fatal)', exc_info=True)
+            try:
+                with open(file_path, 'rb') as _fh:
+                    _legacy_pdf_bytes = _fh.read()
+            except Exception:
+                logger.warning('[PIDVTask] Could not read file for Vision (non-fatal)', exc_info=True)
+
         all_findings_count = 0
 
         for seg in segments:
@@ -240,8 +306,13 @@ def process_pid_document(self, document_id: str, context: dict = None):
             # Clear any previous findings (re-process idempotency)
             drawing_obj.findings.all().delete()
 
-            # ── 4. Extract elements ───────────────────────────────────────
-            extraction = extract_drawing(file_path, page_index=seg.page_index, legend_data=project_legend)
+            # ── 4. Extract elements (hybrid Tesseract + AI Vision) ─────────
+            _legacy_extraction_key = context.get('claude_api_key') or context.get('openai_api_key')
+            _legacy_extraction_provider = 'claude' if context.get('claude_api_key') else 'openai'
+            extraction = extract_drawing(
+                file_path, page_index=seg.page_index, legend_data=project_legend,
+                api_key=_legacy_extraction_key, provider=_legacy_extraction_provider,
+            )
 
             # Persist extraction diagnostics per drawing for frontend transparency.
             raw_text = extraction.get('raw_text', '') or ''
@@ -321,7 +392,8 @@ def process_pid_document(self, document_id: str, context: dict = None):
                     legend_data=legend_data,
                     line_list_data=line_list_data,
                     equipment_list_data=equipment_list_data,
-                    instrument_index_data=instrument_index_data
+                    instrument_index_data=instrument_index_data,
+                    ai_api_key=context.get('claude_api_key'),
                 )
                 
                 # Store comparison results in drawing metadata for frontend access
@@ -405,10 +477,13 @@ def process_pid_document(self, document_id: str, context: dict = None):
                     try:
                         from apps.pid_verification_v2.services.ai_analysis import (
                             run_openai_analysis,
-                            run_claude_analysis,
                             run_hybrid_analysis,
+                            to_rule_findings,
                         )
-                        
+                        from apps.pid_verification_v2.services.legend_bridge import (
+                            run_page_vision_analysis, SYMBOL_BATCH_SIZE,
+                        )
+
                         # Prepare drawing data for AI analysis
                         drawing_data = {
                             'instruments': extraction.get('instruments', []),
@@ -419,27 +494,57 @@ def process_pid_document(self, document_id: str, context: dict = None):
                             'line_sizes': extraction.get('line_sizes', []),
                             'notes': extraction.get('notes', []),
                         }
-                        
+
+                        # This page's rendered image — required for the
+                        # deep_claude/hybrid Claude leg (real Vision, not
+                        # text-only). enhanced_openai stays text-only.
+                        page_image_b64 = None
+                        if analysis_mode in ('deep_claude', 'hybrid') and _legacy_pdf_bytes is not None:
+                            try:
+                                from apps.pid_checker_v2.services.vision_extractor import (
+                                    _render_single_page, _prepare_image_b64, VISION_OVERVIEW_MAX_DIMENSION_PX,
+                                )
+                                page_img = _render_single_page(_legacy_pdf_bytes, seg.page_index)
+                                page_image_b64 = _prepare_image_b64(page_img, VISION_OVERVIEW_MAX_DIMENSION_PX)
+                            except Exception:
+                                logger.warning('[PIDVTask] Could not render page image for Vision', exc_info=True)
+
+                        raw_findings = []
+                        symbols = []
                         # Route to appropriate AI service
                         if analysis_mode == 'enhanced_openai':
                             openai_key = context.get('openai_api_key')
                             if openai_key:
-                                ai_findings = run_openai_analysis(drawing_data, openai_key)
-                        
+                                raw_findings = run_openai_analysis(drawing_data, openai_key)['findings']
+
                         elif analysis_mode == 'deep_claude':
                             claude_key = context.get('claude_api_key')
-                            if claude_key:
-                                ai_findings = run_claude_analysis(drawing_data, claude_key)
-                        
+                            if claude_key and page_image_b64:
+                                result = run_page_vision_analysis(
+                                    drawing_data, claude_key, page_image_b64,
+                                    symbol_images=_legacy_symbol_images,
+                                )
+                                if result:
+                                    raw_findings = result['findings']
+                                    symbols = result['symbols']
+
                         elif analysis_mode == 'hybrid':
                             openai_key = context.get('openai_api_key')
                             claude_key = context.get('claude_api_key')
                             if openai_key and claude_key:
-                                ai_findings = run_hybrid_analysis(drawing_data, openai_key, claude_key)
-                        
+                                result = run_hybrid_analysis(
+                                    drawing_data, openai_key, claude_key,
+                                    page_image_b64=page_image_b64,
+                                    symbol_images=_legacy_symbol_images[:SYMBOL_BATCH_SIZE],
+                                )
+                                raw_findings = result['findings']
+                                symbols = result['symbols']
+
+                        ai_findings = to_rule_findings(raw_findings)
+
                         logger.info(
-                            '[PIDVTask] AI analysis completed: %d findings from %s',
-                            len(ai_findings), analysis_mode
+                            '[PIDVTask] AI analysis completed: %d findings, %d symbols from %s',
+                            len(ai_findings), len(symbols), analysis_mode
                         )
                     
                     except Exception as ai_exc:
@@ -609,11 +714,11 @@ def _persist_segment_result(doc, seg, result_context) -> int:
     soft_time_limit=900,  # 15 min soft limit per page
     time_limit=960,       # 16 min hard limit per page
 )
-def process_pid_page(self, document_id: str, segment_dict: dict, context: dict = None):
+def process_pid_page(self, document_id: str, segment_dict: dict, context: dict = None, symbol_images: list = None):
     """
     Process exactly ONE page/segment of a multi-page P&ID document:
     extraction → graph → rule engine → comparison engine → AI analysis →
-    persist PIDVDrawing + findings for that page only.
+    legend/symbol bridge → persist PIDVDrawing + findings for that page only.
 
     Dispatched as one member of a Celery chord (one subtask per page) from
     `process_pid_document` when a document has more pages than
@@ -622,17 +727,23 @@ def process_pid_page(self, document_id: str, segment_dict: dict, context: dict =
     task looping through every page sequentially (which cannot finish 20+
     pages of multi-pass OCR within any sane Celery time limit).
 
+    `symbol_images` is loaded ONCE by `process_pid_document` (see
+    services/legend_bridge.get_symbol_images_for_project) and passed to
+    every page-task unchanged — avoids each of N page-tasks independently
+    re-reading/re-encoding the same reference-picture library from storage.
+
     Never raises — any failure is captured and returned as
     {'success': False, 'error': ...} so a single bad/slow page can't abort
     the whole chord/document; `finalize_pid_document` decides overall
     document status from the aggregate of these results.
     """
     context = context or {}
+    symbol_images = symbol_images or []
     from apps.pid_verification_v2.models import PIDVDocument
     from apps.pid_verification_v2.services.segmentation import SegmentedDrawing
     from apps.pid_verification_v2.services.orchestrator import (
         PipelineContext, ExtractionStage, GraphBuildingStage,
-        RuleEngineStage, ComparisonEngineStage, AIAnalysisStage,
+        RuleEngineStage, ComparisonEngineStage, AIAnalysisStage, LegendSymbolBridgeStage,
     )
 
     seg = SegmentedDrawing(**segment_dict)
@@ -653,9 +764,11 @@ def process_pid_page(self, document_id: str, segment_dict: dict, context: dict =
             user_context=context,
             file_path=file_path,
             segments=[seg],
+            symbol_images=symbol_images,
         )
 
-        for stage_cls in (ExtractionStage, GraphBuildingStage, RuleEngineStage, ComparisonEngineStage, AIAnalysisStage):
+        for stage_cls in (ExtractionStage, GraphBuildingStage, RuleEngineStage, ComparisonEngineStage,
+                          AIAnalysisStage, LegendSymbolBridgeStage):
             stage = stage_cls()
             result = stage.execute(pipeline_context)
             pipeline_context.add_result(result)
@@ -1436,33 +1549,37 @@ def run_ai_checks_task(self, run_id: str, context: dict = None):
         sheets_processed = 0
         api_calls_made = 0
         
-        s3_client = boto3.client('s3')
-        
         for drawing in drawings[:10]:  # Limit to 10 sheets for initial implementation
             try:
-                # Download image from S3
+                # Download image from S3 — via the field's own storage
+                # backend (_download_field_file), NOT a raw boto3 client
+                # keyed on doc.original_file.name alone. That was the exact
+                # 2026-08-27 HeadObject 404 bug (see _download_field_file's
+                # docstring): .name is relative to the storage's `location`
+                # prefix (e.g. MediaStorage.location = 'media'), so a raw
+                # S3 key built from .name alone 404s on the real object.
                 doc = drawing.document
-                bucket = settings.AWS_STORAGE_BUCKET_NAME
-                key = doc.original_file.name if hasattr(doc.original_file, 'name') else doc.s3_path
-                
-                # Download to temp file
-                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-                s3_client.download_file(bucket, key, tmp_file.name)
-                
+                if doc.original_file:
+                    tmp_file_path = _download_field_file(doc.original_file)
+                elif doc.s3_path:
+                    tmp_file_path = _download_from_s3(doc.s3_path)
+                else:
+                    raise ValueError(f'No file source available for document {doc.document_id}')
+
                 # Extract using vision API
                 logger.info('[AICheckTask] Extracting sheet: %s (page %d)', drawing.title, drawing.page_index)
-                
-                extraction_result = extractor.extract_all(tmp_file.name, sheet_number=drawing.title)
-                
+
+                extraction_result = extractor.extract_all(tmp_file_path, sheet_number=drawing.title)
+
                 all_equipment.extend(extraction_result.get('equipment', []))
                 all_lines.extend(extraction_result.get('lines', []))
                 all_instruments.extend(extraction_result.get('instruments', []))
-                
+
                 sheets_processed += 1
                 api_calls_made += 3  # equipment + lines + instruments
-                
+
                 # Cleanup
-                os.unlink(tmp_file.name)
+                os.unlink(tmp_file_path)
                 
                 logger.info('[AICheckTask] Extracted %d equipment, %d lines, %d instruments from sheet %s',
                            len(extraction_result.get('equipment', [])),

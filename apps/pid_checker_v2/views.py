@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
+import uuid
 
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -124,6 +127,7 @@ def _persist_extraction(*, user, upload, pdf_bytes, mode, provider, model_name,
                 spec=t.get('spec') or '',
                 serial=t.get('serial') or '',
                 service_group=t.get('service_group') or '',
+                confidence=t.get('confidence') or '',
             ))
         if rows:
             PidCheckerV2LineTag.objects.bulk_create(rows, batch_size=500)
@@ -296,10 +300,17 @@ class ExtractLineTagsView(APIView):
             if not api_key:
                 return Response({'error': 'api_key required for vision mode'},
                                 status=status.HTTP_400_BAD_REQUEST)
+            model = (request.data.get('model') or '').strip() or None
+            if model and provider == 'claude':
+                from .services.vision_extractor import ALLOWED_CLAUDE_VISION_MODELS
+                if model not in ALLOWED_CLAUDE_VISION_MODELS:
+                    return Response({'error': f'model must be one of {ALLOWED_CLAUDE_VISION_MODELS}'},
+                                    status=status.HTTP_400_BAD_REQUEST)
             try:
                 result = extract_line_tags_via_vision(
                     pdf_bytes, provider, api_key,
                     legend_prompt=legend_prompt,
+                    model=model,
                 )
             except Exception as exc:
                 logger.exception('Vision extraction failed')
@@ -819,6 +830,8 @@ EQUIPMENT_LIST_KNOWN_FIELDS = {
     'design_p_min', 'design_p_max', 'design_t_min', 'design_t_max',
     'moc', 'insulation', 'dim_length', 'dim_diameter', 'motor_rating',
     'pid_no', 'qty', 'phase', 'remarks', 'sno', 'rev',
+    'nominal_capacity', 'length_tt', 'diameter_id', 'material_shell',
+    'material_internal', 'trim',
 }
 
 
@@ -870,6 +883,12 @@ def _persist_equipment_list(user, filename: str, parsed: dict) -> PidCheckerV2Eq
                 qty=str(r.get('qty') or '')[:16],
                 phase=str(r.get('phase') or '')[:64],
                 remarks=str(r.get('remarks') or '')[:500],
+                nominal_capacity=str(r.get('nominal_capacity') or '')[:64],
+                length_tt=str(r.get('length_tt') or '')[:64],
+                diameter_id=str(r.get('diameter_id') or '')[:64],
+                material_shell=str(r.get('material_shell') or '')[:120],
+                material_internal=str(r.get('material_internal') or '')[:120],
+                trim=str(r.get('trim') or '')[:120],
                 extras=extras,
             ))
         if rows:
@@ -1460,6 +1479,412 @@ class ExtractInstrumentTagsFromPidView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+def _normalise_symbol_name(name):
+    """Mirror the frontend's normaliseSymbolName so cross-project /
+    cross-request symbol-name matching lines up regardless of stray
+    whitespace or casing."""
+    return re.sub(r'\s+', ' ', str(name or '')).strip().upper()
+
+
+def _get_symbol_images_with_fallback(project_id):
+    """Every legend symbol picture available to a project: its own
+    uploads, plus — for any (section, symbol_name) it hasn't uploaded
+    itself — whichever other project uploaded that symbol most recently,
+    used as a cross-project fallback.
+
+    Deliberately per-symbol rather than all-or-nothing (i.e. NOT "if this
+    project has zero uploads, use every other project's images") — a
+    project that already uploaded a few symbols of its own should still
+    get fallback coverage for the ones it hasn't uploaded yet, not lose
+    fallback entirely just because it has *some* pictures.
+
+    Uploads are still stored strictly per-project (see
+    SymbolImageUploadView) — this is the only place the "shared across all
+    projects, project's own copy wins" behaviour is applied, so a picture
+    uploaded once under any project becomes usable everywhere (including
+    by SymbolImagesListView for display and IdentifySymbolsView for Vision
+    reference) without needing to be re-uploaded or explicitly promoted.
+    Separate from the static-file default library (DefaultSymbolImagesView)
+    — that one covers a fresh server with an empty database; this one
+    covers "someone already uploaded this exact symbol somewhere".
+
+    Returns a list of LegendSymbolImage rows (own rows first).
+    """
+    from .models import LegendSymbolImage
+
+    own_rows = list(
+        LegendSymbolImage.objects.filter(project__project_id=project_id).exclude(image_file='')
+    )
+    own_keys = {(r.section, _normalise_symbol_name(r.symbol_name)) for r in own_rows}
+
+    fallback_rows = []
+    seen_fallback_keys = set()
+    other_rows = (
+        LegendSymbolImage.objects
+        .exclude(project__project_id=project_id)
+        .exclude(image_file='')
+        .order_by('-updated_at')
+    )
+    for r in other_rows:
+        key = (r.section, _normalise_symbol_name(r.symbol_name))
+        if key in own_keys or key in seen_fallback_keys:
+            continue
+        seen_fallback_keys.add(key)
+        fallback_rows.append(r)
+
+    return own_rows + fallback_rows
+
+
+class SymbolImagesListView(APIView):
+    """GET the legend symbol pictures available to a project. Three tiers,
+    in priority order — each only fills gaps the previous one left:
+      1. The project's own uploads.
+      2. Any OTHER project's upload of that same (section, symbol_name) —
+         see _get_symbol_images_with_fallback().
+      3. The repo-committed static default-picture library — see
+         services/default_symbol_images.py. Covers a symbol nobody has
+         ever uploaded a picture for on ANY project, including on a fresh
+         server with an empty database.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        project_id = (request.query_params.get('project_id') or '').strip()
+        if not project_id:
+            return Response({'error': 'project_id is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        rows = _get_symbol_images_with_fallback(project_id)
+        images = [{
+            'section': r.section,
+            'symbol_name': r.symbol_name,
+            'content_type': r.content_type,
+            'image_url': r.image_file.url,
+        } for r in rows]
+
+        from .services.default_symbol_images import list_default_symbol_images
+        covered_keys = {(img['section'], _normalise_symbol_name(img['symbol_name'])) for img in images}
+        images.extend(list_default_symbol_images(exclude_keys=covered_keys))
+
+        return Response({'images': images, 'total_count': len(images)}, status=status.HTTP_200_OK)
+
+
+class DefaultSymbolImagesView(APIView):
+    """POST {section, symbol_names: [...]} → {results: {name: url_or_null}}.
+
+    Looks up the shared default-picture library (repo-committed static
+    files, no database involved — see services/default_symbol_images.py)
+    for a batch of names in one request, so loading a whole legend section
+    doesn't need one round-trip per symbol that's missing a project upload.
+    Works identically on a brand-new server with an empty database, since
+    the pictures ship with the code.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        from .services.default_symbol_images import get_default_symbol_image_url
+
+        section = (request.data.get('section') or '').strip()
+        symbol_names = request.data.get('symbol_names')
+        if not section or not isinstance(symbol_names, list):
+            return Response({'error': 'section and symbol_names (list) are required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        results = {
+            name: get_default_symbol_image_url(section, name)
+            for name in symbol_names if isinstance(name, str) and name.strip()
+        }
+        return Response({'results': results}, status=status.HTTP_200_OK)
+
+
+def _normalize_symbol_image(raw_bytes, ext):
+    """Flatten an uploaded raster image onto a white 200x200 PNG canvas,
+    symbol centred and aspect ratio preserved. SVGs are vector and already
+    scale cleanly in the UI, so they pass through untouched — Pillow can't
+    rasterize them and this deployment has no cairosvg.
+
+    Returns (normalized_bytes, content_type).
+    """
+    if ext == '.svg':
+        return raw_bytes, 'image/svg+xml'
+
+    from io import BytesIO
+    from PIL import Image
+
+    CANVAS_SIZE = 200
+    with Image.open(BytesIO(raw_bytes)) as src:
+        src.load()
+        if src.mode in ('RGBA', 'LA') or (src.mode == 'P' and 'transparency' in src.info):
+            rgba = src.convert('RGBA')
+            canvas_src = Image.new('RGB', rgba.size, (255, 255, 255))
+            canvas_src.paste(rgba, mask=rgba.split()[-1])
+            src = canvas_src
+        else:
+            src = src.convert('RGB')
+
+        src.thumbnail((CANVAS_SIZE, CANVAS_SIZE), Image.LANCZOS)
+        canvas = Image.new('RGB', (CANVAS_SIZE, CANVAS_SIZE), (255, 255, 255))
+        offset = ((CANVAS_SIZE - src.width) // 2, (CANVAS_SIZE - src.height) // 2)
+        canvas.paste(src, offset)
+
+        out = BytesIO()
+        canvas.save(out, format='PNG')
+        return out.getvalue(), 'image/png'
+
+
+class SymbolImageUploadView(APIView):
+    """POST an image file for exactly one symbol — manual curation, no AI,
+    no PDF. Accepts project_id, section, symbol_name, image (PNG/JPG/SVG).
+    Creates or replaces the LegendSymbolImage row for that
+    (project, section, symbol_name) — the same action serves both the
+    "Upload" and "Replace" buttons in the modal.
+
+    Raster uploads (PNG/JPG) are normalized to a 200x200 white-background
+    PNG with the symbol centred, so every card renders consistently
+    regardless of the source image's size/aspect/background.
+    """
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    ALLOWED_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.svg')
+    ALLOWED_IMAGE_CONTENT_TYPES = {
+        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml',
+    }
+    MAX_IMAGE_MB = 5
+
+    def post(self, request, *args, **kwargs):
+        project_id = (request.data.get('project_id') or '').strip()
+        section = (request.data.get('section') or '').strip()
+        symbol_name = (request.data.get('symbol_name') or '').strip()
+        if not project_id or not section or not symbol_name:
+            return Response({'error': 'project_id, section, and symbol_name are required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.pid_verification.models import PIDVProject
+        try:
+            project = PIDVProject.objects.get(project_id=project_id)
+        except (PIDVProject.DoesNotExist, ValueError, ValidationError):
+            return Response({'error': 'project_id not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        image_file = request.FILES.get('image')
+        if image_file is None:
+            return Response({'error': "missing file field 'image'"}, status=status.HTTP_400_BAD_REQUEST)
+        if image_file.size > self.MAX_IMAGE_MB * 1024 * 1024:
+            return Response({'error': f'image exceeds {self.MAX_IMAGE_MB} MB limit'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        name_lower = (image_file.name or '').lower()
+        ext = next((e for e in self.ALLOWED_IMAGE_EXTENSIONS if name_lower.endswith(e)), None)
+        if ext is None:
+            return Response({'error': f'image must be one of {self.ALLOWED_IMAGE_EXTENSIONS}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        raw_bytes = image_file.read()
+        try:
+            normalized_bytes, content_type = _normalize_symbol_image(raw_bytes, ext)
+        except Exception:
+            logger.exception('Symbol image normalization failed, storing original upload as-is')
+            normalized_bytes, content_type = raw_bytes, self.ALLOWED_IMAGE_CONTENT_TYPES[ext]
+
+        from django.core.files.base import ContentFile
+
+        from .models import LegendSymbolImage
+        obj = LegendSymbolImage.objects.filter(
+            project=project, section=section, symbol_name=symbol_name,
+        ).first()
+        if obj is None:
+            obj = LegendSymbolImage(project=project, section=section, symbol_name=symbol_name)
+        elif obj.image_file:
+            # Replacing an existing picture — drop the old stored file so
+            # repeated "Replace" clicks don't accumulate orphaned objects
+            # (S3 or local disk; file_overwrite=False on S3 means a bare
+            # reassignment would otherwise leave the previous key behind).
+            obj.image_file.delete(save=False)
+
+        obj.legend_sheet = None
+        obj.content_type = content_type
+        file_ext = 'svg' if content_type == 'image/svg+xml' else 'png'
+        obj.image_file.save(f'{uuid.uuid4().hex}.{file_ext}', ContentFile(normalized_bytes), save=True)
+
+        return Response({
+            'section': obj.section,
+            'symbol_name': obj.symbol_name,
+            'content_type': obj.content_type,
+            'image_url': obj.image_file.url,
+        }, status=status.HTTP_200_OK)
+
+
+class SymbolImageDeleteView(APIView):
+    """DELETE the manually-uploaded image for one (project, section, symbol_name)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, *args, **kwargs):
+        project_id = (request.query_params.get('project_id') or '').strip()
+        section = (request.query_params.get('section') or '').strip()
+        symbol_name = (request.query_params.get('symbol_name') or '').strip()
+        if not project_id or not section or not symbol_name:
+            return Response({'error': 'project_id, section, and symbol_name are required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from .models import LegendSymbolImage
+        qs = LegendSymbolImage.objects.filter(
+            project__project_id=project_id, section=section, symbol_name=symbol_name,
+        )
+        deleted_count = 0
+        for obj in qs:
+            if obj.image_file:
+                obj.image_file.delete(save=False)
+            obj.delete()
+            deleted_count += 1
+        return Response({'deleted': deleted_count > 0}, status=status.HTTP_200_OK)
+
+
+class TestApiKeyView(APIView):
+    """POST a BYOK provider + api_key; sends one minimal text-only call
+    (no image, no P&ID) to confirm the key actually works. Not tied to any
+    specific extraction feature — reuses the same provider/model config as
+    the rest of BYOK Vision.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        provider = (request.data.get('provider') or 'claude').lower()
+        api_key = (request.data.get('api_key') or '').strip()
+        if provider not in SUPPORTED_PROVIDERS:
+            return Response({'valid': False, 'message': f"Unsupported provider '{provider}'."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not api_key:
+            return Response({'valid': False, 'message': 'API key is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from .services.vision_extractor import test_api_key
+        valid, message = test_api_key(provider, api_key)
+        return Response({'valid': valid, 'message': message}, status=status.HTTP_200_OK)
+
+
+class IdentifySymbolsView(APIView):
+    """POST a P&ID document id + BYOK; receive a best-guess list of legend
+    symbols the Vision model can identify on the drawing, compared against
+    that project's manually-uploaded reference pictures (LegendSymbolImage
+    — see SymbolImagesListView / SymbolImageUploadView). Each reference
+    picture is sent to Vision labeled with its exact symbol name, so the
+    model can match shapes on the drawing back to a name.
+
+    Separate, best-effort feature — does not touch line/equipment/instrument
+    tag extraction. Every result is explicitly flagged as needing engineer
+    verification; nothing here is auto-saved or treated as ground truth.
+    """
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, *args, **kwargs):
+        pid_document_id = (request.data.get('pid_document_id') or '').strip()
+        if not pid_document_id:
+            return Response({'error': 'pid_document_id is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.pid_verification.models import PIDVDocument
+        try:
+            pid_document = PIDVDocument.objects.get(document_id=pid_document_id)
+        except (PIDVDocument.DoesNotExist, ValueError, ValidationError):
+            return Response({'error': 'pid_document_id not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        if not pid_document.original_file:
+            return Response({'error': 'the P&ID document has no stored file to analyze'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not pid_document.project_id:
+            return Response({'error': 'this P&ID is not linked to a project, so its reference '
+                                       'pictures cannot be looked up. Re-upload it under a project first.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Project's own uploads, falling back per-symbol to any other
+        # project's picture where this one hasn't uploaded its own — same
+        # sharing behaviour as SymbolImagesListView (see
+        # _get_symbol_images_with_fallback), so a brand-new project can
+        # still run Identify Symbols using pictures uploaded elsewhere.
+        symbol_image_rows = _get_symbol_images_with_fallback(str(pid_document.project.project_id))
+        if not symbol_image_rows:
+            return Response({'error': 'no reference symbol pictures have been uploaded to any '
+                                       'project yet. Legend Sheets → pick a section → Reference '
+                                       'pictures → Upload at least one, then try again.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        provider = (request.data.get('provider') or 'claude').lower()
+        api_key = (request.data.get('api_key') or '').strip()
+        thorough = str(request.data.get('thorough') or '').strip().lower() in ('1', 'true', 'yes')
+        model = (request.data.get('model') or '').strip() or None
+        if provider not in SUPPORTED_PROVIDERS:
+            return Response({'error': f'provider must be one of {SUPPORTED_PROVIDERS}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not api_key:
+            return Response({'error': 'api_key required for vision extraction'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if model and provider == 'claude':
+            from .services.vision_extractor import ALLOWED_CLAUDE_VISION_MODELS
+            if model not in ALLOWED_CLAUDE_VISION_MODELS:
+                return Response({'error': f'model must be one of {ALLOWED_CLAUDE_VISION_MODELS}'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+        import base64
+
+        legend_symbol_images = []
+        for row in symbol_image_rows:
+            row.image_file.open('rb')
+            try:
+                data = row.image_file.read()
+            finally:
+                row.image_file.close()
+            legend_symbol_images.append({
+                'symbol_type': row.symbol_name,
+                'b64': base64.b64encode(data).decode('ascii'),
+            })
+
+        from .services.symbol_shape_extractor import identify_symbols_via_vision
+        try:
+            pid_document.original_file.open('rb')
+            pid_bytes = pid_document.original_file.read()
+        finally:
+            pid_document.original_file.close()
+
+        try:
+            result = identify_symbols_via_vision(pid_bytes, legend_symbol_images, api_key,
+                                                  provider=provider, thorough=thorough, model=model)
+        except Exception as exc:
+            logger.exception('Symbol identification failed')
+            msg = str(exc)
+            if 'overloaded' in msg.lower() or '529' in msg:
+                friendly = (f"{provider.title()} vision API is temporarily overloaded "
+                            "after several automatic retries. Please try again in a "
+                            "minute or switch provider.")
+            else:
+                friendly = f'symbol identification failed: {exc}'
+            return Response({'error': friendly},
+                            status=status.HTTP_502_BAD_GATEWAY)
+
+        _persist_token_usage(
+            user=request.user,
+            feature='symbol_identification',
+            usage=result.get('token_usage') or {},
+        )
+
+        return Response({
+            'identified_symbols': result['symbols'],
+            'total_count': result['total_count'],
+            'warning': 'Results require engineer verification',
+            'reference_image_count': result['reference_image_count'],
+            'thorough': result['thorough'],
+            'provider': result['provider'],
+            'model': result['model'],
+            'call_count': result['call_count'],
+            'token_usage': result.get('token_usage'),
+        }, status=status.HTTP_200_OK)
+
+
 # ─── Token usage endpoints ───────────────────────────────────────────
 USAGE_LIST_PAGE_SIZE = 200
 USAGE_LIST_MAX_PAGE_SIZE = 1000
@@ -1545,6 +1970,35 @@ class UsageSummaryView(APIView):
             'by_model': {k: _fmt(v) for k, v in by_model.items()},
             'row_count': qs.count(),
         })
+
+
+class CrossReferenceResultsView(APIView):
+    """POST {line_tags: [...], symbols: [...]} — already-computed results
+    from ExtractLineTagsView / IdentifySymbolsView — and get back which
+    ones share a drawing region (see services/cross_reference.py).
+
+    Stateless: takes whatever the caller already has in hand, runs no new
+    Vision calls, touches no extraction pipeline. A tag and a symbol
+    reported in the same coarse region (e.g. both "top-left") come back as
+    a CONFIRMED high-confidence pair.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        line_tags = request.data.get('line_tags')
+        symbols = request.data.get('symbols')
+        if not isinstance(line_tags, list) or not isinstance(symbols, list):
+            return Response({'error': 'line_tags and symbols must both be lists'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        from .services.cross_reference import cross_reference_results
+        try:
+            result = cross_reference_results(line_tags, symbols)
+        except Exception as exc:
+            logger.exception('Cross-reference failed')
+            return Response({'error': f'cross-reference failed: {exc}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class TokenReportView(APIView):

@@ -12,51 +12,22 @@ app = Celery('radai')
 
 # Using a string here means the worker doesn't have to serialize
 # the configuration object to child processes.
+# settings.CELERY_BEAT_SCHEDULE (built in config/settings.py by merging each
+# app's own BEAT_SCHEDULE dict) is picked up here via the CELERY_ namespace —
+# periodic tasks are NOT merged in this file. This module is imported from
+# config/__init__.py the moment Django's settings module is first touched,
+# often before django.setup() has populated the app registry; importing
+# apps.<name>.config here (as this file used to) intermittently raised
+# AppRegistryNotReady and/or landed in a not-yet-finalized `app.conf` view
+# whose beat_schedule assignment doesn't reliably stick before finalize.
+# Doing the merge in settings.py — which always finishes executing before
+# any app-registry-dependent code runs, and which these config.py modules
+# don't depend on anyway (they only build crontab() schedules) — avoids
+# both problems.
 app.config_from_object('django.conf:settings', namespace='CELERY')
 
 # Load task modules from all registered Django apps.
 app.autodiscover_tasks()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Periodic tasks (soft-coded; per-app dicts merged at import time so adding a
-# new feature is one-line, never edits to celery.py).
-# ─────────────────────────────────────────────────────────────────────────────
-from celery.schedules import crontab
-
-_beat_schedule: dict = {}
-
-try:
-    from apps.timesheet.config import BEAT_SCHEDULE as _timesheet_beat
-    _beat_schedule.update(_timesheet_beat)
-except Exception:
-    pass
-
-try:
-    from apps.project_control.config import BEAT_SCHEDULE as _project_control_beat
-    _beat_schedule.update(_project_control_beat)
-except Exception:
-    pass
-
-try:
-    from apps.finance.config import BEAT_SCHEDULE as _finance_beat
-    _beat_schedule.update(_finance_beat)
-except Exception:
-    pass
-
-try:
-    from apps.dashboard.config import BEAT_SCHEDULE as _dashboard_beat
-    _beat_schedule.update(_dashboard_beat)
-except Exception:
-    pass
-
-try:
-    from apps.payroll.config import BEAT_SCHEDULE as _payroll_beat
-    _beat_schedule.update(_payroll_beat)
-except Exception:
-    pass
-
-if _beat_schedule:
-    app.conf.beat_schedule = _beat_schedule
 
 
 @app.task(bind=True, ignore_result=True)

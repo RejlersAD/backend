@@ -295,6 +295,40 @@ if USE_S3:
             logger.info(f"[IOListDocumentStorage] Initialized: {self.bucket_name}/{self.location}")
 
 
+    class PIDAnalysisCacheStorage(S3Boto3Storage):
+        """
+        Dedicated S3 storage for P&ID analysis result-cache snapshots
+        (apps.pid_verification.services.results_cache) — one JSON blob per
+        document at ``analysis_cache/<document_id>/results.json``.
+
+        file_overwrite=True (unlike the other classes in this file): there is
+        exactly one canonical cache file per document, always replaced in
+        place rather than accumulating hashed-filename versions.
+        """
+
+        location = 'media/analysis_cache'
+        default_acl = 'private'
+        file_overwrite = True
+        custom_domain = False
+
+        @property
+        def endpoint_url(self):
+            region = getattr(settings, 'AWS_S3_REGION_NAME', 'us-east-1')
+            return getattr(settings, 'AWS_S3_ENDPOINT_URL', f'https://s3.{region}.amazonaws.com')
+
+        object_parameters = {
+            'CacheControl': 'no-cache',
+            'Metadata': {
+                'app': 'aiflow',
+                'content_type': 'pid_analysis_cache',
+            },
+        }
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            logger.info(f"[PIDAnalysisCacheStorage] Initialized: {self.bucket_name}/{self.location}")
+
+
     class PlanningIntelligenceStorage(S3Boto3Storage):
         """
         Dedicated S3 storage for RADAI Project Planning Application uploads
@@ -393,5 +427,11 @@ else:
         """Local storage for RADAI Project Planning Application uploads (non-S3 fallback)"""
         def __init__(self, *args, **kwargs):
             kwargs['location'] = 'media/planning_intelligence'
+            super().__init__(*args, **kwargs)
+
+    class PIDAnalysisCacheStorage(FileSystemStorage):
+        """Local storage for P&ID analysis result-cache snapshots (non-S3 fallback)"""
+        def __init__(self, *args, **kwargs):
+            kwargs['location'] = 'media/analysis_cache'
             super().__init__(*args, **kwargs)
 

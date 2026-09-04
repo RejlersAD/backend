@@ -255,6 +255,22 @@ urlpatterns.extend([
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='swagger-ui'),  name='swagger-ui'),
 ])
 
-# Serve media files in development
+# Serve media files whenever they're actually on local disk (dev, or any
+# deployment running with USE_S3=False) — gating this on DEBUG alone left
+# every locally-stored upload (e.g. legend symbol pictures) 404ing in any
+# non-DEBUG environment that isn't using S3, since nothing else serves
+# MEDIA_URL in that case (WhiteNoise only covers STATIC_URL).
+#
+# NOTE: django.conf.urls.static.static() has its own hardcoded
+# `if not settings.DEBUG: return []` guard baked into Django itself, so it
+# can't be used here even wrapped in our own condition — it silently
+# no-ops whenever DEBUG=False regardless of what triggered the call. Using
+# django.views.static.serve directly bypasses that shortcut's restriction.
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+elif not getattr(settings, 'USE_S3', False):
+    from django.urls import re_path
+    from django.views.static import serve as serve_static_media
+    urlpatterns += [
+        re_path(r'^media/(?P<path>.*)$', serve_static_media, {'document_root': settings.MEDIA_ROOT}),
+    ]

@@ -114,18 +114,22 @@ INSTRUMENT SYMBOL SHAPES (ISA-5.1) — read the tag inside each of these:
   (4) Circle inside a SQUARE / hexagon   → DCS / PLC / computer function.
 Every one of these balloons carries a tag inside — READ IT.
 
-Tag shapes (both are valid, drawings often mix them):
-  HYPHENATED :  LT-8019, LT-8019TF, PT-8003A, PCV-8004B, SDV-8003TF, FE-8001
-  FUSED     :  SDV8005, FIC8002, LCV8002, CP8003, PI8003, PI8003A, PI8003B,
-               PCV8004A, LT8019, PT8003ATF
+Tag shapes (both are valid, drawings often mix them). These are ILLUSTRATIVE
+SHAPES only, not real values — never copy one into your output; every tag
+you report must come from characters you actually observe in THIS image.
+  HYPHENATED :  FUNC-####, FUNC-####SITE, FUNC-####A
+  FUSED     :  FUNC####, FUNC####A, FUNC####SITE
 
 Field rules:
 - FUNC  = 1-4 uppercase ISA letters (LT, PT, FT, FIC, LIC, PCV, FCV, LCV,
           PSV, SDV, TIT, FIT, LG, FE, TW, PY, LY, CP, PI, TI, LI…).
-- LOOP  = 2-4 digits, optional trailing single letter for parallel duty
-          (8003A, 8004B).
-- SITE  = optional 2-letter site symbol (TF = Mubarraz Island); may appear
-          fused ("PT8003ATF") or space-separated ("LT-8019 TF").
+- LOOP  = 2-4 digits — read EVERY digit independently and carefully. Two
+          tags can share the same FUNC/SITE and differ only in one LOOP
+          digit — do not let a tag you already reported bias your reading
+          of a different, similar-looking tag elsewhere on the drawing.
+          Optional trailing single letter for parallel duty (e.g. ...A, ...B).
+- SITE  = optional 2-letter site symbol (a project-specific code — read it
+          exactly as printed); may appear fused or space-separated.
 - The hyphen between FUNC and LOOP is OPTIONAL.
   Preserve the tag EXACTLY as it appears on the drawing — do NOT insert
   a hyphen where the drawing omits one, and do NOT delete a hyphen where
@@ -138,25 +142,28 @@ INCLUDE:
 - Tags on branches to vessels, on flare / drain / vent lines.
 - Balloons near the borders of the drawing — check every corner.
 
-EXCLUDE strictly:
-- Equipment tags (V-803-TF, P-801-A, E-401, T-101, K-501).
-- Line tags (4"-FL-AC6N-8112, 20"-PL-DC3N-8106).
-- Reference / drawing numbers (PJ6-EXD-MRI-BQDA-0023).
-- Note / type callouts (NOTE 4, TYPE 8, DETAIL A).
+EXCLUDE strictly (these are illustrative SHAPES only, not real values — do
+not let them bias your reading of similar-looking text elsewhere):
+- Equipment tags (shape PREFIX-###[-SITE], e.g. V-###-XX, P-###A).
+- Line tags (shape SIZE"-SERVICE-SPEC-SERIAL, e.g. #"-XX-YYNN-####).
+- Reference / drawing numbers (shape PJ#-XXX-XXX-XXXX-####).
+- Note / type callouts (NOTE #, TYPE #, DETAIL #).
 
 SCAN THE ENTIRE IMAGE METHODICALLY:
 - Start top-left, sweep row by row down to bottom-right.
 - Read text rotated 90° / 270° along vertical lines.
 - Do not stop after finding a few tags — a typical P&ID has 20-80.
 
-Return ONLY a JSON array of objects — no prose, no markdown fences.
-Each object has these fields (leave "" if not visible):
+Return ONLY a JSON array of objects — no prose, no markdown fences. Every
+"tag" value must be a literal transcription of what you see in the image,
+not a copy of a shape example above. Each object has these fields (leave ""
+if not visible):
   {
-    "tag": "SDV8005",
-    "function_code": "SDV",
-    "loop_number": "8005",
+    "tag": "<func><loop><site?>",
+    "function_code": "<func>",
+    "loop_number": "<loop>",
     "site_symbol": "",
-    "service": "Shutdown valve",
+    "service": "<service text as printed, or empty string>",
     "attributes": {
       "instrument_type":     "",
       "service_description": "",
@@ -183,8 +190,9 @@ Attribute rules — read verbatim from the drawing, DO NOT invent:
 - ex_class = hazardous-area classification (e.g. "Ex ia IIC T4").
 - power_supply = "24VDC", "230VAC", "Loop-powered", etc.
 
-Only strip whitespace INSIDE a tag (so "LT-8019 TF" → "LT-8019TF"); keep
-the presence or absence of the hyphen exactly as drawn.
+Only strip whitespace INSIDE a tag (e.g. a fused FUNC-LOOP-SITE reading
+with a stray space before the site symbol should have that space removed);
+keep the presence or absence of the hyphen exactly as drawn.
 
 Be exhaustive. Miss nothing.
 """

@@ -1,17 +1,27 @@
 """
 Celery Background Tasks — P&ID Verification
 ============================================
-Task pipeline (all chained in a single async job):
-  1. Segment document into drawings
-  2. For each drawing: extract → build graph → run rule engine → save findings
-  3. Generate Excel & PDF reports → upload to S3
-  4. Update document status = completed (or failed)
+Task pipeline:
+  1. Segment document into drawings (one per PDF page)
+  2. Small documents (<= MULTI_PAGE_PARALLEL_THRESHOLD pages): processed
+     inline, one page at a time, in this task.
+     Large documents: fanned out to parallel per-page subtasks
+     (process_pid_page, one Celery task per page) via a chord, mirroring
+     apps.pid_verification_v2 — sequential per-page processing cannot
+     finish a 32-50 page P&ID set within any sane Celery time limit.
+  3. Per page: extract -> build graph -> run rule engine -> comparison
+     engine -> AI Vision analysis (BYOK) -> legend/symbol bridge -> save
+     findings.
+  4. Generate Excel & PDF reports -> upload to S3 (finalize step).
+  5. Update document status = completed (or failed).
 """
 import logging
 import os
+import shutil
 import tempfile
 
 from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -25,20 +35,35 @@ logger = logging.getLogger(__name__)
 # extraction).  Set to False to allow quality checks without a legend.
 LEGEND_REQUIRED_FOR_QC = True
 
+# Documents segmented into MORE pages than this are fanned out across
+# parallel Celery subtasks (one per page, via a chord) instead of being
+# processed sequentially inside a single task — mirrors
+# apps.pid_verification_v2.tasks.MULTI_PAGE_PARALLEL_THRESHOLD exactly (same
+# reasoning: a 28+ page P&ID set cannot realistically finish sequential
+# multi-pass OCR within any sane Celery time limit).
+MULTI_PAGE_PARALLEL_THRESHOLD = 2
+
 
 @shared_task(
     bind=True,
     name='pid_verification.process_document',
     max_retries=2,
     default_retry_delay=30,
-    soft_time_limit=540,   # 9 min soft limit
-    time_limit=600,        # 10 min hard limit
+    # Soft-coded to match apps.pid_verification_v2's top-level task budget —
+    # was 540s/600s (9/10 min), tuned back when this task only ever
+    # processed a single page. Documents over MULTI_PAGE_PARALLEL_THRESHOLD
+    # now fan out to process_pid_page (their own bounded per-page budget)
+    # almost immediately, but small documents still run their full
+    # extraction/Vision pipeline inline in THIS task, so it needs the same
+    # generous budget process_pid_page gets.
+    soft_time_limit=1800,  # 30 min soft limit
+    time_limit=2100,       # 35 min hard limit
 )
 def process_pid_document(self, document_id: str, context: dict = None):
     """
     Main background task.
     Receives the string form of PIDVDocument.document_id (UUID).
-    
+
     Args:
         document_id: UUID string of the PIDVDocument
         context: Optional dict with BYOK settings:
@@ -47,14 +72,8 @@ def process_pid_document(self, document_id: str, context: dict = None):
                  - claude_api_key: User-provided Claude API key
     """
     context = context or {}
-    from apps.pid_verification.models import PIDVDocument, PIDVDrawing, PIDVFinding
-    from apps.pid_verification.services.segmentation  import segment_document
-    from apps.pid_verification.services.extraction    import extract_drawing
-    from apps.pid_verification.services.graph_builder import build_graph
-    from apps.pid_verification.services.rule_engine   import run_rules
-    from apps.pid_verification.services.export_service import (
-        generate_excel, generate_pdf, upload_to_s3
-    )
+    from apps.pid_verification.models import PIDVDocument
+    from apps.pid_verification.services.segmentation import segment_document
 
     logger.info('[PIDVTask] Starting processing for document_id=%s with context=%s', document_id, context)
 
@@ -78,6 +97,16 @@ def process_pid_document(self, document_id: str, context: dict = None):
             project.legend_knowledge_data is not None
             or project.legend_sheets.filter(status='completed').exists()
         )
+        # Fallback: the project-level legend-PDF upload above was deprecated
+        # in favor of pid_checker_v2's per-user LegendSheetsModal (structured
+        # rule sheets — no AI-extraction step, so "active" is the equivalent
+        # of "completed" here). Without this, the gate is a dead end, since
+        # nothing in the current UI can satisfy the checks above.
+        if not legend_ready and doc.uploaded_by_id:
+            from apps.pid_checker_v2.models import PidCheckerV2LegendSheet
+            legend_ready = PidCheckerV2LegendSheet.objects.filter(
+                created_by_id=doc.uploaded_by_id, is_active=True,
+            ).exists()
         if not legend_ready:
             doc.status        = PIDVDocument.Status.LEGEND_PENDING
             doc.error_message = (
@@ -92,397 +121,74 @@ def process_pid_document(self, document_id: str, context: dict = None):
             )
             return   # not a failure — user must upload a legend first
 
-    # ── V2 ORCHESTRATOR: Configuration-driven processing pipeline ────────
-    USE_V2_ORCHESTRATOR = True  # Feature flag - set to False to use legacy pipeline
-    
-    if USE_V2_ORCHESTRATOR:
-        try:
-            from apps.pid_verification.services.orchestrator import (
-                PipelineOrchestrator,
-                PipelineContext,
-                update_processing_progress,
-            )
-            
-            logger.info('[PIDVTask] Using V2 Orchestrator for document_id=%s', document_id)
-            
-            # Initialize pipeline context
-            pipeline_context = PipelineContext(
-                document_id=str(doc.document_id),
-                document=doc,
-                project=doc.project if doc.project_id else None,
-                user_context=context,
-            )
-            
-            # Execute orchestrated pipeline
-            orchestrator = PipelineOrchestrator()
-            result_context = orchestrator.execute(pipeline_context)
-            
-            # Check for critical failure
-            if result_context.has_critical_failure():
-                doc.status = PIDVDocument.Status.FAILED
-                doc.error_message = 'Critical processing stage failed. Check logs for details.'
-                doc.save(update_fields=['status', 'error_message', 'updated_at'])
-                logger.error('[PIDVTask] Pipeline failed for document_id=%s', document_id)
-                return
-            
-            # Persist findings from all sources
-            from apps.pid_verification.models import PIDVDrawing, PIDVFinding
-            
-            # Get or create drawing (assuming single drawing for now)
-            if result_context.segments:
-                seg = result_context.segments[0]
-                drawing_obj, _ = PIDVDrawing.objects.get_or_create(
-                    document=doc,
-                    drawing_id=seg.drawing_id,
-                    defaults={
-                        'title': seg.title,
-                        'page_index': seg.page_index,
-                        'metadata': seg.metadata,
-                    },
-                )
-                
-                # Clear existing findings
-                drawing_obj.findings.all().delete()
-                
-                # Store extraction and comparison results in metadata
-                metadata = drawing_obj.metadata or {}
-                metadata['extraction_summary'] = result_context.get_stage_result('extraction').data if result_context.get_stage_result('extraction') else {}
-                metadata['comparison_summary'] = result_context.get_stage_result('comparison_engine').data if result_context.get_stage_result('comparison_engine') else {}
-                metadata['processing_duration'] = result_context.get_total_duration()
-                drawing_obj.metadata = metadata
-                drawing_obj.save(update_fields=['metadata'])
-                
-                # Merge all findings
-                all_findings = (
-                    result_context.rule_findings + 
-                    result_context.comparison_findings + 
-                    result_context.ai_findings
-                )
-                
-                # Bulk create findings
-                bulk = []
-                for sl, rf in enumerate(all_findings, start=1):
-                    bulk.append(PIDVFinding(
-                        drawing=drawing_obj,
-                        sl_no=sl,
-                        category=rf.category,
-                        rule_id=rf.rule_id,
-                        issue_observed=rf.issue_observed,
-                        action_required=rf.action_required,
-                        evidence=rf.evidence,
-                        direction=rf.direction,
-                        severity=rf.severity,
-                        status='open',
-                    ))
-                
-                if bulk:
-                    PIDVFinding.objects.bulk_create(bulk, batch_size=500)
-                    logger.info('[PIDVTask] Created %d findings for drawing_id=%s', len(bulk), seg.drawing_id)
-            
-            # Mark document as completed
-            doc.status = PIDVDocument.Status.COMPLETED
-            doc.save(update_fields=['status', 'updated_at'])
-            logger.info('[PIDVTask] V2 Pipeline completed successfully for document_id=%s', document_id)
-            return
-            
-        except Exception as orch_exc:
-            logger.error(
-                '[PIDVTask] V2 Orchestrator failed for document_id=%s: %s',
-                document_id, orch_exc, exc_info=True
-            )
-            # Fall through to legacy pipeline
-            logger.warning('[PIDVTask] Falling back to legacy pipeline')
-    
-    # ── LEGACY PIPELINE (V1 Logic) — Fallback if orchestrator disabled ───
+    # NOTE: this task used to try apps.pid_verification.services.orchestrator
+    # (a stage-based pipeline) first, falling back to a "legacy" per-page
+    # loop only if the orchestrator raised. In practice the orchestrator
+    # NEVER raised — it just silently processed context.segments[0] only
+    # (see ExtractionStage's own comment: "Extract from first segment,
+    # multi-segment support can be added") — so pages 2+ of every
+    # multi-page document were dropped with no error, and the correct
+    # multi-page "legacy" loop below was never actually reached. That
+    # orchestrator is left in place (unused) rather than deleted, in case
+    # someone wants to finish it properly later; this task no longer calls
+    # it. The loop below (already page-complete) is now the only path, and
+    # is used both for small documents (inline, right here) and — via
+    # process_pid_page — for the parallel per-page fan-out on large ones.
+
+    # ── Reference symbol pictures — loaded ONCE for this whole document
+    # run, reused for every page (inline or fanned-out) instead of every
+    # page re-reading/re-encoding the same images from storage. Always
+    # fetched fresh from LegendSymbolImage (never a hardcoded count), so
+    # this scales to any library size automatically. Only bothers fetching
+    # when a Claude key is actually present — Vision won't run without one.
+    _symbol_images = []
+    if context.get('claude_api_key') and doc.project_id:
+        _symbol_images = _load_symbol_images_v1(doc.project)
+        logger.info(
+            '[PIDVTask] Loaded %d reference symbol image(s) for document_id=%s',
+            len(_symbol_images), document_id,
+        )
+
     try:
-        # ── 2. Resolve file path ──────────────────────────────────────────
+        # ── Resolve file path ────────────────────────────────────────────
         file_path = _resolve_file_path(doc)
 
-        # ── 3. Segment into drawings ──────────────────────────────────────
+        # ── Segment into pages ───────────────────────────────────────────
         segments = segment_document(str(doc.document_id), file_path)
-        logger.info('[PIDVTask] %d drawing(s) segmented', len(segments))
+        logger.info('[PIDVTask] %d page(s) segmented for document_id=%s', len(segments), document_id)
 
-        # ── 3b. Resolve per-project legend (project legend → global fallback) ──
+        # ── Resolve per-project legend (project legend → global fallback) ──
         project_legend = None
         if doc.project_id and doc.project and doc.project.legend_knowledge_data:
             project_legend = doc.project.legend_knowledge_data
             logger.info('[PIDVTask] Using per-project legend for project=%s', doc.project.project_id)
 
-        all_findings_count = 0
+        # ── Large documents: fan out to parallel per-page subtasks ────────
+        # Sequential per-page OCR/extraction does not scale — mirrors
+        # apps.pid_verification_v2.tasks.process_pid_document exactly.
+        if len(segments) > MULTI_PAGE_PARALLEL_THRESHOLD:
+            from celery import chord
+            from dataclasses import asdict as _asdict
+
+            header = [
+                process_pid_page.s(str(doc.document_id), _asdict(seg), context, _symbol_images)
+                for seg in segments
+            ]
+            chord(header)(finalize_pid_document.s(str(doc.document_id)))
+            logger.info(
+                '[PIDVTask] Dispatched %d parallel page-task(s) for document_id=%s',
+                len(segments), document_id,
+            )
+            return  # doc stays PROCESSING; finalize_pid_document completes it
+
+        # ── Small document (<= threshold pages) — process inline ──────────
+        with open(file_path, 'rb') as _fh:
+            pdf_bytes = _fh.read()
 
         for seg in segments:
-            # Save drawing record (idempotent via get_or_create)
-            drawing_obj, _ = PIDVDrawing.objects.get_or_create(
-                document=doc,
-                drawing_id=seg.drawing_id,
-                defaults={
-                    'title':      seg.title,
-                    'page_index': seg.page_index,
-                    'metadata':   seg.metadata,
-                }
-            )
-            # Clear any previous findings (re-process idempotency)
-            drawing_obj.findings.all().delete()
+            _process_one_page(doc, seg, file_path, pdf_bytes, project_legend, context, _symbol_images)
 
-            # ── 4. Extract elements ───────────────────────────────────────
-            extraction = extract_drawing(file_path, page_index=seg.page_index, legend_data=project_legend)
-
-            # Persist extraction diagnostics per drawing for frontend transparency.
-            raw_text = extraction.get('raw_text', '') or ''
-            extraction_summary = {
-                'tags': len(extraction.get('tags', [])),
-                'instruments': len(extraction.get('instruments', [])),
-                'valves': len(extraction.get('valves', [])),
-                'equipment': len(extraction.get('equipment', [])),
-                'line_sizes': len(extraction.get('line_sizes', [])),
-                'notes': len(extraction.get('notes', [])),
-                'holds': len(extraction.get('holds', [])),
-                'raw_text_length': len(raw_text),
-                'no_text_detected': len(raw_text.strip()) == 0,
-                # Multi-angle pipeline designations (H + V combined, deduplicated)
-                'line_tags': len(extraction.get('line_tags', [])),
-                'line_tags_multi_angle': sum(
-                    1 for lt in extraction.get('line_tags', []) if lt.get('multi_angle')
-                ),
-            }
-            metadata = drawing_obj.metadata or {}
-            metadata['extraction_summary'] = extraction_summary
-            # Real tag anchor coordinates for v2 smart overlay (soft-coded, additive).
-            tag_positions = extraction.get('tag_positions', {})
-            if tag_positions:
-                metadata['tag_positions'] = tag_positions
-            # Pipeline line designations with orientation info (H/V multi-angle).
-            line_tags = extraction.get('line_tags', [])
-            if line_tags:
-                metadata['line_tags'] = line_tags
-            # Red-colored annotations (revision marks, HOLDs, scope-cloud items).
-            red_annotations = extraction.get('red_annotations', [])
-            if red_annotations:
-                metadata['red_annotations'] = red_annotations
-            drawing_obj.metadata = metadata
-            drawing_obj.save(update_fields=['metadata'])
-
-            # ── 5. Build graph ────────────────────────────────────────────
-            graph = build_graph(extraction)
-
-            # ── 6. Run deterministic rule engine ─────────────────────────
-            rule_findings = run_rules(extraction, graph)
-            
-            # ── 6b. V2 COMPARISON ENGINE — Cross-document comparison ─────
-            # Run comparison-based analysis (V2 feature)
-            comparison_findings = []
-            try:
-                from apps.pid_verification.services.comparison_engine import run_all_comparisons
-                
-                # Fetch reference data for comparison
-                legend_data = project_legend  # Already resolved above
-                line_list_data = []
-                equipment_list_data = []
-                instrument_index_data = []
-                
-                # Fetch Line List data if available
-                if doc.project_id and doc.project:
-                    # TODO: Load actual line list from database/Excel
-                    # For now, use empty list - will be populated when Line List import is implemented
-                    logger.info('[PIDVTask] Line List comparison: No reference data available yet')
-                
-                # Fetch Equipment List data if available
-                if doc.project_id and doc.project:
-                    # TODO: Load actual equipment list from database
-                    # For now, use empty list
-                    logger.info('[PIDVTask] Equipment List comparison: No reference data available yet')
-                
-                # Fetch Instrument Index data if available
-                if doc.project_id and doc.project:
-                    # TODO: Load actual instrument index from database
-                    # For now, use empty list
-                    logger.info('[PIDVTask] Instrument Index comparison: No reference data available yet')
-                
-                # Run all 4 comparison types
-                logger.info('[PIDVTask] Running V2 comparison engine for drawing_id=%s', seg.drawing_id)
-                comparison_results = run_all_comparisons(
-                    extraction=extraction,
-                    legend_data=legend_data,
-                    line_list_data=line_list_data,
-                    equipment_list_data=equipment_list_data,
-                    instrument_index_data=instrument_index_data
-                )
-                
-                # Store comparison results in drawing metadata for frontend access
-                metadata = drawing_obj.metadata or {}
-                metadata['comparison_results'] = {
-                    comp_type: {
-                        'total_pid_items': result.total_pid_items,
-                        'total_ref_items': result.total_ref_items,
-                        'matched_count': result.matched_count,
-                        'missing_count': result.missing_count,
-                        'extra_count': result.extra_count,
-                        'mismatch_count': result.mismatch_count,
-                        'summary': result.summary,
-                    }
-                    for comp_type, result in comparison_results.items()
-                }
-                drawing_obj.metadata = metadata
-                drawing_obj.save(update_fields=['metadata'])
-                
-                # Convert comparison findings to RuleFinding format
-                from apps.pid_verification.services.rule_engine import RuleFinding
-                
-                for comp_type, result in comparison_results.items():
-                    for finding in result.findings:
-                        # Generate rule ID based on comparison type and category
-                        rule_prefix = {
-                            'legend': 'LGN',
-                            'linelist': 'LSZ',
-                            'equipment': 'EQP',
-                            'instrument': 'IMS'
-                        }.get(comp_type, 'CMP')
-                        
-                        category_suffix = {
-                            'missing': '001',
-                            'extra': '002',
-                            'mismatch': '003'
-                        }.get(finding.category, '999')
-                        
-                        rule_id = f'{rule_prefix}-{category_suffix}'
-                        
-                        comparison_findings.append(RuleFinding(
-                            category=comp_type,
-                            rule_id=rule_id,
-                            issue_observed=finding.issue_observed,
-                            action_required=f'Review and resolve {finding.category} discrepancy',
-                            evidence=finding.evidence,
-                            direction=None,
-                            severity=finding.severity
-                        ))
-                
-                logger.info(
-                    '[PIDVTask] V2 Comparison complete: %d comparison findings generated',
-                    len(comparison_findings)
-                )
-                
-            except Exception as comp_exc:
-                logger.error(
-                    '[PIDVTask] Comparison engine failed: %s',
-                    str(comp_exc), exc_info=True
-                )
-                # Store error in metadata but continue processing
-                metadata = drawing_obj.metadata or {}
-                metadata['comparison_error'] = {
-                    'error': str(comp_exc),
-                    'timestamp': str(timezone.now())
-                }
-                drawing_obj.metadata = metadata
-                drawing_obj.save(update_fields=['metadata'])
-            
-            # ── 6c. AI Analysis (BYOK) — Optional enhancement ────────────
-            ai_findings = []
-            if context:
-                analysis_mode = context.get('analysis_mode', 'standard')
-                
-                if analysis_mode != 'standard':
-                    logger.info(
-                        '[PIDVTask] Running AI analysis mode=%s for drawing_id=%s',
-                        analysis_mode, seg.drawing_id
-                    )
-                    
-                    try:
-                        from apps.pid_verification.services.ai_analysis import (
-                            run_openai_analysis,
-                            run_claude_analysis,
-                            run_hybrid_analysis,
-                        )
-                        
-                        # Prepare drawing data for AI analysis
-                        drawing_data = {
-                            'instruments': extraction.get('instruments', []),
-                            'valves': extraction.get('valves', []),
-                            'equipment': extraction.get('equipment', []),
-                            'tags': extraction.get('tags', []),
-                            'line_tags': extraction.get('line_tags', []),
-                            'line_sizes': extraction.get('line_sizes', []),
-                            'notes': extraction.get('notes', []),
-                        }
-                        
-                        # Route to appropriate AI service
-                        if analysis_mode == 'enhanced_openai':
-                            openai_key = context.get('openai_api_key')
-                            if openai_key:
-                                ai_findings = run_openai_analysis(drawing_data, openai_key)
-                        
-                        elif analysis_mode == 'deep_claude':
-                            claude_key = context.get('claude_api_key')
-                            if claude_key:
-                                ai_findings = run_claude_analysis(drawing_data, claude_key)
-                        
-                        elif analysis_mode == 'hybrid':
-                            openai_key = context.get('openai_api_key')
-                            claude_key = context.get('claude_api_key')
-                            if openai_key and claude_key:
-                                ai_findings = run_hybrid_analysis(drawing_data, openai_key, claude_key)
-                        
-                        logger.info(
-                            '[PIDVTask] AI analysis completed: %d findings from %s',
-                            len(ai_findings), analysis_mode
-                        )
-                    
-                    except Exception as ai_exc:
-                        logger.error(
-                            '[PIDVTask] AI analysis failed for mode=%s: %s',
-                            analysis_mode, str(ai_exc), exc_info=True
-                        )
-                        # Continue processing with rule-based findings only
-                        # Store error in drawing metadata for user visibility
-                        metadata = drawing_obj.metadata or {}
-                        metadata['ai_analysis_error'] = {
-                            'mode': analysis_mode,
-                            'error': str(ai_exc),
-                            'timestamp': str(timezone.now())
-                        }
-                        drawing_obj.metadata = metadata
-                        drawing_obj.save(update_fields=['metadata'])
-            
-            # ── 7. Merge rule-based, comparison, and AI findings ─────────
-            # Soft-coded: V2 comparison findings + AI findings are additive to rule-based findings
-            all_findings = rule_findings + comparison_findings + ai_findings
-
-            # ── 8. Persist findings ───────────────────────────────────────
-            bulk = []
-            for sl, rf in enumerate(all_findings, start=1):
-                bulk.append(PIDVFinding(
-                    drawing         = drawing_obj,
-                    sl_no           = sl,
-                    category        = rf.category,
-                    rule_id         = rf.rule_id,
-                    issue_observed  = rf.issue_observed,
-                    action_required = rf.action_required,
-                    evidence        = rf.evidence,
-                    direction       = rf.direction,
-                    severity        = rf.severity,
-                    status          = 'open',
-                ))
-            PIDVFinding.objects.bulk_create(bulk)
-            all_findings_count += len(bulk)
-            logger.info('[PIDVTask] Drawing %s → %d findings', seg.drawing_id, len(bulk))
-
-        # ── 9. Generate & upload reports ──────────────────────────────────
-        doc.refresh_from_db()
-
-        excel_bytes = generate_excel(doc)
-        if excel_bytes:
-            project_slug = str(doc.project.project_id) if doc.project_id else 'unassigned'
-            key = f'pid_verification/projects/{project_slug}/reports/{doc.document_id}/findings.xlsx'
-            doc.excel_s3_url = upload_to_s3(excel_bytes, key, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-
-        pdf_bytes = generate_pdf(doc)
-        if pdf_bytes:
-            project_slug = str(doc.project.project_id) if doc.project_id else 'unassigned'
-            key = f'pid_verification/projects/{project_slug}/reports/{doc.document_id}/findings.pdf'
-            doc.pdf_s3_url = upload_to_s3(pdf_bytes, key, 'application/pdf')
-
-        doc.status = PIDVDocument.Status.COMPLETED
-        doc.save(update_fields=['status', 'excel_s3_url', 'pdf_s3_url', 'updated_at'])
-        logger.info('[PIDVTask] Completed document_id=%s  total_findings=%d', document_id, all_findings_count)
+        _finalize_document(doc, document_id)
 
     except Exception as exc:
         logger.exception('[PIDVTask] Processing failed for document_id=%s: %s', document_id, exc)
@@ -498,9 +204,24 @@ def _resolve_file_path(doc) -> str:
 
     Resolution order (soft-coded to handle all storage backends):
       1. Local FileField  →  .path  (e.g. FileSystemStorage / ResilientMediaStorage)
-      2. S3 FileField     →  .name  holds the S3 key → download to tmp file
-      3. Explicit s3_path →  download to tmp file
+      2. Any other FileField backend (S3 or otherwise) → read through the
+         field's OWN storage object (see _download_via_storage below).
+      3. Explicit s3_path →  download to tmp file (legacy path, no Storage
+         object available — see _download_from_s3)
     Raises ValueError when no source is available.
+
+    IMPORTANT — 2026-08-27 postmortem: step 2 used to hand-roll S3 access
+    with a raw boto3 client, keyed on doc.original_file.name alone. That
+    silently ignored the configured storage backend's `location` prefix
+    (e.g. MediaStorage.location = 'media' — see apps/core/storage_backends.py)
+    — Django's FileField.name is relative to that location, NOT a full S3
+    key. So every single download 404'd on HeadObject: it asked S3 for
+    "<upload_to_path>/<file>" when the real object was at
+    "media/<upload_to_path>/<file>". Going through
+    doc.original_file.storage (the exact same Storage instance that
+    performed the original upload) makes this correct automatically, for
+    whichever storage backend is actually configured — no prefix, bucket,
+    region, or credential logic to keep in sync by hand ever again.
     """
     if doc.original_file:
         # Try local path first (works for FileSystemStorage and ResilientMediaStorage)
@@ -511,13 +232,13 @@ def _resolve_file_path(doc) -> str:
         except NotImplementedError:
             pass  # S3Boto3Storage raises NotImplementedError for .path
 
-        # For S3-backed FileField, .name is the S3 object key
-        s3_key = getattr(doc.original_file, 'name', None)
-        if s3_key:
-            logger.info('[PIDVTask] Downloading file from S3 key: %s', s3_key)
-            return _download_from_s3(s3_key)
+        if doc.original_file.name:
+            logger.info('[PIDVTask] Downloading file via storage backend: %s', doc.original_file.name)
+            return _download_via_storage(doc.original_file)
 
-    # Explicit s3_path field (legacy / manually set)
+    # Explicit s3_path field (legacy / manually set) — no Storage object
+    # attached to a plain CharField, so this one genuinely does need a raw
+    # boto3 client; s3_key here is assumed to already be a full bucket key.
     if doc.s3_path:
         logger.info('[PIDVTask] Downloading file from explicit s3_path: %s', doc.s3_path)
         return _download_from_s3(doc.s3_path)
@@ -525,8 +246,26 @@ def _resolve_file_path(doc) -> str:
     raise ValueError(f'No file path available for document {doc.document_id}')
 
 
+def _download_via_storage(file_field) -> str:
+    """Download a FileField's content to a temp file through its OWN
+    storage backend — correctly handles bucket/region/credentials/location
+    prefix for whichever backend is configured (S3Boto3Storage,
+    FileSystemStorage, etc.), instead of reconstructing S3 access by hand."""
+    ext = file_field.name.rsplit('.', 1)[-1] if '.' in file_field.name else 'bin'
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}')
+    with file_field.open('rb') as src:
+        shutil.copyfileobj(src, tmp)
+    tmp.flush()
+    tmp.close()
+    return tmp.name
+
+
 def _download_from_s3(s3_key: str) -> str:
-    """Download an S3 object to a temp file and return its path."""
+    """Download an S3 object to a temp file and return its path. Only used
+    for the legacy explicit doc.s3_path field (a plain CharField with no
+    Storage object attached) — s3_key is assumed to already be a full,
+    correct bucket key, unlike a FileField's .name (see _resolve_file_path's
+    docstring for why that distinction matters)."""
     import boto3
     bucket = os.environ.get('AWS_STORAGE_BUCKET_NAME', '')
     region = os.environ.get('AWS_S3_REGION_NAME', 'us-east-1')
@@ -538,6 +277,531 @@ def _download_from_s3(s3_key: str) -> str:
     tmp.flush()
     tmp.close()
     return tmp.name
+
+
+# ===========================================================================
+# Multi-page processing — one page at a time, shared by the inline path
+# (small documents) and process_pid_page (large documents, parallel fan-out)
+# ===========================================================================
+
+def _load_symbol_images_v1(project) -> list:
+    """Reference symbol pictures for a V1 project — loaded ONCE per document
+    run (see process_pid_document) and reused for every page, instead of
+    every page independently re-reading/re-encoding the same images.
+
+    Unlike apps.pid_verification_v2's equivalent bridge helper, no
+    project-name-matching indirection is needed here: LegendSymbolImage.project
+    is a direct FK into THIS app's PIDVProject (see
+    apps.pid_checker_v2.models.LegendSymbolImage). Always queried fresh from
+    the DB (never a hardcoded count), so this scales to any library size —
+    uploading symbol #501 needs no code change here.
+    """
+    if project is None:
+        return []
+    try:
+        import base64
+        from apps.pid_checker_v2.views import _get_symbol_images_with_fallback
+
+        rows = _get_symbol_images_with_fallback(str(project.project_id))
+        images = []
+        for row in rows:
+            if not row.image_file:
+                continue
+            row.image_file.open('rb')
+            try:
+                data = row.image_file.read()
+            finally:
+                row.image_file.close()
+            images.append({
+                'symbol_type': row.symbol_name,
+                'b64': base64.b64encode(data).decode('ascii'),
+            })
+        return images
+    except Exception:
+        logger.warning('[PIDVTask] Could not load symbol images (non-fatal)', exc_info=True)
+        return []
+
+
+def _fetch_reference_data_v1(project, data_type: str) -> list:
+    """Latest completed PIDVReferenceData rows for `project`/`data_type`,
+    normalized to the canonical field names the comparison engine expects.
+    Reuses apps.pid_verification_v2's column-alias normalizer directly (pure
+    function, no V2-model dependency) instead of duplicating it — this is
+    also what actually implements the Line List / Equipment List /
+    Instrument Index comparisons, which were previously TODO-stubbed here
+    (hardcoded to empty lists on every run)."""
+    if not project:
+        return []
+    from apps.pid_verification.models import PIDVReferenceData
+    from apps.pid_verification_v2.services.orchestrator import _normalize_reference_rows
+
+    ref = (
+        PIDVReferenceData.objects
+        .filter(project=project, data_type=data_type, status=PIDVReferenceData.Status.COMPLETED)
+        .exclude(parsed_data__isnull=True)
+        .order_by('-created_at')
+        .first()
+    )
+    if not ref or not ref.parsed_data:
+        return []
+    return _normalize_reference_rows(data_type, ref.parsed_data)
+
+
+def _bridge_xref_to_rule_findings(xref: dict) -> list:
+    """Convert legend_bridge.cross_reference()'s {'linked','text_only',
+    'symbol_only'} output into RuleFinding objects so they persist through
+    the same PIDVFinding path as every other finding source. V1 has no
+    PIDVComparisonFinding-equivalent table (that's V2-only), so these are
+    stored as regular findings on the page's drawing — already cleared and
+    recreated on every reprocess by _process_one_page(), so no separate
+    document-level idempotency step is needed (unlike V2's version, which
+    needed one because its findings live in a project-scoped table)."""
+    from apps.pid_verification.services.rule_engine import RuleFinding
+
+    out = []
+    for item in xref.get('linked', []):
+        out.append(RuleFinding(
+            category='legend',
+            rule_id='LGN-004',
+            issue_observed=(
+                f"Confirmed: {item['tag']} → {item['description']} — text tag and a visually "
+                f"identified symbol ('{item['symbol']['symbol_type']}') agree."
+            ),
+            action_required='No action — confirmed match.',
+            evidence=f"tag={item['tag']} code={item['code']} section={item['section']} symbol={item['symbol']['symbol_type']}",
+            direction='N/A',
+            severity='info',
+        ))
+    for item in xref.get('text_only', []):
+        out.append(RuleFinding(
+            category='legend',
+            rule_id='LGN-005',
+            issue_observed=f"Legend text match: {item['tag']} → {item['description']}",
+            action_required='Informational — no symbol visually confirmed.',
+            evidence=f"tag={item['tag']} code={item['code']} section={item['section']}",
+            direction='N/A',
+            severity='info',
+        ))
+    for sym in xref.get('symbol_only', []):
+        out.append(RuleFinding(
+            category='legend',
+            rule_id='LGN-006',
+            issue_observed=f"Symbol identified: {sym['symbol_type']} ({sym.get('confidence', 'low')} confidence)",
+            action_required='Informational — no matching legend text tag found.',
+            evidence=f"symbol={sym['symbol_type']} location={sym.get('location', 'unspecified')}",
+            direction='N/A',
+            severity='info',
+        ))
+    return out
+
+
+def _process_one_page(doc, seg, file_path: str, pdf_bytes: bytes, project_legend,
+                       context: dict, symbol_images: list) -> int:
+    """
+    Process exactly ONE page/segment: extract -> build graph -> run rule
+    engine -> comparison engine -> AI Vision analysis (BYOK, real image) ->
+    legend/symbol bridge -> persist PIDVDrawing + findings for that page only.
+
+    Shared by both the inline (small document) path and the per-page
+    fan-out task (process_pid_page, large documents), so persistence shape
+    stays identical no matter which path ran this page. Never raises for
+    the AI/comparison/bridge sub-steps — each is independently best-effort
+    and logs+continues on failure, so one bad step never loses the page's
+    rule-engine findings.
+
+    Returns the number of findings created for this page.
+    """
+    from apps.pid_verification.models import PIDVDrawing, PIDVFinding
+    from apps.pid_verification.services.extraction import extract_drawing
+    from apps.pid_verification.services.graph_builder import build_graph
+    from apps.pid_verification.services.rule_engine import run_rules, RuleFinding
+
+    drawing_obj, _ = PIDVDrawing.objects.get_or_create(
+        document=doc,
+        drawing_id=seg.drawing_id,
+        defaults={'title': seg.title, 'page_index': seg.page_index, 'metadata': seg.metadata},
+    )
+    # Clear any previous findings (re-process idempotency) — this also
+    # covers the legend/symbol bridge findings added below, since those are
+    # persisted as regular PIDVFinding rows on this same drawing.
+    drawing_obj.findings.all().delete()
+
+    # ── Extract (hybrid Tesseract + AI Vision) ───────────────────────────
+    # extract_drawing() runs Tesseract (if installed) AND Vision (if a BYOK
+    # key is present) and merges both. Raises NoExtractionMethodAvailableError
+    # only when NEITHER is available; deliberately left uncaught here so it
+    # propagates to process_pid_document's outer except-handler (inline
+    # path) or process_pid_page's (fan-out path), both of which surface it
+    # as a clear FAILED status + error_message instead of a silently
+    # "completed" document with zero findings.
+    extraction_api_key = (context or {}).get('claude_api_key') or (context or {}).get('openai_api_key')
+    extraction_provider = 'claude' if (context or {}).get('claude_api_key') else 'openai'
+    extraction = extract_drawing(
+        file_path, page_index=seg.page_index, legend_data=project_legend,
+        api_key=extraction_api_key, provider=extraction_provider,
+    )
+    _ext_info = extraction.get('extraction_info') or {}
+    if _ext_info.get('message'):
+        metadata = drawing_obj.metadata or {}
+        metadata['extraction_method_info'] = _ext_info
+        drawing_obj.metadata = metadata
+        drawing_obj.save(update_fields=['metadata'])
+
+    raw_text = extraction.get('raw_text', '') or ''
+    extraction_summary = {
+        'tags': len(extraction.get('tags', [])),
+        'instruments': len(extraction.get('instruments', [])),
+        'valves': len(extraction.get('valves', [])),
+        'equipment': len(extraction.get('equipment', [])),
+        'line_sizes': len(extraction.get('line_sizes', [])),
+        'notes': len(extraction.get('notes', [])),
+        'holds': len(extraction.get('holds', [])),
+        'raw_text_length': len(raw_text),
+        'no_text_detected': len(raw_text.strip()) == 0,
+        'line_tags': len(extraction.get('line_tags', [])),
+        'line_tags_multi_angle': sum(1 for lt in extraction.get('line_tags', []) if lt.get('multi_angle')),
+    }
+    metadata = drawing_obj.metadata or {}
+    metadata['extraction_summary'] = extraction_summary
+    tag_positions = extraction.get('tag_positions', {})
+    if tag_positions:
+        metadata['tag_positions'] = tag_positions
+    line_tags = extraction.get('line_tags', [])
+    if line_tags:
+        metadata['line_tags'] = line_tags
+    red_annotations = extraction.get('red_annotations', [])
+    if red_annotations:
+        metadata['red_annotations'] = red_annotations
+    drawing_obj.metadata = metadata
+    drawing_obj.save(update_fields=['metadata'])
+
+    # ── Graph + deterministic rule engine ────────────────────────────────
+    graph = build_graph(extraction)
+    rule_findings = run_rules(extraction, graph)
+
+    # ── Comparison engine (Legend / Line List / Equipment / Instrument) ──
+    comparison_findings = []
+    try:
+        from apps.pid_verification.services.comparison_engine import run_all_comparisons
+
+        comparison_results = run_all_comparisons(
+            extraction=extraction,
+            legend_data=project_legend,
+            line_list_data=_fetch_reference_data_v1(doc.project, 'line_list'),
+            equipment_list_data=_fetch_reference_data_v1(doc.project, 'equipment_list'),
+            instrument_index_data=_fetch_reference_data_v1(doc.project, 'instrument_index'),
+        )
+
+        metadata = drawing_obj.metadata or {}
+        metadata['comparison_results'] = {
+            comp_type: {
+                'total_pid_items': result.total_pid_items,
+                'total_ref_items': result.total_ref_items,
+                'matched_count': result.matched_count,
+                'missing_count': result.missing_count,
+                'extra_count': result.extra_count,
+                'mismatch_count': result.mismatch_count,
+                'summary': result.summary,
+            }
+            for comp_type, result in comparison_results.items()
+        }
+        drawing_obj.metadata = metadata
+        drawing_obj.save(update_fields=['metadata'])
+
+        for comp_type, result in comparison_results.items():
+            for finding in result.findings:
+                rule_prefix = {'legend': 'LGN', 'linelist': 'LSZ', 'equipment': 'EQP', 'instrument': 'IMS'}.get(comp_type, 'CMP')
+                category_suffix = {'missing': '001', 'extra': '002', 'mismatch': '003'}.get(finding.category, '999')
+                comparison_findings.append(RuleFinding(
+                    category=comp_type,
+                    rule_id=f'{rule_prefix}-{category_suffix}',
+                    issue_observed=finding.issue_observed,
+                    action_required=f'Review and resolve {finding.category} discrepancy',
+                    evidence=finding.evidence,
+                    direction='N/A',
+                    severity=finding.severity,
+                ))
+    except Exception as comp_exc:
+        logger.error('[PIDVTask] Comparison engine failed for drawing_id=%s: %s', seg.drawing_id, comp_exc, exc_info=True)
+        metadata = drawing_obj.metadata or {}
+        metadata['comparison_error'] = {'error': str(comp_exc), 'timestamp': str(timezone.now())}
+        drawing_obj.metadata = metadata
+        drawing_obj.save(update_fields=['metadata'])
+
+    # ── AI Vision analysis (BYOK) — real page image, one page at a time ──
+    ai_findings = []
+    ai_symbols = []
+    analysis_mode = (context or {}).get('analysis_mode', 'standard')
+    if analysis_mode != 'standard':
+        try:
+            from apps.pid_verification_v2.services.ai_analysis import (
+                run_openai_analysis, run_hybrid_analysis, to_rule_findings,
+            )
+            from apps.pid_verification_v2.services.legend_bridge import (
+                run_page_vision_analysis, SYMBOL_BATCH_SIZE,
+            )
+            from apps.pid_verification_v2.services.orchestrator import _page_worth_vision
+
+            drawing_data = {
+                'instruments': extraction.get('instruments', []),
+                'valves': extraction.get('valves', []),
+                'equipment': extraction.get('equipment', []),
+                'tags': extraction.get('tags', []),
+                'line_tags': extraction.get('line_tags', []),
+                'line_sizes': extraction.get('line_sizes', []),
+                'notes': extraction.get('notes', []),
+            }
+
+            openai_key = context.get('openai_api_key')
+            claude_key = context.get('claude_api_key')
+            raw_findings = []
+
+            if analysis_mode == 'enhanced_openai' and openai_key:
+                raw_findings = run_openai_analysis(drawing_data, openai_key)['findings']
+
+            elif analysis_mode in ('deep_claude', 'hybrid') and claude_key \
+                    and _page_worth_vision(extraction_summary, seg.title):
+                page_image_b64 = None
+                try:
+                    from apps.pid_checker_v2.services.vision_extractor import (
+                        _render_single_page, _prepare_image_b64, VISION_OVERVIEW_MAX_DIMENSION_PX,
+                    )
+                    page_img = _render_single_page(pdf_bytes, seg.page_index)
+                    page_image_b64 = _prepare_image_b64(page_img, VISION_OVERVIEW_MAX_DIMENSION_PX)
+                except Exception:
+                    logger.warning(
+                        '[PIDVTask] Could not render page image for Vision, drawing_id=%s',
+                        seg.drawing_id, exc_info=True,
+                    )
+
+                if page_image_b64:
+                    if analysis_mode == 'deep_claude':
+                        result = run_page_vision_analysis(
+                            drawing_data, claude_key, page_image_b64, symbol_images=symbol_images,
+                        )
+                        if result:
+                            raw_findings = result['findings']
+                            ai_symbols = result['symbols']
+                    elif analysis_mode == 'hybrid' and openai_key:
+                        result = run_hybrid_analysis(
+                            drawing_data, openai_key, claude_key,
+                            page_image_b64=page_image_b64,
+                            symbol_images=symbol_images[:SYMBOL_BATCH_SIZE],
+                        )
+                        raw_findings = result['findings']
+                        ai_symbols = result['symbols']
+
+            ai_findings = to_rule_findings(raw_findings)
+            logger.info(
+                '[PIDVTask] AI analysis: %d finding(s), %d symbol(s) for drawing_id=%s (mode=%s)',
+                len(ai_findings), len(ai_symbols), seg.drawing_id, analysis_mode,
+            )
+        except Exception as ai_exc:
+            logger.error(
+                '[PIDVTask] AI analysis failed for drawing_id=%s mode=%s: %s',
+                seg.drawing_id, analysis_mode, ai_exc, exc_info=True,
+            )
+            metadata = drawing_obj.metadata or {}
+            metadata['ai_analysis_error'] = {'mode': analysis_mode, 'error': str(ai_exc), 'timestamp': str(timezone.now())}
+            drawing_obj.metadata = metadata
+            drawing_obj.save(update_fields=['metadata'])
+
+    # ── Legend Sheets / Symbol Images bridge (apps.pid_checker_v2) ───────
+    # Text-matches this page's extracted tags against pid_checker_v2's
+    # legend lookup tables and cross-references them with whichever
+    # symbols the Vision call above identified for THIS page — reuses
+    # apps.pid_verification_v2.services.legend_bridge's pure functions
+    # directly (no V2-model dependency) rather than duplicating them here.
+    bridge_findings = []
+    try:
+        from apps.pid_verification_v2.services.legend_bridge import (
+            get_legend_lookup_fields, match_text_against_legend, cross_reference,
+        )
+        fields = get_legend_lookup_fields(doc.uploaded_by)
+        text_matches = match_text_against_legend(extraction, fields)
+        symbol_result = {'symbols': ai_symbols} if ai_symbols else None
+        xref = cross_reference(text_matches, symbol_result)
+        bridge_findings = _bridge_xref_to_rule_findings(xref)
+    except Exception:
+        logger.warning(
+            '[PIDVTask] Legend/symbol bridge failed for drawing_id=%s (non-fatal)',
+            seg.drawing_id, exc_info=True,
+        )
+
+    # ── Merge + persist ────────────────────────────────────────────────
+    all_findings = rule_findings + comparison_findings + ai_findings + bridge_findings
+    bulk = [
+        PIDVFinding(
+            drawing=drawing_obj, sl_no=sl, category=rf.category, rule_id=rf.rule_id,
+            issue_observed=rf.issue_observed, action_required=rf.action_required,
+            evidence=rf.evidence, direction=rf.direction, severity=rf.severity, status='open',
+        )
+        for sl, rf in enumerate(all_findings, start=1)
+    ]
+    if bulk:
+        PIDVFinding.objects.bulk_create(bulk, batch_size=500)
+    logger.info(
+        '[PIDVTask] Drawing %s -> %d findings (rule=%d comparison=%d ai=%d bridge=%d)',
+        seg.drawing_id, len(bulk), len(rule_findings), len(comparison_findings),
+        len(ai_findings), len(bridge_findings),
+    )
+    return len(bulk)
+
+
+def _finalize_document(doc, document_id: str) -> None:
+    """Generate Excel/PDF reports, mark the document COMPLETED, and write
+    the results cache — shared by the inline path and finalize_pid_document
+    (the chord callback for the large-document fan-out)."""
+    from apps.pid_verification.models import PIDVDocument
+    from apps.pid_verification.services.export_service import generate_excel, generate_pdf, upload_to_s3
+
+    doc.refresh_from_db()
+
+    excel_bytes = generate_excel(doc)
+    if excel_bytes:
+        project_slug = str(doc.project.project_id) if doc.project_id else 'unassigned'
+        key = f'pid_verification/projects/{project_slug}/reports/{doc.document_id}/findings.xlsx'
+        doc.excel_s3_url = upload_to_s3(excel_bytes, key, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+    pdf_bytes = generate_pdf(doc)
+    if pdf_bytes:
+        project_slug = str(doc.project.project_id) if doc.project_id else 'unassigned'
+        key = f'pid_verification/projects/{project_slug}/reports/{doc.document_id}/findings.pdf'
+        doc.pdf_s3_url = upload_to_s3(pdf_bytes, key, 'application/pdf')
+
+    doc.status = PIDVDocument.Status.COMPLETED
+    doc.save(update_fields=['status', 'excel_s3_url', 'pdf_s3_url', 'updated_at'])
+    logger.info('[PIDVTask] Completed document_id=%s', document_id)
+
+    # Result caching (S3/local) — never fatal: a caching failure shouldn't
+    # turn a successful analysis into a failed one.
+    try:
+        from apps.pid_verification.services.results_cache import save_results_cache
+        save_results_cache(doc, doc.file_hash)
+    except Exception:
+        logger.exception('[PIDVTask] Result cache write failed for document_id=%s (non-fatal)', document_id)
+
+
+@shared_task(
+    bind=True,
+    name='pid_verification.process_page',
+    max_retries=1,
+    default_retry_delay=15,
+    # Soft-coded, tuned for ONE page — mirrors
+    # apps.pid_verification_v2.tasks.process_pid_page exactly (same
+    # multi-DPI/multi-angle OCR cost per page).
+    soft_time_limit=900,  # 15 min soft limit per page
+    time_limit=960,       # 16 min hard limit per page
+)
+def process_pid_page(self, document_id: str, segment_dict: dict, context: dict = None, symbol_images: list = None):
+    """
+    Process exactly ONE page/segment of a multi-page P&ID document.
+
+    Dispatched as one member of a Celery chord (one subtask per page) from
+    `process_pid_document` when a document has more pages than
+    MULTI_PAGE_PARALLEL_THRESHOLD, so large multi-page P&ID sets are
+    processed with true parallelism instead of one task looping through
+    every page sequentially (which cannot finish 32-50 pages of multi-pass
+    OCR within any sane Celery time limit) — mirrors
+    apps.pid_verification_v2.tasks.process_pid_page.
+
+    `symbol_images` is loaded ONCE by `process_pid_document` and passed to
+    every page-task unchanged — avoids each of N page-tasks independently
+    re-reading/re-encoding the same reference-picture library from storage.
+
+    Never raises — any failure is captured and returned as
+    {'success': False, 'error': ...} so a single bad/slow page can't abort
+    the whole chord/document; `finalize_pid_document` decides overall
+    document status from the aggregate of these results.
+    """
+    context = context or {}
+    symbol_images = symbol_images or []
+    from apps.pid_verification.models import PIDVDocument
+    from apps.pid_verification.services.segmentation import SegmentedDrawing
+
+    seg = SegmentedDrawing(**segment_dict)
+
+    try:
+        doc = PIDVDocument.objects.get(document_id=document_id)
+    except PIDVDocument.DoesNotExist:
+        logger.error('[PIDVPage] Document %s not found for page %s', document_id, seg.drawing_id)
+        return {'drawing_id': seg.drawing_id, 'success': False, 'error': 'Document not found'}
+
+    try:
+        file_path = _resolve_file_path(doc)
+        with open(file_path, 'rb') as fh:
+            pdf_bytes = fh.read()
+
+        project_legend = None
+        if doc.project_id and doc.project and doc.project.legend_knowledge_data:
+            project_legend = doc.project.legend_knowledge_data
+
+        findings_count = _process_one_page(doc, seg, file_path, pdf_bytes, project_legend, context, symbol_images)
+        logger.info('[PIDVPage] Page %s completed: %d finding(s)', seg.drawing_id, findings_count)
+        return {'drawing_id': seg.drawing_id, 'success': True, 'findings_count': findings_count}
+
+    except SoftTimeLimitExceeded:
+        logger.error(
+            '[PIDVPage] Soft time limit exceeded for page %s (document_id=%s)',
+            seg.drawing_id, document_id,
+        )
+        return {'drawing_id': seg.drawing_id, 'success': False, 'error': 'Page processing timed out'}
+    except Exception as exc:
+        logger.error('[PIDVPage] Failed processing page %s: %s', seg.drawing_id, exc, exc_info=True)
+        return {'drawing_id': seg.drawing_id, 'success': False, 'error': str(exc)}
+
+
+@shared_task(
+    bind=True,
+    name='pid_verification.finalize_document',
+    max_retries=1,
+    default_retry_delay=15,
+    soft_time_limit=600,  # 10 min — report generation only, not extraction
+    time_limit=660,
+)
+def finalize_pid_document(self, page_results, document_id: str):
+    """
+    Celery chord callback — runs once ALL per-page subtasks dispatched by
+    `process_pid_document`'s parallel fan-out have finished. Generates the
+    Excel/PDF reports and marks the document COMPLETED (or FAILED if every
+    single page failed) — mirrors
+    apps.pid_verification_v2.tasks.finalize_pid_document.
+    """
+    from apps.pid_verification.models import PIDVDocument
+
+    try:
+        doc = PIDVDocument.objects.get(document_id=document_id)
+    except PIDVDocument.DoesNotExist:
+        logger.error('[PIDVFinalize] Document %s not found', document_id)
+        return
+
+    total     = len(page_results)
+    succeeded = sum(1 for r in page_results if r.get('success'))
+    failed    = [r for r in page_results if not r.get('success')]
+
+    logger.info('[PIDVFinalize] document_id=%s pages_ok=%d/%d', document_id, succeeded, total)
+    if failed:
+        logger.warning(
+            '[PIDVFinalize] %d/%d page(s) failed for document_id=%s: %s',
+            len(failed), total, document_id, [f.get('error') for f in failed],
+        )
+
+    if total > 0 and succeeded == 0:
+        doc.status = PIDVDocument.Status.FAILED
+        doc.error_message = (
+            f'All {total} page(s) failed to process. '
+            f'First error: {failed[0].get("error", "unknown")}'
+        )
+        doc.save(update_fields=['status', 'error_message', 'updated_at'])
+        return
+
+    _finalize_document(doc, document_id)
+
+    if failed:
+        doc.error_message = (
+            f'Completed — {len(failed)} of {total} page(s) failed to process (see logs).'
+        )
+        doc.save(update_fields=['error_message', 'updated_at'])
 
 
 # ===========================================================================

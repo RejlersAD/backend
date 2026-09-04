@@ -143,14 +143,27 @@ def _finding_match(tag: str, pid_row: dict, ll_row: dict) -> dict:
     }
 
 
+def _attrs_equivalent(p: str, l: str) -> bool:
+    """Free, no-AI check for unit/format differences (e.g. "6 IN" vs "6\"",
+    "150 psig" vs "150") before declaring a real attribute mismatch — same
+    deterministic matcher used across the rest of the app's comparisons."""
+    if p == l:
+        return True
+    try:
+        from apps.pid_verification_v2.services.comparison_engine import _try_deterministic_value_match
+        return _try_deterministic_value_match(p, l) == 'MATCH'
+    except Exception:
+        return False
+
+
 def _finding_mismatch(pid_row: dict, ll_row: dict) -> dict:
     pid_tag = _norm(pid_row.get('tag'))
     ll_tag  = _norm(ll_row.get('tag'))
     diffs: list[str] = []
     for key, label in (('size', 'Size'), ('service_code', 'Service'), ('spec', 'Spec')):
-        p = _norm(pid_row.get(key) if key != 'service_code' else pid_row.get('service'))
-        l = _norm(ll_row.get(key))
-        if p and l and p != l:
+        p = str(pid_row.get(key) if key != 'service_code' else pid_row.get('service') or '').strip()
+        l = str(ll_row.get(key) or '').strip()
+        if p and l and not _attrs_equivalent(p.upper(), l.upper()):
             diffs.append(f'{label}: P&ID={p!r} vs LineList={l!r}')
     return {
         'kind': FINDING_MISMATCH,
@@ -290,9 +303,22 @@ def _extract_json_array(text: str) -> list:
 # ═════════════════════════════════════════════════════════════════════
 
 def _norm(v) -> str:
+    """Tag-matching key. Delegates to the shared, more forgiving
+    normalize_tag() (whitespace/underscore -> hyphen, repeated-hyphen
+    collapse, junk-char strip). A bare .strip().upper() (the previous
+    implementation) doesn't even collapse INTERNAL whitespace — a P&ID
+    extraction reading "6-FL AC3N-8183" or "V-803 -TF" against a Line
+    List/Equipment List cell spelled without the stray space would fail to
+    match at all, showing up as a false Missing+Extra pair instead of a
+    Match. Falls back to the old behavior if the shared helper can't be
+    imported for any reason."""
     if v is None:
         return ''
-    return str(v).strip().upper()
+    try:
+        from apps.pid_verification_v2.services.comparison_engine import normalize_tag
+        return normalize_tag(v)
+    except Exception:
+        return str(v).strip().upper()
 
 
 def _summarise(findings: list[dict], n_pid: int, n_ll: int) -> dict:

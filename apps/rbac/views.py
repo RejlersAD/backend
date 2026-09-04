@@ -39,7 +39,11 @@ class OrganizationViewSet(viewsets.ModelViewSet):
     ViewSet for managing organizations
     Admins can view organizations, only super admin can create/edit/delete
     """
-    queryset = Organization.objects.all()
+    # user_count is computed in OrganizationSerializer.get_user_count() from
+    # the prefetched 'users' relation below, not via annotate(Count(...)) —
+    # that annotation caused a PostgreSQL "column must appear in the GROUP BY
+    # clause" error in production for the same pattern on RoleViewSet.
+    queryset = Organization.objects.prefetch_related('users')
     serializer_class = OrganizationSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]

@@ -17,6 +17,7 @@ Documents:
   DELETE /api/v1/pid-verification/delete/<document_id>/  → remove document
 """
 import logging
+import os
 import threading
 import json
 import tempfile
@@ -433,7 +434,14 @@ def upload_pid(request):
                     process_pid_document,
                     args=(str(doc.document_id),),
                     kwargs={'context': byok_context},
-                    sync_fallback=lambda: _run_sync_pipeline(str(doc.document_id), byok_context),
+                    # RobustQueueService._execute_with_fallback() calls
+                    # sync_fallback(*args, **kwargs) using the SAME args/kwargs
+                    # given to queue_task() above — i.e. it invokes this as
+                    # sync_fallback(str(doc.document_id), context=byok_context).
+                    # A zero-arg lambda here raised "got an unexpected keyword
+                    # argument 'context'" on every fallback, silently failing
+                    # every upload whose Celery enqueue didn't go through cleanly.
+                    sync_fallback=lambda doc_id, context=None: _run_sync_pipeline(doc_id, context),
                     max_retries=3,
                 )
                 logger.info("[PIDVUpload] Task queued via Celery: doc_id=%s", doc.document_id)
@@ -519,6 +527,38 @@ def reprocess_document(request, document_id):
             status=status.HTTP_409_CONFLICT,
         )
 
+    # ── Result cache check ──────────────────────────────────────────────
+    # Hash the file as it exists RIGHT NOW (not the stored doc.file_hash —
+    # that's a sanity re-check that the underlying file genuinely hasn't
+    # changed) and compare to what the cache was captured against. Same
+    # hash → skip the pipeline entirely and serve the cached snapshot;
+    # different hash (or no cache yet) → fall through to a normal re-run,
+    # which will write a fresh cache on completion (see tasks.py).
+    if doc.original_file:
+        from .services.consistency import compute_file_hash
+        from .services.results_cache import load_results_cache
+
+        try:
+            doc.original_file.open('rb')
+            current_hash = compute_file_hash(doc.original_file)
+        finally:
+            doc.original_file.close()
+
+        cached = load_results_cache(doc)
+        if cached and cached.get('file_hash') == current_hash:
+            logger.info('[PIDVReprocess] Cache hit for document_id=%s — skipping pipeline', document_id)
+            return Response(
+                {
+                    "document_id": str(doc.document_id),
+                    "status": doc.status,
+                    "message": "Loaded from cache — file unchanged since last analysis.",
+                    "file_name": doc.file_name,
+                    "cache_status": "cache",
+                    "analysis_timestamp": cached.get("analysis_timestamp"),
+                },
+                status=status.HTTP_200_OK,
+            )
+
     # Reset state so the task pipeline treats this as a fresh run
     doc.status        = 'uploaded'
     doc.error_message = ''
@@ -527,7 +567,7 @@ def reprocess_document(request, document_id):
     # Enqueue Celery task (with sync-thread fallback if workers unavailable)
     try:
         from .tasks import process_pid_document
-        from apps.config.queue_service import RobustQueueService
+        from apps.core.queue_service import RobustQueueService
 
         def _sync_fallback(doc_id):
             import threading
@@ -538,9 +578,9 @@ def reprocess_document(request, document_id):
             )
             t.start()
 
-        RobustQueueService.enqueue(
-            process_pid_document.delay,
-            str(doc.document_id),
+        RobustQueueService.queue_task(
+            process_pid_document,
+            args=(str(doc.document_id),),
             sync_fallback=_sync_fallback,
         )
     except Exception:
@@ -562,6 +602,7 @@ def reprocess_document(request, document_id):
             "status":      doc.status,
             "message":     "Re-check queued — the original file will be re-analysed without re-uploading.",
             "file_name":   doc.file_name,
+            "cache_status": "fresh",
         },
         status=status.HTTP_202_ACCEPTED,
     )
@@ -578,6 +619,24 @@ def get_status(request, document_id):
     if doc is None:
         return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
 
+    # Cache info — only looked up once a run has settled (completed/failed),
+    # not on every poll during active processing, to avoid extra S3/local
+    # reads on a frequently-polled endpoint. Compared against the stored
+    # doc.file_hash (cheap) rather than re-hashing the live file on every
+    # request — reprocess_document() does the authoritative live re-hash
+    # at the moment it actually matters (right before deciding to skip the
+    # pipeline).
+    cache_available = False
+    cache_timestamp = None
+    cache_matches_current_file = False
+    if doc.status in (PIDVDocument.Status.COMPLETED, PIDVDocument.Status.FAILED):
+        from .services.results_cache import load_results_cache
+        cached = load_results_cache(doc)
+        if cached:
+            cache_available = True
+            cache_timestamp = cached.get('analysis_timestamp')
+            cache_matches_current_file = cached.get('file_hash') == doc.file_hash
+
     return Response({
         "document_id":   str(doc.document_id),
         "status":        doc.status,
@@ -587,6 +646,9 @@ def get_status(request, document_id):
         "pdf_s3_url":    doc.pdf_s3_url   or None,
         "project_id":    str(doc.project.project_id) if doc.project else None,
         "updated_at":    doc.updated_at,
+        "cache_available": cache_available,
+        "cache_timestamp": cache_timestamp,
+        "cache_matches_current_file": cache_matches_current_file,
     })
 
 
@@ -1748,8 +1810,12 @@ def check_naming(request, document_id):
     page_index = int(body.get("page_index", 0))
     run_ai     = bool(body.get("run_ai", True))
 
+    # Same S3-vs-local fix as drawing_image()/reprocess_document() above —
+    # .path always raised under S3Boto3Storage, so this endpoint
+    # unconditionally 400'd in production. _resolve_file_path handles both.
+    from .tasks import _resolve_file_path
     try:
-        file_path = doc.original_file.path
+        file_path = _resolve_file_path(doc)
     except Exception:
         return Response(
             {"error": "File path unavailable — storage may be remote"},
@@ -1845,55 +1911,84 @@ def drawing_image(request, document_id, page_index):
     if not doc.original_file:
         return Response({"error": "Original file not stored"}, status=status.HTTP_404_NOT_FOUND)
 
+    # Same S3-vs-local abstraction already fixed in tasks.py's
+    # _resolve_file_path/_download_via_storage (2026-08-27 HeadObject 404
+    # postmortem) — this view used to call doc.original_file.path directly,
+    # which ALWAYS raises NotImplementedError under S3Boto3Storage, so this
+    # endpoint unconditionally 404'd for every document in production
+    # ("Drawing preview unavailable" in the UI). _resolve_file_path handles
+    # both local disk (returns the real path) and S3 (downloads to a temp
+    # file) correctly.
+    from .tasks import _resolve_file_path
     try:
-        file_path = doc.original_file.path
-    except Exception:
+        file_path = _resolve_file_path(doc)
+    except Exception as exc:
+        logger.warning("[PIDVDrawingImage] Could not resolve file for doc_id=%s: %s", document_id, exc)
         return Response({"error": "File path unavailable"}, status=status.HTTP_404_NOT_FOUND)
+
+    # _resolve_file_path downloads S3-backed files to a temp copy for us to
+    # read — clean it up afterward so these don't accumulate on disk across
+    # repeated page views. Only ever deletes OUR OWN temp download, never
+    # doc.original_file's real path when storage is local (that's a
+    # permanent file, not ours to remove) — detected by directory, not by
+    # storage type, so this stays correct regardless of which backend ran.
+    is_temp_download = os.path.dirname(os.path.abspath(file_path)) == os.path.abspath(tempfile.gettempdir())
 
     ext = Path(file_path).suffix.lower().lstrip(".")
     png_data = None
 
-    if ext == "pdf":
-        try:
-            import fitz  # PyMuPDF
-            pdf_doc = fitz.open(file_path)
-            if page_index >= len(pdf_doc):
+    try:
+        if ext == "pdf":
+            try:
+                import fitz  # PyMuPDF
+                pdf_doc = fitz.open(file_path)
+                if page_index >= len(pdf_doc):
+                    pdf_doc.close()
+                    return Response({"error": "Page index out of range"}, status=status.HTTP_400_BAD_REQUEST)
+                page = pdf_doc[page_index]
+                # 2× zoom → ~150 dpi for typical A1 drawings
+                mat = fitz.Matrix(2.0, 2.0)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                png_data = pix.tobytes("png")
                 pdf_doc.close()
-                return Response({"error": "Page index out of range"}, status=status.HTTP_400_BAD_REQUEST)
-            page = pdf_doc[page_index]
-            # 2× zoom → ~150 dpi for typical A1 drawings
-            mat = fitz.Matrix(2.0, 2.0)
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            png_data = pix.tobytes("png")
-            pdf_doc.close()
-        except ImportError:
-            return Response({"error": "PyMuPDF not available"}, status=status.HTTP_501_NOT_IMPLEMENTED)
-        except Exception as exc:
-            logger.warning("[PIDVDrawingImage] PDF render failed: %s", exc)
-            return Response({"error": "Failed to render PDF page"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    elif ext in {"png", "jpg", "jpeg", "tiff", "tif"}:
-        try:
-            with open(file_path, "rb") as f:
-                raw = f.read()
-            if ext == "png":
-                png_data = raw
-            else:
-                from PIL import Image
-                import io
-                img = Image.open(io.BytesIO(raw)).convert("RGB")
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                png_data = buf.getvalue()
-        except Exception as exc:
-            logger.warning("[PIDVDrawingImage] Image read failed: %s", exc)
-            return Response({"error": "Failed to read image file"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    else:
-        return Response({"error": f"Unsupported file type: {ext}"}, status=status.HTTP_400_BAD_REQUEST)
+            except ImportError:
+                return Response({"error": "PyMuPDF not available"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+            except Exception as exc:
+                logger.warning("[PIDVDrawingImage] PDF render failed: %s", exc)
+                return Response({"error": "Failed to render PDF page"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        elif ext in {"png", "jpg", "jpeg", "tiff", "tif"}:
+            try:
+                with open(file_path, "rb") as f:
+                    raw = f.read()
+                if ext == "png":
+                    png_data = raw
+                else:
+                    from PIL import Image
+                    import io
+                    img = Image.open(io.BytesIO(raw)).convert("RGB")
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    png_data = buf.getvalue()
+            except Exception as exc:
+                logger.warning("[PIDVDrawingImage] Image read failed: %s", exc)
+                return Response({"error": "Failed to read image file"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        else:
+            return Response({"error": f"Unsupported file type: {ext}"}, status=status.HTTP_400_BAD_REQUEST)
 
-    response = HttpResponse(png_data, content_type="image/png")
-    response["Cache-Control"] = "private, max-age=3600"
-    response["Content-Length"] = len(png_data)
-    return response
+        response = HttpResponse(png_data, content_type="image/png")
+        response["Cache-Control"] = "private, max-age=3600"
+        response["Content-Length"] = len(png_data)
+        return response
+    finally:
+        # Clean up our own S3 temp download (never a real local-storage
+        # file — see is_temp_download above) regardless of which return
+        # path was taken, so these don't accumulate across repeated page
+        # views (this endpoint is called once per drawing page viewed).
+        if is_temp_download:
+            try:
+                os.unlink(file_path)
+            except OSError:
+                pass
 
 
 # ===========================================================================

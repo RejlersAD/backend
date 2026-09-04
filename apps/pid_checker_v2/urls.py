@@ -24,6 +24,13 @@ from .views import (
     InstrumentCrossCheckView,
     ExtractEquipmentTagsFromPidView,
     ExtractInstrumentTagsFromPidView,
+    IdentifySymbolsView,
+    CrossReferenceResultsView,
+    SymbolImagesListView,
+    DefaultSymbolImagesView,
+    SymbolImageUploadView,
+    SymbolImageDeleteView,
+    TestApiKeyView,
     UsageLogListView,
     UsageSummaryView,
     TokenReportView,
@@ -54,6 +61,13 @@ INSTRUMENT_INDEXES_ACTIVATE_PATH = 'instrument-indexes/<uuid:instrument_index_id
 INSTRUMENT_CROSS_CHECK_PATH = 'instrument-cross-check/'
 EXTRACT_EQUIPMENT_TAGS_PATH = 'extract-equipment-tags/'
 EXTRACT_INSTRUMENT_TAGS_PATH = 'extract-instrument-tags/'
+IDENTIFY_SYMBOLS_PATH = 'identify-symbols/'
+CROSS_REFERENCE_RESULTS_PATH = 'cross-reference-results/'
+SYMBOL_IMAGES_PATH = 'symbol-images/'
+DEFAULT_SYMBOL_IMAGES_PATH = 'default-symbol-images/'
+SYMBOL_IMAGE_UPLOAD_PATH = 'symbol-image/upload/'
+SYMBOL_IMAGE_DELETE_PATH = 'symbol-image/delete/'
+TEST_API_KEY_PATH = 'test-api-key/'
 USAGE_LIST_PATH = 'usage/'
 USAGE_SUMMARY_PATH = 'usage/summary/'
 USAGE_REPORT_PATH = 'usage/report/'
@@ -110,6 +124,22 @@ urlpatterns = [
          name='extract-equipment-tags'),
     path(EXTRACT_INSTRUMENT_TAGS_PATH, ExtractInstrumentTagsFromPidView.as_view(),
          name='extract-instrument-tags'),
+    # Symbol recognition (BYOK Vision) — P&ID vs Legend Sheet comparison
+    path(IDENTIFY_SYMBOLS_PATH, IdentifySymbolsView.as_view(),
+         name='identify-symbols'),
+    path(CROSS_REFERENCE_RESULTS_PATH, CrossReferenceResultsView.as_view(),
+         name='cross-reference-results'),
+    # Legend Sheet symbol pictures — manual per-symbol upload/replace/delete
+    path(SYMBOL_IMAGES_PATH, SymbolImagesListView.as_view(),
+         name='symbol-images'),
+    path(DEFAULT_SYMBOL_IMAGES_PATH, DefaultSymbolImagesView.as_view(),
+         name='default-symbol-images'),
+    path(SYMBOL_IMAGE_UPLOAD_PATH, SymbolImageUploadView.as_view(),
+         name='symbol-image-upload'),
+    path(SYMBOL_IMAGE_DELETE_PATH, SymbolImageDeleteView.as_view(),
+         name='symbol-image-delete'),
+    path(TEST_API_KEY_PATH, TestApiKeyView.as_view(),
+         name='test-api-key'),
     # Token usage / consolidated report — /usage/summary/ must precede /usage/
     path(USAGE_SUMMARY_PATH, UsageSummaryView.as_view(), name='usage-summary'),
     path(USAGE_REPORT_PATH, TokenReportView.as_view(), name='usage-report'),

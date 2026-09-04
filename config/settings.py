@@ -516,6 +516,12 @@ USE_TZ = True
 # in the S3 section below based on USE_S3 setting
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
+# Project-root static source dir (repo-committed, deploy-time only — e.g.
+# apps/pid_checker_v2's default_symbols/ picture library). Static files are
+# always served locally (WhiteNoise), never from S3, regardless of USE_S3 —
+# see the S3 section below, which only redirects MEDIA to S3.
+STATICFILES_DIRS = [BASE_DIR / 'static']
+
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -1058,6 +1064,28 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Merge each app's own BEAT_SCHEDULE dict (soft-coded — adding a periodic
+# task to a new app is one line there, no edits needed here or in
+# config/celery.py). Done here, at settings.py module level, rather than in
+# celery.py: this module always finishes executing before django.setup()
+# populates the app registry, and none of these config.py files import
+# models — they only build crontab() schedules — so it's safe this early.
+# ─────────────────────────────────────────────────────────────────────────────
+for _app_config_module in (
+    'apps.timesheet.config',
+    'apps.project_control.config',
+    'apps.finance.config',
+    'apps.dashboard.config',
+    'apps.payroll.config',
+):
+    try:
+        import importlib as _importlib
+        _mod = _importlib.import_module(_app_config_module)
+        CELERY_BEAT_SCHEDULE.update(getattr(_mod, 'BEAT_SCHEDULE', {}))
+    except Exception as _e:
+        print(f'[CELERY BEAT] WARNING: failed to load schedule from {_app_config_module}: {_e}')
+
 # ==============================================================================
 # End of Celery Configuration
 # ==============================================================================
@@ -1449,19 +1477,59 @@ print(f"Max Retries: {QUEUE_MAX_RETRIES}")
 # unconfigured here), so unhandled exceptions were invisible in Railway's
 # console output. This adds a console handler for django.request so
 # tracebacks show up in `railway logs`.
+# RotatingFileHandler opens its target file immediately at logging-config
+# time and does not create missing parent directories itself — a fresh
+# container/deploy with no logs/ dir yet would crash django.setup() before
+# a single request is served. Guarantee the directory exists first.
+os.makedirs(BASE_DIR / 'logs', exist_ok=True)
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '%(asctime)s %(levelname)s %(name)s: %(message)s',
+        },
+    },
     'handlers': {
         'console': {
             'class': 'logging.StreamHandler',
         },
+        # 2026-08-28: with DEBUG=False even in local dev, an unhandled view
+        # exception only ever reaches the browser as the generic "Server
+        # Error (500)" page — no traceback. django.request already logged
+        # the real traceback to console (ERROR level), but that's only
+        # visible in whatever terminal happens to be running `manage.py
+        # runserver`, which isn't always at hand when debugging remotely.
+        # This mirrors the same ERROR-level log to a local file so the
+        # actual traceback for any 500 is always readable afterward,
+        # without needing to reproduce it live or dig through terminal
+        # scrollback.
+        'file': {
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': str(BASE_DIR / 'logs' / 'django_errors.log'),
+            'maxBytes': 5 * 1024 * 1024,   # 5 MB
+            'backupCount': 3,
+            'formatter': 'verbose',
+        },
     },
     'loggers': {
         'django.request': {
-            'handlers': ['console'],
+            'handlers': ['console', 'file'],
             'level': 'ERROR',
             'propagate': False,
+        },
+        # 2026-08-28 (same day, follow-up): django.request only fires for
+        # exceptions that escape ALL the way up to Django's own exception
+        # middleware. Plenty of view code in this project catches its own
+        # exceptions and logs them via a plain module-level
+        # logging.getLogger(__name__) call before returning a 500 Response
+        # itself (see e.g. equipment_cross_check.py's cross_check()) — that
+        # never touches django.request at all, so it never reached the file
+        # above. Routing the root logger to the same file/console handlers
+        # catches those too, without needing every module to opt in.
+        '': {
+            'handlers': ['console', 'file'],
+            'level': 'WARNING',
         },
     },
 }

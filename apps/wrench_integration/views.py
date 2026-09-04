@@ -11,7 +11,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.utils import timezone
 
-from apps.rbac.permissions import IsAdmin, IsSuperAdmin
+from apps.rbac.permissions import IsAdmin, IsSuperAdmin, HasModuleAccess
 from apps.rbac.utils import create_audit_log
 
 from .models import WrenchConfig, WrenchSyncLog, WrenchS3SyncJob
@@ -265,6 +265,26 @@ class WrenchSyncViewSet(viewsets.ViewSet):
     GET  /api/v1/wrench/sync/<id>/       – retrieve a specific log
     """
     permission_classes = [IsAuthenticated, IsAdmin]
+
+    # 2026-08-28: list_projects ('projects') and trans_documents
+    # ('trans-documents') are the two read-only Wrench lookups the Data
+    # Mining Platform page (DataMiningPlatform.jsx -> wrench.service.js)
+    # calls as part of its normal, expected workflow — letting a user pick
+    # a Wrench project/transmittal to pull source documents from. This
+    # whole ViewSet was blanket IsAdmin-only (see class docstring above),
+    # so a non-admin user with the data_mining module correctly granted by
+    # their role still hit "You must be an admin to perform this action."
+    # the moment the page tried to load Wrench projects — the RBAC module
+    # grant was being silently overridden by an unrelated hardcoded admin
+    # gate. Sync history/trigger stay admin-only (actual Wrench config/
+    # write operations, not what Data Mining's read-only browsing needs).
+    module_required = 'data_mining'
+    _DATA_MINING_READ_ACTIONS = {'list_projects', 'trans_documents'}
+
+    def get_permissions(self):
+        if self.action in self._DATA_MINING_READ_ACTIONS:
+            return [IsAuthenticated(), HasModuleAccess()]
+        return [perm() for perm in self.permission_classes]
 
     def list(self, request):
         logs = WrenchSyncLog.objects.select_related('triggered_by').order_by('-started_at')[:50]

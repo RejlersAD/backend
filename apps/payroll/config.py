@@ -12,11 +12,15 @@ from celery.schedules import crontab
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Monthly leave accrual schedule
-# Default: 1st of every month at 00:05 AM (5 minutes after midnight)
-# Runs after day rollover to ensure correct month processing
-MONTHLY_ACCRUAL_DAY_OF_MONTH = 1
-MONTHLY_ACCRUAL_HOUR = 0
-MONTHLY_ACCRUAL_MINUTE = 5
+# Target: 00:05 Abu Dhabi time (UTC+4) on the 1st of every month
+#       = 20:05 UTC on the LAST day of the previous month.
+# crontab() has no "last day of month" expression, so this fires daily on
+# 28-31 at 20:05 UTC; the task itself (run_monthly_leave_accrual) re-checks
+# the real Asia/Dubai date and only does real work when tomorrow is the 1st
+# — so it's correct regardless of what CELERY_TIMEZONE is actually set to.
+MONTHLY_ACCRUAL_DAYS_OF_MONTH = '28-31'
+MONTHLY_ACCRUAL_HOUR_UTC = 20
+MONTHLY_ACCRUAL_MINUTE_UTC = 5
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CELERY BEAT SCHEDULE
@@ -24,19 +28,20 @@ MONTHLY_ACCRUAL_MINUTE = 5
 # ─────────────────────────────────────────────────────────────────────────────
 
 BEAT_SCHEDULE = {
-    # Automated monthly leave accrual — adds 1.83 days to all employees on the 1st of each month
+    # Automated monthly leave accrual — adds annual_entitlement/12 days to
+    # every current-year EmployeeLeaveRecord at the start of each month.
     'payroll-monthly-leave-accrual': {
         'task': 'payroll.run_monthly_leave_accrual',
         'schedule': crontab(
-            day_of_month=str(MONTHLY_ACCRUAL_DAY_OF_MONTH),
-            hour=MONTHLY_ACCRUAL_HOUR,
-            minute=MONTHLY_ACCRUAL_MINUTE,
+            day_of_month=MONTHLY_ACCRUAL_DAYS_OF_MONTH,
+            hour=MONTHLY_ACCRUAL_HOUR_UTC,
+            minute=MONTHLY_ACCRUAL_MINUTE_UTC,
         ),
         'kwargs': {
             'triggered_by': 'celery_beat',
         },
         'options': {
-            'expires': 3600 * 12,  # Task expires after 12 hours if not executed
+            'expires': 3600 * 6,  # Task expires after 6 hours if not executed
         },
     },
 }

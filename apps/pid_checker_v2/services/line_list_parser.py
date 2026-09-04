@@ -15,6 +15,7 @@ it can be diff'd directly against tags extracted from the P&ID.
 """
 from __future__ import annotations
 
+import datetime
 import io
 import logging
 import re
@@ -244,6 +245,64 @@ def _clean(v: Any) -> Any:
     return v
 
 
+# A fractional pipe-size cell like "3/4" or "1/2" is routinely mangled by
+# Excel unless the SIZE column is explicitly formatted as text — Excel's
+# autocorrect reinterprets "M/D"-shaped text as a date at entry time. What
+# openpyxl then hands back for that cell depends on how/when the file was
+# saved and by what tool, so this has to be handled defensively rather
+# than assuming one fixed shape:
+#   - a live datetime/date object (the common case — Excel itself saved it
+#     as a real date value)
+#   - a "M/D/YYYY" or "M/D/YY" string (some export pipelines/older Excel
+#     re-serialize the date as displayed text instead of a date object)
+#   - a "D-Mon" / "Mon-D" / "D-Mon-YY" string (a different Excel display
+#     format for the same underlying date)
+#   - unicode vulgar-fraction characters (¾ ½ ¼ ⅛ ⅜ ⅝ ⅞) typed directly
+#     instead of "3/4" etc. — not a date-conversion bug, but the same
+#     "doesn't match the P&ID's plain-ASCII fraction" symptom
+# All of these are recovered back to the plain "M/D" form a real pipe size
+# uses. Only NPS-legal fraction values ever hit this path (denominators
+# 2/4/8/16, numerator < denominator), so the month/day round-trip is safe.
+_SIZE_MDY_RE = re.compile(r'^(\d{1,2})/(\d{1,2})/\d{2,4}$')
+_SIZE_ISO_RE = re.compile(r'^\d{4}-(\d{1,2})-(\d{1,2})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$')
+_SIZE_D_MON_RE = re.compile(r'^(\d{1,2})[-\s]([A-Za-z]{3,9})(?:[-\s]\d{2,4})?$')
+_SIZE_MON_D_RE = re.compile(r'^([A-Za-z]{3,9})[-\s](\d{1,2})(?:[-\s]\d{2,4})?$')
+_MONTH_NUM = {
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+}
+_UNICODE_FRACTIONS = {
+    '½': '1/2', '¼': '1/4', '¾': '3/4', '⅛': '1/8', '⅜': '3/8',
+    '⅝': '5/8', '⅞': '7/8', '⅓': '1/3', '⅔': '2/3',
+}
+
+
+def _normalize_size_value(v: Any) -> str:
+    """Recover a plain "M/D"-shaped pipe size from any of the Excel-corrupted
+    forms described above. Returns str(v).strip() unchanged when none of
+    the corruption patterns match — i.e. this is purely additive and never
+    changes an already-correct size like "6", "20", or "1-1/2"."""
+    if isinstance(v, (datetime.datetime, datetime.date)):
+        return f'{v.month}/{v.day}'
+    s = str(v).strip()
+    for uni, ascii_frac in _UNICODE_FRACTIONS.items():
+        if uni in s:
+            return s.replace(uni, ascii_frac)
+    m = _SIZE_MDY_RE.match(s)
+    if m:
+        return f'{int(m.group(1))}/{int(m.group(2))}'
+    m = _SIZE_ISO_RE.match(s)
+    if m:
+        return f'{int(m.group(1))}/{int(m.group(2))}'
+    m = _SIZE_D_MON_RE.match(s)
+    if m and m.group(2).lower()[:3] in _MONTH_NUM:
+        return f'{_MONTH_NUM[m.group(2).lower()[:3]]}/{int(m.group(1))}'
+    m = _SIZE_MON_D_RE.match(s)
+    if m and m.group(1).lower()[:3] in _MONTH_NUM:
+        return f'{_MONTH_NUM[m.group(1).lower()[:3]]}/{int(m.group(2))}'
+    return s
+
+
 def _build_tag(row: dict) -> str:
     """Compose  SIZE"-SERVICECODE-SPEC-SERIAL  from parsed row cells."""
     parts = []
@@ -253,6 +312,7 @@ def _build_tag(row: dict) -> str:
             return ''  # cannot compose — leave blank so cross-check flags it
         s = str(v).strip()
         if key == 'size':
+            s = _normalize_size_value(v)
             # ensure trailing "  (openpyxl gives us bare number or "3/4")
             s = s.rstrip('"')
             s = f'{s}"'
