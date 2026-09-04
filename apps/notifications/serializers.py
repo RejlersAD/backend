@@ -134,6 +134,17 @@ class MarkAsReadSerializer(serializers.Serializer):
     )
 
 
+class WebPushSubscriptionSerializer(serializers.Serializer):
+    endpoint = serializers.URLField(max_length=2048)
+    expirationTime = serializers.IntegerField(required=False, allow_null=True)
+    keys = serializers.DictField()
+
+    def validate_keys(self, value):
+        if not value.get('p256dh') or not value.get('auth'):
+            raise serializers.ValidationError('Push subscription keys are required.')
+        return value
+
+
 class BulkNotificationSerializer(serializers.Serializer):
     """Serializer for creating bulk notifications"""
     recipient_ids = serializers.ListField(

@@ -8,7 +8,7 @@ from django.utils.html import strip_tags
 from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
-from .models import Notification, NotificationCategory, NotificationPreference, NotificationLog
+from .models import Notification, NotificationCategory, NotificationPreference, NotificationLog, WebPushSubscription
 from celery import shared_task
 import logging
 
@@ -217,7 +217,7 @@ class NotificationService:
                     notification,
                     notification_data.get('teams_context') or {},
                 )
-            
+
             return notification
             
         except Exception as e:
@@ -252,6 +252,62 @@ class NotificationService:
             'INFO': '📢',
         }
         return icons.get(category, '📢')
+
+
+@shared_task
+def send_web_push_notification(notification_id):
+    """Deliver one notification to every active browser owned by its recipient."""
+    import json
+
+    try:
+        from pywebpush import WebPushException, webpush
+    except ImportError:
+        logger.warning('pywebpush is not installed; skipping notification %s', notification_id)
+        return {'sent': 0, 'disabled': 0}
+
+    try:
+        notification = Notification.objects.get(id=notification_id)
+    except Notification.DoesNotExist:
+        return {'sent': 0, 'disabled': 0}
+
+    payload = json.dumps({
+        'title': notification.title,
+        'body': notification.message,
+        'url': notification.action_url or '/notifications',
+        'tag': f'radai-notification-{notification.id}',
+        'priority': notification.priority,
+        'notification_id': notification.id,
+    })
+    sent = 0
+    disabled = 0
+    subscriptions = WebPushSubscription.objects.filter(
+        user=notification.recipient,
+        is_active=True,
+    )
+    for subscription in subscriptions.iterator():
+        try:
+            webpush(
+                subscription_info={
+                    'endpoint': subscription.endpoint,
+                    'keys': {'p256dh': subscription.p256dh, 'auth': subscription.auth},
+                },
+                data=payload,
+                vapid_private_key=settings.WEB_PUSH_VAPID_PRIVATE_KEY,
+                vapid_claims={'sub': settings.WEB_PUSH_VAPID_SUBJECT},
+                ttl=300,
+            )
+            sent += 1
+        except WebPushException as error:
+            response_status = getattr(getattr(error, 'response', None), 'status_code', None)
+            if response_status in (404, 410):
+                subscription.is_active = False
+                subscription.save(update_fields=['is_active', 'updated_at'])
+                disabled += 1
+            else:
+                logger.warning('Web push failed for subscription %s: %s', subscription.id, error)
+        except Exception as error:
+            logger.warning('Web push failed for subscription %s: %s', subscription.id, error)
+    return {'sent': sent, 'disabled': disabled}
 
 
 @shared_task(bind=True, max_retries=3)

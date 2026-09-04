@@ -13,6 +13,12 @@ import dj_database_url
 # Build paths inside the project
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Browser Push API. Keys are deployment secrets; the private key is never
+# returned to clients.
+WEB_PUSH_VAPID_PUBLIC_KEY = config('WEB_PUSH_VAPID_PUBLIC_KEY', default='')
+WEB_PUSH_VAPID_PRIVATE_KEY = config('WEB_PUSH_VAPID_PRIVATE_KEY', default='')
+WEB_PUSH_VAPID_SUBJECT = config('WEB_PUSH_VAPID_SUBJECT', default='mailto:it@radai.ae')
+
 # ============================================
 # SOFT-CODED CENTRALIZED CONFIGURATION
 # ============================================
