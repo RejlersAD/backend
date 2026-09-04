@@ -184,6 +184,7 @@ class EmployeeIdentityService:
         if user and not profile:
             issues.append({'system': 'rbac', 'field': 'profile', 'canonical': 'present', 'actual': 'missing'})
         elif profile:
+            compare('rbac', 'employee_number', employee.employee_number, profile.employee_id)
             compare('rbac', 'department', employee.department, profile.department)
             compare(
                 'rbac', 'job_title',
@@ -205,6 +206,7 @@ class EmployeeIdentityService:
             if not payroll_rows.exists():
                 issues.append({'system': 'payroll', 'field': 'canonical_link', 'canonical': str(employee.id), 'actual': 'missing'})
             for row in payroll_rows:
+                compare('payroll', 'employee_number', employee.employee_number, row.employee_no)
                 compare('payroll', 'full_name', employee.get_full_name(), row.full_name)
                 compare('payroll', 'department', employee.department, row.department)
                 compare('payroll', 'designation', employee.designation, row.designation)

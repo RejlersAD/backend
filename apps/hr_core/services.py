@@ -82,6 +82,11 @@ class EmployeeService:
             updates['email'] = user.email
         if requested('employee_id') and profile.employee_id:
             employee_code = str(profile.employee_id).strip()
+            number_is_available = not EmployeeMaster.objects.filter(
+                employee_number__iexact=employee_code
+            ).exclude(pk=employee.pk).exists()
+            if number_is_available:
+                updates['employee_number'] = employee_code
             updates['employee_code'] = employee_code
             updates['emp_code'] = employee_code[:20]
         if requested('department'):
@@ -155,8 +160,10 @@ class EmployeeService:
             profile_updates['phone'] = employee.phone_number or ''
         if requested('office'):
             profile_updates['location'] = employee.office or ''
-        if requested('employee_code', 'emp_code'):
-            profile_updates['employee_id'] = employee.emp_code or employee.employee_code or ''
+        if requested('employee_number', 'employee_code', 'emp_code'):
+            profile_updates['employee_id'] = (
+                employee.employee_number or employee.employee_code or employee.emp_code or ''
+            )
         if requested('manager'):
             profile_updates['manager'] = (
                 RBACUserProfile.objects.filter(

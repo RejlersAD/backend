@@ -85,6 +85,21 @@ def _link_domain_extensions(employee):
     for code in codes:
         payroll_query |= Q(employee_no__iexact=code)
     PayrollEmployee.objects.filter(payroll_query, employee=None).update(employee=employee)
+    linked_payroll = PayrollEmployee.objects.filter(employee=employee)
+    linked_payroll.update(
+        full_name=employee.get_full_name(),
+        department=employee.department,
+        designation=employee.designation,
+        joining_date=employee.join_date,
+    )
+    if (
+        employee.employee_number
+        and linked_payroll.count() == 1
+        and not PayrollEmployee.objects.filter(
+            employee_no__iexact=employee.employee_number,
+        ).exclude(employee=employee).exists()
+    ):
+        linked_payroll.update(employee_no=employee.employee_number)
 
     lifecycle_query = Q(user_id=employee.user_id) if employee.user_id else Q(pk__in=[])
     if employee.email:
