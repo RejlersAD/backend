@@ -673,7 +673,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         # Admin (level 2+) can assign/revoke roles — but the action itself guards
         # against assigning the super_admin role without super_admin privileges
         ADMIN_ACTIONS = {'assign_role', 'revoke_role'}
-        AUTH_ONLY_ACTIONS = {'me', 'change_password', 'engineers'}
+        AUTH_ONLY_ACTIONS = {'me', 'profile_completeness', 'change_password', 'engineers'}
 
         if self.action in AUTH_ONLY_ACTIONS:
             return [IsAuthenticated()]
@@ -2161,6 +2161,53 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 'status': 'pending',
                 'message': 'Profile temporarily unavailable'
             })
+
+    @action(detail=False, methods=['get'], url_path='me/profile-completeness')
+    def profile_completeness(self, request):
+        """Return completion details for the authenticated user's own profile."""
+        from apps.rbac.profile_config import get_profile_completeness
+
+        profile = UserProfile.objects.select_related('user', 'engineer_profile', 'canonical_employee').filter(
+            user=request.user,
+            is_deleted=False,
+        ).first()
+        if not profile:
+            return Response({
+                'percentage': 0,
+                'is_complete': False,
+                'missing_fields': [{
+                    'key': 'employee_profile',
+                    'label': 'Employee profile record - contact HR',
+                    'section': 'Profile setup',
+                    'weight': 100,
+                }],
+                'completed_fields': 0,
+                'total_fields': 1,
+                'detail': 'Your employee profile has not been configured. Contact HR.',
+                'profile_url': '/profile',
+            })
+
+        try:
+            engineer_profile = profile.engineer_profile.to_dict()
+        except Exception:
+            engineer_profile = {}
+
+        result = get_profile_completeness({
+            'first_name': request.user.first_name,
+            'last_name': request.user.last_name,
+            'profile_photo': bool(
+                profile.profile_photo
+                or (profile.canonical_employee and profile.canonical_employee.photo_file_path)
+            ),
+            'phone': profile.phone,
+            'location': profile.location,
+            'bio': profile.bio,
+            'department': profile.department,
+            'job_title': profile.job_title,
+            'engineer_profile': engineer_profile,
+        })
+        result['profile_url'] = '/profile'
+        return Response(result)
     
     @transaction.atomic
     def update_my_profile(self, request):

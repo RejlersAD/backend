@@ -40,6 +40,39 @@ from .sqlserver import TimesheetConnectionError, TimesheetDriverError
 logger = logging.getLogger(__name__)
 
 
+def _authenticated_user_activity(user) -> dict:
+    """Return a lightweight, failure-safe activity snapshot for ESS presence.
+
+    ``last_login`` proves that authentication occurred, while the indexed
+    activity stream proves that the authenticated user is still using RADAI.
+    Attendance remains the primary source for physical office presence.
+    """
+    from django.utils import timezone
+
+    now = timezone.now()
+    last_login = getattr(user, 'last_login', None)
+    last_activity = None
+    try:
+        from apps.activity.models import SystemActivity
+        last_activity = (
+            SystemActivity.objects
+            .filter(user=user, success=True)
+            .order_by('-timestamp')
+            .values_list('timestamp', flat=True)
+            .first()
+        )
+    except Exception:
+        logger.warning('Could not resolve RADAI activity for user %s', getattr(user, 'pk', None), exc_info=True)
+
+    activity_is_recent = bool(last_activity and last_activity >= now - dt.timedelta(minutes=5))
+    login_is_recent = bool(last_login and last_login >= now - dt.timedelta(minutes=30))
+    return {
+        'is_active': activity_is_recent or login_is_recent,
+        'last_activity': last_activity.isoformat() if last_activity else None,
+        'last_login': last_login.isoformat() if last_login else None,
+    }
+
+
 def _svc():
     """Soft-coded backend dispatcher. Resolved at call time so flipping
     TIMESHEET_DATA_SOURCE in Railway env vars takes effect on the very next
@@ -456,8 +489,9 @@ def my_live_attendance(request):
             }
         }
     """
+    user_activity = _authenticated_user_activity(request.user)
     if not ts_config.is_configured():
-        return Response({'configured': False, 'data': None})
+        return Response({'configured': False, 'data': None, 'user_activity': user_activity})
     
     try:
         from apps.rbac.models import UserProfile
@@ -473,6 +507,7 @@ def my_live_attendance(request):
                 'configured': True,
                 'error': 'Your profile does not have an employee_id linked. Please contact HR.',
                 'data': None,
+                'user_activity': user_activity,
             })
         
         # Calculate detailed live metrics for current user
@@ -484,10 +519,11 @@ def my_live_attendance(request):
             'email': email,
             'as_of': dt.datetime.now().isoformat(),
             'data': metrics,
+            'user_activity': user_activity,
         })
         
     except (TimesheetConnectionError, TimesheetDriverError) as exc:
-        return _graceful_unavailable(exc)
+        return _graceful_unavailable(exc, extra_keys={'user_activity': user_activity})
     except Exception as exc:
         logger.exception('[timesheet.my_live_attendance] failed: %s', exc)
         return _error_response(exc)

@@ -7,11 +7,31 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.contrib.auth import get_user_model
 from django.apps import apps
-from .services import NotificationService
+from django.conf import settings
+from django.db import transaction
+from .models import Notification
+from .services import NotificationService, send_web_push_notification
 import logging
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+
+@receiver(post_save, sender=Notification)
+def queue_browser_push(sender, instance, created, **kwargs):
+    """Fan out every newly delivered in-app notification to opted-in browsers."""
+    if not created or instance.status != 'SENT' or not instance.send_in_app:
+        return
+    if not getattr(settings, 'WEB_PUSH_VAPID_PRIVATE_KEY', ''):
+        return
+
+    def enqueue():
+        try:
+            send_web_push_notification.delay(instance.id)
+        except Exception as error:
+            logger.warning('Unable to queue web push for notification %s: %s', instance.id, error)
+
+    transaction.on_commit(enqueue)
 
 
 def is_app_installed(app_label):

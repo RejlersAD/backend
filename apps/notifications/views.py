@@ -14,12 +14,12 @@ from django.core.cache import cache
 from django.db import connection
 import logging
 
-from .models import Notification, NotificationCategory, NotificationPreference, NotificationLog
+from .models import Notification, NotificationCategory, NotificationPreference, NotificationLog, WebPushSubscription
 from .serializers import (
     NotificationSerializer, NotificationListSerializer,
     NotificationCategorySerializer, NotificationPreferenceSerializer,
     NotificationLogSerializer, MarkAsReadSerializer,
-    BulkNotificationSerializer, NotificationStatsSerializer
+    BulkNotificationSerializer, NotificationStatsSerializer, WebPushSubscriptionSerializer
 )
 from .services import NotificationService
 
@@ -220,14 +220,56 @@ class NotificationViewSet(PersonalDataMixin, viewsets.ModelViewSet):
             
         except Exception as e:
             logger.error(f"[Notification] Unread count error for user {user_id}: {str(e)}", exc_info=True)
-            # Return safe default on error
+            # Report failure instead of returning a false zero. The frontend
+            # keeps its last known count, preventing false "new" sound alerts
+            # when the database recovers.
             return Response({
-                'unread_count': 0,
-                'total': 0,
-                'by_priority': {},
                 'error': 'Unable to fetch unread count',
                 'cached': False
-            }, status=status.HTTP_200_OK)  # Return 200 to prevent frontend errors
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    @action(detail=False, methods=['get'], url_path='push-config')
+    def push_config(self, request):
+        """Expose only the public VAPID key and current user's subscription count."""
+        from django.conf import settings
+        return Response({
+            'available': bool(settings.WEB_PUSH_VAPID_PUBLIC_KEY and settings.WEB_PUSH_VAPID_PRIVATE_KEY),
+            'public_key': settings.WEB_PUSH_VAPID_PUBLIC_KEY or '',
+            'subscriptions': WebPushSubscription.objects.filter(
+                user=request.user,
+                is_active=True,
+            ).count(),
+        })
+
+    @action(detail=False, methods=['post'], url_path='push-subscribe')
+    def push_subscribe(self, request):
+        """Register or refresh this browser for the authenticated user."""
+        serializer = WebPushSubscriptionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        keys = data['keys']
+        subscription, _ = WebPushSubscription.objects.update_or_create(
+            endpoint=data['endpoint'],
+            defaults={
+                'user': request.user,
+                'p256dh': keys['p256dh'],
+                'auth': keys['auth'],
+                'user_agent': request.META.get('HTTP_USER_AGENT', '')[:500],
+                'is_active': True,
+            },
+        )
+        return Response({'subscribed': True, 'id': subscription.id}, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], url_path='push-unsubscribe')
+    def push_unsubscribe(self, request):
+        endpoint = str(request.data.get('endpoint') or '').strip()
+        if not endpoint:
+            return Response({'endpoint': ['This field is required.']}, status=status.HTTP_400_BAD_REQUEST)
+        updated = WebPushSubscription.objects.filter(
+            user=request.user,
+            endpoint=endpoint,
+        ).update(is_active=False)
+        return Response({'subscribed': False, 'updated': updated})
     
     @action(detail=False, methods=['get'])
     def stats(self, request):

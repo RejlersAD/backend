@@ -1,4 +1,4 @@
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -323,6 +323,27 @@ class AttendanceNameBackfillTests(SimpleTestCase):
 class BiometricMirrorIntegrationTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+
+    def test_live_presence_uses_the_latest_punch_not_an_earlier_out(self):
+        now = datetime.now(timezone.utc)
+        TimesheetEvent.objects.create(
+            source_event_id='presence-in-1', employee_code='E-PRESENCE',
+            event_time=now.replace(microsecond=0) - timedelta(hours=3), event_type='IN',
+        )
+        TimesheetEvent.objects.create(
+            source_event_id='presence-out-1', employee_code='E-PRESENCE',
+            event_time=now.replace(microsecond=0) - timedelta(hours=2), event_type='OUT',
+        )
+        TimesheetEvent.objects.create(
+            source_event_id='presence-in-2', employee_code='E-PRESENCE',
+            event_time=now.replace(microsecond=0) - timedelta(minutes=30), event_type='IN',
+        )
+
+        result = mirror_services._calculate_live_metrics('E-PRESENCE')
+
+        self.assertTrue(result['is_in'])
+        self.assertEqual(result['punch_in_count'], 2)
+        self.assertEqual(result['punch_out_count'], 1)
 
     def test_ingest_is_idempotent_and_builds_daily_summary(self):
         payload = {

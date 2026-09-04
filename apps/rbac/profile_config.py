@@ -249,15 +249,29 @@ PROFILE_BADGES = {
 }
 
 # Profile completion weights (updated to include new sections)
+PROFILE_COMPLETION_FIELDS = (
+    # This is the single source of truth shared by the global completion guard
+    # and the Profile workspace. Every requirement maps to a field employees
+    # can update themselves on /profile.
+    {'key': 'first_name', 'label': 'First name', 'section': 'Personal information', 'weight': 5},
+    {'key': 'last_name', 'label': 'Last name', 'section': 'Personal information', 'weight': 5},
+    {'key': 'profile_photo', 'label': 'Profile photo', 'section': 'Personal information', 'weight': 10},
+    {'key': 'phone', 'label': 'Phone number', 'section': 'Personal information', 'weight': 5},
+    {'key': 'location', 'label': 'Work location', 'section': 'Personal information', 'weight': 5},
+    {'key': 'bio', 'label': 'Professional summary', 'section': 'Personal information', 'weight': 5},
+    {'key': 'department', 'label': 'Department', 'section': 'Professional details', 'weight': 5},
+    {'key': 'job_title', 'label': 'Job title', 'section': 'Professional details', 'weight': 5},
+    {'key': 'expertise_level', 'label': 'Expertise level', 'section': 'Career profile', 'weight': 10, 'source': 'engineer_profile'},
+    {'key': 'years_experience', 'label': 'Years of experience', 'section': 'Career profile', 'weight': 5, 'source': 'engineer_profile', 'allow_zero': True},
+    {'key': 'engineering_disciplines', 'label': 'At least one discipline', 'section': 'Career profile', 'weight': 10, 'source': 'engineer_profile', 'kind': 'list'},
+    {'key': 'technical_skills', 'label': 'At least one skill', 'section': 'Skills & certifications', 'weight': 10, 'source': 'engineer_profile', 'kind': 'list'},
+    {'key': 'certifications', 'label': 'At least one certification', 'section': 'Skills & certifications', 'weight': 10, 'source': 'engineer_profile', 'kind': 'list'},
+    {'key': 'availability_status', 'label': 'Availability status', 'section': 'Career profile', 'weight': 5, 'source': 'engineer_profile'},
+    {'key': 'languages', 'label': 'At least one language', 'section': 'Career profile', 'weight': 5, 'source': 'engineer_profile', 'kind': 'list'},
+)
+
 PROFILE_COMPLETION_WEIGHTS = {
-    'basic_info': 20,        # Name, photo, contact
-    'bio': 10,               # Bio section
-    'professional': 15,      # Department, job title, expertise
-    'skills': 15,            # Technical skills
-    'certifications': 10,    # Professional certifications
-    'experience': 15,        # Work experience entries
-    'achievements': 10,      # Achievement entries
-    'social_links': 5,       # Social media links
+    field['key']: field['weight'] for field in PROFILE_COMPLETION_FIELDS
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -272,63 +286,45 @@ def get_social_platform(platform_code):
     """Return social media platform configuration by code."""
     return SOCIAL_MEDIA_PLATFORMS.get(platform_code, SOCIAL_MEDIA_PLATFORMS['website'])
 
+def get_profile_completeness(profile_data):
+    """Return an authoritative score plus an actionable missing-field list."""
+    engineer_profile = profile_data.get('engineer_profile') or {}
+    completed_weight = 0
+    missing_fields = []
+
+    for requirement in PROFILE_COMPLETION_FIELDS:
+        source = engineer_profile if requirement.get('source') == 'engineer_profile' else profile_data
+        value = source.get(requirement['key'])
+        if requirement.get('kind') == 'list':
+            is_complete = isinstance(value, (list, tuple)) and len(value) > 0
+        elif requirement.get('allow_zero'):
+            is_complete = value not in (None, '')
+        else:
+            is_complete = bool(str(value).strip()) if value is not None else False
+
+        if is_complete:
+            completed_weight += requirement['weight']
+        else:
+            missing_fields.append({
+                'key': requirement['key'],
+                'label': requirement['label'],
+                'section': requirement['section'],
+                'weight': requirement['weight'],
+            })
+
+    percentage = min(100, round(completed_weight))
+    return {
+        'percentage': percentage,
+        'is_complete': percentage == 100,
+        'missing_fields': missing_fields,
+        'completed_fields': len(PROFILE_COMPLETION_FIELDS) - len(missing_fields),
+        'total_fields': len(PROFILE_COMPLETION_FIELDS),
+    }
+
+
 def calculate_profile_completeness(profile_data):
-    """
-    Calculate profile completeness percentage based on filled sections.
-    Returns a value between 0-100.
-    """
-    score = 0
-    
-    # Basic info (20%)
-    basic_fields = ['first_name', 'last_name', 'email', 'profile_photo']
-    basic_filled = sum(1 for f in basic_fields if profile_data.get(f))
-    score += (basic_filled / len(basic_fields)) * PROFILE_COMPLETION_WEIGHTS['basic_info']
-    
-    # Bio (10%)
-    if profile_data.get('bio') and len(profile_data['bio']) > 50:
-        score += PROFILE_COMPLETION_WEIGHTS['bio']
-    
-    # Professional (15%)
-    prof_fields = ['department', 'job_title', 'engineer_profile']
-    prof_filled = sum(1 for f in prof_fields if profile_data.get(f))
-    score += (prof_filled / len(prof_fields)) * PROFILE_COMPLETION_WEIGHTS['professional']
-    
-    # Skills (15%)
-    skills = profile_data.get('engineer_profile', {}).get('technical_skills', [])
-    if len(skills) >= 5:
-        score += PROFILE_COMPLETION_WEIGHTS['skills']
-    elif len(skills) > 0:
-        score += (len(skills) / 5) * PROFILE_COMPLETION_WEIGHTS['skills']
-    
-    # Certifications (10%)
-    certs = profile_data.get('engineer_profile', {}).get('certifications', [])
-    if len(certs) >= 3:
-        score += PROFILE_COMPLETION_WEIGHTS['certifications']
-    elif len(certs) > 0:
-        score += (len(certs) / 3) * PROFILE_COMPLETION_WEIGHTS['certifications']
-    
-    # Experience (15%)
-    experience_count = profile_data.get('experience_count', 0)
-    if experience_count >= 2:
-        score += PROFILE_COMPLETION_WEIGHTS['experience']
-    elif experience_count > 0:
-        score += (experience_count / 2) * PROFILE_COMPLETION_WEIGHTS['experience']
-    
-    # Achievements (10%)
-    achievement_count = profile_data.get('achievement_count', 0)
-    if achievement_count >= 3:
-        score += PROFILE_COMPLETION_WEIGHTS['achievements']
-    elif achievement_count > 0:
-        score += (achievement_count / 3) * PROFILE_COMPLETION_WEIGHTS['achievements']
-    
-    # Social Links (5%)
-    social_count = profile_data.get('social_links_count', 0)
-    if social_count >= 2:
-        score += PROFILE_COMPLETION_WEIGHTS['social_links']
-    elif social_count > 0:
-        score += (social_count / 2) * PROFILE_COMPLETION_WEIGHTS['social_links']
-    
-    return min(100, round(score))
+    """Backward-compatible numeric completeness helper."""
+    return get_profile_completeness(profile_data)['percentage']
 
 def get_earned_badges(profile_data):
     """
