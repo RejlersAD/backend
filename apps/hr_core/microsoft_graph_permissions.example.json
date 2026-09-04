@@ -1,0 +1,20 @@
+{
+  "authentication": {
+    "flow": "client_credentials",
+    "scope": "https://graph.microsoft.com/.default",
+    "secret_environment_variable": "MICROSOFT_GRAPH_CLIENT_SECRET"
+  },
+  "application_permissions": {
+    "entra_employee_sync": ["User.Read.All"],
+    "connection_health": ["Organization.Read.All"],
+    "outlook_delivery": ["Mail.Send"],
+    "teams_activity": ["TeamsActivity.Send.Group (preferred resource-specific consent)", "TeamsActivity.Send (tenant-wide alternative)"],
+    "sharepoint_policy_library": ["Sites.Selected with an explicit read grant to the configured HR policy site"]
+  },
+  "configuration_notes": [
+    "Grant admin consent only for workloads that are enabled in RADAI.",
+    "Do not store the client secret in the MicrosoftGraphConnection table.",
+    "Use a dedicated SharePoint site and explicit Sites.Selected grant for HR policies.",
+    "Declare systemDefault activity notifications in the Teams app and install it in the configured team."
+  ]
+}

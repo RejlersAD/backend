@@ -45,12 +45,12 @@ class EmployeeSalaryInfoSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeSalaryInfo
         fields = [
-            'id', 'user', 'user_id', 'employee_id', 'department', 'designation',
+            'id', 'canonical_employee', 'user', 'user_id', 'employee_id', 'department', 'designation',
             'join_date', 'bank_name', 'account_number', 'iban', 'swift_code',
             'tax_id', 'tax_exemption', 'basic_salary', 'currency', 'is_active',
             'termination_date', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'canonical_employee', 'created_at', 'updated_at']
     
     def validate_employee_id(self, value):
         """Ensure employee ID is unique"""
@@ -75,7 +75,7 @@ class EmployeeSalaryInfoListSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeSalaryInfo
         fields = [
-            'id', 'employee_id', 'user_name', 'user_email', 'department',
+            'id', 'canonical_employee', 'employee_id', 'user_name', 'user_email', 'department',
             'designation', 'basic_salary', 'currency', 'is_active',
             'gross_salary', 'net_salary'
         ]

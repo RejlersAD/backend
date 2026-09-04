@@ -632,6 +632,13 @@ TEAMS_APPROVAL_WEBHOOK_TIMEOUT = config(
     cast=int,
 )
 
+# Native Microsoft Graph HR integration. The client secret is read directly by
+# the Graph service from MICROSOFT_GRAPH_CLIENT_SECRET and is never persisted.
+MICROSOFT_GRAPH_BASE_URL = config('MICROSOFT_GRAPH_BASE_URL', default='https://graph.microsoft.com/v1.0')
+MICROSOFT_GRAPH_TIMEOUT = config('MICROSOFT_GRAPH_TIMEOUT', default=30, cast=int)
+HR_ASSISTANT_MODEL = config('HR_ASSISTANT_MODEL', default='gpt-4o-mini')
+HR_ASSISTANT_LLM_ENABLED = config('HR_ASSISTANT_LLM_ENABLED', default=False, cast=bool)
+
 # ==============================================================================
 # RAILWAY PRODUCTION SAFETY CHECK
 # ==============================================================================

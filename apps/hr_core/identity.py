@@ -85,7 +85,10 @@ class EmployeeIdentityService:
         try:
             from apps.payroll_engine.models import PayrollEmployee
 
-            for payroll_employee in PayrollEmployee.objects.filter(user_id=employee.user_id):
+            payroll_rows = PayrollEmployee.objects.filter(employee=employee)
+            if employee.user_id:
+                payroll_rows = payroll_rows | PayrollEmployee.objects.filter(user_id=employee.user_id)
+            for payroll_employee in payroll_rows.distinct():
                 add(
                     'payroll', 'employee_number', payroll_employee.employee_no,
                     metadata={'payroll_employee_id': payroll_employee.pk},
@@ -96,7 +99,10 @@ class EmployeeIdentityService:
         try:
             from apps.onboarding.models import OnboardingRecord
 
-            for record in OnboardingRecord.objects.filter(user_id=employee.user_id).only('id', 'employee_id'):
+            records = OnboardingRecord.objects.filter(canonical_employee=employee)
+            if employee.user_id:
+                records = records | OnboardingRecord.objects.filter(user_id=employee.user_id)
+            for record in records.distinct().only('id', 'employee_id'):
                 add(
                     'onboarding', 'employee_number', record.employee_id,
                     metadata={'onboarding_record_id': record.pk},
@@ -166,17 +172,18 @@ class EmployeeIdentityService:
                 })
 
         user = employee.user
-        compare('user', 'email', employee.email.casefold(), user.email.casefold())
-        compare('user', 'first_name', employee.first_name, user.first_name)
-        compare('user', 'last_name', employee.last_name, user.last_name)
+        if user:
+            compare('user', 'email', (employee.email or '').casefold(), user.email.casefold())
+            compare('user', 'first_name', employee.first_name, user.first_name)
+            compare('user', 'last_name', employee.last_name, user.last_name)
 
         try:
-            profile = user.rbac_profile
+            profile = user.rbac_profile if user else None
         except Exception:
             profile = None
-        if not profile:
+        if user and not profile:
             issues.append({'system': 'rbac', 'field': 'profile', 'canonical': 'present', 'actual': 'missing'})
-        else:
+        elif profile:
             compare('rbac', 'department', employee.department, profile.department)
             compare(
                 'rbac', 'job_title',
@@ -192,9 +199,11 @@ class EmployeeIdentityService:
         try:
             from apps.payroll_engine.models import PayrollEmployee
 
-            payroll_rows = PayrollEmployee.objects.filter(user_id=user.id)
+            payroll_rows = PayrollEmployee.objects.filter(employee=employee)
+            if user:
+                payroll_rows = payroll_rows | PayrollEmployee.objects.filter(user_id=user.id)
             if not payroll_rows.exists():
-                issues.append({'system': 'payroll', 'field': 'user_link', 'canonical': str(user.id), 'actual': 'missing'})
+                issues.append({'system': 'payroll', 'field': 'canonical_link', 'canonical': str(employee.id), 'actual': 'missing'})
             for row in payroll_rows:
                 compare('payroll', 'full_name', employee.get_full_name(), row.full_name)
                 compare('payroll', 'department', employee.department, row.department)
@@ -221,7 +230,7 @@ class EmployeeIdentityService:
         try:
             from apps.payroll_engine.models import PayrollEmployee
 
-            PayrollEmployee.objects.filter(user_id=employee.user_id).update(
+            PayrollEmployee.objects.filter(employee=employee).update(
                 full_name=employee.get_full_name(),
                 department=employee.department,
                 designation=employee.designation,

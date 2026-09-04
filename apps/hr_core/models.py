@@ -3,13 +3,13 @@ HR Core Models - Unified Employee Master System
 
 This module consolidates employee data from:
 - apps.users.models.User
-- apps.users.models.UserProfile
-- apps.finance.models.EmployeeSalaryInfo
-- apps.onboarding.models.OnboardingRecord
+- retired apps.users.models.UserProfile rows
+- finance and payroll domain extensions
+- onboarding and offboarding workflow extensions
 
 DESIGN PRINCIPLE: Single Source of Truth
-- All employee data lives here
-- Other tables reference this via Foreign Key
+- Employee identity and organization data lives here
+- Domain-specific tables reference this canonical record
 - Legacy identifiers (employee_code, emp_code) indexed for backward compatibility
 """
 import uuid
@@ -72,15 +72,19 @@ class EmployeeMaster(TimeStampedModel):
     # ========================================
     user = models.OneToOneField(
         'users.User',
-        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
         related_name='employee_master',
-        help_text='Link to Django authentication user'
+        help_text='Optional authentication account; historical employees and contractors may not have one'
     )
     
     email = models.EmailField(
+        null=True,
+        blank=True,
         unique=True,
         db_index=True,
-        help_text='Employee email (denormalized for performance)'
+        help_text='Employee email; optional for historical employees without an account'
     )
     
     # ========================================
@@ -1048,3 +1052,195 @@ class EmployeeServiceRequestComment(models.Model):
     class Meta:
         db_table = 'hr_employee_service_request_comment'
         ordering = ['created_at']
+
+
+# =============================================================================
+# Microsoft 365, grounded HR assistance, and data governance
+# =============================================================================
+
+class MicrosoftGraphConnection(TimeStampedModel):
+    """Non-secret Microsoft Graph tenant configuration.
+
+    Client secrets/certificates are deliberately environment-backed and are never
+    written to the database or returned by the API.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=120, default='Microsoft 365')
+    tenant_id = models.CharField(max_length=100)
+    client_id = models.CharField(max_length=100)
+    enabled = models.BooleanField(default=False, db_index=True)
+    entra_sync_enabled = models.BooleanField(default=True)
+    outlook_enabled = models.BooleanField(default=False)
+    teams_enabled = models.BooleanField(default=False)
+    sharepoint_enabled = models.BooleanField(default=False)
+    sharepoint_site_id = models.CharField(max_length=220, blank=True)
+    sharepoint_drive_id = models.CharField(max_length=220, blank=True)
+    sharepoint_policy_folder = models.CharField(max_length=500, default='HR Policies')
+    teams_app_id = models.CharField(max_length=100, blank=True)
+    default_team_id = models.CharField(max_length=100, blank=True)
+    mail_sender = models.EmailField(blank=True)
+    last_health_check_at = models.DateTimeField(null=True, blank=True)
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    last_status = models.CharField(max_length=24, default='not_configured')
+    last_error = models.TextField(blank=True)
+    created_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+    updated_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+
+    class Meta:
+        db_table = 'hr_microsoft_graph_connection'
+        ordering = ['name']
+
+
+class MicrosoftGraphUserLink(TimeStampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.OneToOneField(EmployeeMaster, on_delete=models.CASCADE, related_name='microsoft_graph_link')
+    entra_object_id = models.CharField(max_length=100, unique=True, db_index=True)
+    user_principal_name = models.EmailField(blank=True, db_index=True)
+    account_enabled = models.BooleanField(default=True)
+    raw_profile = models.JSONField(default=dict, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'hr_microsoft_graph_user_link'
+
+
+class HRPolicyDocument(TimeStampedModel):
+    VISIBILITY_CHOICES = [('employees', 'All Employees'), ('managers', 'Managers and HR'), ('hr', 'HR Only')]
+    STATUS_CHOICES = [('draft', 'Draft'), ('published', 'Published'), ('retired', 'Retired')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=240)
+    category = models.CharField(max_length=100, db_index=True)
+    jurisdiction = models.CharField(max_length=100, blank=True, db_index=True)
+    version = models.CharField(max_length=40, default='1.0')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='draft', db_index=True)
+    visibility = models.CharField(max_length=16, choices=VISIBILITY_CHOICES, default='employees', db_index=True)
+    allowed_role_codes = models.JSONField(default=list, blank=True)
+    content = models.TextField()
+    source_url = models.URLField(max_length=1000, blank=True)
+    sharepoint_item_id = models.CharField(max_length=220, blank=True, db_index=True)
+    checksum = models.CharField(max_length=64, blank=True, db_index=True)
+    effective_date = models.DateField(null=True, blank=True)
+    review_date = models.DateField(null=True, blank=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    owner = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='owned_hr_policies')
+
+    class Meta:
+        db_table = 'hr_policy_document'
+        ordering = ['category', 'title', '-version']
+        constraints = [models.UniqueConstraint(fields=['title', 'version', 'jurisdiction'], name='hr_policy_title_version_jurisdiction_unique')]
+
+
+class HRAssistantInteraction(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey('users.User', null=True, on_delete=models.SET_NULL, related_name='hr_assistant_interactions')
+    employee = models.ForeignKey(EmployeeMaster, null=True, blank=True, on_delete=models.SET_NULL, related_name='assistant_interactions')
+    question = models.TextField()
+    answer = models.TextField()
+    citations = models.JSONField(default=list, blank=True)
+    model_name = models.CharField(max_length=80, default='extractive-grounded')
+    grounded = models.BooleanField(default=False)
+    refusal_reason = models.CharField(max_length=160, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'hr_assistant_interaction'
+        ordering = ['-created_at']
+
+
+class HRAuditEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+    action = models.CharField(max_length=100, db_index=True)
+    object_type = models.CharField(max_length=120, blank=True, db_index=True)
+    object_id = models.CharField(max_length=120, blank=True, db_index=True)
+    employee = models.ForeignKey(EmployeeMaster, null=True, blank=True, on_delete=models.SET_NULL, related_name='audit_events')
+    outcome = models.CharField(max_length=20, default='success', db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    previous_hash = models.CharField(max_length=64, blank=True)
+    event_hash = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'hr_audit_event'
+        ordering = ['-created_at']
+
+
+class HRConsentRecord(TimeStampedModel):
+    STATUS_CHOICES = [('granted', 'Granted'), ('withdrawn', 'Withdrawn')]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.CASCADE, related_name='consents')
+    purpose = models.CharField(max_length=120, db_index=True)
+    policy_version = models.CharField(max_length=40)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='granted')
+    recorded_by = models.ForeignKey('users.User', null=True, on_delete=models.SET_NULL, related_name='+')
+    evidence = models.JSONField(default=dict, blank=True)
+    granted_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'hr_consent_record'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['employee', 'purpose', 'status'], name='hr_consent_employee_idx')]
+
+
+class HRPrivacyRequest(TimeStampedModel):
+    TYPE_CHOICES = [('access', 'Access'), ('correction', 'Correction'), ('deletion', 'Deletion'), ('restriction', 'Restriction'), ('export', 'Portable Export')]
+    STATUS_CHOICES = [('submitted', 'Submitted'), ('verified', 'Identity Verified'), ('in_progress', 'In Progress'), ('completed', 'Completed'), ('rejected', 'Rejected')]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request_number = models.CharField(max_length=32, unique=True, db_index=True, blank=True)
+    employee = models.ForeignKey(EmployeeMaster, on_delete=models.PROTECT, related_name='privacy_requests')
+    request_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    details = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='submitted', db_index=True)
+    due_at = models.DateTimeField(null=True, blank=True)
+    assigned_to = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='assigned_hr_privacy_requests')
+    resolution = models.TextField(blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'hr_privacy_request'
+        ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        if not self.request_number:
+            self.request_number = f'PRV-{timezone.now():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}'
+        super().save(*args, **kwargs)
+
+
+class HRRetentionPolicy(TimeStampedModel):
+    ACTION_CHOICES = [('review', 'Review'), ('anonymize', 'Anonymize'), ('delete', 'Delete')]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    data_category = models.CharField(max_length=100, unique=True)
+    legal_basis = models.CharField(max_length=240)
+    retention_days = models.PositiveIntegerField()
+    disposition_action = models.CharField(max_length=16, choices=ACTION_CHOICES, default='review')
+    legal_hold = models.BooleanField(default=False)
+    enabled = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
+    updated_by = models.ForeignKey('users.User', null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+
+    class Meta:
+        db_table = 'hr_retention_policy'
+        ordering = ['data_category']
+
+
+class LegacyEmployeeArchive(models.Model):
+    """Read-only migration evidence retained after a legacy identity table retires."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_table = models.CharField(max_length=120, db_index=True)
+    source_pk = models.CharField(max_length=120)
+    canonical_employee = models.ForeignKey(
+        EmployeeMaster, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='legacy_archives',
+    )
+    payload = models.JSONField(default=dict)
+    retired_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'hr_legacy_employee_archive'
+        ordering = ['source_table', 'source_pk']
+        constraints = [
+            models.UniqueConstraint(fields=['source_table', 'source_pk'], name='hr_legacy_archive_source_unique'),
+        ]

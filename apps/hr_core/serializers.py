@@ -27,6 +27,14 @@ from apps.hr_core.models import (
     SuccessionPlan,
     TalentAssessment,
     WorkShift,
+    HRAssistantInteraction,
+    HRAuditEvent,
+    HRConsentRecord,
+    HRPolicyDocument,
+    HRPrivacyRequest,
+    HRRetentionPolicy,
+    MicrosoftGraphConnection,
+    MicrosoftGraphUserLink,
 )
 from apps.users.serializers import UserSerializer
 
@@ -598,3 +606,78 @@ class EmployeeServiceRequestSerializer(serializers.ModelSerializer):
             if end < start:
                 raise serializers.ValidationError({'end_date': 'End date cannot be before start date.'})
         return attrs
+
+
+class MicrosoftGraphConnectionSerializer(serializers.ModelSerializer):
+    secret_configured = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MicrosoftGraphConnection
+        fields = '__all__'
+        read_only_fields = ['id', 'last_health_check_at', 'last_sync_at', 'last_status', 'last_error', 'created_by', 'updated_by', 'created_at', 'updated_at']
+
+    def get_secret_configured(self, obj):
+        import os
+        return bool(os.environ.get('MICROSOFT_GRAPH_CLIENT_SECRET', '').strip())
+
+
+class MicrosoftGraphUserLinkSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_display_name', read_only=True)
+
+    class Meta:
+        model = MicrosoftGraphUserLink
+        fields = '__all__'
+
+
+class HRPolicyDocumentSerializer(serializers.ModelSerializer):
+    owner_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = HRPolicyDocument
+        fields = '__all__'
+        read_only_fields = ['id', 'checksum', 'published_at', 'owner', 'created_at', 'updated_at']
+
+    def get_owner_name(self, obj):
+        return (obj.owner.get_full_name() or obj.owner.email) if obj.owner else 'System'
+
+
+class HRAssistantInteractionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HRAssistantInteraction
+        fields = '__all__'
+
+
+class HRAuditEventSerializer(serializers.ModelSerializer):
+    actor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = HRAuditEvent
+        fields = '__all__'
+
+    def get_actor_name(self, obj):
+        return (obj.actor.get_full_name() or obj.actor.email) if obj.actor else 'System'
+
+
+class HRConsentRecordSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_display_name', read_only=True)
+
+    class Meta:
+        model = HRConsentRecord
+        fields = '__all__'
+        read_only_fields = ['id', 'recorded_by', 'granted_at', 'withdrawn_at', 'created_at', 'updated_at']
+
+
+class HRPrivacyRequestSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.get_display_name', read_only=True)
+
+    class Meta:
+        model = HRPrivacyRequest
+        fields = '__all__'
+        read_only_fields = ['id', 'request_number', 'status', 'assigned_to', 'resolution', 'completed_at', 'created_at', 'updated_at']
+
+
+class HRRetentionPolicySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HRRetentionPolicy
+        fields = '__all__'
+        read_only_fields = ['id', 'updated_by', 'created_at', 'updated_at']

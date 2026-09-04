@@ -26,6 +26,7 @@ import secrets
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
 
+from django.core.cache import cache
 from django.db import transaction
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
@@ -60,6 +61,10 @@ def _record_heartbeat(last_event_time=None):
         key='default',
         defaults=defaults,
     )
+    # A stale health result is cached for up to 30 minutes by the monitor.
+    # Invalidate it immediately so the next UI health request reflects this
+    # successful agent cycle instead of continuing to report disconnected.
+    cache.delete('timesheet:sync_health:status')
 
 
 def _apply_ingest_tz(dt_naive: datetime) -> datetime:
@@ -224,7 +229,8 @@ def ingest_events(request):
     if prepared:
         existing = TimesheetEvent.objects.in_bulk(prepared, field_name='source_event_id')
         changed_ids: set[str] = set()
-        write_objects: list[TimesheetEvent] = []
+        new_objects: list[TimesheetEvent] = []
+        changed_objects: list[TimesheetEvent] = []
         compare_fields = (
             'employee_code', 'employee_name', 'employee_email', 'department',
             'event_time', 'event_type',
@@ -234,31 +240,27 @@ def ingest_events(request):
             if current is None:
                 inserted += 1
                 changed_ids.add(sid)
-                write_objects.append(obj)
+                new_objects.append(obj)
             elif any(getattr(current, field) != getattr(obj, field) for field in compare_fields):
                 updated += 1
                 changed_ids.add(sid)
-                write_objects.append(obj)
+                for field in compare_fields:
+                    setattr(current, field, getattr(obj, field))
+                changed_objects.append(current)
             else:
                 unchanged += 1
-        # Use Django's ordinary upsert path here instead of bulk_create with
-        # update_conflicts.  The mirror runs continuously with a checkpoint,
-        # so batches are small, while update_or_create remains compatible with
-        # production databases that do not support Django's generated bulk
-        # ON CONFLICT statement.  It also runs model field pre_save hooks for
-        # created_at/updated_at consistently.
+        # One row-at-a-time update_or_create is prohibitively slow when the
+        # office agent backfills into a remote PostgreSQL database. Inserts
+        # and updates are separated so both operations remain portable while
+        # requiring only a few database round trips per batch.
         with transaction.atomic():
-            for obj in write_objects:
-                TimesheetEvent.objects.update_or_create(
-                    source_event_id=obj.source_event_id,
-                    defaults={
-                        'employee_code': obj.employee_code,
-                        'employee_name': obj.employee_name,
-                        'employee_email': obj.employee_email,
-                        'department': obj.department,
-                        'event_time': obj.event_time,
-                        'event_type': obj.event_type,
-                    },
+            if new_objects:
+                TimesheetEvent.objects.bulk_create(
+                    new_objects, ignore_conflicts=True, batch_size=500,
+                )
+            if changed_objects:
+                TimesheetEvent.objects.bulk_update(
+                    changed_objects, fields=compare_fields, batch_size=500,
                 )
             _bulk_upsert_user_masters(master_values)
         summary_events = {sid: summary_events[sid] for sid in changed_ids}

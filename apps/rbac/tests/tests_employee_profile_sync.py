@@ -1,8 +1,10 @@
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from types import SimpleNamespace
 
 from apps.hr_core.services import EmployeeService
 from apps.rbac.models import Organization, UserProfile
+from apps.rbac.views import UserProfileViewSet
 
 
 User = get_user_model()
@@ -95,3 +97,15 @@ class EmployeeProfileSyncTests(TestCase):
 
         self.employee.refresh_from_db()
         self.assertEqual(self.employee.employment_status, 'suspended')
+
+    def test_employee_list_does_not_defer_serialized_canonical_fields(self):
+        """Keep list serialization from reintroducing one query per employee."""
+        view = UserProfileViewSet()
+        view.action = 'list'
+        view.request = SimpleNamespace(user=self.user, query_params={})
+
+        profile = list(view.get_queryset().filter(pk=self.profile.pk))[0]
+        master = profile.user.employee_master
+
+        self.assertNotIn('canonical_employee_id', profile.get_deferred_fields())
+        self.assertNotIn('probation_end_date', master.get_deferred_fields())

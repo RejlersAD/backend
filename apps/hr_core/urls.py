@@ -23,6 +23,15 @@ from .views import (
     SuccessionPlanViewSet,
     TalentAssessmentViewSet,
     WorkShiftViewSet,
+    HRAssistantViewSet,
+    HRAuditEventViewSet,
+    HRConsentRecordViewSet,
+    HRPolicyDocumentViewSet,
+    HRPrivacyRequestViewSet,
+    HRRetentionPolicyViewSet,
+    MicrosoftGraphConnectionViewSet,
+    MicrosoftGraphUserLinkViewSet,
+    SelfServiceWorkspaceViewSet,
 )
 
 router = DefaultRouter()
@@ -47,5 +56,14 @@ router.register(r'shift-rosters', ShiftRosterViewSet, basename='hr-shift-roster'
 router.register(r'shift-assignments', ShiftAssignmentViewSet, basename='hr-shift-assignment')
 router.register(r'overtime-requests', OvertimeRequestViewSet, basename='hr-overtime-request')
 router.register(r'service-requests', EmployeeServiceRequestViewSet, basename='hr-service-request')
+router.register(r'self-service-workspace', SelfServiceWorkspaceViewSet, basename='hr-self-service-workspace')
+router.register(r'microsoft-graph-connections', MicrosoftGraphConnectionViewSet, basename='hr-microsoft-graph-connection')
+router.register(r'microsoft-graph-user-links', MicrosoftGraphUserLinkViewSet, basename='hr-microsoft-graph-user-link')
+router.register(r'policies', HRPolicyDocumentViewSet, basename='hr-policy')
+router.register(r'assistant', HRAssistantViewSet, basename='hr-assistant')
+router.register(r'audit-events', HRAuditEventViewSet, basename='hr-audit-event')
+router.register(r'consents', HRConsentRecordViewSet, basename='hr-consent')
+router.register(r'privacy-requests', HRPrivacyRequestViewSet, basename='hr-privacy-request')
+router.register(r'retention-policies', HRRetentionPolicyViewSet, basename='hr-retention-policy')
 
 urlpatterns = [path('', include(router.urls))]

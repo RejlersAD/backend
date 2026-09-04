@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
+from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
@@ -359,6 +360,10 @@ class BiometricMirrorIntegrationTests(TestCase):
         self.assertEqual(summary.effective_hours, 9.0)
 
     def test_heartbeat_records_agent_liveness_without_events(self):
+        cache.set('timesheet:sync_health:status', {
+            'healthy': False,
+            'message': 'stale cached result',
+        }, timeout=1800)
         with patch.object(config, 'MIRROR_API_KEY', 'test-key'):
             response = self.client.post(
                 reverse('timesheet:mirror-heartbeat'), {}, format='json',
@@ -368,6 +373,7 @@ class BiometricMirrorIntegrationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         heartbeat = TimesheetMirrorHeartbeat.objects.get(key='default')
         self.assertIsNotNone(heartbeat.last_seen_at)
+        self.assertIsNone(cache.get('timesheet:sync_health:status'))
 
     def test_old_punch_does_not_mark_a_recent_heartbeat_stale(self):
         TimesheetEvent.objects.create(
