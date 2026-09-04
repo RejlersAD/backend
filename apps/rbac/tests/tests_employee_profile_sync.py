@@ -3,8 +3,10 @@ from django.test import TestCase
 from types import SimpleNamespace
 
 from apps.hr_core.services import EmployeeService
+from apps.payroll_engine.models import PayrollEmployee
+from apps.payroll_engine.serializers import PayrollEmployeeSerializer
 from apps.rbac.models import Organization, UserProfile
-from apps.rbac.serializers import UserProfileListSerializer
+from apps.rbac.serializers import UserProfileListSerializer, UserProfileSerializer
 from apps.rbac.views import UserProfileViewSet
 
 
@@ -125,3 +127,60 @@ class EmployeeProfileSyncTests(TestCase):
         data = UserProfileListSerializer(self.profile).data
 
         self.assertEqual(data['profile_photo'], photo_url)
+
+    def test_employee_id_becomes_the_canonical_employee_number(self):
+        self.profile.employee_id = '23022'
+        self.profile.save(update_fields=['employee_id', 'updated_at'])
+
+        self.employee.refresh_from_db()
+        self.assertEqual(self.employee.employee_number, '23022')
+        self.assertEqual(self.employee.employee_code, '23022')
+        self.assertEqual(self.employee.emp_code, '23022')
+
+    def test_payroll_shared_fields_follow_employee_master(self):
+        payroll = PayrollEmployee.objects.create(
+            employee=self.employee,
+            user=self.user,
+            employee_no='OLD-23022',
+            full_name='Different Payroll Name',
+            department='Different Department',
+            designation='Different Title',
+        )
+        PayrollEmployee.objects.filter(pk=payroll.pk).update(
+            employee_no='OLD-23022',
+            full_name='Different Payroll Name',
+            department='Different Department',
+            designation='Different Title',
+        )
+        payroll.refresh_from_db()
+
+        data = PayrollEmployeeSerializer(payroll).data
+
+        self.assertEqual(data['employee_no'], self.employee.employee_number)
+        self.assertEqual(data['full_name'], self.employee.get_full_name())
+        self.assertEqual(data['department'], self.employee.department)
+        self.assertEqual(data['designation'], self.employee.designation)
+
+        serializer = PayrollEmployeeSerializer(
+            payroll,
+            data={
+                'full_name': 'Conflicting Payroll Name',
+                'department': 'Conflicting Department',
+                'designation': 'Conflicting Title',
+            },
+            partial=True,
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        serializer.save()
+        payroll.refresh_from_db()
+        self.assertEqual(payroll.full_name, self.employee.get_full_name())
+        self.assertEqual(payroll.department, self.employee.department)
+        self.assertEqual(payroll.designation, self.employee.designation)
+
+    def test_detail_serializer_labels_all_identity_keys(self):
+        identity = UserProfileSerializer(self.profile).data['canonical_identity']
+
+        self.assertEqual(identity['access_profile_uuid'], str(self.profile.pk))
+        self.assertEqual(identity['login_account_id'], self.user.pk)
+        self.assertEqual(identity['employee_uuid'], str(self.employee.pk))
+        self.assertEqual(identity['employee_number'], self.employee.employee_number)

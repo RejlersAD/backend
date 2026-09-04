@@ -312,6 +312,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     engineer_profile = serializers.SerializerMethodField()
     join_date = serializers.SerializerMethodField()
     probation_end_date = serializers.SerializerMethodField()
+    canonical_identity = serializers.SerializerMethodField()
 
     # User creation fields (used on POST). phone is intentionally NOT redeclared
     # here so the auto-generated model field stays read+write — otherwise the
@@ -444,7 +445,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if not normalized:
             return ''
         matches = EmployeeMaster.objects.filter(
-            Q(employee_code__iexact=normalized)
+            Q(employee_number__iexact=normalized)
+            | Q(employee_code__iexact=normalized)
             | Q(emp_code__iexact=normalized)
         )
         if self.instance is not None:
@@ -464,7 +466,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'manager_id', 'manager_name', 'manager_detail',
             'last_login_ip', 'last_login_at', 'failed_login_attempts',
             'must_change_password',
-            'profile_photo', 'phone', 'bio', 'location', 'engineer_profile',
+            'profile_photo', 'phone', 'bio', 'location', 'engineer_profile', 'canonical_identity',
             'join_date', 'probation_end_date',
             'is_deleted', 'deleted_at', 'deleted_by',
             'created_at', 'updated_at',
@@ -492,6 +494,29 @@ class UserProfileSerializer(serializers.ModelSerializer):
             return obj.user.employee_master.probation_end_date
         except (AttributeError, ObjectDoesNotExist):
             return None
+
+    def get_canonical_identity(self, obj):
+        """Expose linked identifiers with explicit, non-conflicting labels."""
+        employee = obj.canonical_employee
+        if employee is None:
+            try:
+                employee = obj.user.employee_master
+            except (AttributeError, ObjectDoesNotExist):
+                employee = None
+        return {
+            'access_profile_uuid': str(obj.pk),
+            'login_account_id': obj.user_id,
+            'employee_uuid': str(employee.pk) if employee else None,
+            'employee_number': employee.employee_number if employee else (obj.employee_id or None),
+            'department': employee.department if employee else obj.department,
+            'designation': (
+                employee.designation or employee.job_title_uae or employee.job_title_finland
+                if employee else obj.job_title
+            ),
+            'first_name': employee.first_name if employee else obj.user.first_name,
+            'last_name': employee.last_name if employee else obj.user.last_name,
+            'email': employee.email if employee else obj.user.email,
+        }
     
     def get_modules(self, obj):
         """Get all accessible modules for user"""

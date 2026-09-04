@@ -115,7 +115,38 @@ class PayrollEmployeeSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'user': 'This RADAI account is already linked to another payroll employee.'
                 })
+
+        # Shared identity fields are governed by EmployeeMaster. Payroll keeps
+        # compensation/banking data, but must not create a second profile for
+        # a person already linked to the canonical employee record.
+        canonical = (
+            getattr(self.instance, 'employee', None)
+            if self.instance
+            else attrs.get('employee')
+        )
+        if canonical:
+            attrs.update({
+                'full_name': canonical.get_full_name(),
+                'department': canonical.department or '',
+                'designation': canonical.designation or '',
+                'joining_date': canonical.join_date,
+            })
         return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        canonical = getattr(instance, 'employee', None)
+        if canonical:
+            data.update({
+                'employee': str(canonical.pk),
+                'employee_no': canonical.employee_number,
+                'full_name': canonical.get_full_name(),
+                'employee_email': canonical.email or data.get('employee_email'),
+                'department': canonical.department or '',
+                'designation': canonical.designation or '',
+                'joining_date': canonical.join_date.isoformat() if canonical.join_date else None,
+            })
+        return data
 
 
 class PayslipLineItemSerializer(serializers.ModelSerializer):
