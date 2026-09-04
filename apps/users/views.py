@@ -684,10 +684,8 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
         POST /api/v1/users/employees/my-profile-photo/
         Upload profile photo for current user
         
-        Handles file upload to S3 and updates EmployeeMaster photo_url
+        Uses the configured local/S3 storage and updates EmployeeMaster photo metadata.
         """
-        from apps.core.s3_service import S3Service
-        
         user = request.user
         
         # Check if file is provided
@@ -714,26 +712,27 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
             )
         
         try:
-            # Get or create employee record
+            # EmployeeMaster is the canonical identity source. Never create a
+            # duplicate employee record as a side effect of uploading a photo.
             try:
                 employee = EmployeeMaster.objects.get(user=user)
             except EmployeeMaster.DoesNotExist:
-                employee = EmployeeService.create_employee(
-                    user=user,
-                    email=user.email,
-                    first_name=user.first_name or '',
-                    last_name=user.last_name or ''
+                return Response(
+                    {'error': 'Employee record not found. Please contact HR.'},
+                    status=status.HTTP_404_NOT_FOUND,
                 )
-            
-            # Upload to S3
+
             photo_url = EmployeeService.upload_employee_photo(
-                employee_id=str(employee.id),
-                photo_file=photo_file
+                employee=employee,
+                photo_file=photo_file,
+                uploaded_by=user,
             )
-            
-            # Update employee record
-            employee.photo_url = photo_url
-            employee.save(update_fields=['photo_url'])
+
+            response_photo_url = (
+                photo_url
+                if str(photo_url).startswith(('http://', 'https://'))
+                else request.build_absolute_uri(photo_url)
+            )
             
             # ✅ SYNC: Also update OnboardingRecord photo_url for bidirectional sync
             try:
@@ -744,8 +743,15 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                 if onboarding_record:
                     # Extract S3 key from photo_url (assuming it's structured like employee_photos/)
                     # Use the same URL since it's already in S3
+                    onboarding_record.photo_file_path = employee.photo_file_path
                     onboarding_record.photo_url = photo_url
-                    onboarding_record.save(update_fields=['photo_url'])
+                    onboarding_record.photo_file_size = employee.photo_file_size
+                    onboarding_record.photo_mime_type = employee.photo_mime_type
+                    onboarding_record.photo_original_filename = photo_file.name
+                    onboarding_record.save(update_fields=[
+                        'photo_file_path', 'photo_url', 'photo_file_size',
+                        'photo_mime_type', 'photo_original_filename',
+                    ])
             except Exception as sync_error:
                 # Log but don't fail - sync is optional
                 print(f"[WARNING] Failed to sync photo to OnboardingRecord: {str(sync_error)}")
@@ -753,9 +759,13 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
             return Response({
                 'success': True,
                 'message': 'Profile photo uploaded successfully',
-                'photo_url': photo_url,
+                'photo_url': response_photo_url,
             })
-        
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         except Exception as e:
             import traceback
             print(f"[ERROR] upload_my_profile_photo: {str(e)}")

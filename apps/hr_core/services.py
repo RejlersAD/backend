@@ -18,6 +18,9 @@ from typing import Optional, Dict, Any, List
 from django.db import transaction, models
 from django.utils import timezone
 from django.contrib.auth import get_user_model
+from django.conf import settings
+from django.core.files.storage import default_storage
+from PIL import Image, UnidentifiedImageError
 
 from apps.hr_core.models import EmployeeMaster
 
@@ -427,7 +430,7 @@ class EmployeeService:
         return employee
     
     # ========================================
-    # PHOTO MANAGEMENT (Unified S3 Upload)
+    # PHOTO MANAGEMENT (Unified configured storage)
     # ========================================
     
     @staticmethod
@@ -437,7 +440,7 @@ class EmployeeService:
         uploaded_by: User = None
     ) -> str:
         """
-        Upload employee photo to S3 and update employee record.
+        Upload an employee photo to the configured storage and update the record.
         
         This is the SINGLE photo upload method for the entire platform.
         Replaces:
@@ -451,44 +454,77 @@ class EmployeeService:
             uploaded_by: User who uploaded the photo (for audit)
             
         Returns:
-            Presigned S3 URL
+            Accessible photo URL
             
         Raises:
             ValueError: If file validation fails
         """
-        from apps.core.s3_service import S3Service
-        
-        # Validate file type
-        allowed_types = ['image/jpeg', 'image/jpg', 'image/png']
-        content_type = photo_file.content_type.lower() if hasattr(photo_file, 'content_type') else 'unknown'
-        
+        # Validate both the declared MIME type and the actual decoded image.
+        # The extension is derived from the decoded format, never from the
+        # user-supplied filename.
+        allowed_types = {'image/jpeg', 'image/jpg', 'image/png', 'image/webp'}
+        content_type = (
+            photo_file.content_type.lower()
+            if hasattr(photo_file, 'content_type') and photo_file.content_type
+            else 'unknown'
+        )
+
         if content_type not in allowed_types:
-            raise ValueError(f"Invalid file type: {content_type}. Allowed: {', '.join(allowed_types)}")
+            raise ValueError('Invalid file type. Allowed: JPEG, PNG, WebP')
         
         # Validate file size (5MB max)
         max_size = 5 * 1024 * 1024  # 5MB in bytes
         if photo_file.size > max_size:
             raise ValueError(f"File too large: {photo_file.size} bytes. Maximum: {max_size} bytes (5MB)")
         
-        # Generate S3 key
-        file_ext = photo_file.name.split('.')[-1].lower() if hasattr(photo_file, 'name') else 'jpg'
-        s3_key = f"media/employee_photos/{employee.id}.{file_ext}"
-        
-        logger.info(f"Uploading photo for {employee.employee_number} to S3: {s3_key}")
-        
-        # Upload to S3
-        s3_service = S3Service()
         try:
-            s3_service.upload_file(photo_file, s3_key, content_type)
-        except Exception as e:
-            logger.error(f"S3 upload failed for {employee.employee_number}: {e}")
-            raise
-        
-        # Generate presigned URL (7-day expiry)
-        photo_url = s3_service.generate_presigned_url(s3_key, expiration=604800)
+            image = Image.open(photo_file)
+            image_format = str(image.format or '').upper()
+            width, height = image.size
+            image.verify()
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            raise ValueError('The selected file is not a valid image') from exc
+        finally:
+            photo_file.seek(0)
+
+        allowed_formats = {'JPEG': 'jpg', 'PNG': 'png', 'WEBP': 'webp'}
+        if image_format not in allowed_formats:
+            raise ValueError('Invalid image format. Allowed: JPEG, PNG, WebP')
+        if width > 4096 or height > 4096:
+            raise ValueError('Image dimensions must not exceed 4096 x 4096 pixels')
+
+        file_ext = allowed_formats[image_format]
+        # Keep the key below the legacy User.avatar ImageField's 100-character
+        # limit while retaining an employee-specific folder and unique name.
+        filename = f"profile-{uuid.uuid4().hex[:12]}.{file_ext}"
+
+        if getattr(settings, 'USE_S3', False):
+            from apps.core.s3_service import S3Service
+
+            s3_service = S3Service()
+            upload_result = s3_service.upload_file(
+                photo_file,
+                folder_type='avatars',
+                filename=filename,
+                content_type=content_type,
+                metadata={'employee_id': str(employee.id)},
+            )
+            if not upload_result.get('success'):
+                raise RuntimeError(upload_result.get('error') or 'Photo storage upload failed')
+            storage_key = upload_result['key']
+            photo_url = s3_service.get_presigned_url(storage_key, expiration=604800)
+        else:
+            storage_key = default_storage.save(
+                f"employee_photos/{employee.id}/{filename}",
+                photo_file,
+            )
+            photo_url = default_storage.url(storage_key)
+
+        if not photo_url:
+            raise RuntimeError('Photo storage did not return an accessible URL')
         
         # Update employee record
-        employee.photo_file_path = s3_key
+        employee.photo_file_path = storage_key
         employee.photo_url = photo_url
         employee.photo_file_size = photo_file.size
         employee.photo_mime_type = content_type
@@ -507,8 +543,9 @@ class EmployeeService:
             'updated_at'
         ])
         
-        # Also update user.avatar for /profile page compatibility
-        employee.user.avatar = photo_url
+        # Keep the legacy User avatar reference aligned without storing a URL
+        # in an ImageField. The binary itself still has one storage location.
+        employee.user.avatar.name = storage_key
         employee.user.save(update_fields=['avatar'])
         
         logger.info(f"Photo uploaded successfully for {employee.employee_number}")

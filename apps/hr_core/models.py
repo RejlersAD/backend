@@ -409,12 +409,16 @@ class EmployeeMaster(TimeStampedModel):
         Called by Celery task daily to maintain valid URLs.
         """
         if self.photo_file_path:
-            from apps.core.s3_service import S3Service
-            s3_service = S3Service()
-            self.photo_url = s3_service.generate_presigned_url(
-                self.photo_file_path,
-                expiration=604800  # 7 days
-            )
+            from django.conf import settings
+            if getattr(settings, 'USE_S3', False):
+                from apps.core.s3_service import S3Service
+                self.photo_url = S3Service().get_presigned_url(
+                    self.photo_file_path,
+                    expiration=604800,  # 7 days
+                )
+            else:
+                from django.core.files.storage import default_storage
+                self.photo_url = default_storage.url(self.photo_file_path)
             self.save(update_fields=['photo_url'])
 
 
