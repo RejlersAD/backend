@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from apps.hr_core.services import EmployeeService
 from apps.rbac.models import Organization, UserProfile
+from apps.rbac.serializers import UserProfileListSerializer
 from apps.rbac.views import UserProfileViewSet
 
 
@@ -109,3 +110,18 @@ class EmployeeProfileSyncTests(TestCase):
 
         self.assertNotIn('canonical_employee_id', profile.get_deferred_fields())
         self.assertNotIn('probation_end_date', master.get_deferred_fields())
+        self.assertNotIn('photo_file_path', master.get_deferred_fields())
+        self.assertNotIn('photo_url', master.get_deferred_fields())
+
+    def test_employee_list_photo_falls_back_to_user_employee_master(self):
+        """Older profiles still show their canonical uploaded employee photo."""
+        photo_url = 'https://cdn.example.com/employee-photo.png'
+        self.employee.photo_file_path = ''
+        self.employee.photo_url = photo_url
+        self.employee.save(update_fields=['photo_file_path', 'photo_url'])
+        UserProfile.objects.filter(pk=self.profile.pk).update(canonical_employee=None)
+        self.profile.refresh_from_db()
+
+        data = UserProfileListSerializer(self.profile).data
+
+        self.assertEqual(data['profile_photo'], photo_url)

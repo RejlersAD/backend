@@ -21,7 +21,13 @@ def _profile_photo_url(serializer, profile):
     """Resolve the canonical employee photo with legacy-profile fallback."""
     url = None
     try:
+        # ``canonical_employee`` was added after many production profiles had
+        # already been created.  Until every historical row is linked, the
+        # auth user's one-to-one EmployeeMaster remains an authoritative and
+        # safe fallback for the same person.
         employee = profile.canonical_employee if profile.canonical_employee_id else None
+        if employee is None:
+            employee = profile.user.employee_master
         if employee and employee.photo_file_path:
             from django.conf import settings
             if getattr(settings, 'USE_S3', False):
@@ -36,7 +42,8 @@ def _profile_photo_url(serializer, profile):
         # Preserve the last known URL if storage URL regeneration is
         # temporarily unavailable.
         try:
-            url = profile.canonical_employee.photo_url if profile.canonical_employee_id else None
+            employee = profile.canonical_employee if profile.canonical_employee_id else profile.user.employee_master
+            url = employee.photo_url
         except Exception:
             url = None
 
@@ -531,33 +538,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return result
     
     def get_profile_photo(self, obj):
-        """Return absolute URL for profile photo.
-
-        - S3 (production): obj.profile_photo.url already returns a presigned HTTPS URL.
-        - Local dev: url is relative (/media/...) — build absolute from request context.
-        """
-        if obj.canonical_employee_id:
-            return _profile_photo_url(self, obj)
-        if not obj.profile_photo:
-            return None
-        try:
-            url = obj.profile_photo.url
-            # S3 presigned URLs are already absolute
-            if url.startswith('http'):
-                return url
-            # Local filesystem — build absolute URL from request context
-            request = self.context.get('request')
-            if request:
-                absolute_uri = request.build_absolute_uri(url)
-                # Fix Vite dev-server proxy: Host header is localhost:8000 so
-                # build_absolute_uri should already produce the correct host.
-                # Guard against edge cases where :5173 leaks through.
-                if ':5173' in absolute_uri:
-                    absolute_uri = absolute_uri.replace('http://localhost:5173', 'http://localhost:8000')
-                return absolute_uri
-            return url
-        except Exception:
-            return None
+        """Return the canonical or legacy profile photo as an absolute URL."""
+        return _profile_photo_url(self, obj)
     
     def get_engineer_profile(self, obj):
         """Return engineering competency data from the dedicated rbac_engineer_profiles table."""
@@ -1084,23 +1066,7 @@ class UserProfileListSerializer(serializers.ModelSerializer):
 
     def get_profile_photo(self, obj):
         """Return absolute presigned URL for profile photo (same logic as detail serializer)."""
-        if obj.canonical_employee_id:
-            return _profile_photo_url(self, obj)
-        if not obj.profile_photo:
-            return None
-        try:
-            url = obj.profile_photo.url
-            if url.startswith('http'):
-                return url
-            request = self.context.get('request')
-            if request:
-                absolute_uri = request.build_absolute_uri(url)
-                if ':5173' in absolute_uri:
-                    absolute_uri = absolute_uri.replace('http://localhost:5173', 'http://localhost:8000')
-                return absolute_uri
-            return url
-        except Exception:
-            return None
+        return _profile_photo_url(self, obj)
 
 
 class UserStorageSerializer(serializers.ModelSerializer):
