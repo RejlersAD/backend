@@ -248,6 +248,13 @@ def forward(apps, schema_editor):
         payroll_updates.append(payroll)
 
     onboarding_updates = []
+    # The field is still one-to-one at this point in the migration chain.
+    # Link one workflow per employee now; a following migration relaxes the
+    # constraint and backfills duplicate historical/rehire workflows.
+    claimed_onboarding_employee_ids = set(
+        Onboarding.objects.exclude(canonical_employee=None)
+        .values_list('canonical_employee_id', flat=True)
+    )
     for record in Onboarding.objects.all().iterator():
         employee = resolve(user_id=record.user_id, email=record.employee_email, codes=[record.employee_id])
         if not employee:
@@ -257,8 +264,11 @@ def forward(apps, schema_editor):
                 join_date=record.joining_date, department=record.department or '',
                 designation=record.position or '', branch=record.branch or '',
             )
+        if employee.pk in claimed_onboarding_employee_ids:
+            continue
         record.canonical_employee_id = employee.pk
         onboarding_updates.append(record)
+        claimed_onboarding_employee_ids.add(employee.pk)
 
     offboarding_updates = []
     for record in Offboarding.objects.all().iterator():
@@ -295,7 +305,6 @@ def forward(apps, schema_editor):
     required = {
         'finance.EmployeeSalaryInfo': SalaryInfo.objects.filter(canonical_employee=None).count(),
         'payroll_engine.PayrollEmployee': PayrollEmployee.objects.filter(employee=None).count(),
-        'onboarding.OnboardingRecord': Onboarding.objects.filter(canonical_employee=None).count(),
         'onboarding.OffboardingRecord': Offboarding.objects.filter(canonical_employee=None).count(),
         'onboarding.ProbationPerformanceReport': Probation.objects.filter(canonical_employee=None).count(),
     }
