@@ -15,6 +15,62 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunSQL(
+            sql='''
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name = 'payroll_engine_run'
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'payroll_engine_run'
+          AND column_name = 'id'
+    )
+    AND NOT EXISTS (
+        -- A foreign key can only target a primary key or an unconditional
+        -- unique index.  Some legacy databases have a primary key on this
+        -- table, but not on ``id``, so checking for any primary key is not
+        -- sufficient.
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class t ON t.oid = i.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        JOIN pg_attribute a ON a.attrelid = t.oid
+        WHERE n.nspname = 'public'
+          AND t.relname = 'payroll_engine_run'
+          AND a.attname = 'id'
+          AND i.indisunique
+          AND i.indpred IS NULL
+          AND i.indexprs IS NULL
+          AND i.indnkeyatts = 1
+          AND a.attnum = ANY(i.indkey)
+    ) THEN
+        IF EXISTS (
+            SELECT 1
+            FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            JOIN pg_namespace n ON t.relnamespace = n.oid
+            WHERE n.nspname = 'public'
+              AND t.relname = 'payroll_engine_run'
+              AND c.contype = 'p'
+        ) THEN
+            ALTER TABLE public.payroll_engine_run
+                ADD CONSTRAINT uq_payroll_engine_run_id UNIQUE (id);
+        ELSE
+            ALTER TABLE public.payroll_engine_run
+                ADD CONSTRAINT payroll_engine_run_pkey PRIMARY KEY (id);
+        END IF;
+    END IF;
+END $$;
+''',
+            reverse_sql=migrations.RunSQL.noop,
+        ),
         migrations.CreateModel(
             name='PayrollAccountingExport',
             fields=[
