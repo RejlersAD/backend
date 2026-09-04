@@ -34,6 +34,9 @@ class TeamsApprovalNotificationTests(SimpleTestCase):
     def test_payload_contains_private_recipient_and_open_request_link(self):
         payload = build_approval_assignment_payload(self._notification(), {
             'request_name': 'Purchase Requisition RAD-PRJ-PR-0001_2026',
+            'description': 'Engineering software renewal',
+            'project_name': 'Onboarding Enhancement phase 2',
+            'project_id': 'RAD-PRJ-2026-0042',
             'due_date': date(2026, 9, 5),
         })
 
@@ -42,6 +45,9 @@ class TeamsApprovalNotificationTests(SimpleTestCase):
         self.assertEqual(payload['due_date'], '05-Sep-2026')
         self.assertEqual(payload['action_url'], 'https://radai.ae/approvals?tab=procurement')
         self.assertIn('New approval request assigned', payload['message'])
+        self.assertIn('Description: Engineering software renewal', payload['message'])
+        self.assertIn('Project Name: Onboarding Enhancement phase 2', payload['message'])
+        self.assertIn('Project ID: RAD-PRJ-2026-0042', payload['message'])
         self.assertEqual(payload['type'], 'message')
         self.assertEqual(
             payload['attachments'][0]['contentType'],

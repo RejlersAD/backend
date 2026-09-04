@@ -98,6 +98,16 @@ def _is_hr(user):
     return user.is_staff or user.is_superuser or bool(_role_codes(user) & HR_ROLE_CODES)
 
 
+def _can_access_hr_management(user):
+    """Allow the HR dashboard module without granting user-admin access."""
+    if _is_hr(user):
+        return True
+    try:
+        return user.rbac_profile.has_module_access('hr_management')
+    except Exception:
+        return False
+
+
 class EmployeeMasterViewSet(viewsets.ModelViewSet):
     """The authoritative employee directory and identity-health API."""
 
@@ -138,6 +148,47 @@ class EmployeeMasterViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         raise ValidationError({'detail': 'Use the onboarding employee-creation workflow.'})
+
+    @action(detail=False, methods=['get'], url_path='workforce-summary')
+    def workforce_summary(self, request):
+        """Small, HR-scoped directory payload for workforce dashboard KPIs."""
+        if not _can_access_hr_management(request.user):
+            raise PermissionDenied('HR Management access is required to view workforce analytics.')
+
+        rows = EmployeeMaster.objects.values(
+            'id',
+            'user_id',
+            'email',
+            'first_name',
+            'last_name',
+            'employee_number',
+            'department',
+            'designation',
+            'employment_status',
+            'join_date',
+            'created_at',
+            'user__is_active',
+            'user__rbac_profile__status',
+            'user__rbac_profile__is_mfa_enabled',
+        ).order_by('first_name', 'last_name')
+
+        results = []
+        for row in rows.iterator(chunk_size=500):
+            access_status = row.pop('user__rbac_profile__status', None)
+            user_is_active = row.pop('user__is_active', None)
+            row['is_mfa_enabled'] = bool(
+                row.pop('user__rbac_profile__is_mfa_enabled', False)
+            )
+            row['status'] = access_status or row['employment_status']
+            row['is_active'] = (
+                user_is_active
+                if user_is_active is not None
+                else row['employment_status'] in {'active', 'probation'}
+            )
+            row['full_name'] = f"{row['first_name']} {row['last_name']}".strip()
+            results.append(row)
+
+        return Response({'count': len(results), 'results': results})
 
     @action(detail=False, methods=['get'], url_path='resolve')
     def resolve(self, request):

@@ -93,7 +93,7 @@ from .serializers import (
 from .services.requisition_workflow import RequisitionWorkflowService
 from .services.requisition_conversion import RequisitionConversionService
 from .services.purchase_order_numbering import PurchaseOrderNumberService
-from .services.purchase_order_approvals import pending_entries_for, record_decision
+from .services.purchase_order_approvals import _entry_matches_user, pending_entries_for, record_decision
 from .services.requisition_status import canonicalize_pr_status, stored_values_for
 from .services.project_relationships import (
     build_project_reconciliation_payload,
@@ -206,7 +206,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         'eng_manager_name',
         'manager_projects_name',
         'vp_op_name',
-    ).prefetch_related('issued_by__onboarding_records').all().order_by('-created_at')
+    ).prefetch_related('issued_by__onboarding_records', 'purchase_orders').all().order_by('-created_at')
     serializer_class = PurchaseRequisitionSerializer
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'procurement_requisitions'
@@ -217,6 +217,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         # service verifies that the signed-in user owns the current stage, so
         # those employees do not also need procurement module access.
         approval_actions = {
+            'retrieve',
             'pending_for_me',
             'pm_approve',
             'pm_reject',
@@ -237,6 +238,18 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         if getattr(self, 'action', None) == 'convert_to_po':
             self.module_required = 'procurement_orders'
         return super().get_permissions()
+
+    def retrieve(self, request, *args, **kwargs):
+        pr = self.get_object()
+        has_module = HasModuleAccess().has_permission(request, self)
+        is_owner = pr.issued_by_id == request.user.id or pr.requested_by_id == request.user.id
+        is_assigned = any(
+            RequisitionWorkflowService._stage_matches_user(stage, request.user)
+            for stage in (pr.approval_workflow_config or [])
+        )
+        if not (has_module or is_owner or is_assigned):
+            raise PermissionDenied('You are not assigned to this Purchase Requisition.')
+        return Response(self.get_serializer(pr).data)
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1810,13 +1823,25 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         # Helper actions like available-requisitions, available-projects, and
         # create-project are also needed during PO creation.
         if self.action in {
-            'pending_for_me', 'approve', 'reject',
+            'pending_for_me', 'approve', 'reject', 'retrieve',
             'create', 'update', 'partial_update',
             'available_requisitions', 'available_projects', 'create_project',
             'reserve_number',
         }:
             return [IsAuthenticated()]
         return super().get_permissions()
+
+    def retrieve(self, request, *args, **kwargs):
+        order = self.get_object()
+        has_module = HasModuleAccess().has_permission(request, self)
+        is_owner = order.created_by_id == request.user.id
+        is_assigned = any(
+            _entry_matches_user(entry, request.user)
+            for entry in (order.approval_log or [])
+        )
+        if not (has_module or is_owner or is_assigned):
+            raise PermissionDenied('You are not assigned to this Purchase Order.')
+        return Response(self.get_serializer(order).data)
     
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -1855,6 +1880,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
                 'approval_queue_id': f'{order.id}:{index}',
                 'approval_stage': entry.get('stage'),
                 'approval_status': entry.get('status'),
+                'approval_level': entry.get('level', index),
                 'approver_name': entry.get('approver'),
             })
             results.append(payload)

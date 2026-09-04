@@ -137,7 +137,13 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
 
         RequisitionWorkflowService._approve_locked(pr, self.pm)
 
-        notify_level.assert_called_once_with(pr, pr.approval_workflow_config, 1)
+        notify_level.assert_called_once_with(
+            pr,
+            pr.approval_workflow_config,
+            1,
+            previous_approver='Project Manager',
+            previous_level=0,
+        )
 
     @patch('apps.notifications.services.NotificationService.create_notification')
     @patch('apps.notifications.models.Notification.objects.filter')
@@ -174,7 +180,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
             {'level-one-a', 'level-one-b'},
         )
         for call in create_notification.call_args_list:
-            self.assertEqual(call.kwargs['action_url'], '/approvals?tab=procurement')
+            self.assertEqual(call.kwargs['action_url'], '/procurement/requisitions/pr-id')
             self.assertEqual(call.kwargs['action_label'], 'Open Request')
             self.assertTrue(call.kwargs['send_teams'])
 

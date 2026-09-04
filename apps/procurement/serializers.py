@@ -14,6 +14,9 @@ from django.db.models import Q
 from .models import Vendor, PurchaseRequisition, PurchaseOrder, Receipt, PODocument, PROCUREMENT_CATEGORIES
 from .services.purchase_order_numbering import PurchaseOrderNumberService
 from .services.purchase_order_approvals import (
+    _active_entries,
+    _entry_level,
+    _entry_matches_user,
     normalize_assignments,
     notify_assigned_approvers,
     notify_purchase_order_created,
@@ -177,6 +180,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
 
     # API alias for frontend compatibility
     approval_hierarchy = serializers.JSONField(source='approval_workflow_config', read_only=True)
+    linked_po_id = serializers.SerializerMethodField()
 
     SERVER_CONTROLLED_FIELDS = PR_SERVER_CONTROLLED_FIELDS
     
@@ -219,7 +223,7 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'management_approval', 'management_approval_remarks', 'management_approval_evidence',
             
             # Reference Section (Field 14) - Enhanced with PO Applicable
-            'po_applicable', 'po_number_reference',
+            'po_applicable', 'po_number_reference', 'linked_po_id',
             
             # Purchase Recommendation Section (Field 15) - RENAMED from special_notes
             'purchase_recommendation',
@@ -256,6 +260,14 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
             'id', 'created_at', 'updated_at', 'attachments',
             *PR_SERVER_CONTROLLED_FIELDS,
         ]
+
+    def get_linked_po_id(self, obj):
+        linked_order = max(
+            obj.purchase_orders.all(),
+            key=lambda order: order.created_at,
+            default=None,
+        )
+        return str(linked_order.id) if linked_order else None
 
     def _is_super_admin(self, user):
         if getattr(user, 'is_superuser', False):
@@ -705,6 +717,8 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     pr_number = serializers.CharField(source='pr_reference.pr_number', read_only=True, allow_null=True)
     po_number_verified = serializers.SerializerMethodField()
     po_number_verification_message = serializers.SerializerMethodField()
+    can_approve = serializers.SerializerMethodField()
+    current_approval = serializers.SerializerMethodField()
     
     # Project linkage fields (soft-coded relationship)
     project_name = serializers.CharField(source='project.project_name', read_only=True, allow_null=True)
@@ -760,7 +774,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             'approved_by', 'approved_by_user_name', 'approved_by_name', 'approved_by_title', 'approved_date', 'approved_at',
             'approval_signature', 'approval_stamp',
             'technical_approver', 'financial_approver', 'management_approver',
-            'approval_log', 'final_approver_notes',
+            'approval_log', 'final_approver_notes', 'can_approve', 'current_approval',
             
             # Order confirmation (vendor response)
             'confirmation_date', 'seller_contact_person', 'seller_phone', 'seller_fax', 'seller_email',
@@ -847,6 +861,26 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
         if obj.project:
             return f"{obj.project.project_number} - {obj.project.project_name}"
         return None
+
+    def get_current_approval(self, obj):
+        active = _active_entries(list(obj.approval_log or []))
+        if not active:
+            return None
+        index, entry = active[0]
+        return {
+            'stage': entry.get('stage'),
+            'level': _entry_level(entry, index),
+            'approver': entry.get('approver'),
+        }
+
+    def get_can_approve(self, obj):
+        request = self.context.get('request')
+        if not request or not getattr(request, 'user', None):
+            return False
+        return any(
+            _entry_matches_user(entry, request.user)
+            for _, entry in _active_entries(list(obj.approval_log or []))
+        )
     
     def get_category_display(self, obj):
         return PROCUREMENT_CATEGORIES.get(obj.category, {}).get('name', obj.category)

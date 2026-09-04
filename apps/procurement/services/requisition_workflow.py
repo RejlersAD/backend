@@ -245,7 +245,9 @@ class RequisitionWorkflowService:
         return None
 
     @classmethod
-    def _notify_level(cls, pr, workflow, level, force=False):
+    def _notify_level(
+        cls, pr, workflow, level, force=False, previous_approver='', previous_level=None,
+    ):
         if not getattr(pr, 'pk', None):
             return
         recipients = {}
@@ -288,16 +290,36 @@ class RequisitionWorkflowService:
                         f'Please review and record your Level {level} decision for converted '
                         f'Purchase Requisition {pr_number}.'
                         if force else
-                        f'You have been assigned as a Level {level} approver for Purchase Requisition {pr_number}.'
+                        (
+                            f'Level {previous_level} ({previous_approver}) is approved. Purchase Requisition '
+                            f'{pr_number} is now waiting for your Level {level} decision.'
+                            if previous_approver else
+                            f'Purchase Requisition {pr_number} is waiting for your Level {level} decision.'
+                        )
                     ),
                     category='APPROVAL',
                     priority='HIGH',
-                    action_url='/approvals?tab=procurement',
+                    action_url=f'/procurement/requisitions/{pr_id}',
                     action_label='Open Request',
                     send_teams=True,
                     teams_context={
                         'request_name': f'Purchase Requisition {pr_number}',
                         'submitted_by': submitted_by,
+                        'description': (
+                            getattr(pr, 'description_reason', None)
+                            or getattr(pr, 'product_service', None)
+                            or 'Not specified'
+                        ),
+                        'project_name': (
+                            getattr(getattr(pr, 'enterprise_project', None), 'name', None)
+                            or getattr(pr, 'project_department', None)
+                            or getattr(pr, 'project', None)
+                            or 'Not specified'
+                        ),
+                        'project_id': (
+                            getattr(getattr(pr, 'enterprise_project', None), 'code', None)
+                            or 'Not specified'
+                        ),
                         'due_date': due_date,
                     },
                     metadata={
@@ -305,6 +327,7 @@ class RequisitionWorkflowService:
                         'pr_number': pr_number,
                         'approval_level': level,
                         'approval_evidence_resend': force,
+                        'requires_action': True,
                     },
                 )
 
@@ -478,7 +501,13 @@ class RequisitionWorkflowService:
                 if evidence_recovery:
                     cls._notify_level(pr, workflow, next_level, force=True)
                 else:
-                    cls._notify_level(pr, workflow, next_level)
+                    cls._notify_level(
+                        pr,
+                        workflow,
+                        next_level,
+                        previous_approver=actor_name,
+                        previous_level=active_level,
+                    )
 
         pr.approval_workflow_config = workflow
         pr.save()
