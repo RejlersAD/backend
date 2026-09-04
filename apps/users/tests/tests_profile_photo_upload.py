@@ -12,6 +12,7 @@ from PIL import Image
 
 from apps.hr_core.models import EmployeeMaster
 from apps.hr_core.services import EmployeeService
+from apps.rbac.models import Organization, UserProfile
 
 
 User = get_user_model()
@@ -64,6 +65,13 @@ class ProfilePhotoUploadAPITests(TestCase):
     @patch('apps.users.views.EmployeeService.upload_employee_photo')
     def test_upload_uses_existing_canonical_employee(self, upload_photo):
         upload_photo.return_value = '/media/employee_photos/photo.png'
+        organization = Organization.objects.create(name='Photo Test', code='PHOTO-TEST')
+        profile, _ = UserProfile.objects.get_or_create(
+            user=self.user,
+            defaults={'organization': organization},
+        )
+        profile.canonical_employee = None
+        profile.save(update_fields=['canonical_employee'])
 
         response = self.client.post(
             '/api/v1/users/employees/my-profile-photo/',
@@ -77,6 +85,8 @@ class ProfilePhotoUploadAPITests(TestCase):
         upload_photo.assert_called_once()
         self.assertEqual(upload_photo.call_args.kwargs['employee'], self.employee)
         self.assertEqual(upload_photo.call_args.kwargs['uploaded_by'], self.user)
+        profile.refresh_from_db()
+        self.assertEqual(profile.canonical_employee, self.employee)
 
     def test_upload_does_not_create_a_missing_employee_record(self):
         self.employee.delete()
@@ -143,3 +153,8 @@ class ProfilePhotoUploadAPITests(TestCase):
             self.assertEqual(self.employee.photo_url, photo_url)
             self.assertEqual(self.employee.photo_mime_type, 'image/png')
             self.assertEqual(self.user.avatar.name, self.employee.photo_file_path)
+
+            response = self.client.get('/api/v1/users/employees/my-profile-photo/')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response['Content-Type'], 'image/png')
+            self.assertGreater(len(b''.join(response.streaming_content)), 0)
