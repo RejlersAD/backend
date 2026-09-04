@@ -51,6 +51,9 @@ def build_approval_assignment_payload(notification, context=None):
     event_type = str(context.get('event_type') or 'approval_assignment')
     request_name = str(context.get('request_name') or notification.title or 'Approval request')
     submitted_by = str(context.get('submitted_by') or _display_name(notification.sender))
+    description = str(context.get('description') or 'Not specified')
+    project_name = str(context.get('project_name') or 'Not specified')
+    project_id = str(context.get('project_id') or 'Not specified')
     due_date = _format_due_date(context.get('due_date'))
     action_url = _absolute_action_url(notification.action_url)
     recipient_name = _display_name(notification.recipient)
@@ -58,6 +61,9 @@ def build_approval_assignment_payload(notification, context=None):
     plain_message = (
         f'{message_title}\n'
         f'Request: {request_name}\n'
+        f'Description: {description}\n'
+        f'Project Name: {project_name}\n'
+        f'Project ID: {project_id}\n'
         f'Submitted By: {submitted_by}\n'
         f'Due Date: {due_date}\n'
         f'Open Request: {action_url}'
@@ -72,6 +78,9 @@ def build_approval_assignment_payload(notification, context=None):
         'recipient_name': recipient_name,
         'title': message_title,
         'request': request_name,
+        'description': description,
+        'project_name': project_name,
+        'project_id': project_id,
         'submitted_by': submitted_by,
         'due_date': due_date,
         'action_label': notification.action_label or 'Open Request',
@@ -97,6 +106,9 @@ def build_approval_assignment_payload(notification, context=None):
                     'type': 'FactSet',
                     'facts': [
                         {'title': 'Request', 'value': request_name},
+                        {'title': 'Description', 'value': description},
+                        {'title': 'Project Name', 'value': project_name},
+                        {'title': 'Project ID', 'value': project_id},
                         {'title': 'Submitted By', 'value': submitted_by},
                         {'title': 'Due Date', 'value': due_date},
                     ],

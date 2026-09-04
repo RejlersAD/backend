@@ -13,6 +13,7 @@ from apps.procurement.services.purchase_order_approvals import (
     _entry_matches_user,
     normalize_assignments,
     notify_purchase_order_created,
+    pending_entries_for,
     record_decision,
 )
 from apps.procurement.serializers import PurchaseOrderSerializer, VendorICVSerializer
@@ -80,6 +81,20 @@ class PurchaseOrderApprovalAssignmentTests(SimpleTestCase):
         }
 
         self.assertTrue(_entry_matches_user(entry, actor))
+
+    def test_only_first_pending_level_is_visible_to_approvers(self):
+        level_zero = SimpleNamespace(id='level-zero', email='l0@example.com')
+        level_one = SimpleNamespace(id='level-one', email='l1@example.com')
+        order = SimpleNamespace(approval_log=[
+            {'level': 0, 'user_id': 'level-zero', 'status': 'Pending'},
+            {'level': 1, 'user_id': 'level-one', 'status': 'Pending'},
+        ])
+
+        self.assertEqual(len(pending_entries_for(level_zero, [order])), 1)
+        self.assertEqual(pending_entries_for(level_one, [order]), [])
+
+        order.approval_log[0]['status'] = 'Approved'
+        self.assertEqual(len(pending_entries_for(level_one, [order])), 1)
 
     @patch('apps.procurement.services.purchase_order_approvals._active_profiles')
     def test_linked_po_removes_jarmo_management_approval(self, active_profiles):
