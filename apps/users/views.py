@@ -5,6 +5,9 @@ Handles listing active employees and updating profile fields
 ⚠️ MIGRATION IN PROGRESS: Migrating from UserProfile to EmployeeMaster
 """
 from django.contrib.auth import get_user_model
+from django.conf import settings
+from django.core.files.storage import default_storage
+from django.http import FileResponse, StreamingHttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -678,7 +681,7 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                 'updated_fields': updated_fields,
             })
 
-    @action(detail=False, methods=['post'], url_path='my-profile-photo')
+    @action(detail=False, methods=['get', 'post'], url_path='my-profile-photo')
     def upload_my_profile_photo(self, request):
         """
         POST /api/v1/users/employees/my-profile-photo/
@@ -687,6 +690,44 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
         Uses the configured local/S3 storage and updates EmployeeMaster photo metadata.
         """
         user = request.user
+
+        try:
+            employee = EmployeeMaster.objects.get(user=user)
+        except EmployeeMaster.DoesNotExist:
+            return Response(
+                {'error': 'Employee record not found. Please contact HR.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if request.method == 'GET':
+            if not employee.photo_file_path:
+                return Response({'error': 'Profile photo not found'}, status=status.HTTP_404_NOT_FOUND)
+            try:
+                if getattr(settings, 'USE_S3', False):
+                    from apps.core.s3_service import S3Service
+                    result = S3Service().download_file(employee.photo_file_path)
+                    body = result.get('body') if result.get('success') else None
+                    if body is None:
+                        raise RuntimeError(result.get('error') or 'Profile photo could not be read')
+                    response = StreamingHttpResponse(
+                        body.iter_chunks(),
+                        content_type=employee.photo_mime_type or 'application/octet-stream',
+                    )
+                else:
+                    response = FileResponse(
+                        default_storage.open(employee.photo_file_path, 'rb'),
+                        content_type=employee.photo_mime_type or 'application/octet-stream',
+                    )
+                response['Cache-Control'] = 'private, no-cache, must-revalidate'
+                response['Content-Disposition'] = 'inline'
+                return response
+            except FileNotFoundError:
+                return Response({'error': 'Profile photo file not found'}, status=status.HTTP_404_NOT_FOUND)
+            except Exception as exc:
+                return Response(
+                    {'error': f'Profile photo could not be loaded: {exc}'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
         
         # Check if file is provided
         if 'photo' not in request.FILES:
@@ -714,13 +755,13 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
         try:
             # EmployeeMaster is the canonical identity source. Never create a
             # duplicate employee record as a side effect of uploading a photo.
-            try:
-                employee = EmployeeMaster.objects.get(user=user)
-            except EmployeeMaster.DoesNotExist:
-                return Response(
-                    {'error': 'Employee record not found. Please contact HR.'},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
+            # Repair older production records where the canonical employee
+            # exists but the RBAC profile was never linked to it.
+            from apps.rbac.models import UserProfile
+            profile = UserProfile.objects.filter(user=user).first()
+            if profile and profile.canonical_employee_id != employee.pk:
+                profile.canonical_employee = employee
+                profile.save(update_fields=['canonical_employee', 'updated_at'])
 
             photo_url = EmployeeService.upload_employee_photo(
                 employee=employee,

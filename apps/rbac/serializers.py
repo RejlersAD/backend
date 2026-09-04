@@ -21,9 +21,24 @@ def _profile_photo_url(serializer, profile):
     """Resolve the canonical employee photo with legacy-profile fallback."""
     url = None
     try:
-        url = profile.canonical_employee.photo_url if profile.canonical_employee_id else None
+        employee = profile.canonical_employee if profile.canonical_employee_id else None
+        if employee and employee.photo_file_path:
+            from django.conf import settings
+            if getattr(settings, 'USE_S3', False):
+                from apps.core.s3_service import S3Service
+                url = S3Service().get_presigned_url(employee.photo_file_path, expiration=604800)
+            else:
+                from django.core.files.storage import default_storage
+                url = default_storage.url(employee.photo_file_path)
+        elif employee:
+            url = employee.photo_url
     except Exception:
-        url = None
+        # Preserve the last known URL if storage URL regeneration is
+        # temporarily unavailable.
+        try:
+            url = profile.canonical_employee.photo_url if profile.canonical_employee_id else None
+        except Exception:
+            url = None
 
     if not url and profile.profile_photo:
         try:
