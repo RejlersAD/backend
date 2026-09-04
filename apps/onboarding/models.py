@@ -170,9 +170,9 @@ class OnboardingRecord(models.Model):
     Workflow: Initiated → Documentation → Equipment → Access → Training → Completed
     """
     # Employee Info
-    canonical_employee = models.OneToOneField(
+    canonical_employee = models.ForeignKey(
         'hr_core.EmployeeMaster', null=True, blank=True, on_delete=models.PROTECT,
-        related_name='onboarding_record',
+        related_name='onboarding_records',
         help_text='Canonical employee identity; name/email/code fields are immutable workflow snapshots.',
     )
     employee_name = models.CharField(max_length=255)
