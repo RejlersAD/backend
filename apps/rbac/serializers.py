@@ -17,6 +17,34 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
+def _profile_photo_url(serializer, profile):
+    """Resolve the canonical employee photo with legacy-profile fallback."""
+    url = None
+    try:
+        url = profile.canonical_employee.photo_url if profile.canonical_employee_id else None
+    except Exception:
+        url = None
+
+    if not url and profile.profile_photo:
+        try:
+            url = profile.profile_photo.url
+        except Exception:
+            url = None
+
+    if not url:
+        return None
+    if str(url).startswith(('http://', 'https://', 'data:', 'blob:')):
+        return url
+
+    request = serializer.context.get('request')
+    if not request:
+        return url
+    absolute_uri = request.build_absolute_uri(url)
+    if ':5173' in absolute_uri:
+        absolute_uri = absolute_uri.replace('http://localhost:5173', 'http://localhost:8000')
+    return absolute_uri
+
+
 class OrganizationSerializer(serializers.ModelSerializer):
     """Organization serializer"""
     user_count = serializers.SerializerMethodField()
@@ -490,6 +518,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         - S3 (production): obj.profile_photo.url already returns a presigned HTTPS URL.
         - Local dev: url is relative (/media/...) — build absolute from request context.
         """
+        if obj.canonical_employee_id:
+            return _profile_photo_url(self, obj)
         if not obj.profile_photo:
             return None
         try:
@@ -1036,6 +1066,8 @@ class UserProfileListSerializer(serializers.ModelSerializer):
 
     def get_profile_photo(self, obj):
         """Return absolute presigned URL for profile photo (same logic as detail serializer)."""
+        if obj.canonical_employee_id:
+            return _profile_photo_url(self, obj)
         if not obj.profile_photo:
             return None
         try:
