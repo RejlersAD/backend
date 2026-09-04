@@ -50,13 +50,23 @@ def _user_role_codes(user) -> set:
     """Return the lowercased role codes assigned to ``user`` (best-effort)."""
     if not user or not user.is_authenticated:
         return set()
+
+    # RADAI roles belong to the user's RBAC profile, not directly to the
+    # authentication user.  Keep the legacy fallbacks for older deployments,
+    # but use the actual User -> UserProfile -> UserRole relationship first.
     try:
-        codes = user.user_roles.values_list('role__code', flat=True)
+        profile = user.rbac_profile
+        codes = profile.userrole_set.filter(
+            role__is_active=True,
+        ).values_list('role__code', flat=True)
     except Exception:
         try:
-            codes = user.roles.values_list('code', flat=True)
+            codes = user.user_roles.values_list('role__code', flat=True)
         except Exception:
-            return set()
+            try:
+                codes = user.roles.values_list('code', flat=True)
+            except Exception:
+                return set()
     return {(c or '').strip().lower() for c in codes if c}
 
 
