@@ -410,7 +410,8 @@ class ChatbotMessageViewSet(viewsets.ModelViewSet):
 
 class EmployeeLeaveRecordViewSet(viewsets.ModelViewSet):
     """
-    API for employee leave records imported from the HR Excel.
+    API for employee leave records reconciled with EmployeeMaster while
+    preserving HR Excel imports as the authoritative leave-balance source.
     Supports filtering by year, department, employee_code, and name search.
     Detail view includes the full monthly breakdown.
 
@@ -424,6 +425,21 @@ class EmployeeLeaveRecordViewSet(viewsets.ModelViewSet):
     http_method_names   = ['get', 'patch', 'head', 'options']
 
     def get_queryset(self):
+        # EmployeeMaster is the workforce source of truth. Reconcile missing
+        # leave ledgers before listing so newly onboarded employees do not
+        # disappear merely because they were absent from the last HR workbook.
+        from apps.payroll.services.leave_workforce_sync import ensure_canonical_leave_records
+
+        requested_year = self.request.query_params.get('year')
+        try:
+            sync_year = int(requested_year) if requested_year else timezone.now().year
+        except (TypeError, ValueError):
+            sync_year = timezone.now().year
+        ensure_canonical_leave_records(
+            year=sync_year,
+            employee_code=self.request.query_params.get('employee_code'),
+        )
+
         qs = EmployeeLeaveRecord.objects.prefetch_related('monthly_breakdown').all()
         user = self.request.user
 
