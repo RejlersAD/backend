@@ -11,7 +11,6 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django.db.models import Q
-from .models import UserProfile  # ⚠️ DEPRECATED - keeping for backward compatibility
 from .serializers import UserProfileSerializer
 
 # New employee management

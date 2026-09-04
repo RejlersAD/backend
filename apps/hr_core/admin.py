@@ -27,6 +27,15 @@ from apps.hr_core.models import (
     SuccessionPlan,
     TalentAssessment,
     WorkShift,
+    HRAssistantInteraction,
+    HRAuditEvent,
+    HRConsentRecord,
+    HRPolicyDocument,
+    HRPrivacyRequest,
+    HRRetentionPolicy,
+    MicrosoftGraphConnection,
+    MicrosoftGraphUserLink,
+    LegacyEmployeeArchive,
 )
 
 
@@ -330,3 +339,53 @@ class EmployeeServiceRequestAdmin(admin.ModelAdmin):
     list_filter = ('request_type', 'status', 'priority')
     search_fields = ('request_number', 'title', 'employee__email')
     inlines = (EmployeeServiceRequestCommentInline,)
+
+
+@admin.register(MicrosoftGraphConnection)
+class MicrosoftGraphConnectionAdmin(admin.ModelAdmin):
+    list_display = ('name', 'tenant_id', 'enabled', 'last_status', 'last_sync_at')
+    readonly_fields = ('last_health_check_at', 'last_sync_at', 'last_status', 'last_error', 'created_at', 'updated_at')
+
+
+admin.site.register(MicrosoftGraphUserLink)
+
+
+@admin.register(HRPolicyDocument)
+class HRPolicyDocumentAdmin(admin.ModelAdmin):
+    list_display = ('title', 'category', 'version', 'visibility', 'status', 'effective_date')
+    list_filter = ('status', 'visibility', 'category', 'jurisdiction')
+    search_fields = ('title', 'content')
+
+
+@admin.register(HRAuditEvent)
+class HRAuditEventAdmin(admin.ModelAdmin):
+    list_display = ('created_at', 'action', 'actor', 'object_type', 'outcome')
+    list_filter = ('outcome', 'action', 'object_type')
+    readonly_fields = tuple(field.name for field in HRAuditEvent._meta.fields)
+
+    def has_add_permission(self, request): return False
+    def has_change_permission(self, request, obj=None): return False
+    def has_delete_permission(self, request, obj=None): return False
+
+
+admin.site.register(HRAssistantInteraction)
+admin.site.register(HRConsentRecord)
+admin.site.register(HRPrivacyRequest)
+admin.site.register(HRRetentionPolicy)
+
+
+@admin.register(LegacyEmployeeArchive)
+class LegacyEmployeeArchiveAdmin(admin.ModelAdmin):
+    list_display = ('source_table', 'source_pk', 'canonical_employee', 'retired_at')
+    list_filter = ('source_table', 'retired_at')
+    search_fields = ('source_pk', 'canonical_employee__employee_number', 'canonical_employee__email')
+    readonly_fields = tuple(field.name for field in LegacyEmployeeArchive._meta.fields)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

@@ -52,7 +52,7 @@ class EmployeeService:
         changed = set(changed_fields or ())
         sync_all = changed_fields is None
         user = profile.user
-        employee = EmployeeMaster.objects.filter(user=user).first()
+        employee = profile.canonical_employee or EmployeeMaster.objects.filter(user=user).first()
         if employee is None:
             employee = EmployeeService.create_employee(
                 user=user,
@@ -62,6 +62,9 @@ class EmployeeService:
                 department=profile.department or '',
                 designation=profile.job_title or '',
             )
+        if profile.canonical_employee_id != employee.pk:
+            type(profile).objects.filter(pk=profile.pk).update(canonical_employee=employee)
+            profile.canonical_employee = employee
 
         updates = {}
 
@@ -134,6 +137,8 @@ class EmployeeService:
             return None
 
         profile_updates = {}
+        if profile.canonical_employee_id != employee.pk:
+            profile_updates['canonical_employee'] = employee
         if requested('department'):
             profile_updates['department'] = employee.department or ''
         if requested('designation', 'job_title_uae', 'job_title_finland'):

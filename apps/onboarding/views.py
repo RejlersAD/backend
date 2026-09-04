@@ -351,6 +351,7 @@ def ensure_onboarding_record(employee, created_by=None):
     return OnboardingRecord.objects.get_or_create(
         employee_email=employee.email.strip().lower(),
         defaults={
+            'canonical_employee': employee,
             'employee_name': employee_name,
             'employee_id': employee.employee_number,
             'user': employee.user,

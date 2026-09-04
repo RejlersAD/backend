@@ -5,7 +5,6 @@ Smart data validation and transformation.
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from .models import UserProfile  # ⚠️ DEPRECATED - migrating to hr_core.EmployeeMaster
 
 # New employee management
 from apps.hr_core.models import EmployeeMaster
@@ -34,13 +33,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
     """
     
     class Meta:
-        model = UserProfile
+        model = EmployeeMaster
         fields = ['date_of_birth', 'address', 'city', 'country', 'postal_code']
 
 
 class UserSerializer(serializers.ModelSerializer):
     """Serializer for user model."""
-    profile = UserProfileSerializer(read_only=True)
+    profile = serializers.SerializerMethodField()
     roles = serializers.SerializerMethodField()
     
     class Meta:
@@ -64,6 +63,10 @@ class UserSerializer(serializers.ModelSerializer):
             print(f"[ERROR] UserSerializer.get_roles failed: {str(e)}")
             print(traceback.format_exc())
         return []
+
+    def get_profile(self, obj):
+        employee = EmployeeMaster.objects.filter(user=obj).first()
+        return UserProfileSerializer(employee).data if employee else None
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -108,7 +111,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             import traceback
             print(f"[WARNING] Failed to create EmployeeMaster record during registration: {str(e)}")
             print(traceback.format_exc())
-            # Fallback to old UserProfile for backward compatibility
-            UserProfile.objects.create(user=user)
+            # Do not create a second employee profile. HR can resolve a failed
+            # canonical employee creation from the migration audit.
         
         return user

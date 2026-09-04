@@ -50,6 +50,11 @@ class EmployeeSalaryInfo(models.Model):
     Extends User model with payroll-specific fields
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    canonical_employee = models.OneToOneField(
+        'hr_core.EmployeeMaster', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='legacy_compensation_profile',
+        help_text='Canonical employee identity; this row contains compensation-domain data only.',
+    )
     user = models.OneToOneField(
         User, 
         on_delete=models.CASCADE, 

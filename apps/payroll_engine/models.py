@@ -32,6 +32,11 @@ class PayrollEmployee(models.Model):
     historical employees can also be tracked.
     """
     employee_no = models.CharField(max_length=32, unique=True, db_index=True)
+    employee = models.ForeignKey(
+        'hr_core.EmployeeMaster', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='payroll_records',
+        help_text='Canonical employee identity for this payroll-domain extension.',
+    )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True, blank=True,

@@ -408,7 +408,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserProfile
         fields = [
-            'id', 'user', 'organization', 'organization_id', 'organization_name', 'status', 'is_mfa_enabled',
+            'id', 'canonical_employee', 'user', 'organization', 'organization_id', 'organization_name', 'status', 'is_mfa_enabled',
             'primary_role', 'roles', 'role_ids', 'module_ids', 'permissions', 'modules',
             'employee_id', 'department', 'job_title', 'manager',
             'manager_id', 'manager_name', 'manager_detail',
@@ -421,7 +421,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'username', 'email', 'password', 'first_name', 'last_name', 'is_active', 'phone'
         ]
         read_only_fields = [
-            'id', 'user', 'last_login_ip', 'last_login_at', 'failed_login_attempts',
+            'id', 'canonical_employee', 'user', 'last_login_ip', 'last_login_at', 'failed_login_attempts',
             'is_deleted', 'deleted_at', 'deleted_by', 'created_at', 'updated_at',
             'manager', 'manager_name', 'manager_detail',
         ]
@@ -631,6 +631,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
         else:
             # Create new profile
             profile = UserProfile.objects.create(user=user, **validated_data)
+
+        from apps.hr_core.services import EmployeeService
+        profile.canonical_employee = EmployeeService.sync_from_rbac_profile(profile)
         
         # Assign roles based on role_ids if provided
         if role_ids:
@@ -851,7 +854,7 @@ class UserProfileSelfSerializer(UserProfileSerializer):
 
     class Meta(UserProfileSerializer.Meta):
         fields = [
-            'id', 'user', 'organization', 'organization_name', 'status',
+            'id', 'canonical_employee', 'user', 'organization', 'organization_name', 'status',
             'is_mfa_enabled', 'employee_id', 'department', 'job_title',
             'manager_name', 'manager_detail', 'last_login_ip', 'last_login_at',
             'must_change_password', 'profile_photo', 'phone', 'bio', 'location',
@@ -903,7 +906,7 @@ class UserProfileListSerializer(serializers.ModelSerializer):
         model = UserProfile
         fields = [
             # Identity
-            'id', 'user', 'email', 'first_name', 'last_name', 'full_name',
+            'id', 'canonical_employee', 'user', 'email', 'first_name', 'last_name', 'full_name',
             # Organisation / role
             'organization_name', 'primary_role', 'roles',
             # Employment

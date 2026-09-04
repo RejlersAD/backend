@@ -53,10 +53,10 @@ class Command(BaseCommand):
 
         # Tables to deprecate
         date_suffix = datetime.now().strftime('%Y%m%d')
+        # Compensation and onboarding are active domain ledgers linked to the
+        # canonical employee; they must never be renamed as identity duplicates.
         tables_to_deprecate = [
             ('user_profiles', f'user_profiles_deprecated_{date_suffix}'),
-            ('finance_employee_salary_info', f'finance_employee_salary_info_deprecated_{date_suffix}'),
-            ('onboarding_record', f'onboarding_record_deprecated_{date_suffix}'),
         ]
 
         # Step 1: Check table existence

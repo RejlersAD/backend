@@ -700,6 +700,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         queryset = UserProfile.objects.select_related(
             'user', 'organization', 'manager__user',
             'user__employee_master', 'user__employee_master__manager',
+            'user__employee_master__manager__user__rbac_profile',
         ).filter(is_deleted=False)
 
         if self.action == 'list':
@@ -712,7 +713,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
 
             queryset = queryset.only(
                 'id', 'created_at', 'updated_at', 'user_id', 'organization_id',
-                'manager_id', 'employee_id', 'department', 'job_title', 'phone',
+                'manager_id', 'canonical_employee_id', 'employee_id', 'department', 'job_title', 'phone',
                 'location', 'bio', 'status', 'is_mfa_enabled', 'profile_photo',
                 'last_login_at', 'is_deleted',
                 'user__id', 'user__username', 'user__email', 'user__first_name',
@@ -724,6 +725,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 'manager__user__first_name', 'manager__user__last_name',
                 'user__employee_master__id', 'user__employee_master__user_id',
                 'user__employee_master__join_date', 'user__employee_master__exit_date',
+                'user__employee_master__probation_end_date',
                 'user__employee_master__employment_status',
                 'user__employee_master__manager_id',
                 'user__employee_master__manager__id',
@@ -733,6 +735,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 'user__employee_master__manager__designation',
                 'user__employee_master__manager__job_title_uae',
                 'user__employee_master__manager__department',
+                'user__employee_master__manager__user__rbac_profile__id',
             ).prefetch_related(
                 Prefetch(
                     'userrole_set',

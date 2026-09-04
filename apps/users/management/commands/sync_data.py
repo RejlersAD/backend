@@ -40,7 +40,6 @@ SYNC_CONFIG = {
         'role_modules',
         'role_permissions',
         'users',
-        'user_profiles',
         'rbac_profiles',
     ],
     
@@ -53,14 +52,12 @@ SYNC_CONFIG = {
         'role_modules': 'rbac.RoleModule',
         'role_permissions': 'rbac.RolePermission',
         'users': 'users.User',
-        'user_profiles': 'users.UserProfile',
         'rbac_profiles': 'rbac.UserProfile',
     },
     
     # Fields to exclude from sync (auto-generated or sensitive)
     'exclude_fields': {
         'users': ['last_login', 'date_joined', 'password'],  # Keep existing passwords
-        'user_profiles': [],
         'rbac_profiles': [],
         'organizations': [],
         'modules': [],
@@ -73,7 +70,6 @@ SYNC_CONFIG = {
     # Conflict resolution strategy
     'conflict_strategy': {
         'users': 'update',  # update existing users
-        'user_profiles': 'update',
         'rbac_profiles': 'update',
         'organizations': 'skip',  # don't update existing orgs
         'modules': 'skip',
@@ -221,7 +217,7 @@ class Command(BaseCommand):
         if entity == 'all':
             return SYNC_CONFIG['sync_order']
         elif entity == 'users':
-            return ['users', 'user_profiles', 'rbac_profiles']
+            return ['users', 'rbac_profiles']
         elif entity == 'roles':
             return ['roles', 'role_modules', 'role_permissions']
         elif entity == 'organizations':

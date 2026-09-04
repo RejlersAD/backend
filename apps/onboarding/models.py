@@ -170,6 +170,11 @@ class OnboardingRecord(models.Model):
     Workflow: Initiated → Documentation → Equipment → Access → Training → Completed
     """
     # Employee Info
+    canonical_employee = models.OneToOneField(
+        'hr_core.EmployeeMaster', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='onboarding_record',
+        help_text='Canonical employee identity; name/email/code fields are immutable workflow snapshots.',
+    )
     employee_name = models.CharField(max_length=255)
     employee_email = models.EmailField(unique=True)
     employee_id = models.CharField(max_length=100, blank=True, null=True)
@@ -234,6 +239,10 @@ class ProbationPerformanceReport(models.Model):
     employee = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name='probation_performance_reports'
     )
+    canonical_employee = models.ForeignKey(
+        'hr_core.EmployeeMaster', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='probation_performance_reports',
+    )
     checkpoint_days = models.PositiveSmallIntegerField(default=100)
     due_date = models.DateField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
@@ -293,6 +302,11 @@ class OffboardingRecord(models.Model):
     Workflow: Initiated → Access Revocation → Equipment Return → Exit Interview → Settlement → Completed
     """
     # Employee Info
+    canonical_employee = models.ForeignKey(
+        'hr_core.EmployeeMaster', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='offboarding_records',
+        help_text='Canonical employee identity; duplicated fields are historical exit snapshots.',
+    )
     employee_name = models.CharField(max_length=255)
     employee_email = models.EmailField()
     employee_id = models.CharField(max_length=100, blank=True, null=True)

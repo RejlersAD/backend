@@ -41,6 +41,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENV = AutoConfig(search_path=str(PROJECT_ROOT))
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#@]*$")
 DEFAULT_STATE_FILE = PROJECT_ROOT / "scripts" / "timesheet_mirror.state.json"
+MIRROR_URL_OVERRIDE = ""
 
 
 def configure_env_file(path: str) -> None:
@@ -311,7 +312,7 @@ def unseen_events(events: list[dict], seen_event_ids: set[str]) -> list[dict]:
 
 
 def mirror_base_url() -> str:
-    configured = env_first("TIMESHEET_MIRROR_URL", "BACKEND_URL")
+    configured = MIRROR_URL_OVERRIDE or env_first("TIMESHEET_MIRROR_URL", "BACKEND_URL")
     if not configured:
         raise RuntimeError("TIMESHEET_MIRROR_URL (or BACKEND_URL) must be configured")
     parsed = urlparse(configured)
@@ -458,14 +459,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--env-file",
         help="dedicated agent env file (recommended: scripts/timesheet_mirror.env)",
     )
+    parser.add_argument(
+        "--mirror-url",
+        help="override the destination backend URL (useful for a separate local mirror task)",
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser
 
 
 def main() -> int:
+    global MIRROR_URL_OVERRIDE
     args = build_parser().parse_args()
     if args.env_file:
         configure_env_file(args.env_file)
+    MIRROR_URL_OVERRIDE = str(args.mirror_url or '').strip()
     args.state_file = args.state_file or env_first(
         "TIMESHEET_MIRROR_STATE_FILE", default=str(DEFAULT_STATE_FILE),
     )

@@ -98,11 +98,8 @@ def _upsert_employee(row: dict, summary: ImportSummary) -> PayrollEmployee:
     # Employee numbers are the shared identity across RBAC, biometric,
     # leave, timesheet and payroll modules. Preserve that relationship during
     # every roster import instead of creating disconnected payroll records.
-    from apps.rbac.models import UserProfile
-    profile = (UserProfile.objects
-               .filter(employee_id=emp_no, is_deleted=False)
-               .select_related('user')
-               .first())
+    from apps.hr_core.identity import EmployeeIdentityService
+    canonical_employee = EmployeeIdentityService.resolve(emp_no)
     defaults = {
         'full_name':         _normalise_str(row.get('full_name')),
         'mol_no':            _normalise_str(row.get('mol_no'), 32),
@@ -125,8 +122,10 @@ def _upsert_employee(row: dict, summary: ImportSummary) -> PayrollEmployee:
     }
     # Never erase a pre-existing manual link when an imported employee number
     # has no RADAI match; only set the relation when the match is exact.
-    if profile:
-        defaults['user'] = profile.user
+    if canonical_employee:
+        defaults['employee'] = canonical_employee
+        if canonical_employee.user_id:
+            defaults['user'] = canonical_employee.user
     employee, created = PayrollEmployee.objects.update_or_create(
         employee_no=emp_no, defaults=defaults,
     )

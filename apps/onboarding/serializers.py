@@ -214,7 +214,7 @@ class OnboardingRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = OnboardingRecord
         fields = [
-            'id', 'employee_name', 'employee_email', 'employee_id', 'user',
+            'id', 'canonical_employee', 'employee_name', 'employee_email', 'employee_id', 'user',
             'position', 'department', 'reporting_manager', 'branch',
             'joining_date', 'initiated_date', 'target_completion_date', 'actual_completion_date',
             'status', 'progress_percentage',
@@ -225,7 +225,7 @@ class OnboardingRecordSerializer(serializers.ModelSerializer):
             'photo', 'photo_file_path', 'photo_url', 'photo_file_size', 'photo_mime_type', 'photo_original_filename',
             'engineer_profile', 'checklist_stage_permissions'
         ]
-        read_only_fields = ['photo_file_path', 'photo_url', 'photo_file_size', 'photo_mime_type', 'photo_original_filename']
+        read_only_fields = ['canonical_employee', 'photo_file_path', 'photo_url', 'photo_file_size', 'photo_mime_type', 'photo_original_filename']
     
     def get_days_until_joining(self, obj):
         """Calculate days until joining date"""
@@ -275,7 +275,7 @@ class OnboardingRecordListSerializer(serializers.ModelSerializer):
     class Meta:
         model = OnboardingRecord
         fields = [
-            'id', 'employee_name', 'employee_email', 'employee_id',
+            'id', 'canonical_employee', 'employee_name', 'employee_email', 'employee_id',
             'position', 'department', 'reporting_manager', 'branch',
             'joining_date', 'initiated_date', 'target_completion_date', 'actual_completion_date',
             'status', 'progress_percentage',
@@ -326,7 +326,7 @@ class OffboardingRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = OffboardingRecord
         fields = [
-            'id', 'employee_name', 'employee_email', 'employee_id', 'user',
+            'id', 'canonical_employee', 'employee_name', 'employee_email', 'employee_id', 'user',
             'position', 'department', 'reporting_manager', 'branch',
             'exit_reason', 'exit_reason_detail', 'last_working_day', 'notice_period_days',
             'initiated_date', 'target_completion_date', 'actual_completion_date',
@@ -350,6 +350,7 @@ class OffboardingRecordSerializer(serializers.ModelSerializer):
             'ongoing_projects', 'has_ongoing_projects', 'can_manage_actions'
         ]
         read_only_fields = [
+            'canonical_employee',
             'rejection_reason', 'rejected_by', 'rejected_at',
             'project_manager_approval_status', 'project_manager_decided_by',
             'project_manager_decided_at', 'project_manager_decision_note',
@@ -468,7 +469,7 @@ class OffboardingRecordListSerializer(serializers.ModelSerializer):
     class Meta:
         model = OffboardingRecord
         fields = [
-            'id', 'employee_name', 'employee_email', 'employee_id',
+            'id', 'canonical_employee', 'employee_name', 'employee_email', 'employee_id',
             'position', 'department', 'reporting_manager', 'branch',
             'exit_reason', 'last_working_day', 'initiated_date', 'target_completion_date', 'actual_completion_date',
             'status', 'progress_percentage',

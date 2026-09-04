@@ -15,21 +15,18 @@ class PayrollComplianceCheckSerializer(serializers.ModelSerializer):
     class Meta:
         model = PayrollComplianceCheck
         fields = '__all__'
-        read_only_fields = fields
 
 
 class PayrollPaymentBatchSerializer(serializers.ModelSerializer):
     class Meta:
         model = PayrollPaymentBatch
         fields = '__all__'
-        read_only_fields = fields
 
 
 class PayrollAccountingExportSerializer(serializers.ModelSerializer):
     class Meta:
         model = PayrollAccountingExport
         fields = '__all__'
-        read_only_fields = fields
 
 
 class PayrollEmployeeSerializer(serializers.ModelSerializer):
@@ -41,7 +38,7 @@ class PayrollEmployeeSerializer(serializers.ModelSerializer):
     class Meta:
         model = PayrollEmployee
         fields = [
-            'id', 'employee_no', 'user', 'employee_email', 'hr_profile_id', 'profile_photo',
+            'id', 'employee', 'employee_no', 'user', 'employee_email', 'hr_profile_id', 'profile_photo',
             'full_name', 'emirates_id', 'mol_no',
             'iban', 'bank_name', 'routing_code',
             'department', 'discipline', 'designation', 'grade', 'nationality_group',
@@ -52,7 +49,7 @@ class PayrollEmployeeSerializer(serializers.ModelSerializer):
             'is_active', 'effective_from', 'effective_to',
             'notes', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'default_gross', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'employee', 'default_gross', 'created_at', 'updated_at']
 
     def get_hr_profile_id(self, obj):
         profile = getattr(obj.user, 'rbac_profile', None) if obj.user_id else None

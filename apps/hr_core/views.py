@@ -1,5 +1,7 @@
 """Canonical employee and reusable HR workflow APIs."""
 
+from datetime import timedelta
+
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
@@ -33,6 +35,14 @@ from .models import (
     SuccessionPlan,
     TalentAssessment,
     WorkShift,
+    HRAssistantInteraction,
+    HRAuditEvent,
+    HRConsentRecord,
+    HRPolicyDocument,
+    HRPrivacyRequest,
+    HRRetentionPolicy,
+    MicrosoftGraphConnection,
+    MicrosoftGraphUserLink,
 )
 from .serializers import (
     ContinuousFeedbackSerializer,
@@ -57,8 +67,19 @@ from .serializers import (
     SuccessionPlanSerializer,
     TalentAssessmentSerializer,
     WorkShiftSerializer,
+    HRAssistantInteractionSerializer,
+    HRAuditEventSerializer,
+    HRConsentRecordSerializer,
+    HRPolicyDocumentSerializer,
+    HRPrivacyRequestSerializer,
+    HRRetentionPolicySerializer,
+    MicrosoftGraphConnectionSerializer,
+    MicrosoftGraphUserLinkSerializer,
 )
 from .workflows import HRWorkflowService
+from .assistant import accessible_policies, answer_question
+from .governance import audit, employee_for_user, is_manager
+from .microsoft_graph import GraphConfigurationError, MicrosoftGraphService
 
 
 HR_ROLE_CODES = {'hr_manager', 'hr_admin', 'human_resource', 'admin', 'super_admin'}
@@ -897,3 +918,217 @@ class EmployeeServiceRequestViewSet(viewsets.ModelViewSet):
         service_request.closed_at = timezone.now()
         service_request.save(update_fields=['status', 'resolution', 'closed_at', 'updated_at'])
         return Response(self.get_serializer(service_request).data)
+
+
+class SelfServiceWorkspaceViewSet(viewsets.ViewSet):
+    """One permission-scoped entry point for employee and manager work."""
+    permission_classes = [IsAuthenticated]
+
+    def list(self, request):
+        employee = employee_for_user(request.user)
+        direct_reports = EmployeeMaster.objects.filter(manager=employee) if employee else EmployeeMaster.objects.none()
+        manager = bool(direct_reports.exists())
+        my = {
+            'service_requests': EmployeeServiceRequest.objects.filter(employee=employee).exclude(status__in=['fulfilled', 'cancelled']).count() if employee else 0,
+            'goals': PerformanceGoal.objects.filter(employee=employee, status__in=['pending', 'active']).count() if employee else 0,
+            'reviews': PerformanceReview.objects.filter(employee=employee, status__in=['draft', 'reopened']).count() if employee else 0,
+            'overtime': OvertimeRequest.objects.filter(employee=employee, status='pending').count() if employee else 0,
+        }
+        manager_queue = {'employees': 0, 'service_requests': 0, 'goals': 0, 'reviews': 0, 'overtime': 0}
+        if manager:
+            manager_queue = {
+                'employees': direct_reports.count(),
+                'service_requests': EmployeeServiceRequest.objects.filter(employee__in=direct_reports, status='pending').count(),
+                'goals': PerformanceGoal.objects.filter(employee__in=direct_reports, status='pending').count(),
+                'reviews': PerformanceReview.objects.filter(employee__in=direct_reports, reviewer=request.user, status__in=['draft', 'reopened']).count(),
+                'overtime': OvertimeRequest.objects.filter(employee__in=direct_reports, status='pending').count(),
+            }
+        return Response({
+            'employee': EmployeeMasterListSerializer(employee).data if employee else None,
+            'capabilities': {'employee': bool(employee), 'manager': manager, 'hr': _is_hr(request.user)},
+            'my_work': my, 'manager_queue': manager_queue,
+        })
+
+
+class MicrosoftGraphConnectionViewSet(viewsets.ModelViewSet):
+    serializer_class = MicrosoftGraphConnectionSerializer
+    permission_classes = [IsAuthenticated]
+    queryset = MicrosoftGraphConnection.objects.all()
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not _is_hr(request.user):
+            raise PermissionDenied('Only HR administrators can manage Microsoft Graph.')
+
+    def perform_create(self, serializer):
+        instance = serializer.save(created_by=self.request.user, updated_by=self.request.user)
+        audit(actor=self.request.user, action='graph.connection.create', object_type='MicrosoftGraphConnection', object_id=instance.pk, request=self.request)
+
+    def perform_update(self, serializer):
+        instance = serializer.save(updated_by=self.request.user)
+        audit(actor=self.request.user, action='graph.connection.update', object_type='MicrosoftGraphConnection', object_id=instance.pk, request=self.request)
+
+    def _run(self, request, operation):
+        connection = self.get_object()
+        service = MicrosoftGraphService(connection)
+        try:
+            result = getattr(service, operation)()
+            audit(actor=request.user, action=f'graph.{operation}', object_type='MicrosoftGraphConnection', object_id=connection.pk, metadata=result, request=request)
+            return Response(result)
+        except (GraphConfigurationError, Exception) as exc:
+            audit(actor=request.user, action=f'graph.{operation}', object_type='MicrosoftGraphConnection', object_id=connection.pk, outcome='failure', metadata={'error': str(exc)}, request=request)
+            code = status.HTTP_400_BAD_REQUEST if isinstance(exc, GraphConfigurationError) else status.HTTP_502_BAD_GATEWAY
+            return Response({'detail': str(exc)}, status=code)
+
+    @action(detail=True, methods=['post'], url_path='test-connection')
+    def test_connection(self, request, pk=None): return self._run(request, 'health_check')
+
+    @action(detail=True, methods=['post'], url_path='sync-entra')
+    def sync_entra(self, request, pk=None): return self._run(request, 'sync_entra_users')
+
+    @action(detail=True, methods=['post'], url_path='sync-sharepoint-policies')
+    def sync_sharepoint_policies(self, request, pk=None): return self._run(request, 'sync_sharepoint_policies')
+
+    @action(detail=True, methods=['post'], url_path='send-test-mail')
+    def send_test_mail(self, request, pk=None):
+        recipient = str(request.data.get('recipient', '')).strip()
+        if not recipient: raise ValidationError({'recipient': 'Recipient email is required.'})
+        result = MicrosoftGraphService(self.get_object()).send_mail(recipient, 'RADAI Microsoft Graph connection test', 'Microsoft Graph Outlook delivery is connected.')
+        audit(actor=request.user, action='graph.outlook.test_mail', metadata={'recipient': recipient}, request=request)
+        return Response(result)
+
+    @action(detail=True, methods=['post'], url_path='send-test-teams')
+    def send_test_teams(self, request, pk=None):
+        recipient = str(request.data.get('recipient_entra_id', '')).strip()
+        if not recipient: raise ValidationError({'recipient_entra_id': 'Recipient Entra object ID is required.'})
+        result = MicrosoftGraphService(self.get_object()).send_teams_notification(recipient, 'RADAI Microsoft Graph connection test')
+        audit(actor=request.user, action='graph.teams.test_notification', metadata={'recipient_entra_id': recipient}, request=request)
+        return Response(result)
+
+
+class MicrosoftGraphUserLinkViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = MicrosoftGraphUserLinkSerializer
+    permission_classes = [IsAuthenticated]
+    queryset = MicrosoftGraphUserLink.objects.select_related('employee').all()
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not _is_hr(request.user): raise PermissionDenied('Only HR can view Entra links.')
+
+
+class HRPolicyDocumentViewSet(viewsets.ModelViewSet):
+    serializer_class = HRPolicyDocumentSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['category', 'jurisdiction', 'status', 'visibility']
+    search_fields = ['title', 'category', 'content']
+
+    def get_queryset(self):
+        if _is_hr(self.request.user): return HRPolicyDocument.objects.all()
+        accessible = accessible_policies(self.request.user)
+        ids = [p.pk for p in accessible] if isinstance(accessible, list) else accessible.values_list('pk', flat=True)
+        return HRPolicyDocument.objects.filter(pk__in=ids)
+
+    def perform_create(self, serializer):
+        if not _is_hr(self.request.user): raise PermissionDenied('Only HR can create policies.')
+        policy = serializer.save(owner=self.request.user)
+        audit(actor=self.request.user, action='policy.create', object_type='HRPolicyDocument', object_id=policy.pk, request=self.request)
+
+    def perform_update(self, serializer):
+        if not _is_hr(self.request.user): raise PermissionDenied('Only HR can edit policies.')
+        policy = serializer.save()
+        audit(actor=self.request.user, action='policy.update', object_type='HRPolicyDocument', object_id=policy.pk, request=self.request)
+
+    def perform_destroy(self, instance):
+        if not _is_hr(self.request.user): raise PermissionDenied('Only HR can retire policies.')
+        instance.status = 'retired'; instance.save(update_fields=['status', 'updated_at'])
+
+    @action(detail=True, methods=['post'])
+    def publish(self, request, pk=None):
+        if not _is_hr(request.user): raise PermissionDenied('Only HR can publish policies.')
+        policy = self.get_object(); policy.status = 'published'; policy.published_at = timezone.now(); policy.save(update_fields=['status', 'published_at', 'updated_at'])
+        audit(actor=request.user, action='policy.publish', object_type='HRPolicyDocument', object_id=policy.pk, request=request)
+        return Response(self.get_serializer(policy).data)
+
+
+class HRAssistantViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = HRAssistantInteractionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return HRAssistantInteraction.objects.filter(user=self.request.user)
+
+    @action(detail=False, methods=['post'])
+    def ask(self, request):
+        question = str(request.data.get('question', '')).strip()
+        if len(question) < 3: raise ValidationError({'question': 'Please enter a complete HR question.'})
+        if len(question) > 2000: raise ValidationError({'question': 'Question cannot exceed 2,000 characters.'})
+        result = answer_question(request.user, question)
+        employee = employee_for_user(request.user)
+        interaction = HRAssistantInteraction.objects.create(user=request.user, employee=employee, question=question, **result)
+        audit(actor=request.user, action='assistant.ask', object_type='HRAssistantInteraction', object_id=interaction.pk, employee=employee, metadata={'grounded': result['grounded'], 'citation_count': len(result['citations'])}, request=request)
+        return Response(self.get_serializer(interaction).data, status=status.HTTP_201_CREATED)
+
+
+class HRAuditEventViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = HRAuditEventSerializer
+    permission_classes = [IsAuthenticated]
+    queryset = HRAuditEvent.objects.select_related('actor', 'employee').all()
+    filterset_fields = ['action', 'outcome', 'object_type', 'employee']
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not _is_hr(request.user): raise PermissionDenied('Only HR can review the HR audit ledger.')
+
+
+class HRConsentRecordViewSet(viewsets.ModelViewSet):
+    serializer_class = HRConsentRecordSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return HRConsentRecord.objects.all() if _is_hr(self.request.user) else HRConsentRecord.objects.filter(employee__user=self.request.user)
+
+    def perform_create(self, serializer):
+        employee = serializer.validated_data['employee']
+        if not _is_hr(self.request.user) and employee.user_id != self.request.user.id: raise PermissionDenied('You can only record your own consent.')
+        status_value = serializer.validated_data.get('status', 'granted')
+        consent = serializer.save(recorded_by=self.request.user, granted_at=timezone.now() if status_value == 'granted' else None, withdrawn_at=timezone.now() if status_value == 'withdrawn' else None)
+        audit(actor=self.request.user, action=f'consent.{status_value}', object_type='HRConsentRecord', object_id=consent.pk, employee=employee, request=self.request)
+
+
+class HRPrivacyRequestViewSet(viewsets.ModelViewSet):
+    serializer_class = HRPrivacyRequestSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return HRPrivacyRequest.objects.all() if _is_hr(self.request.user) else HRPrivacyRequest.objects.filter(employee__user=self.request.user)
+
+    def perform_create(self, serializer):
+        employee = serializer.validated_data['employee']
+        if not _is_hr(self.request.user) and employee.user_id != self.request.user.id: raise PermissionDenied('You can only submit your own privacy request.')
+        item = serializer.save(due_at=timezone.now() + timedelta(days=30))
+        audit(actor=self.request.user, action='privacy_request.submit', object_type='HRPrivacyRequest', object_id=item.pk, employee=employee, request=self.request)
+
+    def perform_update(self, serializer):
+        if not _is_hr(self.request.user): raise PermissionDenied('Only HR can process privacy requests.')
+        serializer.save()
+
+    @action(detail=True, methods=['post'])
+    def complete(self, request, pk=None):
+        if not _is_hr(request.user): raise PermissionDenied('Only HR can complete privacy requests.')
+        item = self.get_object(); item.status = 'completed'; item.resolution = str(request.data.get('resolution', '')).strip(); item.completed_at = timezone.now(); item.save(update_fields=['status', 'resolution', 'completed_at', 'updated_at'])
+        audit(actor=request.user, action='privacy_request.complete', object_type='HRPrivacyRequest', object_id=item.pk, employee=item.employee, request=request)
+        return Response(self.get_serializer(item).data)
+
+
+class HRRetentionPolicyViewSet(viewsets.ModelViewSet):
+    serializer_class = HRRetentionPolicySerializer
+    permission_classes = [IsAuthenticated]
+    queryset = HRRetentionPolicy.objects.all()
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if not _is_hr(request.user): raise PermissionDenied('Only HR can manage retention policies.')
+
+    def perform_create(self, serializer): serializer.save(updated_by=self.request.user)
+    def perform_update(self, serializer): serializer.save(updated_by=self.request.user)

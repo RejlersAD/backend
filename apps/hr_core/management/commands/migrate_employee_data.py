@@ -22,7 +22,7 @@ from django.db import transaction
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from apps.hr_core.models import EmployeeMaster
-from apps.users.models import UserProfile
+from apps.rbac.models import UserProfile as RBACUserProfile
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING('🔍 DRY RUN MODE - No changes will be made'))
         
         # Get all users with profiles
-        users_query = User.objects.select_related('profile').all()
+        users_query = User.objects.select_related('rbac_profile').all()
         
         if specific_email:
             users_query = users_query.filter(email=specific_email)
@@ -147,8 +147,8 @@ class Command(BaseCommand):
         
         # Get profile data
         try:
-            profile = user.profile
-        except UserProfile.DoesNotExist:
+            profile = user.rbac_profile
+        except RBACUserProfile.DoesNotExist:
             profile = None
         
         # Get finance data if exists
@@ -165,35 +165,21 @@ class Command(BaseCommand):
             'last_name': user.last_name or '',
         }
         
-        # From UserProfile
+        # From the authorization profile. Only shared compatibility fields are
+        # copied; EmployeeMaster remains authoritative after this repair.
         if profile:
             employee_data.update({
-                'preferred_given_name': profile.preferred_given_name or '',
-                'initials': profile.initials or '',
-                'employee_number': profile.employee_number or self._generate_employee_number(user),
-                'employment_id': profile.employment_id or '',
-                'candidate_id': profile.candidate_id or '',
-                'account_name': profile.account_name or '',
-                'date_of_birth': profile.date_of_birth,
-                'department': profile.business_unit or '',
-                'division': profile.division or '',
-                'business_unit': profile.business_unit or '',
-                'business_area': profile.business_area or '',
-                'office': profile.office or '',
-                'job_title_uae': profile.job_title_uae or '',
-                'job_title_finland': profile.job_title_finland or '',
-                'country': profile.country or '',
-                'city': profile.city or '',
-                'address': profile.address or '',
-                'postal_code': profile.postal_code or '',
-                'protected_identity': profile.protected_identity,
-                'is_test_person': profile.is_test_person,
-                'not_signed': profile.not_signed,
+                'employee_number': profile.employee_id or self._generate_employee_number(user),
+                'department': profile.department or '',
+                'designation': profile.job_title or '',
+                'job_title_uae': profile.job_title or '',
+                'office': profile.location or '',
+                'phone_number': profile.phone or '',
             })
             
             # Manager relationship (will be linked after all employees migrated)
             if profile.manager_id:
-                manager_employee = EmployeeMaster.objects.filter(user_id=profile.manager_id).first()
+                manager_employee = EmployeeMaster.objects.filter(user_id=profile.manager.user_id).first()
                 if manager_employee:
                     employee_data['manager'] = manager_employee
         

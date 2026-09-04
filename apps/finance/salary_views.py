@@ -63,7 +63,7 @@ class EmployeeSalaryInfoViewSet(viewsets.ModelViewSet):
     API endpoint for employee salary information management
     CRUD operations for employee payroll data
     """
-    queryset = EmployeeSalaryInfo.objects.select_related('user').all()
+    queryset = EmployeeSalaryInfo.objects.select_related('user', 'canonical_employee').all()
     permission_classes = [IsAuthenticated]
     
     def get_serializer_class(self):
@@ -96,7 +96,10 @@ class EmployeeSalaryInfoViewSet(viewsets.ModelViewSet):
         return queryset
     
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        from apps.hr_core.models import EmployeeMaster
+        user_id = serializer.validated_data.get('user_id')
+        employee = EmployeeMaster.objects.filter(user_id=user_id).first()
+        serializer.save(created_by=self.request.user, canonical_employee=employee)
     
     @action(detail=True, methods=['get'])
     def salary_history(self, request, pk=None):

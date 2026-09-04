@@ -20,7 +20,7 @@ class OnboardingRecordAdmin(admin.ModelAdmin):
 
 @admin.register(ProbationPerformanceReport)
 class ProbationPerformanceReportAdmin(admin.ModelAdmin):
-    list_display = ['employee', 'checkpoint_days', 'due_date', 'status', 'created_by', 'submitted_at']
+    list_display = ['employee', 'canonical_employee', 'checkpoint_days', 'due_date', 'status', 'created_by', 'submitted_at']
     list_filter = ['status', 'checkpoint_days', 'due_date']
     search_fields = ['employee__first_name', 'employee__last_name', 'employee__email']
     date_hierarchy = 'due_date'
