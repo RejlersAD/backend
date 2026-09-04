@@ -1,5 +1,6 @@
 """DRF serializers for the Payroll Engine."""
 from __future__ import annotations
+from django.core.exceptions import ObjectDoesNotExist
 from rest_framework import serializers
 
 from . import catalog
@@ -52,14 +53,34 @@ class PayrollEmployeeSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'employee', 'default_gross', 'created_at', 'updated_at']
 
     def get_hr_profile_id(self, obj):
-        profile = getattr(obj.user, 'rbac_profile', None) if obj.user_id else None
+        try:
+            profile = getattr(obj.user, 'rbac_profile', None) if obj.user_id else None
+        except (AttributeError, ObjectDoesNotExist):
+            profile = None
         return str(profile.id) if profile and not profile.is_deleted else None
 
     def get_profile_photo(self, obj):
-        profile = getattr(obj.user, 'rbac_profile', None) if obj.user_id else None
-        if not profile or profile.is_deleted or not profile.profile_photo:
-            return None
+        employee = getattr(obj, 'employee', None)
+        if employee:
+            if employee.photo_file_path:
+                try:
+                    from django.conf import settings
+                    if getattr(settings, 'USE_S3', False):
+                        from config.storage_backends import ProfilePhotoStorage
+                        url = ProfilePhotoStorage().url(employee.photo_file_path)
+                    else:
+                        url = f"{settings.MEDIA_URL.rstrip('/')}/{employee.photo_file_path.lstrip('/')}"
+                    request = self.context.get('request')
+                    return request.build_absolute_uri(url) if request and not url.startswith('http') else url
+                except Exception:
+                    pass
+            if employee.photo_url:
+                return employee.photo_url
+
         try:
+            profile = getattr(obj.user, 'rbac_profile', None) if obj.user_id else None
+            if not profile or profile.is_deleted or not profile.profile_photo:
+                return None
             url = profile.profile_photo.url
             if url.startswith('http'):
                 return url

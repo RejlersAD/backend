@@ -107,7 +107,15 @@ class PayrollEmployee(models.Model):
 
     @property
     def default_gross(self) -> Decimal:
-        return (self.basic + self.housing + self.transport + self.home_leave)
+        # Historical/imported production rows can pre-date the current
+        # non-null constraints.  Treat missing components as zero so one
+        # legacy row cannot make the employee detail endpoint return 500.
+        return sum((
+            self.basic or ZERO,
+            self.housing or ZERO,
+            self.transport or ZERO,
+            self.home_leave or ZERO,
+        ), ZERO)
 
 
 # ════════════════════════════════════════════════════════════════════
