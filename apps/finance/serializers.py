@@ -1,6 +1,7 @@
 """
 Finance API Serializers
 """
+from django.core.files.storage import default_storage
 from rest_framework import serializers
 from .models import (
     Invoice,
@@ -121,6 +122,15 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
     structured_line_items = InvoiceLineItemSerializer(many=True, read_only=True)
     po_allocations = InvoicePurchaseOrderAllocationSerializer(many=True, read_only=True)
     payment_operations = PayablePaymentSerializer(many=True, read_only=True)
+    source_file_available = serializers.SerializerMethodField()
+
+    def get_source_file_available(self, obj):
+        if not obj.file_path:
+            return False
+        try:
+            return default_storage.exists(obj.file_path)
+        except (OSError, ValueError):
+            return False
     
     class Meta:
         model = Invoice
@@ -134,7 +144,7 @@ class InvoiceDetailSerializer(serializers.ModelSerializer):
             'extracted_text', 'line_items', 'structured_line_items',
             'ocr_metadata', 'ocr_confidence', 'manual_review_required',
             'source_file_sha256', 'po_allocations',
-            'original_filename', 'file_path',
+            'original_filename', 'file_path', 'source_file_available',
             'status', 'status_display', 'procurement_status', 'match_status',
             'payment_status', 'procurement_reviewed_by', 'procurement_reviewed_at',
             'finance_reviewed_by', 'finance_reviewed_at', 'scheduled_payment_date',

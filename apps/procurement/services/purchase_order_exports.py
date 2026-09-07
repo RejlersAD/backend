@@ -152,13 +152,22 @@ def _buyer_reference(order):
     for reference in references:
         if not reference or not reference.get('name'):
             continue
-        rendered.append(' · '.join(str(reference.get(key)).strip() for key in ('name', 'designation', 'email') if reference.get(key)))
+        name = escape(str(reference.get('name')).strip())
+        designation = str(reference.get('designation') or '').strip()
+        email = str(reference.get('email') or '').strip()
+        lines = [name]
+        if designation:
+            lines.append(f'<b>{escape(designation)}</b>')
+        if email:
+            lines.append(f'<font size="9">{escape(email)}</font>')
+        rendered.append('<br/>'.join(lines))
     if not rendered:
-        rendered.append(' · '.join(filter(None, (
-            _value(getattr(order, 'buyer_reference_pm', None), 'Richa Hannah Thomas'),
-            str(getattr(order, 'buyer_reference_email', '') or '').strip(),
-        ))))
-    return '\n'.join(rendered)
+        name = escape(_value(getattr(order, 'buyer_reference_pm', None), 'Richa Hannah Thomas'))
+        designation = escape(_value(getattr(order, 'buyer_reference_designation', None), 'Procurement Manager'))
+        email = escape(str(getattr(order, 'buyer_reference_email', '') or '').strip())
+        email_line = f'<font size="9">{email}</font>' if email else ''
+        rendered.append('<br/>'.join(filter(None, (name, f'<b>{designation}</b>', email_line))))
+    return '<br/>'.join(rendered)
 
 
 def _items(order):
@@ -282,9 +291,9 @@ def _pdf_page(canvas, document, order, page_number=None):
     logo_x = width - left - logo_width
     _draw_rejlers_wordmark(canvas, logo_x, top - 1.5 * mm, logo_width, BRAND_NAVY)
     canvas.setFillColor(BRAND_TEXT_BLUE)
-    canvas.setFont('Helvetica-Bold', 16)
-    canvas.drawRightString(width - left, top - 11 * mm, 'HOME OF THE')
-    canvas.drawRightString(width - left, top - 18 * mm, 'LEARNING MINDS')
+    canvas.setFont('Helvetica-Bold', 8.5)
+    canvas.drawRightString(width - left, top - 9.5 * mm, 'HOME OF THE')
+    canvas.drawRightString(width - left, top - 13.5 * mm, 'LEARNING MINDS')
 
     # Footer: repeated white brand marks in the blue band, then the same
     # company/contact block and page number shown by the browser preview.
@@ -346,7 +355,10 @@ def _main_pdf(order):
 
     def pair_rows(rows):
         return Table(
-            [[Paragraph(f'<b>{escape(label)}:</b>', preview), _paragraph(value, preview, strong)] for label, value, strong in rows],
+            [[
+                Paragraph(f'<b>{escape(label)}:</b>', preview),
+                value if isinstance(value, Paragraph) else _paragraph(value, preview, strong),
+            ] for label, value, strong in rows],
             colWidths=[30 * mm, 52 * mm],
             style=TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -369,17 +381,24 @@ def _main_pdf(order):
             'PO Box 39317', 'Abu Dhabi, UAE.', 'Tel: +971 2 639 7449',
             f'Fax: {_value(getattr(order, "company_fax", None), "+971 2 639 7448")}',
         )))
+    invoice_address_lines = []
+    for line in invoice_address.splitlines():
+        rendered_line = escape(line)
+        if '@' in line:
+            rendered_line = f'<font size="9">{rendered_line}</font>'
+        invoice_address_lines.append(rendered_line)
+    invoice_address_paragraph = Paragraph('<br/>'.join(invoice_address_lines), preview)
 
     details = Table([[pair_rows([
         ('Seller', getattr(vendor, 'name', None), False),
         ('Seller Address', getattr(order, 'seller_address', None) or getattr(vendor, 'address', None), False),
-        ('Invoicing Address', invoice_address, False),
+        ('Invoicing Address', invoice_address_paragraph, False),
     ]), '', pair_rows([
         ('Seller Reference', getattr(order, 'seller_reference', None), False),
         ('Quote Ref.', getattr(order, 'quote_ref', None), False),
         ('License No.', getattr(order, 'seller_license_no', None), False),
-        ('Buyer Reference', _buyer_reference(order), False),
-    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], rowHeights=[64 * mm], style=TableStyle([
+        ('Buyer Reference', Paragraph(_buyer_reference(order), preview), False),
+    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], rowHeights=[73 * mm], style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LEFTPADDING', (0, 0), (-1, -1), 0),
         ('RIGHTPADDING', (0, 0), (-1, -1), 0),
@@ -399,7 +418,7 @@ def _main_pdf(order):
         ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
     ]))
     summary_table = Table([[
-        Paragraph(f'<b>Purchase Summary:</b><br/><br/><b>{escape(_value(getattr(order, "summary", None) or order.title))}</b>', preview),
+        Paragraph(f'<b>Purchase Summary:</b><br/><b>{escape(_value(getattr(order, "summary", None) or order.title))}</b>', preview),
         '',
         Table([
             [Paragraph('<b>Total Purchase Price:</b>', preview), Paragraph(escape(f'{subtotal:,.2f} {currency}'), styles['right'])],
@@ -410,7 +429,7 @@ def _main_pdf(order):
             ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
             ('TOPPADDING', (0, 0), (-1, -1), 1), ('BOTTOMPADDING', (0, 0), (-1, -1), 1),
         ])),
-    ]], colWidths=[91 * mm, 6 * mm, 79 * mm], rowHeights=[23 * mm], style=TableStyle([
+    ]], colWidths=[91 * mm, 6 * mm, 79 * mm], style=TableStyle([
         ('LINEABOVE', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
         ('LINEBELOW', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -461,14 +480,14 @@ def _main_pdf(order):
             ]),
         ),
     ]
-    approval_table = Table([[approved, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm], rowHeights=[83 * mm], style=TableStyle([
+    approval_table = Table([[approved, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm], rowHeights=[69 * mm], style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LINEBEFORE', (2, 0), (2, 0), 0.5, colors.HexColor('#64748b')),
         ('LEFTPADDING', (0, 0), (0, 0), 0), ('RIGHTPADDING', (0, 0), (0, 0), 7 * mm),
         ('LEFTPADDING', (2, 0), (2, 0), 3 * mm), ('RIGHTPADDING', (2, 0), (2, 0), 0),
     ]))
     story = [
-        Spacer(1, 2 * mm), details, Spacer(1, 3 * mm), commercial, Spacer(1, 3 * mm),
+        Spacer(1, 1 * mm), details, Spacer(1, 1 * mm), commercial, Spacer(1, 2 * mm),
         summary_table, Spacer(1, 2 * mm), approval_table, PageBreak(),
         Paragraph(f'<u>PURCHASE ORDER:</u> &nbsp;{escape(_value(order.title))}', styles['heading']),
         Paragraph(
