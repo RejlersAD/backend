@@ -159,13 +159,14 @@ def _buyer_reference(order):
         if designation:
             lines.append(f'<b>{escape(designation)}</b>')
         if email:
-            lines.append(escape(email))
+            lines.append(f'<font size="9">{escape(email)}</font>')
         rendered.append('<br/>'.join(lines))
     if not rendered:
         name = escape(_value(getattr(order, 'buyer_reference_pm', None), 'Richa Hannah Thomas'))
         designation = escape(_value(getattr(order, 'buyer_reference_designation', None), 'Procurement Manager'))
         email = escape(str(getattr(order, 'buyer_reference_email', '') or '').strip())
-        rendered.append('<br/>'.join(filter(None, (name, f'<b>{designation}</b>', email))))
+        email_line = f'<font size="9">{email}</font>' if email else ''
+        rendered.append('<br/>'.join(filter(None, (name, f'<b>{designation}</b>', email_line))))
     return '<br/>'.join(rendered)
 
 
@@ -290,9 +291,9 @@ def _pdf_page(canvas, document, order, page_number=None):
     logo_x = width - left - logo_width
     _draw_rejlers_wordmark(canvas, logo_x, top - 1.5 * mm, logo_width, BRAND_NAVY)
     canvas.setFillColor(BRAND_TEXT_BLUE)
-    canvas.setFont('Helvetica-Bold', 16)
-    canvas.drawRightString(width - left, top - 11 * mm, 'HOME OF THE')
-    canvas.drawRightString(width - left, top - 18 * mm, 'LEARNING MINDS')
+    canvas.setFont('Helvetica-Bold', 8.5)
+    canvas.drawRightString(width - left, top - 9.5 * mm, 'HOME OF THE')
+    canvas.drawRightString(width - left, top - 13.5 * mm, 'LEARNING MINDS')
 
     # Footer: repeated white brand marks in the blue band, then the same
     # company/contact block and page number shown by the browser preview.
@@ -380,11 +381,18 @@ def _main_pdf(order):
             'PO Box 39317', 'Abu Dhabi, UAE.', 'Tel: +971 2 639 7449',
             f'Fax: {_value(getattr(order, "company_fax", None), "+971 2 639 7448")}',
         )))
+    invoice_address_lines = []
+    for line in invoice_address.splitlines():
+        rendered_line = escape(line)
+        if '@' in line:
+            rendered_line = f'<font size="9">{rendered_line}</font>'
+        invoice_address_lines.append(rendered_line)
+    invoice_address_paragraph = Paragraph('<br/>'.join(invoice_address_lines), preview)
 
     details = Table([[pair_rows([
         ('Seller', getattr(vendor, 'name', None), False),
         ('Seller Address', getattr(order, 'seller_address', None) or getattr(vendor, 'address', None), False),
-        ('Invoicing Address', invoice_address, False),
+        ('Invoicing Address', invoice_address_paragraph, False),
     ]), '', pair_rows([
         ('Seller Reference', getattr(order, 'seller_reference', None), False),
         ('Quote Ref.', getattr(order, 'quote_ref', None), False),

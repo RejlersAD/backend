@@ -38,10 +38,10 @@ class PurchaseOrderExportTests(TestCase):
             seller_fax='+971 1 234 5679',
             seller_email='vendor@example.com',
             invoicing_attn='Accounts Payable',
-            invoicing_emails=['finance@example.com'],
+            invoicing_emails=['aneef.thadikkarantavida@rejlers.ae'],
             company_fax='+971 2 639 7448',
             buyer_reference_pm='Test Buyer',
-            buyer_reference_email='buyer@example.com',
+            buyer_reference_email='richahannah.thomas@rejlers.ae',
             contact_persons={},
             project_number='590001',
             rad_project_no='',
@@ -105,8 +105,9 @@ class PurchaseOrderExportTests(TestCase):
         self.assertIn('Contact Person:', first_page_text)
         self.assertRegex(
             first_page_text,
-            r'Buyer\s+Reference:\s+Test Buyer\s+Procurement Manager\s+buyer@example\.com',
+            r'Buyer\s+Reference:\s+Test Buyer\s+Procurement Manager\s+richahannah\.thomas@rejlers\.ae',
         )
+        self.assertIn('aneef.thadikkarantavida@rejlers.ae', first_page_text)
         self.assertIn('Phone Number:', first_page_text)
         self.assertIn('Fax:', first_page_text)
         self.assertIn('Email:', first_page_text)
