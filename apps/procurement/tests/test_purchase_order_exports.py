@@ -29,11 +29,13 @@ class PurchaseOrderExportTests(TestCase):
             currency='USD',
             title='Test Purchase Order',
             description='<p>First scope&nbsp;paragraph</p><p>Second scope paragraph</p><ul><li>Required document</li></ul>',
-            seller_reference='',
+            seller_reference='Vendor Contact',
             quote_ref='',
             seller_license_no='',
             seller_address='Vendor City',
+            seller_contact_person='',
             seller_phone='+971 1 234 5678',
+            seller_fax='+971 1 234 5679',
             seller_email='vendor@example.com',
             invoicing_attn='Accounts Payable',
             invoicing_emails=['finance@example.com'],
@@ -96,6 +98,17 @@ class PurchaseOrderExportTests(TestCase):
         self.assertIn('First scope paragraph', narrative_text)
         self.assertIn('Second scope paragraph', narrative_text)
         self.assertNotIn('&nbsp;', narrative_text)
+        first_page_text = exported.pages[0].extract_text()
+        self.assertIn('Seller Address:', first_page_text)
+        self.assertIn('Seller Name:', first_page_text)
+        self.assertIn('Seller Ref. no:', first_page_text)
+        self.assertIn('Contact Person:', first_page_text)
+        self.assertIn('Phone Number:', first_page_text)
+        self.assertIn('Fax:', first_page_text)
+        self.assertIn('Email:', first_page_text)
+        self.assertNotIn('Phone / Email:', first_page_text)
+        self.assertRegex(first_page_text, r'Seller Ref\. no:\s+—')
+        self.assertRegex(first_page_text, r'Contact Person:\s+Vendor Contact')
         self.assertIn('SUMMARY OF PRICES', exported.pages[2].extract_text())
         first_cover_text = exported.pages[3].extract_text()
         self.assertIn('PURCHASE ORDER', first_cover_text)
