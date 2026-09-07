@@ -83,7 +83,6 @@ class Vendor(TimeStampedModel):
     STATUS_CHOICES = [
         ('active', 'Active'),
         ('inactive', 'Inactive'),
-        ('pending', 'Pending Approval'),
         ('blacklisted', 'Blacklisted'),
     ]
     
@@ -98,6 +97,12 @@ class Vendor(TimeStampedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     vendor_code = models.CharField(max_length=50, unique=True, db_index=True)
     name = models.CharField(max_length=300)
+    logo = models.ImageField(upload_to='procurement/vendors/logos/', blank=True, null=True)
+    logo_url = models.URLField(max_length=1000, blank=True)
+    business_type = models.CharField(max_length=100, blank=True)
+    specialization = models.CharField(max_length=300, blank=True)
+    website = models.URLField(max_length=1000, blank=True)
+    city = models.CharField(max_length=150, blank=True)
     contact_person = models.CharField(max_length=200, blank=True)
     email = models.EmailField(blank=True)
     phone = models.CharField(max_length=50, blank=True)
@@ -112,7 +117,7 @@ class Vendor(TimeStampedModel):
     credit_limit = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
     
     # Performance
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
     rating = models.IntegerField(choices=RATING_CHOICES, null=True, blank=True)
     performance_notes = models.TextField(blank=True)
     
