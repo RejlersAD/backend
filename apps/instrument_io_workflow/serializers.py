@@ -98,10 +98,17 @@ class IOListLegendSheetSerializer(serializers.ModelSerializer):
         model = IOListLegendSheet
         fields = [
             'legend_id', 'section', 'section_label', 'name', 'description',
-            'definition', 'is_active', 'created_by', 'created_by_name',
+            'definition', 'is_active', 'is_default', 'created_by', 'created_by_name',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['legend_id', 'created_by', 'created_at', 'updated_at']
+        # is_default is exposed for the frontend to read (e.g. a "Default"
+        # badge, disabling edit/delete for these rows) but is never
+        # settable through this serializer — a user can never create or
+        # flip their own row into a shared default; see views.py's
+        # IOListLegendSheetDetailView.perform_update/perform_destroy for
+        # the matching server-side enforcement against editing an
+        # existing one.
+        read_only_fields = ['legend_id', 'is_default', 'created_by', 'created_at', 'updated_at']
 
     def create(self, validated_data):
         request = self.context.get('request')

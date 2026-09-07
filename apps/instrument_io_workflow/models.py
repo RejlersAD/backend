@@ -394,7 +394,10 @@ class IOListLegendSheet(models.Model):
     unchanged), but this app never imports from pid_checker_v2 at runtime.
 
     Only one legend per (created_by, section) may be is_active=True at a
-    time — enforced by the partial unique constraint below.
+    time — enforced by the partial unique constraint below. created_by=None
+    + is_default=True is its own group under that same constraint (one
+    active DEFAULT per section, shared by every user — see is_default's own
+    comment), so this needs no separate constraint.
     """
     legend_id   = models.UUIDField(
         default=uuid.uuid4, editable=False, unique=True, db_index=True,
@@ -407,9 +410,18 @@ class IOListLegendSheet(models.Model):
     description = models.TextField(blank=True, default='')
     definition  = models.JSONField(default=dict)
     is_active   = models.BooleanField(default=False)
+    # Shared, repo/seed-provisioned legend — visible (read-only) to every
+    # user, not just created_by, exactly mirroring IOListLegendSymbolImage's
+    # own is_default flag. created_by is None for these (see below) — a
+    # global default has no single owner. Per-section fallback: a user's
+    # OWN active legend for a section always takes priority over the
+    # default (see views.py's queryset filtering and orchestrator.py's
+    # _run_legend_check); the default only applies when the user has never
+    # created/activated one of their own.
+    is_default  = models.BooleanField(default=False)
     created_by  = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
-        related_name='io_list_legends',
+        related_name='io_list_legends', null=True, blank=True,
     )
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)

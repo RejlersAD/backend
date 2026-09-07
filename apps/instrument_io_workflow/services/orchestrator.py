@@ -114,17 +114,32 @@ def _detect_document_type(pages: list, io_rows: list) -> str:
 def _active_legends_for_user(user):
     """{section: IOListLegendSheet} for every section this user currently
     has an active legend in. Returns {} for an anonymous/None user — legend
-    checking is purely additive, never required."""
+    checking is purely additive, never required.
+
+    Falls back to the shared default (is_default=True, is_active=True —
+    seeded by seed_io_default_legends) for any section the user has no
+    active legend of their own in, so legend checking works out of the box
+    for every user, not just whoever's account the seed data happened to
+    land under historically. The user's own legend for a section always
+    wins over the default when both exist — same priority order as
+    views.py's IOListLegendSheetListCreateView.get_queryset.
+    """
     from ..models import IOListLegendSheet
 
     if not user or not getattr(user, 'is_authenticated', False):
         return {}
-    return {
+    own = {
         legend.section: legend
         for legend in IOListLegendSheet.objects.filter(
             created_by=user, is_active=True,
         )
     }
+    defaults = {
+        legend.section: legend
+        for legend in IOListLegendSheet.objects.filter(is_default=True, is_active=True)
+        if legend.section not in own
+    }
+    return {**defaults, **own}
 
 
 def _run_legend_check(io_rows: list, comments: list, user) -> list:

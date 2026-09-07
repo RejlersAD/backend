@@ -37,12 +37,14 @@ from __future__ import annotations
 import logging
 
 from django.db import transaction
+from django.db.models import Q
 from django.http import FileResponse, HttpResponse, Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
 from rest_framework import status, viewsets, generics
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -536,9 +538,31 @@ class IOListProjectViewSet(viewsets.ModelViewSet):
                 Q(client__icontains=search)
             )
 
-        # Annotate with document count for efficiency
-        from django.db.models import Count
-        qs = qs.annotate(document_count=Count('documents'))
+        # Annotate with document count for efficiency.
+        # BUG FIX (production 500): Count('documents') — a plain JOIN +
+        # GROUP BY aggregate — raised "column ...project_name must appear
+        # in the GROUP BY clause" in production. Django normally generates
+        # GROUP BY on just the primary key here, relying on Postgres's
+        # functional-dependency rule to allow selecting every other column
+        # of the SAME row without listing it explicitly — but any
+        # downstream .order_by()/.distinct() on a non-aggregated field
+        # (e.g. an `?ordering=` query param, or a filter backend) breaks
+        # that assumption and forces Postgres to demand every selected
+        # column be listed. Rewritten as a correlated Subquery instead of
+        # a JOIN+annotate — this never produces a GROUP BY on the outer
+        # query at all, so no combination of ordering/filtering downstream
+        # can ever trigger this class of error again.
+        from django.db.models import Count, IntegerField, OuterRef, Subquery
+        from django.db.models.functions import Coalesce
+        from .models import IOListDocument
+        document_counts = (
+            IOListDocument.objects.filter(project=OuterRef('pk'))
+            .order_by().values('project')
+            .annotate(c=Count('id')).values('c')
+        )
+        qs = qs.annotate(
+            document_count=Coalesce(Subquery(document_counts, output_field=IntegerField()), 0),
+        )
 
         return qs
 
@@ -656,11 +680,26 @@ class IOListLegendSheetListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = IOListLegendSheet.objects.filter(created_by=self.request.user)
+        # A user's OWN legend for a section always takes priority over the
+        # shared default (is_default=True, created_by=None — seeded by
+        # seed_io_default_legends) — the default only ever appears for a
+        # section the user has no row of their own for yet, so the
+        # frontend's `.find(l => l.is_active)` (LegendSheetsModal /
+        # IOListWorkflowPage's active-legend summary) never sees two
+        # is_active=True rows for the same section and can't pick the
+        # wrong one.
+        user = self.request.user
         section = self.request.query_params.get('section')
         if section:
-            qs = qs.filter(section=section)
-        return qs
+            if IOListLegendSheet.objects.filter(created_by=user, section=section).exists():
+                return IOListLegendSheet.objects.filter(created_by=user, section=section)
+            return IOListLegendSheet.objects.filter(is_default=True, section=section)
+        owned_sections = set(
+            IOListLegendSheet.objects.filter(created_by=user).values_list('section', flat=True)
+        )
+        return IOListLegendSheet.objects.filter(
+            Q(created_by=user) | (Q(is_default=True) & ~Q(section__in=owned_sections)),
+        )
 
 
 class IOListLegendSheetDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -670,7 +709,21 @@ class IOListLegendSheetDetailView(generics.RetrieveUpdateDestroyAPIView):
     lookup_url_kwarg = 'legend_id'
 
     def get_queryset(self):
-        return IOListLegendSheet.objects.filter(created_by=self.request.user)
+        # Readable (GET) whether it's the user's own or a shared default —
+        # see perform_update/perform_destroy below for why a default stays
+        # read-only through this endpoint regardless.
+        return IOListLegendSheet.objects.filter(Q(created_by=self.request.user) | Q(is_default=True))
+
+    def perform_update(self, serializer):
+        if serializer.instance.is_default and not self.request.user.is_staff:
+            raise PermissionDenied('This is a shared default legend — it cannot be edited directly. '
+                                    'Create your own copy for this section instead.')
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance.is_default and not self.request.user.is_staff:
+            raise PermissionDenied('This is a shared default legend — it cannot be deleted.')
+        instance.delete()
 
 
 class IOListLegendActivateView(APIView):
