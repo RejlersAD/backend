@@ -221,17 +221,17 @@ def _attachment(entry, index):
 def _pdf_styles():
     styles = getSampleStyleSheet()
     return {
-        'title': ParagraphStyle('POTitle', parent=styles['Title'], fontSize=17, leading=21, textColor=colors.HexColor('#16689b')),
-        'heading': ParagraphStyle('POHeading', parent=styles['Heading2'], fontSize=10, leading=13, spaceBefore=8, spaceAfter=5, textColor=colors.HexColor('#1f2937')),
-        'body': ParagraphStyle('POBody', parent=styles['BodyText'], fontSize=8.5, leading=11),
-        'bullet': ParagraphStyle('POBullet', parent=styles['BodyText'], fontSize=8.5, leading=11, leftIndent=5 * mm, firstLineIndent=-3 * mm),
+        'title': ParagraphStyle('POTitle', parent=styles['Title'], fontSize=15, leading=18, textColor=colors.HexColor('#16689b')),
+        'heading': ParagraphStyle('POHeading', parent=styles['Heading2'], fontSize=12, leading=15, spaceBefore=8, spaceAfter=5, textColor=colors.HexColor('#1f2937')),
+        'body': ParagraphStyle('POBody', parent=styles['BodyText'], fontSize=10.5, leading=13.5),
+        'bullet': ParagraphStyle('POBullet', parent=styles['BodyText'], fontSize=10.5, leading=13.5, leftIndent=5 * mm, firstLineIndent=-3 * mm),
         'small': ParagraphStyle('POSmall', parent=styles['BodyText'], fontSize=7, leading=9),
         'right': ParagraphStyle('PORight', parent=styles['BodyText'], fontSize=8.5, leading=11, alignment=TA_RIGHT),
         'cover': ParagraphStyle('POCover', parent=styles['Title'], fontSize=22, leading=28, alignment=TA_CENTER, textColor=colors.HexColor('#16689b')),
         'cover_body': ParagraphStyle('POCoverBody', parent=styles['BodyText'], fontSize=12, leading=18, alignment=TA_CENTER),
-        'preview': ParagraphStyle('POPreview', parent=styles['BodyText'], fontSize=6.8, leading=8.3, textColor=colors.HexColor('#334155')),
-        'preview_bold': ParagraphStyle('POPreviewBold', parent=styles['BodyText'], fontSize=6.8, leading=8.3, fontName='Helvetica-Bold', textColor=colors.HexColor('#334155')),
-        'preview_heading': ParagraphStyle('POPreviewHeading', parent=styles['Heading2'], fontSize=7.8, leading=10, fontName='Helvetica-Bold', textColor=colors.HexColor('#1f2937')),
+        'preview': ParagraphStyle('POPreview', parent=styles['BodyText'], fontSize=10.5, leading=13.5, textColor=colors.HexColor('#334155')),
+        'preview_bold': ParagraphStyle('POPreviewBold', parent=styles['BodyText'], fontSize=10.5, leading=13.5, fontName='Helvetica-Bold', textColor=colors.HexColor('#334155')),
+        'preview_heading': ParagraphStyle('POPreviewHeading', parent=styles['Heading2'], fontSize=12, leading=15, fontName='Helvetica-Bold', textColor=colors.HexColor('#1f2937')),
     }
 
 
@@ -267,29 +267,31 @@ def _pdf_page(canvas, document, order, page_number=None):
     left = 16 * mm
     top = height - 11 * mm
     canvas.setFillColor(BRAND_TEXT_BLUE)
-    canvas.setFont('Helvetica-Bold', 8.5)
+    canvas.setFont('Helvetica-Bold', 15)
     canvas.drawString(left, top, 'PURCHASE ORDER')
-    canvas.setFont('Helvetica-Bold', 7.5)
-    canvas.drawString(left, top - 4 * mm, _value(order.po_number, 'PO NUMBER PENDING'))
+    canvas.setFont('Helvetica-Bold', 10)
+    canvas.drawString(left, top - 6 * mm, _value(order.po_number, 'PO NUMBER PENDING'))
     canvas.setFillColor(colors.HexColor('#64748b'))
-    canvas.setFont('Helvetica', 5.5)
-    canvas.drawString(left, top - 7 * mm, _value(getattr(order, 'form_note', None), '(PO no. to be used in all documents)'))
+    canvas.setFont('Helvetica', 7.5)
+    canvas.drawString(left, top - 10 * mm, _value(getattr(order, 'form_note', None), '(PO no. to be used in all documents)'))
     canvas.setFillColor(BRAND_TEXT_BLUE)
-    canvas.setFont('Helvetica-Bold', 7)
-    canvas.drawString(left, top - 12 * mm, _date_text(getattr(order, 'po_date', None)))
+    canvas.setFont('Helvetica-Bold', 10)
+    canvas.drawString(left, top - 16 * mm, _date_text(getattr(order, 'po_date', None)))
 
     logo_width = 27 * mm
     logo_x = width - left - logo_width
     _draw_rejlers_wordmark(canvas, logo_x, top - 1.5 * mm, logo_width, BRAND_NAVY)
     canvas.setFillColor(BRAND_TEXT_BLUE)
-    canvas.setFont('Helvetica-Bold', 5.7)
-    canvas.drawRightString(width - left, top - 9 * mm, 'HOME OF THE')
-    canvas.drawRightString(width - left, top - 12 * mm, 'LEARNING MINDS')
+    canvas.setFont('Helvetica-Bold', 16)
+    canvas.drawRightString(width - left, top - 11 * mm, 'HOME OF THE')
+    canvas.drawRightString(width - left, top - 18 * mm, 'LEARNING MINDS')
 
     # Footer: repeated white brand marks in the blue band, then the same
     # company/contact block and page number shown by the browser preview.
     band_x = left
-    band_y = 12 * mm
+    # Keep the footer in the same position as the approved legacy A4 form,
+    # leaving room for the full company/address block beneath the blue band.
+    band_y = 29 * mm
     band_width = width - (2 * left)
     band_height = 7 * mm
     canvas.setFillColor(BRAND_BLUE)
@@ -305,19 +307,19 @@ def _pdf_page(canvas, document, order, page_number=None):
             colors.white,
         )
     canvas.setFillColor(colors.white)
-    canvas.setFont('Helvetica-Bold', 4.5)
+    canvas.setFont('Helvetica-Bold', 7)
     for index in (1, 3):
         center = band_x + ((index + 0.5) * group_width)
-        canvas.drawCentredString(center, band_y + 4.2 * mm, 'HOME of the')
-        canvas.drawCentredString(center, band_y + 2.2 * mm, 'LEARNING MINDS')
+        canvas.drawCentredString(center, band_y + 4.8 * mm, 'HOME of the')
+        canvas.drawCentredString(center, band_y + 1.8 * mm, 'LEARNING MINDS')
 
     canvas.setFillColor(BRAND_TEXT_BLUE)
-    canvas.setFont('Helvetica', 4.6)
-    canvas.drawString(left + 8 * mm, 9.2 * mm, COMPANY_NAME)
-    canvas.drawString(left + 8 * mm, 7.0 * mm, COMPANY_ADDRESS)
-    canvas.drawString(left + 8 * mm, 4.8 * mm, f'Tel: {COMPANY_PHONE} | {COMPANY_WEBSITE}')
-    canvas.setFont('Helvetica', 5.2)
-    canvas.drawRightString(width - left, 5.5 * mm, f'Page {page_number or document.page}')
+    canvas.setFont('Helvetica', 7)
+    canvas.drawString(left + 8 * mm, 25.8 * mm, COMPANY_NAME)
+    canvas.drawString(left + 8 * mm, 22.8 * mm, 'Rejlers Tower, 13th floor, AI Hamdan Street, P.O. Box 39317,')
+    canvas.drawString(left + 8 * mm, 19.8 * mm, 'Abu Dhabi, United Arab Emirates')
+    canvas.drawString(left + 8 * mm, 16.8 * mm, f'Tel: {COMPANY_PHONE} | {COMPANY_WEBSITE}')
+    canvas.drawRightString(width - left, 17.5 * mm, f'Page {page_number or document.page}')
     canvas.restoreState()
 
 
@@ -330,7 +332,7 @@ def _main_pdf(order):
         leftMargin=16 * mm,
         rightMargin=16 * mm,
         topMargin=34 * mm,
-        bottomMargin=25 * mm,
+        bottomMargin=42 * mm,
         title=_value(order.po_number),
     )
     currency = order.currency or 'AED'
@@ -345,13 +347,13 @@ def _main_pdf(order):
     def pair_rows(rows):
         return Table(
             [[Paragraph(f'<b>{escape(label)}:</b>', preview), _paragraph(value, preview, strong)] for label, value, strong in rows],
-            colWidths=[24 * mm, 58 * mm],
+            colWidths=[30 * mm, 52 * mm],
             style=TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 0),
                 ('RIGHTPADDING', (0, 0), (-1, -1), 1.5 * mm),
-                ('TOPPADDING', (0, 0), (-1, -1), 1.2),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 1.8),
+                ('TOPPADDING', (0, 0), (-1, -1), 2.2),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3.2),
             ]),
         )
 
@@ -369,17 +371,15 @@ def _main_pdf(order):
         )))
 
     details = Table([[pair_rows([
-        ('Seller information', '\n'.join(filter(None, (
-            _value(getattr(vendor, 'name', None)),
-            str(getattr(order, 'seller_address', '') or '').strip(),
-        ))), False),
+        ('Seller', getattr(vendor, 'name', None), False),
+        ('Seller Address', getattr(order, 'seller_address', None) or getattr(vendor, 'address', None), False),
         ('Invoicing Address', invoice_address, False),
     ]), '', pair_rows([
         ('Seller Reference', getattr(order, 'seller_reference', None), False),
         ('Quote Ref.', getattr(order, 'quote_ref', None), False),
         ('License No.', getattr(order, 'seller_license_no', None), False),
         ('Buyer Reference', _buyer_reference(order), False),
-    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], style=TableStyle([
+    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], rowHeights=[64 * mm], style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LEFTPADDING', (0, 0), (-1, -1), 0),
         ('RIGHTPADDING', (0, 0), (-1, -1), 0),
@@ -394,7 +394,7 @@ def _main_pdf(order):
         ('Delivery terms', getattr(order, 'delivery_terms', None), False),
         ('Delivery date', _date_text(getattr(order, 'expected_delivery', None)), False),
         ('Marking', getattr(order, 'marking', None) or order.po_number, True),
-    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], style=TableStyle([
+    ])]], colWidths=[84 * mm, 8 * mm, 84 * mm], rowHeights=[34 * mm], style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
     ]))
@@ -410,7 +410,7 @@ def _main_pdf(order):
             ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
             ('TOPPADDING', (0, 0), (-1, -1), 1), ('BOTTOMPADDING', (0, 0), (-1, -1), 1),
         ])),
-    ]], colWidths=[91 * mm, 6 * mm, 79 * mm], style=TableStyle([
+    ]], colWidths=[91 * mm, 6 * mm, 79 * mm], rowHeights=[23 * mm], style=TableStyle([
         ('LINEABOVE', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
         ('LINEBELOW', (0, 0), (-1, 0), 1.2, colors.HexColor('#475569')),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -420,27 +420,56 @@ def _main_pdf(order):
     approval_name = _value(getattr(order, 'approved_by_name', None), JARMO_NAME)
     approval_title = _value(getattr(order, 'approved_by_title', None), JARMO_TITLE)
     approved = Paragraph(
-        '<b>Approved by:</b><br/><br/><br/><br/><br/><br/>'
+        '<b>Approved by:</b><br/><br/><br/><br/><br/><br/><br/><br/><br/><br/>'
         f'<b>{escape(approval_name)}</b><br/>{escape(approval_title).replace(chr(10), "<br/>")}<br/>'
         f'{JARMO_COMPANY}<br/><b>Date:</b> {escape(_value(getattr(order, "approved_date", None), ""))}', preview,
     )
-    confirmation = Paragraph(
-        '<b>Order Confirmation:</b><br/>We acknowledge receipt of your documents and will perform according to this PO.'
-        '<br/><br/><b>Seller Signature:</b> ______________________________'
-        f'<br/><br/><b>Date:</b> {_date_text(getattr(order, "confirmation_date", None))}'
-        f'<br/><br/><b>Seller information:</b> {escape(_value(getattr(vendor, "name", None)))}'
-        f'<br/><br/><b>Phone / Email:</b> {escape(" / ".join(filter(None, (str(getattr(order, "seller_phone", "") or ""), str(getattr(order, "seller_email", "") or "")))) or "â€”")}',
-        preview,
+    raw_seller_reference = str(getattr(order, 'seller_reference', '') or '').strip()
+    raw_contact_person = str(getattr(order, 'seller_contact_person', '') or '').strip()
+    confirmation_contact = raw_contact_person or raw_seller_reference
+    confirmation_reference = (
+        raw_seller_reference
+        if raw_contact_person and raw_seller_reference != raw_contact_person
+        else ''
     )
-    approval_table = Table([[approved, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm], style=TableStyle([
+    confirmation_rows = [
+        ('Seller Signature', ' '),
+        ('Date', _date_text(getattr(order, 'confirmation_date', None))),
+        ('Seller Name', _value(getattr(vendor, 'name', None))),
+        ('Seller Ref. no', _value(confirmation_reference)),
+        ('Contact Person', _value(confirmation_contact)),
+        ('Phone Number', _value(getattr(order, 'seller_phone', None))),
+        ('Fax', _value(getattr(order, 'seller_fax', None))),
+        ('Email', _value(getattr(order, 'seller_email', None))),
+    ]
+    confirmation = [
+        Paragraph(
+            '<b>Order Confirmation:</b><br/>We acknowledge receipt of your documents and will perform according to this PO.',
+            preview,
+        ),
+        Spacer(1, 4 * mm),
+        Table(
+            [[Paragraph(f'<b>{escape(label)}:</b>', preview), Paragraph(escape(value), preview)] for label, value in confirmation_rows],
+            colWidths=[30 * mm, 49 * mm],
+            style=TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+                ('TOPPADDING', (0, 0), (-1, -1), 1),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('LINEBELOW', (1, 0), (1, 0), 0.6, colors.HexColor('#64748b')),
+            ]),
+        ),
+    ]
+    approval_table = Table([[approved, '', confirmation]], colWidths=[86 * mm, 5 * mm, 85 * mm], rowHeights=[83 * mm], style=TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('LINEBEFORE', (2, 0), (2, 0), 0.5, colors.HexColor('#64748b')),
         ('LEFTPADDING', (0, 0), (0, 0), 0), ('RIGHTPADDING', (0, 0), (0, 0), 7 * mm),
         ('LEFTPADDING', (2, 0), (2, 0), 3 * mm), ('RIGHTPADDING', (2, 0), (2, 0), 0),
     ]))
     story = [
-        Spacer(1, 2 * mm), details, Spacer(1, 5 * mm), commercial, Spacer(1, 4 * mm),
-        summary_table, Spacer(1, 8 * mm), approval_table, PageBreak(),
+        Spacer(1, 2 * mm), details, Spacer(1, 3 * mm), commercial, Spacer(1, 3 * mm),
+        summary_table, Spacer(1, 2 * mm), approval_table, PageBreak(),
         Paragraph(f'<u>PURCHASE ORDER:</u> &nbsp;{escape(_value(order.title))}', styles['heading']),
         Paragraph(
             f'We, {COMPANY_NAME} (Buyer), issue this purchase order to '
