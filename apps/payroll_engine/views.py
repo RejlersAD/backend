@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import logging
 from datetime import datetime
 from decimal import Decimal
 
@@ -40,6 +41,9 @@ from .serializers import (
 from .services import excel_export, excel_import, run_generator, workflow
 from .services import bulk_deduction, comparison as comparison_service
 from .services.calculator import recompute_payslip_totals, recompute_run_totals
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── Permissions ────────────────────────────────────────────────────
@@ -237,33 +241,36 @@ class PayrollEmployeeViewSet(viewsets.ModelViewSet):
     ordering_fields = ['full_name', 'employee_no', 'department', 'basic']
     ordering = ['full_name']
 
-    def _sync_to_draft_payslips(self, employee, request_data: dict) -> None:
+    def _sync_to_draft_payslips(self, employee, changed_data: dict) -> None:
         """
         When an employee's org/identity fields change, cascade the update to
         all Draft payslip snapshots for this employee so Monthly Runs and
         the Employees tab stay aligned.
         """
         snap_updates = {
-            snap_field: request_data[emp_field]
+            snap_field: getattr(employee, emp_field)
             for emp_field, snap_field in _EMPLOYEE_TO_SNAPSHOT_SYNC.items()
-            if emp_field in request_data
+            if emp_field in changed_data
         }
-        if snap_updates:
+        if not snap_updates:
+            return
+        try:
             (Payslip.objects
              .filter(employee=employee, run__status=catalog.Status.DRAFT)
              .update(**snap_updates))
+        except Exception:
+            # Updating the employee is the primary operation. A legacy draft
+            # snapshot must not turn a successful employee PATCH into an HTML
+            # 500 response; record the repairable secondary failure instead.
+            logger.exception(
+                'Could not synchronize draft payslips for payroll employee %s',
+                employee.pk,
+            )
 
-    def update(self, request, *args, **kwargs):
-        employee = self.get_object()
-        response = super().update(request, *args, **kwargs)
-        self._sync_to_draft_payslips(employee, request.data)
-        return response
-
-    def partial_update(self, request, *args, **kwargs):
-        employee = self.get_object()
-        response = super().partial_update(request, *args, **kwargs)
-        self._sync_to_draft_payslips(employee, request.data)
-        return response
+    def perform_update(self, serializer):
+        """Save once and propagate the validated (canonical) values once."""
+        employee = serializer.save()
+        self._sync_to_draft_payslips(employee, serializer.validated_data)
 
     def get_queryset(self):
         qs = super().get_queryset()
