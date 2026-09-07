@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 from .models import (
     IOListProject, IOListDocument, IOListExtractedComment, IOListExtractedRow,
+    IOListLegendSheet, IOListLegendSymbolImage,
 )
 
 
@@ -58,6 +59,8 @@ class IOListDocumentListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'project_name', 'document_number', 'revision_label',
             'plant', 'unit', 'status', 'extraction_stats',
+            'document_type', 'legend_findings',
+            'pages_processed', 'pages_total',
             'crs_chain_id', 'project', 'project_name_ref',
             'uploaded_by_email',
             'created_at', 'updated_at',
@@ -83,3 +86,49 @@ class IOListDocumentDetailSerializer(IOListDocumentListSerializer):
             return obj.pdf_file.url
         except Exception:
             return None
+
+
+class IOListLegendSheetSerializer(serializers.ModelSerializer):
+    section_label = serializers.CharField(source='get_section_display', read_only=True)
+    created_by_name = serializers.CharField(
+        source='created_by.get_full_name', read_only=True, required=False
+    )
+
+    class Meta:
+        model = IOListLegendSheet
+        fields = [
+            'legend_id', 'section', 'section_label', 'name', 'description',
+            'definition', 'is_active', 'created_by', 'created_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['legend_id', 'created_by', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        if request and hasattr(request, 'user'):
+            validated_data['created_by'] = request.user
+        return super().create(validated_data)
+
+
+class IOListLegendSymbolImageSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = IOListLegendSymbolImage
+        fields = [
+            'image_id', 'section', 'symbol_name', 'image_file', 'image_url',
+            'content_type', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['image_id', 'created_at', 'updated_at']
+
+    def get_image_url(self, obj):
+        try:
+            return obj.image_file.url if obj.image_file else None
+        except Exception:
+            return None
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        if request and hasattr(request, 'user'):
+            validated_data['created_by'] = request.user
+        return super().create(validated_data)

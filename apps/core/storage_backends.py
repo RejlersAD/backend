@@ -329,6 +329,44 @@ if USE_S3:
             logger.info(f"[PIDAnalysisCacheStorage] Initialized: {self.bucket_name}/{self.location}")
 
 
+    class IOListResultsCacheStorage(S3Boto3Storage):
+        """
+        Dedicated S3 storage for Instrument IO List extraction result-cache
+        snapshots (apps.instrument_io_workflow.services.results_cache) —
+        one JSON blob per document at
+        ``io_list_cache/<document_id>/results.json``. Same pattern as
+        apps.pid_verification.services.results_cache / PIDAnalysisCacheStorage.
+
+        file_overwrite=True: there is exactly one canonical cache file per
+        document, always replaced in place rather than accumulating
+        hashed-filename versions — so a fresh Upload & Extract / Re-extract
+        naturally clears out whatever the previous cache entry held, with
+        no separate delete step required.
+        """
+
+        location = 'media/io_list_cache'
+        default_acl = 'private'
+        file_overwrite = True
+        custom_domain = False
+
+        @property
+        def endpoint_url(self):
+            region = getattr(settings, 'AWS_S3_REGION_NAME', 'us-east-1')
+            return getattr(settings, 'AWS_S3_ENDPOINT_URL', f'https://s3.{region}.amazonaws.com')
+
+        object_parameters = {
+            'CacheControl': 'no-cache',
+            'Metadata': {
+                'app': 'aiflow',
+                'content_type': 'io_list_results_cache',
+            },
+        }
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            logger.info(f"[IOListResultsCacheStorage] Initialized: {self.bucket_name}/{self.location}")
+
+
     class PlanningIntelligenceStorage(S3Boto3Storage):
         """
         Dedicated S3 storage for RADAI Project Planning Application uploads
@@ -433,5 +471,11 @@ else:
         """Local storage for P&ID analysis result-cache snapshots (non-S3 fallback)"""
         def __init__(self, *args, **kwargs):
             kwargs['location'] = 'media/analysis_cache'
+            super().__init__(*args, **kwargs)
+
+    class IOListResultsCacheStorage(FileSystemStorage):
+        """Local storage for I/O List extraction result-cache snapshots (non-S3 fallback)"""
+        def __init__(self, *args, **kwargs):
+            kwargs['location'] = 'media/io_list_cache'
             super().__init__(*args, **kwargs)
 
