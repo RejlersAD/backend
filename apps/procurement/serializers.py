@@ -76,13 +76,20 @@ class VendorSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     rating_display = serializers.CharField(source='get_rating_display', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True, allow_null=True)
+    remove_logo = serializers.BooleanField(write_only=True, required=False, default=False)
+    icv_expiry_date = serializers.DateField(
+        required=False,
+        allow_null=True,
+        input_formats=['%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y'],
+    )
     
     class Meta:
         model = Vendor
         fields = [
             # Core Information
-            'id', 'vendor_code', 'name', 'contact_person', 'email', 'phone', 'address',
-            'country',
+            'id', 'vendor_code', 'name', 'logo', 'logo_url', 'remove_logo',
+            'business_type', 'specialization', 'website', 'city',
+            'contact_person', 'email', 'phone', 'address', 'country',
             
             # Financial & Legal
             'tax_id', 'trade_license_number', 'vat_number', 'payment_terms', 'credit_limit',
@@ -111,8 +118,21 @@ class VendorSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
     
     def create(self, validated_data):
+        validated_data.pop('remove_logo', None)
         validated_data['created_by'] = self.context['request'].user
         return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        remove_logo = validated_data.pop('remove_logo', False)
+        if remove_logo and instance.logo:
+            instance.logo.delete(save=False)
+            instance.logo = None
+        return super().update(instance, validated_data)
+
+    def validate_logo(self, value):
+        if value and value.size > 2 * 1024 * 1024:
+            raise serializers.ValidationError('Supplier logos must be 2 MB or smaller.')
+        return value
 
 
 class VendorICVSerializer(serializers.ModelSerializer):
