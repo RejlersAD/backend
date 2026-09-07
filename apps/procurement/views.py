@@ -1275,9 +1275,9 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
     def export_pdf(self, request, pk=None):
         pr = self.get_object()
 
-        if canonicalize_pr_status(pr.status) != 'approved':
+        if canonicalize_pr_status(pr.status) not in {'approved', 'converted'}:
             return Response(
-                {'error': 'Only approved requisitions can be exported as PDF.'},
+                {'error': 'Only approved or converted requisitions can be exported as PDF.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
