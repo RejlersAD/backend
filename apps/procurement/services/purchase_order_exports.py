@@ -292,8 +292,8 @@ def _pdf_page(canvas, document, order, page_number=None):
     _draw_rejlers_wordmark(canvas, logo_x, top - 1.5 * mm, logo_width, BRAND_NAVY)
     canvas.setFillColor(BRAND_TEXT_BLUE)
     canvas.setFont('Helvetica-Bold', 8.5)
-    canvas.drawRightString(width - left, top - 9.5 * mm, 'HOME OF THE')
-    canvas.drawRightString(width - left, top - 13.5 * mm, 'LEARNING MINDS')
+    canvas.drawRightString(width - left, top - 6 * mm, 'HOME OF THE')
+    canvas.drawRightString(width - left, top - 10 * mm, 'LEARNING MINDS')
 
     # Footer: repeated white brand marks in the blue band, then the same
     # company/contact block and page number shown by the browser preview.
