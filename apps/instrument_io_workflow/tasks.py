@@ -444,8 +444,8 @@ def process_io_table_page(self, document_id: str, page_index: int) -> dict:
     # into an artificial task failure. Extra headroom on top accounts for
     # the local-OCR fallback that can still run afterward within this same
     # task if the Vision call itself fails.
-    soft_time_limit=200,
-    time_limit=240,
+    soft_time_limit=840,
+    time_limit=900,
 )
 def process_pid_vision_page(
     self, document_id: str, page_index: int,
@@ -528,7 +528,7 @@ def process_pid_vision_page(
     max_retries=1,
     default_retry_delay=15,
     soft_time_limit=180,
-    time_limit=240,
+    time_limit=900,
 )
 def finalize_io_document(
     self, unit_results: list, document_id: str, started: float,
