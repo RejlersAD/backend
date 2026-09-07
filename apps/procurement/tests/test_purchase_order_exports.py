@@ -103,6 +103,10 @@ class PurchaseOrderExportTests(TestCase):
         self.assertIn('Seller Name:', first_page_text)
         self.assertIn('Seller Ref. no:', first_page_text)
         self.assertIn('Contact Person:', first_page_text)
+        self.assertRegex(
+            first_page_text,
+            r'Buyer\s+Reference:\s+Test Buyer\s+Procurement Manager\s+buyer@example\.com',
+        )
         self.assertIn('Phone Number:', first_page_text)
         self.assertIn('Fax:', first_page_text)
         self.assertIn('Email:', first_page_text)
@@ -147,6 +151,25 @@ class PurchaseOrderExportTests(TestCase):
         self.assertIn('HOME OF THE', header_text)
         self.assertIn('Rejlers International Engineering Solutions', footer_text)
         self.assertIn('Page ', footer_text)
+
+    def test_long_purchase_summary_stays_on_first_page_without_displacing_approval(self):
+        order = self._order()
+        order.title = (
+            'Supply of Smart Interop Publisher License — May 2026 (PO Form 29) '
+            '(1 No) for RFIN XLPE Project = USD 1,755.40 1 No: USD 1,755.40 '
+            'equally shared in RAB Projects 5900863 (H2 Extraction) and 5901055 (ADOC)'
+        )
+
+        content, warnings = build_purchase_order_pdf(order)
+        exported = PdfReader(BytesIO(content))
+        first_page_text = exported.pages[0].extract_text()
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(exported.pages), 3)
+        self.assertIn('5901055', first_page_text)
+        self.assertIn('(ADOC)', first_page_text)
+        self.assertIn('Approved by:', first_page_text)
+        self.assertIn('Order Confirmation:', first_page_text)
 
     def test_rich_text_normalization_decodes_entities_and_keeps_blocks(self):
         self.assertEqual(

@@ -1,4 +1,5 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.db import IntegrityError, transaction
 from django.test import TestCase
@@ -117,6 +118,20 @@ class ProcurementVendorInvoiceFoundationTests(TestCase):
             data['po_allocations'][0]['purchase_order_number'],
             self.purchase_order.po_number,
         )
+
+    @patch('apps.finance.serializers.default_storage.exists', return_value=False)
+    def test_detail_serializer_reports_missing_source_pdf(self, storage_exists):
+        data = InvoiceDetailSerializer(self.invoice).data
+
+        storage_exists.assert_called_once_with(self.invoice.file_path)
+        self.assertFalse(data['source_file_available'])
+
+    @patch('apps.finance.serializers.default_storage.exists', return_value=True)
+    def test_detail_serializer_reports_available_source_pdf(self, storage_exists):
+        data = InvoiceDetailSerializer(self.invoice).data
+
+        storage_exists.assert_called_once_with(self.invoice.file_path)
+        self.assertTrue(data['source_file_available'])
 
     def test_invoice_number_is_unique_per_vendor_not_globally(self):
         other_vendor = Vendor.objects.create(
