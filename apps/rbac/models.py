@@ -331,6 +331,11 @@ class UserProfile(TimeStampedModel):
         blank=True,
         help_text="User profile photo — stored in S3 (production) or local media (dev)"
     )
+    # Cropped PNG data URL used as the user's reusable approval signature.
+    # Keeping the processed image in the profile makes approval records
+    # self-contained when the data URL is copied into their audit snapshot.
+    signature_image = models.TextField(blank=True)
+    signature_updated_at = models.DateTimeField(null=True, blank=True)
     phone = models.CharField(max_length=20, blank=True)
     bio = models.TextField(blank=True, max_length=500)
     location = models.CharField(max_length=100, blank=True)

@@ -112,17 +112,21 @@ def is_jarmo_ceo_stage(stage):
     )
 
 
-def normalize_ceo_workflow(workflow, po_reference=''):
-    """Remove conditional CEO approval when a PO Reference already exists."""
+def normalize_ceo_workflow(workflow, po_reference='', po_applicable=None):
+    """Apply the conditional CEO rule from the explicit PO-applicable choice.
+
+    ``po_reference`` remains as a compatibility fallback for older callers and
+    historical records that predate the boolean field.
+    """
     normalized = []
-    has_po_reference = bool(_clean(po_reference))
+    skip_ceo = bool(po_applicable) if po_applicable is not None else bool(_clean(po_reference))
     for raw_stage in workflow if isinstance(workflow, list) else []:
         if not isinstance(raw_stage, dict):
             normalized.append(raw_stage)
             continue
         stage = dict(raw_stage)
         if is_jarmo_ceo_stage(stage):
-            if has_po_reference:
+            if skip_ceo:
                 continue
             stage['role'] = 'CEO'
             stage_name = _clean(stage.get('stage'))

@@ -1,6 +1,8 @@
 """
 RBAC Views - DRF ViewSets for Super Admin Dashboard
 """
+import logging
+
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -12,6 +14,8 @@ from django.db import transaction
 from django.db.models import Q, Count, Prefetch
 from django_filters.rest_framework import DjangoFilterBackend
 from django.http import FileResponse
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     Organization, Module, Permission, Role, RolePermission, RoleModule,
@@ -841,6 +845,55 @@ class UserProfileViewSet(viewsets.ModelViewSet):
                 )
             except Exception:
                 pass
+
+    @action(detail=True, methods=['post'], url_path='profile-photo')
+    def upload_profile_photo(self, request, pk=None):
+        """Upload an employee photo from the managed HR profile drawer."""
+        profile = self.get_object()
+        photo = request.FILES.get('photo')
+        if not photo:
+            return Response(
+                {'error': 'Choose a profile picture to upload.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        employee = profile.canonical_employee
+        if employee is None:
+            try:
+                employee = profile.user.employee_master
+            except Exception:
+                employee = None
+        if employee is None:
+            return Response(
+                {'error': 'This user is not linked to an employee record.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            from apps.hr_core.services import EmployeeService
+            photo_url = EmployeeService.upload_employee_photo(
+                employee=employee,
+                photo_file=photo,
+                uploaded_by=request.user,
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception('Employee profile photo upload failed')
+            return Response(
+                {'error': 'The profile picture could not be uploaded.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if profile.canonical_employee_id != employee.pk:
+            profile.canonical_employee = employee
+            profile.save(update_fields=['canonical_employee', 'updated_at'])
+
+        return Response({
+            'success': True,
+            'photo_url': photo_url,
+            'profile': self.get_serializer(profile).data,
+        })
 
     @action(detail=True, methods=['post'])
     def deactivate(self, request, pk=None):

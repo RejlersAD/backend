@@ -451,9 +451,14 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                 'po_number_reference',
                 getattr(self.instance, 'po_number_reference', '') if self.instance else '',
             )
+            po_applicable = attrs.get(
+                'po_applicable',
+                getattr(self.instance, 'po_applicable', False) if self.instance else False,
+            )
             attrs['approval_workflow_config'] = normalize_ceo_workflow(
                 attrs['approval_workflow_config'],
                 po_reference,
+                po_applicable,
             )
 
         if 'items' in attrs and attrs['items']:
@@ -566,7 +571,11 @@ class PurchaseRequisitionSerializer(serializers.ModelSerializer):
                     # an actionable decision. Its internal evidence was not captured.
                     stage['status'] = 'not_recorded'
                 normalized.append(stage)
-            normalized = normalize_ceo_workflow(normalized, instance.po_number_reference)
+            normalized = normalize_ceo_workflow(
+                normalized,
+                instance.po_number_reference,
+                instance.po_applicable,
+            )
             data['approval_workflow_config'] = normalized
             data['approval_hierarchy'] = normalized
         return data

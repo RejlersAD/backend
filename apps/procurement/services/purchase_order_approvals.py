@@ -150,6 +150,7 @@ def normalize_assignments(approval_log, existing_log=None, require_core=True, re
             'date': previous.get('date', '') if same_assignee else '',
             'approved_at': previous.get('approved_at', previous.get('date', '')) if same_assignee else '',
             'comments': previous.get('comments', '') if same_assignee else '',
+            'signature': previous.get('signature', '') if same_assignee else '',
         })
     return normalized
 
@@ -303,7 +304,7 @@ def pending_entries_for(user, queryset):
 
 
 @transaction.atomic
-def record_decision(order, actor, decision, stage='', comment=''):
+def record_decision(order, actor, decision, stage='', comment='', require_signature=False):
     from apps.procurement.models import PurchaseOrder
 
     locked = PurchaseOrder.objects.select_for_update().select_related('created_by').get(pk=order.pk)
@@ -322,11 +323,19 @@ def record_decision(order, actor, decision, stage='', comment=''):
 
     index, entry = candidate
     decision_at = timezone.now()
+    signature = ''
+    if decision == 'approve':
+        profile = getattr(actor, 'rbac_profile', None)
+        signature = getattr(profile, 'signature_image', '') if profile else ''
+        if require_signature and not signature:
+            raise ValidationError('Add your signature in Profile > My Signature before approving.')
     entry['status'] = 'Approved' if decision == 'approve' else 'Rejected'
     entry['date'] = decision_at.isoformat()
     entry['approved_at'] = decision_at.isoformat() if decision == 'approve' else ''
     entry['decided_at'] = decision_at.isoformat()
     entry['comments'] = str(comment or '').strip()
+    if decision == 'approve':
+        entry['signature'] = signature
     workflow[index] = entry
     locked.approval_log = workflow
 
@@ -337,7 +346,8 @@ def record_decision(order, actor, decision, stage='', comment=''):
         locked.approved_by_name = employee_display_name(actor)
         locked.approved_date = timezone.localtime(decision_at).date()
         locked.approved_at = decision_at
-        update_fields.extend(['approved_by', 'approved_by_name', 'approved_date', 'approved_at'])
+        locked.approval_signature = signature
+        update_fields.extend(['approved_by', 'approved_by_name', 'approved_date', 'approved_at', 'approval_signature'])
     locked.save(update_fields=update_fields)
     if decision == 'approve' and _active_entries(workflow):
         transaction.on_commit(

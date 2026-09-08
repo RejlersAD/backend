@@ -183,7 +183,10 @@ class CanManageUsers(permissions.BasePermission):
             
             # Elevated administrative and HR roles can manage users (soft-coded)
             if profile.roles.filter(
-                code__in=['super_admin', 'admin', 'ict_admin', 'hr_admin'],
+                code__in=[
+                    'super_admin', 'admin', 'ict_admin',
+                    'hr_admin', 'hr_manager', 'human_resource',
+                ],
                 is_active=True
             ).exists():
                 return True
@@ -192,8 +195,13 @@ class CanManageUsers(permissions.BasePermission):
             if profile.has_module_access('user_mgmt'):
                 return True
             
-            # Check specific permission
-            return profile.has_permission('users.manage')
+            # Keep API authorization aligned with the HR employee drawer. Some
+            # organizations grant scoped employee editing without the broader
+            # user-administration permission.
+            return (
+                profile.has_permission('users.manage')
+                or profile.has_permission('hr.employee.update')
+            )
         except UserProfile.DoesNotExist:
             return False
 

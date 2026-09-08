@@ -331,25 +331,25 @@ class PurchaseRequisition(TimeStampedModel):
     # === APPROVALS SECTION (Fields 16-21) ===
     # Project Manager (PM) Approval
     pm_name = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_pm_approved', help_text='Project Manager name')
-    pm_signature = models.CharField(max_length=500, blank=True, help_text='PM signature (base64 or S3 URL)')
+    pm_signature = models.TextField(blank=True, help_text='PM signature image snapshot (data URL or S3 URL)')
     pm_approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default='pending', help_text='PM Approval Status')
     pm_approved_at = models.DateTimeField(null=True, blank=True, help_text='PM approval timestamp')
     
     # Engineering Manager Approval (NEW - dynamic workflow tier)
     eng_manager_name = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_eng_manager_approved', help_text='Engineering Manager name')
-    eng_manager_signature = models.CharField(max_length=500, blank=True, help_text='Engineering Manager signature (base64 or S3 URL)')
+    eng_manager_signature = models.TextField(blank=True, help_text='Engineering Manager signature image snapshot (data URL or S3 URL)')
     eng_manager_approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default='pending', help_text='Engineering Manager Approval Status')
     eng_manager_approved_at = models.DateTimeField(null=True, blank=True, help_text='Engineering Manager approval timestamp')
     
     # Manager of Projects Approval (NEW - dynamic workflow tier)
     manager_projects_name = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_manager_projects_approved', help_text='Manager of Projects name')
-    manager_projects_signature = models.CharField(max_length=500, blank=True, help_text='Manager of Projects signature (base64 or S3 URL)')
+    manager_projects_signature = models.TextField(blank=True, help_text='Manager of Projects signature image snapshot (data URL or S3 URL)')
     manager_projects_approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default='pending', help_text='Manager of Projects Approval Status')
     manager_projects_approved_at = models.DateTimeField(null=True, blank=True, help_text='Manager of Projects approval timestamp')
     
     # VP Operations (Vp, Op) Approval
     vp_op_name = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='prs_vp_approved', help_text='VP Operations name')
-    vp_op_signature = models.CharField(max_length=500, blank=True, help_text='VP signature (base64 or S3 URL)')
+    vp_op_signature = models.TextField(blank=True, help_text='VP signature image snapshot (data URL or S3 URL)')
     vp_op_approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default='pending', help_text='VP Approval Status')
     vp_op_approved_at = models.DateTimeField(null=True, blank=True, help_text='VP approval timestamp')
     
@@ -593,7 +593,7 @@ class PurchaseOrder(TimeStampedModel):
     approved_by_title = models.CharField(max_length=300, blank=True, help_text='Approver title (e.g., Senior VP, Middle East, CEO)')
     approved_date = models.DateField(null=True, blank=True, help_text='Date when PO was approved')
     approved_at = models.DateTimeField(null=True, blank=True, help_text='Exact timestamp when final PO approval was recorded')
-    approval_signature = models.CharField(max_length=500, blank=True, help_text='Digital signature (base64 or S3 URL)')
+    approval_signature = models.TextField(blank=True, help_text='Digital signature image snapshot (data URL or S3 URL)')
     approval_stamp = models.CharField(max_length=500, blank=True, help_text='Company stamp image (S3 URL)')
 
     # ═══ MULTI-STAGE APPROVAL WORKFLOW (Form Section: Approval Status Log) ═══
