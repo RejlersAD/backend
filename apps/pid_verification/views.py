@@ -47,7 +47,7 @@ from .serializers import (
     PIDVFindingUpdateSerializer,
     UploadSerializer,
 )
-from .services.consistency import compute_file_hash, check_cache
+from .services.consistency import compute_file_hash
 from .services.legend_knowledge import (
     LEGEND_KNOWLEDGE_PATH,
     build_legend_knowledge,
@@ -246,35 +246,17 @@ def upload_pid(request):
     )
     # ── End BYOK validation ─────────────────────────────────────────────────
 
-    # Deterministic cache check (only reuse if same project)
+    # BUG FIX: this used to check_cache(file_hash) here and, on a match,
+    # return the EXISTING document's stale results instead of running a
+    # fresh analysis — silently skipping "Start AI Analysis" for a
+    # re-uploaded file, even after the underlying legend/rules/model
+    # changed since the cached run. Uploading is one of the two explicit
+    # analysis triggers (alongside Re-analyze/reprocess_document) that
+    # must ALWAYS run a genuinely fresh pipeline — no exceptions. See
+    # services/results_cache.py's own docstring: that S3 cache still
+    # exists, but is now only ever consulted by get_results() (viewing),
+    # never here.
     file_hash = compute_file_hash(uploaded_file)
-    cached    = check_cache(file_hash)
-    if cached and cached.project == project:
-        # Do not reuse degraded cache entries (e.g. completed docs with 0 drawings).
-        if cached.status == PIDVDocument.Status.COMPLETED and not cached.drawings.exists():
-            logger.warning(
-                "[PIDVUpload] Ignoring degraded cache hash=%s doc_id=%s (0 drawings)",
-                file_hash,
-                cached.document_id,
-            )
-        elif cached.status == PIDVDocument.Status.FAILED:
-            logger.warning(
-                "[PIDVUpload] Ignoring failed cache hash=%s doc_id=%s",
-                file_hash,
-                cached.document_id,
-            )
-        else:
-            logger.info("[PIDVUpload] Cache hit hash=%s doc_id=%s", file_hash, cached.document_id)
-            return Response(
-                {
-                    "document_id": str(cached.document_id),
-                    "status":      cached.status,
-                    "cached":      True,
-                    "message":     "Identical file already processed – returning cached results.",
-                    "project_id":  str(project.project_id) if project else None,
-                },
-                status=status.HTTP_200_OK,
-            )
 
     # Create new document record
     doc = PIDVDocument.objects.create(
@@ -295,6 +277,15 @@ def upload_pid(request):
         project.project_name if project else "None",
         request.user.username
     )
+
+    # Explicit cache clear: doc.document_id is a brand-new UUID here so
+    # there is normally nothing to clear, but "Start AI Analysis" must
+    # NEVER be able to serve a stale cache under any circumstance — this
+    # makes that guarantee explicit rather than implicit (previously it
+    # only held because save_results_cache()'s file_overwrite=True would
+    # eventually replace any leftover entry once the fresh run finished).
+    from .services.results_cache import clear_results_cache
+    clear_results_cache(doc)
 
     # Enqueue Celery task with intelligent fallback
     try:
@@ -527,37 +518,96 @@ def reprocess_document(request, document_id):
             status=status.HTTP_409_CONFLICT,
         )
 
-    # ── Result cache check ──────────────────────────────────────────────
-    # Hash the file as it exists RIGHT NOW (not the stored doc.file_hash —
-    # that's a sanity re-check that the underlying file genuinely hasn't
-    # changed) and compare to what the cache was captured against. Same
-    # hash → skip the pipeline entirely and serve the cached snapshot;
-    # different hash (or no cache yet) → fall through to a normal re-run,
-    # which will write a fresh cache on completion (see tasks.py).
-    if doc.original_file:
-        from .services.consistency import compute_file_hash
-        from .services.results_cache import load_results_cache
+    # BUG FIX (2026-09-08): this endpoint never read ANY BYOK context from
+    # the request at all — no analysis_mode/key parsing, and
+    # process_pid_document was always called with no `context` argument
+    # (args=(str(doc.document_id),) only, no byok_context), so `context`
+    # was always None inside the task no matter what the frontend sent.
+    # PIDVerification.jsx's recheckDocument() DOES correctly build and
+    # send analysis_mode/claude_api_key/openai_api_key in its POST body
+    # (see its own BUG FIX comment) — this endpoint just silently threw
+    # that data away. Root cause, confirmed via extraction.py:124's
+    # NoExtractionMethodAvailableError, of "Re-check (run fresh)" always
+    # failing with "Please install Tesseract OR add a Claude API key"
+    # even with a valid, present key: extraction_api_key in tasks.py's
+    # _process_one_page reads from context, and context was always None.
+    # Mirrors upload_pid()'s own parsing exactly (same VALID_MODES/
+    # API_KEY_PATTERNS validation) so re-check behaves identically to a
+    # fresh upload.
+    analysis_mode = (request.data.get('analysis_mode') or 'standard').strip()
+    openai_api_key = (request.data.get('openai_api_key') or '').strip()
+    claude_api_key = (request.data.get('claude_api_key') or '').strip()
 
-        try:
-            doc.original_file.open('rb')
-            current_hash = compute_file_hash(doc.original_file)
-        finally:
-            doc.original_file.close()
-
-        cached = load_results_cache(doc)
-        if cached and cached.get('file_hash') == current_hash:
-            logger.info('[PIDVReprocess] Cache hit for document_id=%s — skipping pipeline', document_id)
+    VALID_MODES = ['standard', 'enhanced_openai', 'deep_claude', 'hybrid']
+    if analysis_mode not in VALID_MODES:
+        return Response(
+            {"error": f"Invalid analysis_mode. Must be one of: {', '.join(VALID_MODES)}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    import re as _re
+    API_KEY_PATTERNS = {
+        'openai': _re.compile(r'^sk-[A-Za-z0-9\-_]{20,}$'),
+        'claude': _re.compile(r'^sk-ant-[A-Za-z0-9\-_]{20,}$'),
+    }
+    needs_openai = analysis_mode in ['enhanced_openai', 'hybrid']
+    needs_claude = analysis_mode in ['deep_claude', 'hybrid']
+    if openai_api_key:
+        if not API_KEY_PATTERNS['openai'].match(openai_api_key):
             return Response(
-                {
-                    "document_id": str(doc.document_id),
-                    "status": doc.status,
-                    "message": "Loaded from cache — file unchanged since last analysis.",
-                    "file_name": doc.file_name,
-                    "cache_status": "cache",
-                    "analysis_timestamp": cached.get("analysis_timestamp"),
-                },
-                status=status.HTTP_200_OK,
+                {"error": "Invalid OpenAI API key format. Must start with 'sk-' and contain at least 20 characters."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
+    elif needs_openai:
+        return Response(
+            {"error": f"OpenAI API key required for '{analysis_mode}' mode."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if claude_api_key:
+        if not API_KEY_PATTERNS['claude'].match(claude_api_key):
+            return Response(
+                {"error": "Invalid Claude API key format. Must start with 'sk-ant-' and contain at least 20 characters."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    elif needs_claude:
+        return Response(
+            {"error": f"Claude API key required for '{analysis_mode}' mode."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    byok_context = {
+        'analysis_mode': analysis_mode,
+        'openai_api_key': openai_api_key if openai_api_key else None,
+        'claude_api_key': claude_api_key if claude_api_key else None,
+    }
+    logger.info(
+        "[PIDVReprocess] BYOK resolved: mode=%s, openai=%s, claude=%s",
+        analysis_mode,
+        "provided" if openai_api_key else "none",
+        "provided" if claude_api_key else "none",
+    )
+
+    # BUG FIX: this used to hash the current file and compare against the
+    # cached snapshot's file_hash, skipping the entire pipeline on a
+    # match and serving the stale cached result instead. Re-analyze is
+    # one of the two explicit analysis triggers (alongside upload_pid on
+    # a hash match) that must ALWAYS run a genuinely fresh pipeline — a
+    # user clicking "Re-analyze" on the exact same file is very often
+    # doing so specifically because something ELSE changed (rules,
+    # legend, model, prompt) since the last run, not because the file
+    # itself changed, so a file-hash match is not a reason to skip. The
+    # S3 cache (services/results_cache.py) still exists — it's now only
+    # ever consulted by get_results() for fast VIEWING of an already-
+    # completed document, never here. "Re-check (use cache)" — the
+    # explicit fast/no-API-call viewing option — never calls this
+    # endpoint at all; it hits GET /results/ directly.
+
+    # Explicit cache clear: this endpoint is "Re-check (run fresh)" — it
+    # must ignore any existing cache completely, not just eventually
+    # overwrite it once the new run finishes. Cleared up front so a crash
+    # mid-run can never leave a stale cache entry to be served as if it
+    # were current.
+    from .services.results_cache import clear_results_cache
+    clear_results_cache(doc)
 
     # Reset state so the task pipeline treats this as a fresh run
     doc.status        = 'uploaded'
@@ -565,22 +615,27 @@ def reprocess_document(request, document_id):
     doc.save(update_fields=['status', 'error_message', 'updated_at'])
 
     # Enqueue Celery task (with sync-thread fallback if workers unavailable)
+    # BUG FIX: byok_context is now actually passed through here — this used
+    # to call process_pid_document with args=(str(doc.document_id),) only,
+    # so `context` was always None inside the task regardless of the
+    # analysis_mode/keys parsed above. See this function's own BUG FIX
+    # comment for the full trace to extraction.py:124.
     try:
         from .tasks import process_pid_document
         from apps.core.queue_service import RobustQueueService
 
-        def _sync_fallback(doc_id):
+        def _sync_fallback(doc_id, context=None):
             import threading
             t = threading.Thread(
                 target=process_pid_document,
-                args=(doc_id,),
+                args=(doc_id, context),
                 daemon=True,
             )
             t.start()
 
         RobustQueueService.queue_task(
             process_pid_document,
-            args=(str(doc.document_id),),
+            args=(str(doc.document_id), byok_context),
             sync_fallback=_sync_fallback,
         )
     except Exception:
@@ -589,7 +644,7 @@ def reprocess_document(request, document_id):
         from .tasks import process_pid_document
         t = threading.Thread(
             target=process_pid_document,
-            args=(str(doc.document_id),),
+            args=(str(doc.document_id), byok_context),
             daemon=True,
         )
         t.start()
@@ -619,13 +674,12 @@ def get_status(request, document_id):
     if doc is None:
         return Response({"error": "Document not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    # Cache info — only looked up once a run has settled (completed/failed),
-    # not on every poll during active processing, to avoid extra S3/local
-    # reads on a frequently-polled endpoint. Compared against the stored
-    # doc.file_hash (cheap) rather than re-hashing the live file on every
-    # request — reprocess_document() does the authoritative live re-hash
-    # at the moment it actually matters (right before deciding to skip the
-    # pipeline).
+    # Cache info — purely informational (e.g. "results last cached at...").
+    # Never used to decide whether to skip an analysis — reprocess_document()
+    # and upload_pid() always run a fresh pipeline regardless of this.
+    # Only looked up once a run has settled (completed/failed), not on
+    # every poll during active processing, to avoid extra S3/local reads
+    # on a frequently-polled endpoint.
     cache_available = False
     cache_timestamp = None
     cache_matches_current_file = False
@@ -661,6 +715,22 @@ def get_results(request, document_id):
 
     if doc.status not in (PIDVDocument.Status.COMPLETED, PIDVDocument.Status.FAILED):
         return Response({"error": "Processing not yet complete", "status": doc.status}, status=status.HTTP_202_ACCEPTED)
+
+    # Fast path for VIEWING an already-completed document: one cache read
+    # instead of the doc.drawings.all() DB query plus both backfill passes
+    # below. NEVER consulted before running an analysis — upload_pid() and
+    # reprocess_document() only ever WRITE to this cache (see tasks.py);
+    # this is the one and only READ site. Falls back to the normal DB path
+    # on ANY cache miss (no entry yet, corrupt, or file_hash no longer
+    # matching — see load_results_cache), so a cache problem can never
+    # make a document un-viewable. Same pattern as instrument_io_workflow's
+    # IOListDocumentViewSet.retrieve().
+    if doc.status == PIDVDocument.Status.COMPLETED:
+        from .services.results_cache import load_results_cache
+        cached = load_results_cache(doc)
+        if cached and cached.get('file_hash') == doc.file_hash and cached.get('full_data'):
+            logger.info('[PIDVResults] Results cache HIT for document_id=%s — serving instantly', document_id)
+            return Response(cached['full_data'])
 
     # Soft-upgrade: backfill tag_positions for drawings that were processed
     # before line-size coordinate extraction was added.  Runs only when the

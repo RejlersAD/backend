@@ -240,6 +240,16 @@ def process_pid_document(self, document_id: str, context: dict = None):
             doc.status = PIDVDocument.Status.COMPLETED
             doc.save(update_fields=['status', 'updated_at'])
             logger.info('[PIDVTask] V2 Pipeline completed successfully for document_id=%s', document_id)
+
+            # Result caching (S3/local) — never fatal: a caching failure
+            # shouldn't turn a successful analysis into a failed one. Same
+            # pattern as apps.pid_verification.tasks._finalize_document.
+            try:
+                from apps.pid_verification_v2.services.results_cache import save_results_cache
+                save_results_cache(doc, doc.file_hash)
+            except Exception:
+                logger.exception('[PIDVTask] Result cache write failed for document_id=%s (non-fatal)', document_id)
+
             return
             
         except SoftTimeLimitExceeded:
@@ -866,6 +876,15 @@ def finalize_pid_document(self, page_results, document_id: str):
     doc.save(update_fields=update_fields)
     logger.info('[PIDVFinalize] Completed document_id=%s (%d/%d pages ok)', document_id, succeeded, total)
 
+    # Result caching (S3/local) — never fatal: a caching failure shouldn't
+    # turn a successful analysis into a failed one. Same pattern as
+    # apps.pid_verification.tasks._finalize_document.
+    try:
+        from apps.pid_verification_v2.services.results_cache import save_results_cache
+        save_results_cache(doc, doc.file_hash)
+    except Exception:
+        logger.exception('[PIDVFinalize] Result cache write failed for document_id=%s (non-fatal)', document_id)
+
 
 def _resolve_file_path(doc) -> str:
     """
@@ -1480,8 +1499,10 @@ def parse_reference_data_task(self, reference_id: str):
     name='pid_verification_v2.run_ai_checks',
     max_retries=2,
     default_retry_delay=60,
-    soft_time_limit=1800,   # 30 min soft limit (for large P&ID sets)
-    time_limit=2100,        # 35 min hard limit
+    # UPDATED: raised from 30/35 min to 35/40 min — same reasoning as
+    # process_pid_document's TASK_CONFIG (extended thinking adds latency).
+    soft_time_limit=2100,   # 35 min soft limit (for large P&ID sets)
+    time_limit=2400,        # 40 min hard limit
 )
 def run_ai_checks_task(self, run_id: str, context: dict = None):
     """

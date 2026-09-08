@@ -25,7 +25,7 @@ exec gunicorn config.wsgi_bulletproof:application \
     --workers "${GUNICORN_WORKERS:-1}" \
     --threads "${GUNICORN_THREADS:-4}" \
     --worker-class "${GUNICORN_WORKER_CLASS:-gthread}" \
-    --timeout "${GUNICORN_TIMEOUT:-150}" \
+    --timeout "${GUNICORN_TIMEOUT:-2400}" \
     --graceful-timeout "${GUNICORN_GRACEFUL_TIMEOUT:-30}" \
     --keep-alive "${GUNICORN_KEEPALIVE:-75}" \
     --max-requests "${GUNICORN_MAX_REQUESTS:-500}" \

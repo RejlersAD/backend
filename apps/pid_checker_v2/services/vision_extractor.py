@@ -70,14 +70,33 @@ def _resolve_claude_vision_model() -> str:
 # — far past the frontend's own request timeout, so the user sees a
 # generic "failed" message while the backend is still silently working.
 # Bounding each individual call keeps failures fast and diagnosable.
-VISION_REQUEST_TIMEOUT_S = 45.0
+#
+# UPDATED: 45s -> 150s (matching apps.instrument_io_workflow.services.
+# pid_vision_extractor's own VISION_REQUEST_TIMEOUT_S). VISION_MAX_TOKENS
+# in this file just went from 4096 to 32000 with thinking enabled — a
+# single call can now legitimately generate far more output than before,
+# and 45s risked timing out a genuinely-successful-but-slower call at the
+# HTTP-client level regardless of how generous the Celery task's own
+# time_limit is. This stays a per-CALL bound, not the task-level 40-minute
+# budget — a single hung connection should still fail fast and let the
+# existing retry logic handle it, not block for the full task budget.
+VISION_REQUEST_TIMEOUT_S = 150.0
 
 VISION_MODELS = {
     'openai': 'gpt-4o',
     'claude': _resolve_claude_vision_model(),
 }
 
-VISION_MAX_TOKENS = 4096
+# 32000 — sized to an even 16000-tokens-thinking / 16000-tokens-answer
+# split for the two Claude calls in this file that run with thinking
+# enabled (_call_raw_text_vision, _call_claude — see their own comments).
+# 2026-09-08: brought down from 50000/20000 after the per-call token
+# logging added alongside this change gave real usage numbers to size
+# against instead of guessing — watch the "[raw_text_vision] tokens:" /
+# "[symbol_vision] tokens:" log lines (input/output/thinking/stop_reason)
+# on real runs and adjust this and the two budget_tokens values together
+# if thinking or output is consistently running close to its half.
+VISION_MAX_TOKENS = 32000
 VISION_TEMPERATURE = 0.0             # deterministic — we want factual extraction
                                       # OpenAI only — Claude Sonnet 5 / Opus 5 reject
                                       # any non-default temperature (see _call_claude)
@@ -294,28 +313,35 @@ the literal characters you see in THIS image. Two tags can look almost
 identical and differ in only one digit; read each one's digits independently
 rather than reusing a digit you already transcribed for a similar tag.
 
-Also identify approximate locations for the most important TAG-like strings
-(pipeline/instrument/equipment tags specifically — not notes or titles) so
-they can be anchored on the drawing.
+REQUIRED — for EVERY pipeline/instrument/equipment tag you transcribe
+(not notes or titles), also report its position on the page as numeric
+percentages of the full image, so it can be plotted as a marker on the
+drawing:
+- x_pct: horizontal position, 0 = left edge, 100 = right edge
+- y_pct: vertical position, 0 = top edge, 100 = bottom edge
+Estimate the CENTER of the tag's text as you actually see it placed in
+the image — this is not optional or "for the most important ones only":
+skipping it for a tag means that tag cannot be shown on the drawing at
+all, so include a best-effort x_pct/y_pct for every tag you transcribe.
 
 Return ONLY a single JSON object, no prose, no markdown fences:
 {
   "raw_text": "one transcribed line/fragment per line, newline-separated",
   "located_tags": [
-    {"text": "6\\"-FL-AC6N-8112", "location": "top-left"}
+    {"text": "6\\"-FL-AC6N-8112", "x_pct": 23.5, "y_pct": 61.2}
   ]
 }
-Valid "location" values: top-left, top, top-right, middle-left, center,
-middle-right, bottom-left, bottom, bottom-right.
 If you cannot make out ANY text at all, return {"raw_text": "", "located_tags": []} —
 never invent text that isn't there."""
 
-# Coarse 3x3-grid location -> approximate (x_pct, y_pct) center, used to
-# turn Vision's qualitative location strings into the same {tag: {x_pct,
-# y_pct}} shape the Tesseract-based _extract_tag_positions() used to
-# produce from real pixel bounding boxes. This is a genuine accuracy
-# regression (a zone center vs. an exact pixel) — documented, not hidden —
-# but keeps the Drawing Layout overlay feature functional rather than empty.
+# Coarse 3x3-grid location -> approximate (x_pct, y_pct) center — kept ONLY
+# as a compatibility fallback for a response that still comes back with the
+# older qualitative "location" field (e.g. an in-flight retry hitting the
+# previous prompt version, or the model ignoring the numeric-coordinate
+# instruction and reverting to a zone word on its own). RAW_TEXT_USER_PROMPT
+# above now asks for real numeric x_pct/y_pct directly — see
+# extract_raw_text_via_vision's tag_positions loop, which prefers those
+# when present and only falls back to this coarse mapping otherwise.
 _LOCATION_TO_PCT = {
     'top-left': (15, 15), 'top': (50, 15), 'top-right': (85, 15),
     'middle-left': (15, 50), 'center': (50, 50), 'middle-right': (85, 50),
@@ -354,11 +380,34 @@ def extract_raw_text_via_vision(pdf_bytes: bytes, page_index: int, api_key: str,
 
     parsed = _parse_raw_text_response(raw)
 
+    # BUG FIX (2026-09-08): real, confirmed live symptom — for any document
+    # with no Tesseract and no vector text layer (a scanned P&ID processed
+    # via Vision-only), tag_positions had no way to ever come back non-empty,
+    # so the drawing overlay always fell back to fabricated hash positions
+    # (since fixed separately in PIDVerification.jsx to suppress those
+    # entirely rather than scatter them). RAW_TEXT_USER_PROMPT above now
+    # asks for real numeric x_pct/y_pct per tag directly — preferred here
+    # when present and in a valid 0-100 range. The qualitative "location"
+    # (9-zone) field is kept only as a fallback for a response that still
+    # comes back in the older shape, never the primary path any more.
     tag_positions = {}
     for item in parsed.get('located_tags', []):
         text = str(item.get('text') or '').strip()
+        if not text:
+            continue
+        x_pct = item.get('x_pct')
+        y_pct = item.get('y_pct')
+        try:
+            x_pct = float(x_pct)
+            y_pct = float(y_pct)
+            valid_numeric = 0 <= x_pct <= 100 and 0 <= y_pct <= 100
+        except (TypeError, ValueError):
+            valid_numeric = False
+        if valid_numeric:
+            tag_positions[text] = {'x_pct': x_pct, 'y_pct': y_pct}
+            continue
         loc = str(item.get('location') or '').strip().lower()
-        if text and loc in _LOCATION_TO_PCT:
+        if loc in _LOCATION_TO_PCT:
             x_pct, y_pct = _LOCATION_TO_PCT[loc]
             tag_positions[text] = {'x_pct': x_pct, 'y_pct': y_pct}
 
@@ -379,19 +428,79 @@ def _call_raw_text_vision(provider: str, api_key: str, image_b64: str, model: st
     code path for an unrelated feature."""
     def _claude_call(k, b64, p, use_model=None):
         import anthropic
-        from .token_accounting import read_claude_usage
+        from .token_accounting import read_claude_usage, read_claude_thinking_tokens
         client = anthropic.Anthropic(api_key=k, timeout=VISION_REQUEST_TIMEOUT_S)
         resp = client.messages.create(
             model=use_model or model or VISION_MODELS['claude'],
             max_tokens=VISION_MAX_TOKENS,
+            # BUG FIX: root cause of a real, reported "API key valid but no
+            # text extracted" symptom — claude-sonnet-5 (and the 4.7+
+            # generation generally) is a hybrid-reasoning model that emits
+            # extended 'thinking' content blocks by default even though
+            # nothing here ever requested them. For a raw-text-transcribe
+            # task the expected OUTPUT can be large (a whole dense P&ID
+            # page's worth of text), so thinking tokens competing for the
+            # same max_tokens budget can consume the entire thing, leaving
+            # stop_reason='max_tokens' and ZERO characters of actual text —
+            # which _parse_raw_text_response then correctly (by its own
+            # contract) treats as "nothing to transcribe," no exception
+            # anywhere in the chain.
+            #
+            # thinking={'enabled', budget_tokens=10000} + max_tokens=32000
+            # was tried first. CONFIRMED LIVE this did not fix it: a fresh
+            # real-key run after that change hit the exact same empty-
+            # result symptom (vision_used=False, no exception, no error
+            # logged) — because budget_tokens is a target the model aims
+            # for, not a hard cap independent of max_tokens, so thinking
+            # can still consume the entire response on its own. Disabled
+            # outright after that, which removed the failure mode entirely.
+            #
+            # RE-ENABLED (again) with a larger budget_tokens=20000 against
+            # max_tokens=50000, later tuned down to 16000/32000 — all of
+            # that was moot: CONFIRMED LIVE (2026-09-08, real key, real
+            # error) the actual root cause of every "no text extracted"
+            # failure all along was that thinking.type.enabled + budget_
+            # tokens is REJECTED OUTRIGHT with a 400 by whatever model this
+            # account's key resolves to:
+            #   anthropic.BadRequestError: "thinking.type.enabled" is not
+            #   supported for this model. Use "thinking.type.adaptive" and
+            #   "output_config.effort" to control thinking behavior.
+            # Every prior "fix" in this comment's history (disable/re-
+            # enable/retune the budget) was chasing a symptom of a request
+            # that was being rejected before generation even started — a
+            # 400 the code silently swallowed as "vision_used=False", never
+            # surfaced as the real error. Switched to the adaptive-thinking
+            # API this model actually accepts; verified the exact param
+            # shape against the installed anthropic SDK's own type stubs
+            # (ThinkingConfigAdaptiveParam / OutputConfigParam) rather than
+            # guessing. effort='high' favors reasoning depth, matching the
+            # accuracy intent of the old large budget_tokens value.
+            thinking={'type': 'adaptive', 'display': 'summarized'},
+            output_config={'effort': 'high'},
             system=RAW_TEXT_SYSTEM_PROMPT,  # no `temperature` — see _call_claude()'s comment
             messages=[{'role': 'user', 'content': [
                 {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': b64}},
                 {'type': 'text', 'text': p},
             ]}],
         )
-        parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
+        # Diagnostic logging — this call previously had none at all, which
+        # is exactly what made the empty-result bug above unprovable from
+        # logs alone (confirmed live: zero log entries, error or otherwise,
+        # for a run that still came back empty). Mirrors pid_vision_
+        # extractor.py's _call_claude, which is what made THAT bug provable.
         inp, out = read_claude_usage(resp)
+        thinking_tok = read_claude_thinking_tokens(resp)
+        stop_reason = getattr(resp, 'stop_reason', None)
+        logger.info(
+            '[raw_text_vision] stop_reason=%s content_block_types=%s',
+            stop_reason,
+            [getattr(b, 'type', None) for b in resp.content],
+        )
+        logger.info(
+            '[raw_text_vision] tokens: input=%s output=%s thinking=%s stop_reason=%s (max_tokens=%s)',
+            inp, out, thinking_tok, stop_reason, VISION_MAX_TOKENS,
+        )
+        parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
         return ''.join(parts), inp, out
 
     def _openai_call(k, b64, p):
@@ -822,7 +931,7 @@ def _call_openai(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PR
 
 def _call_claude(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PROMPT, model: str | None = None):
     import anthropic
-    from .token_accounting import read_claude_usage
+    from .token_accounting import read_claude_usage, read_claude_thinking_tokens
     client = anthropic.Anthropic(api_key=api_key, timeout=VISION_REQUEST_TIMEOUT_S)
     resp = client.messages.create(
         model=model or VISION_MODELS['claude'],
@@ -835,6 +944,15 @@ def _call_claude(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PR
         # for the older fallback model but is rejected outright by the
         # current default model, so it's omitted here (OpenAI is unaffected
         # — see _call_openai above, which still sets it).
+        #
+        # CONFIRMED LIVE (2026-09-08, real key): thinking.type.enabled is
+        # REJECTED with a 400 by this account's model — see
+        # _call_raw_text_vision's matching comment for the exact error and
+        # full history. Switched to the adaptive-thinking API this model
+        # actually accepts; shape verified against the installed anthropic
+        # SDK's own type stubs.
+        thinking={'type': 'adaptive', 'display': 'summarized'},
+        output_config={'effort': 'high'},
         system=VISION_SYSTEM_PROMPT,
         messages=[
             {
@@ -853,6 +971,22 @@ def _call_claude(api_key: str, image_b64: str, user_prompt: str = VISION_USER_PR
             }
         ],
     )
-    parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
+    # Diagnostic logging — this call had none at all before (unlike
+    # _call_raw_text_vision, which already logs this — see its own
+    # comment for why that mattered). Same shape as that one, so a stop_
+    # reason='max_tokens' / thinking-only response is provable here too,
+    # not just inferred from an empty result with nothing in the logs.
     inp, out = read_claude_usage(resp)
+    thinking_tok = read_claude_thinking_tokens(resp)
+    stop_reason = getattr(resp, 'stop_reason', None)
+    logger.info(
+        '[symbol_vision] stop_reason=%s content_block_types=%s',
+        stop_reason,
+        [getattr(b, 'type', None) for b in resp.content],
+    )
+    logger.info(
+        '[symbol_vision] tokens: input=%s output=%s thinking=%s stop_reason=%s (max_tokens=%s)',
+        inp, out, thinking_tok, stop_reason, VISION_MAX_TOKENS,
+    )
+    parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
     return ''.join(parts), inp, out

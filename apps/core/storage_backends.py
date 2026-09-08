@@ -329,6 +329,46 @@ if USE_S3:
             logger.info(f"[PIDAnalysisCacheStorage] Initialized: {self.bucket_name}/{self.location}")
 
 
+    class PIDVerificationV2AnalysisCacheStorage(S3Boto3Storage):
+        """
+        Dedicated S3 storage for P&ID Verification V2's own analysis
+        result-cache snapshots (apps.pid_verification_v2.services.
+        results_cache) — one JSON blob per document at
+        ``analysis_cache_v2/<document_id>/results.json``. Deliberately its
+        own location, NOT sharing PIDAnalysisCacheStorage's — V1 and V2 are
+        independent apps with independent PIDVDocument models, matching
+        this codebase's established isolation convention (no cross-app
+        runtime coupling) even though the UUID document_id space makes an
+        actual collision astronomically unlikely either way.
+
+        file_overwrite=True: exactly one canonical cache file per document,
+        always replaced in place rather than accumulating hashed-filename
+        versions.
+        """
+
+        location = 'media/analysis_cache_v2'
+        default_acl = 'private'
+        file_overwrite = True
+        custom_domain = False
+
+        @property
+        def endpoint_url(self):
+            region = getattr(settings, 'AWS_S3_REGION_NAME', 'us-east-1')
+            return getattr(settings, 'AWS_S3_ENDPOINT_URL', f'https://s3.{region}.amazonaws.com')
+
+        object_parameters = {
+            'CacheControl': 'no-cache',
+            'Metadata': {
+                'app': 'aiflow',
+                'content_type': 'pid_analysis_v2_cache',
+            },
+        }
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            logger.info(f"[PIDVerificationV2AnalysisCacheStorage] Initialized: {self.bucket_name}/{self.location}")
+
+
     class IOListResultsCacheStorage(S3Boto3Storage):
         """
         Dedicated S3 storage for Instrument IO List extraction result-cache
@@ -467,13 +507,40 @@ else:
             kwargs['location'] = 'media/planning_intelligence'
             super().__init__(*args, **kwargs)
 
-    class PIDAnalysisCacheStorage(FileSystemStorage):
+    class _OverwriteFileSystemStorage(FileSystemStorage):
+        """FileSystemStorage that actually overwrites in place — plain
+        Django FileSystemStorage has no concept of `file_overwrite` at all
+        (that attribute only means something on S3Boto3Storage, from
+        django-storages); without this override, saving to a name that
+        already exists silently calls the default get_available_name(),
+        which appends a random suffix instead of overwriting. Confirmed
+        live: a single-canonical-cache-file class (file_overwrite=True on
+        its S3 counterpart) kept accumulating results_<random>.json
+        siblings on local disk while load_results_cache() — which always
+        looks for the literal, un-suffixed name — kept reading the FIRST
+        file ever written and never saw any later write again. Deleting
+        any existing file for this name before the base class picks a
+        name makes local dev genuinely match S3Boto3Storage's real
+        overwrite-in-place behavior instead of only looking like it does.
+        """
+        def get_available_name(self, name, max_length=None):
+            if self.exists(name):
+                self.delete(name)
+            return name
+
+    class PIDAnalysisCacheStorage(_OverwriteFileSystemStorage):
         """Local storage for P&ID analysis result-cache snapshots (non-S3 fallback)"""
         def __init__(self, *args, **kwargs):
             kwargs['location'] = 'media/analysis_cache'
             super().__init__(*args, **kwargs)
 
-    class IOListResultsCacheStorage(FileSystemStorage):
+    class PIDVerificationV2AnalysisCacheStorage(_OverwriteFileSystemStorage):
+        """Local storage for P&ID Verification V2's own analysis result-cache snapshots (non-S3 fallback)"""
+        def __init__(self, *args, **kwargs):
+            kwargs['location'] = 'media/analysis_cache_v2'
+            super().__init__(*args, **kwargs)
+
+    class IOListResultsCacheStorage(_OverwriteFileSystemStorage):
         """Local storage for I/O List extraction result-cache snapshots (non-S3 fallback)"""
         def __init__(self, *args, **kwargs):
             kwargs['location'] = 'media/io_list_cache'

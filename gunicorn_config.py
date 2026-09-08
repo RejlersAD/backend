@@ -20,11 +20,11 @@ max_requests_jitter = 50    # Spread recycling to avoid simultaneous restarts
 
 # Timeout settings - CRITICAL for P&ID processing AND large-file uploads.
 # Soft-coded via env vars so ops can retune on Railway without a code deploy.
-#   GUNICORN_TIMEOUT          → worker request timeout in seconds (default 1800 = 30 min)
+#   GUNICORN_TIMEOUT          → worker request timeout in seconds (default 2400 = 40 min)
 #   GUNICORN_GRACEFUL_TIMEOUT → graceful shutdown window in seconds (default 120)
 #   GUNICORN_KEEPALIVE        → keep-alive seconds (default 75; fixes ECONNRESET)
 import os
-timeout          = int(os.environ.get("GUNICORN_TIMEOUT", "1800"))          # 30 min — supports ~1 GB uploads + AI work
+timeout          = int(os.environ.get("GUNICORN_TIMEOUT", "2400"))          # 40 min — supports ~1 GB uploads + AI work (thinking-enabled Vision calls)
 graceful_timeout = int(os.environ.get("GUNICORN_GRACEFUL_TIMEOUT", "120"))   # 2 min
 keepalive        = int(os.environ.get("GUNICORN_KEEPALIVE", "75"))           # 75 s
 

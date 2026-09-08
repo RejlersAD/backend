@@ -10,8 +10,11 @@
 #
 # Deployment chain:
 # 1. Railway detects this Dockerfile → uses it (highest priority)
-# 2. Dockerfile CMD → runs bash railway_start.sh
-# 3. railway_start.sh → starts Gunicorn with bulletproof WSGI
+# 2. Dockerfile CMD → runs bash railway_runtime.sh (see CMD below — this
+#    comment previously said railway_start.sh, which is NOT what CMD
+#    actually invokes; corrected to match reality so the next person
+#    tracing a timeout/startup setting doesn't check the wrong script)
+# 3. railway_runtime.sh → starts Gunicorn with bulletproof WSGI
 # 4. Bulletproof WSGI → always responds (even if Django fails)
 # ============================================
 

@@ -309,9 +309,13 @@ REPORT_SECTIONS = [
 # ===========================================================================
 
 # Celery task settings
+# UPDATED: raised from 30/35 min to 35/40 min — Vision calls now run with
+# extended thinking enabled (see pid_checker_v2.services.vision_extractor),
+# which adds real latency on top of an already-large max_tokens ceiling; a
+# large P&ID with thorough scan can genuinely need the extra room.
 TASK_CONFIG = {
-    'soft_time_limit': 1800,  # 30 minutes
-    'time_limit': 2100,       # 35 minutes (hard limit)
+    'soft_time_limit': 2100,  # 35 minutes
+    'time_limit': 2400,       # 40 minutes (hard limit)
     'max_retries': 3,
     'retry_delay': 60,        # seconds
     'acks_late': True,

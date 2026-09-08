@@ -1518,6 +1518,42 @@ LOGGING = {
             'level': 'ERROR',
             'propagate': False,
         },
+        # 2026-09-08: the P&ID/Vision pipeline apps carry extensive
+        # logger.info() diagnostic logging (Claude Vision token usage —
+        # input/output/thinking/stop_reason — added specifically to prove
+        # live whether "thinking" is consuming its budget on real runs;
+        # see apps/pid_checker_v2/services/vision_extractor.py and
+        # apps/pid_verification_v2/services/ai_analysis.py). CONFIRMED
+        # LIVE this was being silently discarded: the root logger below
+        # is WARNING, so isEnabledFor(logging.INFO) is False for every
+        # module-level logger in this project that doesn't override it —
+        # every one of those .info() calls executed and produced nothing
+        # in console or django_errors.log, making the actual "no text
+        # extracted" symptom unprovable from logs alone, exactly the
+        # failure mode that logging was added to prevent. Scoped to just
+        # these apps (rather than bumping the root logger to INFO) to
+        # avoid flooding the log with third-party INFO chatter (boto3,
+        # urllib3, django.db.backends, etc.).
+        'apps.pid_checker_v2': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'apps.pid_verification': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'apps.pid_verification_v2': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'apps.instrument_io_workflow': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
         # 2026-08-28 (same day, follow-up): django.request only fires for
         # exceptions that escape ALL the way up to Django's own exception
         # middleware. Plenty of view code in this project catches its own

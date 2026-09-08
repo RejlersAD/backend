@@ -1,31 +1,33 @@
 """
-P&ID Analysis Results Cache
-============================
+P&ID Verification V2 Analysis Results Cache
+=============================================
 Stores a JSON snapshot of a document's analysis results — one blob per
-document at ``analysis_cache/<document_id>/results.json`` — via Django's
-storage abstraction (apps.core.storage_backends.PIDAnalysisCacheStorage),
-so this transparently uses S3 in any environment with USE_S3=True and
-local disk otherwise, exactly like every other storage-backed feature in
-this codebase. No raw boto3 calls needed.
+document at ``analysis_cache_v2/<document_id>/results.json`` — via
+Django's storage abstraction (apps.core.storage_backends.
+PIDVerificationV2AnalysisCacheStorage), so this transparently uses S3 in
+any environment with USE_S3=True and local disk otherwise, exactly like
+every other storage-backed feature in this codebase. No raw boto3 calls
+needed.
+
+Own independent module, not shared with apps.pid_verification's own
+results_cache.py — same isolation convention this codebase already uses
+throughout (e.g. instrument_io_workflow never imports pid_checker_v2's
+services at runtime), even though the two modules' logic is intentionally
+near-identical.
 
 Purpose: a fast-path for VIEWING an already-completed document — one
-S3/disk read instead of the doc.drawings.all() DB query (plus backfill
-passes) get_results() would otherwise run. It is NEVER consulted before
-running an analysis: "Start AI Analysis" (upload_pid, on a hash match)
-and "Re-analyze" (reprocess_document) must always run a genuinely fresh
-analysis, no exceptions — a pre-analysis cache check here previously
-skipped the pipeline entirely on a file-hash match, which is exactly the
-behavior this was reworked to remove. Both only ever WRITE to this cache,
+S3/disk read instead of the doc.drawings.all() DB query (plus both
+backfill passes) get_results() would otherwise run. It is NEVER consulted
+before running an analysis: "Start AI Analysis" (upload_pid, on a hash
+match) and "Re-analyze" (reprocess_document) must always run a genuinely
+fresh analysis, no exceptions. Both only ever WRITE to this cache,
 unconditionally, right after an analysis finishes (see tasks.py) —
-file_overwrite=True naturally retires whatever the previous entry held,
-so there's nothing separate to clear first on a fresh upload or a
-re-analysis.
+file_overwrite=True naturally retires whatever the previous entry held.
 
 The database (PIDVDrawing / PIDVFinding) remains the source of truth. A
 cache miss, a corrupt entry, or a stale entry (file_hash no longer
 matching the document's current state) always falls back to the normal
-DB-backed response, never an error. Same pattern as
-apps.instrument_io_workflow.services.results_cache.
+DB-backed response, never an error.
 """
 from __future__ import annotations
 
@@ -61,8 +63,7 @@ def build_cache_payload(doc, file_hash: str) -> dict:
     hit is byte-for-byte what a fresh DB-backed call would have produced
     at the moment this was written. The other top-level keys (findings,
     line_tags, equipment, instruments, quality_score) are kept alongside
-    it, unchanged, for whatever else already reads this cache file
-    directly rather than through get_results().
+    it as a summary, matching apps.pid_verification's own cache shape.
     """
     from ..serializers import PIDVDocumentSerializer
 
@@ -79,10 +80,6 @@ def build_cache_payload(doc, file_hash: str) -> dict:
         for drawing in drawings
         for tag in (drawing.get('metadata') or {}).get('line_tags', [])
     ]
-    # This app doesn't currently extract equipment/instrument tags as a
-    # separate concept (only line_tags live in drawing.metadata) — kept as
-    # empty lists so the cache shape matches the spec; populated from
-    # drawing.metadata automatically if a future extractor adds those keys.
     equipment = [
         item
         for drawing in drawings
@@ -109,19 +106,19 @@ def build_cache_payload(doc, file_hash: str) -> dict:
 
 def save_results_cache(doc, file_hash: str) -> dict:
     """Snapshot a just-completed document's results to the cache.
-    file_overwrite=True on PIDAnalysisCacheStorage means this always
-    replaces any previous cache for this document_id. Returns the payload
-    that was written (callers don't need to re-read it back)."""
-    from apps.core.storage_backends import PIDAnalysisCacheStorage
+    file_overwrite=True on PIDVerificationV2AnalysisCacheStorage means
+    this always replaces any previous cache for this document_id. Returns
+    the payload that was written (callers don't need to re-read it back)."""
+    from apps.core.storage_backends import PIDVerificationV2AnalysisCacheStorage
     from django.core.files.base import ContentFile
 
     payload = build_cache_payload(doc, file_hash)
     content = json.dumps(payload, default=str).encode('utf-8')
 
-    storage = PIDAnalysisCacheStorage()
+    storage = PIDVerificationV2AnalysisCacheStorage()
     storage.save(_cache_path(doc.document_id), ContentFile(content))
     logger.info(
-        '[PIDVResultsCache] Saved cache for document_id=%s (%d findings, hash=%s)',
+        '[PIDVV2ResultsCache] Saved cache for document_id=%s (%d findings, hash=%s)',
         doc.document_id, len(payload['findings']), file_hash[:12],
     )
     return payload
@@ -130,9 +127,9 @@ def save_results_cache(doc, file_hash: str) -> dict:
 def load_results_cache(doc) -> dict | None:
     """Return the cached payload dict, or None if no cache exists or it
     can't be read (corrupt/missing — treated as a cache miss, never an error)."""
-    from apps.core.storage_backends import PIDAnalysisCacheStorage
+    from apps.core.storage_backends import PIDVerificationV2AnalysisCacheStorage
 
-    storage = PIDAnalysisCacheStorage()
+    storage = PIDVerificationV2AnalysisCacheStorage()
     path = _cache_path(doc.document_id)
     if not storage.exists(path):
         return None
@@ -140,16 +137,16 @@ def load_results_cache(doc) -> dict | None:
         with storage.open(path, 'rb') as f:
             return json.loads(f.read().decode('utf-8'))
     except Exception:
-        logger.exception('[PIDVResultsCache] Failed to read cache for document_id=%s', doc.document_id)
+        logger.exception('[PIDVV2ResultsCache] Failed to read cache for document_id=%s', doc.document_id)
         return None
 
 
 def clear_results_cache(doc) -> None:
     """Delete the cached snapshot for a document, if any."""
-    from apps.core.storage_backends import PIDAnalysisCacheStorage
+    from apps.core.storage_backends import PIDVerificationV2AnalysisCacheStorage
 
-    storage = PIDAnalysisCacheStorage()
+    storage = PIDVerificationV2AnalysisCacheStorage()
     path = _cache_path(doc.document_id)
     if storage.exists(path):
         storage.delete(path)
-        logger.info('[PIDVResultsCache] Cleared cache for document_id=%s', doc.document_id)
+        logger.info('[PIDVV2ResultsCache] Cleared cache for document_id=%s', doc.document_id)
