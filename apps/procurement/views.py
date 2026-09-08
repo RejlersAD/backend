@@ -511,6 +511,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             workflow = normalize_ceo_workflow(
                 pr.approval_workflow_config,
                 pr.po_number_reference,
+                getattr(pr, 'po_applicable', None),
             )
             if not isinstance(workflow, list):
                 continue
@@ -552,7 +553,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         pr = RequisitionWorkflowService.approve(
             pk,
             request.user,
-            signature=request.data.get('signature', ''),
+            require_signature=True,
             expected_stage_key='pm',
         )
         return Response(self._build_requisition_response(pr))
@@ -572,7 +573,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         pr = RequisitionWorkflowService.approve(
             pk,
             request.user,
-            signature=request.data.get('signature', ''),
+            require_signature=True,
             expected_stage_key='vp',
         )
         return Response(self._build_requisition_response(pr))
@@ -592,7 +593,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         pr = RequisitionWorkflowService.approve(
             pk,
             request.user,
-            signature=request.data.get('signature', ''),
+            require_signature=True,
             expected_stage_key='eng_manager',
         )
         return Response(self._build_requisition_response(pr))
@@ -612,7 +613,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         pr = RequisitionWorkflowService.approve(
             pk,
             request.user,
-            signature=request.data.get('signature', ''),
+            require_signature=True,
             expected_stage_key='manager_projects',
         )
         return Response(self._build_requisition_response(pr))
@@ -632,7 +633,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         pr = RequisitionWorkflowService.approve(
             pk,
             request.user,
-            signature=request.data.get('signature', ''),
+            require_signature=True,
         )
         return Response(self._build_requisition_response(pr))
 
@@ -796,14 +797,19 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
             'manager_projects': ['Manager of Projects', 'Manager - Projects', 'Projects Manager'],
             'vp_operations': ['VP Delivery', 'Vice President Delivery', 'VP Operations', 'Vice President Operations', 'VP - Operations', 'Vice President of Operation', 'Project Delivery', 'Operations & Project Delivery'],
             'finance': ['Finance Manager', 'Finance Controller', 'Financial Controller', 'Accountant'],
-            'procurement_head': ['Head of Procurement', 'Procurement Head'],
+            'procurement_head': ['Procurement Manager', 'Head of Procurement', 'Procurement Head'],
             'ict_head_admin': ['ICT Administrator', 'ICT Head Admin', 'Head of ICT'],
             'super_admin': ['Super Administrator'],
         }
         assigned_role_mapping = {
             'procurement_head': {
-                'codes': ['head_of_procurement', 'head_procurement', 'procurement_head'],
-                'names': ['Head of Procurement', 'Procurement Head'],
+                'codes': [
+                    'procurement_manager',
+                    'head_of_procurement',
+                    'head_procurement',
+                    'procurement_head',
+                ],
+                'names': ['Procurement Manager', 'Head of Procurement', 'Procurement Head'],
             },
             'ict_head_admin': {
                 'codes': ['ict_admin', 'ict_head_admin', 'head_of_ict'],
@@ -1573,7 +1579,7 @@ class PurchaseRequisitionViewSet(viewsets.ModelViewSet):
         pr = RequisitionWorkflowService.approve(
             pk,
             request.user,
-            signature=request.data.get('signature', ''),
+            require_signature=True,
         )
         return Response(self._build_requisition_response(pr))
     
@@ -1890,7 +1896,10 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         order = self.get_object()
         note = request.data.get('note') or request.data.get('reason') or ''
         stage = request.data.get('approval_stage') or ''
-        updated, entry = record_decision(order, request.user, decision, stage=stage, comment=note)
+        updated, entry = record_decision(
+            order, request.user, decision, stage=stage, comment=note,
+            require_signature=decision == 'approve',
+        )
         return Response({
             'message': f"{entry['stage']} {entry['status'].lower()} successfully.",
             'approval': entry,

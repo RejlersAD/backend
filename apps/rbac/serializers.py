@@ -910,6 +910,7 @@ class UserProfileSelfSerializer(UserProfileSerializer):
             'is_mfa_enabled', 'employee_id', 'department', 'job_title',
             'manager_name', 'manager_detail', 'last_login_ip', 'last_login_at',
             'must_change_password', 'profile_photo', 'phone', 'bio', 'location',
+            'signature_updated_at',
             'engineer_profile', 'created_at', 'updated_at',
         ]
         read_only_fields = fields

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import html
 import re
 from io import BytesIO
@@ -67,6 +68,21 @@ USD_TO_AED_RATE = 3.6725
 def _value(value, fallback='—'):
     rendered = str(value or '').strip()
     return rendered or fallback
+
+
+def _signature_stream(value):
+    """Decode a stored signature data URL for PDF/DOCX renderers."""
+    raw = str(value or '')
+    if not raw.startswith('data:image/') or ';base64,' not in raw:
+        return None
+    try:
+        stream = BytesIO(base64.b64decode(raw.split(',', 1)[1], validate=True))
+        with PILImage.open(stream) as image:
+            image.verify()
+        stream.seek(0)
+        return stream
+    except (ValueError, OSError):
+        return None
 
 
 def _decode_html(value):
@@ -438,11 +454,18 @@ def _main_pdf(order):
     ]))
     approval_name = _value(getattr(order, 'approved_by_name', None), JARMO_NAME)
     approval_title = _value(getattr(order, 'approved_by_title', None), JARMO_TITLE)
-    approved = Paragraph(
-        '<b>Approved by:</b><br/><br/><br/><br/><br/><br/><br/><br/><br/><br/>'
+    approved = [Paragraph('<b>Approved by:</b>', preview)]
+    signature_stream = _signature_stream(getattr(order, 'approval_signature', ''))
+    if signature_stream:
+        signature_image = Image(signature_stream)
+        signature_image._restrictSize(52 * mm, 20 * mm)
+        approved.extend([Spacer(1, 2 * mm), signature_image, Spacer(1, 2 * mm)])
+    else:
+        approved.append(Spacer(1, 23 * mm))
+    approved.append(Paragraph(
         f'<b>{escape(approval_name)}</b><br/>{escape(approval_title).replace(chr(10), "<br/>")}<br/>'
         f'{JARMO_COMPANY}<br/><b>Date:</b> {escape(_value(getattr(order, "approved_date", None), ""))}', preview,
-    )
+    ))
     raw_seller_reference = str(getattr(order, 'seller_reference', '') or '').strip()
     raw_contact_person = str(getattr(order, 'seller_contact_person', '') or '').strip()
     confirmation_contact = raw_contact_person or raw_seller_reference
@@ -863,11 +886,18 @@ def build_purchase_order_docx(order):
     document.add_paragraph().paragraph_format.space_after = Pt(0)
     approval = document.add_table(rows=1, cols=2)
     _docx_no_borders(approval)
-    _docx_set_cell_text(
-        approval.cell(0, 0),
-        f'Approved by:\n\n\n\n\n{_value(getattr(order, "approved_by_name", None), JARMO_NAME)}\n'
+    approval_cell = approval.cell(0, 0)
+    _docx_set_cell_text(approval_cell, 'Approved by:', size=7, bold=True)
+    signature_stream = _signature_stream(getattr(order, 'approval_signature', ''))
+    if signature_stream:
+        signature_run = approval_cell.add_paragraph().add_run()
+        signature_run.add_picture(signature_stream, width=Mm(50))
+    else:
+        approval_cell.add_paragraph('\n\n\n')
+    approval_cell.add_paragraph(
+        f'{_value(getattr(order, "approved_by_name", None), JARMO_NAME)}\n'
         f'{_value(getattr(order, "approved_by_title", None), JARMO_TITLE)}\n{JARMO_COMPANY}\n'
-        f'Date: {_value(getattr(order, "approved_date", None), "")}', size=7,
+        f'Date: {_value(getattr(order, "approved_date", None), "")}'
     )
     _docx_set_cell_text(
         approval.cell(0, 1),
