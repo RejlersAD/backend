@@ -156,7 +156,7 @@ class RequisitionConversionService:
         po = PurchaseOrder.objects.create(
             po_number=po_number,
             pr_reference=pr,
-            enterprise_project=pr.enterprise_project,
+            enterprise_project=getattr(pr, 'enterprise_project', None),
             pr_requester_name=requester_name,
             vendor=vendor,
             seller_reference=vendor.contact_person or '',
