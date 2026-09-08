@@ -1,17 +1,24 @@
+from django.db.models import Sum
 from rest_framework import serializers
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 from .config import MAX_DOCUMENT_BYTES
 from .models import (
+    ApprovedHourEntry,
     BudgetAllocation,
     ChangeEvent,
+    ControlAccount,
     CostAllocation,
     CostLedgerEntry,
     CostSnapshot,
+    IntegratedReportingSnapshot,
     Estimate,
     EstimateLineItem,
     PlanningPackage,
     ProjectDocument,
+    ReportingPeriod,
+    ReportingPeriodAudit,
+    ReconciliationRun,
     WBSNode,
 )
 from .services.cost_ledger import allocation_totals, source_record, source_value
@@ -75,6 +82,222 @@ class WBSNodeSerializer(serializers.ModelSerializer):
         fields = ['id', 'project', 'parent', 'code', 'name', 'level', 'sort_order',
                   'created_at', 'updated_at']
         read_only_fields = ('created_at', 'updated_at')
+
+
+def _user_name(user):
+    if not user:
+        return None
+    return user.get_full_name() or user.email or user.username
+
+
+class ControlAccountSerializer(serializers.ModelSerializer):
+    wbs_code = serializers.CharField(source='wbs_node.code', read_only=True)
+    wbs_name = serializers.CharField(source='wbs_node.name', read_only=True)
+    manager_name = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+    approved_by_name = serializers.SerializerMethodField()
+    approved_budget = serializers.SerializerMethodField()
+    draft_budget = serializers.SerializerMethodField()
+    currency = serializers.CharField(source='project.currency', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    earned_value_method_display = serializers.CharField(
+        source='get_earned_value_method_display', read_only=True,
+    )
+
+    class Meta:
+        model = ControlAccount
+        fields = [
+            'id', 'project', 'wbs_node', 'wbs_code', 'wbs_name', 'code', 'name',
+            'manager', 'manager_name', 'earned_value_method', 'earned_value_method_display',
+            'baseline_start', 'baseline_finish', 'status', 'status_display', 'notes',
+            'approved_budget', 'draft_budget', 'currency', 'created_by', 'created_by_name',
+            'submitted_by', 'submitted_at', 'approved_by', 'approved_by_name',
+            'approved_at', 'closed_by', 'closed_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = (
+            'status', 'created_by', 'created_by_name', 'submitted_by', 'submitted_at',
+            'approved_by', 'approved_by_name', 'approved_at', 'closed_by', 'closed_at',
+            'approved_budget', 'draft_budget', 'currency', 'created_at', 'updated_at',
+        )
+
+    def get_manager_name(self, obj):
+        return _user_name(obj.manager)
+
+    def get_created_by_name(self, obj):
+        return _user_name(obj.created_by)
+
+    def get_approved_by_name(self, obj):
+        return _user_name(obj.approved_by)
+
+    def _budget(self, obj, status):
+        value = obj.wbs_node.budget_allocations.filter(
+            project=obj.project, status=status, is_deleted=False,
+        ).aggregate(total=Sum('amount'))['total']
+        return value or 0
+
+    def get_approved_budget(self, obj):
+        return self._budget(obj, 'approved')
+
+    def get_draft_budget(self, obj):
+        return self._budget(obj, 'draft')
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        project = attrs.get('project', getattr(self.instance, 'project', None))
+        wbs = attrs.get('wbs_node', getattr(self.instance, 'wbs_node', None))
+        manager = attrs.get('manager', getattr(self.instance, 'manager', None))
+        start = attrs.get('baseline_start', getattr(self.instance, 'baseline_start', None))
+        finish = attrs.get('baseline_finish', getattr(self.instance, 'baseline_finish', None))
+        if project and wbs and wbs.project_id != project.pk:
+            raise serializers.ValidationError({'wbs_node': 'WBS node must belong to the selected project.'})
+        if project and manager and manager.id != project.owner_id and not project.memberships.filter(
+            user=manager, is_active=True,
+        ).exists():
+            raise serializers.ValidationError({'manager': 'Control Account Manager must be an active project member.'})
+        if start and finish and finish < start:
+            raise serializers.ValidationError({'baseline_finish': 'Baseline finish must be on or after baseline start.'})
+        return attrs
+
+
+class ReportingPeriodSerializer(serializers.ModelSerializer):
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    is_entry_allowed = serializers.BooleanField(read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+    submitted_by_name = serializers.SerializerMethodField()
+    locked_by_name = serializers.SerializerMethodField()
+    reopened_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ReportingPeriod
+        fields = [
+            'id', 'project', 'sequence', 'name', 'start_date', 'end_date', 'data_date',
+            'status', 'status_display', 'is_entry_allowed', 'notes', 'created_by',
+            'created_by_name', 'submitted_by', 'submitted_by_name', 'submitted_at',
+            'locked_by', 'locked_by_name', 'locked_at', 'reopened_by',
+            'reopened_by_name', 'reopened_at', 'reopen_reason', 'created_at', 'updated_at',
+        ]
+        read_only_fields = (
+            'status', 'created_by', 'created_by_name', 'submitted_by', 'submitted_by_name',
+            'submitted_at', 'locked_by', 'locked_by_name', 'locked_at', 'reopened_by',
+            'reopened_by_name', 'reopened_at', 'reopen_reason', 'created_at', 'updated_at',
+        )
+
+    def get_created_by_name(self, obj):
+        return _user_name(obj.created_by)
+
+    def get_submitted_by_name(self, obj):
+        return _user_name(obj.submitted_by)
+
+    def get_locked_by_name(self, obj):
+        return _user_name(obj.locked_by)
+
+    def get_reopened_by_name(self, obj):
+        return _user_name(obj.reopened_by)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        project = attrs.get('project', getattr(self.instance, 'project', None))
+        start = attrs.get('start_date', getattr(self.instance, 'start_date', None))
+        end = attrs.get('end_date', getattr(self.instance, 'end_date', None))
+        data_date = attrs.get('data_date', getattr(self.instance, 'data_date', None))
+        errors = {}
+        if start and end and end < start:
+            errors['end_date'] = 'Period end must be on or after period start.'
+        if start and end and data_date and not start <= data_date <= end:
+            errors['data_date'] = 'Data date must fall inside the reporting period.'
+        if project and start and end:
+            overlaps = ReportingPeriod.objects.filter(
+                project=project, is_deleted=False, start_date__lte=end, end_date__gte=start,
+            )
+            if self.instance:
+                overlaps = overlaps.exclude(pk=self.instance.pk)
+            if overlaps.exists():
+                errors['start_date'] = 'Reporting periods for a project cannot overlap.'
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+
+class ReportingPeriodAuditSerializer(serializers.ModelSerializer):
+    actor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ReportingPeriodAudit
+        fields = ['id', 'period', 'actor', 'actor_name', 'action', 'from_status', 'to_status', 'reason', 'created_at']
+        read_only_fields = fields
+
+    def get_actor_name(self, obj):
+        return _user_name(obj.actor)
+
+
+class ApprovedHourEntrySerializer(serializers.ModelSerializer):
+    control_account_code = serializers.CharField(source='control_account.code', read_only=True)
+    reporting_period_name = serializers.CharField(source='reporting_period.name', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    approved_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ApprovedHourEntry
+        fields = [
+            'id', 'project', 'control_account', 'control_account_code', 'reporting_period',
+            'reporting_period_name', 'employee_code', 'employee_name', 'work_date', 'hours',
+            'hourly_cost_rate', 'labor_actual_cost', 'currency', 'source_type',
+            'source_reference', 'status', 'status_display', 'notes', 'created_by',
+            'submitted_by', 'submitted_at', 'approved_by', 'approved_by_name', 'approved_at',
+            'reversed_by', 'reversed_at', 'reversal_reason', 'created_at', 'updated_at',
+        ]
+        read_only_fields = (
+            'labor_actual_cost', 'currency', 'status', 'created_by', 'submitted_by',
+            'submitted_at', 'approved_by', 'approved_by_name', 'approved_at', 'reversed_by',
+            'reversed_at', 'reversal_reason', 'created_at', 'updated_at',
+        )
+
+    def get_approved_by_name(self, obj):
+        return _user_name(obj.approved_by)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        project = attrs.get('project', getattr(self.instance, 'project', None))
+        account = attrs.get('control_account', getattr(self.instance, 'control_account', None))
+        period = attrs.get('reporting_period', getattr(self.instance, 'reporting_period', None))
+        work_date = attrs.get('work_date', getattr(self.instance, 'work_date', None))
+        if project and account and account.project_id != project.pk:
+            raise serializers.ValidationError({'control_account': 'Control Account must belong to the selected project.'})
+        if account and account.status != 'active':
+            raise serializers.ValidationError({'control_account': 'Hours can be charged only to an active Control Account.'})
+        if project and period and period.project_id != project.pk:
+            raise serializers.ValidationError({'reporting_period': 'Reporting period must belong to the selected project.'})
+        if period and not period.is_entry_allowed:
+            raise serializers.ValidationError({'reporting_period': 'Hours can be entered only in an open or reopened period.'})
+        if period and work_date and not period.start_date <= work_date <= period.end_date:
+            raise serializers.ValidationError({'work_date': 'Work date must fall inside the reporting period.'})
+        return attrs
+
+
+class ReconciliationRunSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReconciliationRun
+        fields = [
+            'id', 'project', 'reporting_period', 'run_number', 'status', 'approved_hours',
+            'labor_actual_cost', 'finance_actual_cost', 'ledger_actual_cost', 'exception_count',
+            'exceptions', 'source_manifest', 'checksum', 'created_by', 'created_at',
+        ]
+        read_only_fields = fields
+
+
+class IntegratedReportingSnapshotSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = IntegratedReportingSnapshot
+        fields = [
+            'id', 'project', 'reporting_period', 'reconciliation_run', 'version', 'data_date',
+            'currency', 'budget_at_completion', 'planned_value', 'earned_value', 'actual_cost',
+            'commitments', 'approved_hours', 'labor_actual_cost', 'finance_actual_cost',
+            'progress_pct', 'planned_progress_pct', 'cost_variance', 'schedule_variance',
+            'cpi', 'spi', 'estimate_at_completion', 'estimate_to_complete',
+            'variance_at_completion', 'source_manifest', 'calculation_payload', 'checksum',
+            'sealed_by', 'sealed_at',
+        ]
+        read_only_fields = fields
 
 
 class BudgetAllocationSerializer(serializers.ModelSerializer):
@@ -178,6 +401,7 @@ class CostLedgerEntrySerializer(serializers.ModelSerializer):
         fields = [
             'id', 'project', 'project_code', 'wbs_node', 'wbs_code', 'wbs_name',
             'budget_allocation', 'cost_allocation', 'entry_key', 'entry_type',
+            'control_account', 'reporting_period',
             'amount', 'currency', 'source_type', 'source_id', 'source_reference',
             'entry_date', 'status', 'metadata', 'created_at', 'updated_at',
         ]

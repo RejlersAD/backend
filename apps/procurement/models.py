@@ -7,6 +7,8 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from apps.core.models import TimeStampedModel
 import uuid
+import hashlib
+import json
 
 # Import master database tables for project-based procurement
 from .models_master import (
@@ -16,7 +18,8 @@ from .models_master import (
 
 __all__ = [
     'Vendor', 'PurchaseRequisition', 'PurchaseOrder', 'Receipt', 'PODocument',
-    'Project', 'Budget', 'CostCenter', 'ProjectRelationshipResolution',  # Master tables
+    'Project', 'Budget', 'CostCenter', 'ProjectRelationshipResolution',
+    'ProcurementReportingSnapshot', 'ProcurementCalculationAudit',  # Master tables
 ]
 
 User = get_user_model()
@@ -773,6 +776,71 @@ class Receipt(TimeStampedModel):
     
     def __str__(self):
         return f"GRN-{self.receipt_number} for {self.purchase_order.po_number}"
+
+
+class ProcurementReportingSnapshot(models.Model):
+    """Immutable, reproducible procurement command-centre result."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    schema_version = models.CharField(max_length=20, default='1.0')
+    definition_version = models.CharField(max_length=20, default='2026.1')
+    scope = models.JSONField(default=dict)
+    period_start = models.DateField(null=True, blank=True)
+    period_end = models.DateField(null=True, blank=True)
+    reporting_currency = models.CharField(max_length=8, blank=True)
+    payload = models.JSONField(default=dict)
+    checksum = models.CharField(max_length=64, unique=True, editable=False)
+    created_by = models.ForeignKey(
+        User, null=True, on_delete=models.SET_NULL,
+        related_name='procurement_reporting_snapshots',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'procurement_reporting_snapshots'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['period_end', '-created_at'])]
+
+    def save(self, *args, **kwargs):
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValueError('Procurement reporting snapshots are immutable.')
+        canonical = json.dumps(self.payload, sort_keys=True, separators=(',', ':'), default=str)
+        self.checksum = hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Procurement reporting snapshots are immutable.')
+
+
+class ProcurementCalculationAudit(models.Model):
+    """Metric inputs and results captured with an immutable snapshot."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    snapshot = models.ForeignKey(
+        ProcurementReportingSnapshot, on_delete=models.PROTECT, related_name='calculations'
+    )
+    metric_key = models.CharField(max_length=100)
+    definition_version = models.CharField(max_length=20, default='2026.1')
+    inputs = models.JSONField(default=dict)
+    result = models.JSONField(default=dict)
+    calculated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'procurement_calculation_audits'
+        ordering = ['metric_key']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['snapshot', 'metric_key'], name='proc_calc_snapshot_metric_uniq'
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValueError('Procurement calculation audits are immutable.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Procurement calculation audits are immutable.')
 
 
 class PODocument(TimeStampedModel):

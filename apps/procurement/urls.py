@@ -10,6 +10,7 @@ from .views import (
     ProjectViewSet,
     BudgetViewSet,
     CostCenterViewSet,
+    ProcurementGovernanceViewSet,
     get_categories
 )
 
@@ -24,6 +25,7 @@ router.register(r'po-documents', PODocumentViewSet, basename='po-document')
 router.register(r'projects', ProjectViewSet, basename='project')
 router.register(r'budgets', BudgetViewSet, basename='budget')
 router.register(r'cost-centers', CostCenterViewSet, basename='cost-center')
+router.register(r'governance', ProcurementGovernanceViewSet, basename='procurement-governance')
 
 urlpatterns = [
     path('categories/', get_categories, name='categories'),

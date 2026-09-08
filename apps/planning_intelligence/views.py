@@ -23,13 +23,14 @@ from django.db.models import Count, IntegerField, Max, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
 from django.http import Http404, HttpResponse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .access import PlanningObjectPermission, accessible_projects, can_final_approve_defaults
+from .access import PlanningObjectPermission, accessible_projects, can_final_approve_defaults, can_write_project
 from .config import CLAUDE_API_KEY_PATTERN, CLAUDE_MODEL_CHOICES, DEFAULT_CLAUDE_MODEL
 from .models import PlanningAuditEvent, PlanningFile, PlanningGeneration, PlanningJob, PlanningProject
 from .serializers import (
@@ -45,6 +46,73 @@ from .services.workflow_configuration import ensure_project_schedule_configurati
 from .tasks import parse_uploaded_planning_file
 
 logger = logging.getLogger(__name__)
+
+ENTERPRISE_CONTRACT_FIELDS = (
+    ('name', 'name', 'Project name'),
+    ('client', 'client_name', 'Client'),
+    ('location', 'location', 'Location'),
+    ('effective_date', 'start_date', 'Project start'),
+    ('planned_end_date', 'end_date', 'Project finish'),
+)
+ENTERPRISE_DATE_FIELDS = {'effective_date', 'planned_end_date'}
+
+
+def _contract_value(value):
+    return value.isoformat() if hasattr(value, 'isoformat') else value
+
+
+def _enterprise_contract_state(project):
+    enterprise = project.enterprise_project
+    from .models import ScheduleBaseline
+
+    baseline = ScheduleBaseline.objects.filter(
+        schedule__project=project, is_deleted=False,
+    ).select_related('source_version').first()
+    schedule = project.schedules.filter(is_deleted=False).first()
+    version = schedule.versions.filter(is_deleted=False).first() if schedule else None
+    generation = project.generations.filter(is_deleted=False).first()
+    differences = []
+    fields = []
+    if enterprise:
+        for planning_field, enterprise_field, label in ENTERPRISE_CONTRACT_FIELDS:
+            enterprise_value = getattr(enterprise, enterprise_field)
+            planning_value = getattr(project, planning_field)
+            differs = enterprise_value != planning_value
+            row = {
+                'field': planning_field,
+                'label': label,
+                'enterprise_value': _contract_value(enterprise_value),
+                'planning_value': _contract_value(planning_value),
+                'different': differs,
+                'locked_by_baseline': bool(baseline and planning_field in ENTERPRISE_DATE_FIELDS),
+            }
+            fields.append(row)
+            if differs:
+                differences.append(row)
+    lifecycle = 'baselined' if baseline else (
+        version.status if version else ('generated' if generation else ('inputs' if project.files.filter(is_deleted=False).exists() else 'setup'))
+    )
+    return {
+        'linked': bool(enterprise),
+        'enterprise_project': enterprise.pk if enterprise else None,
+        'enterprise_code': enterprise.code if enterprise else None,
+        'enterprise_updated_at': enterprise.updated_at if enterprise else None,
+        'planning_updated_at': project.updated_at,
+        'in_sync': not differences,
+        'fields': fields,
+        'differences': differences,
+        'baseline_locked': bool(baseline),
+        'lifecycle': lifecycle,
+        'latest_schedule_version': {
+            'id': version.id, 'version': version.version, 'status': version.status,
+        } if version else None,
+        'baseline': {
+            'id': baseline.id,
+            'name': baseline.name,
+            'source_version': baseline.source_version_id,
+            'approved_at': baseline.approved_at,
+        } if baseline else None,
+    }
 
 class PlanningProjectViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, PlanningObjectPermission]
@@ -62,12 +130,16 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         latest_generation = PlanningGeneration.objects.filter(
             project_id=OuterRef('pk'), is_deleted=False,
         ).order_by('-version').values('version')[:1]
-        return accessible_projects(self.request.user).select_related('enterprise_project').annotate(
+        queryset = accessible_projects(self.request.user).select_related('enterprise_project').annotate(
             active_file_count=Coalesce(
                 Subquery(active_files, output_field=IntegerField()), Value(0),
             ),
             latest_generation_version_value=Subquery(latest_generation),
-        ).order_by('-created_at')
+        )
+        enterprise_project_id = self.request.query_params.get('enterprise_project')
+        if enterprise_project_id:
+            queryset = queryset.filter(enterprise_project_id=enterprise_project_id)
+        return queryset.order_by('-created_at')
 
     def perform_create(self, serializer):
         project = serializer.save(created_by=self.request.user)
@@ -78,6 +150,80 @@ class PlanningProjectViewSet(viewsets.ModelViewSet):
         before = PlanningProjectSerializer(serializer.instance).data
         project = serializer.save()
         record_event(project=project, actor=self.request.user, action='project.updated', entity=project, before=before, after=serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='enterprise-contract')
+    def enterprise_contract(self, request, pk=None):
+        """Return the authoritative link, drift, lifecycle, and baseline lock state."""
+        return Response(_enterprise_contract_state(self.get_object()))
+
+    @action(detail=True, methods=['post'], url_path='sync-from-enterprise')
+    def sync_from_enterprise(self, request, pk=None):
+        """Synchronize explicitly controlled fields from the enterprise project.
+
+        Contract dates are immutable once a schedule baseline exists. Metadata
+        may still be synchronized without modifying the approved plan.
+        """
+        project = self.get_object()
+        if not can_write_project(request.user, project):
+            return Response({'error': 'You cannot synchronize this planning workspace.'}, status=status.HTTP_403_FORBIDDEN)
+        enterprise = project.enterprise_project
+        if not enterprise:
+            return Response({'error': 'This planning workspace is not linked to an enterprise project.'}, status=status.HTTP_409_CONFLICT)
+        expected_updated_at = request.data.get('expected_enterprise_updated_at')
+        parsed_expected_updated_at = parse_datetime(str(expected_updated_at)) if expected_updated_at else None
+        if expected_updated_at and parsed_expected_updated_at is None:
+            return Response({
+                'error': 'expected_enterprise_updated_at must be a valid ISO 8601 timestamp.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if parsed_expected_updated_at and parsed_expected_updated_at != enterprise.updated_at:
+            return Response({
+                'error': 'The enterprise project changed after it was loaded. Refresh before synchronizing.',
+                'code': 'enterprise_project_changed',
+                'contract': _enterprise_contract_state(project),
+            }, status=status.HTTP_409_CONFLICT)
+        requested_fields = request.data.get('fields')
+        allowed_fields = {row[0] for row in ENTERPRISE_CONTRACT_FIELDS}
+        if requested_fields is not None:
+            if not isinstance(requested_fields, list) or not set(requested_fields).issubset(allowed_fields):
+                return Response({'error': 'One or more requested synchronization fields are invalid.'}, status=status.HTTP_400_BAD_REQUEST)
+            allowed_fields &= set(requested_fields)
+        baseline_locked = project.schedules.filter(
+            is_deleted=False, baselines__is_deleted=False,
+        ).exists()
+        changed_fields = {
+            planning_field
+            for planning_field, enterprise_field, _label in ENTERPRISE_CONTRACT_FIELDS
+            if getattr(project, planning_field) != getattr(enterprise, enterprise_field)
+        }
+        skipped_fields = sorted(
+            allowed_fields & ENTERPRISE_DATE_FIELDS & changed_fields,
+        ) if baseline_locked else []
+        sync_fields = allowed_fields - set(skipped_fields)
+        updates = {
+            planning_field: getattr(enterprise, enterprise_field)
+            for planning_field, enterprise_field, _label in ENTERPRISE_CONTRACT_FIELDS
+            if planning_field in sync_fields and getattr(project, planning_field) != getattr(enterprise, enterprise_field)
+        }
+        before = PlanningProjectSerializer(project).data
+        if updates:
+            serializer = self.get_serializer(project, data=updates, partial=True)
+            serializer.is_valid(raise_exception=True)
+            project = serializer.save()
+            record_event(
+                project=project,
+                actor=request.user,
+                action='project.enterprise_synced',
+                entity=project,
+                before=before,
+                after=PlanningProjectSerializer(project).data,
+                metadata={'synced_fields': sorted(updates), 'skipped_fields': skipped_fields},
+            )
+        return Response({
+            'synced_fields': sorted(updates),
+            'skipped_fields': skipped_fields,
+            'planning_project': PlanningProjectSerializer(project, context={'request': request}).data,
+            'contract': _enterprise_contract_state(project),
+        })
 
     @action(detail=True, methods=['post'], url_path='build-workable-plan')
     def build_workable_plan(self, request, pk=None):

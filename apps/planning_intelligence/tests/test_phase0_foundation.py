@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from unittest.mock import patch
 import tempfile
 
@@ -6,6 +7,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import DatabaseError
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.renderers import JSONRenderer
 from rest_framework.test import APIClient
 
@@ -13,7 +15,10 @@ from apps.core.project_models import Project, ProjectMember
 from apps.users.models import User
 
 from ..access import accessible_projects
-from ..models import PlanningFile, PlanningGeneration, PlanningJob, PlanningProject
+from ..models import (
+    DocumentIntelligenceRun, PlanningAuditEvent, PlanningFile, PlanningGeneration,
+    PlanningJob, PlanningProject, Schedule, ScheduleBaseline, ScheduleBasis, ScheduleVersion,
+)
 from ..serializers import PlanningFileSerializer, PlanningGenerationSerializer
 from ..services import byok_crypto
 from ..services.pipeline import generate_schedule
@@ -55,6 +60,92 @@ class PlanningAccessTests(Phase0Fixture):
         response = client.get('/api/v1/planning-intelligence/projects/')
         rows = response.data.get('results', response.data)
         self.assertEqual(rows, [])
+
+    def test_project_list_can_be_scoped_to_enterprise_project(self):
+        other_enterprise_project = Project.objects.create(
+            code='P-002', name='Project Two', owner=self.owner,
+        )
+        PlanningProject.objects.create(
+            enterprise_project=other_enterprise_project,
+            name='Planning Two',
+            created_by=self.owner,
+        )
+        client = APIClient()
+        client.force_authenticate(self.owner)
+
+        response = client.get(
+            '/api/v1/planning-intelligence/projects/',
+            {'enterprise_project': self.enterprise_project.id},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.data.get('results', response.data)
+        self.assertEqual([row['id'] for row in rows], [self.workspace.id])
+
+    def test_enterprise_contract_reports_and_synchronizes_master_data(self):
+        self.enterprise_project.name = 'Authoritative Project Name'
+        self.enterprise_project.client_name = 'Authoritative Client'
+        self.enterprise_project.location = 'Abu Dhabi'
+        self.enterprise_project.start_date = date(2026, 1, 15)
+        self.enterprise_project.end_date = date(2026, 12, 15)
+        self.enterprise_project.save()
+        client = APIClient()
+        client.force_authenticate(self.owner)
+
+        contract_response = client.get(
+            f'/api/v1/planning-intelligence/projects/{self.workspace.id}/enterprise-contract/',
+        )
+        self.assertEqual(contract_response.status_code, 200)
+        self.assertFalse(contract_response.data['in_sync'])
+        self.assertEqual(contract_response.data['enterprise_code'], 'P-001')
+
+        sync_response = client.post(
+            f'/api/v1/planning-intelligence/projects/{self.workspace.id}/sync-from-enterprise/',
+            {'expected_enterprise_updated_at': contract_response.data['enterprise_updated_at']},
+            format='json',
+        )
+        self.assertEqual(sync_response.status_code, 200)
+        self.assertTrue(sync_response.data['contract']['in_sync'])
+        self.workspace.refresh_from_db()
+        self.assertEqual(self.workspace.name, 'Authoritative Project Name')
+        self.assertEqual(self.workspace.client, 'Authoritative Client')
+        self.assertEqual(str(self.workspace.effective_date), '2026-01-15')
+        self.assertTrue(PlanningAuditEvent.objects.filter(
+            project=self.workspace, action='project.enterprise_synced',
+        ).exists())
+
+    def test_enterprise_contract_does_not_sync_dates_after_baseline(self):
+        self.enterprise_project.start_date = date(2026, 2, 1)
+        self.enterprise_project.end_date = date(2026, 11, 30)
+        self.enterprise_project.save()
+        self.workspace.effective_date = date(2026, 1, 1)
+        self.workspace.planned_end_date = date(2026, 12, 31)
+        self.workspace.save()
+        schedule = Schedule.objects.create(
+            project=self.workspace, name='Control Schedule', code='CS-01',
+            planned_start=date(2026, 1, 1), created_by=self.owner,
+        )
+        version = ScheduleVersion.objects.create(
+            schedule=schedule, version=1, status='baselined', created_by=self.owner,
+        )
+        ScheduleBaseline.objects.create(
+            schedule=schedule, source_version=version, name='Approved Baseline',
+            approved_by=self.owner,
+        )
+        client = APIClient()
+        client.force_authenticate(self.owner)
+
+        response = client.post(
+            f'/api/v1/planning-intelligence/projects/{self.workspace.id}/sync-from-enterprise/',
+            {'fields': ['effective_date', 'planned_end_date']}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['synced_fields'], [])
+        self.assertEqual(response.data['skipped_fields'], ['effective_date', 'planned_end_date'])
+        self.workspace.refresh_from_db()
+        self.assertEqual(str(self.workspace.effective_date), '2026-01-01')
+        self.assertEqual(str(self.workspace.planned_end_date), '2026-12-31')
 
 
 class PlanningValidationTests(Phase0Fixture):
@@ -187,14 +278,34 @@ class GenerationRevisionTests(Phase0Fixture):
 
 
 class PlanningJobAndExportTests(Phase0Fixture):
-    @patch('apps.planning_intelligence.services.pipeline.analyze_documents', return_value={'scope': 'FEED'})
-    def test_analysis_job_persists_terminal_result(self, _analyze):
+    @patch('apps.planning_intelligence.services.pipeline.analyze_documents')
+    def test_analysis_job_persists_terminal_result(self, analyze):
+        intelligence_run = DocumentIntelligenceRun.objects.create(
+            project=self.workspace, status='succeeded', started_at=timezone.now(),
+            finished_at=timezone.now(), requested_by=self.owner,
+        )
+        basis = ScheduleBasis.objects.create(
+            project=self.workspace, source_run=intelligence_run, version=1,
+            readiness={'ready': True},
+        )
+        analyze.return_value = {
+            'scope': 'FEED',
+            'document_intelligence_run_id': intelligence_run.id,
+        }
         job = PlanningJob.objects.create(project=self.workspace, job_type='analyze', requested_by=self.owner)
         run_planning_job.apply(args=[job.id]).get()
         job.refresh_from_db()
         self.assertEqual(job.status, 'succeeded')
         self.assertEqual(job.progress, 100)
-        self.assertEqual(job.result_data, {'intelligence': {'scope': 'FEED'}})
+        self.assertEqual(job.result_data, {
+            'intelligence': {
+                'scope': 'FEED',
+                'document_intelligence_run_id': intelligence_run.id,
+            },
+            'schedule_basis_id': basis.id,
+            'schedule_basis_version': 1,
+            'schedule_basis_readiness': {'ready': True},
+        })
 
     def test_generation_export_is_project_scoped(self):
         generation = PlanningGeneration.objects.create(

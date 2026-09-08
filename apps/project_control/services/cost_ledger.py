@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
-from ..models import BudgetAllocation, CostAllocation, CostLedgerEntry
+from ..models import BudgetAllocation, ControlAccount, CostAllocation, CostLedgerEntry, ReportingPeriod
 
 
 def _decimal(value):
@@ -56,6 +56,18 @@ def allocation_totals(source_type, source_id, *, exclude_id=None):
 
 def _post_entry(project, active_keys, *, entry_key, defaults):
     active_keys.add(entry_key)
+    existing = CostLedgerEntry.objects.filter(entry_key=entry_key).select_related('reporting_period').first()
+    if existing and existing.reporting_period_id and existing.reporting_period.status == 'locked':
+        return existing
+    wbs = defaults.get('wbs_node')
+    entry_date = defaults.get('entry_date')
+    defaults['control_account'] = (
+        ControlAccount.objects.filter(project=project, wbs_node=wbs, status='active', is_deleted=False).first()
+        if wbs else None
+    )
+    defaults['reporting_period'] = ReportingPeriod.objects.filter(
+        project=project, start_date__lte=entry_date, end_date__gte=entry_date, is_deleted=False,
+    ).first() if entry_date else None
     CostLedgerEntry.objects.update_or_create(
         entry_key=entry_key,
         defaults={**defaults, 'project': project, 'status': 'posted', 'is_deleted': False},
@@ -124,7 +136,11 @@ def rebuild_project_ledger(project, *, user=None):
             'source_type': allocation.source_type,
             'source_id': allocation.source_id,
             'source_reference': allocation.source_reference,
-            'entry_date': allocation.approved_at.date() if allocation.approved_at else today,
+            'entry_date': (
+                row.invoice.invoice_date or row.created_at.date()
+                if allocation.source_type == 'invoice_allocation'
+                else (allocation.approved_at.date() if allocation.approved_at else today)
+            ),
             'metadata': {'allocation_status': allocation.status},
             'created_by': user,
         })
@@ -199,7 +215,9 @@ def rebuild_project_ledger(project, *, user=None):
 
     CostLedgerEntry.objects.filter(
         project=project, status='posted', is_deleted=False,
-    ).exclude(entry_key__in=active_keys).exclude(entry_type='adjustment').update(status='reversed')
+    ).exclude(entry_key__in=active_keys).exclude(entry_type='adjustment').exclude(
+        source_type='approved_hour',
+    ).exclude(reporting_period__status='locked').update(status='reversed')
 
     totals = defaultdict(lambda: Decimal('0'))
     for row in CostLedgerEntry.objects.filter(

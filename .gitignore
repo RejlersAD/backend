@@ -167,12 +167,16 @@ test_*.py
 !apps/procurement/tests/test_purchase_order_numbering.py
 !apps/procurement/tests/test_project_relationships.py
 !apps/project_control/tests/test_cost_ledger.py
+!apps/project_control/tests/test_control_governance.py
+!apps/project_control/tests/test_actuals_and_snapshots.py
+!apps/project_control/tests/test_portfolio_exceptions.py
 !apps/hr_core/tests/test_graph_assistant_governance.py
 *.md
 *.txt
 # Keep the office-agent runbook, but never track its credential file.
 !scripts/TIMESHEET_MIRROR_SETUP.md
 !docs/PROJECT_RELATIONSHIP_MIGRATION_REPORT.md
+!docs/project-control-governance.md
 scripts/timesheet_mirror.env
 scripts/timesheet_mirror*.state.json
 # Allow P&ID analysis config prompt files (engineers tune these without code deploys)

@@ -182,6 +182,11 @@ class PlanningProjectSerializer(serializers.ModelSerializer):
 
     def validate_enterprise_project(self, value):
         request = self.context.get('request')
+        if self.instance and self.instance.enterprise_project_id:
+            if value is None or value.pk != self.instance.enterprise_project_id:
+                raise serializers.ValidationError(
+                    'The enterprise-project link is permanent. Create a separate planning workspace instead.',
+                )
         if request and value and not can_access_enterprise_project(request.user, value, write=True):
             raise serializers.ValidationError('You cannot create a planning workspace for this enterprise project.')
         return value

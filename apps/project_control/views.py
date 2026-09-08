@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 
+from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
@@ -35,21 +37,25 @@ from .config import (
     is_phase_enabled,
 )
 from .models import (
-    BudgetAllocation, ChangeEvent, CostAllocation, CostLedgerEntry,
-    CostSnapshot, Estimate, EstimateLineItem,
-    PlanningPackage, ProjectDocument, WBSNode,
+    ApprovedHourEntry, BudgetAllocation, ChangeEvent, ControlAccount, CostAllocation, CostLedgerEntry,
+    CostSnapshot, Estimate, EstimateLineItem, IntegratedReportingSnapshot,
+    PlanningPackage, ProjectDocument, ReconciliationRun, ReportingPeriod, ReportingPeriodAudit, WBSNode,
 )
 from .serializers import (
-    BudgetAllocationSerializer, ChangeEventSerializer, CostAllocationSerializer,
+    ApprovedHourEntrySerializer, BudgetAllocationSerializer, ChangeEventSerializer, ControlAccountSerializer, CostAllocationSerializer,
     CostLedgerEntrySerializer, CostSnapshotSerializer,
+    IntegratedReportingSnapshotSerializer, ReconciliationRunSerializer,
     EstimateLineItemSerializer, EstimateListSerializer, EstimateSerializer,
     PlanningPackageListSerializer, PlanningPackageSerializer,
-    ProjectDocumentSerializer, WBSNodeSerializer,
+    ProjectDocumentSerializer, ReportingPeriodAuditSerializer, ReportingPeriodSerializer,
+    WBSNodeSerializer,
 )
 from .services.excel_import import import_boq_excel
 from .services.finance_sync import sync_project_spend
 from .services.kpis import compute_project_kpis
+from .services.portfolio_exceptions import build_portfolio_exception_dashboard
 from .services.cost_ledger import source_record
+from .services.actuals import create_integrated_snapshot, reconcile_reporting_period
 from .services.commercial_dashboard import project_commercial_dashboard
 from .services.s3 import presign_document_download
 from .services.variance import compute_variance
@@ -152,6 +158,312 @@ class WBSNodeViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = WBSNodeSerializer
     queryset = WBSNode.objects.all()
+
+
+class ControlAccountViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+    """Governed WBS responsibility with submit/approve/close transitions."""
+
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
+    serializer_class = ControlAccountSerializer
+    queryset = ControlAccount.objects.select_related(
+        'project', 'wbs_node', 'manager', 'created_by', 'submitted_by', 'approved_by', 'closed_by',
+    )
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        requested_status = self.request.query_params.get('status')
+        return queryset.filter(status=requested_status) if requested_status else queryset
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data['project']
+        if not can_write_enterprise_project(self.request.user, project):
+            raise PermissionDenied('You cannot modify this project.')
+        serializer.save(created_by=self.request.user, status='draft')
+
+    def perform_update(self, serializer):
+        if serializer.instance.status != 'draft':
+            raise ValidationError('Only draft Control Accounts can be edited.')
+        super().perform_update(serializer)
+
+    @action(detail=True, methods=['post'])
+    def submit(self, request, pk=None):
+        with transaction.atomic():
+            account = ControlAccount.objects.select_for_update().get(pk=self.get_object().pk)
+            if account.status != 'draft':
+                raise ValidationError('Only a draft Control Account can be submitted.')
+            account.status = 'submitted'
+            account.submitted_by = request.user
+            account.submitted_at = timezone.now()
+            account.save(update_fields=['status', 'submitted_by', 'submitted_at', 'updated_at'])
+        return Response(self.get_serializer(account).data)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        if not can_approve_commercial(request.user):
+            raise PermissionDenied('Project Control or Finance approval access is required.')
+        with transaction.atomic():
+            account = ControlAccount.objects.select_for_update().get(pk=self.get_object().pk)
+            if account.status != 'submitted':
+                raise ValidationError('Only a submitted Control Account can be approved.')
+            if account.submitted_by_id == request.user.id and not request.user.is_superuser:
+                raise PermissionDenied('The submitter cannot approve their own Control Account.')
+            approved_budget = BudgetAllocation.objects.filter(
+                project=account.project, wbs_node=account.wbs_node,
+                status='approved', is_deleted=False,
+            ).aggregate(total=Sum('amount'))['total'] or 0
+            if approved_budget <= 0:
+                raise ValidationError({
+                    'approved_budget': 'Approve at least one budget allocation for this WBS before activation.',
+                })
+            account.status = 'active'
+            account.approved_by = request.user
+            account.approved_at = timezone.now()
+            account.save(update_fields=['status', 'approved_by', 'approved_at', 'updated_at'])
+        return Response(self.get_serializer(account).data)
+
+    @action(detail=True, methods=['post'])
+    def close(self, request, pk=None):
+        if not can_approve_commercial(request.user):
+            raise PermissionDenied('Project Control or Finance approval access is required.')
+        with transaction.atomic():
+            account = ControlAccount.objects.select_for_update().get(pk=self.get_object().pk)
+            if account.status != 'active':
+                raise ValidationError('Only an active Control Account can be closed.')
+            account.status = 'closed'
+            account.closed_by = request.user
+            account.closed_at = timezone.now()
+            account.save(update_fields=['status', 'closed_by', 'closed_at', 'updated_at'])
+        return Response(self.get_serializer(account).data)
+
+
+class ReportingPeriodViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+    """Controlled project reporting calendar and immutable transition history."""
+
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
+    serializer_class = ReportingPeriodSerializer
+    queryset = ReportingPeriod.objects.select_related(
+        'project', 'created_by', 'submitted_by', 'locked_by', 'reopened_by',
+    ).prefetch_related('audit_events')
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        requested_status = self.request.query_params.get('status')
+        return queryset.filter(status=requested_status) if requested_status else queryset
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data['project']
+        if not can_write_enterprise_project(self.request.user, project):
+            raise PermissionDenied('You cannot modify this project.')
+        if ReportingPeriod.objects.filter(
+            project=project, status__in=['open', 'reopened'], is_deleted=False,
+        ).exists():
+            raise ValidationError({
+                'period': 'Submit the current open reporting period before opening another one.',
+            })
+        with transaction.atomic():
+            period = serializer.save(created_by=self.request.user, status='open')
+            ReportingPeriodAudit.objects.create(
+                period=period, actor=self.request.user, action='created', to_status='open',
+            )
+
+    def perform_update(self, serializer):
+        if serializer.instance.status not in {'open', 'reopened'}:
+            raise ValidationError('Submitted and locked reporting periods are immutable.')
+        before = serializer.instance.status
+        with transaction.atomic():
+            period = serializer.save()
+            ReportingPeriodAudit.objects.create(
+                period=period, actor=self.request.user, action='updated',
+                from_status=before, to_status=period.status,
+            )
+
+    def _transition(self, request, period, *, expected, target, action_name, reason=''):
+        if period.status not in expected:
+            expected_text = ' or '.join(sorted(expected))
+            raise ValidationError(f'Only a {expected_text} reporting period can be {action_name}.')
+        previous = period.status
+        now = timezone.now()
+        period.status = target
+        update_fields = ['status', 'updated_at']
+        if target == 'submitted':
+            period.submitted_by = request.user
+            period.submitted_at = now
+            update_fields += ['submitted_by', 'submitted_at']
+        elif target == 'locked':
+            period.locked_by = request.user
+            period.locked_at = now
+            update_fields += ['locked_by', 'locked_at']
+        elif target == 'reopened':
+            period.reopened_by = request.user
+            period.reopened_at = now
+            period.reopen_reason = reason
+            update_fields += ['reopened_by', 'reopened_at', 'reopen_reason']
+        period.save(update_fields=update_fields)
+        ReportingPeriodAudit.objects.create(
+            period=period, actor=request.user, action=action_name,
+            from_status=previous, to_status=target, reason=reason,
+        )
+        return period
+
+    @action(detail=True, methods=['post'])
+    def submit(self, request, pk=None):
+        period = self.get_object()
+        reconciliation = reconcile_reporting_period(period, user=request.user)
+        if reconciliation.exception_count:
+            raise ValidationError({
+                'reconciliation': 'Resolve reconciliation exceptions before submitting the period.',
+                'run': ReconciliationRunSerializer(reconciliation).data,
+            })
+        with transaction.atomic():
+            period = ReportingPeriod.objects.select_for_update().get(pk=period.pk)
+            self._transition(
+                request, period, expected={'open', 'reopened'}, target='submitted', action_name='submitted',
+            )
+        return Response(self.get_serializer(period).data)
+
+    @action(detail=True, methods=['post'])
+    def lock(self, request, pk=None):
+        if not can_approve_commercial(request.user):
+            raise PermissionDenied('Project Control or Finance approval access is required to lock a period.')
+        with transaction.atomic():
+            period = ReportingPeriod.objects.select_for_update().get(pk=self.get_object().pk)
+            if period.submitted_by_id == request.user.id and not request.user.is_superuser:
+                raise PermissionDenied('The submitter cannot lock their own reporting period.')
+            try:
+                snapshot = create_integrated_snapshot(period, user=request.user)
+            except ValueError as exc:
+                raise ValidationError({'snapshot': str(exc)}) from exc
+            self._transition(request, period, expected={'submitted'}, target='locked', action_name='locked')
+        result = self.get_serializer(period).data
+        result['snapshot'] = IntegratedReportingSnapshotSerializer(snapshot).data
+        return Response(result)
+
+    @action(detail=True, methods=['post'])
+    def reconcile(self, request, pk=None):
+        period = self.get_object()
+        if not can_write_enterprise_project(request.user, period.project):
+            raise PermissionDenied('You cannot reconcile actuals for this project.')
+        try:
+            run = reconcile_reporting_period(period, user=request.user)
+        except ValueError as exc:
+            raise ValidationError({'reconciliation': str(exc)}) from exc
+        return Response(ReconciliationRunSerializer(run).data)
+
+    @action(detail=True, methods=['get'], url_path='reconciliations')
+    def reconciliations(self, request, pk=None):
+        period = self.get_object()
+        return Response(ReconciliationRunSerializer(period.reconciliation_runs.all(), many=True).data)
+
+    @action(detail=True, methods=['post'])
+    def reopen(self, request, pk=None):
+        if not can_approve_commercial(request.user):
+            raise PermissionDenied('Project Control or Finance approval access is required to reopen a period.')
+        reason = str(request.data.get('reason') or '').strip()
+        if len(reason) < 10:
+            raise ValidationError({'reason': 'Provide a reopen reason of at least 10 characters.'})
+        with transaction.atomic():
+            period = ReportingPeriod.objects.select_for_update().get(pk=self.get_object().pk)
+            if ReportingPeriod.objects.filter(
+                project=period.project, status__in=['open', 'reopened'], is_deleted=False,
+            ).exclude(pk=period.pk).exists():
+                raise ValidationError({
+                    'period': 'Submit the current open reporting period before reopening this one.',
+                })
+            self._transition(
+                request, period, expected={'locked'}, target='reopened',
+                action_name='reopened', reason=reason,
+            )
+        return Response(self.get_serializer(period).data)
+
+    @action(detail=True, methods=['get'])
+    def history(self, request, pk=None):
+        period = self.get_object()
+        return Response(ReportingPeriodAuditSerializer(period.audit_events.all(), many=True).data)
+
+
+class ApprovedHourEntryViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
+    """Two-person approval workflow for project-attributed labour actuals."""
+
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
+    serializer_class = ApprovedHourEntrySerializer
+    queryset = ApprovedHourEntry.objects.select_related(
+        'project', 'control_account', 'reporting_period', 'created_by',
+        'submitted_by', 'approved_by', 'reversed_by',
+    )
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data['project']
+        if not can_write_enterprise_project(self.request.user, project):
+            raise PermissionDenied('You cannot enter hours for this project.')
+        serializer.save(
+            created_by=self.request.user, status='draft', currency=project.currency or 'AED',
+        )
+
+    def perform_update(self, serializer):
+        if serializer.instance.status != 'draft':
+            raise ValidationError('Only draft hour entries can be edited.')
+        super().perform_update(serializer)
+
+    @action(detail=True, methods=['post'])
+    def submit(self, request, pk=None):
+        with transaction.atomic():
+            entry = ApprovedHourEntry.objects.select_for_update().get(pk=self.get_object().pk)
+            if entry.status != 'draft':
+                raise ValidationError('Only a draft hour entry can be submitted.')
+            if not entry.reporting_period.is_entry_allowed:
+                raise ValidationError('The reporting period is no longer open for entry.')
+            entry.status = 'submitted'
+            entry.submitted_by = request.user
+            entry.submitted_at = timezone.now()
+            entry.save(update_fields=['status', 'submitted_by', 'submitted_at', 'updated_at'])
+        return Response(self.get_serializer(entry).data)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        if not can_approve_commercial(request.user):
+            raise PermissionDenied('Project Control or Finance approval access is required.')
+        with transaction.atomic():
+            entry = ApprovedHourEntry.objects.select_for_update().get(pk=self.get_object().pk)
+            if entry.status != 'submitted':
+                raise ValidationError('Only a submitted hour entry can be approved.')
+            if entry.submitted_by_id == request.user.id and not request.user.is_superuser:
+                raise PermissionDenied('The submitter cannot approve their own hour entry.')
+            if not entry.reporting_period.is_entry_allowed:
+                raise ValidationError('The reporting period is no longer open for approval.')
+            entry.status = 'approved'
+            entry.labor_actual_cost = entry.hours * entry.hourly_cost_rate
+            entry.approved_by = request.user
+            entry.approved_at = timezone.now()
+            entry.save(update_fields=[
+                'status', 'labor_actual_cost', 'approved_by', 'approved_at', 'updated_at',
+            ])
+        return Response(self.get_serializer(entry).data)
+
+    @action(detail=True, methods=['post'])
+    def reverse(self, request, pk=None):
+        if not can_approve_commercial(request.user):
+            raise PermissionDenied('Project Control or Finance approval access is required.')
+        reason = str(request.data.get('reason') or '').strip()
+        if len(reason) < 10:
+            raise ValidationError({'reason': 'Provide a reversal reason of at least 10 characters.'})
+        with transaction.atomic():
+            entry = ApprovedHourEntry.objects.select_for_update().get(pk=self.get_object().pk)
+            if entry.status != 'approved':
+                raise ValidationError('Only an approved hour entry can be reversed.')
+            if not entry.reporting_period.is_entry_allowed:
+                raise ValidationError('Reopen the reporting period before reversing approved hours.')
+            entry.status = 'reversed'
+            entry.reversed_by = request.user
+            entry.reversed_at = timezone.now()
+            entry.reversal_reason = reason
+            entry.save(update_fields=[
+                'status', 'reversed_by', 'reversed_at', 'reversal_reason', 'updated_at',
+            ])
+            CostLedgerEntry.objects.filter(entry_key=f'approved-hour:{entry.pk}').update(status='reversed')
+        return Response(self.get_serializer(entry).data)
 
 
 class BudgetAllocationViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
@@ -371,6 +683,19 @@ class CostSnapshotViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
     queryset = CostSnapshot.objects.all()
 
 
+class IntegratedReportingSnapshotViewSet(_ProjectFilteredMixin, viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
+    serializer_class = IntegratedReportingSnapshotSerializer
+    queryset = IntegratedReportingSnapshot.objects.select_related(
+        'project', 'reporting_period', 'reconciliation_run', 'sealed_by',
+    )
+
+    def get_queryset(self):
+        queryset = self.queryset.filter(project__in=accessible_enterprise_projects(self.request.user))
+        project_id = self.request.query_params.get('project')
+        return queryset.filter(project_id=project_id) if project_id else queryset
+
+
 class ChangeEventViewSet(_ProjectFilteredMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, ProjectControlObjectPermission]
     serializer_class = ChangeEventSerializer
@@ -507,6 +832,16 @@ class ProjectAnalyticsViewSet(viewsets.ViewSet):
         if err:
             return err
         return Response(project_commercial_dashboard(project))
+
+    @action(detail=False, methods=['get'], url_path='portfolio-exceptions')
+    def portfolio_exceptions(self, request):
+        """Management-by-exception view across every accessible enterprise project."""
+        return Response(build_portfolio_exception_dashboard(
+            accessible_enterprise_projects(request.user),
+            severity=request.query_params.get('severity'),
+            category=request.query_params.get('category'),
+            search=request.query_params.get('search'),
+        ))
 
     @action(detail=False, methods=['get'], url_path='estimate-variance')
     def estimate_variance(self, request):
