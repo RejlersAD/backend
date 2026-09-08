@@ -117,6 +117,34 @@ COMMERCIAL_EVENT_TYPE_CHOICES = [
     ('historical_reconciliation', 'Historical Reconciliation'),
 ]
 
+CONTROL_ACCOUNT_STATUS_CHOICES = [
+    ('draft', 'Draft'),
+    ('submitted', 'Submitted for approval'),
+    ('active', 'Active'),
+    ('closed', 'Closed'),
+]
+
+EARNED_VALUE_METHOD_CHOICES = [
+    ('weighted_milestone', 'Weighted milestones'),
+    ('units_complete', 'Units complete'),
+    ('percent_complete', 'Physical percent complete'),
+    ('level_of_effort', 'Level of effort'),
+]
+
+REPORTING_PERIOD_STATUS_CHOICES = [
+    ('open', 'Open'),
+    ('submitted', 'Submitted'),
+    ('locked', 'Locked'),
+    ('reopened', 'Reopened'),
+]
+
+HOUR_ENTRY_STATUS_CHOICES = [
+    ('draft', 'Draft'),
+    ('submitted', 'Submitted for approval'),
+    ('approved', 'Approved'),
+    ('reversed', 'Reversed'),
+]
+
 
 def _document_upload_path(instance, filename):
     """Storage path resolver — keeps S3 layout soft-coded via config."""
@@ -144,6 +172,138 @@ class WBSNode(BaseModel):
 
     def __str__(self):
         return f'{self.project.code} · {self.code} {self.name}'
+
+
+class ControlAccount(BaseModel):
+    """Governed responsibility point joining WBS scope, owner and control budget."""
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='control_accounts')
+    wbs_node = models.OneToOneField(WBSNode, on_delete=models.PROTECT, related_name='control_account')
+    code = models.CharField(max_length=64)
+    name = models.CharField(max_length=255)
+    manager = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='managed_control_accounts',
+    )
+    earned_value_method = models.CharField(
+        max_length=24, choices=EARNED_VALUE_METHOD_CHOICES, default='weighted_milestone',
+    )
+    baseline_start = models.DateField()
+    baseline_finish = models.DateField()
+    status = models.CharField(
+        max_length=12, choices=CONTROL_ACCOUNT_STATUS_CHOICES, default='draft', db_index=True,
+    )
+    notes = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_control_accounts_created',
+    )
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_control_accounts_submitted',
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_control_accounts_approved',
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    closed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_control_accounts_closed',
+    )
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['project', 'wbs_node__sort_order', 'code']
+        constraints = [
+            models.UniqueConstraint(fields=['project', 'code'], name='pc_control_account_code_uniq'),
+            models.CheckConstraint(
+                check=models.Q(baseline_finish__gte=models.F('baseline_start')),
+                name='pc_control_account_dates_valid',
+            ),
+        ]
+        indexes = [models.Index(fields=['project', 'status'], name='pc_ca_project_status_idx')]
+
+    def __str__(self):
+        return f'{self.project.code} · {self.code} {self.name}'
+
+
+class ReportingPeriod(BaseModel):
+    """Project data-entry boundary with controlled submit, lock and reopen transitions."""
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='reporting_periods')
+    sequence = models.PositiveIntegerField()
+    name = models.CharField(max_length=100)
+    start_date = models.DateField()
+    end_date = models.DateField()
+    data_date = models.DateField()
+    status = models.CharField(
+        max_length=12, choices=REPORTING_PERIOD_STATUS_CHOICES, default='open', db_index=True,
+    )
+    notes = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_reporting_periods_created',
+    )
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_reporting_periods_submitted',
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    locked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_reporting_periods_locked',
+    )
+    locked_at = models.DateTimeField(null=True, blank=True)
+    reopened_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_reporting_periods_reopened',
+    )
+    reopened_at = models.DateTimeField(null=True, blank=True)
+    reopen_reason = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['project', '-sequence']
+        constraints = [
+            models.UniqueConstraint(fields=['project', 'sequence'], name='pc_period_project_sequence_uniq'),
+            models.UniqueConstraint(fields=['project', 'name'], name='pc_period_project_name_uniq'),
+            models.UniqueConstraint(
+                fields=['project'], condition=models.Q(status__in=['open', 'reopened']),
+                name='pc_period_one_entry_window_uniq',
+            ),
+            models.CheckConstraint(check=models.Q(end_date__gte=models.F('start_date')), name='pc_period_dates_valid'),
+            models.CheckConstraint(
+                check=models.Q(data_date__gte=models.F('start_date'), data_date__lte=models.F('end_date')),
+                name='pc_period_data_date_valid',
+            ),
+        ]
+        indexes = [models.Index(fields=['project', 'status'], name='pc_period_project_status_idx')]
+
+    @property
+    def is_entry_allowed(self):
+        return self.status in {'open', 'reopened'}
+
+    def __str__(self):
+        return f'{self.project.code} · {self.name}'
+
+
+class ReportingPeriodAudit(models.Model):
+    """Append-only evidence for every reporting-period governance transition."""
+
+    period = models.ForeignKey(ReportingPeriod, on_delete=models.PROTECT, related_name='audit_events')
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_reporting_period_actions',
+    )
+    action = models.CharField(max_length=24, db_index=True)
+    from_status = models.CharField(max_length=12, blank=True)
+    to_status = models.CharField(max_length=12)
+    reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
+        indexes = [models.Index(fields=['period', 'created_at'], name='pc_period_audit_date_idx')]
 
 
 class BudgetAllocation(BaseModel):
@@ -231,6 +391,14 @@ class CostLedgerEntry(BaseModel):
         CostAllocation, null=True, blank=True, on_delete=models.SET_NULL,
         related_name='ledger_entries',
     )
+    control_account = models.ForeignKey(
+        ControlAccount, null=True, blank=True, on_delete=models.PROTECT,
+        related_name='ledger_entries',
+    )
+    reporting_period = models.ForeignKey(
+        ReportingPeriod, null=True, blank=True, on_delete=models.PROTECT,
+        related_name='ledger_entries',
+    )
     entry_key = models.CharField(max_length=255, unique=True)
     entry_type = models.CharField(max_length=20, choices=LEDGER_ENTRY_TYPE_CHOICES, db_index=True)
     amount = models.DecimalField(max_digits=18, decimal_places=2)
@@ -252,7 +420,152 @@ class CostLedgerEntry(BaseModel):
         indexes = [
             models.Index(fields=['project', 'entry_type', 'status'], name='pc_ledger_proj_type_idx'),
             models.Index(fields=['project', 'wbs_node', 'status'], name='pc_ledger_proj_wbs_idx'),
+            models.Index(fields=['reporting_period', 'entry_type', 'status'], name='pc_ledger_period_type_idx'),
         ]
+
+
+class ApprovedHourEntry(BaseModel):
+    """Project labour actual requiring independent approval before ledger posting."""
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='approved_hour_entries')
+    control_account = models.ForeignKey(
+        ControlAccount, on_delete=models.PROTECT, related_name='approved_hour_entries',
+    )
+    reporting_period = models.ForeignKey(
+        ReportingPeriod, on_delete=models.PROTECT, related_name='approved_hour_entries',
+    )
+    employee_code = models.CharField(max_length=64)
+    employee_name = models.CharField(max_length=255, blank=True)
+    work_date = models.DateField()
+    hours = models.DecimalField(max_digits=10, decimal_places=2)
+    hourly_cost_rate = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    labor_actual_cost = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    currency = models.CharField(max_length=8, default='AED')
+    source_type = models.CharField(max_length=24, default='manual')
+    source_reference = models.CharField(max_length=120)
+    status = models.CharField(max_length=12, choices=HOUR_ENTRY_STATUS_CHOICES, default='draft', db_index=True)
+    notes = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_hours_created',
+    )
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_hours_submitted',
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_hours_approved',
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    reversed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_hours_reversed',
+    )
+    reversed_at = models.DateTimeField(null=True, blank=True)
+    reversal_reason = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-work_date', '-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['project', 'source_type', 'source_reference'],
+                condition=models.Q(is_deleted=False), name='pc_hour_source_uniq',
+            ),
+            models.CheckConstraint(check=models.Q(hours__gt=0), name='pc_hour_hours_positive'),
+            models.CheckConstraint(check=models.Q(hourly_cost_rate__gte=0), name='pc_hour_rate_nonnegative'),
+        ]
+        indexes = [
+            models.Index(fields=['project', 'status'], name='pc_hour_project_status_idx'),
+            models.Index(fields=['reporting_period', 'status'], name='pc_hour_period_status_idx'),
+        ]
+
+
+class ReconciliationRun(models.Model):
+    """Append-only evidence of the sources reconciled for one reporting period."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(Project, on_delete=models.PROTECT, related_name='reconciliation_runs')
+    reporting_period = models.ForeignKey(
+        ReportingPeriod, on_delete=models.PROTECT, related_name='reconciliation_runs',
+    )
+    run_number = models.PositiveIntegerField()
+    status = models.CharField(max_length=16, choices=[('completed', 'Completed'), ('exceptions', 'Exceptions')])
+    approved_hours = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    labor_actual_cost = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    finance_actual_cost = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    ledger_actual_cost = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    exception_count = models.PositiveIntegerField(default=0)
+    exceptions = models.JSONField(default=list, blank=True)
+    source_manifest = models.JSONField(default=dict, blank=True)
+    checksum = models.CharField(max_length=64)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_reconciliations_created',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [models.UniqueConstraint(
+            fields=['reporting_period', 'run_number'], name='pc_recon_period_run_uniq',
+        )]
+
+
+class IntegratedReportingSnapshot(models.Model):
+    """Immutable, versioned project-control KPI result sealed when a period locks."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(Project, on_delete=models.PROTECT, related_name='integrated_reporting_snapshots')
+    reporting_period = models.ForeignKey(
+        ReportingPeriod, on_delete=models.PROTECT, related_name='integrated_snapshots',
+    )
+    reconciliation_run = models.OneToOneField(
+        ReconciliationRun, on_delete=models.PROTECT, related_name='snapshot',
+    )
+    version = models.PositiveIntegerField()
+    data_date = models.DateField()
+    currency = models.CharField(max_length=8, default='AED')
+    budget_at_completion = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    planned_value = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    earned_value = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    actual_cost = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    commitments = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    approved_hours = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    labor_actual_cost = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    finance_actual_cost = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    progress_pct = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    planned_progress_pct = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    cost_variance = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    schedule_variance = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    cpi = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    spi = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    estimate_at_completion = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    estimate_to_complete = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    variance_at_completion = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    source_manifest = models.JSONField(default=dict, blank=True)
+    calculation_payload = models.JSONField(default=dict, blank=True)
+    checksum = models.CharField(max_length=64)
+    sealed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_snapshots_sealed',
+    )
+    sealed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-data_date', '-version']
+        constraints = [models.UniqueConstraint(
+            fields=['reporting_period', 'version'], name='pc_snapshot_period_version_uniq',
+        )]
+
+    def save(self, *args, **kwargs):
+        if self.pk and IntegratedReportingSnapshot.objects.filter(pk=self.pk).exists():
+            raise ValueError('Integrated reporting snapshots are immutable.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValueError('Integrated reporting snapshots cannot be deleted.')
 
 
 class CommercialEvent(models.Model):

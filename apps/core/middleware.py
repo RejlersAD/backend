@@ -4,6 +4,7 @@ Guaranteed to work without any imports that could fail
 """
 import re
 import time
+from django.db import transaction
 from django.conf import settings
 from django.http import HttpResponse
 from django.utils import timezone
@@ -129,11 +130,14 @@ class ApiUsageLoggingMiddleware:
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
-        ApiUsageLog.objects.create(
-            endpoint=path[:255],
-            method=request.method,
-            user_id=request.user.id,
-            status_code=response.status_code,
-            response_time_ms=elapsed_ms,
-            timestamp=timezone.now(),
-        )
+        # A savepoint prevents an optional/unmanaged logging-table failure from
+        # poisoning the surrounding request/test transaction after it is caught.
+        with transaction.atomic():
+            ApiUsageLog.objects.create(
+                endpoint=path[:255],
+                method=request.method,
+                user_id=request.user.id,
+                status_code=response.status_code,
+                response_time_ms=elapsed_ms,
+                timestamp=timezone.now(),
+            )

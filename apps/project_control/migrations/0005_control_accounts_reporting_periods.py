@@ -1,0 +1,92 @@
+from django.conf import settings
+from django.db import migrations, models
+import django.db.models.deletion
+
+
+class Migration(migrations.Migration):
+    dependencies = [
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+        ('project_control', '0004_commercialevent'),
+    ]
+
+    operations = [
+        migrations.CreateModel(
+            name='ControlAccount',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('is_deleted', models.BooleanField(default=False)),
+                ('deleted_at', models.DateTimeField(blank=True, null=True)),
+                ('code', models.CharField(max_length=64)),
+                ('name', models.CharField(max_length=255)),
+                ('earned_value_method', models.CharField(choices=[('weighted_milestone', 'Weighted milestones'), ('units_complete', 'Units complete'), ('percent_complete', 'Physical percent complete'), ('level_of_effort', 'Level of effort')], default='weighted_milestone', max_length=24)),
+                ('baseline_start', models.DateField()),
+                ('baseline_finish', models.DateField()),
+                ('status', models.CharField(choices=[('draft', 'Draft'), ('submitted', 'Submitted for approval'), ('active', 'Active'), ('closed', 'Closed')], db_index=True, default='draft', max_length=12)),
+                ('notes', models.TextField(blank=True)),
+                ('approved_at', models.DateTimeField(blank=True, null=True)),
+                ('closed_at', models.DateTimeField(blank=True, null=True)),
+                ('submitted_at', models.DateTimeField(blank=True, null=True)),
+                ('approved_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='project_control_accounts_approved', to=settings.AUTH_USER_MODEL)),
+                ('closed_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='project_control_accounts_closed', to=settings.AUTH_USER_MODEL)),
+                ('created_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='project_control_accounts_created', to=settings.AUTH_USER_MODEL)),
+                ('manager', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='managed_control_accounts', to=settings.AUTH_USER_MODEL)),
+                ('project', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='control_accounts', to='core.project')),
+                ('submitted_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='project_control_accounts_submitted', to=settings.AUTH_USER_MODEL)),
+                ('wbs_node', models.OneToOneField(on_delete=django.db.models.deletion.PROTECT, related_name='control_account', to='project_control.wbsnode')),
+            ],
+            options={'ordering': ['project', 'wbs_node__sort_order', 'code']},
+        ),
+        migrations.CreateModel(
+            name='ReportingPeriod',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('updated_at', models.DateTimeField(auto_now=True)),
+                ('is_deleted', models.BooleanField(default=False)),
+                ('deleted_at', models.DateTimeField(blank=True, null=True)),
+                ('sequence', models.PositiveIntegerField()),
+                ('name', models.CharField(max_length=100)),
+                ('start_date', models.DateField()),
+                ('end_date', models.DateField()),
+                ('data_date', models.DateField()),
+                ('status', models.CharField(choices=[('open', 'Open'), ('submitted', 'Submitted'), ('locked', 'Locked'), ('reopened', 'Reopened')], db_index=True, default='open', max_length=12)),
+                ('notes', models.TextField(blank=True)),
+                ('submitted_at', models.DateTimeField(blank=True, null=True)),
+                ('locked_at', models.DateTimeField(blank=True, null=True)),
+                ('reopened_at', models.DateTimeField(blank=True, null=True)),
+                ('reopen_reason', models.TextField(blank=True)),
+                ('created_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='project_reporting_periods_created', to=settings.AUTH_USER_MODEL)),
+                ('locked_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='project_reporting_periods_locked', to=settings.AUTH_USER_MODEL)),
+                ('project', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='reporting_periods', to='core.project')),
+                ('reopened_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='project_reporting_periods_reopened', to=settings.AUTH_USER_MODEL)),
+                ('submitted_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='project_reporting_periods_submitted', to=settings.AUTH_USER_MODEL)),
+            ],
+            options={'ordering': ['project', '-sequence']},
+        ),
+        migrations.CreateModel(
+            name='ReportingPeriodAudit',
+            fields=[
+                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                ('action', models.CharField(db_index=True, max_length=24)),
+                ('from_status', models.CharField(blank=True, max_length=12)),
+                ('to_status', models.CharField(max_length=12)),
+                ('reason', models.TextField(blank=True)),
+                ('created_at', models.DateTimeField(auto_now_add=True, db_index=True)),
+                ('actor', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='project_reporting_period_actions', to=settings.AUTH_USER_MODEL)),
+                ('period', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='audit_events', to='project_control.reportingperiod')),
+            ],
+            options={'ordering': ['created_at', 'id']},
+        ),
+        migrations.AddConstraint(model_name='controlaccount', constraint=models.UniqueConstraint(fields=('project', 'code'), name='pc_control_account_code_uniq')),
+        migrations.AddConstraint(model_name='controlaccount', constraint=models.CheckConstraint(check=models.Q(('baseline_finish__gte', models.F('baseline_start'))), name='pc_control_account_dates_valid')),
+        migrations.AddIndex(model_name='controlaccount', index=models.Index(fields=['project', 'status'], name='pc_ca_project_status_idx')),
+        migrations.AddConstraint(model_name='reportingperiod', constraint=models.UniqueConstraint(fields=('project', 'sequence'), name='pc_period_project_sequence_uniq')),
+        migrations.AddConstraint(model_name='reportingperiod', constraint=models.UniqueConstraint(fields=('project', 'name'), name='pc_period_project_name_uniq')),
+        migrations.AddConstraint(model_name='reportingperiod', constraint=models.UniqueConstraint(condition=models.Q(('status__in', ['open', 'reopened'])), fields=('project',), name='pc_period_one_entry_window_uniq')),
+        migrations.AddConstraint(model_name='reportingperiod', constraint=models.CheckConstraint(check=models.Q(('end_date__gte', models.F('start_date'))), name='pc_period_dates_valid')),
+        migrations.AddConstraint(model_name='reportingperiod', constraint=models.CheckConstraint(check=models.Q(('data_date__gte', models.F('start_date')), ('data_date__lte', models.F('end_date'))), name='pc_period_data_date_valid')),
+        migrations.AddIndex(model_name='reportingperiod', index=models.Index(fields=['project', 'status'], name='pc_period_project_status_idx')),
+        migrations.AddIndex(model_name='reportingperiodaudit', index=models.Index(fields=['period', 'created_at'], name='pc_period_audit_date_idx')),
+    ]

@@ -191,8 +191,9 @@ class ProjectTaskViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         """Filter tasks by project"""
-        queryset = super().get_queryset()
-        project_id = self.request.query_params.get('project_id', None)
+        from apps.project_control.access import accessible_enterprise_projects
+        queryset = super().get_queryset().filter(project__in=accessible_enterprise_projects(self.request.user))
+        project_id = self.request.query_params.get('project_id') or self.request.query_params.get('project')
         
         if project_id:
             queryset = queryset.filter(project_id=project_id)
@@ -219,8 +220,9 @@ class ProjectMilestoneViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         """Filter milestones by project"""
-        queryset = super().get_queryset()
-        project_id = self.request.query_params.get('project_id', None)
+        from apps.project_control.access import accessible_enterprise_projects
+        queryset = super().get_queryset().filter(project__in=accessible_enterprise_projects(self.request.user))
+        project_id = self.request.query_params.get('project_id') or self.request.query_params.get('project')
         
         if project_id:
             queryset = queryset.filter(project_id=project_id)

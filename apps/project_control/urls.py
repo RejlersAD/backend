@@ -3,9 +3,12 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    ApprovedHourEntryViewSet,
     BudgetAllocationViewSet,
     ChangeEventViewSet,
+    ControlAccountViewSet,
     CostSnapshotViewSet,
+    IntegratedReportingSnapshotViewSet,
     CostAllocationViewSet,
     CostLedgerEntryViewSet,
     EstimateLineItemViewSet,
@@ -13,6 +16,7 @@ from .views import (
     PlanningPackageViewSet,
     ProjectAnalyticsViewSet,
     ProjectDocumentViewSet,
+    ReportingPeriodViewSet,
     WBSNodeViewSet,
     phase_flags_view,
 )
@@ -21,11 +25,15 @@ router = DefaultRouter()
 router.register(r'estimates', EstimateViewSet, basename='project-control-estimate')
 router.register(r'estimate-line-items', EstimateLineItemViewSet, basename='project-control-line-item')
 router.register(r'wbs-nodes', WBSNodeViewSet, basename='project-control-wbs')
+router.register(r'control-accounts', ControlAccountViewSet, basename='project-control-control-account')
+router.register(r'reporting-periods', ReportingPeriodViewSet, basename='project-control-reporting-period')
+router.register(r'approved-hours', ApprovedHourEntryViewSet, basename='project-control-approved-hour')
 router.register(r'budget-allocations', BudgetAllocationViewSet, basename='project-control-budget-allocation')
 router.register(r'cost-allocations', CostAllocationViewSet, basename='project-control-cost-allocation')
 router.register(r'cost-ledger', CostLedgerEntryViewSet, basename='project-control-cost-ledger')
 router.register(r'documents', ProjectDocumentViewSet, basename='project-control-document')
 router.register(r'cost-snapshots', CostSnapshotViewSet, basename='project-control-snapshot')
+router.register(r'integrated-snapshots', IntegratedReportingSnapshotViewSet, basename='project-control-integrated-snapshot')
 router.register(r'change-events', ChangeEventViewSet, basename='project-control-change')
 router.register(r'planning-packages', PlanningPackageViewSet, basename='project-control-planning-package')
 router.register(r'analytics', ProjectAnalyticsViewSet, basename='project-control-analytics')

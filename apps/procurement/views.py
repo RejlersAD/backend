@@ -75,6 +75,7 @@ from .models import (
     Project,
     Budget,
     CostCenter,
+    ProcurementReportingSnapshot,
 )
 from .serializers import (
     VendorSerializer,
@@ -100,7 +101,62 @@ from .services.project_relationships import (
     resolve_invoice_purchase_order,
     resolve_project_relationship,
 )
+from .services.governed_dashboard import build_dashboard, create_snapshot
 from apps.project_control.access import CommercialModulePermission
+
+
+class ProcurementGovernanceViewSet(viewsets.ViewSet):
+    """Governed command centre and immutable reporting snapshots."""
+
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'procurement'
+
+    @action(detail=False, methods=['get'], url_path='dashboard')
+    def dashboard(self, request):
+        try:
+            return Response(build_dashboard(request.user, request.query_params))
+        except ValueError as exc:
+            raise ValidationError({'detail': str(exc)}) from exc
+
+    @action(detail=False, methods=['get', 'post'], url_path='snapshots')
+    def snapshots(self, request):
+        if request.method == 'POST':
+            try:
+                snapshot = create_snapshot(request.user, request.data)
+            except ValueError as exc:
+                raise ValidationError({'detail': str(exc)}) from exc
+            return Response(self._snapshot_payload(snapshot, include_payload=True), status=status.HTTP_201_CREATED)
+
+        snapshots = ProcurementReportingSnapshot.objects.select_related('created_by')[:50]
+        return Response({'results': [self._snapshot_payload(item) for item in snapshots]})
+
+    def retrieve(self, request, pk=None):
+        try:
+            snapshot = ProcurementReportingSnapshot.objects.select_related('created_by').get(pk=pk)
+        except ProcurementReportingSnapshot.DoesNotExist as exc:
+            raise ValidationError({'detail': 'Procurement reporting snapshot was not found.'}) from exc
+        return Response(self._snapshot_payload(snapshot, include_payload=True))
+
+    @staticmethod
+    def _snapshot_payload(snapshot, include_payload=False):
+        result = {
+            'id': str(snapshot.id),
+            'schema_version': snapshot.schema_version,
+            'definition_version': snapshot.definition_version,
+            'scope': snapshot.scope,
+            'period_start': snapshot.period_start,
+            'period_end': snapshot.period_end,
+            'reporting_currency': snapshot.reporting_currency or None,
+            'checksum': snapshot.checksum,
+            'created_at': snapshot.created_at,
+            'created_by': snapshot.created_by.get_full_name() if snapshot.created_by else None,
+        }
+        if include_payload:
+            result['payload'] = snapshot.payload
+            result['calculations'] = list(snapshot.calculations.values(
+                'metric_key', 'definition_version', 'inputs', 'result', 'calculated_at'
+            ))
+        return result
 
 # Soft-coded pagination for vendor list - supports large page_size
 class VendorPagination(PageNumberPagination):
@@ -1859,6 +1915,15 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         vendor_id = self.request.query_params.get('vendor', None)
         if vendor_id:
             queryset = queryset.filter(vendor_id=vendor_id)
+
+        # Canonical cross-department project filter. Legacy procurement project
+        # IDs remain accepted only as an explicit compatibility parameter.
+        enterprise_project_id = self.request.query_params.get('enterprise_project', None)
+        if enterprise_project_id:
+            queryset = queryset.filter(enterprise_project_id=enterprise_project_id)
+        legacy_project_id = self.request.query_params.get('legacy_project', None)
+        if legacy_project_id:
+            queryset = queryset.filter(project_id=legacy_project_id)
         
         search = self.request.query_params.get('search', None)
         if search:

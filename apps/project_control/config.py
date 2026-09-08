@@ -127,6 +127,17 @@ VARIANCE_THRESHOLDS = {
     'amber_max': float(config('PROJECT_CONTROL_VARIANCE_AMBER_MAX', default='10')),
 }
 
+# Portfolio management-by-exception thresholds. Lower CPI/SPI values are worse;
+# forecast overrun percentages and snapshot age values are worse when higher.
+PORTFOLIO_EXCEPTION_THRESHOLDS = {
+    'cpi_critical_below': float(config('PROJECT_CONTROL_CPI_CRITICAL_BELOW', default='0.90')),
+    'cpi_warning_below': float(config('PROJECT_CONTROL_CPI_WARNING_BELOW', default='0.95')),
+    'spi_critical_below': float(config('PROJECT_CONTROL_SPI_CRITICAL_BELOW', default='0.90')),
+    'spi_warning_below': float(config('PROJECT_CONTROL_SPI_WARNING_BELOW', default='0.95')),
+    'forecast_overrun_critical_pct': float(config('PROJECT_CONTROL_EAC_CRITICAL_PCT', default='10')),
+    'snapshot_stale_days': int(config('PROJECT_CONTROL_SNAPSHOT_STALE_DAYS', default='35')),
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Finance sync — how invoices link to projects (Phase 1 best-effort)
 # ─────────────────────────────────────────────────────────────────────────────
