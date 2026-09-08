@@ -52,6 +52,7 @@ class RequisitionConversionService:
         workflow = normalize_ceo_workflow(
             pr.approval_workflow_config,
             pr.po_number_reference,
+            getattr(pr, 'po_applicable', None),
         )
         return [
             {
@@ -122,6 +123,7 @@ class RequisitionConversionService:
         workflow = normalize_ceo_workflow(
             pr.approval_workflow_config,
             pr.po_number_reference,
+            getattr(pr, 'po_applicable', None),
         )
         unresolved_stages = [
             stage.get('role') or stage.get('stage') or f'Stage {index + 1}'

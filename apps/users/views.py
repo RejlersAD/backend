@@ -14,6 +14,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from .serializers import UserProfileSerializer
 
 # New employee management
@@ -815,5 +816,120 @@ class EmployeeProfileViewSet(viewsets.GenericViewSet):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=False, methods=['get', 'post', 'delete'], url_path='my-signature')
+    def my_signature(self, request):
+        """Manage the authenticated user's cropped approval signature."""
+        import base64
+        from io import BytesIO
+
+        from PIL import Image, ImageChops, ImageOps, UnidentifiedImageError
+        from apps.rbac.models import UserProfile
+
+        profile = UserProfile.objects.filter(user=request.user, is_deleted=False).first()
+        if not profile:
+            return Response(
+                {'error': 'User profile not found. Please contact an administrator.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if request.method == 'GET':
+            return Response({
+                'has_signature': bool(profile.signature_image),
+                'signature': profile.signature_image or None,
+                'updated_at': profile.signature_updated_at,
+            })
+
+        if request.method == 'DELETE':
+            profile.signature_image = ''
+            profile.signature_updated_at = None
+            profile.save(update_fields=['signature_image', 'signature_updated_at', 'updated_at'])
+            return Response({'success': True, 'has_signature': False})
+
+        upload = request.FILES.get('signature')
+        if not upload:
+            return Response({'error': 'Choose a signature image to upload.'}, status=status.HTTP_400_BAD_REQUEST)
+        if upload.size > 8 * 1024 * 1024:
+            return Response({'error': 'Signature image must be 8 MB or smaller.'}, status=status.HTTP_400_BAD_REQUEST)
+        if upload.content_type not in ('image/jpeg', 'image/jpg', 'image/png', 'image/webp'):
+            return Response({'error': 'Use a JPEG, PNG, or WebP image.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            source = Image.open(upload)
+            source.verify()
+            upload.seek(0)
+            source = ImageOps.exif_transpose(Image.open(upload)).convert('RGBA')
+            if source.width * source.height > 25_000_000:
+                raise ValueError('Signature image dimensions are too large.')
+
+            # Detect ink against scanned white paper, crop to its bounding box,
+            # then turn the paper into transparency while retaining antialiasing.
+            grayscale = ImageOps.grayscale(source)
+            histogram = grayscale.histogram()
+            percentile_target = source.width * source.height * 0.90
+            cumulative = 0
+            background_level = 255
+            for level, count in enumerate(histogram):
+                cumulative += count
+                if cumulative >= percentile_target:
+                    background_level = level
+                    break
+            ink_threshold = max(80, min(235, background_level - 25))
+            ink_mask = grayscale.point(lambda value: 255 if value < ink_threshold else 0)
+            bbox = ink_mask.getbbox()
+            if not bbox:
+                raise ValueError('No signature ink was detected. Use a clear, high-contrast scan.')
+            left, top, right, bottom = bbox
+            pad = max(8, round(max(right - left, bottom - top) * 0.04))
+            crop_box = (
+                max(0, left - pad), max(0, top - pad),
+                min(source.width, right + pad), min(source.height, bottom + pad),
+            )
+            cropped = source.crop(crop_box)
+            crop_grayscale = ImageOps.grayscale(cropped)
+            transparency_start = max(ink_threshold + 10, background_level - 10)
+            paper_alpha = crop_grayscale.point(
+                lambda value: max(0, min(255, (transparency_start - value) * 5))
+            )
+            cropped.putalpha(ImageChops.multiply(cropped.getchannel('A'), paper_alpha))
+
+            # The first crop deliberately uses a tolerant ink mask so faint
+            # strokes are not lost. Scanner shadows and paper edges can make
+            # that box much larger than the pixels that remain visible after
+            # background removal. Crop once more from the final alpha channel
+            # so the signature fills profile and approval previews.
+            visible_bbox = cropped.getchannel('A').getbbox()
+            if not visible_bbox:
+                raise ValueError('No visible signature remained after removing the paper background.')
+            visible_left, visible_top, visible_right, visible_bottom = visible_bbox
+            visible_pad = max(4, round(max(
+                visible_right - visible_left,
+                visible_bottom - visible_top,
+            ) * 0.04))
+            cropped = cropped.crop((
+                max(0, visible_left - visible_pad),
+                max(0, visible_top - visible_pad),
+                min(cropped.width, visible_right + visible_pad),
+                min(cropped.height, visible_bottom + visible_pad),
+            ))
+
+            cropped.thumbnail((900, 300), Image.Resampling.LANCZOS)
+            output = BytesIO()
+            cropped.save(output, format='PNG', optimize=True)
+            data_url = f"data:image/png;base64,{base64.b64encode(output.getvalue()).decode('ascii')}"
+        except (UnidentifiedImageError, Image.DecompressionBombError, OSError):
+            return Response({'error': 'The uploaded file is not a valid image.'}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        profile.signature_image = data_url
+        profile.signature_updated_at = timezone.now()
+        profile.save(update_fields=['signature_image', 'signature_updated_at', 'updated_at'])
+        return Response({
+            'success': True,
+            'has_signature': True,
+            'signature': data_url,
+            'updated_at': profile.signature_updated_at,
+        })
 
 

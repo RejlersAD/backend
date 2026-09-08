@@ -215,7 +215,7 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
 
         self.assertEqual(result.status, 'submitted')
 
-    def test_po_reference_skips_jarmo_level_five_requirement(self):
+    def test_po_reference_does_not_skip_jarmo_when_po_is_not_applicable(self):
         pr = self._pr()
         pr.po_applicable = False
         pr.po_number_reference = 'RAD-PRJ-PUR-0461_SEP2026'
@@ -232,8 +232,46 @@ class RequisitionWorkflowServiceTests(SimpleTestCase):
         result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
 
         self.assertEqual(result.status, 'submitted')
+        self.assertEqual(len(result.approval_workflow_config), 2)
+        self.assertEqual(result.approval_workflow_config[1]['role'], 'CEO')
+
+    def test_po_applicable_skips_jarmo_even_before_reference_is_entered(self):
+        pr = self._pr()
+        pr.po_applicable = True
+        pr.approval_workflow_config = [
+            {'level': 0, 'role': 'Procurement Department', 'user_id': 'procurement'},
+            {
+                'level': 5,
+                'role': 'General Manager',
+                'user_id': 'jarmo',
+                'user_name': 'Jarmo Suominen',
+            },
+        ]
+
+        result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
+
         self.assertEqual(len(result.approval_workflow_config), 1)
         self.assertEqual(result.approval_workflow_config[0]['role'], 'Procurement Department')
+
+    def test_project_submission_requires_mohamad_as_level_four_default(self):
+        pr = self._pr()
+        pr.requisition_type = 'project'
+        pr.po_applicable = True
+        pr.approval_workflow_config = [
+            {'level': 0, 'role': 'Procurement Department', 'user_id': 'procurement'},
+            {'level': 4, 'role': 'VP Delivery', 'user_id': 'wrong-vp', 'user_name': 'Wrong VP'},
+        ]
+
+        with self.assertRaisesMessage(ValidationError, 'Mohamad El-Ghawanmeh'):
+            RequisitionWorkflowService._submit_locked(pr, self.issuer)
+
+        pr.approval_workflow_config[1].update({
+            'user_id': 'mohamad',
+            'user_name': 'Mohamad El-Ghawanmeh',
+        })
+        result = RequisitionWorkflowService._submit_locked(pr, self.issuer)
+
+        self.assertEqual(result.status, 'submitted')
 
     def test_only_issuer_can_submit(self):
         pr = self._pr()

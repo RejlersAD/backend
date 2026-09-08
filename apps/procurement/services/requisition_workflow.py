@@ -131,6 +131,7 @@ class RequisitionWorkflowService:
         workflow = normalize_ceo_workflow(
             pr.approval_workflow_config,
             pr.po_number_reference,
+            getattr(pr, 'po_applicable', None),
         )
         if not isinstance(workflow, list) or not workflow:
             raise ValidationError({'error': 'A configured approval workflow is required.'})
@@ -399,10 +400,27 @@ class RequisitionWorkflowService:
 
         workflow = cls._workflow(pr)
 
-        if (
-            getattr(pr, 'po_applicable', True) is False
-            and not str(getattr(pr, 'po_number_reference', '') or '').strip()
-        ):
+        if str(getattr(pr, 'requisition_type', '') or '').strip().lower() == 'project':
+            has_mohamad_level_four = any(
+                cls._stage_level(stage, index) == 4
+                and any(
+                    identity in ' '.join(str(stage.get(field) or '').strip().lower() for field in (
+                        'user_name', 'approver', 'user_email', 'approver_email',
+                    ))
+                    for identity in (
+                        'mohamad el-ghawanmeh',
+                        'mohamed el-ghawanmeh',
+                        'moghawanmeh@rejlers.ae',
+                    )
+                )
+                for index, stage in enumerate(workflow)
+            )
+            if not has_mohamad_level_four:
+                raise ValidationError({
+                    'error': 'Project workflows require Mohamad El-Ghawanmeh as the default Level 4 VP Delivery approver.'
+                })
+
+        if getattr(pr, 'po_applicable', True) is False:
             has_level_zero = any(cls._stage_level(stage, index) == 0 for index, stage in enumerate(workflow))
             has_jarmo_level_five = any(
                 cls._stage_level(stage, index) == 5
@@ -412,7 +430,7 @@ class RequisitionWorkflowService:
             )
             if not has_level_zero or not has_jarmo_level_five:
                 raise ValidationError({
-                    'error': 'When no PO Reference is provided, the workflow requires Level 0 Procurement and Level 5 Jarmo Suominen (CEO).'
+                    'error': 'When PO is not applicable, the workflow requires Level 0 Procurement and Level 5 Jarmo Suominen (CEO).'
                 })
 
         # Pass 1: Validate all stages before mutating memory
@@ -447,12 +465,12 @@ class RequisitionWorkflowService:
 
     @classmethod
     @transaction.atomic
-    def approve(cls, pr_id, actor, signature='', expected_stage_key=None):
+    def approve(cls, pr_id, actor, signature='', expected_stage_key=None, require_signature=False):
         pr = get_object_or_404(PurchaseRequisition.objects.select_for_update(), pk=pr_id)
-        return cls._approve_locked(pr, actor, signature, expected_stage_key)
+        return cls._approve_locked(pr, actor, signature, expected_stage_key, require_signature)
 
     @classmethod
-    def _approve_locked(cls, pr, actor, signature='', expected_stage_key=None):
+    def _approve_locked(cls, pr, actor, signature='', expected_stage_key=None, require_signature=False):
         workflow = cls._workflow(pr)
         current_status = canonicalize_pr_status(pr.status)
         evidence_recovery = current_status == 'converted' and any(
@@ -462,11 +480,19 @@ class RequisitionWorkflowService:
         )
         if current_status not in cls.ACTIVE_REVIEW_STATUSES and not evidence_recovery:
             raise ValidationError({'error': 'This requisition is not awaiting approval.'})
-        if len(signature or '') > 500:
-            raise ValidationError({'error': 'Signature cannot exceed 500 characters.'})
-
         active_level, active_stages = cls._active_level_stages(pr, workflow)
         current_index, stage = cls._actor_stage(active_stages, actor, expected_stage_key)
+
+        # Empty signatures from older clients now resolve to the approver's
+        # saved profile signature. Copying the data URL creates an immutable
+        # snapshot: later profile changes do not rewrite past approvals.
+        if not signature:
+            profile = getattr(actor, 'rbac_profile', None)
+            signature = getattr(profile, 'signature_image', '') if profile else ''
+        if require_signature and not signature:
+            raise ValidationError({
+                'error': 'Add your signature in Profile > My Signature before approving.'
+            })
 
         approved_at = timezone.now()
         actor_name = employee_display_name(actor)
@@ -474,6 +500,7 @@ class RequisitionWorkflowService:
         stage['approved_at'] = approved_at.isoformat()
         stage['approved_by_id'] = str(actor.id)
         stage['approved_by_name'] = actor_name
+        stage['signature'] = signature
         cls._mirror_fixed_approval(pr, stage, actor, signature or '', approved_at)
 
         remaining_current_level = [

@@ -552,8 +552,13 @@ class EmployeeService:
         
         # Keep the legacy User avatar reference aligned without storing a URL
         # in an ImageField. The binary itself still has one storage location.
-        employee.user.avatar.name = storage_key
-        employee.user.save(update_fields=['avatar'])
+        # Historical/imported EmployeeMaster rows may intentionally have no
+        # login account. The employee photo is still valid and is resolved via
+        # UserProfile.canonical_employee, so legacy avatar synchronization must
+        # not turn an otherwise successful upload into a 500 response.
+        if employee.user_id:
+            employee.user.avatar.name = storage_key
+            employee.user.save(update_fields=['avatar'])
         
         logger.info(f"Photo uploaded successfully for {employee.employee_number}")
         
