@@ -6,6 +6,8 @@ from django.utils import timezone
 
 from apps.core.project_models import Project
 from apps.finance.models import Invoice, InvoiceMatchStatus, InvoicePurchaseOrderAllocation
+from apps.planning_intelligence.models import PlanningProject
+from apps.planning_intelligence.schedule_models import Schedule, ScheduleControlSnapshot, ScheduleVersion
 from apps.procurement.models import PurchaseOrder, Vendor
 from apps.users.models import User
 
@@ -103,6 +105,33 @@ class ActualsAndSnapshotTests(TestCase):
         with self.assertRaisesMessage(ValueError, 'immutable'):
             snapshot.save()
         self.assertEqual(IntegratedReportingSnapshot.objects.get(pk=snapshot.pk).actual_cost, Decimal('0'))
+
+    def test_snapshot_uses_approved_schedule_for_planned_progress(self):
+        workspace = PlanningProject.objects.create(
+            enterprise_project=self.project, name='Integrated planning workspace', created_by=self.owner,
+        )
+        schedule = Schedule.objects.create(
+            project=workspace, name='Master Schedule', code='MASTER', status='active',
+            planned_start=date(2026, 1, 1), data_date=date(2026, 1, 31), created_by=self.owner,
+        )
+        version = ScheduleVersion.objects.create(
+            schedule=schedule, version=1, status='approved', created_by=self.owner,
+        )
+        schedule_control = ScheduleControlSnapshot.objects.create(
+            version=version, data_date=date(2026, 1, 31), bac=Decimal('1000'),
+            planned_value=Decimal('370'), earned_value=Decimal('400'), actual_cost=Decimal('0'),
+            progress_pct=Decimal('40'), planned_progress_pct=Decimal('37'), captured_by=self.owner,
+        )
+        reconcile_reporting_period(self.period, user=self.approver)
+        self.period.status = 'submitted'
+        self.period.submitted_by = self.owner
+        self.period.save(update_fields=['status', 'submitted_by', 'updated_at'])
+
+        snapshot = create_integrated_snapshot(self.period, user=self.approver)
+
+        self.assertEqual(snapshot.planned_progress_pct, Decimal('37'))
+        self.assertEqual(snapshot.planned_value, Decimal('370'))
+        self.assertEqual(snapshot.source_manifest['schedule_control_snapshot_id'], schedule_control.pk)
 
     def test_unallocated_verified_actual_blocks_clean_reconciliation(self):
         vendor = Vendor.objects.create(vendor_code='UNMAP-VENDOR', name='Unmapped Vendor', status='active')

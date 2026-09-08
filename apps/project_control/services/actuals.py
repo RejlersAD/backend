@@ -177,7 +177,14 @@ def create_integrated_snapshot(period, *, user=None):
             project=period.project, wbs_node=account.wbs_node,
             status='approved', is_deleted=False,
         ).aggregate(total=Sum('amount'))['total'])
-        planned_pct = _planned_progress(account, period.data_date)
+        # Once an approved schedule-control snapshot exists it is the governed
+        # source for planned progress.  The control-account date curve remains
+        # an explicit fallback for projects that have not integrated Planning
+        # Intelligence yet.
+        planned_pct = (
+            _d(schedule_snapshot.planned_progress_pct)
+            if schedule_snapshot else _planned_progress(account, period.data_date)
+        )
         bac += budget
         pv += budget * planned_pct / Decimal('100')
         account_payload.append({
