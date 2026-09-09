@@ -5,7 +5,10 @@ DRF serializers for Sales Management API
 
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Client, Contact, Deal, Quote, SalesActivity, SalesForecast
+from .models import (
+    Client, Contact, Deal, FrameworkAgreement, OpportunityAuditEvent,
+    ProjectHandover, Quote, SalesActivity, SalesForecast,
+)
 
 User = get_user_model()
 
@@ -55,6 +58,8 @@ class ClientListSerializer(serializers.ModelSerializer):
             'status', 'account_manager', 'account_manager_name', 'health_score',
             'churn_risk', 'lifetime_value', 'last_contact_date', 'created_at',
             'primary_contact', 'active_deals_count', 'total_deal_value', 'tags'
+            , 'legal_name', 'trading_name', 'parent_client', 'country',
+            'market_sectors', 'verification_status', 'new_proposals_permitted'
         ]
         read_only_fields = ['id', 'created_at', 'health_score']
     
@@ -63,11 +68,11 @@ class ClientListSerializer(serializers.ModelSerializer):
         return contact.full_name if contact else None
     
     def get_active_deals_count(self, obj):
-        return obj.deals.exclude(stage__in=['closed_won', 'closed_lost']).count()
+        return obj.deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).count()
     
     def get_total_deal_value(self, obj):
         from django.db.models import Sum
-        total = obj.deals.exclude(stage='closed_lost').aggregate(Sum('estimated_value'))
+        total = obj.deals.exclude(stage__in=['lost', 'no_bid', 'cancelled']).aggregate(Sum('estimated_value'))
         return total['estimated_value__sum'] or 0
 
 
@@ -92,11 +97,11 @@ class ClientDetailSerializer(serializers.ModelSerializer):
         deals = obj.deals.all()
         return {
             'total_count': deals.count(),
-            'active_count': deals.exclude(stage__in=['closed_won', 'closed_lost']).count(),
-            'won_count': deals.filter(stage='closed_won').count(),
-            'lost_count': deals.filter(stage='closed_lost').count(),
+            'active_count': deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).count(),
+            'won_count': deals.filter(stage__in=['awarded', 'converted']).count(),
+            'lost_count': deals.filter(stage='lost').count(),
             'total_value': deals.aggregate(Sum('estimated_value'))['estimated_value__sum'] or 0,
-            'pipeline_value': deals.exclude(stage__in=['closed_won', 'closed_lost']).aggregate(Sum('weighted_value'))['weighted_value__sum'] or 0,
+            'pipeline_value': deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).aggregate(Sum('weighted_value'))['weighted_value__sum'] or 0,
         }
 
 
@@ -106,6 +111,17 @@ class ClientCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Client
         exclude = ['health_score', 'churn_risk', 'lifetime_value', 'created_at', 'updated_at']
+        extra_kwargs = {'client_code': {'required': False}}
+
+    def validate(self, attrs):
+        company_name = attrs.get('company_name', getattr(self.instance, 'company_name', '')).strip()
+        legal_name = attrs.get('legal_name', getattr(self.instance, 'legal_name', '')).strip()
+        candidates = Client.objects.exclude(pk=getattr(self.instance, 'pk', None))
+        if candidates.filter(company_name__iexact=company_name).exists():
+            raise serializers.ValidationError({'company_name': 'A possible duplicate client already exists.'})
+        if legal_name and candidates.filter(legal_name__iexact=legal_name).exists():
+            raise serializers.ValidationError({'legal_name': 'A client with this legal identity already exists.'})
+        return attrs
     
     def create(self, validated_data):
         # Auto-generate client code if not provided
@@ -115,6 +131,29 @@ class ClientCreateSerializer(serializers.ModelSerializer):
             validated_data['client_code'] = f"CLT-{prefix}-{get_random_string(6, '0123456789')}"
         
         return super().create(validated_data)
+
+
+class FrameworkAgreementSerializer(serializers.ModelSerializer):
+    client_name = serializers.CharField(source='client.company_name', read_only=True)
+    owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
+    remaining_value = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
+    is_eligible = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = FrameworkAgreement
+        fields = '__all__'
+        read_only_fields = ['id', 'approved_by', 'approved_at', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        effective = attrs.get('effective_date', getattr(self.instance, 'effective_date', None))
+        expiry = attrs.get('expiry_date', getattr(self.instance, 'expiry_date', None))
+        if effective and expiry and expiry < effective:
+            raise serializers.ValidationError({'expiry_date': 'Expiry must be after the effective date.'})
+        ceiling = attrs.get('ceiling_value', getattr(self.instance, 'ceiling_value', None))
+        committed = attrs.get('committed_value', getattr(self.instance, 'committed_value', 0))
+        if ceiling is not None and committed > ceiling:
+            raise serializers.ValidationError({'committed_value': 'Committed value cannot exceed the framework ceiling.'})
+        return attrs
 
 
 # ==============================================================================
@@ -127,6 +166,7 @@ class DealListSerializer(serializers.ModelSerializer):
     owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
     stage_display = serializers.SerializerMethodField()
     days_in_stage = serializers.SerializerMethodField()
+    framework_number = serializers.CharField(source='framework.framework_number', read_only=True)
     
     class Meta:
         model = Deal
@@ -134,7 +174,13 @@ class DealListSerializer(serializers.ModelSerializer):
             'id', 'deal_code', 'deal_name', 'client', 'client_name', 'stage',
             'stage_display', 'probability', 'priority', 'estimated_value',
             'weighted_value', 'currency', 'expected_close_date', 'owner',
-            'owner_name', 'ai_win_probability', 'created_at', 'days_in_stage'
+            'owner_name', 'ai_win_probability', 'created_at', 'days_in_stage',
+            'scope_type', 'location', 'client_reference', 'submission_due_date',
+            'next_action_date', 'bid_decision', 'award_status', 'award_value',
+            'converted_project', 'stage_entered_at',
+            'framework', 'framework_number', 'client_contact', 'disciplines',
+            'estimated_hours', 'delivery_office', 'opportunity_source',
+            'next_action', 'risk_level',
         ]
         read_only_fields = ['id', 'weighted_value', 'created_at']
     
@@ -144,7 +190,20 @@ class DealListSerializer(serializers.ModelSerializer):
     
     def get_days_in_stage(self, obj):
         from django.utils import timezone
-        return (timezone.now().date() - obj.updated_at.date()).days
+        entered = obj.stage_entered_at or obj.updated_at
+        return (timezone.now().date() - entered.date()).days
+
+
+class OpportunityAuditEventSerializer(serializers.ModelSerializer):
+    actor_name = serializers.CharField(source='actor.get_full_name', read_only=True)
+
+    class Meta:
+        model = OpportunityAuditEvent
+        fields = [
+            'id', 'event_type', 'from_stage', 'to_stage', 'reason', 'data',
+            'actor', 'actor_name', 'occurred_at',
+        ]
+        read_only_fields = fields
 
 
 class DealDetailSerializer(serializers.ModelSerializer):
@@ -155,6 +214,7 @@ class DealDetailSerializer(serializers.ModelSerializer):
     quotes = serializers.SerializerMethodField()
     activities = serializers.SerializerMethodField()
     stage_history = serializers.SerializerMethodField()
+    permitted_actions = serializers.SerializerMethodField()
     
     class Meta:
         model = Deal
@@ -170,8 +230,21 @@ class DealDetailSerializer(serializers.ModelSerializer):
         return SalesActivityListSerializer(activities, many=True).data
     
     def get_stage_history(self, obj):
-        # This would track stage changes - implement with signals or audit log
-        return []
+        return OpportunityAuditEventSerializer(obj.audit_events.all()[:100], many=True).data
+
+    def get_permitted_actions(self, obj):
+        actions = {
+            'lead': ['submit_qualification'],
+            'qualified': ['bid_decision'],
+            'proposal': ['enter_negotiation'],
+            'negotiation': ['submit_award'],
+            'award_pending': ['approve_award', 'reject_award'],
+            'awarded': ['convert_to_project'],
+        }
+        permitted = actions.get(obj.stage, [])
+        if obj.stage not in {'awarded', 'converted', 'lost', 'no_bid', 'cancelled'}:
+            permitted = [*permitted, 'close']
+        return permitted
 
 
 class DealCreateSerializer(serializers.ModelSerializer):
@@ -180,6 +253,23 @@ class DealCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Deal
         exclude = ['weighted_value', 'ai_win_probability', 'ai_recommended_actions', 'created_at', 'updated_at']
+        extra_kwargs = {'deal_code': {'required': False}}
+        read_only_fields = [
+            'stage', 'stage_entered_at', 'bid_decision', 'bid_decision_reason',
+            'bid_decided_by', 'bid_decided_at', 'award_status', 'award_submitted_by',
+            'award_submitted_at', 'award_approved_by', 'award_approved_at',
+            'award_rejection_reason', 'converted_project', 'converted_by',
+            'converted_at', 'actual_close_date',
+        ]
+
+    def validate(self, attrs):
+        framework = attrs.get('framework', getattr(self.instance, 'framework', None))
+        client = attrs.get('client', getattr(self.instance, 'client', None))
+        if framework and framework.client_id != getattr(client, 'id', None):
+            raise serializers.ValidationError({
+                'framework': 'The framework must belong to the selected client.',
+            })
+        return attrs
     
     def create(self, validated_data):
         # Auto-generate deal code if not provided
@@ -217,6 +307,8 @@ class QuoteListSerializer(serializers.ModelSerializer):
             'client_name', 'status', 'total_amount', 'currency', 'issue_date',
             'valid_until', 'prepared_by', 'prepared_by_name', 'created_at',
             'days_until_expiry'
+            , 'estimated_cost', 'expected_margin_percent', 'approved_by',
+            'approved_at', 'submitted_version_hash', 'submission_recipient'
         ]
         read_only_fields = ['id', 'created_at']
     
@@ -238,6 +330,41 @@ class QuoteDetailSerializer(serializers.ModelSerializer):
         model = Quote
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        deal = attrs.get('deal', getattr(self.instance, 'deal', None))
+        client = attrs.get('client', getattr(self.instance, 'client', None))
+        if deal and client and deal.client_id != client.id:
+            raise serializers.ValidationError({
+                'client': 'Proposal client must match its opportunity.',
+            })
+        if not self.instance and deal and deal.stage != 'proposal':
+            raise serializers.ValidationError({
+                'deal': 'A proposal can only be created after an approved bid decision.',
+            })
+        if client and (client.status != 'active' or not client.new_proposals_permitted):
+            raise serializers.ValidationError({
+                'client': 'This client is not currently permitted for new proposals.',
+            })
+        return attrs
+
+
+class ProjectHandoverSerializer(serializers.ModelSerializer):
+    opportunity_code = serializers.CharField(source='opportunity.deal_code', read_only=True)
+    opportunity_name = serializers.CharField(source='opportunity.deal_name', read_only=True)
+    client_name = serializers.CharField(source='opportunity.client.company_name', read_only=True)
+    proposal_number = serializers.CharField(source='proposal.quote_number', read_only=True)
+    owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
+    project_manager_name = serializers.CharField(source='project_manager.get_full_name', read_only=True)
+    accepted_by_name = serializers.CharField(source='accepted_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = ProjectHandover
+        fields = '__all__'
+        read_only_fields = [
+            'id', 'opportunity', 'proposal', 'owner', 'contract_value', 'currency',
+            'accepted_by', 'accepted_at', 'project', 'created_at', 'updated_at',
+        ]
 
 
 # ==============================================================================
@@ -295,6 +422,12 @@ class SalesForecastSerializer(serializers.ModelSerializer):
         if obj.actual_revenue and obj.predicted_revenue:
             return float(obj.actual_revenue - obj.predicted_revenue)
         return None
+
+    def validate_manual_adjustments(self, value):
+        invalid = [index for index, item in enumerate(value) if not item.get('reason')]
+        if invalid:
+            raise serializers.ValidationError('Every manual adjustment requires a reason.')
+        return value
 
 
 # ==============================================================================

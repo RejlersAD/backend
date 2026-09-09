@@ -5,8 +5,9 @@ Sales App URL Configuration
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    ClientViewSet, ContactViewSet, DealViewSet, QuoteViewSet,
-    SalesActivityViewSet, SalesForecastViewSet, SalesDashboardViewSet
+    ClientViewSet, ContactViewSet, DealViewSet, FrameworkAgreementViewSet,
+    ProjectHandoverViewSet, QuoteViewSet, SalesActivityViewSet,
+    SalesForecastViewSet, SalesDashboardViewSet,
 )
 from .analytics_views import (
     SalesPipelineAnalyticsView,
@@ -21,6 +22,8 @@ router.register(r'clients', ClientViewSet, basename='client')
 router.register(r'contacts', ContactViewSet, basename='contact')
 router.register(r'deals', DealViewSet, basename='deal')
 router.register(r'quotes', QuoteViewSet, basename='quote')
+router.register(r'frameworks', FrameworkAgreementViewSet, basename='framework')
+router.register(r'project-handovers', ProjectHandoverViewSet, basename='project-handover')
 router.register(r'activities', SalesActivityViewSet, basename='sales-activity')
 router.register(r'forecasts', SalesForecastViewSet, basename='sales-forecast')
 router.register(r'dashboard', SalesDashboardViewSet, basename='sales-dashboard')

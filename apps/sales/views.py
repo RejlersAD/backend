@@ -16,16 +16,24 @@ from django_filters.rest_framework import DjangoFilterBackend
 from datetime import timedelta
 from decimal import Decimal
 
-from .models import Client, Contact, Deal, Quote, SalesActivity, SalesForecast
+from .models import (
+    Client, Contact, Deal, FrameworkAgreement, ProjectHandover, Quote,
+    SalesActivity, SalesForecast,
+)
 from .serializers import (
     ClientListSerializer, ClientDetailSerializer, ClientCreateSerializer,
     ContactSerializer, DealListSerializer, DealDetailSerializer, DealCreateSerializer,
     QuoteListSerializer, QuoteDetailSerializer, SalesActivityListSerializer,
     SalesActivityDetailSerializer, SalesForecastSerializer, SalesDashboardSerializer,
-    AIInsightSerializer
+    AIInsightSerializer, FrameworkAgreementSerializer, ProjectHandoverSerializer,
 )
 from .ai_service import SalesAIService
 from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
+from .workflow import (
+    close_opportunity, convert_to_project, decide_award, enter_negotiation, record_bid_decision,
+    decide_handover, submit_award, submit_handover_for_acceptance,
+    submit_qualification,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -193,6 +201,42 @@ class ContactViewSet(viewsets.ModelViewSet):
         })
 
 
+class FrameworkAgreementViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
+    """Client framework terms, eligibility, rate versions, and value control."""
+
+    visibility_module_code = 'sales'
+    visibility_owner_field = 'owner'
+    queryset = FrameworkAgreement.objects.select_related('client', 'owner', 'approved_by')
+    serializer_class = FrameworkAgreementSerializer
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['status', 'client', 'owner', 'currency']
+    search_fields = ['framework_number', 'title', 'client__company_name']
+    ordering_fields = ['effective_date', 'expiry_date', 'ceiling_value', 'created_at']
+
+    def perform_create(self, serializer):
+        serializer.save(owner=serializer.validated_data.get('owner') or self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def activate(self, request, pk=None):
+        framework = self.get_object()
+        if framework.owner_id == request.user.id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'approver': 'The framework owner cannot approve their own agreement.'})
+        if not framework.signed_document:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'signed_document': 'A signed agreement is required before activation.'})
+        if not framework.effective_date <= timezone.now().date() <= framework.expiry_date:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'validity': 'The framework is outside its effective dates.'})
+        framework.status = 'active'
+        framework.approved_by = request.user
+        framework.approved_at = timezone.now()
+        framework.save(update_fields=['status', 'approved_by', 'approved_at', 'updated_at'])
+        return Response(self.get_serializer(framework).data)
+
+
 # ==============================================================================
 # SALES PIPELINE VIEWSETS
 # ==============================================================================
@@ -236,6 +280,89 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
             serializer.save(owner=self.request.user)
         else:
             serializer.save()
+
+    @action(detail=True, methods=['post'])
+    def verify(self, request, pk=None):
+        client = self.get_object()
+        client.verification_status = 'verified'
+        client.verified_by = request.user
+        client.verified_at = timezone.now()
+        client.save(update_fields=['verification_status', 'verified_by', 'verified_at', 'updated_at'])
+        return Response(ClientDetailSerializer(client).data)
+
+    def _detail_response(self, deal, **extra):
+        return Response({'success': True, 'opportunity': DealDetailSerializer(deal).data, **extra})
+
+    @action(detail=True, methods=['post'], url_path='submit-qualification')
+    def submit_qualification(self, request, pk=None):
+        return self._detail_response(submit_qualification(self.get_object(), request.user))
+
+    @action(detail=True, methods=['post'], url_path='bid-decision')
+    def bid_decision(self, request, pk=None):
+        deal = record_bid_decision(
+            self.get_object(), request.user,
+            request.data.get('decision'), request.data.get('reason', ''),
+        )
+        return self._detail_response(deal)
+
+    @action(detail=True, methods=['post'])
+    def close(self, request, pk=None):
+        deal = close_opportunity(
+            self.get_object(), request.user,
+            outcome=request.data.get('outcome'), reason=request.data.get('reason', ''),
+        )
+        return self._detail_response(deal)
+
+    @action(detail=True, methods=['post'], url_path='enter-negotiation')
+    def enter_negotiation(self, request, pk=None):
+        return self._detail_response(enter_negotiation(
+            self.get_object(), request.user, request.data.get('reason', ''),
+        ))
+
+    @action(detail=True, methods=['post'], url_path='submit-award')
+    def submit_award(self, request, pk=None):
+        try:
+            award_value = Decimal(str(request.data.get('award_value')))
+        except Exception as exc:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'award_value': 'Enter a valid award value.'}) from exc
+        deal = submit_award(
+            self.get_object(), request.user,
+            reference=request.data.get('award_reference'),
+            award_date=request.data.get('award_date'),
+            award_value=award_value,
+            handover_data=request.data.get('handover_data'),
+        )
+        return self._detail_response(deal)
+
+    @action(detail=True, methods=['post'], url_path='approve-award')
+    def approve_award(self, request, pk=None):
+        return self._detail_response(decide_award(
+            self.get_object(), request.user, approved=True, reason=request.data.get('reason', ''),
+        ))
+
+    @action(detail=True, methods=['post'], url_path='reject-award')
+    def reject_award(self, request, pk=None):
+        return self._detail_response(decide_award(
+            self.get_object(), request.user, approved=False, reason=request.data.get('reason', ''),
+        ))
+
+    @action(detail=True, methods=['post'], url_path='convert-to-project')
+    def convert_to_project(self, request, pk=None):
+        deal, project, created = convert_to_project(
+            self.get_object().pk, request.user,
+            project_code=request.data.get('project_code'),
+            project_name=request.data.get('project_name'),
+        )
+        return self._detail_response(deal, project={
+            'id': project.id, 'code': project.code, 'name': project.name,
+        }, created=created)
+
+    @action(detail=True, methods=['get'], url_path='audit-events')
+    def audit_events(self, request, pk=None):
+        from .serializers import OpportunityAuditEventSerializer
+        deal = self.get_object()
+        return Response(OpportunityAuditEventSerializer(deal.audit_events.all(), many=True).data)
     
     @action(detail=True, methods=['post'])
     def calculate_win_probability(self, request, pk=None):
@@ -300,7 +427,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         """
         Get pipeline summary by stage
         """
-        pipeline = self.get_queryset().exclude(stage__in=['closed_won', 'closed_lost'])
+        pipeline = self.get_queryset().filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending'])
         
         summary = {
             'total_deals': pipeline.count(),
@@ -313,7 +440,7 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         # Group by stage
         from .models import DEAL_STAGES
         for stage_key, stage_info in DEAL_STAGES.items():
-            if stage_key not in ['closed_won', 'closed_lost']:
+            if stage_key in ['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']:
                 stage_deals = pipeline.filter(stage=stage_key)
                 summary['by_stage'][stage_key] = {
                     'name': stage_info['name'],
@@ -341,6 +468,13 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
         """
         Move deal to different stage
         """
+        return Response({
+            'success': False,
+            'error': 'Direct stage movement is disabled. Use the governed lifecycle command for the current stage.',
+        }, status=status.HTTP_409_CONFLICT)
+
+        # Legacy implementation retained below temporarily for migration
+        # compatibility; it is unreachable by design.
         deal_id = request.data.get('deal_id')
         new_stage = request.data.get('stage')
         
@@ -395,13 +529,58 @@ class QuoteViewSet(viewsets.ModelViewSet):
     search_fields = ['quote_number', 'client__company_name', 'deal__deal_name']
     
     def get_serializer_class(self):
-        if self.action == 'retrieve':
+        if self.action in ['retrieve', 'create', 'update', 'partial_update']:
             return QuoteDetailSerializer
         return QuoteListSerializer
     
     def perform_create(self, serializer):
         """Set prepared_by to current user"""
         serializer.save(prepared_by=self.request.user)
+
+    def update(self, request, *args, **kwargs):
+        if self.get_object().status in {'submitted', 'sent', 'viewed', 'won', 'lost'}:
+            return Response(
+                {'detail': 'Submitted proposal versions are immutable. Create a new revision.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if self.get_object().status not in {'draft', 'cancelled'}:
+            return Response(
+                {'detail': 'Only draft or cancelled proposal versions may be deleted.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        from rest_framework.exceptions import ValidationError
+        quote = self.get_object()
+        if quote.prepared_by_id == request.user.id:
+            raise ValidationError({'approver': 'The proposal preparer cannot approve their own version.'})
+        missing = [name for name, value in [
+            ('scope', quote.scope), ('deliverables', quote.deliverables),
+            ('estimated_hours', quote.estimated_hours), ('valid_until', quote.valid_until),
+        ] if not value]
+        if missing:
+            raise ValidationError({'missing_fields': missing})
+        if quote.total_amount <= 0:
+            raise ValidationError({'total_amount': 'Proposed price must be greater than zero.'})
+        quote.expected_margin_percent = (
+            (quote.total_amount - quote.estimated_cost) / quote.total_amount * 100
+        )
+        quote.approved_by = request.user
+        quote.approved_at = timezone.now()
+        quote.status = 'ready_to_submit'
+        history = list(quote.approval_history)
+        history.append({
+            'decision': 'approved', 'actor_id': str(request.user.id),
+            'at': quote.approved_at.isoformat(), 'comment': request.data.get('comment', ''),
+        })
+        quote.approval_history = history
+        quote.save()
+        return Response(QuoteDetailSerializer(quote).data)
     
     @action(detail=True, methods=['post'])
     def send_to_client(self, request, pk=None):
@@ -409,9 +588,28 @@ class QuoteViewSet(viewsets.ModelViewSet):
         Mark quote as sent to client
         """
         quote = self.get_object()
-        quote.status = 'sent'
+        from rest_framework.exceptions import ValidationError
+        if quote.status == 'submitted':
+            raise ValidationError({'submission': 'This exact proposal version has already been submitted.'})
+        if quote.status != 'ready_to_submit' or not quote.approved_at:
+            raise ValidationError({'approval': 'Only an approved proposal version can be submitted.'})
+        recipient = request.data.get('recipient', '').strip()
+        if not recipient:
+            raise ValidationError({'recipient': 'The submission recipient is required.'})
+        import hashlib
+        fingerprint = '|'.join([
+            str(quote.id), str(quote.version), str(quote.total_amount),
+            quote.currency, quote.approved_at.isoformat(),
+        ])
+        quote.submitted_version_hash = hashlib.sha256(fingerprint.encode()).hexdigest()
+        quote.submission_recipient = recipient
+        quote.submission_evidence = request.data.get('evidence', '')
+        quote.status = 'submitted'
         quote.sent_date = timezone.now()
-        quote.save()
+        quote.save(update_fields=[
+            'submitted_version_hash', 'submission_recipient', 'submission_evidence',
+            'status', 'sent_date', 'updated_at',
+        ])
         
         # Log activity
         SalesActivity.objects.create(
@@ -446,6 +644,60 @@ class QuoteViewSet(viewsets.ModelViewSet):
             'quote_id': str(quote.id),
             'viewed_date': quote.viewed_date
         })
+
+
+class ProjectHandoverViewSet(viewsets.ModelViewSet):
+    """Formal delivery acceptance queue; records are initiated by approved awards."""
+
+    queryset = ProjectHandover.objects.select_related(
+        'opportunity__client', 'proposal', 'owner', 'project_manager', 'accepted_by', 'project',
+    )
+    serializer_class = ProjectHandoverSerializer
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['status', 'owner', 'project_manager']
+    search_fields = [
+        'opportunity__deal_code', 'opportunity__deal_name',
+        'opportunity__client__company_name', 'signed_contract_reference',
+    ]
+    ordering_fields = ['created_at', 'updated_at', 'contract_value']
+    http_method_names = ['get', 'patch', 'post', 'head', 'options']
+
+    def create(self, request, *args, **kwargs):
+        return Response(
+            {'detail': 'Handovers are initiated automatically from independently approved awards.'},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
+    def update(self, request, *args, **kwargs):
+        if self.get_object().status in {'accepted', 'project_created', 'closed'}:
+            return Response(
+                {'detail': 'Accepted handover records are immutable.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().update(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'], url_path='submit-for-acceptance')
+    def submit_for_acceptance(self, request, pk=None):
+        handover = submit_handover_for_acceptance(self.get_object(), request.user)
+        return Response(self.get_serializer(handover).data)
+
+    @action(detail=True, methods=['post'])
+    def accept(self, request, pk=None):
+        handover = decide_handover(
+            self.get_object(), request.user, accepted=True,
+            comment=request.data.get('comment', ''),
+        )
+        return Response(self.get_serializer(handover).data)
+
+    @action(detail=True, methods=['post'])
+    def return_for_correction(self, request, pk=None):
+        handover = decide_handover(
+            self.get_object(), request.user, accepted=False,
+            comment=request.data.get('reason', ''),
+        )
+        return Response(self.get_serializer(handover).data)
 
 
 class SalesActivityViewSet(viewsets.ModelViewSet):
@@ -531,6 +783,29 @@ class SalesForecastViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, HasModuleAccess]
     module_required = 'sales'
     ordering = ['-forecast_date']
+
+    def update(self, request, *args, **kwargs):
+        if self.get_object().status in {'approved', 'superseded'}:
+            return Response(
+                {'detail': 'Approved forecast snapshots are immutable.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().update(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        forecast = self.get_object()
+        if forecast.generated_by_id == request.user.id:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'approver': 'The forecast preparer cannot approve their own snapshot.'})
+        SalesForecast.objects.filter(
+            forecast_period=forecast.forecast_period, status='approved',
+        ).exclude(pk=forecast.pk).update(status='superseded')
+        forecast.status = 'approved'
+        forecast.approved_by = request.user
+        forecast.approved_at = timezone.now()
+        forecast.save(update_fields=['status', 'approved_by', 'approved_at', 'updated_at'])
+        return Response(self.get_serializer(forecast).data)
     
     @action(detail=False, methods=['post'])
     def generate_forecast(self, request):
@@ -641,16 +916,16 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         # Deal metrics
         deals = Deal.objects.all()
         total_deals = deals.count()
-        active_deals = deals.exclude(stage__in=['closed_won', 'closed_lost']).count()
+        active_deals = deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).count()
         
         # Pipeline value
-        pipeline_value = deals.exclude(stage__in=['closed_won', 'closed_lost']).aggregate(
+        pipeline_value = deals.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).aggregate(
             Sum('weighted_value')
         )['weighted_value__sum'] or Decimal('0')
         
         # Won deals this month
         won_mtd = deals.filter(
-            stage='closed_won',
+            stage__in=['awarded', 'converted'],
             actual_close_date__gte=start_of_month
         ).aggregate(Sum('actual_value'))['actual_value__sum'] or Decimal('0')
         
@@ -658,13 +933,13 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         avg_deal_size = deals.aggregate(Avg('estimated_value'))['estimated_value__avg'] or Decimal('0')
         
         # Win rate
-        closed_deals = deals.filter(stage__in=['closed_won', 'closed_lost'])
-        won_deals = closed_deals.filter(stage='closed_won').count()
+        closed_deals = deals.filter(stage__in=['awarded', 'converted', 'lost'])
+        won_deals = closed_deals.filter(stage__in=['awarded', 'converted']).count()
         win_rate = (won_deals / closed_deals.count() * 100) if closed_deals.count() > 0 else 0
         
         # Average sales cycle
         won_with_dates = deals.filter(
-            stage='closed_won',
+            stage__in=['awarded', 'converted'],
             actual_close_date__isnull=False
         )
         if won_with_dates.exists():
@@ -680,7 +955,7 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         top_clients = clients.order_by('-lifetime_value')[:5]
         
         # Top deals
-        top_deals = deals.exclude(stage='closed_lost').order_by('-weighted_value')[:5]
+        top_deals = deals.exclude(stage__in=['lost', 'no_bid', 'cancelled']).order_by('-weighted_value')[:5]
         
         # Recent activities
         recent_activities = SalesActivity.objects.order_by('-activity_date')[:10]
@@ -699,7 +974,7 @@ class SalesDashboardViewSet(viewsets.ViewSet):
             industry = client.get_industry_type_display()
             client_pipeline = deals.filter(
                 client=client
-            ).exclude(stage='closed_lost').aggregate(
+            ).exclude(stage__in=['lost', 'no_bid', 'cancelled']).aggregate(
                 Sum('weighted_value')
             )['weighted_value__sum'] or Decimal('0')
             revenue_by_industry[industry] = revenue_by_industry.get(industry, 0) + float(client_pipeline)
@@ -761,7 +1036,7 @@ class SalesDashboardViewSet(viewsets.ViewSet):
             })
         
         # Insight 2: Stagnant deals
-        stagnant_deals = Deal.objects.exclude(stage__in=['closed_won', 'closed_lost']).filter(
+        stagnant_deals = Deal.objects.filter(stage__in=['lead', 'qualified', 'proposal', 'negotiation', 'award_pending']).filter(
             updated_at__lt=timezone.now() - timedelta(days=30)
         ).count()
         
@@ -793,12 +1068,12 @@ class SalesDashboardViewSet(viewsets.ViewSet):
         
         # Insight 4: Win rate trend
         recent_closed = Deal.objects.filter(
-            stage__in=['closed_won', 'closed_lost'],
+            stage__in=['awarded', 'converted', 'lost'],
             actual_close_date__gte=timezone.now().date() - timedelta(days=90)
         )
         
         if recent_closed.count() > 5:
-            win_rate = recent_closed.filter(stage='closed_won').count() / recent_closed.count() * 100
+            win_rate = recent_closed.filter(stage__in=['awarded', 'converted']).count() / recent_closed.count() * 100
             
             if win_rate < 30:
                 severity = 'high'
