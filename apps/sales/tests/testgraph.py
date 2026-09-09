@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
+from rest_framework.test import APIClient
 
 from apps.sales.microsoft_graph import SalesMicrosoftGraphService
 from apps.sales.models import SalesMailboxConnection
@@ -114,3 +115,56 @@ class SalesMicrosoftGraphServiceTests(TestCase):
         requested_urls = [call.args[1] for call in graph_request.call_args_list]
         self.assertTrue(any(url.endswith('/me') for url in requested_urls))
         self.assertTrue(any('/me/mailFolders/inbox' in url for url in requested_urls))
+
+
+class SalesMailboxConnectionOAuthTests(TestCase):
+    endpoint = '/api/v1/sales/mailbox-connections/connect-my-outlook/'
+
+    def setUp(self):
+        permission = patch(
+            'apps.rbac.permissions.HasModuleAccess.has_permission',
+            return_value=True,
+        )
+        permission.start()
+        self.addCleanup(permission.stop)
+        self.user = get_user_model().objects.create_user(
+            username='sales-employee',
+            email='sales.employee@example.com',
+            password='test',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    @override_settings(
+        SALES_MICROSOFT_TENANT_ID='central-tenant-id',
+        SALES_MICROSOFT_CLIENT_ID='central-client-id',
+        SALES_GRAPH_TOKEN_ENCRYPTION_KEY='test-token-encryption-key',
+        SALES_MICROSOFT_OAUTH_REDIRECT_URI='https://api.example.com/oauth/callback/',
+    )
+    @patch.dict(os.environ, {'RADAI_SALES_GRAPH_CLIENT_SECRET': 'test-secret'})
+    def test_one_click_connect_creates_user_connection_and_returns_microsoft_url(self):
+        response = self.client.post(self.endpoint, {}, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            'login.microsoftonline.com/central-tenant-id',
+            response.data['authorization_url'],
+        )
+        self.assertIn('client_id=central-client-id', response.data['authorization_url'])
+        connection = SalesMailboxConnection.objects.get(created_by=self.user)
+        self.assertEqual(connection.mailbox_address, self.user.email)
+        self.assertEqual(connection.auth_mode, 'delegated')
+        self.assertFalse(connection.enabled)
+
+    @override_settings(
+        SALES_MICROSOFT_TENANT_ID='',
+        SALES_MICROSOFT_CLIENT_ID='',
+        SALES_GRAPH_TOKEN_ENCRYPTION_KEY='test-token-encryption-key',
+    )
+    @patch.dict(os.environ, {'RADAI_SALES_GRAPH_CLIENT_SECRET': 'test-secret'})
+    def test_one_click_connect_reports_missing_central_configuration(self):
+        response = self.client.post(self.endpoint, {}, format='json')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('RADAI administrator', response.data['detail'])
+        self.assertEqual(SalesMailboxConnection.objects.count(), 0)

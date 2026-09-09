@@ -47,11 +47,49 @@ class SalesMicrosoftGraphService:
     def _secret():
         return os.environ.get('RADAI_SALES_GRAPH_CLIENT_SECRET', '').strip()
 
+    @property
+    def tenant_id(self):
+        """Use central delegated configuration while preserving legacy/admin records."""
+        if self.connection.auth_mode == 'delegated':
+            central = str(getattr(settings, 'SALES_MICROSOFT_TENANT_ID', '')).strip()
+            if central:
+                return central
+        return self.connection.tenant_id.strip()
+
+    @property
+    def client_id(self):
+        if self.connection.auth_mode == 'delegated':
+            central = str(getattr(settings, 'SALES_MICROSOFT_CLIENT_ID', '')).strip()
+            if central:
+                return central
+        return self.connection.client_id.strip()
+
+    @classmethod
+    def delegated_runtime_configuration(cls):
+        """Return centrally managed values needed to start employee OAuth."""
+        tenant_id = str(getattr(settings, 'SALES_MICROSOFT_TENANT_ID', '')).strip()
+        client_id = str(getattr(settings, 'SALES_MICROSOFT_CLIENT_ID', '')).strip()
+        missing = []
+        if not tenant_id:
+            missing.append('RADAI_SALES_GRAPH_TENANT_ID')
+        if not client_id:
+            missing.append('RADAI_SALES_GRAPH_CLIENT_ID')
+        if not cls._secret():
+            missing.append('RADAI_SALES_GRAPH_CLIENT_SECRET')
+        if not token_encryption_configured():
+            missing.append('SALES_GRAPH_TOKEN_ENCRYPTION_KEY')
+        if missing:
+            raise SalesGraphConfigurationError(
+                f'Outlook sign-in is not yet configured by your RADAI administrator. '
+                f'Missing server settings: {", ".join(missing)}.'
+            )
+        return tenant_id, client_id
+
     def _validate_configuration(self):
         missing = []
-        if not self.connection.tenant_id:
+        if not self.tenant_id:
             missing.append('tenant ID')
-        if not self.connection.client_id:
+        if not self.client_id:
             missing.append('application/client ID')
         if not self.connection.mailbox_address:
             missing.append('mailbox address')
@@ -80,7 +118,7 @@ class SalesMicrosoftGraphService:
     def delegated_authorization_url(self, state):
         self._validate_configuration()
         query = urlencode({
-            'client_id': self.connection.client_id,
+            'client_id': self.client_id,
             'response_type': 'code',
             'redirect_uri': self.redirect_uri,
             'response_mode': 'query',
@@ -88,11 +126,11 @@ class SalesMicrosoftGraphService:
             'state': state,
             'prompt': 'select_account',
         })
-        tenant = quote(self.connection.tenant_id, safe='')
+        tenant = quote(self.tenant_id, safe='')
         return f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize?{query}'
 
     def _token_request(self, data):
-        tenant = quote(self.connection.tenant_id, safe='')
+        tenant = quote(self.tenant_id, safe='')
         response = requests.post(
             f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
             data=data,
@@ -108,7 +146,7 @@ class SalesMicrosoftGraphService:
     def complete_delegated_authorization(self, code):
         self._validate_configuration()
         payload = self._token_request({
-            'client_id': self.connection.client_id,
+            'client_id': self.client_id,
             'client_secret': self._secret(),
             'scope': ' '.join(self.DELEGATED_SCOPES),
             'grant_type': 'authorization_code',
@@ -147,7 +185,7 @@ class SalesMicrosoftGraphService:
                 'Outlook authorization is missing or cannot be decrypted. Reconnect your account.'
             )
         payload = self._token_request({
-            'client_id': self.connection.client_id,
+            'client_id': self.client_id,
             'client_secret': self._secret(),
             'scope': ' '.join(self.DELEGATED_SCOPES),
             'grant_type': 'refresh_token',
@@ -168,7 +206,7 @@ class SalesMicrosoftGraphService:
             self._token = self._delegated_token()
         else:
             payload = self._token_request({
-                'client_id': self.connection.client_id,
+                'client_id': self.client_id,
                 'client_secret': self._secret(),
                 'scope': 'https://graph.microsoft.com/.default',
                 'grant_type': 'client_credentials',

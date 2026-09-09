@@ -657,6 +657,16 @@ SALES_MICROSOFT_GRAPH_TIMEOUT = config(
     default=30,
     cast=int,
 )
+# One centrally governed Entra application powers delegated Outlook sign-in for
+# every RADAI employee. These values are runtime configuration, not user input.
+SALES_MICROSOFT_TENANT_ID = config(
+    'RADAI_SALES_GRAPH_TENANT_ID',
+    default='',
+).strip()
+SALES_MICROSOFT_CLIENT_ID = config(
+    'RADAI_SALES_GRAPH_CLIENT_ID',
+    default='',
+).strip()
 SALES_GRAPH_TOKEN_ENCRYPTION_KEY = config(
     'SALES_GRAPH_TOKEN_ENCRYPTION_KEY',
     default=None,
