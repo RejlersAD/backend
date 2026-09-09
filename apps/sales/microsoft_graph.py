@@ -80,8 +80,7 @@ class SalesMicrosoftGraphService:
             missing.append('SALES_GRAPH_TOKEN_ENCRYPTION_KEY')
         if missing:
             raise SalesGraphConfigurationError(
-                f'Outlook sign-in is not yet configured by your RADAI administrator. '
-                f'Missing server settings: {", ".join(missing)}.'
+                'Outlook connection is not available yet. Contact your RADAI administrator.'
             )
         return tenant_id, client_id
 
