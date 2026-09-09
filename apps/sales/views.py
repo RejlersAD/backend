@@ -6,19 +6,25 @@ DRF ViewSets with AI-powered actions
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 
 # RBAC - Module-level access control (soft-coded)
-from apps.rbac.permissions import HasModuleAccess
+from apps.rbac.permissions import HasModuleAccess, IsAdmin
 from django.db.models import Q, Count, Sum, Avg, F
 from django.utils import timezone
+from django.conf import settings
+from django.core import signing
+from django.core.cache import cache
+from django.shortcuts import redirect
 from django_filters.rest_framework import DjangoFilterBackend
 from datetime import timedelta
 from decimal import Decimal
+from urllib.parse import urlencode
+import secrets
 
 from .models import (
     Client, Contact, Deal, FrameworkAgreement, ProjectHandover, Quote,
-    SalesActivity, SalesForecast,
+    SalesActivity, SalesForecast, SalesMailboxConnection,
 )
 from .serializers import (
     ClientListSerializer, ClientDetailSerializer, ClientCreateSerializer,
@@ -26,8 +32,10 @@ from .serializers import (
     QuoteListSerializer, QuoteDetailSerializer, SalesActivityListSerializer,
     SalesActivityDetailSerializer, SalesForecastSerializer, SalesDashboardSerializer,
     AIInsightSerializer, FrameworkAgreementSerializer, ProjectHandoverSerializer,
+    SalesMailboxConnectionSerializer,
 )
 from .ai_service import SalesAIService
+from .microsoft_graph import SalesMicrosoftGraphService
 from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
 from .workflow import (
     close_opportunity, convert_to_project, decide_award, enter_negotiation, record_bid_decision,
@@ -37,6 +45,133 @@ from .workflow import (
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
+    """User-owned delegated Outlook connections and governed admin connections."""
+
+    queryset = SalesMailboxConnection.objects.all()
+    serializer_class = SalesMailboxConnectionSerializer
+    permission_classes = [IsAuthenticated, HasModuleAccess]
+    module_required = 'sales'
+
+    def get_permissions(self):
+        if self.action == 'oauth_callback':
+            return [AllowAny()]
+        return super().get_permissions()
+
+    def _is_admin(self):
+        return IsAdmin().has_permission(self.request, self)
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.request.query_params.get('mine', '').lower() in {'1', 'true', 'yes'}:
+            return queryset.filter(created_by=self.request.user)
+        if self._is_admin():
+            return queryset
+        return queryset.filter(created_by=self.request.user)
+
+    def perform_create(self, serializer):
+        auth_mode = serializer.validated_data.get('auth_mode', 'delegated')
+        if not self._is_admin():
+            auth_mode = 'delegated'
+        serializer.save(
+            auth_mode=auth_mode,
+            created_by=self.request.user,
+            updated_by=self.request.user,
+        )
+
+    def perform_update(self, serializer):
+        auth_mode = serializer.validated_data.get('auth_mode', self.get_object().auth_mode)
+        if not self._is_admin():
+            auth_mode = 'delegated'
+        serializer.save(auth_mode=auth_mode, updated_by=self.request.user)
+
+    @action(detail=True, methods=['post'], url_path='test-connection')
+    def test_connection(self, request, pk=None):
+        result = SalesMicrosoftGraphService(self.get_object()).health_check()
+        response_status = status.HTTP_200_OK if result['connected'] else status.HTTP_400_BAD_REQUEST
+        return Response(result, status=response_status)
+
+    @action(detail=True, methods=['post'], url_path='connect-outlook')
+    def connect_outlook(self, request, pk=None):
+        connection = self.get_object()
+        if connection.auth_mode != 'delegated':
+            connection.auth_mode = 'delegated'
+            connection.save(update_fields=['auth_mode', 'updated_at'])
+        nonce = secrets.token_urlsafe(32)
+        state_payload = {
+            'connection_id': str(connection.id),
+            'user_id': str(request.user.id),
+            'nonce': nonce,
+        }
+        cache.set(
+            f'sales-graph-oauth:{nonce}',
+            state_payload,
+            timeout=600,
+        )
+        state_token = signing.dumps(state_payload, salt='sales-graph-oauth')
+        try:
+            authorization_url = SalesMicrosoftGraphService(
+                connection
+            ).delegated_authorization_url(state_token)
+        except Exception as exc:
+            cache.delete(f'sales-graph-oauth:{nonce}')
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'authorization_url': authorization_url,
+            'expires_in_seconds': 600,
+        })
+
+    @action(
+        detail=False,
+        methods=['get'],
+        url_path='oauth/callback',
+        url_name='oauth-callback',
+    )
+    def oauth_callback(self, request):
+        frontend_url = str(settings.FRONTEND_URL).rstrip('/')
+
+        def finish(result, reason=''):
+            query = urlencode({'outlook': result, 'reason': reason})
+            return redirect(f'{frontend_url}/sales?{query}')
+
+        if request.query_params.get('error'):
+            return finish('error', 'Microsoft sign-in was cancelled or denied.')
+        state_token = request.query_params.get('state', '')
+        code = request.query_params.get('code', '')
+        if not state_token or not code:
+            return finish('error', 'Microsoft sign-in returned an incomplete response.')
+        try:
+            payload = signing.loads(
+                state_token,
+                salt='sales-graph-oauth',
+                max_age=600,
+            )
+            nonce = payload['nonce']
+            expected = cache.get(f'sales-graph-oauth:{nonce}')
+            cache.delete(f'sales-graph-oauth:{nonce}')
+            if expected != payload:
+                raise signing.BadSignature('OAuth state has expired or was already used.')
+            connection = SalesMailboxConnection.objects.get(
+                id=payload['connection_id'],
+                created_by_id=payload['user_id'],
+            )
+            result = SalesMicrosoftGraphService(
+                connection
+            ).complete_delegated_authorization(code)
+            if not result['connected']:
+                return finish('error', result.get('error', 'Mailbox verification failed.'))
+        except Exception as exc:
+            logger.warning('Sales Outlook OAuth callback failed: %s', exc)
+            return finish('error', str(exc)[:300])
+        return finish('connected')
+
+    @action(detail=True, methods=['post'], url_path='disconnect-outlook')
+    def disconnect_outlook(self, request, pk=None):
+        connection = self.get_object()
+        SalesMicrosoftGraphService(connection).disconnect()
+        return Response(self.get_serializer(connection).data)
 
 
 # ==============================================================================

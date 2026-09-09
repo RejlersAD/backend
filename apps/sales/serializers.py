@@ -7,7 +7,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import (
     Client, Contact, Deal, FrameworkAgreement, OpportunityAuditEvent,
-    ProjectHandover, Quote, SalesActivity, SalesForecast,
+    ProjectHandover, Quote, SalesActivity, SalesForecast, SalesMailboxConnection,
 )
 
 User = get_user_model()
@@ -428,6 +428,34 @@ class SalesForecastSerializer(serializers.ModelSerializer):
         if invalid:
             raise serializers.ValidationError('Every manual adjustment requires a reason.')
         return value
+
+
+class SalesMailboxConnectionSerializer(serializers.ModelSerializer):
+    secret_configured = serializers.SerializerMethodField()
+    token_encryption_configured = serializers.SerializerMethodField()
+    delegated_connected = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SalesMailboxConnection
+        exclude = ['encrypted_refresh_token']
+        read_only_fields = [
+            'id', 'last_status', 'last_health_check_at', 'last_error',
+            'mailbox_display_name', 'total_item_count', 'unread_item_count',
+            'delegated_account_id', 'delegated_account_name', 'delegated_scopes',
+            'connected_at',
+            'created_by', 'updated_by', 'created_at', 'updated_at',
+        ]
+
+    def get_secret_configured(self, obj):
+        import os
+        return bool(os.environ.get('RADAI_SALES_GRAPH_CLIENT_SECRET', '').strip())
+
+    def get_token_encryption_configured(self, obj):
+        from .graph_crypto import is_configured
+        return is_configured()
+
+    def get_delegated_connected(self, obj):
+        return bool(obj.auth_mode == 'delegated' and obj.encrypted_refresh_token)
 
 
 # ==============================================================================
