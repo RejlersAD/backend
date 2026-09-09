@@ -87,15 +87,7 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
             auth_mode = 'delegated'
         serializer.save(auth_mode=auth_mode, updated_by=self.request.user)
 
-    @action(detail=True, methods=['post'], url_path='test-connection')
-    def test_connection(self, request, pk=None):
-        result = SalesMicrosoftGraphService(self.get_object()).health_check()
-        response_status = status.HTTP_200_OK if result['connected'] else status.HTTP_400_BAD_REQUEST
-        return Response(result, status=response_status)
-
-    @action(detail=True, methods=['post'], url_path='connect-outlook')
-    def connect_outlook(self, request, pk=None):
-        connection = self.get_object()
+    def _authorization_response(self, request, connection):
         if connection.auth_mode != 'delegated':
             connection.auth_mode = 'delegated'
             connection.save(update_fields=['auth_mode', 'updated_at'])
@@ -105,11 +97,7 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
             'user_id': str(request.user.id),
             'nonce': nonce,
         }
-        cache.set(
-            f'sales-graph-oauth:{nonce}',
-            state_payload,
-            timeout=600,
-        )
+        cache.set(f'sales-graph-oauth:{nonce}', state_payload, timeout=600)
         state_token = signing.dumps(state_payload, salt='sales-graph-oauth')
         try:
             authorization_url = SalesMicrosoftGraphService(
@@ -122,6 +110,76 @@ class SalesMailboxConnectionViewSet(viewsets.ModelViewSet):
             'authorization_url': authorization_url,
             'expires_in_seconds': 600,
         })
+
+    @action(detail=False, methods=['post'], url_path='connect-my-outlook')
+    def connect_my_outlook(self, request):
+        """Start one-click delegated OAuth using RADAI's central Entra app."""
+        try:
+            tenant_id, client_id = SalesMicrosoftGraphService.delegated_runtime_configuration()
+        except Exception as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        mailbox_address = (request.user.email or '').strip().lower()
+        if not mailbox_address:
+            return Response(
+                {
+                    'detail': (
+                        'Your RADAI profile needs an email address before '
+                        'Outlook can be connected.'
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        connection = SalesMailboxConnection.objects.filter(
+            created_by=request.user,
+            auth_mode='delegated',
+        ).order_by('created_at').first()
+        if connection is None:
+            existing_mailbox = SalesMailboxConnection.objects.filter(
+                mailbox_address__iexact=mailbox_address,
+            ).first()
+            if existing_mailbox:
+                if existing_mailbox.created_by_id != request.user.id:
+                    return Response(
+                        {'detail': 'This mailbox is already connected to another RADAI user.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                connection = existing_mailbox
+            else:
+                connection = SalesMailboxConnection.objects.create(
+                    name='My Outlook account',
+                    auth_mode='delegated',
+                    tenant_id=tenant_id,
+                    client_id=client_id,
+                    mailbox_address=mailbox_address,
+                    enabled=False,
+                    created_by=request.user,
+                    updated_by=request.user,
+                )
+
+        changed_fields = []
+        for field, value in (
+            ('tenant_id', tenant_id),
+            ('client_id', client_id),
+            ('updated_by', request.user),
+        ):
+            if getattr(connection, field) != value:
+                setattr(connection, field, value)
+                changed_fields.append(field)
+        if changed_fields:
+            connection.save(update_fields=[*changed_fields, 'updated_at'])
+        return self._authorization_response(request, connection)
+
+    @action(detail=True, methods=['post'], url_path='test-connection')
+    def test_connection(self, request, pk=None):
+        result = SalesMicrosoftGraphService(self.get_object()).health_check()
+        response_status = status.HTTP_200_OK if result['connected'] else status.HTTP_400_BAD_REQUEST
+        return Response(result, status=response_status)
+
+    @action(detail=True, methods=['post'], url_path='connect-outlook')
+    def connect_outlook(self, request, pk=None):
+        return self._authorization_response(request, self.get_object())
 
     @action(
         detail=False,
