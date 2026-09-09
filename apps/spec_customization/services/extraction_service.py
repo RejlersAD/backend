@@ -7,6 +7,7 @@ Engine waterfall (soft-coded via SPEC_EXTRACTION_CONFIG['ai_engines']):
   1. pymupdf_text  — free, instant; if text-layer is rich we skip AI entirely.
   2. gemini_vision — primary AI (1M context, cheap).
   3. openai_vision — fallback AI (GPT-4o).
+    4. claude_vision — optional BYOK/provider-selected Anthropic path.
   4. tesseract     — last resort for scanned pages.
 
 Mirrors the pattern used by `InstrumentIndexService` but specialised to
@@ -232,6 +233,17 @@ class PaperSpecExtractionService:
                 "_source_pages":       [start + 1, end + 1],
             })
         return {"piping_classes": list(classes.values()), "page_text_chars": len(full_text)}
+
+    def _text_layer_result_is_complete(self, classes: List[Dict[str, Any]]) -> bool:
+        """Whether the deterministic parser produced a usable extraction.
+
+        Detecting a class title in a text-rich PDF is useful routing evidence,
+        but it is not sufficient to produce a SPEC/CAT workbook.  Keep Vision
+        enabled until the text path can actually supply component rows.
+        """
+        minimum = max(1, int(self.config.get("text_layer_min_components_for_direct_accept", 1)))
+        component_count = sum(len(item.get("components") or []) for item in classes)
+        return component_count >= minimum
 
     # ── Engine: Gemini Vision ───────────────────────────────────────────
     def extract_via_gemini(self, images_b64: List[str], page_range: Tuple[int, int]) -> Optional[Dict[str, Any]]:
@@ -475,10 +487,23 @@ class PaperSpecExtractionService:
         if enable_ensemble is None:
             enable_ensemble = ADVANCED_VALIDATION_CONFIG.get("enable_ensemble_extraction", False)
         
-        engines = self.config["ai_engines"]
+        engines = list(self.config["ai_engines"])
         cost_skip_chars = int(self.config["skip_ai_if_text_chars_gte"])
         max_ai_pages = int(self.config["max_ai_pages_per_job"])
         page_count_in_chunk = (end - start + 1)
+
+        # BYOK provider routing: when a user/project key is present, run the
+        # explicitly selected provider first. For predictable billing/behavior,
+        # default to a strict provider-only AI path plus OCR fallback.
+        byok_provider = self._user_provider if (self._user_api_key and self._user_provider in {"openai", "claude"}) else ""
+        if byok_provider:
+            byok_engine = f"{byok_provider}_vision"
+            if byok_engine not in engines:
+                engines.insert(1, byok_engine)
+            # Keep deterministic text-layer first and OCR fallback last.
+            engines = ["pymupdf_text", byok_engine, "tesseract"]
+            # Ensemble currently supports Gemini+OpenAI only.
+            enable_ensemble = False
         
         # Adjust extraction strategy based on retry attempt
         if retry_attempt > 0:
@@ -492,9 +517,14 @@ class PaperSpecExtractionService:
         text_chars = text_result.get("page_text_chars", 0)
         text_classes = text_result.get("piping_classes", [])
 
-        # If text-layer is rich AND we already found ≥1 class, accept it
-        # without hitting any AI (cost guard rail).
-        if text_classes and text_chars >= cost_skip_chars * max(1, page_count_in_chunk):
+        # A text-rich document is not enough by itself.  Only bypass Vision
+        # when a deterministic parser has returned actual component rows;
+        # otherwise merged table cells yield a deceptively successful,
+        # header-only job with an empty catalog.
+        if (
+            self._text_layer_result_is_complete(text_classes)
+            and text_chars >= cost_skip_chars * max(1, page_count_in_chunk)
+        ):
             return {"piping_classes": text_classes, "engine_used": "pymupdf_text"}
 
         # Within AI budget?
@@ -576,6 +606,24 @@ class PaperSpecExtractionService:
                     if gemini_candidate:
                         # OpenAI failed/empty — Gemini's below-threshold result
                         # is still better than nothing.
+                        return gemini_candidate
+                elif engine == "claude_vision":
+                    images = images or self.render_pages_to_jpeg_b64(pdf_path, start, end)
+                    blob = self.extract_via_claude(images, (start, end))
+                    classes = blob.get("piping_classes") if blob else None
+                    if classes:
+                        self._ai_pages_used += page_count_in_chunk
+                        if not gemini_candidate:
+                            return {"piping_classes": classes, "engine_used": "claude_vision"}
+                        # Compare against prior candidate using objective quality.
+                        g_count, g_conf = self._classes_quality(gemini_candidate["piping_classes"])
+                        c_count, c_conf = self._classes_quality(classes)
+                        if (c_count, c_conf) > (g_count, g_conf):
+                            return {"piping_classes": classes, "engine_used": "claude_vision_escalated"}
+                        return {"piping_classes": gemini_candidate["piping_classes"],
+                                "engine_used": "gemini_vision_kept_over_claude"}
+                    if gemini_candidate:
+                        # Claude failed/empty — keep prior candidate.
                         return gemini_candidate
                 elif engine == "tesseract":
                     if gemini_candidate:

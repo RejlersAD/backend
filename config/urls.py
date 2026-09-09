@@ -237,6 +237,11 @@ if is_app_installed('apps.spec_customization'):
     urlpatterns.append(path('api/v1/spec-customization/', include('apps.spec_customization.urls')))
     print("[URL] ✅ Spec Customization URLs registered")
 
+# Project Organizer — shared, cross-tool project registry (additive)
+if is_app_installed('apps.project_organizer'):
+    urlpatterns.append(path('api/v1/project-organizer/', include('apps.project_organizer.urls')))
+    print("[URL] ✅ Project Organizer URLs registered")
+
 # Valve Standards Reference — ASME B16.34 pressure/wall-thickness/material DB
 if is_app_installed('apps.valve_standards'):
     urlpatterns.append(path('api/v1/valve-standards/', include('apps.valve_standards.urls')))

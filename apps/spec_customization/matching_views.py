@@ -23,6 +23,7 @@ from typing import Any, Dict
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes, permission_classes
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -36,6 +37,31 @@ from .project_models import SpecProject
 from .services.component_matcher import parse_match_xlsx, match_component
 
 logger = logging.getLogger(__name__)
+
+
+def _is_spec_admin(user) -> bool:
+    return bool(
+        getattr(user, 'is_authenticated', False)
+        and (
+            getattr(user, 'is_superuser', False)
+            or getattr(user, 'is_staff', False)
+            or (getattr(user, 'role', '') or '').lower() in {'admin', 'super_admin', 'tenant_admin'}
+        )
+    )
+
+
+def _get_accessible_project(request, project_id) -> SpecProject:
+    project = get_object_or_404(SpecProject, project_id=project_id)
+    if not _is_spec_admin(request.user) and project.created_by_id != getattr(request.user, 'id', None):
+        raise PermissionDenied('You do not have access to this project.')
+    return project
+
+
+def _get_accessible_workbook_set(request, set_id) -> MatchingWorkbookSet:
+    workbook_set = get_object_or_404(MatchingWorkbookSet.objects.select_related('project'), id=set_id)
+    if not _is_spec_admin(request.user) and workbook_set.project.created_by_id != getattr(request.user, 'id', None):
+        raise PermissionDenied('You do not have access to this workbook set.')
+    return workbook_set
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -92,7 +118,7 @@ def upload_matching_workbooks(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    project = get_object_or_404(SpecProject, project_id=project_id)
+    project = _get_accessible_project(request, project_id)
     
     # Get files
     match_file = request.FILES.get('match_file')
@@ -206,7 +232,8 @@ def list_matching_workbook_sets(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    queryset = MatchingWorkbookSet.objects.filter(project__project_id=project_id)
+    project = _get_accessible_project(request, project_id)
+    queryset = MatchingWorkbookSet.objects.filter(project=project)
     
     # Filter by active status
     is_active = request.query_params.get('is_active')
@@ -239,7 +266,7 @@ def list_matching_workbook_sets(request):
 @permission_classes([IsAuthenticated])
 def matching_workbook_set_detail(request, set_id):
     """Get or delete a workbook set."""
-    ws = get_object_or_404(MatchingWorkbookSet, id=set_id)
+    ws = _get_accessible_workbook_set(request, set_id)
     
     if request.method == 'DELETE':
         ws.delete()
@@ -271,7 +298,7 @@ def matching_workbook_set_detail(request, set_id):
 @permission_classes([IsAuthenticated])
 def activate_matching_workbook_set(request, set_id):
     """Activate a workbook set (deactivate others in same project)."""
-    ws = get_object_or_404(MatchingWorkbookSet, id=set_id)
+    ws = _get_accessible_workbook_set(request, set_id)
     
     # Deactivate all sets in same project
     MatchingWorkbookSet.objects.filter(
@@ -292,7 +319,7 @@ def activate_matching_workbook_set(request, set_id):
 @permission_classes([IsAuthenticated])
 def parse_matching_workbook(request, set_id):
     """Parse Match.xlsx and create/update matching rules."""
-    ws = get_object_or_404(MatchingWorkbookSet, id=set_id)
+    ws = _get_accessible_workbook_set(request, set_id)
     
     if not ws.match_file:
         return Response(
@@ -334,7 +361,7 @@ def parse_matching_workbook(request, set_id):
 @permission_classes([IsAuthenticated])
 def list_matching_rules(request, set_id):
     """List all matching rules for a workbook set."""
-    ws = get_object_or_404(MatchingWorkbookSet, id=set_id)
+    ws = _get_accessible_workbook_set(request, set_id)
     
     rules = MatchingRule.objects.filter(workbook_set=ws).order_by('pdf_component_name')
     
@@ -375,10 +402,11 @@ def match_component_endpoint(request):
     project_id = request.data.get('project_id')
     
     if workbook_set_id:
-        ws = get_object_or_404(MatchingWorkbookSet, id=workbook_set_id)
+        ws = _get_accessible_workbook_set(request, workbook_set_id)
     elif project_id:
+        project = _get_accessible_project(request, project_id)
         ws = MatchingWorkbookSet.objects.filter(
-            project__project_id=project_id,
+            project=project,
             is_active=True
         ).first()
         if not ws:
@@ -431,15 +459,19 @@ def list_matching_results(request):
         - limit: Max results (default: 100)
     """
     queryset = ComponentMatchingResult.objects.all()
+    if not _is_spec_admin(request.user):
+        queryset = queryset.filter(workbook_set__project__created_by=request.user)
     
     # Filter by workbook set
     workbook_set_id = request.query_params.get('workbook_set_id')
     if workbook_set_id:
+        _get_accessible_workbook_set(request, workbook_set_id)
         queryset = queryset.filter(workbook_set__id=workbook_set_id)
     
     # Filter by project
     project_id = request.query_params.get('project_id')
     if project_id:
+        _get_accessible_project(request, project_id)
         queryset = queryset.filter(workbook_set__project__project_id=project_id)
     
     # Limit

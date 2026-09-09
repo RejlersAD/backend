@@ -57,6 +57,33 @@ WORKBOOK_CAT  = 'cat'
 
 # Limit how deep we scan the template for the Head row.
 _HEADER_SCAN_DEPTH = 60
+_TEMPLATE_PASSTHROUGH_EXCLUDED_SHEETS = {'StandardNotesData'}
+_MOJIBAKE_MARKERS = ('\ufffd', '\u00c2', '\u00c3', '\u00e2')
+
+
+def _clean_workbook_text(value):
+    """Return readable text without altering valid engineering values.
+
+    A few older PDF/template paths have delivered UTF-8 bytes decoded as a
+    Windows codepage (for example ``Â°C`` or ``â€”``). Repair only those known
+    signatures; ordinary Unicode such as Arabic source text remains untouched.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.replace('\x00', '').replace('\ufffd', '')
+    if not any(marker in text for marker in _MOJIBAKE_MARKERS[1:]):
+        return text
+    try:
+        repaired = text.encode('cp1252').decode('utf-8')
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+    original_score = sum(text.count(marker) for marker in _MOJIBAKE_MARKERS)
+    repaired_score = sum(repaired.count(marker) for marker in _MOJIBAKE_MARKERS)
+    return repaired if repaired_score < original_score else text
+
+
+def _clean_cells(cells: dict) -> dict:
+    return {key: _clean_workbook_text(value) for key, value in cells.items()}
 
 
 def _scan_header_rows(template_path: str, sheet_name: str) -> tuple[int | None, list[str]]:
@@ -215,7 +242,7 @@ def _template_passthrough_rows(
                              sheet_name)
         out.append({
             'row_key':    f'tpl:{sheet_name}:{header_row_idx + row_offset}',
-            'cells':      cells,
+            'cells':      _clean_cells(cells),
             'overridden': [],
             'source':     {'class_id': None, 'class_code': None, 'component_id': None},
         })
@@ -376,7 +403,7 @@ def build_preview(job, workbook: str) -> dict:
             rows_by_sheet[sheet_name] = []
         sheet_overrides = overrides.get((sheet_name, row_key), {})
         # Apply overrides (string-typed; UI sends strings).
-        merged = {k: ('' if v is None else v) for k, v in cells.items()}
+        merged = _clean_cells({k: ('' if v is None else v) for k, v in cells.items()})
         # Soft-coded blank-cell enrichment (SP3D-valid defaults & calculations).
         # Runs on the builder-emitted dict BEFORE overrides so the lambdas in
         # TEMPLATE_PASSTHROUGH_FIELD_DEFAULTS see only deterministic data, then
@@ -387,7 +414,7 @@ def build_preview(job, workbook: str) -> dict:
             logger.exception("[WorkbookPreview] apply_passthrough_defaults failed for %s/%s",
                              sheet_name, row_key)
         for k, v in sheet_overrides.items():
-            merged[k] = v
+            merged[k] = _clean_workbook_text(v)
         rows_by_sheet[sheet_name].append({
             'row_key':    row_key,
             'cells':      merged,
@@ -431,11 +458,13 @@ def build_preview(job, workbook: str) -> dict:
             continue
         # Surface any static data rows shipped with the template (blank in the
         # current standard template) and apply any saved cell overrides on top.
-        passthrough = _template_passthrough_rows(template_path, sheet_name, headers)
+        passthrough = [] if sheet_name in _TEMPLATE_PASSTHROUGH_EXCLUDED_SHEETS else _template_passthrough_rows(
+            template_path, sheet_name, headers,
+        )
         for row in passthrough:
             sheet_overrides = overrides.get((sheet_name, row['row_key']), {})
             if sheet_overrides:
-                row['cells'].update(sheet_overrides)
+                row['cells'].update(_clean_cells(sheet_overrides))
                 row['overridden'] = sorted(sheet_overrides.keys())
         sheets_out.append({
             'name':       sheet_name,

@@ -17,6 +17,7 @@ from .mov_equipment_view import extract_mov_equipment, check_mov_job_status
 from .smart_datasheet_view import smart_datasheet_upload, smart_datasheet_status, smart_datasheet_preview
 from .pump_hydraulic_view import extract_pump_hydraulic_view
 from .pump_hydraulic_snapshot import PumpHydraulicSnapshotViewSet
+from .hmb_extractor_view import extract_hmb_data
 
 router = DefaultRouter()
 router.register(r'equipment-types', EquipmentTypeViewSet, basename='equipment-type')
@@ -41,5 +42,7 @@ urlpatterns = [
     path('mov-job-status/<str:job_id>/', check_mov_job_status, name='check-mov-job-status'),
     # Pump Hydraulic — synchronous form-prefill extractor (additive)
     path('datasheets/extract-pump-hydraulic/', extract_pump_hydraulic_view, name='extract-pump-hydraulic'),
+    # HMB Extractor — standalone stream data extraction (additive, no P&ID coupling)
+    path('datasheets/extract-hmb/', extract_hmb_data, name='extract-hmb'),
     path('', include(router.urls)),
 ]

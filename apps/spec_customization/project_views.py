@@ -21,8 +21,10 @@ regular users only see / modify projects they created.
 from __future__ import annotations
 
 import logging
+import re
 
 from django.db.models import Count, Q
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
@@ -30,6 +32,12 @@ from rest_framework.response import Response
 
 from .models import PaperSpecDocument, PaperSpecExtractionJob
 from .project_models import SpecProject
+from .services.config import BYOK_CONFIG
+
+try:
+    from apps.planning_intelligence.services import byok_crypto
+except Exception:
+    byok_crypto = None
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +85,7 @@ def _user_can_modify(user, project: SpecProject) -> bool:
 
 def _serialize_project(p: SpecProject, *, counts: dict | None = None) -> dict:
     c = counts or {}
+    ai = _project_ai_settings(p)
     return {
         'project_id':    str(p.project_id),
         'name':          p.name,
@@ -94,6 +103,10 @@ def _serialize_project(p: SpecProject, *, counts: dict | None = None) -> dict:
         'created_by':    getattr(p.created_by, 'username', '') if p.created_by_id else '',
         'job_count':     c.get('job_count', 0),
         'document_count': c.get('document_count', 0),
+        'ai_enabled': bool(ai.get('enabled')),
+        'ai_provider': ai.get('provider') or '',
+        'ai_model': ai.get('model') or '',
+        'ai_key_configured': bool(ai.get('api_key_encrypted')),
     }
 
 
@@ -120,6 +133,64 @@ def _sanitize_payload(data: dict, whitelist: set) -> dict:
     return out
 
 
+def _project_ai_settings(project: SpecProject) -> dict:
+    metadata = project.metadata if isinstance(project.metadata, dict) else {}
+    ai = metadata.get('ai_settings')
+    return ai if isinstance(ai, dict) else {}
+
+
+def _set_project_ai_settings(project: SpecProject, ai_settings: dict) -> None:
+    metadata = dict(project.metadata or {}) if isinstance(project.metadata, dict) else {}
+    metadata['ai_settings'] = ai_settings
+    project.metadata = metadata
+
+
+def _server_encryption_available() -> bool:
+    if byok_crypto is None:
+        return False
+    try:
+        return bool(byok_crypto.is_encryption_configured())
+    except Exception:
+        return False
+
+
+def _to_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _provider_model_choices(provider: str) -> list[dict]:
+    if provider == 'claude':
+        return BYOK_CONFIG.get('claude_models') or []
+    return BYOK_CONFIG.get('openai_models') or []
+
+
+def _default_model(provider: str) -> str:
+    defaults = BYOK_CONFIG.get('default_models') or {}
+    if provider in defaults:
+        return defaults.get(provider) or ''
+    choices = _provider_model_choices(provider)
+    if choices:
+        return choices[0].get('id') or ''
+    return ''
+
+
+def _validate_api_key_format(provider: str, api_key: str) -> bool:
+    patterns = BYOK_CONFIG.get('api_key_patterns') or {}
+    pattern = patterns.get(provider) or ''
+    if not pattern:
+        return True
+    try:
+        return bool(re.match(pattern, api_key))
+    except re.error:
+        return True
+
+
 def _count_for_project(project_id) -> dict:
     """Soft-link counts via the existing ``project_id`` CharField on documents."""
     pid_str = str(project_id)
@@ -127,6 +198,26 @@ def _count_for_project(project_id) -> dict:
     doc_count = doc_qs.count()
     job_count = PaperSpecExtractionJob.objects.filter(document__in=doc_qs).count()
     return {'document_count': doc_count, 'job_count': job_count}
+
+
+def _ai_settings_response(project: SpecProject) -> dict:
+    ai = _project_ai_settings(project)
+    provider = (ai.get('provider') or 'openai').lower()
+    if provider not in {'openai', 'claude'}:
+        provider = 'openai'
+    model = ai.get('model') or _default_model(provider)
+    return {
+        'enabled': bool(ai.get('enabled')),
+        'provider': provider,
+        'model': model,
+        'key_configured': bool(ai.get('api_key_encrypted')),
+        'provider_choices': BYOK_CONFIG.get('supported_providers') or ['openai', 'claude'],
+        'model_choices': {
+            'openai': BYOK_CONFIG.get('openai_models') or [],
+            'claude': BYOK_CONFIG.get('claude_models') or [],
+        },
+        'encryption_configured': _server_encryption_available(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +296,60 @@ def project_detail(request, project_id):
     # DELETE
     p.delete()
     return Response({'deleted': True, 'project_id': str(project_id)})
+
+
+@api_view(['GET', 'POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def project_ai_settings(request, project_id):
+    try:
+        p = SpecProject.objects.get(project_id=project_id)
+    except SpecProject.DoesNotExist:
+        return Response({'error': 'Project not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not _is_admin(request.user) and p.created_by_id != getattr(request.user, 'id', None):
+        return Response({'error': 'Access denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == 'GET':
+        return Response(_ai_settings_response(p))
+
+    if request.method == 'DELETE':
+        _set_project_ai_settings(p, {})
+        p.save(update_fields=['metadata', 'updated_at'])
+        return Response(_ai_settings_response(p))
+
+    ai = _project_ai_settings(p)
+    provider = str(request.data.get('provider') or ai.get('provider') or 'openai').strip().lower()
+    if provider not in {'openai', 'claude'}:
+        return Response({'error': 'Unsupported provider.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    model = str(request.data.get('model') or ai.get('model') or _default_model(provider)).strip()
+    valid_models = {m.get('id') for m in _provider_model_choices(provider) if m.get('id')}
+    if model not in valid_models:
+        return Response({'error': f'Unsupported model for provider {provider}.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    enabled = _to_bool(request.data.get('enabled', ai.get('enabled', False)))
+    api_key = str(request.data.get('api_key') or '').strip()
+
+    if api_key and not _server_encryption_available():
+        return Response({'error': 'BYOK encryption is not configured on server.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    if api_key and not _validate_api_key_format(provider, api_key):
+        label = 'OpenAI' if provider == 'openai' else 'Claude'
+        return Response({'error': f'Invalid {label} API key format.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    new_ai = dict(ai or {})
+    new_ai['enabled'] = enabled
+    new_ai['provider'] = provider
+    new_ai['model'] = model
+
+    if api_key:
+        new_ai['api_key_encrypted'] = byok_crypto.encrypt_api_key(api_key)
+        new_ai['key_updated_at'] = timezone.now().isoformat()
+    elif enabled and not new_ai.get('api_key_encrypted'):
+        return Response({'error': 'Provide an API key before enabling BYOK.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    _set_project_ai_settings(p, new_ai)
+    p.save(update_fields=['metadata', 'updated_at'])
+    return Response(_ai_settings_response(p))
 
 
 @api_view(['GET'])
@@ -306,6 +451,7 @@ def list_project_jobs(request, project_id):
             PaperSpecExtractionJob.objects
             .filter(document__project_id=pid_str)
             .select_related('document', 'created_by')
+            .prefetch_related('piping_classes__components')
         )
 
         # Optional status filter
@@ -313,21 +459,8 @@ def list_project_jobs(request, project_id):
         if status_filter:
             jobs_qs = jobs_qs.filter(status=status_filter)
 
-        # Annotate with counts (for serializer efficiency)
-        # DEFENSIVE: Try annotation, but proceed without it if it fails (e.g., migration pending)
-        try:
-            from django.db.models import Count as DjangoCount
-            jobs_qs = jobs_qs.annotate(
-                classes_count=DjangoCount('piping_classes', distinct=True),
-                components_count=DjangoCount('piping_classes__components', distinct=True),
-            )
-        except Exception as annotation_err:
-            logger.warning(
-                "[SpecCustomization] Annotation failed (likely migration pending): %s. "
-                "Proceeding without annotations - serializer will use fallback.",
-                annotation_err
-            )
-            # Continue without annotations - serializer will handle missing values
+        # Avoid SQL GROUP BY edge-cases from aggregate annotations on joined
+        # querysets; serializer derives counts from prefetched relations.
 
         # Order by most recent first
         jobs_qs = jobs_qs.order_by('-created_at')

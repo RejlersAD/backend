@@ -83,3 +83,11 @@ B16_5_STANDARD_EDITION_YEAR = 2017
 # app's data/ directory — it lives next to the source PDF. The loader
 # requires --source (or the env var below) to point at it.
 B16_5_SOURCE_DATA_ENV_VAR = 'ASME_B16_5_DATA_PATH'
+
+# ── Project-specific Pipe Class Conversation dataset (Z0-TS-P-05010) ───────
+PIPE_CLASS_CONVERSATION_DATASET_CODE = 'Z0_TS_P_05010_PIPE_CLASS_CONVERSATION'
+PIPE_CLASS_CONVERSATION_DATASET_TITLE = 'Piping Material Specification - Selected Classes'
+
+# Upload policy for Valve Standards reference updates.
+# Options: 'admin_only', 'authenticated'
+PIPE_CLASS_UPLOAD_ACCESS_MODE = 'authenticated'

@@ -394,3 +394,25 @@ class FlangeBoltingRecommendation(models.Model):
 
     class Meta:
         db_table = 'valve_standards_b165_flange_bolting_recommendation'
+
+
+class PipeClassConversationRecord(models.Model):
+    """Project-specific piping class reference rows imported from workbook.
+
+    Soft-coded storage: each row is persisted as a JSON list of cell values so
+    schema changes in source spreadsheets do not require DB migrations.
+    """
+    standard = models.ForeignKey(Standard, on_delete=models.CASCADE, related_name='pipe_class_conversation_records')
+    source_sheet = models.CharField(max_length=64)
+    source_row = models.PositiveIntegerField()
+    record_type = models.CharField(max_length=32, blank=True, default='', help_text="e.g. 'index_entry', 'sheet_row', 'branch_row'")
+    primary_key_text = models.CharField(max_length=128, blank=True, default='', help_text="Convenience key for quick UI filtering/search")
+    cells = models.JSONField(help_text='Ordered row cell values as strings/nulls')
+
+    class Meta:
+        db_table = 'valve_standards_pipe_class_conversation_record'
+        ordering = ['source_sheet', 'source_row', 'id']
+        indexes = [
+            models.Index(fields=['standard', 'source_sheet'], name='idx_vs_pcc_standard_sheet'),
+            models.Index(fields=['standard', 'record_type'], name='idx_vs_pcc_standard_type'),
+        ]

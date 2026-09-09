@@ -11,6 +11,7 @@ urlpatterns = [
     path('projects/<uuid:project_id>/',        project_views.project_detail,      name='project-detail'),
     path('projects/<uuid:project_id>/items/',  project_views.list_project_items,  name='project-items'),
     path('projects/<uuid:project_id>/jobs/',   project_views.list_project_jobs,   name='project-jobs'),
+    path('projects/<uuid:project_id>/ai-settings/', project_views.project_ai_settings, name='project-ai-settings'),
 
     # Paper Spec extraction
     path('paper-spec/upload/',                 views.upload_paper_spec, name='upload'),
@@ -26,6 +27,8 @@ urlpatterns = [
     path('paper-spec/jobs/<uuid:job_id>/export-cat/',  views.export_smartplant_cat,  name='job-export-cat'),
     path('paper-spec/jobs/<uuid:job_id>/workbook/',      views.workbook_preview, name='job-workbook-preview'),
     path('paper-spec/jobs/<uuid:job_id>/workbook/cell/', views.workbook_cell,    name='job-workbook-cell'),
+    path('paper-spec/jobs/<uuid:job_id>/workbook/chatbot-edit/', views.workbook_chatbot_edit, name='job-workbook-chatbot-edit'),
+    path('paper-spec/jobs/<uuid:job_id>/workbook/validate/', views.workbook_validate, name='job-workbook-validate'),
     path('paper-spec/jobs/<uuid:job_id>/workbook/batch-save/', views.workbook_batch_save, name='job-workbook-batch-save'),
     path('paper-spec/jobs/<uuid:job_id>/workbook/delete-row/', views.workbook_delete_row, name='job-workbook-delete-row'),
     path('paper-spec/jobs/<uuid:job_id>/workbook/bulk-delete/', views.workbook_bulk_delete_rows, name='job-workbook-bulk-delete'),

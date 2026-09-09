@@ -70,11 +70,12 @@ SPEC_EXTRACTION_CONFIG = {
 
     # ── Cost guard rails ────────────────────────────────────────────────
     # If a page already has ≥ this many chars from PyMuPDF text-layer,
-    # do NOT send it to Vision AI — saves $$ on bulk PDFs.
-    # IMPORTANT: only skip AI if the text-layer regex already found classes.
-    # A page may be text-rich yet use a non-standard header — AI must still run.
-    # Raised from 800 to 3000 so only clearly data-dense text pages skip AI.
+    # the pipeline MAY skip Vision AI -- but only after the text parser has
+    # produced structured component rows. A header-only result is not an
+    # extraction. Native PDFs such as ADNOC PMS files are text-rich while their
+    # merged component tables still require layout-aware / Vision extraction.
     "skip_ai_if_text_chars_gte": 3000,
+    "text_layer_min_components_for_direct_accept": 1,
 
     # Hard ceiling on how many pages may be sent to a Vision AI per job.
     # Once exceeded, remaining pages are processed by PyMuPDF/Tesseract only.

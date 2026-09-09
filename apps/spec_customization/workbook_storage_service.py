@@ -40,7 +40,8 @@ WORKBOOK_STORAGE_CONFIG = {
     
     # S3 bucket configuration
     's3': {
-        'bucket_name': settings.AWS_STORAGE_BUCKET_NAME,
+        'enabled': getattr(settings, 'USE_S3', False),
+        'bucket_name': getattr(settings, 'AWS_STORAGE_BUCKET_NAME', ''),
         'prefix': 'spec-customization/workbooks/',
         'public_read': False,
         'server_side_encryption': 'AES256',
@@ -71,20 +72,45 @@ WORKBOOK_STORAGE_CONFIG = {
 }
 
 
+def _revision_cache_key(job_id: str, workbook: str) -> str:
+    """Key used to version chatbot indexes and preview approvals."""
+    return f"spec_customization:workbook_revision:{job_id}:{workbook}"
+
+
+def get_workbook_revision(job_id: str, workbook: str) -> int:
+    """Return the current editable-workbook revision, defaulting to one."""
+    return int(cache.get(_revision_cache_key(job_id, workbook), 1) or 1)
+
+
+def bump_workbook_revision(job_id: str, workbook: str) -> int:
+    """Invalidate plans that were created before the latest workbook edit."""
+    key = _revision_cache_key(job_id, workbook)
+    try:
+        return int(cache.incr(key))
+    except Exception:
+        # Several cache backends require an existing key before ``incr``.
+        next_value = get_workbook_revision(job_id, workbook) + 1
+        cache.set(key, next_value, None)
+        return next_value
+
+
 # ─── S3 Client ────────────────────────────────────────────────────────────────
 def _get_s3_client():
     """Get configured S3 client."""
     return boto3.client(
         's3',
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        region_name=settings.AWS_S3_REGION_NAME,
+        aws_access_key_id=getattr(settings, 'AWS_ACCESS_KEY_ID', None),
+        aws_secret_access_key=getattr(settings, 'AWS_SECRET_ACCESS_KEY', None),
+        region_name=getattr(settings, 'AWS_S3_REGION_NAME', None),
     )
 
 
 # ─── Storage decision logic ───────────────────────────────────────────────────
 def should_use_s3(cell_count: int, data_size_bytes: int) -> bool:
     """Determine if workbook should be stored in S3 based on size."""
+    if not WORKBOOK_STORAGE_CONFIG['s3']['enabled']:
+        return False
+
     cfg = WORKBOOK_STORAGE_CONFIG['storage']
     
     if cell_count >= cfg['use_s3_above_cells']:
@@ -233,12 +259,16 @@ def batch_save_cells(job: PaperSpecExtractionJob, cells: list[dict], user=None) 
             created_count += 1
         else:
             updated_count += 1
+
+    for workbook in {str(cell.get('workbook') or '') for cell in cells}:
+        if workbook:
+            bump_workbook_revision(str(job.id), workbook)
     
     # Check if we should snapshot to S3
     total_overrides = WorkbookCellOverride.objects.filter(job=job).count()
     
     s3_snapshot = None
-    if total_overrides >= WORKBOOK_STORAGE_CONFIG['storage']['use_s3_above_cells']:
+    if should_use_s3(total_overrides, 0):
         try:
             # Build snapshot
             snapshot_data = {
@@ -297,6 +327,7 @@ def delete_row(
     
     columns_deleted = list(overrides.values_list('column_name', flat=True))
     deleted_count, _ = overrides.delete()
+    bump_workbook_revision(str(job.id), workbook)
     
     logger.info(
         f"[WorkbookStorage] Deleted row: {workbook}/{sheet_name}/{row_key} "
@@ -343,6 +374,7 @@ def bulk_delete_rows(
         sheet_name=sheet_name,
         row_key__in=row_keys
     ).delete()
+    bump_workbook_revision(str(job.id), workbook)
     
     logger.info(
         f"[WorkbookStorage] Bulk deleted {len(row_keys)} rows "
@@ -376,3 +408,4 @@ def invalidate_workbook_cache(job_id: str, workbook: str):
     cfg = WORKBOOK_STORAGE_CONFIG['cache']
     cache_key = f"{cfg['key_prefix']}{job_id}:{workbook}"
     cache.delete(cache_key)
+    bump_workbook_revision(job_id, workbook)

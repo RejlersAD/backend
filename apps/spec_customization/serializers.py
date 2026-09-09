@@ -132,12 +132,38 @@ class PaperSpecExtractionJobBriefSerializer(serializers.ModelSerializer):
         return obj.document.original_filename or obj.document.title or f'Document #{str(obj.document.id)[:8]}'
 
     def get_components_count(self, obj):
-        # Prefetch via annotation in the view (components_count)
-        return getattr(obj, 'components_count', 0)
+        # Fast-path when view provides annotated count.
+        if hasattr(obj, 'components_count'):
+            return getattr(obj, 'components_count', 0) or 0
+
+        # Fallback: derive from prefetched relations (no extra SQL when
+        # project_views.list_project_jobs uses prefetch_related).
+        prefetched = getattr(obj, '_prefetched_objects_cache', {}) or {}
+        piping_classes = prefetched.get('piping_classes')
+        if piping_classes is not None:
+            total = 0
+            for cls in piping_classes:
+                cls_prefetched = getattr(cls, '_prefetched_objects_cache', {}) or {}
+                comps = cls_prefetched.get('components')
+                if comps is not None:
+                    total += len(comps)
+                else:
+                    total += cls.components.count()
+            return total
+
+        # Last resort query.
+        return PipingClassComponent.objects.filter(piping_class__job=obj).count()
 
     def get_classes_count(self, obj):
-        # Prefetch via annotation in the view (classes_count)
-        return getattr(obj, 'classes_count', 0)
+        if hasattr(obj, 'classes_count'):
+            return getattr(obj, 'classes_count', 0) or 0
+
+        prefetched = getattr(obj, '_prefetched_objects_cache', {}) or {}
+        piping_classes = prefetched.get('piping_classes')
+        if piping_classes is not None:
+            return len(piping_classes)
+
+        return obj.piping_classes.count()
     
     # Backward-compatible getters for cost tracking fields (migration 0005)
     def get_gemini_prompt_tokens(self, obj):

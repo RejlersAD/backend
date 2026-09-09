@@ -34,4 +34,6 @@ urlpatterns = [
     path('b16-5/drilling-templates/', views.b165_drilling_template_list, name='b165-drilling-templates'),
     path('b16-5/flange-dimensions/', views.b165_flange_dimension_list, name='b165-flange-dimensions'),
     path('b16-5/flange-bolting-recommendations/', views.b165_bolting_recommendation_list, name='b165-flange-bolting-recommendations'),
+    path('b16-5/pipe-class-conversation/', views.b165_pipe_class_conversation_list, name='b165-pipe-class-conversation'),
+    path('b16-5/pipe-class-conversation/upload/', views.b165_pipe_class_conversation_upload, name='b165-pipe-class-conversation-upload'),
 ]

@@ -9,13 +9,16 @@ handling; those remain visible as `notes`/null cells on the underlying rows).
 """
 from __future__ import annotations
 
+from io import BytesIO
 from decimal import Decimal, InvalidOperation
 
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from openpyxl import load_workbook
 
 from . import constants as c
 from .models import (
@@ -34,6 +37,7 @@ from .models import (
     DrillingTemplate,
     FlangeDimension,
     FlangeBoltingRecommendation,
+    PipeClassConversationRecord,
 )
 from .serializers import (
     MaterialGroupListSerializer,
@@ -53,7 +57,39 @@ from .serializers import (
     DrillingTemplateSerializer,
     FlangeDimensionSerializer,
     FlangeBoltingRecommendationSerializer,
+    PipeClassConversationRecordSerializer,
 )
+
+
+def _normalize_excel_cell(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text if text else None
+    return str(value)
+
+
+def _infer_pipe_class_record_type(sheet_name: str, row_idx: int, cells: list):
+    first = (cells[0] or '').lower() if cells else ''
+    if sheet_name.upper() == 'INDEX':
+        if row_idx <= 4:
+            return 'sheet_row'
+        if first.startswith('source:'):
+            return 'sheet_row'
+        if first == 'piping class':
+            return 'sheet_row'
+        return 'index_entry'
+    if sheet_name.upper() == 'BRANCH TABLES':
+        return 'branch_row'
+    return 'sheet_row'
+
+
+def _pipe_class_primary_key_text(cells: list):
+    for value in cells[:3]:
+        if value is not None:
+            return str(value)
+    return ''
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -384,13 +420,34 @@ def b165_config_view(request):
             standard__code=c.B16_5_STANDARD_CODE
         ).values('class_number').distinct()
     })
+    source_sheets = sorted(
+        set(
+            PipeClassConversationRecord.objects.filter(standard__code=c.B16_5_STANDARD_CODE)
+            .values_list('source_sheet', flat=True)
+            .distinct()
+        )
+    )
+    record_types = sorted(
+        set(
+            PipeClassConversationRecord.objects.filter(standard__code=c.B16_5_STANDARD_CODE)
+            .values_list('record_type', flat=True)
+            .distinct()
+        )
+    )
     return Response({
         'standard_code': c.B16_5_STANDARD_CODE,
         'group_nos': group_nos,
         'class_numbers': class_numbers,
+        'source_sheets': source_sheets,
+        'record_types': [t for t in record_types if t],
         'units': [{'value': v, 'label': lbl} for v, lbl in c.LENGTH_UNIT_CHOICES],
         'temp_units': [{'value': v, 'label': lbl} for v, lbl in c.TEMP_UNIT_CHOICES],
         'pressure_units': [{'value': v, 'label': lbl} for v, lbl in c.PRESSURE_UNIT_CHOICES],
+        'pipe_class_conversation_dataset': {
+            'code': c.PIPE_CLASS_CONVERSATION_DATASET_CODE,
+            'title': c.PIPE_CLASS_CONVERSATION_DATASET_TITLE,
+            'upload_access_mode': c.PIPE_CLASS_UPLOAD_ACCESS_MODE,
+        },
     })
 
 
@@ -466,3 +523,130 @@ def b165_flange_dimension_list(request):
 def b165_bolting_recommendation_list(request):
     qs = FlangeBoltingRecommendation.objects.filter(standard__code=c.B16_5_STANDARD_CODE).order_by('id')
     return Response(FlangeBoltingRecommendationSerializer(qs, many=True).data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def b165_pipe_class_conversation_list(request):
+    qs = PipeClassConversationRecord.objects.filter(standard__code=c.B16_5_STANDARD_CODE).order_by(
+        'source_sheet', 'source_row', 'id'
+    )
+    source_sheet = request.query_params.get('source_sheet')
+    record_type = request.query_params.get('record_type')
+    primary_key_text = request.query_params.get('primary_key_text')
+    if source_sheet:
+        qs = qs.filter(source_sheet=source_sheet)
+    if record_type:
+        qs = qs.filter(record_type=record_type)
+    if primary_key_text:
+        qs = qs.filter(primary_key_text__icontains=primary_key_text)
+    return Response(PipeClassConversationRecordSerializer(qs, many=True).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def b165_pipe_class_conversation_upload(request):
+    """
+    Upload .xlsx data and update the Pipe Class Conversation reference records.
+
+    Form fields:
+      - file: Excel .xlsx (required)
+      - mode: 'append' or 'replace' (default: 'replace')
+      - dry_run: 'true' or 'false' (default: false)
+    """
+    # Soft-coded upload access mode.
+    access_mode = c.PIPE_CLASS_UPLOAD_ACCESS_MODE
+    if access_mode == 'admin_only' and not (request.user.is_staff or request.user.is_superuser):
+        return Response(
+            {'error': 'Only admin users can upload reference datasets.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    upload = request.FILES.get('file')
+    if not upload:
+        return Response({'error': 'Missing file field.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    file_name = (upload.name or '').lower()
+    if not file_name.endswith('.xlsx'):
+        return Response({'error': 'Only .xlsx files are supported.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    mode = (request.data.get('mode') or 'replace').strip().lower()
+    if mode not in {'append', 'replace'}:
+        return Response({'error': "mode must be 'append' or 'replace'."}, status=status.HTTP_400_BAD_REQUEST)
+
+    dry_run = str(request.data.get('dry_run', 'false')).strip().lower() in {'1', 'true', 'yes'}
+
+    try:
+        workbook = load_workbook(filename=BytesIO(upload.read()), data_only=True)
+    except Exception as exc:  # pragma: no cover - defensive parsing guard
+        return Response({'error': f'Failed to read Excel workbook: {exc}'}, status=status.HTTP_400_BAD_REQUEST)
+
+    records = []
+    counts = {'total_rows': 0, 'index_entry': 0, 'sheet_row': 0, 'branch_row': 0}
+
+    for ws in workbook.worksheets:
+        sheet_name = ws.title.strip()
+        for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            cells = [_normalize_excel_cell(v) for v in row]
+            if not any(v is not None for v in cells):
+                continue
+
+            record_type = _infer_pipe_class_record_type(sheet_name, row_idx, cells)
+            primary_key_text = _pipe_class_primary_key_text(cells)
+
+            records.append({
+                'source_sheet': sheet_name[:64],
+                'source_row': row_idx,
+                'record_type': record_type,
+                'primary_key_text': primary_key_text[:128],
+                'cells': cells,
+            })
+            counts['total_rows'] += 1
+            counts[record_type] = counts.get(record_type, 0) + 1
+
+    if not records:
+        return Response({'error': 'No non-empty rows found in workbook.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    standard = get_object_or_404(Standard, code=c.B16_5_STANDARD_CODE)
+
+    if dry_run:
+        return Response({
+            'success': True,
+            'dry_run': True,
+            'mode': mode,
+            'standard_code': c.B16_5_STANDARD_CODE,
+            'filename': upload.name,
+            'summary': counts,
+            'message': 'Dry run successful. No database rows were written.',
+        })
+
+    deleted_rows = 0
+    with transaction.atomic():
+        if mode == 'replace':
+            deleted_rows = PipeClassConversationRecord.objects.filter(standard=standard).count()
+            PipeClassConversationRecord.objects.filter(standard=standard).delete()
+
+        objs = [
+            PipeClassConversationRecord(
+                standard=standard,
+                source_sheet=r['source_sheet'],
+                source_row=r['source_row'],
+                record_type=r['record_type'],
+                primary_key_text=r['primary_key_text'],
+                cells=r['cells'],
+            )
+            for r in records
+        ]
+        PipeClassConversationRecord.objects.bulk_create(objs, batch_size=2000)
+
+    return Response({
+        'success': True,
+        'dry_run': False,
+        'mode': mode,
+        'standard_code': c.B16_5_STANDARD_CODE,
+        'filename': upload.name,
+        'deleted_rows': deleted_rows,
+        'inserted_rows': len(records),
+        'summary': counts,
+        'message': 'Pipe Class Conversation dataset updated successfully.',
+    })

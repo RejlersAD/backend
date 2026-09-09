@@ -157,6 +157,20 @@ correctly)**:
 6. Extract W.T. (Wall Thickness) / Schedule values EXACTLY as printed - do NOT normalize
    (e.g. "SCH. 80", "SCH.40", "3/8" THK", "NOTE 1" - keep spaces, periods, and formatting)
 
+7. Treat a table continuing on the next page as one table. Carry the active
+   piping class and merged Part Name/Notes cells across the page boundary.
+8. When a visually merged cell is blank, inherit only that column from the
+   previous row in the same table. Do not invent a component type or standard.
+9. Resolve "AS ABOVE" against the immediately preceding row for the same Part
+   Name and retain the printed qualifier (for example "WITH GEAR OPERATION")
+   in description or notes. Never drop a row because it says "AS ABOVE".
+10. The source table columns are Part Name, Part Symbol, Size From, Size To,
+    W.T., Description, Commodity Code and Notes. Map them faithfully into the
+    schema: Part Name -> component_type/sub_type; W.T. -> schedule_or_rating;
+    Description -> description; Notes -> notes. Leave commodity code in notes
+    when no dedicated field is available. Do not replace source data with a
+    generic catalog default.
+
 For each class produce one object in this exact schema:
 
 {{

@@ -23,6 +23,7 @@ from .models import (
     DrillingTemplate,
     FlangeDimension,
     FlangeBoltingRecommendation,
+    PipeClassConversationRecord,
 )
 
 
@@ -171,7 +172,6 @@ class ModulusOfElasticitySerializer(serializers.ModelSerializer):
     class Meta:
         model = ModulusOfElasticity
         fields = ['id', 'material', 'modulus_1e6_psi']
-        fields = ['id', 'citation']
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -197,3 +197,9 @@ class FlangeBoltingRecommendationSerializer(serializers.ModelSerializer):
     class Meta:
         model = FlangeBoltingRecommendation
         fields = ['id', 'product', 'carbon_steel', 'alloy_steel']
+
+
+class PipeClassConversationRecordSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PipeClassConversationRecord
+        fields = ['id', 'source_sheet', 'source_row', 'record_type', 'primary_key_text', 'cells']

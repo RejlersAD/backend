@@ -17,15 +17,18 @@ import hashlib
 import io
 import json
 import logging
+import os
+import secrets
 from typing import Any, Dict
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes, permission_classes
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -36,12 +39,17 @@ from .models import (
     PipingClass,
     WorkbookCellOverride,
 )
+from .project_models import SpecProject
 from .serializers import (
     PaperSpecDocumentSerializer,
     PaperSpecExtractionJobSerializer,
     PipingClassSerializer,
     PipingClassListSerializer,
 )
+try:
+    from apps.planning_intelligence.services import byok_crypto
+except Exception:
+    byok_crypto = None
 from .services.config import (
     SPEC_EXTRACTION_CONFIG,
     PROGRESS_CACHE_KEY_TPL,
@@ -55,6 +63,9 @@ from .services.file_normalizer import (
 )
 from .services.exporters import build_spec_workbook, build_cat_workbook
 from .services.exporters.workbook_preview import build_preview, WORKBOOK_SPEC, WORKBOOK_CAT
+from .services.workbook_chatbot import WORKBOOK_CHATBOT_CONFIG, apply_workbook_chat_instruction
+from .workbook_storage_service import get_workbook_revision
+from .services.workbook_validation import validate_extracted_workbook
 from .services.exporters.smartplant_config import (
     SPEC_OUTPUT_FILENAME_TPL,
     CAT_OUTPUT_FILENAME_TPL,
@@ -69,6 +80,97 @@ from .services.presigned_upload import (
 from .tasks import extract_paper_spec
 
 logger = logging.getLogger(__name__)
+
+_CHATBOT_APPROVAL_CACHE_PREFIX = "spec_customization:chatbot_approval:"
+_CHATBOT_APPROVAL_TTL_SECONDS = 600
+
+
+def _is_spec_admin(user) -> bool:
+    if not user or not getattr(user, 'is_authenticated', False):
+        return False
+    return bool(
+        getattr(user, 'is_superuser', False)
+        or getattr(user, 'is_staff', False)
+        or (getattr(user, 'role', '') or '').lower() in {'admin', 'super_admin', 'tenant_admin'}
+    )
+
+
+def _can_access_project(user, project: SpecProject) -> bool:
+    return _is_spec_admin(user) or project.created_by_id == getattr(user, 'id', None)
+
+
+def _can_access_document(user, document: PaperSpecDocument) -> bool:
+    if _is_spec_admin(user):
+        return True
+    if document.uploaded_by_id == getattr(user, 'id', None):
+        return True
+    project_id = str(document.project_id or '').strip()
+    if not project_id:
+        return False
+    return SpecProject.objects.filter(project_id=project_id, created_by=user).exists()
+
+
+def _get_accessible_job(request, job_id) -> PaperSpecExtractionJob:
+    job = get_object_or_404(PaperSpecExtractionJob.objects.select_related('document'), pk=job_id)
+    if _is_spec_admin(request.user):
+        return job
+    if job.created_by_id == getattr(request.user, 'id', None) or _can_access_document(request.user, job.document):
+        return job
+    raise PermissionDenied('You do not have access to this extraction job.')
+
+
+def _get_accessible_project(request, project_id) -> SpecProject:
+    project = get_object_or_404(SpecProject, project_id=project_id)
+    if not _can_access_project(request.user, project):
+        raise PermissionDenied('You do not have access to this project.')
+    return project
+
+
+def _resolve_project_byok(project_id, user_provider: str, user_model: str, user_api_key: str):
+    """
+    Resolve effective BYOK inputs for the extraction job.
+
+    Priority:
+      1. Explicit user-supplied values from request body.
+      2. Project-level BYOK settings (encrypted key in SpecProject.metadata.ai_settings).
+      3. Empty values -> backend default non-BYOK engine path.
+    """
+    provider = (user_provider or '').strip().lower()
+    model = (user_model or '').strip()
+    api_key = (user_api_key or '').strip()
+
+    if api_key and provider in {'openai', 'claude'}:
+        return provider, model, api_key
+
+    if not project_id:
+        return provider, model, api_key
+
+    try:
+        project = SpecProject.objects.filter(project_id=project_id).only('metadata').first()
+        if not project:
+            return provider, model, api_key
+        metadata = project.metadata if isinstance(project.metadata, dict) else {}
+        ai = metadata.get('ai_settings') if isinstance(metadata.get('ai_settings'), dict) else {}
+        if not ai or not ai.get('enabled'):
+            return provider, model, api_key
+
+        p = str(ai.get('provider') or '').strip().lower()
+        if p not in {'openai', 'claude'}:
+            return provider, model, api_key
+
+        encrypted = str(ai.get('api_key_encrypted') or '').strip()
+        if not encrypted or byok_crypto is None:
+            return provider, model, api_key
+
+        decrypted = byok_crypto.decrypt_api_key(encrypted)
+        if not decrypted:
+            return provider, model, api_key
+
+        effective_model = str(ai.get('model') or '').strip() or model
+        return p, effective_model, decrypted
+    except Exception as exc:
+        logger.warning("[SpecCustomization] Failed to resolve project BYOK for project %s: %s", project_id, exc)
+        return provider, model, api_key
 
 
 def _sha256_of_file(django_file) -> str:
@@ -160,6 +262,11 @@ def _ingest_paper_spec_file(
             .order_by('-created_at')
             .first()
         )
+        # A hash match must never disclose or reuse another project's
+        # document/job.  The caller receives an independent upload unless
+        # they already have access to the existing source.
+        if existing and not _can_access_document(request_user, existing):
+            existing = None
         if existing:
             latest_completed = (
                 existing.jobs
@@ -195,6 +302,15 @@ def _ingest_paper_spec_file(
     doc.total_pages = _page_count(doc.file)
     doc.save(update_fields=['total_pages'])
 
+    # BYOK resolution: if request did not include a key/provider, try project-level
+    # encrypted settings for this project before default platform keys are used.
+    effective_provider, effective_model, effective_api_key = _resolve_project_byok(
+        project_id=project_id,
+        user_provider=user_provider,
+        user_model=user_model,
+        user_api_key=user_api_key,
+    )
+
     # BACKWARD COMPATIBILITY: Build job creation kwargs conditionally
     # Only set BYOK fields (migration 0006) if they exist in the schema
     job_kwargs = {
@@ -208,14 +324,14 @@ def _ingest_paper_spec_file(
         job_kwargs['engineer_name'] = engineer_name
     if _model_has_field(PaperSpecExtractionJob, 'user_openai_api_key'):
         # Store API key temporarily; will be wiped after extraction completes
-        job_kwargs['user_openai_api_key'] = user_api_key if user_provider == "openai" else ""
+        job_kwargs['user_openai_api_key'] = effective_api_key if effective_provider == "openai" else ""
     # Add Claude BYOK fields if migration has been applied
     if _model_has_field(PaperSpecExtractionJob, 'user_claude_api_key'):
-        job_kwargs['user_claude_api_key'] = user_api_key if user_provider == "claude" else ""
+        job_kwargs['user_claude_api_key'] = effective_api_key if effective_provider == "claude" else ""
     if _model_has_field(PaperSpecExtractionJob, 'user_ai_provider'):
-        job_kwargs['user_ai_provider'] = user_provider
+        job_kwargs['user_ai_provider'] = effective_provider
     if _model_has_field(PaperSpecExtractionJob, 'user_ai_model'):
-        job_kwargs['user_ai_model'] = user_model
+        job_kwargs['user_ai_model'] = effective_model
     
     job = PaperSpecExtractionJob.objects.create(**job_kwargs)
 
@@ -273,6 +389,10 @@ def upload_paper_spec(request):
     DEFENSIVE CODING: Wrapped in try-except to catch any errors before
     they bubble up as generic 500 HTML responses.
     """
+    project_id = request.data.get('project_id') or None
+    if project_id:
+        _get_accessible_project(request, project_id)
+
     try:
         src = request.FILES.get('file') or request.FILES.get('pdf_file')
         if not src:
@@ -281,7 +401,7 @@ def upload_paper_spec(request):
 
         return _ingest_paper_spec_file(
             src=src,
-            project_id=request.data.get('project_id') or None,
+            project_id=project_id,
             title=request.data.get('title') or '',
             document_number=request.data.get('document_number') or '',
             engineer_name=request.data.get('engineer_name') or '',          # BYOK attribution
@@ -389,6 +509,9 @@ def complete_paper_spec_upload(request):
     user_provider     = request.data.get('user_ai_provider') or ''       # BYOK provider: "openai" or "claude"
     user_model        = request.data.get('user_ai_model') or ''          # BYOK model ID
 
+    if project_id:
+        _get_accessible_project(request, project_id)
+
     if not s3_key or not original_filename:
         return Response(
             {"error": "s3_key and filename are required"},
@@ -438,14 +561,23 @@ def complete_paper_spec_upload(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def list_jobs(request):
-    qs = PaperSpecExtractionJob.objects.all().order_by('-created_at')[:50]
+    if _is_spec_admin(request.user):
+        qs = PaperSpecExtractionJob.objects.all()
+    else:
+        owned_project_ids = SpecProject.objects.filter(created_by=request.user).values_list('project_id', flat=True)
+        qs = PaperSpecExtractionJob.objects.filter(
+            Q(created_by=request.user)
+            | Q(document__uploaded_by=request.user)
+            | Q(document__project_id__in=owned_project_ids)
+        ).distinct()
+    qs = qs.order_by('-created_at')[:50]
     return Response(PaperSpecExtractionJobSerializer(qs, many=True).data)
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def job_detail(request, job_id):
-    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    job = _get_accessible_job(request, job_id)
     data = PaperSpecExtractionJobSerializer(job).data
     # Add live progress + partial classes from cache.
     progress = cache.get(PROGRESS_CACHE_KEY_TPL.format(job_id=str(job.id))) or {}
@@ -466,7 +598,7 @@ def job_detail(request, job_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def cancel_job(request, job_id):
-    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    job = _get_accessible_job(request, job_id)
     if job.status in (PaperSpecExtractionJob.STATUS_COMPLETED,
                       PaperSpecExtractionJob.STATUS_FAILED,
                       PaperSpecExtractionJob.STATUS_CANCELLED):
@@ -483,7 +615,7 @@ def cancel_job(request, job_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def job_classes(request, job_id):
-    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    job = _get_accessible_job(request, job_id)
     qs = (job.piping_classes
               .annotate(components_count=Count('components'))
               .order_by('class_code'))
@@ -493,7 +625,12 @@ def job_classes(request, job_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def class_detail(request, class_id):
-    cls = get_object_or_404(PipingClass, pk=class_id)
+    cls = get_object_or_404(PipingClass.objects.select_related('job__document'), pk=class_id)
+    if not _is_spec_admin(request.user) and not (
+        cls.job.created_by_id == getattr(request.user, 'id', None)
+        or _can_access_document(request.user, cls.job.document)
+    ):
+        raise PermissionDenied('You do not have access to this piping class.')
     return Response(PipingClassSerializer(cls).data)
 
 
@@ -503,7 +640,7 @@ def class_detail(request, class_id):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def export_job(request, job_id):
-    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    job = _get_accessible_job(request, job_id)
     fmt = (request.query_params.get('format') or 'json').lower()
 
     classes = list(
@@ -586,7 +723,7 @@ def _smartplant_response(buf, filename: str) -> HttpResponse:
 @permission_classes([IsAuthenticated])
 def export_smartplant_spec(request, job_id):
     """Export SmartPlant 3D SPEC workbook (rule sheets)."""
-    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    job = _get_accessible_job(request, job_id)
     try:
         buf = build_spec_workbook(job)
     except Exception as e:
@@ -600,7 +737,7 @@ def export_smartplant_spec(request, job_id):
 @permission_classes([IsAuthenticated])
 def export_smartplant_cat(request, job_id):
     """Export SmartPlant 3D Catalog workbook (component part sheets)."""
-    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    job = _get_accessible_job(request, job_id)
     try:
         buf = build_cat_workbook(job)
     except Exception as e:
@@ -638,6 +775,11 @@ def config_view(request):
         },
         # BYOK configuration — provider options, models, validation patterns.
         "byok": BYOK_CONFIG,
+        "workbook_chatbot": {
+            "enabled": WORKBOOK_CHATBOT_CONFIG.get("enabled", False),
+            "max_instruction_chars": WORKBOOK_CHATBOT_CONFIG.get("safety", {}).get("max_instruction_chars", 1200),
+            "max_cell_updates": WORKBOOK_CHATBOT_CONFIG.get("safety", {}).get("max_cell_updates", 300),
+        },
     })
 
 
@@ -791,7 +933,7 @@ def workbook_preview(request, job_id):
             {"error": f"workbook must be one of {sorted(_VALID_WORKBOOKS)}"},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    job = _get_accessible_job(request, job_id)
     try:
         data = build_preview(job, workbook)
     except Exception as e:
@@ -801,6 +943,111 @@ def workbook_preview(request, job_id):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
     return Response(data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def workbook_chatbot_edit(request, job_id):
+    """Create a preview, then apply only a user-approved preview token."""
+    job = _get_accessible_job(request, job_id)
+    payload = request.data or {}
+
+    instruction = str(payload.get('instruction') or '').strip()
+    workbook_scope = str(payload.get('workbook_scope') or 'auto').strip().lower()
+    active_workbook = str(payload.get('active_workbook') or WORKBOOK_SPEC).strip().lower()
+    preview_only = bool(payload.get('preview_only', False))
+
+    if not instruction:
+        return Response({"error": "instruction is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not preview_only:
+        approval_token = str(payload.get('approval_token') or '').strip()
+        approval = cache.get(f"{_CHATBOT_APPROVAL_CACHE_PREFIX}{approval_token}") if approval_token else None
+        if not approval:
+            return Response(
+                {"error": "Preview the proposed changes and explicitly approve them before applying."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        expected_revisions = approval.get('workbook_revisions') or {}
+        current_revisions = {
+            workbook: get_workbook_revision(str(job.id), workbook)
+            for workbook in expected_revisions
+        }
+        valid_approval = (
+            approval.get('job_id') == str(job.id)
+            and approval.get('user_id') == getattr(request.user, 'id', None)
+            and approval.get('instruction') == instruction
+            and approval.get('workbook_scope') == workbook_scope
+            and approval.get('active_workbook') == active_workbook
+            and expected_revisions == current_revisions
+        )
+        cache.delete(f"{_CHATBOT_APPROVAL_CACHE_PREFIX}{approval_token}")
+        if not valid_approval:
+            return Response(
+                {"error": "The workbook changed after preview. Create a new preview before applying."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    try:
+        result = apply_workbook_chat_instruction(
+            job=job,
+            instruction=instruction,
+            workbook_scope=workbook_scope,
+            active_workbook=active_workbook,
+            user=request.user if request.user.is_authenticated else None,
+            preview_only=preview_only,
+        )
+    except Exception as e:
+        logger.exception("[WorkbookChatbot] failed for job %s", job_id)
+        return Response(
+            {"error": f"Failed to process instruction: {e}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    if not result.get('ok'):
+        return Response(result, status=status.HTTP_400_BAD_REQUEST)
+    if preview_only and result.get('planned_count', 0):
+        approval_token = secrets.token_urlsafe(24)
+        cache.set(
+            f"{_CHATBOT_APPROVAL_CACHE_PREFIX}{approval_token}",
+            {
+                'job_id': str(job.id),
+                'user_id': getattr(request.user, 'id', None),
+                'instruction': instruction,
+                'workbook_scope': workbook_scope,
+                'active_workbook': active_workbook,
+                'workbook_revisions': result.get('workbook_revisions') or {},
+            },
+            _CHATBOT_APPROVAL_TTL_SECONDS,
+        )
+        result['approval_token'] = approval_token
+        result['approval_expires_in'] = _CHATBOT_APPROVAL_TTL_SECONDS
+    return Response(result, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def workbook_validate(request, job_id):
+    """Validate already-extracted workbook rows (SPEC/CAT) using deterministic rules."""
+    job = _get_accessible_job(request, job_id)
+    payload = request.data or {}
+    workbook_scope = str(payload.get('workbook_scope') or 'auto').strip().lower()
+    active_workbook = str(payload.get('active_workbook') or WORKBOOK_SPEC).strip().lower()
+
+    try:
+        result = validate_extracted_workbook(
+            job=job,
+            workbook_scope=workbook_scope,
+            active_workbook=active_workbook,
+        )
+    except Exception as e:
+        logger.exception("[WorkbookValidate] failed for job %s", job_id)
+        return Response(
+            {"error": f"Failed to validate workbook: {e}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    return Response(result, status=status.HTTP_200_OK)
 
 
 @api_view(['POST', 'DELETE'])
@@ -817,7 +1064,7 @@ def workbook_cell(request, job_id):
             "value":       "new value"       # required for POST
         }
     """
-    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    job = _get_accessible_job(request, job_id)
     payload = request.data or {}
 
     workbook    = (payload.get('workbook') or '').lower().strip()
@@ -836,6 +1083,9 @@ def workbook_cell(request, job_id):
             job=job, workbook=workbook, sheet_name=sheet_name,
             row_key=row_key, column_name=column_name,
         ).delete()
+        if deleted:
+            from .workbook_storage_service import bump_workbook_revision
+            bump_workbook_revision(str(job.id), workbook)
         return Response({"cleared": bool(deleted)})
 
     # POST — upsert.
@@ -857,6 +1107,8 @@ def workbook_cell(request, job_id):
             'edited_by': request.user if request.user.is_authenticated else None,
         },
     )
+    from .workbook_storage_service import bump_workbook_revision
+    bump_workbook_revision(str(job.id), workbook)
     return Response(
         {
             "saved":       True,
@@ -904,7 +1156,7 @@ def workbook_batch_save(request, job_id):
     """
     from .workbook_storage_service import batch_save_cells
     
-    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    job = _get_accessible_job(request, job_id)
     cells = request.data.get('cells', [])
     
     if not cells or not isinstance(cells, list):
@@ -966,7 +1218,7 @@ def workbook_delete_row(request, job_id):
     """
     from .workbook_storage_service import delete_row
     
-    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    job = _get_accessible_job(request, job_id)
     payload = request.data or {}
     
     workbook = (payload.get('workbook') or '').lower().strip()
@@ -1024,7 +1276,7 @@ def workbook_bulk_delete_rows(request, job_id):
     """
     from .workbook_storage_service import bulk_delete_rows
     
-    job = get_object_or_404(PaperSpecExtractionJob, pk=job_id)
+    job = _get_accessible_job(request, job_id)
     payload = request.data or {}
     
     workbook = (payload.get('workbook') or '').lower().strip()
