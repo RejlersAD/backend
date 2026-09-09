@@ -3,14 +3,86 @@ Sales Serializers
 DRF serializers for Sales Management API
 """
 
+import re
+
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import (
     Client, Contact, Deal, FrameworkAgreement, OpportunityAuditEvent,
-    ProjectHandover, Quote, SalesActivity, SalesForecast, SalesMailboxConnection,
+    ProjectHandover, Quote, SalesActivity, SalesEmailIntake, SalesForecast,
+    SalesMailboxConnection,
 )
 
 User = get_user_model()
+
+
+class SalesEmailIntakeSerializer(serializers.ModelSerializer):
+    """Employee-facing intake record with immutable email provenance."""
+
+    reviewed_by_name = serializers.CharField(
+        source='reviewed_by.get_full_name', read_only=True,
+    )
+    opportunity_name = serializers.CharField(
+        source='opportunity.deal_name', read_only=True,
+    )
+    duplicate_of_subject = serializers.CharField(
+        source='duplicate_of.subject', read_only=True,
+    )
+    extracted_information = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SalesEmailIntake
+        fields = [
+            'id', 'source_message_id', 'internet_message_id', 'subject',
+            'sender_name', 'sender_email', 'received_at', 'body_preview',
+            'has_attachments', 'importance', 'status', 'opportunity',
+            'opportunity_name', 'reviewed_by', 'reviewed_by_name',
+            'reviewed_at', 'resolution_note', 'duplicate_of',
+            'duplicate_of_subject', 'created_at', 'updated_at',
+            'extracted_information',
+        ]
+        read_only_fields = fields
+
+    def get_extracted_information(self, obj):
+        content = f'{obj.subject}\n{obj.body_preview}'
+        lower_content = content.lower()
+        request_types = [
+            ('rfq', 'Request for quotation'),
+            ('request for quotation', 'Request for quotation'),
+            ('rfp', 'Request for proposal'),
+            ('request for proposal', 'Request for proposal'),
+            ('itt', 'Invitation to tender'),
+            ('tender', 'Tender'),
+            ('clarification', 'Clarification'),
+            ('purchase order', 'Purchase order'),
+            ('complaint', 'Complaint'),
+            ('invoice', 'Invoice'),
+            ('meeting', 'Meeting request'),
+        ]
+        request_type = next(
+            (label for keyword, label in request_types if keyword in lower_content),
+            'General client email',
+        )
+        reference_match = re.search(
+            r'\b(?:RFQ|RFP|ITT|Tender)\s*(?:No\.?|Number|Ref(?:erence)?|#)\s*[:#-]?\s*'
+            r'([A-Z0-9][A-Z0-9._/-]{2,})',
+            content,
+            flags=re.IGNORECASE,
+        )
+        deadline_match = re.search(
+            r'\b(?:deadline|required submission date|submission date|due date)\s*[:\-]?\s*'
+            r'(\d{1,2}[\s/-](?:[A-Za-z]{3,9}|\d{1,2})[\s/-]\d{2,4}|'
+            r'\d{4}-\d{2}-\d{2})',
+            content,
+            flags=re.IGNORECASE,
+        )
+        sender_domain = obj.sender_email.rsplit('@', 1)[-1].lower()
+        return {
+            'request_type': request_type,
+            'client_domain': sender_domain,
+            'tender_reference': reference_match.group(1) if reference_match else '',
+            'deadline_text': deadline_match.group(1) if deadline_match else '',
+        }
 
 
 # ==============================================================================

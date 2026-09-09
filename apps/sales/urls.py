@@ -15,7 +15,7 @@ from .analytics_views import (
     SalesAIInsightsView,
     SalesActivitiesView,
 )
-from .intake_views import sales_email_intake
+from .intake_views import SalesEmailIntakeViewSet, sales_email_intake
 
 # Create router and register viewsets
 router = DefaultRouter()
@@ -29,6 +29,7 @@ router.register(r'activities', SalesActivityViewSet, basename='sales-activity')
 router.register(r'forecasts', SalesForecastViewSet, basename='sales-forecast')
 router.register(r'dashboard', SalesDashboardViewSet, basename='sales-dashboard')
 router.register(r'mailbox-connections', SalesMailboxConnectionViewSet, basename='sales-mailbox-connection')
+router.register(r'email-intakes', SalesEmailIntakeViewSet, basename='sales-email-intake-review')
 
 # Analytics endpoints — powered by real platform data (no CRM tables needed)
 analytics_urlpatterns = [
