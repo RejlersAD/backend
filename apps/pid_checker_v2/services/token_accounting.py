@@ -65,6 +65,27 @@ def read_claude_usage(resp: Any) -> tuple[int, int]:
     )
 
 
+def read_claude_thinking_tokens(resp: Any) -> int | None:
+    """Return the thinking-token count from an Anthropic Messages resp, or
+    None if unavailable (older SDK/API response with no output_tokens_details
+    breakdown — never an error, just nothing to report).
+
+    usage.output_tokens is the inclusive total (thinking + visible answer);
+    output_tokens_details.thinking_tokens is the portion of that total spent
+    on internal reasoning — this is what actually tells us whether a
+    thinking budget is being respected in practice, not just the combined
+    total read_claude_usage() already reports.
+    """
+    usage = getattr(resp, 'usage', None)
+    if usage is None:
+        return None
+    details = getattr(usage, 'output_tokens_details', None)
+    if details is None:
+        return None
+    val = getattr(details, 'thinking_tokens', None)
+    return int(val) if val is not None else None
+
+
 # ─── Pricing lookup ───────────────────────────────────────────────────
 def price_lookup(provider: str, model_name: str) -> dict[str, float]:
     """Return {'input': $/1M, 'output': $/1M} for the given (provider, model).

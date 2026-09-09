@@ -211,9 +211,13 @@ def run_page_vision_analysis(drawing_data: dict, api_key: str, page_image_b64: s
             for i in range(0, len(symbol_images), SYMBOL_BATCH_SIZE)
         ] or [[]]  # always at least one (findings-only) call, even with 0 symbols
 
+        # 2026-09-08: this call carries the page's FINDINGS (the "more
+        # findings = more accurate" ask) — double_pass=True (the default)
+        # applies here explicitly.
         first_result = run_claude_analysis(
             drawing_data, api_key, page_image_b64,
             symbol_images=batches[0], model=model, include_findings=True,
+            double_pass=True,
         )
         all_symbols = list(first_result['symbols'])
 
@@ -221,10 +225,18 @@ def run_page_vision_analysis(drawing_data: dict, api_key: str, page_image_b64: s
         if overflow_batches:
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=min(SYMBOL_BATCH_CONCURRENT_CALLS, len(overflow_batches))) as pool:
+                # double_pass=False here, deliberately: these are symbol-
+                # only calls (include_findings=False, no findings ever
+                # come out of them) — doubling every overflow batch would
+                # multiply cost per extra 40-symbol chunk in the library
+                # for a benefit outside what was actually asked for
+                # (findings accuracy). The single findings call above
+                # already gets the double-pass treatment.
                 futures = [
                     pool.submit(
                         run_claude_analysis, drawing_data, api_key, page_image_b64,
                         symbol_images=batch, model=model, include_findings=False,
+                        double_pass=False,
                     )
                     for batch in overflow_batches
                 ]

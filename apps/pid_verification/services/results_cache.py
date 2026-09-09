@@ -8,11 +8,24 @@ so this transparently uses S3 in any environment with USE_S3=True and
 local disk otherwise, exactly like every other storage-backed feature in
 this codebase. No raw boto3 calls needed.
 
-Purpose: skip re-running the (expensive) analysis pipeline when the
-underlying file is unchanged. The database (PIDVDrawing / PIDVFinding)
-remains the source of truth for VIEWING already-completed results — this
-cache is only consulted at reprocess time to decide whether the pipeline
-needs to run at all. See reprocess_document() in views.py.
+Purpose: a fast-path for VIEWING an already-completed document — one
+S3/disk read instead of the doc.drawings.all() DB query (plus backfill
+passes) get_results() would otherwise run. It is NEVER consulted before
+running an analysis: "Start AI Analysis" (upload_pid, on a hash match)
+and "Re-analyze" (reprocess_document) must always run a genuinely fresh
+analysis, no exceptions — a pre-analysis cache check here previously
+skipped the pipeline entirely on a file-hash match, which is exactly the
+behavior this was reworked to remove. Both only ever WRITE to this cache,
+unconditionally, right after an analysis finishes (see tasks.py) —
+file_overwrite=True naturally retires whatever the previous entry held,
+so there's nothing separate to clear first on a fresh upload or a
+re-analysis.
+
+The database (PIDVDrawing / PIDVFinding) remains the source of truth. A
+cache miss, a corrupt entry, or a stale entry (file_hash no longer
+matching the document's current state) always falls back to the normal
+DB-backed response, never an error. Same pattern as
+apps.instrument_io_workflow.services.results_cache.
 """
 from __future__ import annotations
 
@@ -41,7 +54,16 @@ def _quality_score(findings: list[dict]) -> int:
 def build_cache_payload(doc, file_hash: str) -> dict:
     """Assemble the cache JSON from a just-completed document's current DB
     state, reusing the same serializer the /results endpoint returns (so
-    the cached shape never drifts from what's actually stored)."""
+    the cached shape never drifts from what's actually stored).
+
+    'full_data' holds that serializer output verbatim — get_results()'s
+    cache-fast-path returns it directly as the response body, so a cache
+    hit is byte-for-byte what a fresh DB-backed call would have produced
+    at the moment this was written. The other top-level keys (findings,
+    line_tags, equipment, instruments, quality_score) are kept alongside
+    it, unchanged, for whatever else already reads this cache file
+    directly rather than through get_results().
+    """
     from ..serializers import PIDVDocumentSerializer
 
     data = PIDVDocumentSerializer(doc).data
@@ -81,6 +103,7 @@ def build_cache_payload(doc, file_hash: str) -> dict:
         'equipment': equipment,
         'instruments': instruments,
         'quality_score': _quality_score(findings),
+        'full_data': data,
     }
 
 

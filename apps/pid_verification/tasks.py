@@ -56,8 +56,13 @@ MULTI_PAGE_PARALLEL_THRESHOLD = 2
     # almost immediately, but small documents still run their full
     # extraction/Vision pipeline inline in THIS task, so it needs the same
     # generous budget process_pid_page gets.
-    soft_time_limit=1800,  # 30 min soft limit
-    time_limit=2100,       # 35 min hard limit
+    #
+    # UPDATED: raised from 30/35 min to 35/40 min — Vision calls now run
+    # with extended thinking enabled (see vision_extractor.py), which adds
+    # real latency on top of an already-large max_tokens ceiling; a large
+    # P&ID with thorough scan can genuinely need the extra room.
+    soft_time_limit=2100,  # 35 min soft limit
+    time_limit=2400,       # 40 min hard limit
 )
 def process_pid_document(self, document_id: str, context: dict = None):
     """
@@ -1154,8 +1159,10 @@ def parse_reference_data_task(self, reference_id: str):
     name='pid_verification.run_ai_checks',
     max_retries=2,
     default_retry_delay=60,
-    soft_time_limit=1800,   # 30 min soft limit (for large P&ID sets)
-    time_limit=2100,        # 35 min hard limit
+    # UPDATED: raised from 30/35 min to 35/40 min — same reasoning as
+    # process_pid_document above (extended thinking adds real latency).
+    soft_time_limit=2100,   # 35 min soft limit (for large P&ID sets)
+    time_limit=2400,        # 40 min hard limit
 )
 def run_ai_checks_task(self, run_id: str, context: dict = None):
     """

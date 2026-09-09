@@ -46,7 +46,7 @@ from .serializers import (
     PIDVFindingUpdateSerializer,
     UploadSerializer,
 )
-from .services.consistency import compute_file_hash, check_cache
+from .services.consistency import compute_file_hash
 from .services.legend_knowledge import (
     LEGEND_KNOWLEDGE_PATH,
     build_legend_knowledge,
@@ -184,7 +184,36 @@ def upload_pid(request):
     analysis_mode = request.data.get('analysis_mode', 'standard').strip()
     openai_api_key = request.data.get('openai_api_key', '').strip()
     claude_api_key = request.data.get('claude_api_key', '').strip()
-    
+
+    # BUG FIX (2026-09-08): fall back to the project's saved BYOK key (the
+    # BYOK — AI Deep Extraction panel) when this request didn't send one
+    # itself. PIDVerificationV2.jsx's handleUpload() only ever posts
+    # file/project_id — it never resends a raw key (by design: the GET
+    # side of manage_api_keys() never exposes a saved key back to the
+    # frontend to resend). Before this fix, nothing ever read the saved
+    # key back at all, so a project with a valid, saved Claude/OpenAI key
+    # still ran every "Start AI Analysis" as analysis_mode='standard' with
+    # no key attached — and, Tesseract not being installed, failed with
+    # "Please install Tesseract OR add a Claude API key" regardless of how
+    # valid the saved key was. An explicit key sent on THIS request still
+    # always wins — this only fills the gap when nothing was sent.
+    if project is not None:
+        if not openai_api_key:
+            openai_api_key = _get_stored_project_api_key(project, 'openai') or ''
+        if not claude_api_key:
+            claude_api_key = _get_stored_project_api_key(project, 'claude') or ''
+        # Also auto-upgrade the mode itself — a caller that didn't ask for
+        # a specific analysis_mode (still the 'standard' default) but now
+        # has a resolved key available should actually get Vision analysis,
+        # not silently stay on OCR-only because it never asked by name.
+        if analysis_mode == 'standard':
+            if claude_api_key and openai_api_key:
+                analysis_mode = 'hybrid'
+            elif claude_api_key:
+                analysis_mode = 'deep_claude'
+            elif openai_api_key:
+                analysis_mode = 'enhanced_openai'
+
     # Validate analysis mode first
     VALID_MODES = ['standard', 'enhanced_openai', 'deep_claude', 'hybrid']
     if analysis_mode not in VALID_MODES:
@@ -245,35 +274,17 @@ def upload_pid(request):
     )
     # ── End BYOK validation ─────────────────────────────────────────────────
 
-    # Deterministic cache check (only reuse if same project)
+    # BUG FIX: this used to check_cache(file_hash) here and, on a match,
+    # return the EXISTING document's stale results instead of running a
+    # fresh analysis — silently skipping "Start AI Analysis" for a
+    # re-uploaded file, even after the underlying legend/rules/model
+    # changed since the cached run. Uploading is one of the two explicit
+    # analysis triggers (alongside Re-analyze/reprocess_document, which
+    # already never checked cache in this app) that must ALWAYS run a
+    # genuinely fresh pipeline — no exceptions. See services/results_
+    # cache.py's own docstring: that S3 cache still exists, but is now
+    # only ever consulted by get_results() (viewing), never here.
     file_hash = compute_file_hash(uploaded_file)
-    cached    = check_cache(file_hash)
-    if cached and cached.project == project:
-        # Do not reuse degraded cache entries (e.g. completed docs with 0 drawings).
-        if cached.status == PIDVDocument.Status.COMPLETED and not cached.drawings.exists():
-            logger.warning(
-                "[PIDVUpload] Ignoring degraded cache hash=%s doc_id=%s (0 drawings)",
-                file_hash,
-                cached.document_id,
-            )
-        elif cached.status == PIDVDocument.Status.FAILED:
-            logger.warning(
-                "[PIDVUpload] Ignoring failed cache hash=%s doc_id=%s",
-                file_hash,
-                cached.document_id,
-            )
-        else:
-            logger.info("[PIDVUpload] Cache hit hash=%s doc_id=%s", file_hash, cached.document_id)
-            return Response(
-                {
-                    "document_id": str(cached.document_id),
-                    "status":      cached.status,
-                    "cached":      True,
-                    "message":     "Identical file already processed – returning cached results.",
-                    "project_id":  str(project.project_id) if project else None,
-                },
-                status=status.HTTP_200_OK,
-            )
 
     # Create new document record
     doc = PIDVDocument.objects.create(
@@ -294,6 +305,13 @@ def upload_pid(request):
         project.project_name if project else "None",
         request.user.username
     )
+
+    # Explicit cache clear: doc.document_id is a brand-new UUID here so
+    # there is normally nothing to clear, but "Start AI Analysis" must
+    # NEVER be able to serve a stale cache under any circumstance — this
+    # makes that guarantee explicit rather than implicit.
+    from .services.results_cache import clear_results_cache
+    clear_results_cache(doc)
 
     # Enqueue Celery task with intelligent fallback
     try:
@@ -526,28 +544,89 @@ def reprocess_document(request, document_id):
             status=status.HTTP_409_CONFLICT,
         )
 
+    # BUG FIX (2026-09-08): this endpoint never read or forwarded ANY BYOK
+    # context at all — no analysis_mode/key parsing from request.data, and
+    # process_pid_document was always called with no `context` argument,
+    # so context was always None inside the task regardless of what a
+    # caller sent. Combined with PIDVerificationV2.jsx's recheckDocument()
+    # posting an empty {} body, "Re-check (run fresh)" always ran with no
+    # API key whatsoever — and, Tesseract not being installed, always
+    # failed with "Please install Tesseract OR add a Claude API key",
+    # even for a document whose project has a valid saved BYOK key.
+    # Mirrors upload_pid()'s own parsing + project-key fallback exactly
+    # (see _get_stored_project_api_key's comment for the fallback's own
+    # rationale) so re-check behaves identically to a fresh upload.
+    analysis_mode = (request.data.get('analysis_mode') or 'standard').strip()
+    openai_api_key = (request.data.get('openai_api_key') or '').strip()
+    claude_api_key = (request.data.get('claude_api_key') or '').strip()
+
+    if not openai_api_key:
+        openai_api_key = _get_stored_project_api_key(doc.project, 'openai') or ''
+    if not claude_api_key:
+        claude_api_key = _get_stored_project_api_key(doc.project, 'claude') or ''
+    if analysis_mode == 'standard':
+        if claude_api_key and openai_api_key:
+            analysis_mode = 'hybrid'
+        elif claude_api_key:
+            analysis_mode = 'deep_claude'
+        elif openai_api_key:
+            analysis_mode = 'enhanced_openai'
+
+    byok_context = {
+        'analysis_mode': analysis_mode,
+        'openai_api_key': openai_api_key or None,
+        'claude_api_key': claude_api_key or None,
+    }
+    logger.info(
+        "[PIDVReprocess] BYOK resolved: mode=%s, openai=%s, claude=%s",
+        analysis_mode,
+        "provided" if openai_api_key else "none",
+        "provided" if claude_api_key else "none",
+    )
+
+    # This endpoint is "Re-check (run fresh)" — always a genuinely new
+    # pipeline run, ignoring any existing cache completely. "Re-check
+    # (use cache)" — the explicit fast/no-API-call viewing option — never
+    # calls this endpoint at all; it hits GET /results/ directly.
+    #
+    # Explicit cache clear: cleared up front so a crash mid-run can never
+    # leave a stale cache entry to be served as if it were current.
+    from .services.results_cache import clear_results_cache
+    clear_results_cache(doc)
+
     # Reset state so the task pipeline treats this as a fresh run
     doc.status        = 'uploaded'
     doc.error_message = ''
     doc.save(update_fields=['status', 'error_message', 'updated_at'])
 
     # Enqueue Celery task (with sync-thread fallback if workers unavailable)
+    # BUG FIX: this used to import a module that doesn't exist at all
+    # (apps.config.queue_service — no such module; the real one is
+    # apps.core.queue_service, exactly like upload_pid() already imports
+    # above) and call a method (.enqueue) that RobustQueueService doesn't
+    # define (the real method is .queue_task, taking the task object
+    # itself plus an `args` tuple — not `.delay` called directly). Both
+    # meant the try block ALWAYS raised (ModuleNotFoundError, silently
+    # swallowed by the except below) and every "Re-check (run fresh)"
+    # silently skipped Celery/the circuit breaker entirely, always falling
+    # through to the raw daemon-thread fallback — functionally still ran,
+    # but with none of RobustQueueService's queueing/retry semantics.
     try:
         from .tasks import process_pid_document
-        from apps.config.queue_service import RobustQueueService
+        from apps.core.queue_service import RobustQueueService
 
-        def _sync_fallback(doc_id):
+        def _sync_fallback(doc_id, context=None):
             import threading
             t = threading.Thread(
                 target=process_pid_document,
-                args=(doc_id,),
+                args=(doc_id, context),
                 daemon=True,
             )
             t.start()
 
-        RobustQueueService.enqueue(
-            process_pid_document.delay,
-            str(doc.document_id),
+        RobustQueueService.queue_task(
+            process_pid_document,
+            args=(str(doc.document_id), byok_context),
             sync_fallback=_sync_fallback,
         )
     except Exception:
@@ -556,7 +635,7 @@ def reprocess_document(request, document_id):
         from .tasks import process_pid_document
         t = threading.Thread(
             target=process_pid_document,
-            args=(str(doc.document_id),),
+            args=(str(doc.document_id), byok_context),
             daemon=True,
         )
         t.start()
@@ -606,6 +685,21 @@ def get_results(request, document_id):
 
     if doc.status not in (PIDVDocument.Status.COMPLETED, PIDVDocument.Status.FAILED):
         return Response({"error": "Processing not yet complete", "status": doc.status}, status=status.HTTP_202_ACCEPTED)
+
+    # Fast path for VIEWING an already-completed document: one cache read
+    # instead of the doc.drawings.all() DB query plus both backfill passes
+    # below. NEVER consulted before running an analysis — upload_pid() and
+    # reprocess_document() only ever WRITE to this cache (see tasks.py);
+    # this is the one and only READ site. Falls back to the normal DB path
+    # on ANY cache miss (no entry yet, corrupt, or file_hash no longer
+    # matching), so a cache problem can never make a document un-viewable.
+    # Same pattern as apps.pid_verification's own get_results().
+    if doc.status == PIDVDocument.Status.COMPLETED:
+        from .services.results_cache import load_results_cache
+        cached = load_results_cache(doc)
+        if cached and cached.get('file_hash') == doc.file_hash and cached.get('full_data'):
+            logger.info('[PIDVResults] Results cache HIT for document_id=%s — serving instantly', document_id)
+            return Response(cached['full_data'])
 
     # Soft-upgrade: backfill tag_positions for drawings that were processed
     # before line-size coordinate extraction was added.  Runs only when the
@@ -1611,35 +1705,24 @@ def manage_api_keys(request, project_id):
         }, status=status.HTTP_200_OK)
     
     # POST: Save encrypted keys
-    from cryptography.fernet import Fernet
-    import base64
-    import hashlib
-    
     openai_key = request.data.get('openai_key', '').strip()
     claude_key = request.data.get('claude_key', '').strip()
-    
+
     if not openai_key and not claude_key:
         return Response({'error': 'At least one API key is required'}, status=status.HTTP_400_BAD_REQUEST)
-    
+
     # SOFT-CODED: Encryption key from settings (should be in environment variable).
     # Fernet requires exactly 32 url-safe base64-encoded bytes, so the configured
     # (or fallback) secret is always run through SHA-256 first — this guarantees a
     # valid key regardless of the raw string's length and avoids the previous bug
     # where an improperly-sized fallback constant made Fernet() raise ValueError,
-    # causing every "Save API keys" request to fail with a 500 error.
-    encryption_key = getattr(settings, 'BYOK_ENCRYPTION_KEY', None)
-    if not encryption_key:
-        # Fallback: derive a stable key from Django's SECRET_KEY so it persists
-        # across restarts (mirrors apps/wrench_integration/crypto.py pattern).
-        # In production, BYOK_ENCRYPTION_KEY MUST be set in environment variables.
-        encryption_key = settings.SECRET_KEY
+    # causing every "Save API keys" request to fail with a 500 error. Shared with
+    # _get_stored_project_api_key()'s decryption via _project_byok_fernet() so
+    # encrypt/decrypt can never drift out of sync.
+    if not getattr(settings, 'BYOK_ENCRYPTION_KEY', None):
         logger.warning('[BYOK] No BYOK_ENCRYPTION_KEY found in settings — deriving key from SECRET_KEY as fallback!')
-    
-    if isinstance(encryption_key, str):
-        encryption_key = encryption_key.encode()
-    fernet_key = base64.urlsafe_b64encode(hashlib.sha256(encryption_key).digest())
-    fernet = Fernet(fernet_key)
-    
+    fernet = _project_byok_fernet()
+
     # Encrypt and store keys
     metadata = project.metadata or {}
     if 'api_keys' not in metadata:
@@ -2461,5 +2544,61 @@ def _get_project_or_404(project_id: str, user):
             "[PIDVProject] Project not found - user=%s requested project_id=%s",
             getattr(user, 'username', 'unknown'),
             project_id
+        )
+        return None
+
+
+def _project_byok_fernet():
+    """Same Fernet-key derivation manage_api_keys() uses to encrypt keys on
+    save — factored out so decryption (below) can never drift out of sync
+    with it. See manage_api_keys()'s own comment for the SHA-256/fallback
+    rationale."""
+    from cryptography.fernet import Fernet
+    import base64
+    import hashlib
+
+    encryption_key = getattr(settings, 'BYOK_ENCRYPTION_KEY', None)
+    if not encryption_key:
+        encryption_key = settings.SECRET_KEY
+    if isinstance(encryption_key, str):
+        encryption_key = encryption_key.encode()
+    fernet_key = base64.urlsafe_b64encode(hashlib.sha256(encryption_key).digest())
+    return Fernet(fernet_key)
+
+
+def _get_stored_project_api_key(project, provider: str) -> str | None:
+    """Decrypt and return a project's saved BYOK key for `provider`
+    ('openai' or 'claude'), or None if none is saved / it fails to decrypt.
+
+    BUG FIX (2026-09-08): the BYOK — AI Deep Extraction panel
+    (manage_api_keys, above) has always encrypted and saved a key here on
+    request — but until now NOTHING ever read it back. upload_pid() and
+    reprocess_document() only ever looked at request.data for a raw key
+    sent on THAT specific request, which the frontend never actually
+    sends (PIDVerificationV2.jsx's handleUpload/recheckDocument post only
+    file/project_id and {} respectively — by design, since the whole
+    point of BYOK-panel storage is "configure once, use afterwards", and
+    the GET side deliberately never exposes the raw key back to the
+    frontend to resend). Net effect: a key saved via the panel was
+    provably never used by any real analysis run — every "Start AI
+    Analysis" / "Re-check (run fresh)" silently ran with no key at all
+    and, Tesseract not being installed, failed with "Please install
+    Tesseract OR add a Claude API key" regardless of how valid the saved
+    key was. This is the read-back half that was missing; callers should
+    use this as a fallback when the request itself carries no key.
+    """
+    if project is None:
+        return None
+    metadata = project.metadata or {}
+    api_keys = metadata.get('api_keys', {})
+    encrypted = api_keys.get(f'{provider}_key')
+    if not encrypted:
+        return None
+    try:
+        return _project_byok_fernet().decrypt(encrypted.encode()).decode()
+    except Exception:
+        logger.exception(
+            '[BYOK] Failed to decrypt stored %s key for project_id=%s',
+            provider, getattr(project, 'project_id', None),
         )
         return None

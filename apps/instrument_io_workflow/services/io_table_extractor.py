@@ -33,7 +33,7 @@ from .config import (
 logger = logging.getLogger(__name__)
 
 _OCR_TAG_RE = re.compile(
-    r'\b(\d{2,4})\s*[-\u2010-\u2015]\s*([A-Z]{1,4})\s*[-\u2010-\u2015]\s*(\d{3,5}[A-Z]?)\b',
+    r'\b(\d{2,4})\s*[-\u2010-\u2015]\s*([A-Z]{1,4})\s*[-\u2010-\u2015]\s*(\d{2,5}[A-Z]?)\b',
     re.I,
 )
 _CABLE_RE = re.compile(r'\b(\d{2,4})\s+([A-Z])\s+(\d{2})\s+(\d{3})\b')
@@ -78,6 +78,7 @@ def _rows_from_ocr_text(text: str, page_number: int) -> List[Dict]:
         record.update({
             'tag_number': tag,
             'instrument_type': instrument_type,
+            'kind': 'instrument',
             'unit': drawing_unit,
             'from_location': 'FIELD' if 'FIELD' in upper else '',
             'system': system,
@@ -109,6 +110,42 @@ def _extract_drawing_rows_with_local_ocr(page, page_number: int) -> List[Dict]:
     except Exception as exc:
         logger.warning('[IOWF] Local OCR failed on drawing page %d: %s', page_number, exc)
         return []
+
+
+def extract_pid_drawing_row_for_page_via_local_ocr(
+    pdf_bytes: bytes, page_index: int,
+) -> List[Dict]:
+    """Single-page local-OCR fallback for a P&ID drawing page — used both
+    by the synchronous path (no BYOK key supplied) and by
+    tasks.process_pid_vision_page's per-page Celery fan-out (no key, or
+    the Vision call itself failed for that one page). Reuses the same OCR
+    primitives as _extract_drawing_rows_with_local_ocr; shapes rows as a
+    P&ID drawing instrument tag (kind='instrument') rather than a
+    cable-block-diagram row, and swaps in the P&ID-appropriate remark.
+    """
+    if not ENABLE_LOCAL_OCR:
+        return []
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    try:
+        if page_index < 0 or page_index >= len(doc):
+            return []
+        page = doc[page_index]
+        rows = _extract_drawing_rows_with_local_ocr(page, page_index + 1)
+        for row in rows:
+            row['kind'] = 'instrument'
+            row['remarks'] = (
+                'Extracted from P&ID drawing via local OCR — '
+                'add an API key for better accuracy.'
+            )
+        return rows
+    except Exception as exc:
+        logger.warning(
+            '[IOWF] Local OCR failed on P&ID drawing page %d: %s',
+            page_index + 1, exc,
+        )
+        return []
+    finally:
+        doc.close()
 
 
 def _build_header_map(header_cells: List[str]) -> Optional[Dict[int, str]]:
@@ -161,7 +198,23 @@ def _extract_rows_with_pymupdf(
 
                 header_map: Optional[Dict[int, str]] = None
                 header_row_idx = -1
-                # IO sheets often have 2-3 header rows (group label + actual cols).
+                # IO sheets often have 2-3 header rows (group label + actual
+                # cols). Deliberately uses ONLY the first matching row, not
+                # a merge of every consecutive header-like row: on at least
+                # one real document this table alternates between two
+                # DIFFERENT row shapes (a primary row using the first
+                # header row's column semantics, and a secondary/companion
+                # row using a second header row's DIFFERENT semantics for
+                # some of the SAME column indices) — merging both header
+                # rows' maps together was tried and made things worse: it
+                # silently overwrote a canonical field's correct column
+                # index with a conflicting one from the other row, blanking
+                # out/corrupting instrument_type on every primary row.
+                # Properly handling that alternating-row-shape structure
+                # needs dedicated per-row-type logic, not a flat merge —
+                # out of scope here; see the sparse-row guard below for the
+                # one part of this that WAS safe to fix (a header sub-row
+                # leaking through as a bogus data row).
                 for hi in range(min(4, len(raw))):
                     header_map = _build_header_map(raw[hi])
                     if header_map:
@@ -171,10 +224,34 @@ def _extract_rows_with_pymupdf(
                     continue
 
                 for r in raw[header_row_idx + 1:]:
+                    # A genuine data record populates several fields — a
+                    # row with only a single non-blank cell is a leftover
+                    # header/label artifact (e.g. a 3rd sub-header row
+                    # naming just one column, like 'Loop Number' under
+                    # the Tag Number column) that slipped past the header-
+                    # matching loop above by not itself reaching the >= 4
+                    # recognised-columns threshold. Bug hit live: exactly
+                    # this produced a bogus tag_number='Loop Number' row.
+                    if sum(1 for c in r if c and str(c).strip()) < 2:
+                        continue
                     record: Dict[str, str] = {c: '' for c in IO_LIST_CANONICAL_COLUMNS}
                     for col_idx, canonical in header_map.items():
                         if col_idx < len(r):
                             record[canonical] = (r[col_idx] or '').strip()
+                    if record.get('tag_number'):
+                        # PDF cell text can carry a stray space where the
+                        # underlying PDF briefly breaks text flow around a
+                        # hyphen — real example hit live on an Instrument
+                        # Cable Schedule table: '113-PT -3193B' instead of
+                        # '113-PT-3193B'. That embedded space breaks BOTH
+                        # the comment<->tag linker's regex match
+                        # (services/comment_row_linker.py /
+                        # config.TAG_NUMBER_REGEX) and any legend tag-
+                        # format check, since neither tolerates whitespace
+                        # inside a tag. Only collapses whitespace
+                        # immediately beside a hyphen — leaves the rest of
+                        # the value (and every other column) untouched.
+                        record['tag_number'] = re.sub(r'\s*-\s*', '-', record['tag_number'])
                     if not record.get('tag_number'):
                         continue  # tag number is the natural key
                     record['page_number'] = pidx + 1

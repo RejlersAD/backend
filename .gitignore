@@ -4,6 +4,10 @@
 # NEVER commit these files!
 .env
 .env.local
+.env.example
+.env.production
+.env.development
+
 .env.*.local
 *.env
 *credentials*
@@ -67,7 +71,18 @@ pid_drawings/
 
 # Analysis scripts (one-off scripts)
 analyze_s3_pfds.py
-/static
+# /static's CONTENTS are ignored one level at a time (not the directory
+# itself recursively) specifically so the exception below can actually
+# take effect — Git never descends into an excluded directory tree even
+# with a nested "!" rule, so "/static" (recursive) + "!/static/X/**"
+# silently does nothing; "/static/*" (single level) leaves the directory
+# itself visible to Git, letting the re-include below reach its contents.
+/static/*
+# Exception: I/O List's repo-committed default symbol picture library must
+# ship with the code (see apps/instrument_io_workflow/services/seed_default_
+# symbols.py) — everything else directly under /static (collected static
+# output, other apps' own default-symbol folders) stays ignored as before.
+!/static/io_list_default_symbols/
 celerybeat-schedule
 celerybeat.pid
 

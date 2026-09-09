@@ -41,7 +41,7 @@ echo "========================================"
 echo "🚀 Starting Gunicorn NOW"
 echo "========================================"
 echo "Workers      : ${GUNICORN_WORKERS:-3}"
-echo "Timeout      : ${GUNICORN_TIMEOUT:-600}s"
+echo "Timeout      : ${GUNICORN_TIMEOUT:-2400}s"
 echo "Bind         : 0.0.0.0:${PORT}"
 echo "WSGI         : config.wsgi_bulletproof:application"
 echo "========================================"
@@ -53,7 +53,7 @@ gunicorn config.wsgi_bulletproof:application \
     --workers "${GUNICORN_WORKERS:-3}" \
     --worker-class sync \
     --worker-connections 1000 \
-    --timeout "${GUNICORN_TIMEOUT:-600}" \
+    --timeout "${GUNICORN_TIMEOUT:-2400}" \
     --graceful-timeout "${GUNICORN_GRACEFUL_TIMEOUT:-30}" \
     --keep-alive 5 \
     --max-requests 1000 \

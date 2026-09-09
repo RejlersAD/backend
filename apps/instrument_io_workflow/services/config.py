@@ -57,6 +57,19 @@ PAGE_TYPES = {
         'tag number', 'loop number', 'i/o type', 'signal type',
         'hmi description', 'instrument type', 'dcs', 'esd',
         'marsh cab', 'jb number', 'cable no',
+        # Instrument Cable Schedule pages — a real, distinct I/O-List-
+        # family sub-type this codebase already parses (26-column,
+        # From/To-origin-destination layout — see io_table_extractor's
+        # header aliases), but its title-block text didn't share ANY
+        # keyword above. Bug hit live: a 2-page cable schedule table had
+        # its FIRST page classified 'unknown' (0 hits) while its SECOND
+        # page — the same table, same header row — happened to also
+        # contain 'dcs'/'esd' in its data rows and scraped by with 2 hits;
+        # the first page's real rows were silently never even attempted.
+        # This phrase appears once in the title block of EVERY page of a
+        # cable schedule (both counted, matching PAGE_TYPE_MIN_HITS=2 on
+        # its own, unlike the data-dependent keywords above).
+        'instrument cable schedule', 'cable schedule',
     ],
     'io_drawing':      [
         'instrument cable block diagram',
@@ -112,6 +125,12 @@ IO_LIST_CANONICAL_COLUMNS = [
     'marsh_cab_no', 'io_group_no', 'sys_cab_no', 'jb_number',
     'intercon_dwg', 'loop_dwg', 'pri_cable_no', 'cable_size',
     'pr_tr_core', 'remarks', 'revision',
+    # P&ID drawing (Vision) extraction only — see services/pid_vision_extractor.py.
+    # A table-sourced (io_list) document never populates these; a
+    # pid_drawing document only ever populates ONE of tag_number/
+    # equipment_tag/line_tag per row (see _row_from_tag_info's docstring).
+    'kind', 'equipment_tag', 'line_tag', 'symbol_type', 'location',
+    'unit_prefix',
 ]
 
 # Header alias map — every variation the extractor will encounter.
@@ -182,3 +201,10 @@ CHAIN_RISK_THRESHOLDS = {'low': 3, 'medium': 5, 'high': 7, 'critical': 9}
 # ───────────────────────────────────────────────────────────────────────
 MAX_PAGES_PER_PDF = int(getattr(settings, 'INSTRUMENT_IO_MAX_PAGES', 200))
 MAX_ROWS_PER_DOC  = int(getattr(settings, 'INSTRUMENT_IO_MAX_ROWS',  20000))
+
+# Above this many total pages, views.py's IOListDocumentViewSet.create()
+# dispatches the Celery chord fan-out (tasks.process_io_document) instead
+# of extracting synchronously inline in the upload request — see tasks.py's
+# module docstring for why (worker-starvation / request-timeout risk on a
+# large document, especially a P&ID drawing using Vision).
+PAGE_FANOUT_THRESHOLD = int(getattr(settings, 'INSTRUMENT_IO_PAGE_FANOUT_THRESHOLD', 15))

@@ -197,14 +197,66 @@ def _parse_vision_response(raw: str) -> Dict[str, Any]:
     }
 
 
+def _dedupe_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop findings that are effectively the same issue reported again —
+    keyed on (category, tag_number, issue_observed), normalized (lowercase,
+    stripped) so trivial whitespace/casing differences between two
+    independent passes don't create false duplicates. First occurrence
+    wins (pass 1 before pass 2); rule_id is re-numbered by the caller
+    after this runs, so gaps left by dropped duplicates never show up."""
+    seen = set()
+    deduped = []
+    for f in findings:
+        key = (
+            str(f.get('category', '')).strip().lower(),
+            str(f.get('tag_number', '')).strip().lower(),
+            str(f.get('issue_observed', '')).strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(f)
+    return deduped
+
+
+def _dedupe_symbols(symbols: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Same dedup approach as _dedupe_findings, keyed on (symbol_type, location)."""
+    seen = set()
+    deduped = []
+    for s in symbols:
+        key = (str(s.get('symbol_type', '')).strip().lower(), str(s.get('location', '')).strip().lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(s)
+    return deduped
+
+
 def run_claude_analysis(
     drawing_data: dict,
     api_key: str,
     page_image_b64: str,
     symbol_images: Optional[List[Dict[str, Any]]] = None,
     model: Optional[str] = None,
-    max_tokens: int = 4096,
+    # 32000 — an even 16000-tokens-thinking / 16000-tokens-answer split
+    # for the thinking-enabled Claude call below (see its own comment).
+    # 2026-09-08: brought down from 50000/20000 once the per-call token
+    # logging added alongside this change gave real usage numbers to size
+    # against — watch the "[Claude] ... tokens:" log line (input/output/
+    # thinking/stop_reason) on real runs and adjust this together with
+    # the matching budget_tokens if either is consistently near its half.
+    max_tokens: int = 32000,
     include_findings: bool = True,
+    # 2026-09-08: double-pass for accuracy — two independent Vision calls
+    # over the same page image/inputs, findings+symbols merged and
+    # deduped (see _dedupe_findings/_dedupe_symbols). Each pass can catch
+    # things the other misses (a Vision model's attention over a dense
+    # P&ID isn't perfectly deterministic across calls), so the union of
+    # two passes is strictly more complete than either pass alone. Costs
+    # 2x the API spend and latency per page — set False for a caller that
+    # explicitly wants the old single-pass behavior (e.g. a cheap symbol-
+    # only overflow batch, though the default covers that case too).
+    double_pass: bool = True,
 ) -> Dict[str, Any]:
     """
     Real Vision-based P&ID page analysis using Claude — sends the ACTUAL
@@ -213,6 +265,10 @@ def run_claude_analysis(
     batch of labeled reference symbol pictures (LegendSymbolImage, via
     apps.pid_checker_v2) so the same call can also do visual symbol
     recognition — one Vision call covers both instead of two separate passes.
+
+    Runs TWICE by default (double_pass=True) — two independent calls over
+    the same inputs, findings/symbols unioned and deduped. See
+    double_pass's own comment for why.
 
     Args:
         drawing_data: OCR-extracted tags/instruments/valves/etc for this page
@@ -226,6 +282,7 @@ def run_claude_analysis(
         include_findings: False for symbol-only overflow-batch calls (when
                           symbol_images is large enough to need >1 call —
                           findings only need to be requested once per page)
+        double_pass: run two independent passes and merge (default True)
 
     Returns:
         {'findings': [...], 'symbols': [...]}  (findings == [] when
@@ -240,6 +297,46 @@ def run_claude_analysis(
     if not page_image_b64:
         raise ValueError("page_image_b64 is required — Vision needs the actual rendered page image")
 
+    pass_count = 2 if double_pass else 1
+    pass_results = [
+        _run_claude_analysis_one_pass(
+            drawing_data, api_key, page_image_b64, symbol_images, model,
+            max_tokens, include_findings, pass_num=i,
+        )
+        for i in range(1, pass_count + 1)
+    ]
+    if pass_count == 1:
+        return pass_results[0]
+
+    merged_findings = _dedupe_findings([f for r in pass_results for f in r['findings']])
+    for idx, f in enumerate(merged_findings, start=1):
+        f['rule_id'] = f"CLAUDE_{idx:03d}"
+    merged_symbols = _dedupe_symbols([s for r in pass_results for s in r['symbols']])
+
+    logger.info(
+        "[Claude] Double-pass merged: pass1=%d/%d findings/symbols, pass2=%d/%d -> "
+        "%d/%d after dedup",
+        len(pass_results[0]['findings']), len(pass_results[0]['symbols']),
+        len(pass_results[1]['findings']), len(pass_results[1]['symbols']),
+        len(merged_findings), len(merged_symbols),
+    )
+    return {'findings': merged_findings, 'symbols': merged_symbols}
+
+
+def _run_claude_analysis_one_pass(
+    drawing_data: dict,
+    api_key: str,
+    page_image_b64: str,
+    symbol_images: Optional[List[Dict[str, Any]]],
+    model: Optional[str],
+    max_tokens: int,
+    include_findings: bool,
+    pass_num: int = 1,
+) -> Dict[str, Any]:
+    """One single Vision call + parse — the original run_claude_analysis
+    body, factored out so run_claude_analysis (above) can invoke it twice
+    for double_pass and merge the results. Not part of this module's
+    public surface; call run_claude_analysis instead."""
     from apps.pid_checker_v2.services.vision_extractor import (
         VISION_MODELS, VISION_MODEL_CLAUDE_FALLBACK, VISION_REQUEST_TIMEOUT_S,
         VISION_RETRY_MAX_ATTEMPTS, VISION_RETRY_BASE_DELAY_S, VISION_RETRY_MAX_DELAY_S,
@@ -293,13 +390,37 @@ def run_claude_analysis(
             # non-default temperature/top_p/top_k with a 400 on every
             # request (see the matching fix in vision_extractor.py's
             # _call_claude()).
+            #
+            # Sonnet 5/Opus 5 also emit extended 'thinking' by default —
+            # for a Vision analysis expected to return a large findings/
+            # symbols JSON payload, thinking tokens can consume the entire
+            # max_tokens budget, leaving stop_reason='max_tokens' with zero
+            # actual answer text and no exception anywhere (same root cause
+            # diagnosed for pid_checker_v2.services.vision_extractor's
+            # _call_raw_text_vision/_call_claude — see those for the
+            # original confirmed case).
+            #
+            # CONFIRMED LIVE (2026-09-08, real key): thinking.type.enabled
+            # is REJECTED with a 400 by this account's model:
+            #   anthropic.BadRequestError: "thinking.type.enabled" is not
+            #   supported for this model. Use "thinking.type.adaptive" and
+            #   "output_config.effort" to control thinking behavior.
+            # Every prior tuning of budget_tokens here was chasing a
+            # symptom of a request rejected before generation even
+            # started — see pid_checker_v2.services.vision_extractor's
+            # _call_raw_text_vision for the full history. Switched to the
+            # adaptive-thinking API this model actually accepts; shape
+            # verified against the installed anthropic SDK's own type
+            # stubs (ThinkingConfigAdaptiveParam / OutputConfigParam).
+            thinking={'type': 'adaptive', 'display': 'summarized'},
+            output_config={'effort': 'high'},
             system=_VISION_SYSTEM_PROMPT,
             messages=[{'role': 'user', 'content': content}],
         )
 
     logger.info(
-        "[Claude] Sending Vision request to %s (%d symbol image(s), include_findings=%s)",
-        resolved_model, len(symbol_images or []), include_findings,
+        "[Claude] Sending Vision request (pass %d) to %s (%d symbol image(s), include_findings=%s)",
+        pass_num, resolved_model, len(symbol_images or []), include_findings,
     )
 
     import time
@@ -340,6 +461,24 @@ def run_claude_analysis(
     if message is None:
         raise RuntimeError(f"Claude Vision analysis failed: {last_exc}")
 
+    # Diagnostic logging — this call had none at all before. Proves, live,
+    # whether thinking stayed inside its budget or consumed the whole
+    # response (stop_reason='max_tokens' with only 'thinking' content
+    # blocks and no 'text' block would mean it didn't).
+    from apps.pid_checker_v2.services.token_accounting import read_claude_usage, read_claude_thinking_tokens
+    inp, out = read_claude_usage(message)
+    thinking_tok = read_claude_thinking_tokens(message)
+    stop_reason = getattr(message, 'stop_reason', None)
+    logger.info(
+        '[Claude] stop_reason=%s content_block_types=%s',
+        stop_reason,
+        [getattr(b, 'type', None) for b in message.content],
+    )
+    logger.info(
+        '[Claude] tokens: input=%s output=%s thinking=%s stop_reason=%s (max_tokens=%s)',
+        inp, out, thinking_tok, stop_reason, max_tokens,
+    )
+
     content_text = ''.join(b.text for b in message.content if getattr(b, 'type', None) == 'text')
     parsed = _parse_vision_response(content_text)
 
@@ -373,7 +512,7 @@ def run_claude_analysis(
             'confidence': confidence,
         })
 
-    logger.info("[Claude] Vision analysis received %d finding(s), %d symbol(s)", len(normalized_findings), len(symbols))
+    logger.info("[Claude] Vision analysis (pass %d) received %d finding(s), %d symbol(s)", pass_num, len(normalized_findings), len(symbols))
     return {'findings': normalized_findings, 'symbols': symbols}
 
 
@@ -815,12 +954,34 @@ def _smart_compare_one_batch(batch, api_key, resolved_model, fallback_model, tim
         client = anthropic.Anthropic(api_key=api_key, timeout=timeout_s)
         resp = client.messages.create(
             model=use_model,
-            max_tokens=4096,
+            max_tokens=50000,
             # No `temperature` — Claude Sonnet 5 / Opus 5 reject any
             # non-default temperature/top_p/top_k with a 400 on every
             # request (see the matching fix in vision_extractor.py).
+            #
+            # CONFIRMED LIVE (2026-09-08, real key): thinking.type.enabled
+            # is REJECTED with a 400 by this account's model — same call
+            # shape as run_claude_analysis's _call() above, same fix, same
+            # root cause. Not explicitly named in the request that
+            # prompted this fix (scoped to vision_extractor.py + run_
+            # claude_analysis), but this call uses the identical model and
+            # would hit the identical 400 if left on the old shape — fixed
+            # alongside the others rather than knowingly leaving a broken
+            # call in place. See _call_raw_text_vision's comment (pid_
+            # checker_v2/services/vision_extractor.py) for the exact error
+            # and full history.
+            thinking={'type': 'adaptive', 'display': 'summarized'},
+            output_config={'effort': 'high'},
             system=_SMART_COMPARE_SYSTEM_PROMPT,
             messages=[{'role': 'user', 'content': prompt}],
+        )
+        # Diagnostic logging — this call had none at all before.
+        logger.info(
+            '[SmartCompare] stop_reason=%s content_block_types=%s tokens: input=%s output=%s',
+            getattr(resp, 'stop_reason', None),
+            [getattr(b, 'type', None) for b in resp.content],
+            getattr(resp.usage, 'input_tokens', None) if getattr(resp, 'usage', None) else None,
+            getattr(resp.usage, 'output_tokens', None) if getattr(resp, 'usage', None) else None,
         )
         return ''.join(b.text for b in resp.content if getattr(b, 'type', None) == 'text')
 
