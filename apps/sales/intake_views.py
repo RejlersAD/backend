@@ -23,7 +23,7 @@ from rest_framework.throttling import SimpleRateThrottle
 
 from apps.rbac.permissions import HasModuleAccess
 
-from .models import Client, Contact, SalesEmailIntake
+from .models import Client, Contact, OpportunityAuditEvent, SalesEmailIntake
 from .serializers import (
     ClientCreateSerializer, DealCreateSerializer, DealDetailSerializer,
     SalesEmailIntakeSerializer as SalesEmailIntakeDetailSerializer,
@@ -296,6 +296,19 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
             opportunity_serializer = DealCreateSerializer(data=payload)
             opportunity_serializer.is_valid(raise_exception=True)
             opportunity = opportunity_serializer.save(owner=request.user)
+            OpportunityAuditEvent.objects.create(
+                opportunity=opportunity,
+                actor=request.user,
+                event_type='opportunity_created_from_email',
+                to_stage=opportunity.stage,
+                data={
+                    'source_email_intake_id': str(intake.id),
+                    'source_message_id': intake.source_message_id,
+                    'internet_message_id': intake.internet_message_id,
+                    'sender_email': intake.sender_email,
+                    'received_at': intake.received_at.isoformat(),
+                },
+            )
 
             intake.opportunity = opportunity
             intake.status = 'converted'

@@ -39,6 +39,7 @@ class WorkforceSummaryAPITests(TestCase):
             department='Engineering',
             designation='Engineer',
             join_date=date(2026, 1, 1),
+            exit_date=date(2026, 12, 31),
         )
 
     def test_hr_management_module_can_read_lightweight_summary(self):
@@ -63,6 +64,8 @@ class WorkforceSummaryAPITests(TestCase):
         row = response.data['results'][0]
         self.assertEqual(row['employee_number'], 'EMP-SUMMARY')
         self.assertEqual(row['department'], 'Engineering')
+        self.assertEqual(row['join_date'], date(2026, 1, 1))
+        self.assertEqual(row['exit_date'], date(2026, 12, 31))
         self.assertNotIn('bank_account_number', row)
         self.assertNotIn('current_base_salary', row)
 

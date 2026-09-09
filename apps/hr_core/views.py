@@ -166,6 +166,7 @@ class EmployeeMasterViewSet(viewsets.ModelViewSet):
             'designation',
             'employment_status',
             'join_date',
+            'exit_date',
             'created_at',
             'user__is_active',
             'user__rbac_profile__status',

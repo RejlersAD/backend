@@ -344,7 +344,7 @@ class DealListSerializer(serializers.ModelSerializer):
 
 
 class OpportunityAuditEventSerializer(serializers.ModelSerializer):
-    actor_name = serializers.CharField(source='actor.get_full_name', read_only=True)
+    actor_name = serializers.SerializerMethodField()
 
     class Meta:
         model = OpportunityAuditEvent
@@ -353,6 +353,15 @@ class OpportunityAuditEventSerializer(serializers.ModelSerializer):
             'actor', 'actor_name', 'occurred_at',
         ]
         read_only_fields = fields
+
+    def get_actor_name(self, obj):
+        if not obj.actor:
+            return ''
+        return (
+            obj.actor.get_full_name()
+            or obj.actor.username
+            or obj.actor.email
+        )
 
 
 class DealDetailSerializer(serializers.ModelSerializer):
@@ -379,7 +388,47 @@ class DealDetailSerializer(serializers.ModelSerializer):
         return SalesActivityListSerializer(activities, many=True).data
     
     def get_stage_history(self, obj):
-        return OpportunityAuditEventSerializer(obj.audit_events.all()[:100], many=True).data
+        history = list(
+            OpportunityAuditEventSerializer(
+                obj.audit_events.select_related('actor').all()[:100],
+                many=True,
+            ).data
+        )
+        creation_events = {
+            'opportunity_created', 'opportunity_created_from_email',
+        }
+        if not any(item['event_type'] in creation_events for item in history):
+            source = obj.custom_fields or {}
+            owner_name = ''
+            if obj.owner:
+                owner_name = obj.owner.get_full_name() or obj.owner.username
+            history.append({
+                'id': f'created-{obj.id}',
+                'event_type': (
+                    'opportunity_created_from_email'
+                    if source.get('source_email_intake_id')
+                    else 'opportunity_created'
+                ),
+                'from_stage': '',
+                'to_stage': 'lead',
+                'reason': '',
+                'data': {
+                    key: source[key]
+                    for key in (
+                        'source_email_intake_id', 'source_message_id',
+                        'internet_message_id', 'sender_email', 'received_at',
+                    )
+                    if source.get(key)
+                },
+                'actor': obj.owner_id,
+                'actor_name': owner_name,
+                'occurred_at': obj.created_at,
+            })
+        return sorted(
+            history,
+            key=lambda item: str(item.get('occurred_at') or ''),
+            reverse=True,
+        )
 
     def get_permitted_actions(self, obj):
         actions = {

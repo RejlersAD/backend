@@ -38,7 +38,7 @@ from .ai_service import SalesAIService
 from .microsoft_graph import SalesMicrosoftGraphService
 from apps.rbac.data_visibility_mixin import TeamCollaborationMixin
 from .workflow import (
-    close_opportunity, convert_to_project, decide_award, enter_negotiation, record_bid_decision,
+    _audit, close_opportunity, convert_to_project, decide_award, enter_negotiation, record_bid_decision,
     decide_handover, submit_award, submit_handover_for_acceptance,
     submit_qualification,
 )
@@ -470,9 +470,14 @@ class DealViewSet(TeamCollaborationMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Set owner to current user if not specified"""
         if not serializer.validated_data.get('owner'):
-            serializer.save(owner=self.request.user)
+            opportunity = serializer.save(owner=self.request.user)
         else:
-            serializer.save()
+            opportunity = serializer.save()
+        _audit(
+            opportunity, self.request.user, 'opportunity_created',
+            to_stage=opportunity.stage,
+            data={'opportunity_source': opportunity.opportunity_source},
+        )
 
     @action(detail=True, methods=['post'])
     def verify(self, request, pk=None):
@@ -728,7 +733,15 @@ class QuoteViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         """Set prepared_by to current user"""
-        serializer.save(prepared_by=self.request.user)
+        quote = serializer.save(prepared_by=self.request.user)
+        _audit(
+            quote.deal, self.request.user, 'proposal_revision_created',
+            data={
+                'proposal_id': str(quote.id),
+                'proposal_number': quote.quote_number,
+                'version': quote.version,
+            },
+        )
 
     def update(self, request, *args, **kwargs):
         if self.get_object().status in {'submitted', 'sent', 'viewed', 'won', 'lost'}:
@@ -771,6 +784,15 @@ class QuoteViewSet(viewsets.ModelViewSet):
         })
         quote.approval_history = history
         quote.save()
+        _audit(
+            quote.deal, request.user, 'proposal_revision_approved',
+            reason=request.data.get('comment', ''),
+            data={
+                'proposal_id': str(quote.id),
+                'proposal_number': quote.quote_number,
+                'version': quote.version,
+            },
+        )
         return Response(QuoteDetailSerializer(quote).data)
     
     @action(detail=True, methods=['post'])
@@ -801,6 +823,16 @@ class QuoteViewSet(viewsets.ModelViewSet):
             'submitted_version_hash', 'submission_recipient', 'submission_evidence',
             'status', 'sent_date', 'updated_at',
         ])
+        _audit(
+            quote.deal, request.user, 'proposal_revision_issued',
+            data={
+                'proposal_id': str(quote.id),
+                'proposal_number': quote.quote_number,
+                'version': quote.version,
+                'recipient': recipient,
+                'evidence': quote.submission_evidence,
+            },
+        )
         
         # Log activity
         SalesActivity.objects.create(
