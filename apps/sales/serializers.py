@@ -83,14 +83,22 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
             content,
             flags=re.IGNORECASE,
         )
+        award_date_match = re.search(
+            r'\b(?:expected award date|anticipated award date|contract award date|award expected by)\s*[:\-]?\s*'
+            r'(\d{1,2}[\s/-](?:[A-Za-z]{3,9}|\d{1,2})[\s/-]\d{2,4}|'
+            r'\d{4}-\d{2}-\d{2})',
+            content,
+            flags=re.IGNORECASE,
+        )
         field_patterns = {
-            'company_name': r'^\s*Company name\s*:\s*(.+?)\s*$',
+            'company_name': r'^\s*(?:Company|Client|Customer|Organisation|Organization) name\s*:\s*(.+?)\s*$',
             'declared_client_domain': r'^\s*Client domain\s*:\s*([^\s]+)\s*$',
             'contact_name': r'^\s*Contact person\s*:\s*(.+?)\s*$',
             'contact_email': r'^\s*Contact email\s*:\s*([^\s]+)\s*$',
             'contact_phone': r'^\s*Contact phone\s*:\s*(.+?)\s*$',
             'location': r'^\s*Project location\s*:\s*(.+?)\s*$',
             'industry': r'^\s*Industry\s*:\s*(.+?)\s*$',
+            'scope_summary': r'^\s*(?:Scope summary|Project scope|Scope of work)\s*:\s*(.+?)\s*$',
         }
         extracted_fields = {}
         for name, pattern in field_patterns.items():
@@ -104,13 +112,18 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
             flags=re.IGNORECASE | re.MULTILINE,
         )
         deadline_text = deadline_match.group(1) if deadline_match else ''
-        deadline_date = ''
-        for date_format in ('%d %B %Y', '%d %b %Y', '%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d'):
-            try:
-                deadline_date = datetime.strptime(deadline_text, date_format).date().isoformat()
-                break
-            except ValueError:
-                continue
+        award_date_text = award_date_match.group(1) if award_date_match else ''
+
+        def parse_email_date(value):
+            for date_format in ('%d %B %Y', '%d %b %Y', '%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d'):
+                try:
+                    return datetime.strptime(value, date_format).date().isoformat()
+                except ValueError:
+                    continue
+            return ''
+
+        deadline_date = parse_email_date(deadline_text)
+        expected_award_date = parse_email_date(award_date_text)
 
         industry_text = extracted_fields['industry'].lower()
         industry_type = 'other'
@@ -139,6 +152,7 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
             ),
             'deadline_text': deadline_text,
             'deadline_date': deadline_date,
+            'expected_award_date': expected_award_date,
             'estimated_value': value_match.group(2).replace(',', '') if value_match else '',
             'currency': value_match.group(1).upper() if value_match and value_match.group(1) else 'AED',
             'industry_type': industry_type,
@@ -193,7 +207,8 @@ class ClientListSerializer(serializers.ModelSerializer):
             'churn_risk', 'lifetime_value', 'last_contact_date', 'created_at',
             'primary_contact', 'active_deals_count', 'total_deal_value', 'tags'
             , 'legal_name', 'trading_name', 'parent_client', 'country',
-            'market_sectors', 'verification_status', 'new_proposals_permitted'
+            'market_sectors', 'verification_status', 'new_proposals_permitted',
+            'email', 'website'
         ]
         read_only_fields = ['id', 'created_at', 'health_score']
     
