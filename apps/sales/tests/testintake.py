@@ -192,6 +192,8 @@ class SalesEmailIntakeReviewTests(TestCase):
             'Project location: Abu Dhabi, United Arab Emirates\n'
             'Industry: Energy and Utilities\n'
             'Estimated contract value: AED 850,000\n'
+            'Expected award date: 25 Sep 2026\n'
+            'Scope summary: Grid stability assessment and recommendations\n'
         )
         self.intake.save(update_fields=['subject', 'body_preview'])
 
@@ -203,6 +205,11 @@ class SalesEmailIntakeReviewTests(TestCase):
         self.assertEqual(extracted['deadline_date'], '2026-09-18')
         self.assertEqual(extracted['company_name'], 'ABC Energy LLC')
         self.assertEqual(extracted['estimated_value'], '850000')
+        self.assertEqual(extracted['expected_award_date'], '2026-09-25')
+        self.assertEqual(
+            extracted['scope_summary'],
+            'Grid stability assessment and recommendations',
+        )
 
         response = self.client.post(
             f'/api/v1/sales/email-intakes/{self.intake.id}/convert-to-opportunity/',
@@ -220,11 +227,12 @@ class SalesEmailIntakeReviewTests(TestCase):
                 'deal_name': self.intake.subject,
                 'estimated_value': extracted['estimated_value'],
                 'currency': extracted['currency'],
-                'expected_close_date': '2026-09-25',
+                'expected_close_date': extracted['expected_award_date'],
                 'submission_due_date': extracted['deadline_date'],
                 'scope_type': extracted['scope_type'],
                 'client_reference': extracted['tender_reference'],
                 'location': extracted['location'],
+                'description': extracted['scope_summary'],
             },
             format='json',
         )
