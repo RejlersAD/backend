@@ -836,6 +836,7 @@ class SalesEmailIntake(TimeStampedModel):
         ('under_review', 'Under review'),
         ('converted', 'Converted to opportunity'),
         ('rejected', 'Rejected'),
+        ('duplicate', 'Duplicate'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -860,6 +861,22 @@ class SalesEmailIntake(TimeStampedModel):
         blank=True,
         on_delete=models.PROTECT,
         related_name='email_intakes',
+    )
+    reviewed_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='sales_email_intakes_reviewed',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    resolution_note = models.TextField(blank=True)
+    duplicate_of = models.ForeignKey(
+        'self',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='duplicate_intakes',
     )
 
     class Meta:

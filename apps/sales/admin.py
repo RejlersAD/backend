@@ -4,7 +4,9 @@ Django Admin interface for Sales Management
 """
 
 from django.contrib import admin
-from .models import Client, Contact, Deal, Quote, SalesActivity, SalesForecast
+from .models import (
+    Client, Contact, Deal, Quote, SalesActivity, SalesEmailIntake, SalesForecast,
+)
 
 
 @admin.register(Client)
@@ -60,4 +62,23 @@ class SalesForecastAdmin(admin.ModelAdmin):
     search_fields = ('forecast_period',)
     readonly_fields = ('id', 'created_at', 'updated_at')
     date_hierarchy = 'forecast_date'
+
+
+@admin.register(SalesEmailIntake)
+class SalesEmailIntakeAdmin(admin.ModelAdmin):
+    list_display = (
+        'subject', 'sender_email', 'received_at', 'status', 'opportunity',
+        'reviewed_by',
+    )
+    list_filter = ('status', 'importance', 'has_attachments', 'received_at')
+    search_fields = (
+        'subject', 'sender_name', 'sender_email', 'source_message_id',
+        'internet_message_id',
+    )
+    readonly_fields = (
+        'id', 'source_message_id', 'internet_message_id', 'subject',
+        'sender_name', 'sender_email', 'received_at', 'body_preview',
+        'has_attachments', 'importance', 'created_at', 'updated_at',
+    )
+    raw_id_fields = ('opportunity', 'reviewed_by', 'duplicate_of')
 
