@@ -6,7 +6,9 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from unittest.mock import patch
 
-from apps.sales.models import Client, Contact, Deal, Quote, SalesEmailIntake
+from apps.sales.models import (
+    Client, Contact, Deal, OpportunityAuditEvent, Quote, SalesEmailIntake,
+)
 
 User = get_user_model()
 
@@ -181,6 +183,15 @@ class SalesEmailIntakeReviewTests(TestCase):
             self.intake.opportunity.custom_fields['source_email_intake_id'],
             str(self.intake.id),
         )
+        created_event = OpportunityAuditEvent.objects.get(
+            opportunity=self.intake.opportunity,
+            event_type='opportunity_created_from_email',
+        )
+        self.assertEqual(created_event.actor, self.user)
+        self.assertEqual(
+            created_event.data['source_email_intake_id'],
+            str(self.intake.id),
+        )
 
     def test_extracts_email_fields_and_creates_client_with_opportunity(self):
         self.intake.subject = (
@@ -310,3 +321,9 @@ class ProposalApprovalTests(TestCase):
         self.quote.refresh_from_db()
         self.assertEqual(self.quote.status, 'ready_to_submit')
         self.assertEqual(self.quote.approved_by_id, self.user.id)
+        approval_event = OpportunityAuditEvent.objects.get(
+            opportunity=self.opportunity,
+            event_type='proposal_revision_approved',
+        )
+        self.assertEqual(approval_event.actor, self.user)
+        self.assertEqual(approval_event.data['proposal_number'], 'PROP-SELF-001')
