@@ -1,9 +1,12 @@
+from datetime import date, timedelta
+from decimal import Decimal
+
 from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from unittest.mock import patch
 
-from apps.sales.models import Client, Contact, SalesEmailIntake
+from apps.sales.models import Client, Contact, Deal, Quote, SalesEmailIntake
 
 User = get_user_model()
 
@@ -247,3 +250,63 @@ class SalesEmailIntakeReviewTests(TestCase):
                 is_primary=True,
             ).exists()
         )
+
+
+class ProposalApprovalTests(TestCase):
+    def setUp(self):
+        permission = patch(
+            'apps.rbac.permissions.HasModuleAccess.has_permission',
+            return_value=True,
+        )
+        permission.start()
+        self.addCleanup(permission.stop)
+        self.user = User.objects.create_user(
+            username='proposal-owner',
+            email='proposal-owner@example.com',
+            password='test-password',
+        )
+        self.client_record = Client.objects.create(
+            client_code='CLIENT-PROPOSAL-001',
+            company_name='Proposal Client',
+            industry_type='energy',
+            status='active',
+            new_proposals_permitted=True,
+        )
+        self.opportunity = Deal.objects.create(
+            deal_code='DEAL-PROPOSAL-001',
+            deal_name='Owner-approved proposal',
+            client=self.client_record,
+            owner=self.user,
+            stage='proposal',
+            estimated_value=Decimal('250000'),
+            expected_close_date=date.today() + timedelta(days=60),
+        )
+        self.quote = Quote.objects.create(
+            quote_number='PROP-SELF-001',
+            deal=self.opportunity,
+            client=self.client_record,
+            status='draft',
+            subtotal=Decimal('250000'),
+            total_amount=Decimal('250000'),
+            estimated_cost=Decimal('175000'),
+            currency='AED',
+            valid_until=date.today() + timedelta(days=30),
+            prepared_by=self.user,
+            scope='Engineering study and recommendations',
+            deliverables=['Study report'],
+            estimated_hours={'total': 320},
+        )
+        self.api_client = APIClient()
+        self.api_client.force_authenticate(self.user)
+
+    def test_proposal_preparer_can_approve_own_complete_revision(self):
+        response = self.api_client.post(
+            f'/api/v1/sales/quotes/{self.quote.id}/approve/',
+            {'comment': 'Reviewed and approved by proposal owner.'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.quote.refresh_from_db()
+        self.assertEqual(self.quote.status, 'ready_to_submit')
+        self.assertEqual(self.quote.approved_by_id, self.user.id)
