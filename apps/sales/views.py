@@ -750,8 +750,6 @@ class QuoteViewSet(viewsets.ModelViewSet):
     def approve(self, request, pk=None):
         from rest_framework.exceptions import ValidationError
         quote = self.get_object()
-        if quote.prepared_by_id == request.user.id:
-            raise ValidationError({'approver': 'The proposal preparer cannot approve their own version.'})
         missing = [name for name, value in [
             ('scope', quote.scope), ('deliverables', quote.deliverables),
             ('estimated_hours', quote.estimated_hours), ('valid_until', quote.valid_until),
