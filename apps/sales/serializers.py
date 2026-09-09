@@ -4,6 +4,7 @@ DRF serializers for Sales Management API
 """
 
 import re
+from datetime import datetime
 
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
@@ -63,25 +64,86 @@ class SalesEmailIntakeSerializer(serializers.ModelSerializer):
             (label for keyword, label in request_types if keyword in lower_content),
             'General client email',
         )
-        reference_match = re.search(
+        direct_reference_match = re.search(
+            r'\b((?:RFQ|RFP|ITT)[-_/][A-Z0-9][A-Z0-9._/-]{2,})\b',
+            content,
+            flags=re.IGNORECASE,
+        )
+        labelled_reference_match = re.search(
             r'\b(?:RFQ|RFP|ITT|Tender)\s*(?:No\.?|Number|Ref(?:erence)?|#)\s*[:#-]?\s*'
             r'([A-Z0-9][A-Z0-9._/-]{2,})',
             content,
             flags=re.IGNORECASE,
         )
         deadline_match = re.search(
-            r'\b(?:deadline|required submission date|submission date|due date)\s*[:\-]?\s*'
+            r'\b(?:proposal deadline|submission deadline|required by|proposal required by|'
+            r'required submission date|submission date|due date|deadline)\s*[:\-]?\s*'
             r'(\d{1,2}[\s/-](?:[A-Za-z]{3,9}|\d{1,2})[\s/-]\d{2,4}|'
             r'\d{4}-\d{2}-\d{2})',
             content,
             flags=re.IGNORECASE,
         )
+        field_patterns = {
+            'company_name': r'^\s*Company name\s*:\s*(.+?)\s*$',
+            'declared_client_domain': r'^\s*Client domain\s*:\s*([^\s]+)\s*$',
+            'contact_name': r'^\s*Contact person\s*:\s*(.+?)\s*$',
+            'contact_email': r'^\s*Contact email\s*:\s*([^\s]+)\s*$',
+            'contact_phone': r'^\s*Contact phone\s*:\s*(.+?)\s*$',
+            'location': r'^\s*Project location\s*:\s*(.+?)\s*$',
+            'industry': r'^\s*Industry\s*:\s*(.+?)\s*$',
+        }
+        extracted_fields = {}
+        for name, pattern in field_patterns.items():
+            match = re.search(pattern, content, flags=re.IGNORECASE | re.MULTILINE)
+            extracted_fields[name] = match.group(1).strip() if match else ''
+
+        value_match = re.search(
+            r'^\s*(?:Estimated contract value|Estimated value|Contract value|Budget)\s*:\s*'
+            r'([A-Z]{3})?\s*([\d,]+(?:\.\d{1,2})?)',
+            content,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        deadline_text = deadline_match.group(1) if deadline_match else ''
+        deadline_date = ''
+        for date_format in ('%d %B %Y', '%d %b %Y', '%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d'):
+            try:
+                deadline_date = datetime.strptime(deadline_text, date_format).date().isoformat()
+                break
+            except ValueError:
+                continue
+
+        industry_text = extracted_fields['industry'].lower()
+        industry_type = 'other'
+        if any(term in industry_text for term in ('energy', 'power', 'utilities')):
+            industry_type = 'power_generation'
+        elif any(term in industry_text for term in ('oil', 'gas')):
+            industry_type = 'oil_gas'
+        elif 'water' in industry_text:
+            industry_type = 'water_treatment'
+
+        scope_type = 'other'
+        if 'pre-feed' in lower_content or 'pre feed' in lower_content:
+            scope_type = 'pre_feed'
+        elif 'feed' in lower_content:
+            scope_type = 'feed'
+        elif 'feasibility' in lower_content or 'study' in lower_content:
+            scope_type = 'feasibility'
         sender_domain = obj.sender_email.rsplit('@', 1)[-1].lower()
         return {
             'request_type': request_type,
             'client_domain': sender_domain,
-            'tender_reference': reference_match.group(1) if reference_match else '',
-            'deadline_text': deadline_match.group(1) if deadline_match else '',
+            'tender_reference': (
+                direct_reference_match.group(1)
+                if direct_reference_match
+                else labelled_reference_match.group(1) if labelled_reference_match else ''
+            ),
+            'deadline_text': deadline_text,
+            'deadline_date': deadline_date,
+            'estimated_value': value_match.group(2).replace(',', '') if value_match else '',
+            'currency': value_match.group(1).upper() if value_match and value_match.group(1) else 'AED',
+            'industry_type': industry_type,
+            'scope_type': scope_type,
+            **extracted_fields,
         }
 
 
