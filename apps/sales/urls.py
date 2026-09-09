@@ -7,7 +7,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     ClientViewSet, ContactViewSet, DealViewSet, FrameworkAgreementViewSet,
     ProjectHandoverViewSet, QuoteViewSet, SalesActivityViewSet,
-    SalesForecastViewSet, SalesDashboardViewSet,
+    SalesForecastViewSet, SalesDashboardViewSet, SalesMailboxConnectionViewSet,
 )
 from .analytics_views import (
     SalesPipelineAnalyticsView,
@@ -15,6 +15,7 @@ from .analytics_views import (
     SalesAIInsightsView,
     SalesActivitiesView,
 )
+from .intake_views import sales_email_intake
 
 # Create router and register viewsets
 router = DefaultRouter()
@@ -27,6 +28,7 @@ router.register(r'project-handovers', ProjectHandoverViewSet, basename='project-
 router.register(r'activities', SalesActivityViewSet, basename='sales-activity')
 router.register(r'forecasts', SalesForecastViewSet, basename='sales-forecast')
 router.register(r'dashboard', SalesDashboardViewSet, basename='sales-dashboard')
+router.register(r'mailbox-connections', SalesMailboxConnectionViewSet, basename='sales-mailbox-connection')
 
 # Analytics endpoints — powered by real platform data (no CRM tables needed)
 analytics_urlpatterns = [
@@ -38,6 +40,7 @@ analytics_urlpatterns = [
 
 # URL patterns
 urlpatterns = analytics_urlpatterns + [
+    path('email-intake/', sales_email_intake, name='sales-email-intake'),
     path('', include(router.urls)),
 ]
 

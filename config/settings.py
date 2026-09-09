@@ -556,6 +556,7 @@ REST_FRAMEWORK = {
         'planning_exports': '60/hour',
         'planning_integrations': '120/hour',
         'planning_enterprise': '240/hour',
+        'sales_email_intake': '120/minute',
     },
 }
 
@@ -647,6 +648,27 @@ TEAMS_APPROVAL_WEBHOOK_TIMEOUT = config(
 # Native Microsoft Graph HR integration. The client secret is read directly by
 # the Graph service from MICROSOFT_GRAPH_CLIENT_SECRET and is never persisted.
 MICROSOFT_GRAPH_BASE_URL = config('MICROSOFT_GRAPH_BASE_URL', default='https://graph.microsoft.com/v1.0')
+SALES_MICROSOFT_GRAPH_BASE_URL = config(
+    'SALES_MICROSOFT_GRAPH_BASE_URL',
+    default='https://graph.microsoft.com/v1.0',
+)
+SALES_MICROSOFT_GRAPH_TIMEOUT = config(
+    'SALES_MICROSOFT_GRAPH_TIMEOUT',
+    default=30,
+    cast=int,
+)
+SALES_GRAPH_TOKEN_ENCRYPTION_KEY = config(
+    'SALES_GRAPH_TOKEN_ENCRYPTION_KEY',
+    default=None,
+)
+SALES_MICROSOFT_OAUTH_REDIRECT_URI = config(
+    'SALES_MICROSOFT_OAUTH_REDIRECT_URI',
+    default=f'{PRODUCTION_BACKEND}/api/v1/sales/mailbox-connections/oauth/callback/',
+)
+SALES_EMAIL_INTAKE_WEBHOOK_KEY = config(
+    'SALES_EMAIL_INTAKE_WEBHOOK_KEY',
+    default='',
+)
 MICROSOFT_GRAPH_TIMEOUT = config('MICROSOFT_GRAPH_TIMEOUT', default=30, cast=int)
 HR_ASSISTANT_MODEL = config('HR_ASSISTANT_MODEL', default='gpt-4o-mini')
 HR_ASSISTANT_LLM_ENABLED = config('HR_ASSISTANT_LLM_ENABLED', default=False, cast=bool)

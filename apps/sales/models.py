@@ -758,3 +758,114 @@ class SalesForecast(TimeStampedModel):
     
     def __str__(self):
         return f"Forecast {self.forecast_period} - ${self.predicted_revenue:,.2f}"
+
+
+class SalesMailboxConnection(TimeStampedModel):
+    """Governed Outlook connection owned by a Sales user or administrator.
+
+    Application secrets remain in the runtime secret store. Delegated refresh
+    tokens are encrypted before persistence and are never exposed by the API.
+    """
+
+    STATUS_CHOICES = [
+        ('not_tested', 'Not tested'),
+        ('connected', 'Connected'),
+        ('error', 'Connection error'),
+    ]
+    AUTH_MODE_CHOICES = [
+        ('delegated', 'Connect my Outlook account'),
+        ('application', 'Application / shared mailbox'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=120, default='Sales Outlook intake')
+    auth_mode = models.CharField(
+        max_length=20,
+        choices=AUTH_MODE_CHOICES,
+        default='delegated',
+        db_index=True,
+    )
+    tenant_id = models.CharField(max_length=100)
+    client_id = models.CharField(max_length=100)
+    mailbox_address = models.EmailField(unique=True)
+    enabled = models.BooleanField(default=False, db_index=True)
+    last_status = models.CharField(
+        max_length=24,
+        choices=STATUS_CHOICES,
+        default='not_tested',
+        db_index=True,
+    )
+    last_health_check_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True)
+    mailbox_display_name = models.CharField(max_length=255, blank=True)
+    total_item_count = models.PositiveIntegerField(null=True, blank=True)
+    unread_item_count = models.PositiveIntegerField(null=True, blank=True)
+    encrypted_refresh_token = models.TextField(blank=True, default='')
+    delegated_account_id = models.CharField(max_length=255, blank=True)
+    delegated_account_name = models.CharField(max_length=255, blank=True)
+    delegated_scopes = models.JSONField(default=list, blank=True)
+    connected_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='+',
+    )
+    updated_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='+',
+    )
+
+    class Meta:
+        db_table = 'sales_mailbox_connections'
+        ordering = ['name']
+
+    def __str__(self):
+        return f'{self.name} ({self.mailbox_address})'
+
+
+class SalesEmailIntake(TimeStampedModel):
+    """Immutable source record received from an approved email automation."""
+
+    STATUS_CHOICES = [
+        ('received', 'Received'),
+        ('under_review', 'Under review'),
+        ('converted', 'Converted to opportunity'),
+        ('rejected', 'Rejected'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_message_id = models.CharField(max_length=512, unique=True, db_index=True)
+    internet_message_id = models.CharField(max_length=512, blank=True, db_index=True)
+    subject = models.CharField(max_length=500)
+    sender_name = models.CharField(max_length=255, blank=True)
+    sender_email = models.EmailField()
+    received_at = models.DateTimeField(db_index=True)
+    body_preview = models.TextField(blank=True)
+    has_attachments = models.BooleanField(default=False)
+    importance = models.CharField(max_length=20, blank=True)
+    status = models.CharField(
+        max_length=24,
+        choices=STATUS_CHOICES,
+        default='received',
+        db_index=True,
+    )
+    opportunity = models.ForeignKey(
+        Deal,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='email_intakes',
+    )
+
+    class Meta:
+        db_table = 'sales_email_intakes'
+        ordering = ['-received_at']
+        indexes = [models.Index(fields=['status', '-received_at'])]
+
+    def __str__(self):
+        return f'{self.sender_email}: {self.subject}'
