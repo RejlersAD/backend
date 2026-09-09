@@ -1,11 +1,14 @@
 """Authenticated machine-to-machine intake for Power Automate email events."""
 
+import re
 import secrets
+from html import unescape
 
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.html import strip_tags
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, serializers, status, viewsets
 from rest_framework.decorators import (
@@ -20,9 +23,9 @@ from rest_framework.throttling import SimpleRateThrottle
 
 from apps.rbac.permissions import HasModuleAccess
 
-from .models import SalesEmailIntake
+from .models import Client, Contact, SalesEmailIntake
 from .serializers import (
-    DealCreateSerializer, DealDetailSerializer,
+    ClientCreateSerializer, DealCreateSerializer, DealDetailSerializer,
     SalesEmailIntakeSerializer as SalesEmailIntakeDetailSerializer,
 )
 
@@ -38,12 +41,18 @@ class SalesEmailIntakeThrottle(SimpleRateThrottle):
 
 
 class SalesEmailWebhookSerializer(serializers.ModelSerializer):
+    body = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+    )
+
     class Meta:
         model = SalesEmailIntake
         fields = [
             'source_message_id', 'internet_message_id', 'subject',
             'sender_name', 'sender_email', 'received_at', 'body_preview',
-            'has_attachments', 'importance',
+            'body', 'has_attachments', 'importance',
         ]
         extra_kwargs = {
             'source_message_id': {'validators': []},
@@ -54,6 +63,19 @@ class SalesEmailWebhookSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError('Outlook message ID is required.')
         return value
+
+    def validate(self, attrs):
+        full_body = attrs.pop('body', '')
+        if full_body:
+            body_with_breaks = re.sub(
+                r'<\s*(?:br\s*/?|/p|/div|/li)\s*>',
+                '\n',
+                full_body,
+                flags=re.IGNORECASE,
+            )
+            plain_body = unescape(strip_tags(body_with_breaks))
+            attrs['body_preview'] = re.sub(r'\n\s*\n\s*\n+', '\n\n', plain_body).strip()
+        return attrs
 
 
 @api_view(['POST'])
@@ -203,14 +225,61 @@ class SalesEmailIntakeViewSet(viewsets.ReadOnlyModelViewSet):
                     'status': 'Rejected or duplicate intake cannot be converted.',
                 })
 
+            client = None
+            client_id = request.data.get('client')
+            if client_id:
+                client = Client.objects.filter(pk=client_id).first()
+                if not client:
+                    raise serializers.ValidationError({
+                        'client': 'The selected client could not be found.',
+                    })
+            else:
+                new_client = request.data.get('new_client') or {}
+                company_name = str(new_client.get('company_name', '')).strip()
+                if not company_name:
+                    raise serializers.ValidationError({
+                        'client': 'Select a client or provide a new client name.',
+                    })
+                client = Client.objects.filter(
+                    company_name__iexact=company_name,
+                ).first()
+                if not client:
+                    client_serializer = ClientCreateSerializer(data={
+                        'company_name': company_name,
+                        'legal_name': company_name,
+                        'industry_type': new_client.get('industry_type') or 'other',
+                        'email': new_client.get('email') or '',
+                        'phone': new_client.get('phone') or '',
+                        'website': new_client.get('website') or '',
+                        'country': new_client.get('country') or '',
+                        'status': 'prospect',
+                        'notes': f'Created from Sales email intake {intake.id}.',
+                    })
+                    client_serializer.is_valid(raise_exception=True)
+                    client = client_serializer.save(account_manager=request.user)
+
+                    contact_email = str(new_client.get('contact_email') or '').strip()
+                    if contact_email:
+                        name_parts = str(new_client.get('contact_name') or '').strip().split()
+                        Contact.objects.create(
+                            client=client,
+                            first_name=name_parts[0] if name_parts else 'Email',
+                            last_name=' '.join(name_parts[1:]) if len(name_parts) > 1 else 'Contact',
+                            email=contact_email,
+                            phone=new_client.get('phone') or '',
+                            role_type='procurement',
+                            is_primary=True,
+                        )
+
             payload = {
                 'deal_name': request.data.get('deal_name') or intake.subject[:300],
-                'client': request.data.get('client'),
+                'client': str(client.id),
                 'estimated_value': request.data.get('estimated_value'),
                 'currency': request.data.get('currency') or 'AED',
                 'expected_close_date': request.data.get('expected_close_date'),
                 'submission_due_date': request.data.get('submission_due_date'),
                 'scope_type': request.data.get('scope_type') or 'other',
+                'location': request.data.get('location') or '',
                 'description': request.data.get('description') or intake.body_preview,
                 'client_reference': request.data.get('client_reference') or '',
                 'opportunity_source': 'client_email',

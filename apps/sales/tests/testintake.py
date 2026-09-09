@@ -3,7 +3,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from unittest.mock import patch
 
-from apps.sales.models import Client, SalesEmailIntake
+from apps.sales.models import Client, Contact, SalesEmailIntake
 
 User = get_user_model()
 
@@ -53,6 +53,21 @@ class SalesEmailIntakeTests(TestCase):
         self.assertEqual(duplicate.status_code, 200)
         self.assertTrue(duplicate.data['duplicate'])
         self.assertEqual(SalesEmailIntake.objects.count(), 1)
+
+    def test_accepts_full_email_body_and_normalizes_html(self):
+        self.payload['body'] = '<p>Company name: ABC Energy LLC</p><p>Budget: AED 850,000</p>'
+
+        response = self.client.post(
+            self.endpoint,
+            self.payload,
+            format='json',
+            HTTP_X_RADAI_WEBHOOK_KEY='test-webhook-key',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        intake = SalesEmailIntake.objects.get()
+        self.assertIn('Company name: ABC Energy LLC', intake.body_preview)
+        self.assertNotIn('<p>', intake.body_preview)
 
 
 class SalesEmailIntakeReviewTests(TestCase):
@@ -162,4 +177,65 @@ class SalesEmailIntakeReviewTests(TestCase):
         self.assertEqual(
             self.intake.opportunity.custom_fields['source_email_intake_id'],
             str(self.intake.id),
+        )
+
+    def test_extracts_email_fields_and_creates_client_with_opportunity(self):
+        self.intake.subject = (
+            'RFQ-2026-0915 | Grid Stability Study | Proposal Required by 18 Sep 2026'
+        )
+        self.intake.body_preview = (
+            'Company name: ABC Energy LLC\n'
+            'Client domain: abcenergy.ae\n'
+            'Contact person: Ahmed Hassan\n'
+            'Contact email: ahmed.hassan@abcenergy.ae\n'
+            'Contact phone: +971 50 123 4567\n'
+            'Project location: Abu Dhabi, United Arab Emirates\n'
+            'Industry: Energy and Utilities\n'
+            'Estimated contract value: AED 850,000\n'
+        )
+        self.intake.save(update_fields=['subject', 'body_preview'])
+
+        detail = self.client.get(
+            f'/api/v1/sales/email-intakes/{self.intake.id}/'
+        )
+        extracted = detail.data['extracted_information']
+        self.assertEqual(extracted['tender_reference'], 'RFQ-2026-0915')
+        self.assertEqual(extracted['deadline_date'], '2026-09-18')
+        self.assertEqual(extracted['company_name'], 'ABC Energy LLC')
+        self.assertEqual(extracted['estimated_value'], '850000')
+
+        response = self.client.post(
+            f'/api/v1/sales/email-intakes/{self.intake.id}/convert-to-opportunity/',
+            {
+                'new_client': {
+                    'company_name': extracted['company_name'],
+                    'industry_type': extracted['industry_type'],
+                    'email': extracted['contact_email'],
+                    'phone': extracted['contact_phone'],
+                    'website': 'https://abcenergy.ae',
+                    'country': 'United Arab Emirates',
+                    'contact_name': extracted['contact_name'],
+                    'contact_email': extracted['contact_email'],
+                },
+                'deal_name': self.intake.subject,
+                'estimated_value': extracted['estimated_value'],
+                'currency': extracted['currency'],
+                'expected_close_date': '2026-09-25',
+                'submission_due_date': extracted['deadline_date'],
+                'scope_type': extracted['scope_type'],
+                'client_reference': extracted['tender_reference'],
+                'location': extracted['location'],
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        created_client = Client.objects.get(company_name='ABC Energy LLC')
+        self.assertEqual(response.data['opportunity']['client'], created_client.id)
+        self.assertTrue(
+            Contact.objects.filter(
+                client=created_client,
+                email='ahmed.hassan@abcenergy.ae',
+                is_primary=True,
+            ).exists()
         )
