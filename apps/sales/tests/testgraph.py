@@ -166,5 +166,8 @@ class SalesMailboxConnectionOAuthTests(TestCase):
         response = self.client.post(self.endpoint, {}, format='json')
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn('RADAI administrator', response.data['detail'])
+        self.assertEqual(
+            response.data['detail'],
+            'Outlook connection is not available yet. Contact your RADAI administrator.',
+        )
         self.assertEqual(SalesMailboxConnection.objects.count(), 0)
