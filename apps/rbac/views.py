@@ -2910,6 +2910,11 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         return Response({'count': count})
 
 
+class AuditLogPagination(FlexiblePageNumberPagination):
+    page_size = 20
+    max_page_size = 100
+
+
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """
     ViewSet for viewing audit logs
@@ -2917,11 +2922,34 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = AuditLog.objects.select_related('user').all()
     serializer_class = AuditLogSerializer
+    pagination_class = AuditLogPagination
     permission_classes = [IsAuthenticated, IsAdmin]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['user_email', 'action', 'resource_type']
     ordering_fields = ['-timestamp']
     filterset_fields = ['action', 'resource_type', 'success']
+
+    def list(self, request, *args, **kwargs):
+        scope = request.query_params.get('scope', 'all')
+        if scope not in ('all', 'today', 'failed'):
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'scope': 'Choose all, today, or failed.'})
+        queryset = self.filter_queryset(self.get_queryset())
+        today = Q(timestamp__date=timezone.localdate())
+        summary = queryset.aggregate(
+            total=Count('pk'), today=Count('pk', filter=today),
+            failed=Count('pk', filter=Q(success=False)),
+        )
+        if scope == 'today':
+            queryset = queryset.filter(today)
+        elif scope == 'failed':
+            queryset = queryset.filter(success=False)
+        page = self.paginate_queryset(queryset)
+        response = self.get_paginated_response(self.get_serializer(page, many=True).data)
+        response.data['page_size'] = self.paginator.get_page_size(request)
+        response.data['summary'] = summary
+        response.data['timezone'] = timezone.get_current_timezone_name()
+        return response
     
     def get_queryset(self):
         """Filter logs based on organization for non-super-admins"""
@@ -2939,7 +2967,7 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         except UserProfile.DoesNotExist:
             return AuditLog.objects.none()
         
-        return queryset.order_by('-timestamp')
+        return queryset.order_by('-timestamp', '-pk')
     
     @action(detail=False, methods=['get'])
     def user_activity(self, request):
@@ -3159,16 +3187,12 @@ class AnalyticsDashboardViewSet(viewsets.ViewSet):
         
         # User Statistics
         total_users = UserProfile.objects.filter(is_deleted=False).count()
-        active_today = UserActivityAnalytics.objects.filter(
-            date=today, 
-            login_count__gt=0
-        ).count()
         
         # System Metrics (Latest)
         latest_metrics = SystemMetrics.objects.first()
         
         # Security Alerts
-        active_alerts = SecurityAlert.objects.filter(status='new').count()
+        active_alerts = SecurityAlert.objects.filter(status__in=['new', 'investigating']).count()
         critical_alerts = SecurityAlert.objects.filter(
             status='new',
             severity='critical'
@@ -3205,11 +3229,13 @@ class AnalyticsDashboardViewSet(viewsets.ViewSet):
         # System Health
         latest_health = SystemHealthCheck.objects.first()
         health_score = latest_health.health_score if latest_health else 100.0
+        from .console_telemetry import console_overview
+        console = console_overview(latest_health)
         
         data = {
             'total_users': total_users,
-            'active_users_today': active_today,
-            'total_api_requests_today': latest_metrics.api_requests_count if latest_metrics else 0,
+            'active_users_today': console['active_users_today'],
+            'total_api_requests_today': console['api_requests_count'],
             'system_health_score': health_score,
             'avg_response_time_ms': latest_metrics.avg_response_time_ms if latest_metrics else 0,
             'success_rate_percentage': latest_metrics.success_rate_percentage if latest_metrics else 100,
@@ -3225,7 +3251,7 @@ class AnalyticsDashboardViewSet(viewsets.ViewSet):
         }
         
         serializer = DashboardStatsSerializer(data)
-        return Response(serializer.data)
+        return Response({**serializer.data, **console})
     
     @action(detail=False, methods=['get'])
     def real_time_activity(self, request):
@@ -3233,21 +3259,37 @@ class AnalyticsDashboardViewSet(viewsets.ViewSet):
         Get real-time activity feed
         Recent user actions, alerts, and system events
         """
-        limit = int(request.query_params.get('limit', 20))
-        
-        # Get recent audit logs
-        recent_audits = AuditLog.objects.select_related('user').order_by('-timestamp')[:limit]
+        from rest_framework.exceptions import ValidationError
+        from .audit_context import administrative_audits, ACTION_LABELS
+        try:
+            limit = min(max(int(request.query_params.get('limit', 20)), 1), 100)
+            hours = min(max(int(request.query_params.get('hours', 24)), 1), 720)
+        except (TypeError, ValueError):
+            raise ValidationError('limit and hours must be whole numbers.')
+
+        # Filter before slicing so telemetry cannot crowd out actual admin events.
+        recent_audits = administrative_audits(AuditLog.objects.select_related('user')).filter(
+            timestamp__gte=timezone.now() - timedelta(hours=hours),
+        ).order_by('-timestamp', '-id')[:limit]
         
         activities = []
         for audit in recent_audits:
             activities.append({
+                'id': str(audit.id),
                 'activity_type': audit.action,
                 'user_email': audit.user_email,
-                'description': f"{audit.action.title()} {audit.resource_type}",
+                'actor_name': audit.user.get_full_name() if audit.user else '',
+                'description': audit.metadata.get('action_label') or ACTION_LABELS.get(audit.action) or f"{audit.get_action_display()} {audit.resource_type}",
+                'target': audit.resource_repr or str(audit.resource_id or audit.metadata.get('target_id') or audit.metadata.get('request_path') or f'{audit.resource_type} (target not recorded)'),
                 'timestamp': audit.timestamp,
                 'severity': 'high' if not audit.success else 'normal',
                 'metadata': {
                     'resource_id': audit.resource_id,
+                    'resource_repr': audit.resource_repr,
+                    'resource_type': audit.resource_type,
+                    'request_path': audit.metadata.get('request_path'),
+                    'request_method': audit.metadata.get('request_method'),
+                    'response_status': audit.metadata.get('response_status'),
                     'success': audit.success,
                     'changes': audit.changes
                 }
@@ -3405,6 +3447,12 @@ class SecurityAlertViewSet(viewsets.ModelViewSet):
     filterset_fields = ['severity', 'status', 'alert_type']
     search_fields = ['title', 'description', 'user__email']
     ordering = ['-detection_time']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.request.query_params.get('active') == 'true':
+            queryset = queryset.filter(status__in=['new', 'investigating'])
+        return queryset
     
     @action(detail=True, methods=['post'])
     def resolve(self, request, pk=None):
