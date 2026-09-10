@@ -66,6 +66,10 @@ def generate_monthly_run(
     from ..catalog import DEFAULT_WORKING_DAYS_PER_MONTH
     effective_working_days = int(working_days) if working_days is not None else DEFAULT_WORKING_DAYS_PER_MONTH
 
+    if PayrollAdjustment.objects.filter(target_year=year, target_month=month, status=AdjustmentStatus.PENDING).exists():
+        from .adjustment_period import require_current_or_future
+        require_current_or_future(year, month)
+
     existing = PayrollRun.objects.filter(year=year, month=month).first()
     if existing:
         if not overwrite:
@@ -77,6 +81,8 @@ def generate_monthly_run(
             raise GenerationError(
                 f"Cannot overwrite a {existing.status} run. Revert to Draft first."
             )
+        PayrollAdjustment.objects.filter(applied_to__run=existing, ot_conversion__isnull=False).update(
+            status=AdjustmentStatus.PENDING, applied_to=None, applied_at=None)
         # Wipe slips so we can regenerate
         existing.payslips.all().delete()
         run = existing
@@ -121,54 +127,9 @@ def generate_monthly_run(
     # ── Leave days per employee for this month ────────────────────────────────
     # Sourced from approved LeaveRequests (apps.payroll) linked by employee_code.
     # Categories are soft-coded in catalog.LEAVE_CATEGORIES_FOR_PAYROLL.
-    # Multi-month leaves are prorated by calendar-day overlap.
-    leave_lookup: dict = {}
-    try:
-        import calendar as _cal
-        from decimal import Decimal as _D
-        from datetime import date as _date
-        from apps.payroll.models import LeaveRequest as _LR, LeaveRequestStatus as _LRS
-        from ..catalog import LEAVE_CATEGORIES_FOR_PAYROLL
-
-        _month_first = _date(year, month, 1)
-        _month_last  = _date(year, month, _cal.monthrange(year, month)[1])
-        _approved = (
-            _LR.objects
-            .filter(
-                status=_LRS.APPROVED,
-                leave_type__category__in=list(LEAVE_CATEGORIES_FOR_PAYROLL.values()),
-                start_date__lte=_month_last,
-                end_date__gte=_month_first,
-                employee_code__isnull=False,
-            )
-            .select_related('leave_type')
-            .values('employee_code', 'leave_type__category', 'days_requested',
-                    'start_date', 'end_date')
-        )
-        for req in _approved:
-            emp_code = str(req['employee_code']).strip()
-            category = req['leave_type__category']
-            days     = _D(str(req['days_requested'] or 0))
-
-            # Prorate if the leave spans across month boundaries
-            req_start = req['start_date']
-            req_end   = req['end_date']
-            if req_start < _month_first or req_end > _month_last:
-                overlap_start    = max(req_start, _month_first)
-                overlap_end      = min(req_end,   _month_last)
-                total_cal_days   = (_req_end   - req_start).days + 1  # noqa: not used
-                total_cal_days   = (req_end    - req_start).days + 1
-                overlap_cal_days = (overlap_end - overlap_start).days + 1
-                if total_cal_days > 0:
-                    days = (days * _D(overlap_cal_days) / _D(total_cal_days)).quantize(_D('0.01'))
-
-            row = leave_lookup.setdefault(emp_code,
-                      {f: _D('0.00') for f in LEAVE_CATEGORIES_FOR_PAYROLL})
-            for field, cat in LEAVE_CATEGORIES_FOR_PAYROLL.items():
-                if cat == category:
-                    row[field] = row[field] + days
-    except Exception:
-        LEAVE_CATEGORIES_FOR_PAYROLL = {}  # graceful fallback if leave app unavailable
+    from decimal import Decimal as _D
+    from apps.payroll.services.leave_sync import monthly_payroll_leave
+    leave_lookup = monthly_payroll_leave(year, month)
 
     # Carry-forward source = previous month's payslips keyed by employee_id
     carry_map = {}
@@ -177,7 +138,7 @@ def generate_monthly_run(
         prev_run = PayrollRun.objects.filter(year=prev_y, month=prev_m).first()
         if prev_run:
             for slip in prev_run.payslips.prefetch_related('line_items'):
-                carry_map[slip.employee_id] = list(slip.line_items.all())
+                carry_map[slip.employee_id] = list(slip.line_items.exclude(component_code='overtime'))
 
     # Pending adjustments for this period, grouped by employee_id
     adj_map: dict[int, list[PayrollAdjustment]] = {}

@@ -30,6 +30,9 @@ class HRWorkflowService:
     def _assignment(cls, stage, instance):
         if stage.approver_type == 'employee_manager':
             manager = instance.employee.manager if instance.employee and instance.employee.manager_id else None
+            if instance.subject_type in {'payroll.leave_request', 'hr.overtime_request'}:
+                from apps.payroll.services.leave_approval import manager_for_employee
+                manager = manager_for_employee(instance.employee)
             return (manager.user if manager else None), ('' if manager else stage.escalation_role_code)
         if stage.approver_type == 'requester':
             return instance.requested_by, ''
@@ -78,6 +81,14 @@ class HRWorkflowService:
         first_stage = definition.stages.order_by('sequence').first()
         if not first_stage:
             raise ValidationError({'workflow': 'Workflow definition has no stages.'})
+        if subject_type == 'payroll.leave_request':
+            from apps.payroll.services.leave_approval import manager_for_employee
+            if manager_for_employee(employee) is None:
+                first_stage = definition.stages.get(code='hr_review')
+        if subject_type == 'hr.overtime_request':
+            from apps.payroll.services.leave_approval import manager_for_employee
+            if (context or {}).get('manager_initiated') or manager_for_employee(employee) is None:
+                first_stage = definition.stages.get(code='hr_review')
         instance, created = HRWorkflowInstance.objects.get_or_create(
             definition=definition,
             subject_type=subject_type,
@@ -94,11 +105,16 @@ class HRWorkflowService:
                 instance=instance, event_type='started', actor=requested_by,
                 stage_code=first_stage.code, metadata={'context': context or {}},
             )
+            if subject_type == 'payroll.leave_request' and first_stage.code == 'hr_review':
+                HRWorkflowEvent.objects.create(instance=instance, event_type='manager_skipped', stage_code='manager_review', metadata={'reason': 'No assigned manager'})
             cls._create_task(instance, first_stage)
         return instance
 
     @classmethod
     def can_act(cls, task, user):
+        if task.instance.subject_type == 'hr.overtime_request':
+            from .overtime import can_review
+            return can_review(task, user)
         if user.is_superuser:
             return True
         if task.assigned_to_id:
@@ -173,6 +189,9 @@ class HRWorkflowService:
 
     @classmethod
     def _task_recipients(cls, task):
+        if task.instance.subject_type == 'hr.overtime_request':
+            from .overtime import recipients
+            return recipients(task)
         if task.assigned_to_id:
             return [task.assigned_to]
         if not task.assigned_role_code:
@@ -191,18 +210,35 @@ class HRWorkflowService:
             from apps.notifications.services import NotificationService
 
             stage = task.stage
+            if task.instance.subject_type == 'hr.overtime_request':
+                from apps.notifications.models import Notification, NotificationCategory
+                category = NotificationCategory.objects.filter(name='APPROVAL').first()
+                context = task.instance.context
+                for recipient in cls._task_recipients(task):
+                    Notification.objects.create(recipient=recipient, category=category,
+                        title=('Reminder: ' if reminder else '') + 'Overtime approval',
+                        message=f'{context.get("employee_name", "Employee")} / {context.get("requested_hours", "")} hours requested',
+                        action_url=f'/hr/leave?view=encashment&request={task.instance.subject_id}', action_label='Review overtime',
+                        metadata={'workflow_task_id': str(task.id)}, send_in_app=True)
+                return
+            is_leave = task.instance.subject_type == 'payroll.leave_request'
+            context = task.instance.context
             for recipient in cls._task_recipients(task):
+                if is_leave and task.instance.employee and recipient.pk == task.instance.employee.user_id:
+                    continue
                 NotificationService.create_notification(
                     recipient=recipient,
                     title=('Reminder: ' if reminder else '') + stage.name,
-                    message=f'{task.instance.definition.name} requires your review.',
+                    message=(f'Please approve the leave request of {context.get("employee_name", "employee")} ? {context.get("days_requested", "")} days requested.' if is_leave else f'{task.instance.definition.name} requires your review.'),
                     category='APPROVAL',
                     priority='HIGH' if reminder else 'NORMAL',
-                    action_url='/approvals',
+                    action_url=f'/approvals?leave={task.instance.subject_id}' if is_leave else '/approvals',
                     action_label='Review request',
                     metadata={'workflow_task_id': str(task.id)},
                 )
         except Exception:
+            if task.instance.subject_type == 'payroll.leave_request':
+                raise
             return
 
     @classmethod
@@ -229,7 +265,7 @@ class HRWorkflowService:
             escalation_at = task.created_at + timedelta(hours=task.stage.escalate_after_hours)
             if escalation_at <= now and not task.escalated_at:
                 task.escalated_at = now
-                if task.stage.escalation_role_code:
+                if task.stage.escalation_role_code and task.instance.subject_type not in {'payroll.leave_request', 'hr.overtime_request'}:
                     task.assigned_to = None
                     task.assigned_role_code = task.stage.escalation_role_code
                 task.save(update_fields=['escalated_at', 'assigned_to', 'assigned_role_code', 'updated_at'])
