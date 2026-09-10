@@ -10,7 +10,7 @@ def ensure_adjustment_reference_key(apps, schema_editor):
     """Repair legacy PostgreSQL tables before installing the OT foreign key.
 
     Some restored databases recorded payroll_engine.0001 as applied without
-    restoring its primary key. Never rewrite IDs or remove financial rows.
+    restoring its primary key. Preserve every financial row and audit ID repairs.
     This must precede CreateModel here: a later migration cannot repair a
     deployment which fails while applying 0012.
     """
@@ -35,18 +35,81 @@ def ensure_adjustment_reference_key(apps, schema_editor):
         """, [table, column])
         if cursor.fetchone()[0]:
             return
-        cursor.execute(f'SELECT 1 FROM {quote(table)} WHERE {quote(column)} IS NULL LIMIT 1')
-        if cursor.fetchone():
-            raise RuntimeError('Cannot repair payroll_engine_adjustment: NULL IDs require manual reconciliation. No rows were changed.')
-        cursor.execute(f'SELECT 1 FROM {quote(table)} GROUP BY {quote(column)} HAVING COUNT(*) > 1 LIMIT 1')
-        if cursor.fetchone():
-            raise RuntimeError('Cannot repair payroll_engine_adjustment: duplicate IDs require manual reconciliation. No rows were changed.')
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM (
+                SELECT {quote(column)}, row_number() OVER (PARTITION BY {quote(column)} ORDER BY ctid) AS occurrence
+                FROM {quote(table)}
+            ) rows WHERE {quote(column)} IS NULL OR occurrence > 1
+        """)
+        repair_count = cursor.fetchone()[0]
+        if repair_count:
+            # A duplicated referenced ID cannot be mapped to one physical row
+            # without business evidence. Never guess when inbound FKs exist.
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_constraint c
+                    JOIN pg_attribute a ON a.attrelid = c.confrelid
+                    WHERE c.contype = 'f' AND c.confrelid = to_regclass(%s)
+                      AND a.attname = %s AND a.attnum = ANY(c.confkey)
+                )
+            """, [table, column])
+            if cursor.fetchone()[0]:
+                raise RuntimeError('Cannot reassign adjustment IDs with existing inbound foreign keys. Reconcile references first; no rows were changed.')
+            cursor.execute(f'SELECT GREATEST(COALESCE(MAX({quote(column)}), 0), 0) FROM {quote(table)}')
+            highest_id = cursor.fetchone()[0]
+            if highest_id + repair_count >= 9223372036854775807:
+                raise RuntimeError('Adjustment ID range exhausted; no rows were changed.')
+            audit = quote('payroll_engine_adjustment_id_repair')
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {audit} (
+                    new_id bigint PRIMARY KEY,
+                    original_id bigint,
+                    original_row jsonb NOT NULL,
+                    repaired_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute(f"""
+                WITH ranked AS (
+                    SELECT ctid AS row_location, {quote(column)} AS original_id,
+                           row_number() OVER (PARTITION BY {quote(column)} ORDER BY ctid) AS occurrence,
+                           to_jsonb(adjustment) AS original_row
+                    FROM {quote(table)} adjustment
+                ), replacements AS (
+                    SELECT row_location, original_id, original_row,
+                           %s + row_number() OVER (ORDER BY original_id NULLS LAST, row_location) AS new_id
+                    FROM ranked WHERE original_id IS NULL OR occurrence > 1
+                ), logged AS (
+                    INSERT INTO {audit} (new_id, original_id, original_row)
+                    SELECT new_id, original_id, original_row FROM replacements
+                    RETURNING new_id
+                )
+                UPDATE {quote(table)} adjustment SET {quote(column)} = replacement.new_id
+                FROM replacements replacement JOIN logged ON logged.new_id = replacement.new_id
+                WHERE adjustment.ctid = replacement.row_location
+            """, [highest_id])
         cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(%s) AND contype = 'p')", [table])
         has_primary_key = cursor.fetchone()[0]
         if has_primary_key:
             schema_editor.execute(f'ALTER TABLE {quote(table)} ADD CONSTRAINT {quote("ot_adjustment_id_unique")} UNIQUE ({quote(column)})')
         else:
             schema_editor.execute(f'ALTER TABLE {quote(table)} ADD CONSTRAINT {quote("payroll_engine_adjustment_pkey")} PRIMARY KEY ({quote(column)})')
+        # Restore/reseed the generator too, so the next INSERT cannot reuse
+        # a repaired ID. Keep an existing sequence's higher watermark.
+        cursor.execute('SELECT pg_get_serial_sequence(%s, %s)', [table, column])
+        sequence = cursor.fetchone()[0]
+        if sequence is None:
+            sequence = table + '_ot_id_seq'
+            cursor.execute(f'CREATE SEQUENCE {quote(sequence)} OWNED BY {quote(table)}.{quote(column)}')
+            cursor.execute(f'ALTER TABLE {quote(table)} ALTER COLUMN {quote(column)} SET DEFAULT nextval(%s::regclass)', [sequence])
+        cursor.execute(f'SELECT COALESCE(MAX({quote(column)}), 0) FROM {quote(table)}')
+        maximum = cursor.fetchone()[0]
+        # regclass::text is PostgreSQL-quoted; do not interpolate external input.
+        cursor.execute('SELECT %s::regclass::text', [sequence])
+        sequence_sql = cursor.fetchone()[0]
+        cursor.execute(f'SELECT last_value FROM {sequence_sql}')
+        next_id = max(maximum + 1, cursor.fetchone()[0] + 1, 1)
+        cursor.execute('SELECT setval(%s::regclass, %s, false)', [sequence, next_id])
+
 
 
 class Migration(migrations.Migration):
