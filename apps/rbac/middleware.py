@@ -62,35 +62,45 @@ class RBACMiddleware(MiddlewareMixin):
         
         return None
     
+    def process_view(self, request, view_func, view_args, view_kwargs):
+        from .audit_context import current_audits
+        request._rbac_audit_entries = []
+        request._rbac_previous_audits = current_audits.get()
+        current_audits.set(request._rbac_audit_entries)
+
     def process_response(self, request, response):
-        """Log important requests"""
-        # Log write operations (POST, PUT, PATCH, DELETE)
-        if request.method in ['POST', 'PUT', 'PATCH', 'DELETE'] and request.user.is_authenticated:
-            # Skip auth endpoints
-            if not request.path.startswith('/api/v1/auth/'):
-                try:
-                    action_map = {
-                        'POST': 'create',
-                        'PUT': 'update',
-                        'PATCH': 'update',
-                        'DELETE': 'delete'
+        from .audit_context import current_audits, request_audit_fields, TELEMETRY_PREFIXES
+        try:
+            if request.method not in ['POST', 'PUT', 'PATCH', 'DELETE'] or not request.user.is_authenticated:
+                return response
+            if request.path.startswith(('/api/v1/auth/', *TELEMETRY_PREFIXES)):
+                return response
+            fields = request_audit_fields(request, response)
+            entries = getattr(request, '_rbac_audit_entries', [])
+            if entries:
+                # Preserve semantic action/target/changes written by the view.
+                # Attach request context instead of emitting a duplicate generic row.
+                for entry in entries:
+                    entry.metadata = {
+                        'request_path': request.path,
+                        'request_method': request.method,
+                        'response_status': response.status_code,
+                        **entry.metadata,
                     }
-                    
-                    # Extract resource type from URL
-                    path_parts = request.path.strip('/').split('/')
-                    resource_type = path_parts[-2] if len(path_parts) >= 2 else 'unknown'
-                    
-                    create_audit_log(
-                        user=request.user,
-                        action=action_map.get(request.method, 'unknown'),
-                        resource_type=resource_type,
-                        ip_address=request.META.get('REMOTE_ADDR'),
-                        user_agent=request.META.get('HTTP_USER_AGENT', ''),
-                        success=response.status_code < 400
-                    )
-                except Exception:
-                    pass  # Don't fail request if logging fails
-        
+                    entry.save(update_fields=['metadata'])
+            else:
+                create_audit_log(
+                    user=request.user, **fields,
+                    ip_address=request.META.get('REMOTE_ADDR'),
+                    user_agent=request.META.get('HTTP_USER_AGENT', ''),
+                    success=response.status_code < 400,
+                )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('Request audit logging failed')
+        finally:
+            if hasattr(request, '_rbac_audit_entries'):
+                current_audits.set(request._rbac_previous_audits)
         return response
 
 

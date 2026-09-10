@@ -1149,43 +1149,13 @@ def aws_status(request):
         if role_level <= 2:
             # Admin — full bucket
             from django.contrib.auth import get_user_model
-            info = s3.get_bucket_size()
-            if not info.get('success'):
-                raise Exception('S3 unavailable')
-            from collections import Counter
-            import boto3
-            from django.conf import settings
-
-            # Direct S3 paginator — no presigned URLs, no 1000 cap
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-                region_name=settings.AWS_S3_REGION_NAME,
-            )
-            ext_counter = Counter()
-            paginator = s3_client.get_paginator('list_objects_v2')
-            for page in paginator.paginate(Bucket=settings.AWS_STORAGE_BUCKET_NAME):
-                for obj in page.get('Contents', []):
-                    key = obj['Key']
-                    if not key.endswith('/') and '.' in key.split('/')[-1]:
-                        ext_counter[key.split('.')[-1].lower()] += 1
-
-            total_ext = sum(ext_counter.values()) or 1
-            file_breakdown = [
-                {'type': k.upper(), 'count': v, 'percentage': round(v / total_ext * 100, 1)}
-                for k, v in ext_counter.most_common(5)
-            ]
-            size_gb = round(info['total_size_mb'] / 1024, 2)
-
+            from apps.core.storage_telemetry import get_admin_s3_snapshot
+            snapshot = get_admin_s3_snapshot()
             return Response({
-                'status': 'connected',
+                **snapshot,
                 'view': 'admin',
                 'role_name': role_name,
-                'total_files': info['total_count'],
-                'total_size_gb': size_gb,
                 'total_users': get_user_model().objects.filter(is_active=True).count(),
-                'file_breakdown': file_breakdown,
             })
 
         elif role_level == 3:

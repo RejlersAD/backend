@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from time import perf_counter
 from datetime import datetime, time, timedelta
 
 from decouple import config
@@ -132,19 +133,23 @@ def collect_system_metrics(force: bool = False) -> SystemMetrics | None:
         cpu_pct = float(psutil.cpu_percent(interval=0.1)) if psutil else 0.0
         memory_mb = float(psutil.virtual_memory().used / (1024 * 1024)) if psutil else 0.0
         disk_gb = float(psutil.disk_usage(DISK_PATH).used / (1024 ** 3)) if psutil else 0.0
-        active_conn = int(len(psutil.net_connections(kind='inet'))) if psutil else 0
+        try:
+            active_conn = int(len(psutil.net_connections(kind='inet'))) if psutil else 0
+        except Exception as exc:
+            logger.debug('Connection telemetry unavailable: %s', exc)
+            active_conn = 0
 
-        # API success rate derived from recent AuditLog rows
-        window_start = timezone.now() - timedelta(minutes=SYSTEM_METRICS_TTL_SEC // 60 + 1)
-        recent = AuditLog.objects.filter(timestamp__gte=window_start)
-        total = recent.count()
-        failed = recent.filter(success=False).count()
+        # API performance comes from request telemetry, including read requests.
+        from .console_telemetry import recent_requests, request_summary
+        summary = request_summary(recent_requests())
+        total = summary['total']
+        failed = summary['failed']
         success_rate = ((total - failed) / total * 100.0) if total else 100.0
 
         return SystemMetrics.objects.create(
             timestamp=timezone.now(),
-            avg_response_time_ms=0,  # populated by external APM if available
-            peak_response_time_ms=0,
+            avg_response_time_ms=summary['response_time'] or 0,
+            peak_response_time_ms=summary['peak'] or 0,
             api_requests_count=total,
             failed_requests_count=failed,
             success_rate_percentage=round(success_rate, 2),
@@ -163,26 +168,65 @@ def collect_health_check(force: bool = False) -> SystemHealthCheck | None:
     if not force and _latest_age_seconds(SystemHealthCheck, 'check_time') < HEALTH_CHECK_TTL_SEC:
         return None
     try:
-        db_ok = _ping_database()
-        redis_ok = _ping_redis()
-        celery_ok = _ping_celery()
+        response_times = {}
+        def timed(name, probe):
+            start = perf_counter()
+            result = probe()
+            response_times[name] = round((perf_counter() - start) * 1000, 2)
+            return result
+        db_ok = timed('database', _ping_database)
+        redis_ok = timed('redis', _ping_redis)
+        celery_ok = timed('celery', _ping_celery)
 
         # Storage check via shutil (cross-platform, no extra dep required)
         storage_ok = True
         storage_pct = 0.0
+        resources = {}
         try:
+            start = perf_counter()
             total, used, _free = shutil.disk_usage(DISK_PATH)
+            response_times['disk'] = round((perf_counter() - start) * 1000, 2)
+            resources.update(disk_used_gb=round(used / 1024 ** 3, 2), disk_total_gb=round(total / 1024 ** 3, 2))
             storage_pct = (used / total) * 100 if total else 0
             storage_ok = storage_pct < 95
         except Exception:
             storage_ok = False
 
+        from apps.core.storage_telemetry import get_admin_s3_snapshot
+        resources['s3'] = get_admin_s3_snapshot()
+        resources['disk_status'] = 'healthy' if storage_ok else 'critical'
+
+        from .console_telemetry import recent_requests, request_summary
+        summary = request_summary(recent_requests())
+        error_rates = {}
+        api_status = 'unknown'
+        if summary['total']:
+            error_rates['api'] = round(summary['failed'] / summary['total'] * 100, 2)
+            response_times['api'] = summary['response_time']
+            api_status = 'degraded' if error_rates['api'] >= HIGH_ERROR_RATE_PCT else 'healthy'
+        # These are observed application routes, not external provider probes.
+        from django.db.models import Q
+        route_groups = {
+            'authentication': Q(request_path__startswith='/api/v1/auth/'),
+            'ai': Q(discipline_key__in=['pid', 'pfd', 'designiq', 'process-datasheet', 'electrical-datasheet']),
+        }
+        resources['service_statuses'] = {}
+        resources['sample_counts'] = {'api': summary['total']}
+        for name, route_filter in route_groups.items():
+            observed = request_summary(recent_requests().filter(route_filter))
+            resources['sample_counts'][name] = observed['total']
+            state = 'unknown'
+            if observed['total']:
+                error_rates[name] = round(observed['failed'] / observed['total'] * 100, 2)
+                response_times[name] = observed['response_time']
+                state = 'degraded' if error_rates[name] >= HIGH_ERROR_RATE_PCT else 'healthy'
+            resources['service_statuses'][name] = state
         components = {
             'database_status': 'healthy' if db_ok else 'critical',
             'redis_status': 'healthy' if redis_ok else 'degraded',
             'celery_status': 'healthy' if celery_ok else 'degraded',
-            'storage_status': 'healthy' if storage_ok else 'critical',
-            'api_status': 'healthy',  # serving this request implies API healthy
+            'storage_status': 'healthy' if resources['s3']['status'] == 'connected' else 'critical',
+            'api_status': api_status,
         }
         weights = {'database_status': 35, 'redis_status': 15, 'celery_status': 15,
                    'storage_status': 15, 'api_status': 20}
@@ -197,15 +241,25 @@ def collect_health_check(force: bool = False) -> SystemHealthCheck | None:
             overall = 'degraded'
         else:
             overall = 'critical'
+        if overall == 'healthy' and any(v != 'healthy' for v in components.values()):
+            overall = 'degraded'
+        if overall == 'healthy' and 'degraded' in resources['service_statuses'].values():
+            overall = 'degraded'
+        if overall == 'healthy' and not storage_ok:
+            overall = 'degraded'
 
         issues = [k.replace('_status', '') for k, v in components.items() if v != 'healthy']
+        if not storage_ok:
+            issues.append('disk')
 
         return SystemHealthCheck.objects.create(
             check_time=timezone.now(),
             **components,
             overall_status=overall,
             health_score=round(score, 2),
-            resource_usage={'storage_pct': round(storage_pct, 2)},
+            response_times=response_times,
+            error_rates=error_rates,
+            resource_usage={**resources, 'storage_pct': round(storage_pct, 2), 'api_sample_count': summary['total'], 'api_window_minutes': 5},
             issues_found=issues,
             warnings=[],
         )

@@ -11,7 +11,7 @@ def create_audit_log(user, action, resource_type, resource_id=None, resource_rep
     """
     Create an audit log entry
     """
-    return AuditLog.objects.create(
+    entry = AuditLog.objects.create(
         user=user,
         user_email=user.email if user else 'system',
         action=action,
@@ -25,6 +25,11 @@ def create_audit_log(user, action, resource_type, resource_id=None, resource_rep
         success=success,
         error_message=error_message
     )
+    from .audit_context import current_audits
+    entries = current_audits.get()
+    if entries is not None:
+        entries.append(entry)
+    return entry
 
 
 def get_user_permissions(user):
