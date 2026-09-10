@@ -6,6 +6,49 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+def ensure_adjustment_reference_key(apps, schema_editor):
+    """Repair legacy PostgreSQL tables before installing the OT foreign key.
+
+    Some restored databases recorded payroll_engine.0001 as applied without
+    restoring its primary key. Never rewrite IDs or remove financial rows.
+    This must precede CreateModel here: a later migration cannot repair a
+    deployment which fails while applying 0012.
+    """
+    if schema_editor.connection.vendor != 'postgresql':
+        return
+    model = apps.get_model('payroll_engine', 'PayrollAdjustment')
+    table = model._meta.db_table
+    column = model._meta.pk.column
+    quote = schema_editor.quote_name
+    with schema_editor.connection.cursor() as cursor:
+        # Block writes during validation and key creation to avoid a race.
+        cursor.execute(f'LOCK TABLE {quote(table)} IN ACCESS EXCLUSIVE MODE')
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM pg_index i
+                JOIN pg_attribute a ON a.attrelid = i.indrelid
+                WHERE i.indrelid = to_regclass(%s) AND a.attname = %s
+                  AND i.indisunique AND i.indisvalid AND i.indimmediate
+                  AND i.indpred IS NULL AND i.indexprs IS NULL
+                  AND i.indnkeyatts = 1 AND i.indkey[0] = a.attnum
+            )
+        """, [table, column])
+        if cursor.fetchone()[0]:
+            return
+        cursor.execute(f'SELECT 1 FROM {quote(table)} WHERE {quote(column)} IS NULL LIMIT 1')
+        if cursor.fetchone():
+            raise RuntimeError('Cannot repair payroll_engine_adjustment: NULL IDs require manual reconciliation. No rows were changed.')
+        cursor.execute(f'SELECT 1 FROM {quote(table)} GROUP BY {quote(column)} HAVING COUNT(*) > 1 LIMIT 1')
+        if cursor.fetchone():
+            raise RuntimeError('Cannot repair payroll_engine_adjustment: duplicate IDs require manual reconciliation. No rows were changed.')
+        cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(%s) AND contype = 'p')", [table])
+        has_primary_key = cursor.fetchone()[0]
+        if has_primary_key:
+            schema_editor.execute(f'ALTER TABLE {quote(table)} ADD CONSTRAINT {quote("ot_adjustment_id_unique")} UNIQUE ({quote(column)})')
+        else:
+            schema_editor.execute(f'ALTER TABLE {quote(table)} ADD CONSTRAINT {quote("payroll_engine_adjustment_pkey")} PRIMARY KEY ({quote(column)})')
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -15,6 +58,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(ensure_adjustment_reference_key, migrations.RunPython.noop),
         migrations.CreateModel(
             name='OvertimeConversion',
             fields=[
