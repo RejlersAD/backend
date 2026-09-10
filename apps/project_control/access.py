@@ -7,7 +7,7 @@ from apps.core.project_models import Project
 
 WRITE_ROLES = {'project_manager', 'lead_engineer', 'engineer', 'designer'}
 COMMERCIAL_MODULES = {
-    'project_control', 'finance', 'procurement', 'procurement_orders',
+    'project_control', 'finance_incoming', 'procurement', 'procurement_orders',
     'procurement_requisitions', 'procurement_receipts',
 }
 
@@ -25,7 +25,7 @@ def has_commercial_module_access(user, modules=COMMERCIAL_MODULES):
 
 
 def can_approve_commercial(user):
-    return has_commercial_module_access(user, {'project_control', 'finance'})
+    return has_commercial_module_access(user, {'project_control', 'finance_incoming'})
 
 
 def accessible_enterprise_projects(user):

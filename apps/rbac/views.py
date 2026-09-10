@@ -119,7 +119,7 @@ class ModuleViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         self._sync_catalogue_modules()
-        return super().get_queryset()
+        return super().get_queryset().exclude(code__in=['finance', 'sales'])
 
     @staticmethod
     def _sync_catalogue_modules():
@@ -425,7 +425,7 @@ class RoleViewSet(viewsets.ModelViewSet):
             )
         
         try:
-            module = Module.objects.get(id=module_id)
+            module = Module.objects.exclude(code__in=['finance', 'sales']).get(id=module_id, is_active=True)
             RoleModule.objects.get_or_create(
                 role=role,
                 module=module,
