@@ -66,6 +66,30 @@ class LeaveApprovalTests(TestCase):
         self.assertIn(self.hr, recipients)
         self.assertIn(self.employee, recipients)
 
+    def test_hr_admin_role_can_receive_and_complete_manager_routed_leave(self):
+        self.hr.rbac_profile.roles.clear()
+        self.hr.rbac_profile.roles.add(Role.objects.create(code='hr_admin', name='HR administrator'))
+        self.test_manager_then_hr_and_duplicate_decision()
+
+    def test_hr_admin_can_approve_directly_when_no_manager(self):
+        self.hr.rbac_profile.roles.clear()
+        self.hr.rbac_profile.roles.add(Role.objects.create(code='hr_admin', name='HR administrator'))
+        self.employee_record.manager = None
+        self.employee_record.save()
+        response = self.submit()
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(len(self.queue(self.hr)), 1)
+        self.assertEqual(self.act(self.hr, response.data['id'], 'approve').status_code, 200)
+
+    def test_inactive_or_self_hr_does_not_satisfy_route(self):
+        self.hr.is_active = False
+        self.hr.save()
+        profile = UserProfile.objects.create(user=self.employee, organization=Organization.objects.first())
+        profile.roles.add(Role.objects.create(code='hr_admin', name='HR administrator'))
+        response = self.submit()
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('No active HR approver', str(response.data))
+
     def test_leave_photo_uses_employee_profile_and_canonical_fallback(self):
         self.employee_record.photo_url = 'https://example.com/employee.jpg'
         self.employee_record.save()

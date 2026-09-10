@@ -115,6 +115,11 @@ class HRWorkflowService:
         if task.instance.subject_type == 'hr.overtime_request':
             from .overtime import can_review
             return can_review(task, user)
+        if task.instance.subject_type == 'payroll.leave_request':
+            from apps.payroll.models import LeaveRequest
+            from apps.payroll.services.leave_approval import can_review
+            request = LeaveRequest.objects.filter(pk=task.instance.subject_id).first()
+            return bool(request and can_review(request, user))
         if user.is_superuser:
             return True
         if task.assigned_to_id:
@@ -192,6 +197,10 @@ class HRWorkflowService:
         if task.instance.subject_type == 'hr.overtime_request':
             from .overtime import recipients
             return recipients(task)
+        if task.instance.subject_type == 'payroll.leave_request' and task.stage.code == 'hr_review':
+            from apps.payroll.services.leave_approval import active_hr_approvers
+            employee_user_id = task.instance.employee.user_id if task.instance.employee else None
+            return list(active_hr_approvers(employee_user_id))
         if task.assigned_to_id:
             return [task.assigned_to]
         if not task.assigned_role_code:

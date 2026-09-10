@@ -7,7 +7,14 @@ from apps.hr_core.workflows import HRWorkflowService
 HR_ROLES = ('hr_manager', 'hr_admin', 'super_admin', 'superadmin', 'admin')
 
 def is_hr(user):
-    return user.is_superuser or bool(set(HR_ROLES) & HRWorkflowService._role_codes(user))
+    return bool(user.is_active and (user.is_superuser or set(HR_ROLES) & HRWorkflowService._role_codes(user)))
+
+def active_hr_approvers(employee_user_id=None):
+    from django.contrib.auth import get_user_model
+    return get_user_model().objects.filter(is_active=True).filter(
+        Q(is_superuser=True) | Q(rbac_profile__roles__code__in=HR_ROLES, rbac_profile__roles__is_active=True)
+    ).exclude(pk=employee_user_id).distinct()
+
 
 def employee_for_request(request):
     if request.canonical_employee_id:
@@ -57,7 +64,7 @@ def can_review(request, user):
         if instance.status != 'pending':
             return False
         stage = instance.definition.stages.filter(code='hr_review').first()
-        return bool(stage and (user.is_superuser or stage.approver_value in HRWorkflowService._role_codes(user)))
+        return bool(stage and is_hr(user))
     return True
 
 
@@ -108,7 +115,7 @@ def notify_employee(request):
 def notify_legacy_hr(request):
     from django.contrib.auth import get_user_model
     from apps.notifications.services import NotificationService
-    for user in get_user_model().objects.filter(rbac_profile__roles__code__in=HR_ROLES, rbac_profile__roles__is_active=True, is_active=True).exclude(pk=request.employee_id).distinct():
+    for user in active_hr_approvers(request.employee_id):
         NotificationService.create_notification(
             recipient=user, title='HR leave approval required', category='APPROVAL',
             message=f'Please approve the leave request of {request.employee_name} ? {request.days_requested} days requested.',
@@ -155,5 +162,5 @@ def require_approval_route(employee):
     stages = list(definition.stages.order_by('sequence')) if definition else []
     if len(stages) != 2 or [(stage.code, stage.approver_type) for stage in stages] != [('manager_review', 'employee_manager'), ('hr_review', 'role')]:
         raise ValidationError({'workflow': 'HR must configure the manager-to-HR leave approval workflow before submission.'})
-    if not get_user_model().objects.filter(is_active=True, rbac_profile__roles__code=stages[1].approver_value, rbac_profile__roles__is_active=True).exclude(pk=employee.user_id).exists():
+    if not active_hr_approvers(employee.user_id).exists():
         raise ValidationError({'workflow': 'No active HR approver is assigned. Contact HR to configure leave approvals.'})
