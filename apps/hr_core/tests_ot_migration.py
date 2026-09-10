@@ -35,23 +35,19 @@ class OvertimeMigrationTests(unittest.TestCase):
                         cursor.execute(f'CREATE TABLE {quote(model._meta.db_table)} ({quote(model._meta.pk.column)} {model._meta.pk.db_type(connection)} PRIMARY KEY)')
                     suffix = ', legacy_key integer PRIMARY KEY' if kind == 'other_pk' else ''
                     key = ' PRIMARY KEY' if kind == 'healthy' else ''
-                    cursor.execute(f'CREATE TABLE payroll_engine_adjustment (id bigint{key}{suffix})')
+                    cursor.execute(f"CREATE TABLE payroll_engine_adjustment (id bigint{key}{suffix}, amount numeric(12,2) DEFAULT 49.00, status text DEFAULT 'applied')")
                     if kind == 'other_pk':
-                        cursor.execute('INSERT INTO payroll_engine_adjustment VALUES (42, 1)')
+                        cursor.execute('INSERT INTO payroll_engine_adjustment (id, legacy_key) VALUES (42, 1)')
                     else:
-                        cursor.execute('INSERT INTO payroll_engine_adjustment VALUES (42)')
+                        cursor.execute('INSERT INTO payroll_engine_adjustment (id) VALUES (42)')
                     if kind == 'duplicate':
-                        cursor.execute('INSERT INTO payroll_engine_adjustment VALUES (42)')
+                        cursor.execute("INSERT INTO payroll_engine_adjustment (id, amount, status) VALUES (42, 1500, 'pending')")
                     elif kind == 'null':
-                        cursor.execute('INSERT INTO payroll_engine_adjustment VALUES (NULL)')
-                if kind in {'duplicate', 'null'}:
-                    with self.assertRaisesRegex(RuntimeError, 'duplicate IDs' if kind == 'duplicate' else 'NULL IDs'):
-                        with connection.schema_editor() as editor:
-                            self.module.Migration('0012', 'hr_core').apply(self.state.clone(), editor)
+                        cursor.execute('INSERT INTO payroll_engine_adjustment (id) VALUES (NULL)')
+                if kind == 'sequence':
                     with connection.cursor() as cursor:
-                        cursor.execute('SELECT COUNT(*) FROM payroll_engine_adjustment')
-                        self.assertEqual(cursor.fetchone()[0], 2)
-                    return
+                        cursor.execute('CREATE SEQUENCE old_adjustment_ids OWNED BY payroll_engine_adjustment.id')
+                        cursor.execute("ALTER TABLE payroll_engine_adjustment ALTER COLUMN id SET DEFAULT nextval('old_adjustment_ids')")
                 if kind == 'missing':
                     with self.assertRaisesRegex(ProgrammingError, 'no unique constraint'):
                         with transaction.atomic():
@@ -65,7 +61,18 @@ class OvertimeMigrationTests(unittest.TestCase):
                     self.module.ensure_adjustment_reference_key(self.state.apps, editor)
                 with connection.cursor() as cursor:
                     cursor.execute('SELECT id FROM payroll_engine_adjustment')
-                    self.assertEqual(cursor.fetchall(), [(42,)])
+                    self.assertEqual(sorted(cursor.fetchall()), [(42,), (43,)] if kind in {'duplicate', 'null'} else [(42,)])
+                    cursor.execute('SELECT amount, status FROM payroll_engine_adjustment')
+                    self.assertEqual(sorted((str(amount), status) for amount, status in cursor.fetchall()), [('1500.00', 'pending'), ('49.00', 'applied')] if kind == 'duplicate' else [('49.00', 'applied')] * (2 if kind == 'null' else 1))
+                    if kind in {'duplicate', 'null'}:
+                        cursor.execute('SELECT new_id, original_id, original_row FROM payroll_engine_adjustment_id_repair')
+                        audit = cursor.fetchall()
+                        self.assertEqual(len(audit), 1)
+                        self.assertEqual(audit[0][0], 43)
+                        self.assertEqual(audit[0][1], 42 if kind == 'duplicate' else None)
+                    if kind not in {'healthy', 'other_pk'}:
+                        cursor.execute('INSERT INTO payroll_engine_adjustment DEFAULT VALUES RETURNING id')
+                        self.assertGreater(cursor.fetchone()[0], 43 if kind in {'duplicate', 'null'} else 42)
                     cursor.execute("SELECT COUNT(*) FROM pg_constraint WHERE conrelid = 'hr_core_overtimeconversion'::regclass AND confrelid = 'payroll_engine_adjustment'::regclass AND contype = 'f'")
                     self.assertEqual(cursor.fetchone()[0], 1)
                     cursor.execute("SELECT COUNT(*) FROM pg_index WHERE indrelid = 'payroll_engine_adjustment'::regclass AND indisunique")
@@ -85,5 +92,8 @@ class OvertimeMigrationTests(unittest.TestCase):
     def test_duplicate_ids_are_not_deleted(self):
         self.scenario('duplicate')
 
-    def test_null_ids_are_not_renumbered(self):
+    def test_null_ids_are_preserved_with_audited_new_ids(self):
         self.scenario('null')
+
+    def test_stale_sequence_is_reseeded(self):
+        self.scenario('sequence')
